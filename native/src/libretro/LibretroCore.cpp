@@ -1,0 +1,390 @@
+#include "LibretroCore.h"
+#include <cstdlib>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+
+#ifdef _WIN32
+  #include <windows.h>
+  static void* dl_open(const char* p) { return (void*)LoadLibraryA(p); }
+  static void* dl_sym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }
+  static void  dl_close(void* h) { if (h) FreeLibrary((HMODULE)h); }
+#else
+  #include <dlfcn.h>
+  static void* dl_open(const char* p) { return dlopen(p, RTLD_LAZY | RTLD_LOCAL); }
+  static void* dl_sym(void* h, const char* n) { return dlsym(h, n); }
+  static void  dl_close(void* h) { if (h) dlclose(h); }
+#endif
+
+LibretroCore* LibretroCore::current_ = nullptr;
+
+static void core_log(enum retro_log_level level, const char* fmt, ...)
+{
+    if (level < RETRO_LOG_WARN) return; // keep the console quiet; surface warnings/errors
+    va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap);
+}
+
+// Run a call into a core under structured exception handling, so a hard fault (access violation, etc.)
+// inside a misbehaving core becomes a recoverable failure instead of crashing the whole app. Kept in
+// its own helper with no C++ objects that need unwinding (a requirement for __try). fn must be trivially
+// destructible (our call sites pass lambdas capturing only `this`/pointers). Returns false on a fault.
+#ifdef _WIN32
+template <class Fn>
+static bool guardedCall(Fn&& fn)
+{
+    __try { fn(); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+#else
+template <class Fn>
+static bool guardedCall(Fn&& fn) { fn(); return true; } // POSIX: a future SIGSEGV handler could harden this
+#endif
+
+LibretroCore::~LibretroCore() { unload(); }
+
+void LibretroCore::resolve(const char* name, void** fn)
+{
+    *fn = dl_sym(handle_, name);
+}
+
+bool LibretroCore::loadCore(const std::string& corePath, std::string* error)
+{
+    handle_ = dl_open(corePath.c_str());
+    if (!handle_) { if (error) *error = "could not load core: " + corePath; return false; }
+    current_ = this;
+    options_.clear();
+    optionValues_.clear();
+    optionsDirty_ = false;
+    crashed_ = false;
+
+    resolve("retro_init", (void**)&retro_init_);
+    resolve("retro_deinit", (void**)&retro_deinit_);
+    resolve("retro_api_version", (void**)&retro_api_version_);
+    resolve("retro_get_system_info", (void**)&retro_get_system_info_);
+    resolve("retro_get_system_av_info", (void**)&retro_get_system_av_info_);
+    resolve("retro_set_environment", (void**)&retro_set_environment_);
+    resolve("retro_set_video_refresh", (void**)&retro_set_video_refresh_);
+    resolve("retro_set_audio_sample", (void**)&retro_set_audio_sample_);
+    resolve("retro_set_audio_sample_batch", (void**)&retro_set_audio_sample_batch_);
+    resolve("retro_set_input_poll", (void**)&retro_set_input_poll_);
+    resolve("retro_set_input_state", (void**)&retro_set_input_state_);
+    resolve("retro_run", (void**)&retro_run_);
+    resolve("retro_load_game", (void**)&retro_load_game_);
+    resolve("retro_unload_game", (void**)&retro_unload_game_);
+    resolve("retro_set_controller_port_device", (void**)&retro_set_controller_port_device_);
+    resolve("retro_serialize_size", (void**)&retro_serialize_size_);
+    resolve("retro_serialize", (void**)&retro_serialize_);
+    resolve("retro_unserialize", (void**)&retro_unserialize_);
+
+    if (!retro_init_ || !retro_run_ || !retro_load_game_ || !retro_get_system_info_)
+    { if (error) *error = "core is missing required libretro exports"; unload(); return false; }
+
+    retro_get_system_info_(&sysInfo_);
+
+    // The environment/setup handshake + init, guarded: some cores fault here in a minimal frontend
+    // (e.g. Mesen). A fault becomes a clean failure the UI can report rather than a process crash.
+    const bool ok = guardedCall([&] {
+        retro_set_environment_(environmentCb);
+        retro_set_video_refresh_(videoRefreshCb);
+        retro_set_audio_sample_(audioSampleCb);
+        retro_set_audio_sample_batch_(audioBatchCb);
+        retro_set_input_poll_(inputPollCb);
+        retro_set_input_state_(inputStateCb);
+        retro_init_();
+    });
+    if (!ok)
+    {
+        if (error) *error = "core crashed during initialization (incompatible build?): " + corePath;
+        unload();
+        return false;
+    }
+    return true;
+}
+
+bool LibretroCore::loadGame(const std::string& gamePath, std::string* error)
+{
+    retro_game_info info{};
+    info.path = gamePath.empty() ? nullptr : gamePath.c_str();
+    if (!gamePath.empty() && !sysInfo_.need_fullpath)
+    {
+        std::ifstream f(gamePath, std::ios::binary | std::ios::ate);
+        if (!f) { if (error) *error = "could not read game: " + gamePath; return false; }
+        gameData_.resize((size_t)f.tellg());
+        f.seekg(0); f.read((char*)gameData_.data(), (std::streamsize)gameData_.size());
+        info.data = gameData_.data();
+        info.size = gameData_.size();
+    }
+    bool loaded = false;
+    if (!guardedCall([&] { loaded = retro_load_game_(&info); }))
+    { if (error) *error = "core crashed while loading the game"; return false; }
+    if (!loaded) { if (error) *error = "core rejected the game"; return false; }
+    gameLoaded_ = true;
+    retro_get_system_av_info_(&avInfo_);
+    frame_.assign((size_t)avInfo_.geometry.max_width * avInfo_.geometry.max_height * 4, 0);
+    return true;
+}
+
+void LibretroCore::runFrame()
+{
+    if (!retro_run_ || crashed_) return;
+    if (!guardedCall([&] { retro_run_(); }))
+        crashed_ = true; // the UI polls crashed() and stops, rather than faulting every frame
+}
+
+void LibretroCore::setControllerPortDevice(unsigned port, unsigned device)
+{
+    if (!retro_set_controller_port_device_ || crashed_) return;
+    guardedCall([&] { retro_set_controller_port_device_(port, device); });
+}
+
+bool LibretroCore::saveState(std::vector<uint8_t>& out)
+{
+    if (!gameLoaded_ || !retro_serialize_size_ || !retro_serialize_) return false;
+    const size_t size = retro_serialize_size_();
+    if (size == 0) return false; // core doesn't support save states for this content
+    out.resize(size);
+    return retro_serialize_(out.data(), size);
+}
+
+bool LibretroCore::loadState(const uint8_t* data, size_t size)
+{
+    if (!gameLoaded_ || !retro_unserialize_ || !data || size == 0) return false;
+    // Some cores grow their state between save and load; only sizes >= current are guaranteed loadable.
+    if (retro_serialize_size_ && size > retro_serialize_size_()) return false;
+    return retro_unserialize_(data, size);
+}
+
+void LibretroCore::unload()
+{
+    if (gameLoaded_ && retro_unload_game_) retro_unload_game_();
+    if (handle_ && retro_deinit_) retro_deinit_();
+    if (handle_) dl_close(handle_);
+    handle_ = nullptr; gameLoaded_ = false;
+    if (current_ == this) current_ = nullptr;
+}
+
+std::string LibretroCore::optionValue(const std::string& key) const
+{
+    auto it = optionValues_.find(key);
+    return it != optionValues_.end() ? it->second : std::string();
+}
+
+void LibretroCore::setOptionValue(const std::string& key, const std::string& value)
+{
+    auto it = optionValues_.find(key);
+    if (it == optionValues_.end() || it->second != value)
+    {
+        optionValues_[key] = value;
+        optionsDirty_ = true; // core re-reads on its next GET_VARIABLE_UPDATE poll
+    }
+}
+
+void LibretroCore::addOption(const std::string& key, const std::string& desc, const std::string& info,
+                             std::vector<std::pair<std::string, std::string>> values, const std::string& def)
+{
+    if (key.empty()) return;
+    CoreOption o;
+    o.key = key;
+    o.desc = desc.empty() ? key : desc;
+    o.info = info;
+    o.values = std::move(values);
+    o.defaultValue = def;
+    if (o.defaultValue.empty() && !o.values.empty())
+        o.defaultValue = o.values.front().first;
+    options_.push_back(std::move(o));
+    // Seed the live value with the default the first time we see this key (don't clobber a value
+    // the frontend may have applied earlier).
+    const CoreOption& added = options_.back();
+    if (optionValues_.find(added.key) == optionValues_.end())
+        optionValues_[added.key] = added.defaultValue;
+}
+
+// SET_VARIABLES (legacy): value string is "Label; v1|v2|v3" with v1 as the default.
+void LibretroCore::registerVariablesLegacy(const retro_variable* v)
+{
+    for (; v && v->key; ++v)
+    {
+        const std::string str = v->value ? v->value : "";
+        std::string desc;
+        std::vector<std::pair<std::string, std::string>> vals;
+        const size_t semi = str.find(';');
+        if (semi != std::string::npos)
+        {
+            desc = str.substr(0, semi);
+            size_t i = semi + 1;
+            while (i < str.size() && str[i] == ' ') ++i; // skip the single space after ';'
+            for (size_t start = i; start <= str.size(); )
+            {
+                const size_t bar = str.find('|', start);
+                const std::string tok = str.substr(start, bar == std::string::npos ? std::string::npos : bar - start);
+                if (!tok.empty()) vals.emplace_back(tok, tok);
+                if (bar == std::string::npos) break;
+                start = bar + 1;
+            }
+        }
+        else
+        {
+            desc = str;
+        }
+        addOption(v->key, desc, "", std::move(vals), ""); // default = first value (addOption fills it in)
+    }
+}
+
+void LibretroCore::registerOptionDefs(const retro_core_option_definition* d)
+{
+    for (; d && d->key; ++d)
+    {
+        std::vector<std::pair<std::string, std::string>> vals;
+        for (int i = 0; i < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[i].value; ++i)
+            vals.emplace_back(d->values[i].value, d->values[i].label ? d->values[i].label : d->values[i].value);
+        addOption(d->key, d->desc ? d->desc : "", d->info ? d->info : "",
+                  std::move(vals), d->default_value ? d->default_value : "");
+    }
+}
+
+void LibretroCore::registerOptionDefsV2(const retro_core_option_v2_definition* d)
+{
+    for (; d && d->key; ++d)
+    {
+        std::vector<std::pair<std::string, std::string>> vals;
+        for (int i = 0; i < RETRO_NUM_CORE_OPTION_VALUES_MAX && d->values[i].value; ++i)
+            vals.emplace_back(d->values[i].value, d->values[i].label ? d->values[i].label : d->values[i].value);
+        addOption(d->key, d->desc ? d->desc : "", d->info ? d->info : "",
+                  std::move(vals), d->default_value ? d->default_value : "");
+    }
+}
+
+bool LibretroCore::environmentCb(unsigned cmd, void* data)
+{
+    auto* self = current_;
+    if (std::getenv("GOLIATH_ENVTRACE")) { fprintf(stderr, "[env] cmd=%u data=%p\n", cmd, data); fflush(stderr); }
+    switch (cmd)
+    {
+    case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
+        self->pixelFormat_ = *(const retro_pixel_format*)data;
+        return true;
+    case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
+        *(const char**)data = self->systemDir.c_str(); return true;
+    case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
+        *(const char**)data = self->saveDir.c_str(); return true;
+    case RETRO_ENVIRONMENT_GET_CAN_DUPE:
+        *(bool*)data = true; return true;
+    case RETRO_ENVIRONMENT_GET_LOG_INTERFACE:
+        ((retro_log_callback*)data)->log = core_log; return true;
+    case RETRO_ENVIRONMENT_GET_RUMBLE_INTERFACE:
+        ((retro_rumble_interface*)data)->set_rumble_state = rumbleSetStateCb; return true;
+    case RETRO_ENVIRONMENT_GET_LANGUAGE:
+        *(unsigned*)data = RETRO_LANGUAGE_ENGLISH; return true; // report a language rather than leaving it unset
+    case RETRO_ENVIRONMENT_GET_CORE_OPTIONS_VERSION:
+        *(unsigned*)data = 2; return true; // we understand the v2 options API
+    case RETRO_ENVIRONMENT_GET_VARIABLE:
+    {
+        auto* var = (retro_variable*)data;
+        if (!var || !var->key) return false;
+        auto it = self->optionValues_.find(var->key);
+        var->value = (it != self->optionValues_.end()) ? it->second.c_str() : nullptr;
+        return var->value != nullptr;
+    }
+    case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE:
+        *(bool*)data = self->optionsDirty_;
+        self->optionsDirty_ = false;
+        return true;
+    case RETRO_ENVIRONMENT_SET_VARIABLES:
+        self->registerVariablesLegacy((const retro_variable*)data);
+        return true;
+    case RETRO_ENVIRONMENT_SET_CORE_OPTIONS:
+        self->registerOptionDefs((const retro_core_option_definition*)data);
+        return true;
+    case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_INTL:
+        if (auto* intl = (const retro_core_options_intl*)data)
+            self->registerOptionDefs(intl->us);
+        return true;
+    case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2:
+        if (auto* v2 = (const retro_core_options_v2*)data)
+            self->registerOptionDefsV2(v2->definitions);
+        return true;
+    case RETRO_ENVIRONMENT_SET_CORE_OPTIONS_V2_INTL:
+        if (auto* v2i = (const retro_core_options_v2_intl*)data)
+            if (v2i->us) self->registerOptionDefsV2(v2i->us->definitions);
+        return true;
+    // RETRO_ENVIRONMENT_SET_HW_RENDER falls through -> false (software only until a GL context exists)
+    default:
+        return false;
+    }
+}
+
+void LibretroCore::videoRefreshCb(const void* data, unsigned width, unsigned height, size_t pitch)
+{
+    auto* self = current_;
+    self->frameW_ = width; self->frameH_ = height;
+    if (!data) return; // duped frame: keep the previous picture
+    if (self->frame_.size() < (size_t)width * height * 4)
+        self->frame_.assign((size_t)width * height * 4, 0);
+    uint8_t* out = self->frame_.data();
+
+    if (self->pixelFormat_ == RETRO_PIXEL_FORMAT_XRGB8888)
+    {
+        for (unsigned y = 0; y < height; ++y) {
+            const uint32_t* src = (const uint32_t*)((const uint8_t*)data + y * pitch);
+            uint8_t* dst = out + (size_t)y * width * 4;
+            for (unsigned x = 0; x < width; ++x) {
+                uint32_t p = src[x];
+                *dst++ = (uint8_t)(p);        // B
+                *dst++ = (uint8_t)(p >> 8);   // G
+                *dst++ = (uint8_t)(p >> 16);  // R
+                *dst++ = 0xFF;                // A
+            }
+        }
+    }
+    else if (self->pixelFormat_ == RETRO_PIXEL_FORMAT_RGB565)
+    {
+        for (unsigned y = 0; y < height; ++y) {
+            const uint16_t* src = (const uint16_t*)((const uint8_t*)data + y * pitch);
+            uint8_t* dst = out + (size_t)y * width * 4;
+            for (unsigned x = 0; x < width; ++x) {
+                uint16_t p = src[x];
+                *dst++ = (uint8_t)(( p        & 0x1F) << 3); // B
+                *dst++ = (uint8_t)(((p >> 5)  & 0x3F) << 2); // G
+                *dst++ = (uint8_t)(((p >> 11) & 0x1F) << 3); // R
+                *dst++ = 0xFF;
+            }
+        }
+    }
+    else // 0RGB1555
+    {
+        for (unsigned y = 0; y < height; ++y) {
+            const uint16_t* src = (const uint16_t*)((const uint8_t*)data + y * pitch);
+            uint8_t* dst = out + (size_t)y * width * 4;
+            for (unsigned x = 0; x < width; ++x) {
+                uint16_t p = src[x];
+                *dst++ = (uint8_t)(( p        & 0x1F) << 3); // B
+                *dst++ = (uint8_t)(((p >> 5)  & 0x1F) << 3); // G
+                *dst++ = (uint8_t)(((p >> 10) & 0x1F) << 3); // R
+                *dst++ = 0xFF;
+            }
+        }
+    }
+}
+
+void LibretroCore::audioSampleCb(int16_t left, int16_t right)
+{
+    int16_t s[2] = { left, right };
+    if (current_->onAudio) current_->onAudio(s, 1);
+}
+size_t LibretroCore::audioBatchCb(const int16_t* data, size_t frames)
+{
+    if (current_->onAudio) current_->onAudio(data, frames);
+    return frames;
+}
+void LibretroCore::inputPollCb() {}
+int16_t LibretroCore::inputStateCb(unsigned port, unsigned device, unsigned index, unsigned id)
+{
+    return current_->onInput ? current_->onInput(port, device, index, id) : 0;
+}
+bool LibretroCore::rumbleSetStateCb(unsigned port, retro_rumble_effect effect, uint16_t strength)
+{
+    if (!current_ || !current_->onRumble) return false;
+    current_->onRumble(port, static_cast<unsigned>(effect), strength);
+    return true;
+}

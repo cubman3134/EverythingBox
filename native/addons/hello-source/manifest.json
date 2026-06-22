@@ -1,0 +1,11 @@
+{
+  "id": "com.goliath.hello-source",
+  "name": "Hello Source",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "Goliath",
+  "description": "A sample JavaScript media-source addon.",
+  "permissions": [],
+  "minAppVersion": "0.1.0"
+}
