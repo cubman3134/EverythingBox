@@ -1,45 +1,51 @@
 # AIO Catalog — Cloudflare Worker
 
 A remote (HTTP) port of the bundled **aiocatalog** addon, running as a Cloudflare Worker. Same media
-sources and logic as the local JS addon, but the API keys live as Worker secrets (not in every user's
-settings file), and you can update the addon by redeploying instead of redistributing files.
+sources and logic as the local JS addon.
 
-| Catalog | Source | Secret |
+**Keys are per-user.** The Worker is keyless and shared — each person enters *their own* API keys in the
+app, and the app sends them to the Worker on each request. So one deployment serves everyone, and nobody
+shares anyone else's keys or rate limits.
+
+| Catalog | Source | Key (entered in-app) |
 |---|---|---|
-| Movies / TV | TMDB | `TMDB_API_KEY` (required) |
-| Games | IGDB (Twitch OAuth) | `IGDB_CLIENT_ID` + `IGDB_CLIENT_SECRET` |
+| Movies / TV | TMDB | TMDB API key |
+| Games | IGDB (Twitch OAuth) | IGDB client id + secret |
 | Music | MusicBrainz | none |
-| Books / Audiobooks | Google Books → Open Library | `GOOGLE_BOOKS_API_KEY` (optional; OL is the keyless fallback) |
-| Comics | Comic Vine | `COMIC_VINE_API_KEY` |
-| Manga | MangaDex | none (optional `MANGA_SHOW_ADULT="true"`) |
+| Books / Audiobooks | Google Books → Open Library | Google Books key (optional; OL is the keyless fallback) |
+| Comics | Comic Vine | Comic Vine key |
+| Manga | MangaDex | none (optional adult toggle) |
 
-## Deploy
+## Deploy (no secrets needed)
 
 ```
 npm i -g wrangler
 wrangler login
-wrangler secret put TMDB_API_KEY
-wrangler secret put IGDB_CLIENT_ID
-wrangler secret put IGDB_CLIENT_SECRET
-wrangler secret put GOOGLE_BOOKS_API_KEY     # optional
-wrangler secret put COMIC_VINE_API_KEY       # optional (Comics)
 wrangler deploy
 ```
 
-Then in the app: **Add-ons → Add by URL**, paste
-`https://mymediavault-aiocatalog.<your-subdomain>.workers.dev`.
+Then in the app:
+1. **Add-ons → Add by URL**, paste `https://mymediavault-aiocatalog.<your-subdomain>.workers.dev`.
+2. Select it in the source list → **Configure…** → enter your own API keys.
+
+## How per-user config works
+
+- The manifest declares `settings` (the keys), so the app's **Configure…** dialog renders a form.
+- Those values are sent as `X-MMV-Config: base64url(json)` on every request.
+- The Worker reads them in an `AsyncLocalStorage` scope (so concurrent users never see each other's keys)
+  and falls back to env vars only if a request carries no config (handy for a private self-host).
 
 ## Migrating from the local addon
 
-This Worker has a distinct id (`com.mymediavault.aiocatalog-worker`), so it can run side by side with the
-bundled local addon. To fully migrate: add the Worker URL, confirm it works, then **disable or Remove** the
+Distinct id (`com.mymediavault.aiocatalog-worker`), so it runs side by side with the bundled local addon.
+To fully migrate: add the Worker URL, Configure your keys, confirm it works, then **disable or Remove** the
 local "AIO Catalog" in the Library.
 
 ## Notes on the port
 
 - The addon's synchronous `httpRequest` became async `fetch`; every data function is now `async`/`await`.
-- `getConfig(key)` reads Worker env vars; the IGDB/Twitch token is cached per isolate.
+- The IGDB/Twitch token is cached per client-id (so per user), not in a shared global.
 - The browse-by-console tiles are bundled SVGs the Worker can't serve, so it points their `thumbnailUrl`
   at the app repo's `raw.githubusercontent.com` copies.
 - It's a metadata source, so `/stream` returns an empty list — opening an item shows its detail page.
-- Verified against all live APIs (catalogs, metadata, IGDB drill-down) before shipping.
+- Verified against all live APIs with per-user config headers (catalogs, metadata, IGDB OAuth) before shipping.

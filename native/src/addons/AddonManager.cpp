@@ -153,12 +153,13 @@ static QString resolveRemoteUrl(const QString& url, const QString& base)
 
 // Blocking GET for the synchronous API (console probe / tests). The UI never uses this - it goes through
 // the async dispatchRemote* path instead.
-static QByteArray httpGetBlocking(const QUrl& url, QString* err = nullptr)
+static QByteArray httpGetBlocking(const QUrl& url, const QByteArray& cfgHeader = {}, QString* err = nullptr)
 {
     QNetworkAccessManager nam;
     QNetworkRequest rq(url);
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    if (!cfgHeader.isEmpty()) rq.setRawHeader("X-MMV-Config", cfgHeader);
     QEventLoop loop;
     QNetworkReply* reply = nam.get(rq);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
@@ -199,6 +200,21 @@ static QString parseStreamJson(const QByteArray& body, const QString& base, QStr
     }
     if (mime) *mime = src.value(QStringLiteral("mime")).toString();
     return resolveRemoteUrl(src.value(QStringLiteral("url")).toString(), base);
+}
+
+// Per-user config for a remote addon: the user's values for the addon's declared settings (API keys etc.),
+// base64url(JSON), sent as the X-MMV-Config header so the service uses THIS user's keys (not baked-in ones).
+static QByteArray remoteConfigHeader(const LoadedAddon* src)
+{
+    if (!src) return {};
+    QJsonObject o;
+    for (const AddonSetting& s : src->manifest.settings)
+    {
+        const QString v = AddonContext::readConfig(src->manifest.id, s.key);
+        if (!v.isEmpty()) o.insert(s.key, v);
+    }
+    if (o.isEmpty()) return {};
+    return QJsonDocument(o).toJson(QJsonDocument::Compact).toBase64(QByteArray::Base64UrlEncoding);
 }
 
 // --- AddonManager ------------------------------------------------------------------------------------
@@ -305,9 +321,9 @@ AddonRequest AddonManager::buildRequest(LoadedAddon* src, const QString& functio
 
 // ---- synchronous ----
 // (Remote sources fetch over HTTP with a blocking GET; the same parsing/resolution as the async path.)
-static MediaCatalog remoteCatalogBlocking(const QUrl& url, const QString& base)
+static MediaCatalog remoteCatalogBlocking(const QUrl& url, const QString& base, const QByteArray& cfg)
 {
-    MediaCatalog cat = MediaCatalog::fromJson(httpGetBlocking(url));
+    MediaCatalog cat = MediaCatalog::fromJson(httpGetBlocking(url, cfg));
     for (MediaItem& it : cat.items)
     {
         it.url = resolveRemoteUrl(it.url, base);
@@ -320,7 +336,8 @@ MediaCatalog AddonManager::catalog(LoadedAddon* src, const QString& catalogId, c
 {
     if (!src) return {};
     if (src->transport == LoadedAddon::RemoteHttp)
-        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, catalogId, query, page), src->baseUrl);
+        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, catalogId, query, page), src->baseUrl,
+                                     remoteConfigHeader(src));
     return executeRequest(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
 }
 
@@ -328,7 +345,8 @@ MediaCatalog AddonManager::detail(LoadedAddon* src, const MediaItem& item, int p
 {
     if (!src) return {};
     if (src->transport == LoadedAddon::RemoteHttp)
-        return remoteCatalogBlocking(remoteDetailUrl(src->baseUrl, item.type, item.id, page), src->baseUrl);
+        return remoteCatalogBlocking(remoteDetailUrl(src->baseUrl, item.type, item.id, page), src->baseUrl,
+                                     remoteConfigHeader(src));
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
         { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
@@ -339,7 +357,8 @@ MediaCatalog AddonManager::search(LoadedAddon* src, const QString& query)
 {
     if (!src) return {};
     if (src->transport == LoadedAddon::RemoteHttp)
-        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, QString(), query, 1), src->baseUrl);
+        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, QString(), query, 1), src->baseUrl,
+                                     remoteConfigHeader(src));
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact));
     return executeRequest(buildRequest(src, QStringLiteral("search"), arg));
@@ -350,7 +369,8 @@ MediaDetail AddonManager::meta(LoadedAddon* src, const MediaItem& item)
     if (!src) return {};
     if (src->transport == LoadedAddon::RemoteHttp)
     {
-        MediaDetail d = MediaDetail::fromJson(httpGetBlocking(remoteMetaUrl(src->baseUrl, item.type, item.id)));
+        MediaDetail d = MediaDetail::fromJson(
+            httpGetBlocking(remoteMetaUrl(src->baseUrl, item.type, item.id), remoteConfigHeader(src)));
         d.imageUrl = resolveRemoteUrl(d.imageUrl, src->baseUrl);
         return d;
     }
@@ -427,6 +447,7 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     QNetworkRequest rq(remoteCatalogUrl(base, catalogId, query, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
         reply->deleteLater();
@@ -452,6 +473,7 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
     QNetworkRequest rq(remoteDetailUrl(base, item.type, item.id, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
         reply->deleteLater();
@@ -477,6 +499,7 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     QNetworkRequest rq(remoteMetaUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
         reply->deleteLater();
@@ -499,6 +522,7 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
     QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [reply, base, cb] {
         reply->deleteLater();
@@ -511,7 +535,8 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
 QString AddonManager::resolveStreamSync(LoadedAddon* src, const MediaItem& item)
 {
     if (!src || src->transport != LoadedAddon::RemoteHttp) return {};
-    return parseStreamJson(httpGetBlocking(remoteStreamUrl(src->baseUrl, item.type, item.id)), src->baseUrl);
+    return parseStreamJson(
+        httpGetBlocking(remoteStreamUrl(src->baseUrl, item.type, item.id), remoteConfigHeader(src)), src->baseUrl);
 }
 
 // ---- install / remove ------------------------------------------------------------------------------

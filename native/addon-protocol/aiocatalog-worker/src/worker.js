@@ -3,11 +3,10 @@
 //   Movies & TV -> TMDB,  Games -> IGDB,  Music -> MusicBrainz,  Books -> Google Books / Open Library,
 //   Comics -> Comic Vine,  Manga -> MangaDex.
 //
-// Same logic as the local JS addon, made async (Workers have only async fetch) and reading its keys from
-// Worker env vars instead of getConfig(). Serves the My Media Vault remote-addon protocol.
-//
-// Secrets (wrangler secret put …):  TMDB_API_KEY, IGDB_CLIENT_ID, IGDB_CLIENT_SECRET, GOOGLE_BOOKS_API_KEY,
-//   COMIC_VINE_API_KEY (optional: STEAMGRIDDB_KEY, MANGA_SHOW_ADULT="true").
+// Same logic as the local JS addon, made async (Workers have only async fetch). Keys are PER USER: each
+// user enters their own in the app's Configure… dialog and the app sends them in the X-MMV-Config header,
+// so the Worker stays keyless and shared. (Worker env vars are only an optional fallback for a self-host.)
+// Serves the My Media Vault remote-addon protocol.
 
 const UA = "MyMediaVault/1.0 (+https://github.com/cubman3134/MyMediaVault)";
 // The bundled console tiles live in the app repo; reference them absolutely since the Worker can't serve them.
@@ -30,12 +29,26 @@ const MANIFEST = {
     { id: "comics", name: "Comics", type: "comic" },
     { id: "manga", name: "Manga", type: "manga" },
   ],
+  // Per-user settings: the app's Configure… dialog renders these and sends the values back as config (each
+  // user uses their own keys; nothing is baked into the Worker).
+  settings: [
+    { key: "tmdbApiKey", label: "TMDB API Key", type: "password", description: "themoviedb.org API key — enables Movies and TV Shows." },
+    { key: "igdbClientId", label: "IGDB / Twitch Client ID", type: "text", description: "Twitch application client id — enables Games (IGDB)." },
+    { key: "igdbClientSecret", label: "IGDB / Twitch Client Secret", type: "password", description: "Twitch application client secret — enables Games (IGDB)." },
+    { key: "googleBooksApiKey", label: "Google Books Key (optional)", type: "password", description: "Optional Google Books API key — higher rate limits for Books." },
+    { key: "comicVineApiKey", label: "Comic Vine API Key", type: "password", description: "Free comicvine.gamespot.com key — enables Comics. (Manga needs no key.)" },
+    { key: "mangaShowAdult", label: "Show adult manga (18+)", type: "checkbox", default: false, description: "Include adult (NSFW) titles in the Manga catalog. Off by default." },
+  ],
 };
 
-// ---- host-API shims (replace the addon's getConfig / httpGet / httpRequest / getStorage) -------------
-
+// ---- host-API shims (replace the addon's getConfig / httpGet / httpRequest) --------------------------
+// Config is PER USER: the app sends each user's keys in the X-MMV-Config header. We stash them in an
+// AsyncLocalStorage scope per request so concurrent requests (which share an isolate) can't see each
+// other's keys. Worker env vars are only an optional fallback for a personal self-host.
+import { AsyncLocalStorage } from "node:async_hooks";
+const cfgStore = new AsyncLocalStorage();
 let ENV = {};
-function getConfig(key) {
+function envFallback(key) {
   switch (key) {
     case "tmdbApiKey": return ENV.TMDB_API_KEY || "";
     case "igdbClientId": return ENV.IGDB_CLIENT_ID || "";
@@ -46,6 +59,11 @@ function getConfig(key) {
     case "mangaShowAdult": return ENV.MANGA_SHOW_ADULT || "false";
     default: return "";
   }
+}
+function getConfig(key) {
+  const cfg = cfgStore.getStore();
+  if (cfg && cfg[key] !== undefined && cfg[key] !== "") return String(cfg[key]);
+  return envFallback(key);
 }
 async function httpGet(url) {
   const r = await fetch(url, { headers: { "User-Agent": UA, "Accept": "application/json" } });
@@ -59,10 +77,6 @@ async function httpRequest(opt) {
   });
   return await r.text();
 }
-// IGDB/Twitch token cache (per isolate).
-let TOKEN = { value: "", exp: 0 };
-function getStorage(k) { return k === "igdbToken" ? TOKEN.value : k === "igdbTokenExp" ? String(TOKEN.exp) : ""; }
-function setStorage(k, v) { if (k === "igdbToken") TOKEN.value = v; else if (k === "igdbTokenExp") TOKEN.exp = parseInt(v, 10) || 0; }
 
 // ---- pure helpers (unchanged from the addon) --------------------------------------------------------
 
@@ -94,7 +108,7 @@ async function tmdbList(kind, query, page) {
   page = page1(page);
   const key = getConfig("tmdbApiKey");
   const label = kind === "tv" ? "TV Shows" : "Movies";
-  if (!key) return info(label, "Set TMDB_API_KEY on the Worker to load " + kind + ".");
+  if (!key) return info(label, "Set your TMDB API key in Configure… to load " + kind + ".");
   const path = kind === "tv" ? "tv" : "movie";
   const url = query
     ? TMDB + "/search/" + path + "?api_key=" + key + "&page=" + page + "&query=" + enc(query)
@@ -115,7 +129,7 @@ async function tmdbList(kind, query, page) {
 }
 
 async function tmdbSeasons(showId) {
-  const key = getConfig("tmdbApiKey"); if (!key) return info("Seasons", "Set TMDB_API_KEY.");
+  const key = getConfig("tmdbApiKey"); if (!key) return info("Seasons", "Set your TMDB API key in Configure…");
   const r = J(await httpGet(TMDB + "/tv/" + showId + "?api_key=" + key));
   if (!r || !r.seasons) return info("Seasons", "Could not load seasons.");
   const items = [];
@@ -130,7 +144,7 @@ async function tmdbSeasons(showId) {
 }
 
 async function tmdbEpisodes(showId, seasonNo) {
-  const key = getConfig("tmdbApiKey"); if (!key) return info("Episodes", "Set TMDB_API_KEY.");
+  const key = getConfig("tmdbApiKey"); if (!key) return info("Episodes", "Set your TMDB API key in Configure…");
   const r = J(await httpGet(TMDB + "/tv/" + showId + "/season/" + seasonNo + "?api_key=" + key));
   if (!r || !r.episodes) return info("Episodes", "Could not load episodes.");
   const items = [];
@@ -196,18 +210,18 @@ async function tmdbEpisodeMeta(showId, season, ep) {
 }
 
 // ---------------------------------------------------------------------------- IGDB
+const tokenCache = new Map(); // clientId -> { value, exp } : keyed per user's client id (not a shared global)
 async function igdbToken() {
   const id = getConfig("igdbClientId"), secret = getConfig("igdbClientSecret");
   if (!id || !secret) return "";
-  const cached = getStorage("igdbToken"), exp = parseInt(getStorage("igdbTokenExp") || "0", 10);
-  if (cached && exp > Date.now()) return cached;
+  const c = tokenCache.get(id);
+  if (c && c.exp > Date.now()) return c.value;
   const resp = J(await httpRequest({
     method: "POST",
     url: "https://id.twitch.tv/oauth2/token?client_id=" + enc(id) + "&client_secret=" + enc(secret) + "&grant_type=client_credentials",
   }));
   if (!resp || !resp.access_token) return "";
-  setStorage("igdbToken", resp.access_token);
-  setStorage("igdbTokenExp", String(Date.now() + ((resp.expires_in || 3600) - 60) * 1000));
+  tokenCache.set(id, { value: resp.access_token, exp: Date.now() + ((resp.expires_in || 3600) - 60) * 1000 });
   return resp.access_token;
 }
 
@@ -264,7 +278,7 @@ function igdbConsoles() {
 async function gamesCatalog(query, page) {
   if (query) {
     page = page1(page);
-    if (!igdbCreds()) return info("Games", "Set IGDB_CLIENT_ID + IGDB_CLIENT_SECRET to search games.");
+    if (!igdbCreds()) return info("Games", "Set your IGDB client id + secret in Configure… to search games.");
     const r = await igdbQuery('search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
     if (!r) return info("Games", "Could not authenticate with IGDB.");
     return result("Games: " + query, igdbToItems(r), r.length === PAGE);
@@ -273,7 +287,7 @@ async function gamesCatalog(query, page) {
 }
 async function igdbPlatformGames(platformId, page) {
   page = page1(page);
-  if (!igdbCreds()) return info("Games", "Set IGDB_CLIENT_ID + IGDB_CLIENT_SECRET to load games.");
+  if (!igdbCreds()) return info("Games", "Set your IGDB client id + secret in Configure… to load games.");
   const r = await igdbQuery('fields name,cover.image_id,first_release_date,rating; where platforms = (' + platformId + ') & cover != null; sort rating desc; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
   if (!r) return info("Games", "Could not load games for this console.");
   if (!r.length && page === 1) return info("Games", "No games found for this console.");
@@ -458,7 +472,7 @@ function cvOk(r) { return r && (!r.error || r.error === "OK"); }
 async function comicsCatalog(query, page) {
   page = page1(page);
   const key = cvKey();
-  if (!key) return info("Comics", "Set COMIC_VINE_API_KEY to load comics.");
+  if (!key) return info("Comics", "Set your Comic Vine API key in Configure… to load comics.");
   const fields = "id,name,image,start_year,publisher,count_of_issues";
   const viaSearch = !!query;
   let url;
@@ -479,7 +493,7 @@ async function comicsCatalog(query, page) {
 }
 async function cvIssues(volumeId, page) {
   page = page1(page);
-  const key = cvKey(); if (!key) return info("Issues", "Set COMIC_VINE_API_KEY.");
+  const key = cvKey(); if (!key) return info("Issues", "Set your Comic Vine API key in Configure…");
   const offset = (page - 1) * PAGE;
   const r = J(await httpGet(CV + "/issues/?api_key=" + enc(key) + "&format=json&filter=volume:" + volumeId + "&sort=issue_number:asc&limit=" + PAGE + "&offset=" + offset + "&field_list=id,name,issue_number,image,cover_date"));
   if (!r) return info("Issues", "Could not load issues.");
@@ -689,28 +703,39 @@ function parseExtras(seg) {
 }
 const dec = (s) => (s == null ? "" : decodeURIComponent(s));
 
+// The app sends each user's config (their API keys etc.) as base64url(JSON) in the X-MMV-Config header.
+function parseConfigHeader(h) {
+  if (!h) return {};
+  try { return JSON.parse(atob(h.replace(/-/g, "+").replace(/_/g, "/"))) || {}; } catch (e) { return {}; }
+}
+
+async function route(request) {
+  const parts = new URL(request.url).pathname.replace(/^\/+|\/+$/g, "").split("/");
+  const last = parts[parts.length - 1] || "";
+  if (last.endsWith(".json")) parts[parts.length - 1] = last.slice(0, -5);
+
+  if (parts[0] === "manifest") return jsonObj(MANIFEST);
+  if (parts[0] === "catalog") {
+    const ex = parseExtras(parts[2]);
+    return jsonStr(await getCatalog(JSON.stringify({ catalog: dec(parts[1]), query: ex.search || "", page: Number(ex.page) || 1 })));
+  }
+  if (parts[0] === "meta") return jsonStr(await getMeta(JSON.stringify({ type: dec(parts[1]), id: dec(parts[2]) })));
+  if (parts[0] === "detail") {
+    const ex = parseExtras(parts[3]);
+    return jsonStr(await getDetail(JSON.stringify({ type: dec(parts[1]), id: dec(parts[2]), page: Number(ex.page) || 1 })));
+  }
+  if (parts[0] === "stream") return jsonObj({ streams: [] }); // metadata source: no playable files
+  return jsonObj({ error: "not found" }, 404);
+}
+
 export default {
   async fetch(request, env) {
     ENV = env;
-    try {
-      const parts = new URL(request.url).pathname.replace(/^\/+|\/+$/g, "").split("/");
-      const last = parts[parts.length - 1] || "";
-      if (last.endsWith(".json")) parts[parts.length - 1] = last.slice(0, -5);
-
-      if (parts[0] === "manifest") return jsonObj(MANIFEST);
-      if (parts[0] === "catalog") {
-        const ex = parseExtras(parts[2]);
-        return jsonStr(await getCatalog(JSON.stringify({ catalog: dec(parts[1]), query: ex.search || "", page: Number(ex.page) || 1 })));
-      }
-      if (parts[0] === "meta") return jsonStr(await getMeta(JSON.stringify({ type: dec(parts[1]), id: dec(parts[2]) })));
-      if (parts[0] === "detail") {
-        const ex = parseExtras(parts[3]);
-        return jsonStr(await getDetail(JSON.stringify({ type: dec(parts[1]), id: dec(parts[2]), page: Number(ex.page) || 1 })));
-      }
-      if (parts[0] === "stream") return jsonObj({ streams: [] }); // metadata source: no playable files
-      return jsonObj({ error: "not found" }, 404);
-    } catch (e) {
-      return jsonObj({ error: String((e && e.message) || e) }, 502);
-    }
+    const cfg = parseConfigHeader(request.headers.get("X-MMV-Config"));
+    // Run the whole request inside the per-user config scope so getConfig() resolves THIS user's keys.
+    return cfgStore.run(cfg, async () => {
+      try { return await route(request); }
+      catch (e) { return jsonObj({ error: String((e && e.message) || e) }, 502); }
+    });
   },
 };
