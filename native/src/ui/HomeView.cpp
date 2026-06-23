@@ -516,7 +516,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         else activateNav(key);                                                          // a media type / Home
     });
     connect(carousel_, &CarouselView::backRequested, this, &HomeView::goBack);
-    connect(carousel_, &CarouselView::navUp, this, [this] { focusChromeRow(); });
+    connect(carousel_, &CarouselView::navUp, this, [this] { focusUpFromColumn(); });
     v->addWidget(carousel_, 1);
 
     // The PS3 XMB view (shown instead of the grid/carousel when the theme's layout is "xmb").
@@ -527,7 +527,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     connect(xmb_, &XmbView::categoryChanged, this, &HomeView::activateNav); // moved to another category
     connect(xmb_, &XmbView::backRequested, this, &HomeView::goBack);
-    connect(xmb_, &XmbView::navUpOffTop, this, [this] { focusChromeRow(); });
+    connect(xmb_, &XmbView::navUpOffTop, this, [this] { focusUpFromColumn(); });
     connect(xmb_, &XmbView::currentChanged, this, [this](int idx, int total) {
         if (total > 0 && idx >= total - 2) loadMore(); // near the end -> pull the next page
     });
@@ -793,6 +793,8 @@ void HomeView::focusContent()
         carousel_->setFocus(Qt::OtherFocusReason);
     else if (grid_->isVisible() && grid_->count() > 0)
         grid_->setFocus(Qt::OtherFocusReason);
+    else if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
+        favBtn_->setFocus(Qt::OtherFocusReason); // a leaf detail page -> the Favorite button is the content
     else if (activeTypeButton_)
         activeTypeButton_->setFocus(Qt::OtherFocusReason);
 }
@@ -971,6 +973,16 @@ void HomeView::focusChrome(QWidget* from, int dir)
     const int j = i + (dir > 0 ? 1 : -1);
     if (j < 0 || j >= row.size()) return; // stop at the ends
     row[j]->setFocus(Qt::OtherFocusReason);
+}
+
+// Up from the top of a content column: on a container detail page (meta header + child column) land on the
+// Favorite button first; otherwise go straight to the top chrome.
+void HomeView::focusUpFromColumn()
+{
+    if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
+        favBtn_->setFocus(Qt::OtherFocusReason);
+    else
+        focusChromeRow();
 }
 
 void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name)
@@ -1188,6 +1200,21 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (k == Qt::Key_Backspace) { goBack(); return true; }
             return false;
         }
+        // --- Detail page: the Favorite button ---
+        if (obj == favBtn_)
+        {
+            if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
+            if (k == Qt::Key_Down) // drop into the child column (container detail), if any is shown
+            {
+                const bool col = (xmb_ && xmb_->isVisible()) || (carousel_ && carousel_->isVisible())
+                                 || (grid_->isVisible() && grid_->count() > 0);
+                if (col) focusContent();
+                return true;
+            }
+            if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space) { favBtn_->click(); return true; }
+            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            return false;
+        }
 
         // Backspace acts as the Back button when focus is on a tab or the grid.
         if (k == Qt::Key_Backspace) { goBack(); return true; }
@@ -1217,7 +1244,9 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (firstItem && cur &&
                     grid_->visualItemRect(cur).top() <= grid_->visualItemRect(firstItem).top())
                 {
-                    if (carouselMode_)         showCarousel();        // back up to the carousel
+                    if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
+                        favBtn_->setFocus(Qt::OtherFocusReason);      // container detail -> Favorite button
+                    else if (carouselMode_)     showCarousel();        // back up to the carousel
                     else if (activeTypeButton_) activeTypeButton_->setFocus(Qt::OtherFocusReason); // to the tabs
                     else                        focusChromeRow();     // no tabs -> up to the chrome
                     return true;

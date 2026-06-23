@@ -83,6 +83,7 @@ private:
     void focusChromeRow(QWidget* preferred = nullptr); // keyboard/controller: jump up to the top chrome
     void focusChrome(QWidget* from, int dir);          // move Left/Right within the chrome row
     QVector<QWidget*> chromeRow() const;               // the focusable top-bar controls, in order
+    void focusUpFromColumn();                          // Up from a content column -> Favorite (if shown) else chrome
     QString openKindForView() const; // file-open kind to offer in the current view, or "" for none
     void loadTop();
     void loadMore();                       // fetch + append the next page (infinite scroll)
