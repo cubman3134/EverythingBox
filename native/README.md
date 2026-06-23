@@ -18,7 +18,7 @@ engine — which is what makes both all-format video and libretro first-class.
 | `probe_core` console harness | builds; loads/inits cores, dumps core options, save-state round-trip test |
 | `MpvWidget` (libmpv render API -> Qt OpenGL surface; play/pause/stop/seek; audio-only "now playing" overlay) | **builds + runs** - video + audio (mp3/flac/ogg/wav/...) in the window; `probe_audio` verifies the audio path |
 | Music playlist / folder queue (`MainWindow`: track list panel, prev/next, auto-advance on EOF) | **builds + deployed** - open one track to queue its folder, or multi-select tracks |
-| Addon system (`AddonManager` + `JsAddon`/Duktape + `LibraryView`): JS media-source addons, sandboxed host API, catalogs, `.addon` install | **builds + verified** - `probe_addon` runs the sample addon's `getCatalog()`, manager discovers + resolves the deployed `hello-source` |
+| Addon system (`AddonManager` + `JsAddon`/Duktape + `LibraryView` + `HomeView`): JS media-source addons, sandboxed host API, catalogs-by-type, drill-down, per-addon settings, `.addon` install | **builds + verified** - `probe_addon` runs the bundled **AIO Catalog** addon; music (MusicBrainz) + drill-down verified live |
 | `RetroView` (core -> window, keyboard + **gamepad (SDL2)** -> RetroPad, **audio via QAudioSink**, **F2/F4 save/load**) | **builds** - emulation video + sound in the same window |
 | `Gamepad` (SDL2 GameController -> RetroPad, hot-plug, analog sticks) | **builds**; SDL2 runtime load verified. Live pad test pending hardware. |
 | Settings: per-system **core selection** + auto-download, per-core **options** editor | **builds + deployed** |
@@ -43,7 +43,7 @@ native/
   src/ui/                   MainWindow, SettingsDialog, ControllerRemapDialog, LibraryView
   src/main.cpp              app entry
   third_party/              miniz (zip), duktape/ (JS engine)
-  addons/hello-source/      bundled sample media-source addon
+  addons/aiocatalog/        bundled AIO Catalog addon (TMDB / IGDB / MusicBrainz)
   tools/probe_*.cpp         console verification harnesses (core / epub / pdf / audio / addon)
 ```
 
@@ -97,7 +97,17 @@ To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv
    ✅ audio (libmpv), ✅ JS addon system (`AddonManager`/`JsAddon` on **Duktape**, `LibraryView`). The addon
    contract matches the Unity one (manifest.json + main.js; getCatalog/search; host log/httpGet/getStorage/
    setStorage). ✅ Per-call **execution timeout** (5s, via Duktape DUK_USE_EXEC_TIMEOUT_CHECK) so a runaway
-   addon can't hang the UI; ✅ per-source **enable/disable** (checkboxes in the Library, persisted).
+   addon can't hang the UI; ✅ per-source **enable/disable** (checkboxes in the Library, persisted);
+   ✅ **per-addon settings**: a manifest `settings` schema (text/password/checkbox) renders a form in the
+   Library's "Configure…" dialog; values persist per addon and the script reads them via `getConfig(key)`.
+   ✅ **catalogs by media type** (manifest `catalogs`) + **drill-down** (`getDetail` — TV show → episodes,
+   album → tracks) + flexible **`httpRequest`** (POST/headers, for IGDB/Twitch & SteamGridDB) + **pagination**
+   (`page` arg + `hasMore`, infinite scroll). Addon invocations run **off the GUI thread** (QtConcurrent;
+   each call gets its own fresh Duktape context, so no interpreter state is shared) — the UI never blocks on
+   addon network calls. A **Home** landing view (`HomeView`) browses catalogs by type with poster thumbnails.
+   Ships an **AIO Catalog** addon:
+   Movies/TV (TMDB), Games (IGDB), Music (MusicBrainz) — music verified live, the rest gated on API keys set
+   in Configure…. (Associating local files with catalog items to play them is the next step.)
 5. **Input + audio** — ✅ keyboard + ✅ gamepad (SDL2, hot-plug, analog) → libretro `onInput`; ✅ QAudioSink
    draining `onAudio`; ✅ controller + keyboard remapping UI; ✅ multi-player (ports 1–4); ✅ per-port controller
    *and* keyboard profiles (each player remaps independently); ✅ rumble (libretro `GET_RUMBLE_INTERFACE` →

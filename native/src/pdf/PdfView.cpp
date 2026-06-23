@@ -35,6 +35,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     view_->setZoomMode(QPdfView::ZoomMode::FitInView);
 
     auto* bar = new QHBoxLayout();
+    auto* homeBtn = new QPushButton(tr("‹ Home"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
     auto* next = new QPushButton(tr("Next ›"), this);
     auto* zoomOutBtn = new QPushButton(tr("−"), this);
@@ -43,6 +44,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     pageLabel_ = new QLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
+    connect(homeBtn, &QPushButton::clicked, this, &PdfView::homeRequested);
     connect(prev, &QPushButton::clicked, this, &PdfView::prevPage);
     connect(next, &QPushButton::clicked, this, &PdfView::nextPage);
     connect(zoomOutBtn, &QPushButton::clicked, this, &PdfView::zoomOut);
@@ -51,6 +53,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     connect(view_->pageNavigator(), &QPdfPageNavigator::currentPageChanged, this, &PdfView::updateLabel);
     connect(doc_, &QPdfDocument::statusChanged, this, &PdfView::updateLabel);
 
+    bar->addWidget(homeBtn);
     bar->addWidget(zoomOutBtn);
     bar->addWidget(zoomInBtn);
     bar->addWidget(fit);

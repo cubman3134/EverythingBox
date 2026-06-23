@@ -1,0 +1,14 @@
+{
+  "name": "Aurora",
+  "accentFollowsTab": true,
+  "neutralTab": "#8A90A0",
+  "background": "aurora-bg.png",
+  "backgroundDim": 0.45,
+  "fontScale": 1.06,
+  "cornerRadius": 14,
+  "detail": {
+    "image": "top",
+    "imageWidth": 200,
+    "order": ["title", "favorite", "facts", "overview"]
+  }
+}

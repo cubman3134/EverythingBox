@@ -19,6 +19,10 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
     mpv_set_option_string(mpv, "vo", "libmpv");
     // Hardware decoding where available; safe fallback to software.
     mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // Subtitles: embedded tracks are auto-selected by mpv and rendered into our FBO (subs + OSD composite
+    // through the render API). "sub-auto=fuzzy" also pulls in sidecar files (movie.srt, movie.eng.srt, …)
+    // sitting next to the video, not just exact-name matches.
+    mpv_set_option_string(mpv, "sub-auto", "fuzzy");
     // mpv parses numbers with the C locale; main() must also setlocale(LC_NUMERIC, "C").
 
     if (mpv_initialize(mpv) < 0)
@@ -247,4 +251,18 @@ void MpvWidget::seekRelative(double seconds)
 void MpvWidget::setPosition(double seconds)
 {
     mpv_set_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &seconds);
+}
+
+void MpvWidget::cycleSubtitle()
+{
+    // Cycles sid through each subtitle track and "no" (off). mpv shows an OSD label of the new track.
+    const char* cmd[] = { "cycle", "sid", nullptr };
+    mpv_command_async(mpv, 0, cmd);
+}
+
+void MpvWidget::addSubtitle(const QString& path)
+{
+    QByteArray p = path.toUtf8();
+    const char* cmd[] = { "sub-add", p.constData(), "select", nullptr }; // load and switch to it
+    mpv_command_async(mpv, 0, cmd); // mpv copies the args
 }

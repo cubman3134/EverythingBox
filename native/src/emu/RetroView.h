@@ -11,6 +11,8 @@
 class QTimer;
 class QAudioSink;
 class QIODevice;
+class QFrame;
+class QLabel;
 
 class RetroView : public QWidget
 {
@@ -33,11 +35,15 @@ public:
     Gamepad* gamepad() { return &pad_; }  // for the controller-remapping UI
     Keymap*  keymap()  { return &keymap_; } // for the keyboard-remapping UI
 
+    void setPaused(bool paused);          // freeze/resume emulation (used by the Esc menu)
+
 signals:
     void statusMessage(const QString& text); // surfaced by the main window (save/load feedback)
+    void exitRequested();                    // the Esc menu's "Exit" - main window stops + returns Home
 
 protected:
     void paintEvent(QPaintEvent*) override;
+    void resizeEvent(QResizeEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     void keyReleaseEvent(QKeyEvent*) override;
 
@@ -45,6 +51,10 @@ private slots:
     void tick();
 
 private:
+    void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
+    void toggleMenu();
+    void showMenu();
+    void hideMenu();
     QString statePath() const; // <app>/states/<romBaseName>.state
     int16_t inputState(unsigned port, unsigned device, unsigned index, unsigned id);
     void updateControllerPorts(); // enable/disable core ports 0..3 as controllers come and go
@@ -60,7 +70,12 @@ private:
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
     bool running_ = false;
+    bool paused_ = false;
+    int frameIntervalMs_ = 16;
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
+
+    QFrame* menu_ = nullptr;        // Esc pause menu overlay
+    QLabel* menuStatus_ = nullptr;  // save/load feedback inside the menu
 
     int turboMask_[4] = { 0, 0, 0, 0 }; // per port: bit set = that RetroPad button auto-fires
     int turboHalfPeriod_ = 3; // frames the autofire stays on (and off) each cycle

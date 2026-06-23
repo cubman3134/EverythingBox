@@ -1,0 +1,74 @@
+#include "RecentStore.h"
+#include "ProfileStore.h"
+
+#include <QSettings>
+#include <QCoreApplication>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
+
+static const int kMaxRecents = 40;
+
+static QSettings& store()
+{
+    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/goliath.ini"),
+                       QSettings::IniFormat);
+    return s;
+}
+
+// Recents are per-profile so each user's home content is exclusive to them.
+static QString recentsKey()
+{
+    const QString id = ProfileStore::currentId();
+    return QStringLiteral("recent/") + (id.isEmpty() ? QStringLiteral("default") : id)
+           + QStringLiteral("/items");
+}
+
+QVector<RecentItem> RecentStore::list()
+{
+    QVector<RecentItem> out;
+    const QByteArray json = store().value(recentsKey()).toString().toUtf8();
+    const QJsonArray arr = QJsonDocument::fromJson(json).array();
+    for (const QJsonValue& v : arr)
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject o = v.toObject();
+        RecentItem it;
+        it.path  = o.value(QStringLiteral("path")).toString();
+        it.title = o.value(QStringLiteral("title")).toString();
+        it.kind  = o.value(QStringLiteral("kind")).toString();
+        it.thumb = o.value(QStringLiteral("thumb")).toString();
+        if (!it.path.isEmpty()) out.push_back(it);
+    }
+    return out;
+}
+
+void RecentStore::add(const RecentItem& item)
+{
+    if (item.path.isEmpty()) return;
+    QVector<RecentItem> items = list();
+    for (int i = items.size() - 1; i >= 0; --i)        // drop any prior entry for the same file
+        if (items[i].path == item.path) items.remove(i);
+    items.prepend(item);                               // newest first
+    while (items.size() > kMaxRecents) items.removeLast();
+
+    QJsonArray arr;
+    for (const RecentItem& it : items)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("path"), it.path);
+        o.insert(QStringLiteral("title"), it.title);
+        o.insert(QStringLiteral("kind"), it.kind);
+        if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
+        arr.append(o);
+    }
+    store().setValue(recentsKey(),
+                     QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+    store().sync();
+}
+
+void RecentStore::clear()
+{
+    store().remove(recentsKey());
+    store().sync();
+}

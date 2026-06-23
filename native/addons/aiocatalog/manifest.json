@@ -1,0 +1,30 @@
+{
+  "id": "com.goliath.aiocatalog",
+  "name": "AIO Catalog",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "Goliath",
+  "description": "All-in-one metadata catalog: Movies & TV (TMDB), Games (IGDB / SteamGridDB), Music (MusicBrainz), Books (Google Books, with Open Library as a keyless fallback), Comics (Comic Vine) and Manga (AniList, keyless). Drill into a TV show for its episodes, a comic series for its issues, or an album for its tracks.",
+  "permissions": ["network"],
+  "minAppVersion": "0.1.0",
+  "catalogs": [
+    { "id": "movies", "name": "Movies",    "type": "movie" },
+    { "id": "tv",     "name": "TV Shows",  "type": "series" },
+    { "id": "games",  "name": "Games",     "type": "game" },
+    { "id": "music",  "name": "Music",     "type": "album" },
+    { "id": "books",  "name": "Books",     "type": "book" },
+    { "id": "audiobooks", "name": "Audiobooks", "type": "audiobook" },
+    { "id": "comics", "name": "Comics",    "type": "comic" },
+    { "id": "manga",  "name": "Manga",     "type": "manga" }
+  ],
+  "settings": [
+    { "key": "tmdbApiKey",       "label": "TMDB API Key",                "type": "password", "description": "themoviedb.org API key — enables Movies and TV Shows." },
+    { "key": "igdbClientId",     "label": "IGDB / Twitch Client ID",     "type": "text",     "description": "Twitch application client id — enables Games (IGDB)." },
+    { "key": "igdbClientSecret", "label": "IGDB / Twitch Client Secret", "type": "password", "description": "Twitch application client secret — enables Games (IGDB)." },
+    { "key": "steamGridDbKey",   "label": "SteamGridDB Key (optional)",  "type": "password", "description": "Optional: nicer game grid artwork from steamgriddb.com." },
+    { "key": "googleBooksApiKey","label": "Google Books Key (optional)", "type": "password", "description": "Optional Google Books API key — higher rate limits for the Books catalog." },
+    { "key": "comicVineApiKey",  "label": "Comic Vine API Key",          "type": "password", "description": "Free comicvine.gamespot.com API key — enables the Comics catalog. (Manga needs no key.)" },
+    { "key": "mangaShowAdult",   "label": "Show adult manga (18+)",      "type": "checkbox", "default": false, "description": "Include adult (NSFW) titles in the Manga catalog. Off by default." }
+  ]
+}

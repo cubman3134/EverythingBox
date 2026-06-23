@@ -12,6 +12,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QFrame>
+#include <QLabel>
+#include <QPushButton>
+#include <QVBoxLayout>
 
 RetroView::RetroView(QWidget* parent) : QWidget(parent)
 {
@@ -23,6 +27,46 @@ RetroView::RetroView(QWidget* parent) : QWidget(parent)
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &RetroView::tick);
+
+    buildMenu();
+}
+
+void RetroView::buildMenu()
+{
+    menu_ = new QFrame(this);
+    menu_->setObjectName(QStringLiteral("emuMenu"));
+    menu_->setStyleSheet(QStringLiteral(
+        "#emuMenu { background: rgba(20,20,24,0.94); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; }"
+        "#emuMenu QPushButton { padding: 9px 18px; font-size: 15px; }"
+        "#emuMenu QLabel { color: #e8e8e8; }"));
+    auto* v = new QVBoxLayout(menu_);
+    v->setContentsMargins(20, 18, 20, 18);
+    v->setSpacing(8);
+
+    auto* title = new QLabel(tr("Paused"), menu_);
+    title->setAlignment(Qt::AlignCenter);
+    title->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
+    v->addWidget(title);
+
+    auto* resume = new QPushButton(tr("Resume"), menu_);
+    auto* save   = new QPushButton(tr("Save State"), menu_);
+    auto* load   = new QPushButton(tr("Load State"), menu_);
+    auto* exit   = new QPushButton(tr("Exit Emulator"), menu_);
+    for (QPushButton* b : { resume, save, load, exit }) v->addWidget(b);
+
+    menuStatus_ = new QLabel(QString(), menu_);
+    menuStatus_->setAlignment(Qt::AlignCenter);
+    menuStatus_->setStyleSheet(QStringLiteral("color:#aaa; font-size:12px;"));
+    v->addWidget(menuStatus_);
+
+    connect(resume, &QPushButton::clicked, this, &RetroView::hideMenu);
+    connect(exit,   &QPushButton::clicked, this, [this] { hideMenu(); emit exitRequested(); });
+    connect(save,   &QPushButton::clicked, this, [this] {
+        QString e; menuStatus_->setText(saveState(&e) ? tr("State saved") : e); });
+    connect(load,   &QPushButton::clicked, this, [this] {
+        QString e; menuStatus_->setText(loadState(&e) ? tr("State loaded") : e); });
+
+    menu_->hide();
 }
 
 RetroView::~RetroView() { stop(); }
@@ -62,7 +106,9 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     portsMask_ = -1;            // force a fresh port setup for this game
     updateControllerPorts();
     loadTurbo();
-    timer_->start(static_cast<int>(1000.0 / fps));
+    frameIntervalMs_ = qMax(1, static_cast<int>(1000.0 / fps));
+    paused_ = false;
+    timer_->start(frameIntervalMs_);
     running_ = true;
     setFocus();
     return true;
@@ -72,11 +118,52 @@ void RetroView::stop()
 {
     if (timer_) timer_->stop();
     running_ = false;
+    paused_ = false;
+    hideMenu();
     pressedKeys_.clear();
     pad_.stopRumble();
     stopAudio();
     core_.unload();
     update();
+}
+
+void RetroView::setPaused(bool paused)
+{
+    paused_ = paused;
+    if (!timer_) return;
+    if (paused) timer_->stop();
+    else if (running_) timer_->start(frameIntervalMs_);
+}
+
+void RetroView::toggleMenu()
+{
+    if (!running_) return;
+    if (menu_->isVisible()) hideMenu();
+    else showMenu();
+}
+
+void RetroView::showMenu()
+{
+    if (!running_) return;
+    setPaused(true);
+    menuStatus_->clear();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    menu_->show();
+    menu_->raise();
+}
+
+void RetroView::hideMenu()
+{
+    menu_->hide();
+    setPaused(false);
+    setFocus(); // keep Esc / gameplay keys coming to the view
+}
+
+void RetroView::resizeEvent(QResizeEvent*)
+{
+    if (menu_ && menu_->isVisible())
+        menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
 }
 
 void RetroView::tick()
@@ -160,6 +247,9 @@ void RetroView::paintEvent(QPaintEvent*)
 void RetroView::keyPressEvent(QKeyEvent* e)
 {
     if (e->isAutoRepeat()) return;
+
+    // Esc toggles the in-game pause menu (Resume / Save / Load / Exit).
+    if (e->key() == Qt::Key_Escape) { toggleMenu(); return; }
 
     // Save-state hotkeys (RetroArch-style: F2 save, F4 load) - reserved, not remappable.
     if (e->key() == Qt::Key_F2) { QString err; if (!saveState(&err)) emit statusMessage(err); return; }

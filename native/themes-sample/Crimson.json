@@ -1,0 +1,10 @@
+{
+  "name": "Crimson",
+  "accentFollowsTab": false,
+  "accent": "#C0392B",
+  "neutralTab": "#9A8480",
+  "tabColors": {
+    "movie": "#C0392B",
+    "music": "#7D3C98"
+  }
+}

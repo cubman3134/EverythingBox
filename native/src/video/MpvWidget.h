@@ -23,6 +23,8 @@ public:
     void togglePause();
     void seekRelative(double seconds);
     void setPosition(double seconds);
+    void cycleSubtitle();                     // step through subtitle tracks (… -> off -> 1 -> 2 -> …)
+    void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
 
 signals:
     void durationChanged(double seconds);

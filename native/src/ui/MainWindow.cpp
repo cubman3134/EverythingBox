@@ -4,21 +4,37 @@
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
 #include "LibraryView.h"
+#include "HomeView.h"
+#include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
+#include "../core/RecentStore.h"
+#include "../core/ProfileStore.h"
+#include "../core/Theme.h"
+#include "ProfileDialog.h"
+#include "RegistryBrowser.h"
+#include <QInputDialog>
 #include "SettingsDialog.h"
 
 #include <QWidget>
 #include <QStackedWidget>
 #include <QSplitter>
 #include <QListWidget>
+#include <QFrame>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
 #include <QSlider>
 #include <QLabel>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QEvent>
+#include <QResizeEvent>
+#include <QShortcut>
+#include <QKeyEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFile>
@@ -45,6 +61,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     addons_ = std::make_unique<AddonManager>();
     library_ = new LibraryView(addons_.get(), this);
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
+    home_ = new HomeView(addons_.get(), this);
+    connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
 
     // The player page pairs the libmpv surface with a playlist panel (shown only for audio queues).
     playlist_ = new QListWidget(this);
@@ -65,69 +83,186 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     stack_->addWidget(book_);      // index 2 - ebooks
     stack_->addWidget(pdf_);       // index 3 - pdf
     stack_->addWidget(library_);   // index 4 - addon library
+    stack_->addWidget(home_);      // index 5 - home / catalog landing
 
     auto* central = new QWidget(this);
     auto* v = new QVBoxLayout(central);
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(stack_, 1);
-
-    auto* bar = new QHBoxLayout();
-    auto* openVid = new QPushButton(tr("Open Video…"), this);
-    auto* openAud = new QPushButton(tr("Open Audio…"), this);
-    auto* openRom = new QPushButton(tr("Open Game…"), this);
-    auto* openDoc = new QPushButton(tr("Open Document…"), this);
-    auto* libraryBtn = new QPushButton(tr("Library"), this);
-    auto* settings = new QPushButton(tr("Settings…"), this);
-    auto* saveState = new QPushButton(tr("Save State"), this);
-    auto* loadState = new QPushButton(tr("Load State"), this);
-    auto* prevTrk = new QPushButton(tr("⏮"), this);
-    auto* playPause = new QPushButton(tr("Play / Pause"), this);
-    auto* nextTrk = new QPushButton(tr("⏭"), this);
-    auto* stop = new QPushButton(tr("Stop"), this);
-    prevTrk->setToolTip(tr("Previous track"));
-    nextTrk->setToolTip(tr("Next track"));
-    seek_ = new QSlider(Qt::Horizontal, this);
-    seek_->setRange(0, 1000);
-    time_ = new QLabel(QStringLiteral("0:00 / 0:00"), this);
-
-    bar->addWidget(openVid);
-    bar->addWidget(openAud);
-    bar->addWidget(openRom);
-    bar->addWidget(openDoc);
-    bar->addWidget(libraryBtn);
-    bar->addWidget(settings);
-    bar->addWidget(saveState);
-    bar->addWidget(loadState);
-    bar->addWidget(prevTrk);
-    bar->addWidget(playPause);
-    bar->addWidget(nextTrk);
-    bar->addWidget(stop);
-    bar->addWidget(seek_, 1);
-    bar->addWidget(time_);
-    v->addLayout(bar);
     setCentralWidget(central);
+    // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media
+    // transport overlay, the emulator Esc menu, and per-view Home buttons).
 
-    connect(openVid, &QPushButton::clicked, this, &MainWindow::openFile);
-    connect(openAud, &QPushButton::clicked, this, &MainWindow::openAudio);
-    connect(openRom, &QPushButton::clicked, this, &MainWindow::openGame);
-    connect(openDoc, &QPushButton::clicked, this, &MainWindow::openDocument);
-    connect(libraryBtn, &QPushButton::clicked, this, &MainWindow::openLibrary);
-    connect(settings, &QPushButton::clicked, this, &MainWindow::openSettings);
-    connect(prevTrk, &QPushButton::clicked, this, &MainWindow::prevTrack);
-    connect(nextTrk, &QPushButton::clicked, this, &MainWindow::nextTrack);
+    // Media transport overlay: a child of the player surface (composites over the GL video), shown only
+    // while media is open and the mouse moves.
+    mediaControls_ = new QFrame(player_);
+    mediaControls_->setObjectName(QStringLiteral("mediaControls"));
+    mediaControls_->setStyleSheet(QStringLiteral(
+        "#mediaControls { background: rgba(20,20,24,0.85); border-radius: 10px; }"
+        "#mediaControls QLabel { color: #e8e8e8; }"));
+    auto* mc = new QHBoxLayout(mediaControls_);
+    mc->setContentsMargins(12, 8, 12, 8);
+    auto* rewind = new QPushButton(tr("⏪"), mediaControls_);
+    auto* playPause = new QPushButton(tr("⏯"), mediaControls_);
+    auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
+    auto* stop = new QPushButton(tr("⏹"), mediaControls_);
+    auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
+    auto* subLoad = new QPushButton(tr("＋Sub"), mediaControls_);
+    auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
+    rewind->setToolTip(tr("Rewind 10s"));
+    playPause->setToolTip(tr("Play / Pause"));
+    fastFwd->setToolTip(tr("Forward 10s"));
+    stop->setToolTip(tr("Stop"));
+    subsBtn->setToolTip(tr("Subtitles: cycle tracks / off"));
+    subLoad->setToolTip(tr("Load a subtitle file…"));
+    fullScreen->setToolTip(tr("Toggle full screen (F11)"));
+    seek_ = new QSlider(Qt::Horizontal, mediaControls_);
+    seek_->setRange(0, 1000);
+    time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
+    mc->addWidget(rewind);
+    mc->addWidget(playPause);
+    mc->addWidget(fastFwd);
+    mc->addWidget(stop);
+    mc->addWidget(seek_, 1);
+    mc->addWidget(time_);
+    mc->addWidget(subsBtn);
+    mc->addWidget(subLoad);
+    mc->addWidget(fullScreen);
+    mediaControls_->hide();
+
+    controlsHideTimer_ = new QTimer(this);
+    controlsHideTimer_->setSingleShot(true);
+    connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
+        // Hide after the inactivity timeout (mouse movement re-reveals via the event filter). In full
+        // screen also blank the cursor so nothing lingers over the movie.
+        mediaControls_->hide();
+        if (isFullScreen() && stack_->currentWidget() == playerPage_)
+            player_->setCursor(Qt::BlankCursor);
+    });
+
+    // Reveal the controls on mouse movement over the player / controls.
+    player_->setMouseTracking(true);
+    player_->installEventFilter(this);
+    mediaControls_->installEventFilter(this);
+
+    connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
+    connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
+    connect(home_, &HomeView::switchProfileRequested, this, &MainWindow::onSwitchProfile);
+    connect(home_, &HomeView::themeChanged, this, &MainWindow::onThemeChanged);
+    connect(home_, &HomeView::settingsRequested, this, &MainWindow::openSettingsHub);
+    connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
+    connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
+    connect(library_, &LibraryView::homeRequested, this, &MainWindow::openHome);
+    connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
+    connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
+    connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
+    connect(subsBtn, &QPushButton::clicked, this, [this] { player_->cycleSubtitle(); revealMediaControls(); });
+    connect(subLoad, &QPushButton::clicked, this, [this] {
+        const QString f = QFileDialog::getOpenFileName(
+            this, tr("Load subtitle"), QString(),
+            tr("Subtitles (*.srt *.ass *.ssa *.sub *.vtt *.idx);;All files (*)"));
+        if (!f.isEmpty()) player_->addSubtitle(f);
+        revealMediaControls();
+    });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
-    connect(saveState, &QPushButton::clicked, this, [this] { QString e; if (!retro_->saveState(&e)) statusBar()->showMessage(e, 4000); });
-    connect(loadState, &QPushButton::clicked, this, [this] { QString e; if (!retro_->loadState(&e)) statusBar()->showMessage(e, 4000); });
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
+    connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
-    connect(stop, &QPushButton::clicked, this, [this] { player_->stop(); retro_->stop(); });
+    connect(stop, &QPushButton::clicked, this, [this] {
+        player_->stop(); mediaControls_->hide(); clearAudioQueue(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
     connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
+    // Hide the transport when leaving the player page.
+    connect(stack_, &QStackedWidget::currentChanged, this, [this] {
+        if (stack_->currentWidget() != playerPage_) mediaControls_->hide(); });
+
+    // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
+    auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
+    connect(fsShortcut, &QShortcut::activated, this, &MainWindow::toggleFullScreen);
+
+    stack_->setCurrentWidget(home_); // the catalog landing screen is shown first
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
+
+bool MainWindow::eventFilter(QObject* obj, QEvent* event)
+{
+    if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_))
+        revealMediaControls();
+    return QMainWindow::eventFilter(obj, event);
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event)
+{
+    QMainWindow::resizeEvent(event);
+    if (mediaControls_ && mediaControls_->isVisible())
+        positionMediaControls();
+}
+
+void MainWindow::leaveFullScreen()
+{
+    showNormal();
+    statusBar()->show();       // restore the bottom bar
+    player_->unsetCursor();    // restore the cursor
+}
+
+void MainWindow::toggleFullScreen()
+{
+    if (isFullScreen())
+    {
+        leaveFullScreen();
+    }
+    else
+    {
+        showFullScreen();
+        statusBar()->hide();   // the status bar would otherwise show as a strip at the bottom of the movie
+    }
+    if (stack_->currentWidget() == playerPage_) revealMediaControls();
+}
+
+void MainWindow::keyPressEvent(QKeyEvent* e)
+{
+    // Esc leaves full screen (the emulator view consumes its own Esc for the pause menu, so this only
+    // fires for the player / readers).
+    if (e->key() == Qt::Key_Escape && isFullScreen()) { leaveFullScreen(); return; }
+    QMainWindow::keyPressEvent(e);
+}
+
+void MainWindow::showEvent(QShowEvent* event)
+{
+    QMainWindow::showEvent(event);
+    if (focusedOnShow_) return;
+    focusedOnShow_ = true;
+    // Become the active window and drop keyboard focus into the home view so arrow keys work without a
+    // click first. Deferred a tick so it runs after the window is actually on screen / activated.
+    raise();
+    activateWindow();
+    QTimer::singleShot(0, this, [this] {
+        activateWindow();
+        if (stack_->currentWidget() == home_ && home_) home_->focusContent();
+    });
+}
+
+void MainWindow::revealMediaControls()
+{
+    if (stack_->currentWidget() != playerPage_) return; // only over an open media item
+    player_->unsetCursor();                              // cursor visible again whenever controls show
+    positionMediaControls();
+    mediaControls_->show();
+    mediaControls_->raise();
+    controlsHideTimer_->start(2500);
+}
+
+void MainWindow::positionMediaControls()
+{
+    // mediaControls_ is a child of player_, so position it in the player's local coordinates (bottom band).
+    const int margin = 16;
+    const int h = mediaControls_->sizeHint().height();
+    mediaControls_->setGeometry(margin, player_->height() - h - margin,
+                                player_->width() - 2 * margin, h);
+}
 
 void MainWindow::openFile()
 {
@@ -135,12 +270,19 @@ void MainWindow::openFile()
         this, tr("Open Video"), QString(),
         tr("Video (*.mkv *.mp4 *.avi *.mov *.webm *.m4v *.wmv *.flv *.ts *.m2ts);;All files (*.*)"));
     if (f.isEmpty()) return;
+    openVideoPath(f);
+}
+
+void MainWindow::openVideoPath(const QString& path)
+{
     retro_->stop();
     book_->persist();
     pdf_->persist();
     clearAudioQueue();
     stack_->setCurrentWidget(playerPage_);
-    player_->play(f);
+    player_->play(path);
+    revealMediaControls();
+    RecentStore::add({ path, QFileInfo(path).completeBaseName(), QStringLiteral("video"), QString() });
 }
 
 void MainWindow::openAudio()
@@ -153,28 +295,33 @@ void MainWindow::openAudio()
            "All files (*.*)"));
     if (sel.isEmpty()) return;
 
+    if (sel.size() == 1) { openAudioPath(sel.first()); return; } // folder queue starting at this track
+
+    retro_->stop();
+    book_->persist();
+    pdf_->persist();
+    setAudioQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
+    const QString first = sel.first();
+    RecentStore::add({ first, QFileInfo(first).completeBaseName(), QStringLiteral("audio"), QString() });
+}
+
+void MainWindow::openAudioPath(const QString& path)
+{
+    // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
+    const QFileInfo fi(path);
+    QStringList filters;
+    for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
+    const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
     QStringList queue;
-    int start = 0;
-    if (sel.size() == 1)
-    {
-        // Folder queue: play the whole directory, sorted, starting at the chosen track.
-        const QFileInfo fi(sel.first());
-        QStringList filters;
-        for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
-        const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
-        for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
-        start = queue.indexOf(fi.absoluteFilePath());
-        if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
-    }
-    else
-    {
-        queue = sel; // exactly the selected tracks, in the order the dialog returned them
-    }
+    for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
+    int start = queue.indexOf(fi.absoluteFilePath());
+    if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
 
     retro_->stop();
     book_->persist();
     pdf_->persist();
     setAudioQueue(queue, start);
+    RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
 void MainWindow::setAudioQueue(const QStringList& files, int startIndex)
@@ -185,6 +332,7 @@ void MainWindow::setAudioQueue(const QStringList& files, int startIndex)
     playlist_->setVisible(true);
     stack_->setCurrentWidget(playerPage_);
     playTrack(startIndex);
+    revealMediaControls();
 }
 
 void MainWindow::playTrack(int index)
@@ -226,7 +374,11 @@ void MainWindow::openGame()
         tr("ROMs (*.gba *.gb *.gbc *.sgb *.nes *.fds *.sfc *.smc *.md *.gen *.smd *.sms *.gg *.n64 *.z64 "
            "*.pce *.ws *.wsc *.a26 *.cue *.chd *.pbp);;All files (*.*)"));
     if (rom.isEmpty()) return;
+    openGamePath(rom);
+}
 
+void MainWindow::openGamePath(const QString& rom)
+{
     const QString ext = QFileInfo(rom).suffix().toLower();
     const GameSystem* sys = SystemCatalog::forExtension(ext);
     if (!sys)
@@ -251,7 +403,10 @@ void MainWindow::openGame()
     clearAudioQueue();
     QString err;
     if (retro_->openGame(corePath, rom, core, &err))
+    {
         stack_->setCurrentWidget(retro_);
+        RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
+    }
     else
         QMessageBox::warning(this, tr("Can't run game"), err);
 }
@@ -262,7 +417,11 @@ void MainWindow::openDocument()
         this, tr("Open Document"), QString(),
         tr("Documents (*.epub *.pdf);;EPUB books (*.epub);;PDF documents (*.pdf);;All files (*.*)"));
     if (f.isEmpty()) return;
+    openDocumentPath(f);
+}
 
+void MainWindow::openDocumentPath(const QString& f)
+{
     const QString ext = QFileInfo(f).suffix().toLower();
     QString err;
 
@@ -284,6 +443,7 @@ void MainWindow::openDocument()
         clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
+    RecentStore::add({ f, QFileInfo(f).completeBaseName(), QStringLiteral("document"), QString() });
 }
 
 void MainWindow::openLibrary()
@@ -292,11 +452,60 @@ void MainWindow::openLibrary()
     stack_->setCurrentWidget(library_);
 }
 
+void MainWindow::openHome()
+{
+    // Leaving whatever was open: stop playback/emulation, save reader positions.
+    player_->stop();
+    retro_->stop();
+    book_->persist();
+    pdf_->persist();
+    clearAudioQueue();
+    home_->refresh();
+    stack_->setCurrentWidget(home_);
+}
+
+void MainWindow::onRequestOpenFile(const QString& kind)
+{
+    // The Home view's "open a file" item routes here (the toolbar open buttons were removed).
+    if (kind == QStringLiteral("video"))         openFile();
+    else if (kind == QStringLiteral("audio"))    openAudio();
+    else if (kind == QStringLiteral("game"))     openGame();
+    else if (kind == QStringLiteral("document")) openDocument();
+}
+
+void MainWindow::openRecent(const QString& path, const QString& kind)
+{
+    if (!QFileInfo::exists(path))
+    {
+        statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), 5000);
+        return;
+    }
+    if (kind == QStringLiteral("video"))         openVideoPath(path);
+    else if (kind == QStringLiteral("audio"))    openAudioPath(path);
+    else if (kind == QStringLiteral("game"))     openGamePath(path);
+    else if (kind == QStringLiteral("document")) openDocumentPath(path);
+}
+
+void MainWindow::onSwitchProfile()
+{
+    const Profile before = ProfileStore::current();
+    ProfileDialog dlg(/*mustChoose*/ false, this);
+    if (dlg.exec() == QDialog::Accepted && !dlg.selectedId().isEmpty())
+        ProfileStore::setCurrent(dlg.selectedId());
+
+    const Profile after = ProfileStore::current();
+    if (after.id != before.id)
+        openHome(); // switched user (or a deletion repointed "current") -> full refresh + this user's recents
+    else if (after.name != before.name || after.icon != before.icon)
+        home_->refresh(); // edited the active profile -> update the avatar / name button
+}
+
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
     if (item.url.isEmpty())
     {
-        QMessageBox::warning(this, tr("Can't open"), tr("This item has no location."));
+        // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
+        statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), 4000);
         return;
     }
     const QString url = item.url;
@@ -326,15 +535,100 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
+        revealMediaControls();
     }
 }
 
-void MainWindow::openSettings()
+void MainWindow::onThemeChanged(const QColor& background, const QColor& accent)
 {
-    // The settings dialog loads cores headlessly to read their options; only one libretro core can be
-    // live at a time (the C ABI routes through a global), so stop any running game first.
+    // Match the home view's theme app-wide: light window + status bar, accent-coloured status text.
+    setStyleSheet(QString("QMainWindow{background:%1;}").arg(background.name()));
+    statusBar()->setStyleSheet(QString("QStatusBar{background:%1;color:#2a2c30;}").arg(background.name()));
+    Q_UNUSED(accent);
+}
+
+void MainWindow::openSettingsHub()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Settings"));
+    auto* v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel(tr("Choose a settings area:"), &dlg));
+
+    auto* theme = new QPushButton(tr("Theme…"), &dlg);
+    auto* emu = new QPushButton(tr("Emulator Settings…"), &dlg);
+    auto* inp = new QPushButton(tr("Input Mapping…"), &dlg);
+    auto* addon = new QPushButton(tr("Addon Settings…"), &dlg);
+    connect(theme, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openThemes(); });
+    connect(emu, &QPushButton::clicked, this, &MainWindow::openEmulatorSettings);
+    connect(inp, &QPushButton::clicked, this, &MainWindow::openInputMapping);
+    connect(addon, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openLibrary(); });
+    v->addWidget(theme);
+    v->addWidget(emu);
+    v->addWidget(inp);
+    v->addWidget(addon);
+
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+    dlg.exec();
+}
+
+void MainWindow::openThemes()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Theme"));
+    dlg.resize(320, 380);
+    auto* v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel(tr("Choose a theme:"), &dlg));
+
+    auto* list = new QListWidget(&dlg);
+    auto repopulate = [list] {
+        list->clear();
+        const QString cur = ThemeStore::currentName();
+        for (const Theme& t : ThemeStore::all())
+        {
+            auto* it = new QListWidgetItem(t.name, list);
+            if (t.name.compare(cur, Qt::CaseInsensitive) == 0) list->setCurrentItem(it);
+        }
+    };
+    repopulate();
+    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+    v->addWidget(list, 1);
+
+    auto* browse = new QPushButton(tr("Browse Themes…"), &dlg);
+    connect(browse, &QPushButton::clicked, &dlg, [this, &dlg, repopulate] {
+        RegistryBrowser rb(RegistryBrowser::Themes, nullptr, &dlg);
+        rb.exec();
+        repopulate(); // a newly downloaded theme appears in the list
+    });
+    v->addWidget(browse);
+
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+
+    if (dlg.exec() == QDialog::Accepted && list->currentItem())
+    {
+        ThemeStore::setCurrent(list->currentItem()->text());
+        home_->applyTheme();
+    }
+}
+
+void MainWindow::openEmulatorSettings()
+{
+    // The dialog loads cores headlessly to read their options; only one libretro core can be live at a
+    // time (the C ABI routes through a global), so stop any running game first.
     retro_->stop();
-    SettingsDialog dlg(retro_->gamepad(), retro_->keymap(), this);
+    SettingsDialog dlg(this);
+    dlg.exec();
+}
+
+void MainWindow::openInputMapping()
+{
+    // Stop the game so the remap dialog has sole use of the controller (for "press a button" capture).
+    retro_->stop();
+    ControllerRemapDialog dlg(retro_->gamepad(), retro_->keymap(), this);
     dlg.exec();
 }
 

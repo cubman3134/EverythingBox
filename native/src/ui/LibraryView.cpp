@@ -1,4 +1,6 @@
 #include "LibraryView.h"
+#include "AddonSettingsDialog.h"
+#include "RegistryBrowser.h"
 #include "../addons/AddonManager.h"
 
 #include <QListWidget>
@@ -16,16 +18,25 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     auto* v = new QVBoxLayout(this);
 
     auto* tools = new QHBoxLayout();
+    auto* homeBtn = new QPushButton(tr("‹ Home"), this);
+    connect(homeBtn, &QPushButton::clicked, this, &LibraryView::homeRequested);
+    tools->addWidget(homeBtn);
+    auto* browse = new QPushButton(tr("Browse Add-ons…"), this);
     auto* install = new QPushButton(tr("Install Addon…"), this);
+    auto* configure = new QPushButton(tr("Configure…"), this);
     auto* reload = new QPushButton(tr("Reload"), this);
     search_ = new QLineEdit(this);
     search_->setPlaceholderText(tr("Search the selected source…"));
     auto* searchBtn = new QPushButton(tr("Search"), this);
+    connect(browse, &QPushButton::clicked, this, &LibraryView::browseAddons);
     connect(install, &QPushButton::clicked, this, &LibraryView::installAddon);
+    connect(configure, &QPushButton::clicked, this, &LibraryView::configureAddon);
     connect(reload, &QPushButton::clicked, this, &LibraryView::reloadAddons);
     connect(searchBtn, &QPushButton::clicked, this, &LibraryView::doSearch);
     connect(search_, &QLineEdit::returnPressed, this, &LibraryView::doSearch);
+    tools->addWidget(browse);
     tools->addWidget(install);
+    tools->addWidget(configure);
     tools->addWidget(reload);
     tools->addWidget(search_, 1);
     tools->addWidget(searchBtn);
@@ -47,6 +58,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     connect(sourceList_, &QListWidget::currentRowChanged, this, &LibraryView::onSourceChanged);
     connect(sourceList_, &QListWidget::itemChanged, this, &LibraryView::onSourceCheckChanged);
     connect(itemList_, &QListWidget::itemActivated, this, &LibraryView::onItemActivated);
+    connect(mgr_, &AddonManager::catalogReady, this, &LibraryView::onCatalogReady);
 
     refreshSources();
 }
@@ -86,11 +98,13 @@ void LibraryView::onSourceChanged()
     {
         itemList_->clear();
         currentItems_.clear();
+        pendingReqId_ = -1; // cancel any in-flight result for this pane
         status_->setText(tr("“%1” is disabled — check its box to enable it.")
                              .arg(s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name));
         return;
     }
-    showCatalog(mgr_->catalog(s));
+    status_->setText(tr("Loading…"));
+    pendingReqId_ = mgr_->requestCatalog(s, QString(), QString(), 1);
 }
 
 void LibraryView::onSourceCheckChanged(QListWidgetItem* item)
@@ -108,11 +122,14 @@ void LibraryView::doSearch()
     const int row = sourceList_->currentRow();
     if (row < 0 || row >= sourceRefs_.size()) return;
     const QString q = search_->text().trimmed();
-    if (q.isEmpty()) { showCatalog(mgr_->catalog(sourceRefs_[row])); return; }
+    status_->setText(tr("Loading…"));
+    pendingReqId_ = q.isEmpty() ? mgr_->requestCatalog(sourceRefs_[row], QString(), QString(), 1)
+                                : mgr_->requestSearch(sourceRefs_[row], q);
+}
 
-    const MediaCatalog cat = mgr_->search(sourceRefs_[row], q);
-    if (cat.items.isEmpty() && cat.title.isEmpty())
-        status_->setText(tr("This source doesn't support search."));
+void LibraryView::onCatalogReady(int requestId, const MediaCatalog& cat)
+{
+    if (requestId != pendingReqId_) return; // superseded
     showCatalog(cat);
 }
 
@@ -154,8 +171,28 @@ void LibraryView::installAddon()
     status_->setText(tr("Addon installed."));
 }
 
+void LibraryView::configureAddon()
+{
+    const int row = sourceList_->currentRow();
+    if (row < 0 || row >= sourceRefs_.size())
+    {
+        status_->setText(tr("Select a source to configure."));
+        return;
+    }
+    AddonSettingsDialog dlg(sourceRefs_[row]->manifest, this);
+    if (dlg.exec() == QDialog::Accepted)
+        onSourceChanged(); // re-fetch the catalog so changed config (e.g. an API key) takes effect now
+}
+
 void LibraryView::reloadAddons()
 {
     mgr_->reload();
     refreshSources();
+}
+
+void LibraryView::browseAddons()
+{
+    RegistryBrowser dlg(RegistryBrowser::Addons, mgr_, this);
+    dlg.exec();
+    if (dlg.installedSomething()) refreshSources(); // show newly installed add-ons
 }

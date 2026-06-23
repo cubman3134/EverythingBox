@@ -2,6 +2,7 @@
 #include <QMainWindow>
 
 #include <QStringList>
+#include <QColor>
 #include <memory>
 #include "../addons/AddonModels.h"
 
@@ -10,11 +11,14 @@ class RetroView;
 class EbookView;
 class PdfView;
 class LibraryView;
+class HomeView;
 class AddonManager;
 class QStackedWidget;
 class QSlider;
 class QLabel;
 class QListWidget;
+class QFrame;
+class QTimer;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
 // with Open Video / Open Game and a transport bar. The shell the rest of the hub grows from.
@@ -30,9 +34,17 @@ private slots:
     void openAudio();
     void openGame();
     void openDocument(); // ebooks (.epub) + PDFs (.pdf), dispatched by extension
+    void openHome();
+    void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
+    void openRecent(const QString& path, const QString& kind); // re-open a Home "Recent" entry
+    void onSwitchProfile();                      // pick/create a profile from the Home profile button
+    void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
-    void openSettings();
+    void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
+    void openEmulatorSettings();
+    void openInputMapping();
     void nextTrack();
     void prevTrack();
     void onTrackEnded();
@@ -40,25 +52,45 @@ private slots:
     void onPosition(double seconds);
     void onSeekReleased();
 
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override; // reveal media controls on mouse move
+    void resizeEvent(QResizeEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;          // Esc leaves full screen
+    void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
+
 private:
     static QString fmt(double seconds);
+    // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
+    // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
+    void openVideoPath(const QString& path);
+    void openAudioPath(const QString& path);    // queue the whole folder, starting at this file
+    void openGamePath(const QString& path);
+    void openDocumentPath(const QString& path); // .epub / .pdf by extension
     void setAudioQueue(const QStringList& files, int startIndex);
     void playTrack(int index);
     void clearAudioQueue();   // leave audio mode (video/game/doc)
+    void toggleFullScreen();
+    void leaveFullScreen();   // restore windowed: status bar + cursor
+    void revealMediaControls();
+    void positionMediaControls();
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
     EbookView* book_ = nullptr;
     PdfView* pdf_ = nullptr;
     LibraryView* library_ = nullptr;
+    HomeView* home_ = nullptr;
     std::unique_ptr<AddonManager> addons_;
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
+    QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
+    QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
     double duration_ = 0.0;
     bool sliderDown_ = false;
+    bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
 
     QStringList tracks_;     // current audio queue (absolute paths)
     int trackIndex_ = -1;    // index into tracks_, or -1 when not playing a queue

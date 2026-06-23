@@ -49,6 +49,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     split_->setSizes({ 240, 800 });
 
     auto* bar = new QHBoxLayout();
+    auto* homeBtn = new QPushButton(tr("‹ Home"), this);
     auto* contents = new QPushButton(tr("Contents"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
     auto* next = new QPushButton(tr("Next ›"), this);
@@ -57,6 +58,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     pageLabel_ = new QLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
+    connect(homeBtn, &QPushButton::clicked, this, &EbookView::homeRequested);
     connect(contents, &QPushButton::clicked, this, &EbookView::toggleContents);
     connect(prev, &QPushButton::clicked, this, &EbookView::prevPage);
     connect(next, &QPushButton::clicked, this, &EbookView::nextPage);
@@ -64,6 +66,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     connect(bigger, &QPushButton::clicked, this, &EbookView::biggerFont);
     connect(browser_->verticalScrollBar(), &QScrollBar::valueChanged, this, &EbookView::updatePageLabel);
 
+    bar->addWidget(homeBtn);
     bar->addWidget(contents);
     bar->addWidget(smaller);
     bar->addWidget(bigger);

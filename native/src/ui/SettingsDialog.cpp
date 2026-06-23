@@ -1,5 +1,4 @@
 #include "SettingsDialog.h"
-#include "ControllerRemapDialog.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
@@ -18,16 +17,16 @@
 #include <QDialogButtonBox>
 #include <vector>
 
-SettingsDialog::SettingsDialog(Gamepad* pad, Keymap* keys, QWidget* parent)
-    : QDialog(parent), pad_(pad), keys_(keys)
+SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 {
-    setWindowTitle(tr("Settings — Cores per System"));
+    setWindowTitle(tr("Emulator Settings — Cores per System"));
 
     auto* v = new QVBoxLayout(this);
 
-    auto* controllerBtn = new QPushButton(tr("Input Mapping (Controller + Keyboard)…"), this);
-    connect(controllerBtn, &QPushButton::clicked, this, &SettingsDialog::editControllerMapping);
-    v->addWidget(controllerBtn);
+    auto* intro = new QLabel(tr("Choose the libretro core for each system, and tune per-core options. "
+                                "Controller and keyboard mapping is in “Input Mapping…”."), this);
+    intro->setWordWrap(true);
+    v->addWidget(intro);
 
     auto* form = new QFormLayout();
 
@@ -80,12 +79,6 @@ void SettingsDialog::save()
         if (QComboBox* c = combos_.value(sys.id))
             Settings::setCoreFor(sys.id, c->currentData().toString());
     accept();
-}
-
-void SettingsDialog::editControllerMapping()
-{
-    ControllerRemapDialog dlg(pad_, keys_, this);
-    dlg.exec();
 }
 
 void SettingsDialog::editOptions(const QString& systemId)

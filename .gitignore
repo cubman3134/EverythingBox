@@ -15,3 +15,7 @@ Thumbs.db
 
 # Misc
 *.log
+
+# Theme/addon registries are published as their own GitHub repos (nested .git);
+# don't embed them in this repo.
+/native/registry/

@@ -17,6 +17,9 @@ public:
     bool openPdf(const QString& path, QString* error = nullptr);
     void persist(); // save the current page (called when navigating away)
 
+signals:
+    void homeRequested();
+
 protected:
     void keyPressEvent(QKeyEvent*) override;
 

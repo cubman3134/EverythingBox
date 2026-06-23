@@ -22,13 +22,17 @@ public:
 
 signals:
     void openItem(const MediaItem& item);
+    void homeRequested();
 
 private slots:
     void onSourceChanged();
     void onSourceCheckChanged(QListWidgetItem* item); // enable/disable toggled
     void onItemActivated();
+    void onCatalogReady(int requestId, const MediaCatalog& cat); // async result
     void doSearch();
     void installAddon();
+    void browseAddons();   // open the add-on registry browser
+    void configureAddon();
     void reloadAddons();
 
 private:
@@ -42,4 +46,5 @@ private:
     QVector<MediaItem> currentItems_;
     QVector<LoadedAddon*> sourceRefs_; // parallel to sourceList_ rows
     bool populating_ = false;          // suppress check-change handling while (re)building the list
+    int pendingReqId_ = -1;            // in-flight async catalog/search request
 };

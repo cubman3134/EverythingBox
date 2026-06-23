@@ -20,6 +20,9 @@ public:
     bool openBook(const QString& path, QString* error = nullptr);
     void persist(); // save reading position (called when navigating away)
 
+signals:
+    void homeRequested();
+
 protected:
     void keyPressEvent(QKeyEvent*) override;
 

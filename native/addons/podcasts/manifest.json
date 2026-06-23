@@ -1,0 +1,17 @@
+{
+  "id": "com.goliath.podcasts",
+  "name": "Podcasts",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "Goliath",
+  "description": "Podcasts via the keyless iTunes Search API. Example of an addon that defines a NEW media type (with its own colour + icon) through the manifest's mediaTypes.",
+  "permissions": ["network"],
+  "mediaTypes": [
+    { "type": "podcast",         "color": "#C44ED1", "icon": "mic.svg", "openKind": "audio", "detailLayout": "banner" },
+    { "type": "podcast_episode", "color": "#9B59B6", "icon": "🎧" }
+  ],
+  "catalogs": [
+    { "id": "podcasts", "name": "Podcasts", "type": "podcast" }
+  ]
+}

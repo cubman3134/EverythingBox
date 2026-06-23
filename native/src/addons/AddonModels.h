@@ -5,6 +5,38 @@
 #include <QStringList>
 #include <QVector>
 
+// A user-configurable addon setting (API key, base URL, toggle, ...) declared in the manifest. The app
+// renders a form from these and stores the values per addon; the script reads them via getConfig(key).
+struct AddonSetting
+{
+    QString key;          // config key the script queries
+    QString label;        // display label
+    QString type;         // "text" | "password" | "checkbox" | "number" (default: text)
+    QString defaultValue; // used until the user sets a value
+    QString description;   // optional help text
+};
+
+// A named, media-typed catalog an addon offers (Movies, TV Shows, Games, Music, ...). The script's
+// getCatalog() receives the catalog id to know which to build.
+struct AddonCatalog
+{
+    QString id;    // passed back to getCatalog({catalog:id})
+    QString name;  // display label (the media-type tab)
+    QString type;  // "movie" | "series" | "game" | "album" | ... (hint for routing/icons)
+};
+
+// A media type an addon defines, so new types (beyond the built-ins) get their own visuals. The app keys
+// a registry by `type`; a catalog/item of that type then uses this colour + icon. Built-in types still
+// have hand-drawn defaults; these override/extend them. `openKind` ties an "Open a file" action to the type.
+struct AddonMediaType
+{
+    QString type;         // e.g. "podcast" - matches a catalog/item type
+    QString color;        // accent colour, e.g. "#E0662E"
+    QString icon;         // an emoji glyph, OR a bundled image file in the addon folder ("icons/x.svg")
+    QString openKind;     // "" | "video" | "audio" | "document" | "game" (offer an Open-a-file item)
+    QString detailLayout; // detail-page arrangement: "" / "poster" (default) | "banner" | "text"
+};
+
 struct AddonManifest
 {
     QString id;            // unique, reverse-DNS recommended
@@ -14,8 +46,12 @@ struct AddonManifest
     QString entry;         // script file name (default "main.js")
     QString author;
     QString description;
+    QString accent;          // optional per-addon accent colour (hex), used by this addon's catalog types
     QStringList permissions; // declared capabilities, e.g. ["network"]
     QString minAppVersion;
+    QVector<AddonSetting> settings;       // user-configurable credentials/options
+    QVector<AddonCatalog> catalogs;       // media-typed catalogs (empty = a single implicit catalog)
+    QVector<AddonMediaType> mediaTypes;   // custom media types with their own colour/icon
 
     static AddonManifest fromJson(const QByteArray& json, bool* ok = nullptr);
     QString entryOrDefault() const { return entry.isEmpty() ? QStringLiteral("main.js") : entry; }
@@ -23,19 +59,37 @@ struct AddonManifest
 
 struct MediaItem
 {
-    QString id;
+    QString id;            // opaque id the addon uses for drill-down (getDetail)
     QString title;
     QString subtitle;
-    QString type;          // "ebook", "video", "audio", "pdf", "link", ...
-    QString thumbnailUrl;
-    QString url;           // resolvable location: file path, http(s) url, ...
+    QString type;          // "movie", "series", "season", "episode", "game", "album", "track", "ebook", ...
+    QString thumbnailUrl;  // poster/cover image (http) to show in the grid
+    QString url;           // playable location (file/http) - empty until a file is associated
     QString mime;
+    bool expandable = false; // a container (series/season/album): clicking fetches its children via getDetail
 };
 
 struct MediaCatalog
 {
     QString title;
     QVector<MediaItem> items;
+    bool hasMore = false; // the addon reports another page is available (drives infinite scroll)
 
     static MediaCatalog fromJson(const QByteArray& json);
+};
+
+// Metadata about a single item, returned by an addon's getMeta(). Drives the detail-page header:
+// a cover image, a title/subtitle, a set of labelled facts (Rating, Genres, Runtime, ...) and a synopsis.
+struct MediaFact { QString label; QString value; };
+
+struct MediaDetail
+{
+    QString title;
+    QString subtitle;
+    QString overview;          // synopsis / description (may contain plain text)
+    QString imageUrl;          // larger cover/poster (http or local)
+    QVector<MediaFact> facts;  // labelled key/value rows
+    bool valid = false;        // false = addon returned nothing usable (header stays hidden)
+
+    static MediaDetail fromJson(const QByteArray& json);
 };

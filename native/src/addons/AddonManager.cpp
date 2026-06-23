@@ -1,5 +1,6 @@
 #include "AddonManager.h"
 #include "AddonContext.h"
+#include "JsAddon.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -9,6 +10,8 @@
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QDebug>
 #include <cstring>
 
@@ -21,8 +24,86 @@ static QSettings& store()
     return s;
 }
 
-AddonManager::AddonManager()
+// --- pure helpers (thread-safe: no AddonManager state) -----------------------------------------------
+
+// Resolve a relative item URL/thumbnail to an absolute path (addon folder first, then app dir).
+static QString resolveUrlIn(const QString& url, const QString& addonDir)
 {
+    if (url.isEmpty()) return url;
+    if (url.contains(QStringLiteral("://"))) return url; // http(s)/file/magnet - leave as-is
+    QFileInfo fi(url);
+    if (fi.isAbsolute() && fi.exists()) return fi.absoluteFilePath();
+    const QString inAddon = QDir::cleanPath(addonDir + QStringLiteral("/") + url);
+    if (QFile::exists(inAddon)) return inAddon;
+    const QString inApp = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/") + url);
+    if (QFile::exists(inApp)) return inApp;
+    return url;
+}
+
+// Load the addon in a fresh JS context, invoke one function, and return the resolved catalog. Runs on
+// whatever thread calls it (GUI for the sync API, a pool thread for the async API) - self-contained.
+static MediaCatalog executeRequest(const AddonRequest& req)
+{
+    if (req.source.isEmpty()) return {};
+    auto ctx = std::make_unique<AddonContext>(req.manifest, req.storageDir);
+    QString err;
+    std::unique_ptr<JsAddon> addon = JsAddon::load(req.source, std::move(ctx), &err);
+    if (!addon)
+    {
+        qWarning().noquote() << QStringLiteral("addon '%1' failed to load: %2").arg(req.manifest.id, err);
+        return {};
+    }
+    // getDetail/search are optional; getCatalog is assumed present.
+    if ((req.function == QStringLiteral("getDetail") || req.function == QStringLiteral("search"))
+        && !addon->hasFunction(req.function))
+        return {};
+
+    MediaCatalog cat = MediaCatalog::fromJson(addon->invoke(req.function, req.argJson).toUtf8());
+    for (MediaItem& it : cat.items)
+    {
+        it.url = resolveUrlIn(it.url, req.dir);
+        it.thumbnailUrl = resolveUrlIn(it.thumbnailUrl, req.dir);
+    }
+    return cat;
+}
+
+// Load the addon in a fresh JS context and invoke getMeta(), returning the parsed item metadata. Like
+// executeRequest but for the single-item detail header; getMeta is optional (absent -> invalid detail).
+static MediaDetail executeMetaRequest(const AddonRequest& req)
+{
+    if (req.source.isEmpty()) return {};
+    auto ctx = std::make_unique<AddonContext>(req.manifest, req.storageDir);
+    QString err;
+    std::unique_ptr<JsAddon> addon = JsAddon::load(req.source, std::move(ctx), &err);
+    if (!addon) return {};
+    if (!addon->hasFunction(req.function)) return {};
+
+    MediaDetail d = MediaDetail::fromJson(addon->invoke(req.function, req.argJson).toUtf8());
+    d.imageUrl = resolveUrlIn(d.imageUrl, req.dir);
+    return d;
+}
+
+static QString itemArg(const MediaItem& item)
+{
+    return QString::fromUtf8(QJsonDocument(QJsonObject{
+        { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type } }).toJson(QJsonDocument::Compact));
+}
+
+static QString catalogArg(const QString& catalogId, const QString& query, int page)
+{
+    QJsonObject a;
+    if (!catalogId.isEmpty()) a.insert(QStringLiteral("catalog"), catalogId);
+    if (!query.isEmpty())     a.insert(QStringLiteral("query"), query);
+    a.insert(QStringLiteral("page"), page);
+    return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact));
+}
+
+// --- AddonManager ------------------------------------------------------------------------------------
+
+AddonManager::AddonManager(QObject* parent) : QObject(parent)
+{
+    qRegisterMetaType<MediaCatalog>("MediaCatalog");
+    qRegisterMetaType<MediaDetail>("MediaDetail");
     root_ = QCoreApplication::applicationDirPath() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
@@ -54,16 +135,12 @@ void AddonManager::loadFolder(const QString& dir)
     entry->manifest = manifest;
     entry->dir = dir;
 
+    // Read (but don't evaluate) the script - it's compiled per request on a worker thread.
     QFile sf(dir + QStringLiteral("/") + manifest.entryOrDefault());
     if (manifest.type == QStringLiteral("media-source") && sf.open(QIODevice::ReadOnly))
     {
-        const QString source = QString::fromUtf8(sf.readAll());
-        const QString storageDir = root_ + QStringLiteral("/_storage/") + manifest.id;
-        auto ctx = std::make_unique<AddonContext>(manifest, storageDir);
-        QString err;
-        entry->addon = JsAddon::load(source, std::move(ctx), &err);
-        if (!entry->addon)
-            qWarning().noquote() << QStringLiteral("addon '%1' failed to load: %2").arg(manifest.id, err);
+        entry->source = QString::fromUtf8(sf.readAll());
+        entry->hasScript = !entry->source.isEmpty();
     }
 
     LoadedAddon* raw = entry.get();
@@ -72,43 +149,110 @@ void AddonManager::loadFolder(const QString& dir)
         sources_.push_back(raw);
 }
 
-MediaCatalog AddonManager::catalog(LoadedAddon* src)
+QVector<AddonCatalog> AddonManager::catalogs(LoadedAddon* src) const
 {
-    if (!src || !src->addon) return {};
-    const QString json = src->addon->invoke(QStringLiteral("getCatalog"), QStringLiteral("{}"));
-    return resolved(MediaCatalog::fromJson(json.toUtf8()), src->dir);
+    if (!src) return {};
+    if (!src->manifest.catalogs.isEmpty()) return src->manifest.catalogs;
+    AddonCatalog c;
+    c.name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
+    c.type = QStringLiteral("mixed");
+    return { c }; // implicit single catalog (id empty)
+}
+
+AddonRequest AddonManager::buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const
+{
+    AddonRequest req;
+    if (src) { req.source = src->source; req.manifest = src->manifest; req.dir = src->dir; }
+    req.storageDir = root_ + QStringLiteral("/_storage/") + (src ? src->manifest.id : QString());
+    req.function = function;
+    req.argJson = argJson;
+    return req;
+}
+
+// ---- synchronous ----
+MediaCatalog AddonManager::catalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
+{
+    if (!src) return {};
+    return executeRequest(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
+}
+
+MediaCatalog AddonManager::detail(LoadedAddon* src, const MediaItem& item, int page)
+{
+    if (!src) return {};
+    const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
+        { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
+        { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
+    return executeRequest(buildRequest(src, QStringLiteral("getDetail"), arg));
 }
 
 MediaCatalog AddonManager::search(LoadedAddon* src, const QString& query)
 {
-    if (!src || !src->addon || !src->addon->hasFunction(QStringLiteral("search"))) return {};
-    // Pass {"query":"..."} as a JSON string (Qt builds the escaping correctly).
-    const QByteArray arg = QJsonDocument(QJsonObject{ { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact);
-    const QString json = src->addon->invoke(QStringLiteral("search"), QString::fromUtf8(arg));
-    return resolved(MediaCatalog::fromJson(json.toUtf8()), src->dir);
+    if (!src) return {};
+    const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
+        { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact));
+    return executeRequest(buildRequest(src, QStringLiteral("search"), arg));
 }
 
-MediaCatalog AddonManager::resolved(MediaCatalog cat, const QString& addonDir) const
+MediaDetail AddonManager::meta(LoadedAddon* src, const MediaItem& item)
 {
-    for (MediaItem& it : cat.items)
-        it.url = resolveUrl(it.url, addonDir);
-    return cat;
+    if (!src) return {};
+    return executeMetaRequest(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
 }
 
-QString AddonManager::resolveUrl(const QString& url, const QString& addonDir) const
+// ---- asynchronous ----
+int AddonManager::dispatch(const AddonRequest& req)
 {
-    if (url.isEmpty()) return url;
-    if (url.contains(QStringLiteral("://"))) return url; // http(s)/file/magnet - leave as-is
+    const int reqId = ++reqCounter_;
+    auto* watcher = new QFutureWatcher<MediaCatalog>(this);
+    connect(watcher, &QFutureWatcher<MediaCatalog>::finished, this, [this, reqId, watcher] {
+        const MediaCatalog cat = watcher->result();
+        watcher->deleteLater();
+        emit catalogReady(reqId, cat);
+    });
+    watcher->setFuture(QtConcurrent::run([req] { return executeRequest(req); }));
+    return reqId;
+}
 
-    QFileInfo fi(url);
-    if (fi.isAbsolute() && fi.exists()) return fi.absoluteFilePath();
+int AddonManager::dispatchMeta(const AddonRequest& req)
+{
+    const int reqId = ++reqCounter_;
+    auto* watcher = new QFutureWatcher<MediaDetail>(this);
+    connect(watcher, &QFutureWatcher<MediaDetail>::finished, this, [this, reqId, watcher] {
+        const MediaDetail d = watcher->result();
+        watcher->deleteLater();
+        emit metaReady(reqId, d);
+    });
+    watcher->setFuture(QtConcurrent::run([req] { return executeMetaRequest(req); }));
+    return reqId;
+}
 
-    // Relative: prefer the addon's own folder, then the app directory.
-    const QString inAddon = QDir::cleanPath(addonDir + QStringLiteral("/") + url);
-    if (QFile::exists(inAddon)) return inAddon;
-    const QString inApp = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/") + url);
-    if (QFile::exists(inApp)) return inApp;
-    return url; // unresolved - hand it back unchanged
+int AddonManager::requestMeta(LoadedAddon* src, const MediaItem& item)
+{
+    if (!src) return -1;
+    return dispatchMeta(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
+}
+
+int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
+{
+    if (!src) return -1;
+    return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
+}
+
+int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page)
+{
+    if (!src) return -1;
+    const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
+        { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
+        { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
+    return dispatch(buildRequest(src, QStringLiteral("getDetail"), arg));
+}
+
+int AddonManager::requestSearch(LoadedAddon* src, const QString& query)
+{
+    if (!src) return -1;
+    const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
+        { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact));
+    return dispatch(buildRequest(src, QStringLiteral("search"), arg));
 }
 
 // ---- install / remove ------------------------------------------------------------------------------

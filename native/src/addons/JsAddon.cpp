@@ -51,6 +51,18 @@ static duk_ret_t js_httpGet(duk_context* d)
     return 1;
 }
 
+static duk_ret_t js_httpRequest(duk_context* d)
+{
+    AddonContext* c = ctxOf(d);
+    // Accept either a JSON string or an object argument.
+    QString opts;
+    if (duk_is_object(d, 0)) { duk_json_encode(d, 0); opts = QString::fromUtf8(duk_safe_to_string(d, 0)); }
+    else opts = QString::fromUtf8(duk_safe_to_string(d, 0));
+    const QString body = c ? c->httpRequest(opts) : QString();
+    duk_push_string(d, body.toUtf8().constData());
+    return 1;
+}
+
 static duk_ret_t js_getStorage(duk_context* d)
 {
     AddonContext* c = ctxOf(d);
@@ -64,6 +76,14 @@ static duk_ret_t js_setStorage(duk_context* d)
     if (AddonContext* c = ctxOf(d))
         c->setStorage(QString::fromUtf8(duk_safe_to_string(d, 0)), QString::fromUtf8(duk_safe_to_string(d, 1)));
     return 0;
+}
+
+static duk_ret_t js_getConfig(duk_context* d)
+{
+    AddonContext* c = ctxOf(d);
+    const QString v = c ? c->getConfig(QString::fromUtf8(duk_safe_to_string(d, 0))) : QString();
+    duk_push_string(d, v.toUtf8().constData());
+    return 1;
 }
 
 std::unique_ptr<JsAddon> JsAddon::load(const QString& source, std::unique_ptr<AddonContext> ctx, QString* error)
@@ -81,8 +101,10 @@ std::unique_ptr<JsAddon> JsAddon::load(const QString& source, std::unique_ptr<Ad
     // Bind the sandboxed host API as globals.
     duk_push_c_function(d, js_log,        1); duk_put_global_string(d, "log");
     duk_push_c_function(d, js_httpGet,    1); duk_put_global_string(d, "httpGet");
+    duk_push_c_function(d, js_httpRequest,1); duk_put_global_string(d, "httpRequest");
     duk_push_c_function(d, js_getStorage, 1); duk_put_global_string(d, "getStorage");
     duk_push_c_function(d, js_setStorage, 2); duk_put_global_string(d, "setStorage");
+    duk_push_c_function(d, js_getConfig,  1); duk_put_global_string(d, "getConfig");
 
     // Evaluate the addon body (protected, and time-bounded against a top-level runaway loop).
     const QByteArray src = source.toUtf8();

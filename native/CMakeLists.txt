@@ -23,7 +23,7 @@ target_link_libraries(probe_core PRIVATE goliath_libretro)
 # ---------------------------------------------------------------------------
 option(GOLIATH_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
 if(GOLIATH_BUILD_APP)
-    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia Network Pdf PdfWidgets)
+    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia Network Pdf PdfWidgets Concurrent)
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
     # libmpv: install it (e.g. `vcpkg install libmpv`, distro `libmpv-dev`, or a prebuilt SDK) and make it
@@ -46,19 +46,31 @@ if(GOLIATH_BUILD_APP)
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
         src/addons/AddonManager.cpp src/addons/AddonManager.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
+        src/ui/HomeView.cpp       src/ui/HomeView.h
+        src/ui/AddonSettingsDialog.cpp src/ui/AddonSettingsDialog.h
+        src/ui/ProfileDialog.cpp  src/ui/ProfileDialog.h
+        src/ui/RegistryBrowser.cpp src/ui/RegistryBrowser.h
+        src/ui/CarouselView.cpp   src/ui/CarouselView.h
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/CoreManager.cpp  src/core/CoreManager.h
+        src/core/RecentStore.cpp  src/core/RecentStore.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/Theme.cpp        src/core/Theme.h
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        resources/appicon.qrc
+        $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
     target_include_directories(goliath PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
     target_compile_definitions(goliath PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(goliath PRIVATE goliath_libretro Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets ${MPV_LIBRARY})
+    target_link_libraries(goliath PRIVATE goliath_libretro Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets Qt6::Concurrent ${MPV_LIBRARY})
+    set_target_properties(goliath PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
 
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
@@ -69,6 +81,10 @@ if(GOLIATH_BUILD_APP)
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)
     target_link_libraries(probe_pdf PRIVATE Qt6::Gui Qt6::Pdf)
+
+    # Console harness: load an image (incl. SVG) into a QPixmap - verifies the bundled console tiles render.
+    add_executable(probe_image tools/probe_image.cpp)
+    target_link_libraries(probe_image PRIVATE Qt6::Gui)
 
     # Console harness for libmpv audio decoding (no Qt) - verifies the "now playing" metadata path.
     add_executable(probe_audio tools/probe_audio.cpp)
@@ -82,7 +98,7 @@ if(GOLIATH_BUILD_APP)
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape)
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network)
+    target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
     # Gamepad support via SDL2 (optional). Install SDL2 and pass CMAKE_PREFIX_PATH, or
     # -DSDL2_INCLUDE_DIR= and -DSDL2_LIBRARY=. Without it, controller input is simply absent.
