@@ -290,7 +290,10 @@ void XmbView::keyPressEvent(QKeyEvent* e)
 {
     switch (e->key())
     {
-    case Qt::Key_Up:   animateItemTo(itemIndex_ - 1); return;
+    case Qt::Key_Up:
+        if (itemIndex_ > 0) animateItemTo(itemIndex_ - 1);
+        else emit navUpOffTop(); // already at the top item -> hand off to the top chrome row
+        return;
     case Qt::Key_Down: animateItemTo(itemIndex_ + 1); return;
     case Qt::Key_Left:
         if (atRoot_)

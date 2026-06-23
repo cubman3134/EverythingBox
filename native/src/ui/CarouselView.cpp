@@ -268,6 +268,7 @@ void CarouselView::keyPressEvent(QKeyEvent* e)
     {
     case Qt::Key_Left:  goTo(index_ - 1, true); return;
     case Qt::Key_Right: goTo(index_ + 1, true); return;
+    case Qt::Key_Up:    emit navUp(); return; // hand off to the top chrome row
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Space:
         if (!entries_.isEmpty()) emit activated(currentKey());
         return;

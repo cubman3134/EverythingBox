@@ -92,9 +92,12 @@ static QColor lightTint(const QColor& c, qreal w = 0.14)
 // Same padding/shape as the tabs so the whole top bar is one seamless strip of equally-sized buttons.
 static QString chromeButtonStyle(const QColor& c)
 {
+    // :focus draws a white inset border (with reduced padding so the box size doesn't shift) so keyboard /
+    // controller users can see which chrome control is selected.
     return QString(
         "QPushButton{background:%1;color:white;border:none;border-radius:0;padding:8px 16px;font-weight:bold;}"
         "QPushButton:hover{background:%2;}"
+        "QPushButton:focus{background:%2;border:2px solid white;padding:6px 14px;}"
         "QPushButton:disabled{background:%3;color:#f4f4f4;}")
         .arg(c.name(), c.lighter(112).name(), c.lighter(135).name());
 }
@@ -102,7 +105,9 @@ static QString chromeButtonStyle(const QColor& c)
 static QString chromeEditStyle(const QColor& c, int radius)
 {
     // Light *tint* of the accent (not pure white) and no border, so no white edge shows next to the buttons.
-    return QString("QLineEdit{background:%1;color:#1b1b1b;border:none;border-radius:%2px;padding:6px 10px;}")
+    // :focus shows a white border (reduced padding keeps the size stable) so it's clearly selected.
+    return QString("QLineEdit{background:%1;color:#1b1b1b;border:none;border-radius:%2px;padding:6px 10px;}"
+                   "QLineEdit:focus{border:2px solid white;padding:4px 8px;}")
         .arg(lightTint(c, 0.30).name()).arg(radius);
 }
 
@@ -387,6 +392,15 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     topRow->addWidget(settingsBtn_);
     v->addWidget(topBar_);
 
+    // Make the top chrome keyboard/controller navigable: arrows move between Back / Search / Profile /
+    // Settings, Down drops into the content, Enter activates (Enter on Search begins typing).
+    for (QWidget* w : { static_cast<QWidget*>(back_), static_cast<QWidget*>(search_),
+                        static_cast<QWidget*>(profileBtn_), static_cast<QWidget*>(settingsBtn_) })
+    {
+        w->setFocusPolicy(Qt::StrongFocus);
+        w->installEventFilter(this);
+    }
+
     // Detail-page metadata header: cover on the left, title / facts / synopsis on the right.
     // Hidden on top-level catalog views; revealed when an item is opened.
     meta_ = new QFrame(this);
@@ -502,6 +516,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         else activateNav(key);                                                          // a media type / Home
     });
     connect(carousel_, &CarouselView::backRequested, this, &HomeView::goBack);
+    connect(carousel_, &CarouselView::navUp, this, [this] { focusChromeRow(); });
     v->addWidget(carousel_, 1);
 
     // The PS3 XMB view (shown instead of the grid/carousel when the theme's layout is "xmb").
@@ -512,6 +527,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     connect(xmb_, &XmbView::categoryChanged, this, &HomeView::activateNav); // moved to another category
     connect(xmb_, &XmbView::backRequested, this, &HomeView::goBack);
+    connect(xmb_, &XmbView::navUpOffTop, this, [this] { focusChromeRow(); });
     connect(xmb_, &XmbView::currentChanged, this, [this](int idx, int total) {
         if (total > 0 && idx >= total - 2) loadMore(); // near the end -> pull the next page
     });
@@ -770,6 +786,7 @@ void HomeView::applyTheme()
 
 void HomeView::focusContent()
 {
+    searchEditing_ = false; // leaving the chrome row -> the search box is no longer in edit mode
     if (xmbMode_ && xmb_ && xmb_->isVisible())
         xmb_->setFocus(Qt::OtherFocusReason);
     else if (carouselMode_ && carousel_ && carousel_->isVisible())
@@ -920,6 +937,40 @@ void HomeView::focusGridTop()
     while (r < items_.size() && items_[r].type == QStringLiteral("rechdr")) ++r; // skip recent headers
     if (r >= grid_->count()) r = 0;
     grid_->setCurrentRow(r);
+}
+
+// The focusable top-bar controls, left to right. Back is skipped when disabled (at the root view).
+QVector<QWidget*> HomeView::chromeRow() const
+{
+    QVector<QWidget*> r;
+    if (back_ && back_->isEnabled()) r << back_;
+    if (search_)      r << search_;
+    if (profileBtn_)  r << profileBtn_;
+    if (settingsBtn_) r << settingsBtn_;
+    return r;
+}
+
+// Jump keyboard/controller focus up into the chrome row (default: the first control, i.e. Back if it's
+// available, otherwise Search).
+void HomeView::focusChromeRow(QWidget* preferred)
+{
+    searchEditing_ = false;
+    const QVector<QWidget*> row = chromeRow();
+    if (row.isEmpty()) return;
+    QWidget* target = (preferred && row.contains(preferred)) ? preferred : row.first();
+    target->setFocus(Qt::OtherFocusReason);
+}
+
+// Move Left/Right within the chrome row, clamped at the ends.
+void HomeView::focusChrome(QWidget* from, int dir)
+{
+    searchEditing_ = false;
+    const QVector<QWidget*> row = chromeRow();
+    const int i = row.indexOf(from);
+    if (i < 0) { focusChromeRow(); return; }
+    const int j = i + (dir > 0 ? 1 : -1);
+    if (j < 0 || j >= row.size()) return; // stop at the ends
+    row[j]->setFocus(Qt::OtherFocusReason);
 }
 
 void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name)
@@ -1103,17 +1154,52 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
     if (event->type() == QEvent::KeyPress)
     {
         auto* ke = static_cast<QKeyEvent*>(event);
+        const int k = ke->key();
 
-        // Backspace acts as the Back button when focus is on a tab or the grid (the search box isn't
-        // filtered, so backspacing while typing a query still deletes characters).
-        if (ke->key() == Qt::Key_Backspace) { goBack(); return true; }
+        // --- Top chrome row: the search box (highlighted vs. typing) ---
+        if (obj == search_)
+        {
+            if (searchEditing_)
+            {
+                // Typing: the line edit handles letters / Backspace / Enter; Esc or Down exits edit mode.
+                if (k == Qt::Key_Escape) { searchEditing_ = false; return true; }
+                if (k == Qt::Key_Down)   { searchEditing_ = false; focusContent(); return true; }
+                return false;
+            }
+            if (k == Qt::Key_Left)  { focusChrome(search_, -1); return true; }
+            if (k == Qt::Key_Right) { focusChrome(search_, +1); return true; }
+            if (k == Qt::Key_Down)  { focusContent();           return true; }
+            if (k == Qt::Key_Up)    { return true; }
+            if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
+            { searchEditing_ = true; return true; } // select/Enter -> cursor in the field, start typing
+            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            if (!ke->text().isEmpty() && ke->text().at(0).isPrint()) { searchEditing_ = true; return false; }
+            return true; // swallow other keys while highlighted (not yet typing)
+        }
+        // --- Top chrome row: the buttons (Back / Profile / Settings) ---
+        if (obj == back_ || obj == profileBtn_ || obj == settingsBtn_)
+        {
+            if (k == Qt::Key_Left)  { focusChrome(static_cast<QWidget*>(obj), -1); return true; }
+            if (k == Qt::Key_Right) { focusChrome(static_cast<QWidget*>(obj), +1); return true; }
+            if (k == Qt::Key_Down)  { focusContent(); return true; }
+            if (k == Qt::Key_Up)    { return true; }
+            if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
+            { if (auto* b = qobject_cast<QPushButton*>(obj)) b->click(); return true; }
+            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            return false;
+        }
+
+        // Backspace acts as the Back button when focus is on a tab or the grid.
+        if (k == Qt::Key_Backspace) { goBack(); return true; }
 
         const int idx = typeButtons_.indexOf(qobject_cast<QPushButton*>(obj));
         if (idx >= 0)
         {
-            if (ke->key() == Qt::Key_Right) { focusTypeButton(idx + 1); return true; }
-            if (ke->key() == Qt::Key_Left)  { focusTypeButton(idx - 1); return true; }
-            if (ke->key() == Qt::Key_Down)  { focusGridTop();           return true; }
+            // Left/Right move between tabs, then off the ends into the chrome row; Up reaches the chrome too.
+            if (k == Qt::Key_Right) { if (idx + 1 < typeButtons_.size()) focusTypeButton(idx + 1); else focusChromeRow(search_); return true; }
+            if (k == Qt::Key_Left)  { if (idx > 0) focusTypeButton(idx - 1); else focusChromeRow(back_); return true; }
+            if (k == Qt::Key_Down)  { focusGridTop();    return true; }
+            if (k == Qt::Key_Up)    { focusChromeRow();  return true; }
         }
         else if (obj == grid_)
         {
@@ -1131,13 +1217,18 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (firstItem && cur &&
                     grid_->visualItemRect(cur).top() <= grid_->visualItemRect(firstItem).top())
                 {
-                    if (carouselMode_) showCarousel();                  // back up to the carousel
-                    else activeTypeButton_->setFocus(Qt::OtherFocusReason); // back up to the tabs
+                    if (carouselMode_)         showCarousel();        // back up to the carousel
+                    else if (activeTypeButton_) activeTypeButton_->setFocus(Qt::OtherFocusReason); // to the tabs
+                    else                        focusChromeRow();     // no tabs -> up to the chrome
                     return true;
                 }
             }
         }
     }
+
+    // Clicking the search box (mouse) means "edit", so arrows move the text cursor, not the chrome focus.
+    if (obj == search_ && event->type() == QEvent::MouseButtonPress) searchEditing_ = true;
+    if (obj == search_ && event->type() == QEvent::FocusOut)         searchEditing_ = false;
 
     // Drive the grid's wheel scrolling at a fixed, comfortable pixels-per-notch (ScrollPerPixel's default
     // step is too large; ScrollPerItem moves only a fraction of a row per notch in a multi-column grid).

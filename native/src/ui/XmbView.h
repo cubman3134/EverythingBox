@@ -42,6 +42,7 @@ signals:
     void activated(const QString& itemKey);          // Enter on the focused item
     void categoryChanged(const QString& navKey);     // moved to another category (root only)
     void backRequested();
+    void navUpOffTop();                              // Up pressed at the top item -> leave for the chrome row
     void currentChanged(int itemIndex, int total);   // focused item moved (drives load-more)
 
 protected:

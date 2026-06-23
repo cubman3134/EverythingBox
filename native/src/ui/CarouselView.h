@@ -33,6 +33,7 @@ public:
 signals:
     void activated(const QString& navKey);       // Enter / click the centre card
     void backRequested();                        // Esc / Backspace
+    void navUp();                                // Up pressed -> hand off to the top chrome row
     void currentChanged(int wrappedIndex, int total); // centre moved (drives load-more)
 
 protected:

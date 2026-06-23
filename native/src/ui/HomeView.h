@@ -80,6 +80,9 @@ private:
     void layoutMetaSections(const QString& itemType); // declarative detail-page arrangement from the theme
     void focusTypeButton(int idx);   // keyboard: move to + activate a top tab (left/right)
     void focusGridTop();             // keyboard: drop focus into the grid (down)
+    void focusChromeRow(QWidget* preferred = nullptr); // keyboard/controller: jump up to the top chrome
+    void focusChrome(QWidget* from, int dir);          // move Left/Right within the chrome row
+    QVector<QWidget*> chromeRow() const;               // the focusable top-bar controls, in order
     QString openKindForView() const; // file-open kind to offer in the current view, or "" for none
     void loadTop();
     void loadMore();                       // fetch + append the next page (infinite scroll)
@@ -134,6 +137,7 @@ private:
     QVector<Level> stack_;       // navigation breadcrumb (top = current view)
     QVector<MediaItem> items_;   // items in the current view (parallel to grid_ rows)
     bool recentView_ = false;    // true = showing the local "Recent" list (not an addon catalog)
+    bool searchEditing_ = false; // search box: false = highlighted (arrows navigate), true = typing
     QVector<int> thumbQueue_;    // item rows awaiting a remote poster load (throttled)
     int thumbActive_ = 0;        // remote poster loads currently in flight
     int generation_ = 0;         // bumped on each fresh load so stale async thumbnails are ignored
