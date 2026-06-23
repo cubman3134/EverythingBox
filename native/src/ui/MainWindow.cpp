@@ -598,30 +598,32 @@ void MainWindow::openCloudSync()
     auto refresh = [this, status, signIn, signOut, setup] {
         const bool cfg = CloudSync::isConfigured();
         const bool in = cloud_->isSignedIn();
-        setup->setVisible(!cfg);
+        setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…")); // always available
         signIn->setVisible(cfg && !in);
         signOut->setVisible(in);
         if (!cfg) status->setText(tr("Google sign-in isn’t set up yet. Click “Set up sign-in…” to paste your "
-                                     "OAuth client id + secret (one-time)."));
+                                     "OAuth client id + secret (use a “Desktop app” client)."));
         else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
-        else status->setText(tr("Not signed in."));
+        else status->setText(tr("Not signed in. Client configured — click “Sign in with Google”."));
     };
     refresh();
 
     connect(signIn, &QPushButton::clicked, &dlg, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
     connect(signOut, &QPushButton::clicked, &dlg, [this] { cloud_->signOut(); });
     connect(setup, &QPushButton::clicked, &dlg, [this, &dlg, refresh] {
+        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         bool ok = false;
-        const QString id = QInputDialog::getText(&dlg, tr("OAuth client id"), tr("Google OAuth client id:"),
-                                                  QLineEdit::Normal, QString(), &ok);
+        const QString id = QInputDialog::getText(&dlg, tr("OAuth client id"),
+            tr("Google OAuth client id (Desktop-app type):"), QLineEdit::Normal,
+            s.value(QStringLiteral("cloud/clientId")).toString(), &ok);
         if (!ok || id.trimmed().isEmpty()) return;
         const QString sec = QInputDialog::getText(&dlg, tr("OAuth client secret"), tr("Google OAuth client secret:"),
-                                                  QLineEdit::Normal, QString(), &ok);
+            QLineEdit::Normal, s.value(QStringLiteral("cloud/clientSecret")).toString(), &ok);
         if (!ok) return;
-        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         s.setValue(QStringLiteral("cloud/clientId"), id.trimmed());
         s.setValue(QStringLiteral("cloud/clientSecret"), sec.trimmed());
         s.sync();
+        cloud_->signOut(); // the stored token (if any) was for the old client; start clean
         refresh();
     });
     connect(cloud_.get(), &CloudSync::signedIn, &dlg, [refresh](const QString&) { refresh(); });
