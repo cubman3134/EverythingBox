@@ -175,6 +175,16 @@ QString RegistryBrowser::localDirFor(const QString& id) const
     return app + QStringLiteral("/addons/") + id;
 }
 
+// A registry entry with a "url" is a remote (HTTP) addon: installing it just subscribes to the URL.
+static bool isRemoteEntry(const QJsonObject& e) { return !e.value(QStringLiteral("url")).toString().isEmpty(); }
+static QString normalizeRemoteUrl(QString u)
+{
+    u = u.trimmed();
+    if (u.endsWith(QStringLiteral("/manifest.json"))) u.chop(int(qstrlen("/manifest.json")));
+    while (u.endsWith(QLatin1Char('/'))) u.chop(1);
+    return u;
+}
+
 bool RegistryBrowser::isInstalled(const QJsonObject& entry) const
 {
     if (kind_ == Themes)
@@ -183,6 +193,8 @@ bool RegistryBrowser::isInstalled(const QJsonObject& entry) const
         if (file.isEmpty()) return false;
         return QFile::exists(localDirFor(QString()) + QStringLiteral("/") + QFileInfo(file).fileName());
     }
+    if (isRemoteEntry(entry)) // remote addon: "installed" = its URL is already in the source list
+        return addons_ && addons_->remoteSourceUrls().contains(normalizeRemoteUrl(entry.value(QStringLiteral("url")).toString()));
     const QString id = entry.value(QStringLiteral("id")).toString();
     return !id.isEmpty() && QFile::exists(localDirFor(id) + QStringLiteral("/manifest.json"));
 }
@@ -251,6 +263,22 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
     connect(btn, &QPushButton::clicked, this, [this, entry, indexUrl, btn] {
         btn->setEnabled(false);
         btn->setText(tr("Installing…"));
+        if (isRemoteEntry(entry) && addons_)
+        {
+            // Remote addon: subscribe to the URL (async manifest fetch); update the button on the result.
+            auto* conn = new QMetaObject::Connection;
+            *conn = connect(addons_, &AddonManager::remoteSourceResult, this,
+                            [this, btn, conn](bool ok, const QString& msg) {
+                status_->setText(msg);
+                btn->setText(ok ? tr("Added ✓") : tr("Retry"));
+                btn->setEnabled(!ok);
+                if (ok) installed_ = true;
+                QObject::disconnect(*conn);
+                delete conn;
+            });
+            addons_->addRemoteSource(entry.value(QStringLiteral("url")).toString());
+            return;
+        }
         installEntry(entry, indexUrl);
         const bool ok = isInstalled(entry);
         btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
