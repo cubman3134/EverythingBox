@@ -51,6 +51,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/ProfileDialog.cpp  src/ui/ProfileDialog.h
         src/ui/RegistryBrowser.cpp src/ui/RegistryBrowser.h
         src/ui/CarouselView.cpp   src/ui/CarouselView.h
+        src/ui/XmbView.cpp        src/ui/XmbView.h
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h

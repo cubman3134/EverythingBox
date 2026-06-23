@@ -10,6 +10,7 @@
 class AddonManager;
 struct LoadedAddon;
 class CarouselView;
+class XmbView;
 class QListWidget;
 class QLineEdit;
 class QLabel;
@@ -65,9 +66,11 @@ private:
 
     void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
     void showCarousel();             // show the media-type carousel landing (carousel layout)
+    void showXmb();                  // show the PS3 XMB layout (categories + item column)
     void activateNav(const QString& navKey); // open a carousel entry (media type, catalog item, or Home)
     void activateItem(int row);      // open/drill a catalog item by row (shared by grid + carousel)
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]
+    void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
@@ -103,6 +106,9 @@ private:
     CarouselView* carousel_ = nullptr;
     bool carouselMode_ = false;
     bool atCarouselLanding_ = false; // showing the media-type carousel (the root)
+    XmbView* xmb_ = nullptr;
+    bool xmbMode_ = false;           // active theme layout is "xmb" (PS3 XrossMediaBar)
+    bool atXmbRoot_ = true;          // at a category's top level (Left/Right switch categories)
     QString lastMediaKey_;           // last media type entered (to re-highlight on return to the carousel)
     QListWidget* grid_ = nullptr;
     QLineEdit* search_ = nullptr;

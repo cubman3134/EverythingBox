@@ -6,6 +6,7 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "CarouselView.h"
+#include "XmbView.h"
 #include <QHash>
 
 #include <QApplication>
@@ -391,6 +392,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     meta_ = new QFrame(this);
     meta_->setObjectName(QStringLiteral("metaHeader"));
     meta_->setFrameShape(QFrame::StyledPanel);
+    // A translucent light card so the detail page stays readable over any theme background (esp. dark ones).
+    meta_->setStyleSheet(QStringLiteral(
+        "QFrame#metaHeader{background:rgba(255,255,255,0.94);border:1px solid rgba(0,0,0,0.12);border-radius:12px;}"));
     meta_->setVisible(false);
     metaLayout_ = new QBoxLayout(QBoxLayout::LeftToRight, meta_); // direction switched per detailLayout
     auto* mh = metaLayout_;
@@ -498,6 +502,19 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     connect(carousel_, &CarouselView::backRequested, this, &HomeView::goBack);
     v->addWidget(carousel_, 1);
+
+    // The PS3 XMB view (shown instead of the grid/carousel when the theme's layout is "xmb").
+    xmb_ = new XmbView(this);
+    xmb_->hide();
+    connect(xmb_, &XmbView::activated, this, [this](const QString& key) {
+        if (key.startsWith(QStringLiteral("item:"))) activateItem(key.mid(5).toInt());
+    });
+    connect(xmb_, &XmbView::categoryChanged, this, &HomeView::activateNav); // moved to another category
+    connect(xmb_, &XmbView::backRequested, this, &HomeView::goBack);
+    connect(xmb_, &XmbView::currentChanged, this, [this](int idx, int total) {
+        if (total > 0 && idx >= total - 2) loadMore(); // near the end -> pull the next page
+    });
+    v->addWidget(xmb_, 1);
 
     // The bottom status/description strip was removed; keep the label as a hidden no-op sink so the
     // existing status_->setText(...) calls remain harmless.
@@ -611,14 +628,24 @@ void HomeView::refresh()
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
     carouselMode_ = (g_theme.layout == QStringLiteral("carousel"));
-    if (typeHost_) typeHost_->setVisible(!carouselMode_);
+    xmbMode_      = (g_theme.layout == QStringLiteral("xmb"));
+    if (typeHost_) typeHost_->setVisible(!carouselMode_ && !xmbMode_);
     if (carouselMode_)
     {
+        xmb_->hide();
         styleTypeButtons(QStringLiteral("home")); // theme the chrome behind the carousel
         showCarousel();                           // builds the media-type carousel from navTargets_
         return;
     }
+    if (xmbMode_)
+    {
+        carousel_->hide();
+        styleTypeButtons(QStringLiteral("home")); // theme the chrome behind the XMB
+        showXmb();                                // builds the XMB categories from navTargets_
+        return;
+    }
     carousel_->hide();
+    xmb_->hide();
 
     // Land on Home (this profile's recent content) when there's anything in it; otherwise the first catalog.
     if (!RecentStore::list().isEmpty())
@@ -654,17 +681,82 @@ void HomeView::showCarousel()
     updateChrome();
 }
 
+void HomeView::showXmb()
+{
+    // The category bar is built from the nav targets (Home + each catalog) and stays visible. The active
+    // category's items fill the vertical column; activating a category loads it (via activateNav).
+    QVector<XmbEntry> cats;
+    for (const NavTarget& t : navTargets_)
+        cats.push_back({ t.navKey, t.name, typeColor(t.type), QString() });
+
+    // Land on the last-used category if known, else Home when it has content, else the first catalog.
+    QString activeKey = lastMediaKey_;
+    bool valid = false;
+    for (const NavTarget& t : navTargets_) if (t.navKey == activeKey) { valid = true; break; }
+    if (!valid)
+    {
+        activeKey.clear();
+        for (const NavTarget& t : navTargets_)
+        {
+            if (t.isHome && !RecentStore::list().isEmpty()) { activeKey = t.navKey; break; }
+            if (!t.isHome && activeKey.isEmpty()) activeKey = t.navKey; // first catalog as fallback
+        }
+    }
+
+    xmb_->setCategories(cats, activeKey);
+    grid_->hide();
+    hideMeta();
+    carousel_->hide();
+    xmb_->show();
+    xmb_->raise();
+    xmb_->setFocus(Qt::OtherFocusReason);
+    updateChrome();
+    if (!activeKey.isEmpty()) activateNav(activeKey); // load the active category's column
+}
+
 void HomeView::activateNav(const QString& navKey)
 {
     for (const NavTarget& t : navTargets_)
         if (t.navKey == navKey)
         {
             atCarouselLanding_ = false;
-            lastMediaKey_ = navKey;          // remember it so Back highlights this type in the carousel
-            if (t.isHome) selectRecent();    // Home -> the recents list (grid)
-            else          selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item carousel
+            atXmbRoot_ = true;               // activating a category lands at its top level
+            lastMediaKey_ = navKey;          // remember it so Back highlights this type in the carousel/XMB
+            if (xmbMode_)
+            {
+                xmb_->setActiveCategory(navKey); // sync the bar (no-op if already there)
+                xmb_->setAtRoot(true);
+                xmb_->clearItems();              // clear the old column while the new one loads
+            }
+            if (t.isHome) selectRecent();    // Home -> the recents list / XMB column
+            else          selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
+}
+
+void HomeView::fillXmbFromItems(int from)
+{
+    QVector<XmbEntry> entries;
+    for (int i = qMax(0, from); i < items_.size(); ++i)
+    {
+        const MediaItem& it = items_[i];
+        if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
+        const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
+        entries.push_back({ QStringLiteral("item:") + QString::number(i), it.title, c, it.thumbnailUrl });
+    }
+
+    if (from > 0) { xmb_->addItems(entries); return; } // paged append
+
+    // Root = Home (recents) or a category's top-level catalog; drilled-in containers are not root.
+    atXmbRoot_ = recentView_ || (stack_.size() == 1 && !stack_.last().detail);
+    xmb_->setAtRoot(atXmbRoot_);
+    const int restoreRow = stack_.isEmpty() ? -1 : stack_.last().childRow;
+    const QString restoreKey = (restoreRow >= 0) ? (QStringLiteral("item:") + QString::number(restoreRow)) : QString();
+    xmb_->setItems(entries, restoreKey);
+    grid_->hide();
+    xmb_->show();
+    xmb_->raise();
+    xmb_->setFocus(Qt::OtherFocusReason);
 }
 
 void HomeView::applyTheme()
@@ -674,7 +766,9 @@ void HomeView::applyTheme()
 
 void HomeView::focusContent()
 {
-    if (carouselMode_ && carousel_ && carousel_->isVisible())
+    if (xmbMode_ && xmb_ && xmb_->isVisible())
+        xmb_->setFocus(Qt::OtherFocusReason);
+    else if (carouselMode_ && carousel_ && carousel_->isVisible())
         carousel_->setFocus(Qt::OtherFocusReason);
     else if (grid_->isVisible() && grid_->count() > 0)
         grid_->setFocus(Qt::OtherFocusReason);
@@ -935,6 +1029,14 @@ void HomeView::renderRecents()
     updateChrome();
     updateStatus();
 
+    // In XMB layout, Home is the active category's column (recents/favourites), not the grid list.
+    if (xmbMode_)
+    {
+        grid_->hide();
+        fillXmbFromItems(0); // shows + focuses the XMB; skips the group-header rows
+        return;
+    }
+
     // Keep keyboard focus on the content. Without this, activating Home from the carousel hides the
     // (focused) carousel and Qt hands focus to the next widget in the chain - the search box.
     if (grid_->isVisible()) grid_->setFocus(Qt::OtherFocusReason);
@@ -1083,6 +1185,7 @@ void HomeView::activateItem(int row)
     // No file yet: open a detail page. Its metadata header describes the item; for a container
     // (TV show / season / album / console) the page also drills into its children below the header.
     stack_.last().childRow = row; // remember where we drilled in, so Back restores this position
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); } // drilled below the category root
     const Level& top = stack_.last();
     Level lvl;
     lvl.addon = top.addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
@@ -1156,6 +1259,7 @@ void HomeView::loadTop()
         items_.clear();
         grid_->hide();
         if (carousel_) carousel_->hide();
+        if (xmb_) xmb_->hide();
         loading_ = false; hasMore_ = false; currentPage_ = 1; pendingReqId_ = -1;
         updateChrome();
         updateStatus();
@@ -1165,8 +1269,8 @@ void HomeView::loadTop()
         return;
     }
 
-    if (carouselMode_) grid_->hide(); // the carousel shows catalog items; populate() fills it
-    else               grid_->show();
+    if (carouselMode_ || xmbMode_) grid_->hide(); // the carousel/XMB shows catalog items; populate() fills them
+    else                           grid_->show();
     issueRequest(/*append*/ false);
 }
 
@@ -1352,6 +1456,10 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         atCarouselLanding_ = false;
         fillCarouselFromItems(from);
+    }
+    else if (xmbMode_)
+    {
+        fillXmbFromItems(from); // the active category's vertical column
     }
     else if (!append)
     {

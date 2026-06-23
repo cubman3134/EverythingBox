@@ -7,8 +7,8 @@
   "fontScale": 1.05,
   "cornerRadius": 5,
   "background": "triple-bg.png",
-  "backgroundDim": 0.4,
-  "layout": "carousel",
+  "backgroundDim": 0.12,
+  "layout": "xmb",
   "detail": {
     "image": "left",
     "imageWidth": 180,
