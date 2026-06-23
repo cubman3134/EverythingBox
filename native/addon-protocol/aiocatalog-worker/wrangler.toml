@@ -1,0 +1,17 @@
+name = "mymediavault-aiocatalog"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+
+# Deploy:
+#   npm i -g wrangler
+#   wrangler login
+#   wrangler secret put TMDB_API_KEY
+#   wrangler secret put IGDB_CLIENT_ID
+#   wrangler secret put IGDB_CLIENT_SECRET
+#   wrangler secret put GOOGLE_BOOKS_API_KEY     # optional (Open Library is the keyless fallback)
+#   wrangler secret put COMIC_VINE_API_KEY       # optional (needed for the Comics catalog)
+#   # optional: wrangler secret put STEAMGRIDDB_KEY ; wrangler secret put MANGA_SHOW_ADULT  (value "true")
+#   wrangler deploy
+#
+# Addon URL:  https://mymediavault-aiocatalog.<your-subdomain>.workers.dev
+# Add it in the app:  Add-ons -> Add by URL.
