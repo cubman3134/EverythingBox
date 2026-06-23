@@ -27,6 +27,8 @@
 #include <QListWidget>
 #include <QFrame>
 #include <QTimer>
+#include <QEventLoop>
+#include <QCloseEvent>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QPushButton>
@@ -62,6 +64,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     pdf_ = new PdfView(this);
 
     addons_ = std::make_unique<AddonManager>();
+    cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
     library_ = new LibraryView(addons_.get(), this);
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
     home_ = new HomeView(addons_.get(), this);
@@ -591,15 +594,17 @@ void MainWindow::openCloudSync()
     auto* status = new QLabel(&dlg); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
     v->addWidget(status);
     auto* signIn = new QPushButton(tr("Sign in with Google"), &dlg);
+    auto* syncNow = new QPushButton(tr("Sync now"), &dlg);
     auto* signOut = new QPushButton(tr("Sign out"), &dlg);
     auto* setup = new QPushButton(tr("Set up sign-in…"), &dlg);
-    v->addWidget(signIn); v->addWidget(signOut); v->addWidget(setup);
+    v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(signOut); v->addWidget(setup);
 
-    auto refresh = [this, status, signIn, signOut, setup] {
+    auto refresh = [this, status, signIn, syncNow, signOut, setup] {
         const bool cfg = CloudSync::isConfigured();
         const bool in = cloud_->isSignedIn();
         setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…")); // always available
         signIn->setVisible(cfg && !in);
+        syncNow->setVisible(in);
         signOut->setVisible(in);
         if (!cfg) status->setText(tr("Google sign-in isn’t set up yet. Click “Set up sign-in…” to paste your "
                                      "OAuth client id + secret (use a “Desktop app” client)."));
@@ -626,7 +631,12 @@ void MainWindow::openCloudSync()
         cloud_->signOut(); // the stored token (if any) was for the old client; start clean
         refresh();
     });
-    connect(cloud_.get(), &CloudSync::signedIn, &dlg, [refresh](const QString&) { refresh(); });
+    connect(syncNow, &QPushButton::clicked, &dlg, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
+    connect(cloud_.get(), &CloudSync::signedIn, &dlg, [this, refresh](const QString&) {
+        refresh();
+        raise(); activateWindow();   // bring the app back in front of the browser tab
+        cloudSyncNow();              // first sync right after signing in
+    });
     connect(cloud_.get(), &CloudSync::signInFailed, &dlg, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
     connect(cloud_.get(), &CloudSync::signedOut, &dlg, [refresh] { refresh(); });
 
@@ -634,6 +644,34 @@ void MainWindow::openCloudSync()
     connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     v->addWidget(box);
     dlg.exec();
+}
+
+// Pull newer Drive data (if any), then push the current state. Shown in the status bar.
+void MainWindow::cloudSyncNow()
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return;
+    statusBar()->showMessage(tr("Syncing with Google Drive…"));
+    cloud_->pull([this](const QString& r) {
+        cloud_->push([this, r](bool ok, const QString& msg) {
+            if (r == QStringLiteral("applied"))
+                statusBar()->showMessage(tr("Downloaded newer data — restart to apply it."), 8000);
+            else
+                statusBar()->showMessage(ok ? tr("Synced with Google Drive.") : msg, 5000);
+        });
+    });
+}
+
+void MainWindow::closeEvent(QCloseEvent* e)
+{
+    // Push the latest state on the way out (best-effort, with a timeout so quitting never hangs).
+    if (cloud_ && cloud_->isSignedIn())
+    {
+        QEventLoop loop;
+        QTimer::singleShot(8000, &loop, &QEventLoop::quit);
+        cloud_->push([&loop](bool, const QString&) { loop.quit(); });
+        loop.exec();
+    }
+    QMainWindow::closeEvent(e);
 }
 
 void MainWindow::openThemes()

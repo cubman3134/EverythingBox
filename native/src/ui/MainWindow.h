@@ -44,6 +44,7 @@ private slots:
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     void openCloudSync();     // Google Drive sign-in + sync panel
+    void cloudSyncNow();      // pull (if newer) then push the current state
     void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
     void openEmulatorSettings();
     void openInputMapping();
@@ -59,6 +60,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;          // Esc leaves full screen
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
+    void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
 
 private:
     static QString fmt(double seconds);

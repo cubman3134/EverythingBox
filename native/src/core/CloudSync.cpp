@@ -17,6 +17,13 @@
 #include <QJsonArray>
 #include <QHostAddress>
 #include <QDateTime>
+#include <QDir>
+#include <QDirIterator>
+#include <QFile>
+#include <QFileInfo>
+#include <QSysInfo>
+#include <cstring>
+#include "miniz.h"
 
 // The shared "My Media Vault" Google OAuth client (Desktop type). Paste the values here once the client is
 // created; a settings override (cloud/clientId, cloud/clientSecret) takes precedence for testing.
@@ -100,8 +107,10 @@ void CloudSync::signIn()
             const QString target = QString::fromUtf8(line.mid(sp1 + 1, sp2 - sp1 - 1));
             const QUrlQuery q(QUrl::fromEncoded(("http://localhost" + target.toUtf8())).query());
 
-            const QByteArray body = "<html><body style='font-family:sans-serif;padding:40px'>"
-                                    "<h3>My Media Vault</h3>You're signed in. You can close this tab.</body></html>";
+            // Try to auto-close the tab (works when the browser allows it); otherwise it shows a one-liner.
+            const QByteArray body = "<html><body style='font-family:sans-serif;padding:30px'>"
+                                    "Signed in to My Media Vault — you can close this tab."
+                                    "<script>window.close();</script></body></html>";
             sock->write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + body);
             sock->flush();
             sock->disconnectFromHost();
@@ -308,6 +317,131 @@ void CloudSync::downloadFile(const QString& fileId, std::function<void(bool, con
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError) { cb(false, {}); return; }
             cb(true, reply->readAll());
+        });
+    });
+}
+
+// ---- state bundle (a zip of the synced settings + local addons + themes) ----------------------------
+
+static const char* kBundleName = "mymediavault-sync.zip";
+
+static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& prefix)
+{
+    QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString path = it.next();
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly)) continue;
+        const QByteArray data = f.readAll();
+        const QString arch = prefix + QStringLiteral("/") + QDir(dir).relativeFilePath(path);
+        mz_zip_writer_add_mem(&z, arch.toUtf8().constData(), data.constData(), data.size(), MZ_DEFAULT_COMPRESSION);
+    }
+}
+
+static QByteArray buildBundle()
+{
+    mz_zip_archive z; std::memset(&z, 0, sizeof(z));
+    mz_zip_writer_init_heap(&z, 0, 0);
+
+    const QJsonObject meta{ { QStringLiteral("device"), QSysInfo::machineHostName() },
+                            { QStringLiteral("time"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate) } };
+    const QByteArray metaJson = QJsonDocument(meta).toJson(QJsonDocument::Compact);
+    mz_zip_writer_add_mem(&z, "meta.json", metaJson.constData(), metaJson.size(), MZ_DEFAULT_COMPRESSION);
+
+    // All settings except the device-specific cloud auth (tokens / client id).
+    QJsonObject so;
+    for (const QString& k : store().allKeys())
+        if (!k.startsWith(QStringLiteral("cloud/"))) so.insert(k, store().value(k).toString());
+    const QByteArray sJson = QJsonDocument(so).toJson(QJsonDocument::Compact);
+    mz_zip_writer_add_mem(&z, "settings.json", sJson.constData(), sJson.size(), MZ_DEFAULT_COMPRESSION);
+
+    const QString app = QCoreApplication::applicationDirPath();
+    zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"));
+    zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
+
+    void* buf = nullptr; size_t sz = 0;
+    mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
+    QByteArray out(static_cast<const char*>(buf), int(sz));
+    mz_zip_writer_end(&z);
+    if (buf) mz_free(buf);
+    return out;
+}
+
+static bool applyBundle(const QByteArray& data)
+{
+    mz_zip_archive z; std::memset(&z, 0, sizeof(z));
+    if (!mz_zip_reader_init_mem(&z, data.constData(), data.size(), 0)) return false;
+    const QString app = QCoreApplication::applicationDirPath();
+    const int n = int(mz_zip_reader_get_num_files(&z));
+    for (int i = 0; i < n; ++i)
+    {
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&z, i, &st)) continue;
+        if (mz_zip_reader_is_file_a_directory(&z, i)) continue;
+        const QString name = QString::fromUtf8(st.m_filename);
+        size_t sz = 0;
+        void* p = mz_zip_reader_extract_to_heap(&z, i, &sz, 0);
+        if (!p) continue;
+        const QByteArray bytes(static_cast<const char*>(p), int(sz));
+        mz_free(p);
+
+        if (name == QStringLiteral("settings.json"))
+        {
+            const QJsonObject so = QJsonDocument::fromJson(bytes).object();
+            for (auto it = so.begin(); it != so.end(); ++it)
+                if (!it.key().startsWith(QStringLiteral("cloud/"))) store().setValue(it.key(), it.value().toString());
+            store().sync();
+        }
+        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/")))
+        {
+            // Restrict to the app dir (defend against path traversal in archive names).
+            const QString dest = QDir::cleanPath(app + QStringLiteral("/") + name);
+            if (!dest.startsWith(QDir::cleanPath(app) + QStringLiteral("/"))) continue;
+            QDir().mkpath(QFileInfo(dest).absolutePath());
+            QFile f(dest);
+            if (f.open(QIODevice::WriteOnly)) { f.write(bytes); f.close(); }
+        }
+    }
+    mz_zip_reader_end(&z);
+    return true;
+}
+
+// ---- pull / push ------------------------------------------------------------------------------------
+
+void CloudSync::pull(std::function<void(const QString&)> cb)
+{
+    ensureFolder([this, cb](const QString& folderId) {
+        if (folderId.isEmpty()) { cb(QStringLiteral("error")); return; }
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, cb](const QString& id, const QString& modIso) {
+            if (id.isEmpty()) { cb(QStringLiteral("none")); return; } // nothing on Drive yet
+            if (modIso == store().value(QStringLiteral("cloud/appliedModified")).toString())
+            { cb(QStringLiteral("current")); return; }                // already the version we hold
+            downloadFile(id, [this, cb, modIso](bool ok, const QByteArray& data) {
+                if (!ok || !applyBundle(data)) { cb(QStringLiteral("error")); return; }
+                store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
+                store().sync();
+                cb(QStringLiteral("applied"));
+            });
+        });
+    });
+}
+
+void CloudSync::push(std::function<void(bool, const QString&)> cb)
+{
+    ensureFolder([this, cb](const QString& folderId) {
+        if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
+        const QByteArray bundle = buildBundle();
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, cb](const QString& id, const QString&) {
+            uploadFile(folderId, id, QString::fromLatin1(kBundleName), QStringLiteral("application/zip"), bundle,
+                       [this, folderId, cb](const QString& newId) {
+                if (newId.isEmpty()) { cb(false, tr("Upload failed.")); return; }
+                // Record the new server modifiedTime as "applied" so our own push doesn't trigger a pull.
+                findFile(folderId, QString::fromLatin1(kBundleName), [this, cb](const QString&, const QString& modIso) {
+                    if (!modIso.isEmpty()) { store().setValue(QStringLiteral("cloud/appliedModified"), modIso); store().sync(); }
+                    cb(true, tr("Backed up to Google Drive."));
+                });
+            });
         });
     });
 }

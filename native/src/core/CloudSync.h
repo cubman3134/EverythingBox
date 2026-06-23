@@ -38,6 +38,12 @@ public:
                     std::function<void(const QString& id)> cb);
     void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
 
+    // ---- sync (slice 2) ----
+    // Pull: download + apply the Drive bundle if it's newer than what we last applied. result is one of
+    // "applied" | "current" | "none" | "error". Push: zip the local state and upload it.
+    void pull(std::function<void(const QString& result)> cb);
+    void push(std::function<void(bool ok, const QString& message)> cb);
+
 signals:
     void signedIn(const QString& email);
     void signInFailed(const QString& error);

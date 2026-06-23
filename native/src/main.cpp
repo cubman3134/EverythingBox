@@ -4,10 +4,26 @@
 #include <QSettings>
 #include <QStringList>
 #include <QMetaType>
+#include <QEventLoop>
+#include <QTimer>
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
 #include "core/ProfileStore.h"
+#include "core/CloudSync.h"
+
+// If signed in to Google Drive, pull a newer state bundle BEFORE the app reads any settings, so the
+// session starts from the latest synced profiles/favorites/addons/themes. Best-effort with a timeout.
+static void cloudPullAtStartup()
+{
+    if (!CloudSync::isConfigured()) return;
+    CloudSync cloud;
+    if (!cloud.isSignedIn()) return;
+    QEventLoop loop;
+    QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never hang startup on a slow/absent network
+    cloud.pull([&loop](const QString&) { loop.quit(); });
+    loop.exec();
+}
 
 // One-time migration from the old "Goliath" naming. If the old goliath.ini exists and the new
 // mymediavault.ini does not, copy it across and rewrite the renamed addon ids (com.goliath.* ->
@@ -59,6 +75,7 @@ int main(int argc, char** argv)
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
+    cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
 
     // A profile must be active before the app opens. One profile -> use it; otherwise (none, or several)
     // the user picks an existing profile or creates one. Refusing to choose at startup exits the app.
