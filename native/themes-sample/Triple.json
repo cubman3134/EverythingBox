@@ -1,0 +1,17 @@
+{
+  "name": "Triple",
+  "accentFollowsTab": false,
+  "accent": "#2C72C9",
+  "neutralTab": "#2B3C5A",
+  "fontFamily": "Segoe UI Light",
+  "fontScale": 1.05,
+  "cornerRadius": 5,
+  "background": "triple-bg.png",
+  "backgroundDim": 0.4,
+  "layout": "carousel",
+  "detail": {
+    "image": "left",
+    "imageWidth": 180,
+    "order": ["title", "facts", "favorite", "overview"]
+  }
+}
