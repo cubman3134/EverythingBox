@@ -1,0 +1,8 @@
+{
+  "title": "The Vault — Season 1",
+  "hasMore": false,
+  "items": [
+    { "id": "s1e1", "type": "episode", "title": "Pilot", "subtitle": "S1 E1" },
+    { "id": "s1e2", "type": "episode", "title": "The Key", "subtitle": "S1 E2" }
+  ]
+}

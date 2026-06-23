@@ -1,0 +1,9 @@
+{
+  "title": "Movies",
+  "hasMore": false,
+  "items": [
+    { "id": "m1", "type": "movie", "title": "Open Skies", "subtitle": "2024", "thumbnailUrl": "https://image.tmdb.org/t/p/w342/placeholder.jpg" },
+    { "id": "m2", "type": "movie", "title": "Night Harbor", "subtitle": "2023" },
+    { "id": "s1", "type": "series", "title": "The Vault", "subtitle": "Season 1", "expandable": true }
+  ]
+}

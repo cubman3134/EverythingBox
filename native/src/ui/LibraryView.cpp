@@ -11,6 +11,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileDialog>
+#include <QInputDialog>
 #include <QMessageBox>
 
 LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(mgr)
@@ -23,6 +24,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     tools->addWidget(homeBtn);
     auto* browse = new QPushButton(tr("Browse Add-ons…"), this);
     auto* install = new QPushButton(tr("Install Addon…"), this);
+    auto* addUrl = new QPushButton(tr("Add by URL…"), this);
     auto* configure = new QPushButton(tr("Configure…"), this);
     auto* reload = new QPushButton(tr("Reload"), this);
     search_ = new QLineEdit(this);
@@ -30,12 +32,19 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     auto* searchBtn = new QPushButton(tr("Search"), this);
     connect(browse, &QPushButton::clicked, this, &LibraryView::browseAddons);
     connect(install, &QPushButton::clicked, this, &LibraryView::installAddon);
+    connect(addUrl, &QPushButton::clicked, this, &LibraryView::addByUrl);
     connect(configure, &QPushButton::clicked, this, &LibraryView::configureAddon);
     connect(reload, &QPushButton::clicked, this, &LibraryView::reloadAddons);
     connect(searchBtn, &QPushButton::clicked, this, &LibraryView::doSearch);
     connect(search_, &QLineEdit::returnPressed, this, &LibraryView::doSearch);
+    // A remote (HTTP) addon's manifest fetch is async; report its outcome + refresh the list.
+    connect(mgr_, &AddonManager::remoteSourceResult, this, [this](bool ok, const QString& msg) {
+        status_->setText(msg);
+        if (ok) refreshSources();
+    });
     tools->addWidget(browse);
     tools->addWidget(install);
+    tools->addWidget(addUrl);
     tools->addWidget(configure);
     tools->addWidget(reload);
     tools->addWidget(search_, 1);
@@ -169,6 +178,17 @@ void LibraryView::installAddon()
     }
     refreshSources();
     status_->setText(tr("Addon installed."));
+}
+
+void LibraryView::addByUrl()
+{
+    bool okPressed = false;
+    const QString url = QInputDialog::getText(
+        this, tr("Add addon by URL"),
+        tr("Addon URL (its manifest.json or base URL):"), QLineEdit::Normal, QString(), &okPressed);
+    if (!okPressed || url.trimmed().isEmpty()) return;
+    status_->setText(tr("Fetching addon…"));
+    mgr_->addRemoteSource(url.trimmed()); // async; remoteSourceResult reports the outcome
 }
 
 void LibraryView::configureAddon()

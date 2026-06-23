@@ -31,6 +31,7 @@ private slots:
     void onCatalogReady(int requestId, const MediaCatalog& cat); // async result
     void doSearch();
     void installAddon();
+    void addByUrl();       // add a remote (HTTP) addon by its URL
     void browseAddons();   // open the add-on registry browser
     void configureAddon();
     void reloadAddons();

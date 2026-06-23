@@ -1,0 +1,8 @@
+{
+  "title": "Series",
+  "hasMore": false,
+  "items": [
+    { "id": "s1", "type": "series", "title": "The Vault", "subtitle": "Season 1", "expandable": true },
+    { "id": "s2", "type": "series", "title": "Deep Field", "subtitle": "Season 2", "expandable": true }
+  ]
+}

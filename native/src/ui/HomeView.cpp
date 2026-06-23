@@ -540,6 +540,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
 
     connect(mgr_, &AddonManager::catalogReady, this, &HomeView::onCatalogReady);
     connect(mgr_, &AddonManager::metaReady, this, &HomeView::onMetaReady);
+    connect(mgr_, &AddonManager::sourcesChanged, this, &HomeView::refresh); // a remote addon was added/removed
 
     refresh();
 }

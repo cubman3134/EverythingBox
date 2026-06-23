@@ -1,0 +1,11 @@
+{
+  "title": "Open Skies",
+  "subtitle": "2024 · 1h 52m",
+  "overview": "A static synopsis served straight from a file by the remote-addon protocol. No server code runs for this response.",
+  "image": "https://image.tmdb.org/t/p/w342/placeholder.jpg",
+  "facts": [
+    { "label": "Released", "value": "2024-05-10" },
+    { "label": "Rating", "value": "7.8 / 10" },
+    { "label": "Genres", "value": "Drama, Adventure" }
+  ]
+}

@@ -164,9 +164,65 @@ static int probeMangaFlow(const QString& jsPath)
     return ok ? 0 : 1;
 }
 
+// With "--remote <baseUrl> [catalogId]": exercise a REMOTE (HTTP) addon end to end via the AddonManager
+// sync path - catalog -> first item's meta -> a container's children. baseUrl may be http(s):// or a
+// file:// path to a static fixture (both serve the same {base}/catalog/{id}.json layout).
+static int probeRemote(const QString& url, const QString& catalogId)
+{
+    AddonManager mgr; // only its sync methods are used; the stack addon need not be in its source list
+    LoadedAddon a;
+    a.transport = LoadedAddon::RemoteHttp;
+    a.manifest.type = QStringLiteral("media-source");
+    a.baseUrl = url;
+    if (a.baseUrl.endsWith(QStringLiteral("/manifest.json"))) a.baseUrl.chop(int(strlen("/manifest.json")));
+    while (a.baseUrl.endsWith(QLatin1Char('/'))) a.baseUrl.chop(1);
+    printf("remote base: %s\n", a.baseUrl.toUtf8().constData());
+
+    const MediaCatalog cat = mgr.catalog(&a, catalogId, QString(), 1);
+    printf("catalog \"%s\": %d item(s) (hasMore=%s)\n", cat.title.toUtf8().constData(),
+           int(cat.items.size()), cat.hasMore ? "yes" : "no");
+    for (int i = 0; i < cat.items.size() && i < 6; ++i)
+        printf("  - [%s%s] %s — %s\n", cat.items[i].type.toUtf8().constData(),
+               cat.items[i].expandable ? ",container" : "", cat.items[i].title.toUtf8().constData(),
+               cat.items[i].subtitle.toUtf8().constData());
+    if (cat.items.isEmpty()) { printf("REMOTE: no items (is the URL reachable?)\n"); return 1; }
+
+    const MediaItem* pick = nullptr;
+    for (const MediaItem& it : cat.items)
+        if (it.type != QStringLiteral("info") && it.type != QStringLiteral("_open")) { pick = &it; break; }
+    bool metaOk = false;
+    if (pick)
+    {
+        const MediaDetail d = mgr.meta(&a, *pick);
+        metaOk = d.valid;
+        printf("getMeta(%s) -> valid=%s  title=\"%s\"  facts=%d  image=%s\n", pick->type.toUtf8().constData(),
+               d.valid ? "yes" : "no", d.title.toUtf8().constData(), int(d.facts.size()),
+               d.imageUrl.isEmpty() ? "(none)" : "set");
+        for (const MediaFact& fc : d.facts) printf("    %s: %s\n", fc.label.toUtf8().constData(), fc.value.toUtf8().constData());
+    }
+
+    const MediaItem* cont = nullptr;
+    for (const MediaItem& it : cat.items) if (it.expandable) { cont = &it; break; }
+    if (cont)
+    {
+        const MediaCatalog det = mgr.detail(&a, *cont, 1);
+        printf("getDetail(%s): %d child item(s)\n", cont->title.toUtf8().constData(), int(det.items.size()));
+        for (int i = 0; i < det.items.size() && i < 6; ++i)
+            printf("    · [%s] %s — %s\n", det.items[i].type.toUtf8().constData(),
+                   det.items[i].title.toUtf8().constData(), det.items[i].subtitle.toUtf8().constData());
+    }
+
+    const bool ok = !cat.items.isEmpty() && (!pick || metaOk);
+    printf("%s\n", ok ? "REMOTE ADDON WORKS: catalog + meta over HTTP" : "REMOTE ADDON: check output");
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
+    if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--remote"))
+        return probeRemote(QString::fromLocal8Bit(argv[2]),
+                           argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--mangaflow"))
         return probeMangaFlow(QString::fromLocal8Bit(argv[2]));
     if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--manager"))

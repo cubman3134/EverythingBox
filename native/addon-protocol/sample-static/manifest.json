@@ -1,0 +1,12 @@
+{
+  "id": "com.mymediavault.sample-remote",
+  "name": "Sample Remote",
+  "version": "1.0.0",
+  "type": "media-source",
+  "author": "My Media Vault",
+  "description": "A static-file sample of the My Media Vault remote-addon protocol. Host this folder anywhere that serves static files (GitHub Pages, a Worker's static assets, a local folder) and add its URL in the app.",
+  "catalogs": [
+    { "id": "movies", "name": "Movies", "type": "movie" },
+    { "id": "series", "name": "Series", "type": "series" }
+  ]
+}

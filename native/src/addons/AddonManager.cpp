@@ -10,8 +10,14 @@
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QFutureWatcher>
 #include <QtConcurrent>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QEventLoop>
+#include <QCryptographicHash>
 #include <QDebug>
 #include <cstring>
 
@@ -98,12 +104,88 @@ static QString catalogArg(const QString& catalogId, const QString& query, int pa
     return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact));
 }
 
+// --- remote (HTTP) addon transport helpers -----------------------------------------------------------
+// A remote addon speaks the SAME JSON contract as a local JS addon (MediaCatalog / MediaDetail), just over
+// HTTP. URLs are path-style and end in ".json" so a service can be a Cloudflare Worker OR plain static
+// files (GitHub Pages / a local folder) - both serve the exact same layout:
+//   {base}/manifest.json
+//   {base}/catalog/{catalogId}.json            (+ "/search={q}" and/or "/page={n}" path segments)
+//   {base}/detail/{type}/{id}.json             (+ "/page={n}")   -> a container's children
+//   {base}/meta/{type}/{id}.json               -> the detail-header metadata
+static QString segEnc(const QString& s) { return QString::fromUtf8(QUrl::toPercentEncoding(s)); }
+
+static QUrl remoteCatalogUrl(const QString& base, const QString& catalogId, const QString& query, int page)
+{
+    QString u = base + QStringLiteral("/catalog/") + segEnc(catalogId.isEmpty() ? QStringLiteral("default") : catalogId);
+    QStringList extra;
+    if (!query.isEmpty()) extra << QStringLiteral("search=") + segEnc(query);
+    if (page > 1)         extra << QStringLiteral("page=") + QString::number(page);
+    if (!extra.isEmpty()) u += QStringLiteral("/") + extra.join(QLatin1Char('&'));
+    return QUrl(u + QStringLiteral(".json"));
+}
+
+static QUrl remoteDetailUrl(const QString& base, const QString& type, const QString& id, int page)
+{
+    QString u = base + QStringLiteral("/detail/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+              + QStringLiteral("/") + segEnc(id);
+    if (page > 1) u += QStringLiteral("/page=") + QString::number(page);
+    return QUrl(u + QStringLiteral(".json"));
+}
+
+static QUrl remoteMetaUrl(const QString& base, const QString& type, const QString& id)
+{
+    return QUrl(base + QStringLiteral("/meta/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+               + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
+}
+
+// Resolve a (possibly relative) item URL/thumbnail returned by a remote addon against its base URL.
+static QString resolveRemoteUrl(const QString& url, const QString& base)
+{
+    if (url.isEmpty() || url.contains(QStringLiteral("://"))) return url;
+    return QUrl(base + QStringLiteral("/")).resolved(QUrl(url)).toString();
+}
+
+// Blocking GET for the synchronous API (console probe / tests). The UI never uses this - it goes through
+// the async dispatchRemote* path instead.
+static QByteArray httpGetBlocking(const QUrl& url, QString* err = nullptr)
+{
+    QNetworkAccessManager nam;
+    QNetworkRequest rq(url);
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QEventLoop loop;
+    QNetworkReply* reply = nam.get(rq);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    QByteArray data;
+    if (reply->error() == QNetworkReply::NoError) data = reply->readAll();
+    else if (err) *err = reply->errorString();
+    reply->deleteLater();
+    return data;
+}
+
+// Normalise a user-entered URL to the service base (drop a trailing "/manifest.json" and slash).
+static QString normalizeBase(const QString& raw)
+{
+    QString b = raw.trimmed();
+    if (b.endsWith(QStringLiteral("/manifest.json"))) b.chop(int(strlen("/manifest.json")));
+    while (b.endsWith(QLatin1Char('/'))) b.chop(1);
+    return b;
+}
+
+static QString manifestCacheKey(const QString& base)
+{
+    const QByteArray h = QCryptographicHash::hash(base.toUtf8(), QCryptographicHash::Md5).toHex();
+    return QStringLiteral("addon.remote.manifest.") + QString::fromUtf8(h);
+}
+
 // --- AddonManager ------------------------------------------------------------------------------------
 
 AddonManager::AddonManager(QObject* parent) : QObject(parent)
 {
     qRegisterMetaType<MediaCatalog>("MediaCatalog");
     qRegisterMetaType<MediaDetail>("MediaDetail");
+    nam_ = new QNetworkAccessManager(this);
     root_ = QCoreApplication::applicationDirPath() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
@@ -119,6 +201,36 @@ void AddonManager::reload()
     {
         if (d.fileName() == QStringLiteral("_storage")) continue; // addon-private storage, not an addon
         loadFolder(d.absoluteFilePath());
+    }
+    loadRemoteSources(); // URL-only HTTP addons (built from their cached manifests)
+}
+
+QStringList AddonManager::remoteSourceUrls() const
+{
+    const QJsonArray arr = QJsonDocument::fromJson(
+        store().value(QStringLiteral("addon.remote.urls")).toByteArray()).array();
+    QStringList urls;
+    for (const QJsonValue& v : arr) urls << v.toString();
+    return urls;
+}
+
+void AddonManager::loadRemoteSources()
+{
+    for (const QString& base : remoteSourceUrls())
+    {
+        const QByteArray mf = store().value(manifestCacheKey(base)).toByteArray();
+        if (mf.isEmpty()) continue; // manifest not fetched yet (added on a previous run that failed) - skip
+        bool ok = false;
+        AddonManifest manifest = AddonManifest::fromJson(mf, &ok);
+        if (!ok) continue;
+
+        auto entry = std::make_unique<LoadedAddon>();
+        entry->transport = LoadedAddon::RemoteHttp;
+        entry->baseUrl = base;
+        entry->manifest = manifest;
+        LoadedAddon* raw = entry.get();
+        loaded_.push_back(std::move(entry));
+        if (raw->isMediaSource()) sources_.push_back(raw);
     }
 }
 
@@ -170,15 +282,31 @@ AddonRequest AddonManager::buildRequest(LoadedAddon* src, const QString& functio
 }
 
 // ---- synchronous ----
+// (Remote sources fetch over HTTP with a blocking GET; the same parsing/resolution as the async path.)
+static MediaCatalog remoteCatalogBlocking(const QUrl& url, const QString& base)
+{
+    MediaCatalog cat = MediaCatalog::fromJson(httpGetBlocking(url));
+    for (MediaItem& it : cat.items)
+    {
+        it.url = resolveRemoteUrl(it.url, base);
+        it.thumbnailUrl = resolveRemoteUrl(it.thumbnailUrl, base);
+    }
+    return cat;
+}
+
 MediaCatalog AddonManager::catalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
 {
     if (!src) return {};
+    if (src->transport == LoadedAddon::RemoteHttp)
+        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, catalogId, query, page), src->baseUrl);
     return executeRequest(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
 }
 
 MediaCatalog AddonManager::detail(LoadedAddon* src, const MediaItem& item, int page)
 {
     if (!src) return {};
+    if (src->transport == LoadedAddon::RemoteHttp)
+        return remoteCatalogBlocking(remoteDetailUrl(src->baseUrl, item.type, item.id, page), src->baseUrl);
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
         { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
@@ -188,6 +316,8 @@ MediaCatalog AddonManager::detail(LoadedAddon* src, const MediaItem& item, int p
 MediaCatalog AddonManager::search(LoadedAddon* src, const QString& query)
 {
     if (!src) return {};
+    if (src->transport == LoadedAddon::RemoteHttp)
+        return remoteCatalogBlocking(remoteCatalogUrl(src->baseUrl, QString(), query, 1), src->baseUrl);
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact));
     return executeRequest(buildRequest(src, QStringLiteral("search"), arg));
@@ -196,6 +326,12 @@ MediaCatalog AddonManager::search(LoadedAddon* src, const QString& query)
 MediaDetail AddonManager::meta(LoadedAddon* src, const MediaItem& item)
 {
     if (!src) return {};
+    if (src->transport == LoadedAddon::RemoteHttp)
+    {
+        MediaDetail d = MediaDetail::fromJson(httpGetBlocking(remoteMetaUrl(src->baseUrl, item.type, item.id)));
+        d.imageUrl = resolveRemoteUrl(d.imageUrl, src->baseUrl);
+        return d;
+    }
     return executeMetaRequest(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
 }
 
@@ -229,18 +365,21 @@ int AddonManager::dispatchMeta(const AddonRequest& req)
 int AddonManager::requestMeta(LoadedAddon* src, const MediaItem& item)
 {
     if (!src) return -1;
+    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteMeta(src, item);
     return dispatchMeta(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
 }
 
 int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
 {
     if (!src) return -1;
+    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteCatalog(src, catalogId, query, page);
     return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
 }
 
 int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page)
 {
     if (!src) return -1;
+    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteDetail(src, item, page);
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
         { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
@@ -250,9 +389,84 @@ int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int pag
 int AddonManager::requestSearch(LoadedAddon* src, const QString& query)
 {
     if (!src) return -1;
+    if (src->transport == LoadedAddon::RemoteHttp)
+        return dispatchRemoteCatalog(src, QString(), query, 1);
     const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
         { QStringLiteral("query"), query } }).toJson(QJsonDocument::Compact));
     return dispatch(buildRequest(src, QStringLiteral("search"), arg));
+}
+
+// ---- remote (HTTP) dispatch: async on the GUI thread, same catalogReady/metaReady result signals ----
+
+int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
+{
+    const int reqId = ++reqCounter_;
+    const QString base = src->baseUrl;
+    QNetworkRequest rq(remoteCatalogUrl(base, catalogId, query, page));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+        reply->deleteLater();
+        MediaCatalog cat;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            cat = MediaCatalog::fromJson(reply->readAll());
+            for (MediaItem& it : cat.items)
+            {
+                it.url = resolveRemoteUrl(it.url, base);
+                it.thumbnailUrl = resolveRemoteUrl(it.thumbnailUrl, base);
+            }
+        }
+        emit catalogReady(reqId, cat);
+    });
+    return reqId;
+}
+
+int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, int page)
+{
+    const int reqId = ++reqCounter_;
+    const QString base = src->baseUrl;
+    QNetworkRequest rq(remoteDetailUrl(base, item.type, item.id, page));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+        reply->deleteLater();
+        MediaCatalog cat;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            cat = MediaCatalog::fromJson(reply->readAll());
+            for (MediaItem& it : cat.items)
+            {
+                it.url = resolveRemoteUrl(it.url, base);
+                it.thumbnailUrl = resolveRemoteUrl(it.thumbnailUrl, base);
+            }
+        }
+        emit catalogReady(reqId, cat);
+    });
+    return reqId;
+}
+
+int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
+{
+    const int reqId = ++reqCounter_;
+    const QString base = src->baseUrl;
+    QNetworkRequest rq(remoteMetaUrl(base, item.type, item.id));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+        reply->deleteLater();
+        MediaDetail d;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            d = MediaDetail::fromJson(reply->readAll());
+            d.imageUrl = resolveRemoteUrl(d.imageUrl, base);
+        }
+        emit metaReady(reqId, d);
+    });
+    return reqId;
 }
 
 // ---- install / remove ------------------------------------------------------------------------------
@@ -303,6 +517,58 @@ bool AddonManager::removeAddon(const QString& id)
     const bool ok = QDir(root_ + QStringLiteral("/") + id).removeRecursively();
     if (ok) reload();
     return ok;
+}
+
+// ---- remote sources (URL-only) ---------------------------------------------------------------------
+
+void AddonManager::addRemoteSource(const QString& url)
+{
+    const QString base = normalizeBase(url);
+    if (base.isEmpty()) { emit remoteSourceResult(false, tr("Enter a valid addon URL.")); return; }
+
+    QNetworkRequest rq((QUrl(base + QStringLiteral("/manifest.json"))));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        { emit remoteSourceResult(false, tr("Couldn't reach that addon: %1").arg(reply->errorString())); return; }
+
+        const QByteArray data = reply->readAll();
+        bool ok = false;
+        const AddonManifest m = AddonManifest::fromJson(data, &ok);
+        if (!ok || m.type != QStringLiteral("media-source"))
+        { emit remoteSourceResult(false, tr("That URL isn't a valid media-source addon.")); return; }
+
+        // Persist the URL (once) + cache its manifest. We store ONLY the URL + manifest, never any code.
+        QStringList urls = remoteSourceUrls();
+        if (!urls.contains(base)) urls << base;
+        QJsonArray arr;
+        for (const QString& u : urls) arr.append(u);
+        store().setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
+        store().setValue(manifestCacheKey(base), data);
+        store().sync();
+
+        reload();
+        emit remoteSourceResult(true, tr("Added \"%1\".").arg(m.name.isEmpty() ? m.id : m.name));
+        emit sourcesChanged();
+    });
+}
+
+bool AddonManager::removeRemoteSource(const QString& url)
+{
+    const QString base = normalizeBase(url);
+    QStringList urls = remoteSourceUrls();
+    if (!urls.removeAll(base)) return false;
+    QJsonArray arr;
+    for (const QString& u : urls) arr.append(u);
+    store().setValue(QStringLiteral("addon.remote.urls"), QJsonDocument(arr).toJson(QJsonDocument::Compact));
+    store().remove(manifestCacheKey(base));
+    store().sync();
+    reload();
+    emit sourcesChanged();
+    return true;
 }
 
 bool AddonManager::isEnabled(const QString& id) const
