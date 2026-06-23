@@ -1,6 +1,6 @@
 // Physical game-controller input via SDL2, mapped to the libretro RetroPad. One player (port 0) for now.
 // Hot-plug aware: a controller connected after launch is picked up automatically. When SDL2 isn't
-// compiled in (GOLIATH_HAVE_SDL undefined), every method is a no-op and available() is false, so the
+// compiled in (MYMEDIAVAULT_HAVE_SDL undefined), every method is a no-op and available() is false, so the
 // rest of the app needs no #ifdefs.
 #pragma once
 #include <cstdint>

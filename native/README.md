@@ -25,13 +25,13 @@ engine — which is what makes both all-format video and libretro first-class.
 | `EpubBook` + `EbookView` (unzip + OPF/spine/TOC parse; page-by-page XHTML render, contents panel, font sizing, per-book resume) | **builds + verified** - parses the bundled Austen book (64 chapters, 61 TOC entries) via `probe_epub` |
 | `PdfView` (QtPdf/PDFium: page-by-page render, zoom/fit-width, per-file resume) | **builds + verified** - QtPdf renders a round-tripped PDF via `probe_pdf` (cross-platform PDFium) |
 | Input: remapping UI (controller + keyboard, per-port profiles), multi-player ports 1–4, rumble, turbo/autofire | **builds + deployed** - SDL enum/defaults cross-checked; live pad behaviour pending hardware |
-| `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `MyMediaVault.exe` (runnable copy at `C:\Goliath-app`, cores auto-download to `cores\`) |
+| `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `MyMediaVault.exe` (runnable copy at `C:\MyMediaVault-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 
 ## Layout
 ```
 native/
-  CMakeLists.txt            libretro lib + probe_core always; Qt app + other probes behind -DGOLIATH_BUILD_APP=ON
+  CMakeLists.txt            libretro lib + probe_core always; Qt app + other probes behind -DMYMEDIAVAULT_BUILD_APP=ON
   src/libretro/             LibretroCore.{h,cpp} + libretro.h  (no deps; load/run cores, options, save states)
   src/video/                MpvWidget                 (libmpv -> Qt OpenGL surface; video + audio + now-playing)
   src/emu/                  RetroView                 (core -> window, input routing, audio, save states)
@@ -65,7 +65,7 @@ Already set up on this machine:
 
 Configure + build (this exact command builds `MyMediaVault.exe` cleanly):
 ```
-cmake -S native -B build -DGOLIATH_BUILD_APP=ON ^
+cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON ^
   -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" ^
   -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib" ^
   -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
@@ -78,7 +78,7 @@ copy C:\mpv-dev\libmpv-2.dll build\Release\
 copy C:\SDL2\lib\x64\SDL2.dll build\Release\
 build\Release\MyMediaVault.exe
 ```
-A ready-to-run copy is already deployed at **`C:\Goliath-app\MyMediaVault.exe`** — double-click it,
+A ready-to-run copy is already deployed at **`C:\MyMediaVault-app\MyMediaVault.exe`** — double-click it,
 **Open Video…**, and pick an MKV.
 
 To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv_*` exports to `mpv.def`

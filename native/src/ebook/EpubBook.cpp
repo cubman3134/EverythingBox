@@ -62,7 +62,7 @@ bool EpubBook::open(const QString& epubPath, QString* error)
 
     // Extract to a stable per-book temp folder (reused across opens to make reopening fast).
     const QByteArray hash = QCryptographicHash::hash(epubPath.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    rootDir_ = QDir::tempPath() + QStringLiteral("/goliath-ebooks/")
+    rootDir_ = QDir::tempPath() + QStringLiteral("/mymediavault-ebooks/")
                + QFileInfo(epubPath).completeBaseName() + QStringLiteral("-") + QString::fromLatin1(hash);
 
     if (!QFile::exists(rootDir_ + QStringLiteral("/META-INF/container.xml")))

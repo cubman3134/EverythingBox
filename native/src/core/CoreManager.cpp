@@ -80,7 +80,7 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent)
 
     QNetworkAccessManager nam;
     QNetworkRequest req((QUrl(url)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("GoliathNative"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
     QNetworkReply* reply = nam.get(req);
 
     QEventLoop loop;

@@ -19,7 +19,7 @@ const long long kAddonTimeoutMs = 5000; // matches the Unity Jint 5s limit
 }
 
 // Called periodically by the Duktape bytecode executor (wired via DUK_USE_EXEC_TIMEOUT_CHECK).
-extern "C" int goliath_duk_exec_timeout(void* udata)
+extern "C" int mymediavault_duk_exec_timeout(void* udata)
 {
     auto* l = static_cast<ExecLimit*>(udata);
     if (!l) return 0;

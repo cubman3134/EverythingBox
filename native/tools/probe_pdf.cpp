@@ -11,16 +11,16 @@
 int main(int argc, char** argv)
 {
     QGuiApplication app(argc, argv);
-    const QString path = QDir::tempPath() + QStringLiteral("/goliath_probe.pdf");
+    const QString path = QDir::tempPath() + QStringLiteral("/mymediavault_probe.pdf");
 
     {
         QPdfWriter w(path);
         w.setPageSize(QPageSize(QPageSize::A4));
         QPainter p(&w);
         QFont f; f.setPointSize(48); p.setFont(f);
-        p.drawText(QRect(200, 200, 4000, 1000), Qt::AlignLeft, QStringLiteral("Goliath PDF page 1"));
+        p.drawText(QRect(200, 200, 4000, 1000), Qt::AlignLeft, QStringLiteral("MyMediaVault PDF page 1"));
         w.newPage();
-        p.drawText(QRect(200, 200, 4000, 1000), Qt::AlignLeft, QStringLiteral("Goliath PDF page 2"));
+        p.drawText(QRect(200, 200, 4000, 1000), Qt::AlignLeft, QStringLiteral("MyMediaVault PDF page 2"));
         p.end();
     }
 

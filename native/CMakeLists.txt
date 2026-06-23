@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(GoliathNative LANGUAGES C CXX)
+project(MyMediaVaultNative LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -7,22 +7,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # libretro frontend - no external deps. Loads/runs any libretro core via the
 # C ABI and exposes BGRA frames. VERIFIED: builds with MSVC, loads + inits mGBA.
 # ---------------------------------------------------------------------------
-add_library(goliath_libretro STATIC src/libretro/LibretroCore.cpp)
-target_include_directories(goliath_libretro PUBLIC src/libretro)
+add_library(mymediavault_libretro STATIC src/libretro/LibretroCore.cpp)
+target_include_directories(mymediavault_libretro PUBLIC src/libretro)
 
 # A console probe that exercises the frontend (no Qt) - used for verification.
 add_executable(probe_core tools/probe_core.cpp)
-target_link_libraries(probe_core PRIVATE goliath_libretro)
+target_link_libraries(probe_core PRIVATE mymediavault_libretro)
 
 # ---------------------------------------------------------------------------
 # The Qt application (UI + libmpv video). Needs Qt6 + libmpv installed, so it
 # is OFF by default; the libretro lib + probe above build without them.
 #   Qt6:    https://www.qt.io/download-qt-installer  (or `aqt`)
 #   libmpv: vcpkg install libmpv   (or distro mpv-dev / a prebuilt SDK)
-# Configure with: cmake -S native -B build -DGOLIATH_BUILD_APP=ON -DCMAKE_PREFIX_PATH=<Qt>
+# Configure with: cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON -DCMAKE_PREFIX_PATH=<Qt>
 # ---------------------------------------------------------------------------
-option(GOLIATH_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
-if(GOLIATH_BUILD_APP)
+option(MYMEDIAVAULT_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
+if(MYMEDIAVAULT_BUILD_APP)
     find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia Network Pdf PdfWidgets Concurrent)
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
@@ -34,7 +34,7 @@ if(GOLIATH_BUILD_APP)
         message(FATAL_ERROR "libmpv not found. Install it and pass CMAKE_PREFIX_PATH (or -DMPV_INCLUDE_DIR / -DMPV_LIBRARY).")
     endif()
 
-    qt_add_executable(goliath
+    qt_add_executable(mymediavault
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
@@ -67,10 +67,10 @@ if(GOLIATH_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
-    target_include_directories(goliath PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
-    target_compile_definitions(goliath PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(goliath PRIVATE goliath_libretro Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets Qt6::Concurrent ${MPV_LIBRARY})
-    set_target_properties(goliath PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
+    target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
+    target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(mymediavault PRIVATE mymediavault_libretro Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets Qt6::Concurrent ${MPV_LIBRARY})
+    set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
 
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
@@ -105,9 +105,9 @@ if(GOLIATH_BUILD_APP)
     find_path(SDL2_INCLUDE_DIR NAMES SDL.h PATH_SUFFIXES SDL2)
     find_library(SDL2_LIBRARY NAMES SDL2)
     if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
-        target_include_directories(goliath PRIVATE ${SDL2_INCLUDE_DIR})
-        target_link_libraries(goliath PRIVATE ${SDL2_LIBRARY})
-        target_compile_definitions(goliath PRIVATE GOLIATH_HAVE_SDL)
+        target_include_directories(mymediavault PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(mymediavault PRIVATE ${SDL2_LIBRARY})
+        target_compile_definitions(mymediavault PRIVATE MYMEDIAVAULT_HAVE_SDL)
         message(STATUS "Gamepad: SDL2 found (${SDL2_LIBRARY})")
     else()
         message(STATUS "Gamepad: SDL2 not found - building without controller input")

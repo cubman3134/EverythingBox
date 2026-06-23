@@ -19,7 +19,7 @@
 
 static QSettings& configStore()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/goliath.ini"),
+    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -78,7 +78,7 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         return QString();
 
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("GoliathAddon"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultAddon"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     const QJsonObject headers = o.value(QStringLiteral("headers")).toObject();
     for (auto it = headers.begin(); it != headers.end(); ++it)

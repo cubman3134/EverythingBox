@@ -61,7 +61,7 @@ AddonSettingsDialog::AddonSettingsDialog(const AddonManifest& manifest, QWidget*
     v->addLayout(form);
 
     auto* note = new QLabel(
-        tr("Credentials are stored on this device (plaintext in goliath.ini) and are only sent where the "
+        tr("Credentials are stored on this device (plaintext in mymediavault.ini) and are only sent where the "
            "addon’s script chooses to use them."),
         this);
     note->setWordWrap(true);

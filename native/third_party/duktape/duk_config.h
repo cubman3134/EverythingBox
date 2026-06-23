@@ -3776,21 +3776,21 @@ typedef struct duk_hthread duk_context;
 #error unsupported: byte order detection failed
 #endif  /* defined(DUK_USE_BYTEORDER) */
 
-/* ---- Goliath: bounded addon execution time -------------------------------------------------------
+/* ---- MyMediaVault: bounded addon execution time -------------------------------------------------------
  * Addon scripts run synchronously on the GUI thread, so a runaway loop would hang the app. Enable the
- * bytecode-executor timeout check; goliath_duk_exec_timeout() (in JsAddon.cpp) returns non-zero once the
+ * bytecode-executor timeout check; mymediavault_duk_exec_timeout() (in JsAddon.cpp) returns non-zero once the
  * per-call deadline passes, and Duktape throws a catchable RangeError. The interrupt counter is required.
  */
 #if defined(__cplusplus)
 extern "C" {
 #endif
-extern int goliath_duk_exec_timeout(void *udata);
+extern int mymediavault_duk_exec_timeout(void *udata);
 #if defined(__cplusplus)
 }
 #endif
 #undef DUK_USE_INTERRUPT_COUNTER
 #define DUK_USE_INTERRUPT_COUNTER
 #undef DUK_USE_EXEC_TIMEOUT_CHECK
-#define DUK_USE_EXEC_TIMEOUT_CHECK(udata)  goliath_duk_exec_timeout((udata))
+#define DUK_USE_EXEC_TIMEOUT_CHECK(udata)  mymediavault_duk_exec_timeout((udata))
 
 #endif  /* DUK_CONFIG_H_INCLUDED */

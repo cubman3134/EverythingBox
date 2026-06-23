@@ -258,7 +258,7 @@ void LibretroCore::registerOptionDefsV2(const retro_core_option_v2_definition* d
 bool LibretroCore::environmentCb(unsigned cmd, void* data)
 {
     auto* self = current_;
-    if (std::getenv("GOLIATH_ENVTRACE")) { fprintf(stderr, "[env] cmd=%u data=%p\n", cmd, data); fflush(stderr); }
+    if (std::getenv("MYMEDIAVAULT_ENVTRACE")) { fprintf(stderr, "[env] cmd=%u data=%p\n", cmd, data); fflush(stderr); }
     switch (cmd)
     {
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:

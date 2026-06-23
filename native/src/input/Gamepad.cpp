@@ -2,7 +2,7 @@
 #include "libretro.h" // RETRO_DEVICE_ID_JOYPAD_*, RETRO_DEVICE_*_ANALOG_*
 #include "../core/Settings.h"
 
-#ifdef GOLIATH_HAVE_SDL
+#ifdef MYMEDIAVAULT_HAVE_SDL
 #define SDL_MAIN_HANDLED   // we never let SDL take over main()
 #include <SDL.h>
 

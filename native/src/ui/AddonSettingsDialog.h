@@ -1,6 +1,6 @@
 // Per-addon settings: renders a form from the addon's declared manifest "settings" (API keys, base URLs,
 // toggles, ...), pre-filled from the stored values, and saves them. The addon's script reads them at
-// runtime via getConfig(key). Values are stored per addon in goliath.ini (plaintext - desktop-local).
+// runtime via getConfig(key). Values are stored per addon in mymediavault.ini (plaintext - desktop-local).
 #pragma once
 #include <QDialog>
 #include <QHash>

@@ -1,9 +1,52 @@
 #include <QApplication>
 #include <QIcon>
+#include <QFile>
+#include <QSettings>
+#include <QStringList>
+#include <QMetaType>
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
 #include "core/ProfileStore.h"
+
+// One-time migration from the old "Goliath" naming. If the old goliath.ini exists and the new
+// mymediavault.ini does not, copy it across and rewrite the renamed addon ids (com.goliath.* ->
+// com.mymediavault.*) in both keys and values, so existing profiles, API keys and favourites carry over.
+// Idempotent: once mymediavault.ini exists this is skipped.
+static void migrateLegacySettings()
+{
+    const QString dir = QCoreApplication::applicationDirPath();
+    const QString oldIni = dir + QStringLiteral("/goliath.ini");
+    const QString newIni = dir + QStringLiteral("/mymediavault.ini");
+    if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;
+    if (!QFile::copy(oldIni, newIni)) return;
+
+    QSettings s(newIni, QSettings::IniFormat);
+    const QString oldNs = QStringLiteral("com.goliath.");
+    const QString newNs = QStringLiteral("com.mymediavault.");
+    const QStringList keys = s.allKeys();
+    for (const QString& k : keys)
+    {
+        QVariant v = s.value(k);
+        // Rewrite the addon namespace inside string values too (e.g. a favourite's stored addonId).
+        if (v.typeId() == QMetaType::QString)
+        {
+            QString sv = v.toString();
+            if (sv.contains(oldNs)) { sv.replace(oldNs, newNs); v = sv; }
+        }
+        if (k.contains(oldNs))
+        {
+            QString nk = k; nk.replace(oldNs, newNs);
+            s.setValue(nk, v);
+            s.remove(k);
+        }
+        else if (v.typeId() == QMetaType::QString && v.toString() != s.value(k).toString())
+        {
+            s.setValue(k, v);
+        }
+    }
+    s.sync();
+}
 
 int main(int argc, char** argv)
 {
@@ -14,6 +57,8 @@ int main(int argc, char** argv)
     QApplication::setApplicationName(QStringLiteral("My Media Vault"));
     QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
+
+    migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
 
     // A profile must be active before the app opens. One profile -> use it; otherwise (none, or several)
     // the user picks an existing profile or creates one. Refusing to choose at startup exits the app.

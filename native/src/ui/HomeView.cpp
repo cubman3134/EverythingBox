@@ -1249,7 +1249,7 @@ void HomeView::showMeta(const MediaDetail& d)
         return;
     }
     QNetworkRequest req((QUrl(d.imageUrl)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Goliath"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, myMeta] {
@@ -1462,7 +1462,7 @@ void HomeView::pumpThumbnails()
         const int gen = generation_;
 
         QNetworkRequest req((QUrl(url)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("Goliath"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;

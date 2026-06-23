@@ -47,7 +47,7 @@ static int probeMetaFlow(const QString& jsPath)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/goliath-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -94,7 +94,7 @@ static int probeMetaOne(const QString& jsPath, const QString& catalogId)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/goliath-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -124,7 +124,7 @@ static int probeMangaFlow(const QString& jsPath)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/goliath-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -184,7 +184,7 @@ int main(int argc, char** argv)
     AddonManifest m;
     m.id = QStringLiteral("probe");
     m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/goliath-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
 
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);

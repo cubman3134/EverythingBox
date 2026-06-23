@@ -1,5 +1,5 @@
 // A small persistent list of recently opened content (videos, audio, books/PDFs, games). Stored as a
-// JSON array in goliath.ini so it survives restarts; the Home screen's "Recent" tab lists it and the
+// JSON array in mymediavault.ini so it survives restarts; the Home screen's "Recent" tab lists it and the
 // main window re-opens an entry by its kind. Newest first, de-duplicated by path, capped.
 #pragma once
 #include <QString>

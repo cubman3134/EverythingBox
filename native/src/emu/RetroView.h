@@ -4,7 +4,7 @@
 #include <QWidget>
 #include <QByteArray>
 #include <set>
-#include "LibretroCore.h"   // goliath_libretro PUBLIC include dir (src/libretro)
+#include "LibretroCore.h"   // mymediavault_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 

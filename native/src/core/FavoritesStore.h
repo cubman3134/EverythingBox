@@ -1,5 +1,5 @@
 // Per-profile favourites: catalog items a user has starred. They appear in a "Favorites" section on the
-// Home page and re-open their detail page when clicked. Stored as a JSON list in goliath.ini, keyed by the
+// Home page and re-open their detail page when clicked. Stored as a JSON list in mymediavault.ini, keyed by the
 // active profile (so each user has their own). Enough of the MediaItem is kept to display + re-open it.
 #pragma once
 #include <QString>

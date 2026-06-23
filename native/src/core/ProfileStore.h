@@ -1,6 +1,6 @@
 // User profiles. Each profile owns its home-screen content (its Recent list is namespaced by profile id).
 // At startup the app must have a selected profile: with none, one is created; with several, one is chosen.
-// Persisted as a JSON list in goliath.ini, with the active profile id under "profiles/current".
+// Persisted as a JSON list in mymediavault.ini, with the active profile id under "profiles/current".
 #pragma once
 #include <QString>
 #include <QVector>
