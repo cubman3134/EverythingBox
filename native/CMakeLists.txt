@@ -60,6 +60,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/Theme.cpp        src/core/Theme.h
+        src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h

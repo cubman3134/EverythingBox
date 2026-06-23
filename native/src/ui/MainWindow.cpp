@@ -13,9 +13,12 @@
 #include "../core/RecentStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
+#include "../core/CloudSync.h"
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
 #include <QInputDialog>
+#include <QSettings>
+#include <QLineEdit>
 #include "SettingsDialog.h"
 
 #include <QWidget>
@@ -558,14 +561,72 @@ void MainWindow::openSettingsHub()
     auto* emu = new QPushButton(tr("Emulator Settings…"), &dlg);
     auto* inp = new QPushButton(tr("Input Mapping…"), &dlg);
     auto* addon = new QPushButton(tr("Addon Settings…"), &dlg);
+    auto* cloud = new QPushButton(tr("Cloud Sync…"), &dlg);
     connect(theme, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openThemes(); });
     connect(emu, &QPushButton::clicked, this, &MainWindow::openEmulatorSettings);
     connect(inp, &QPushButton::clicked, this, &MainWindow::openInputMapping);
     connect(addon, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openLibrary(); });
+    connect(cloud, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openCloudSync(); });
     v->addWidget(theme);
     v->addWidget(emu);
     v->addWidget(inp);
     v->addWidget(addon);
+    v->addWidget(cloud);
+
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+    dlg.exec();
+}
+
+void MainWindow::openCloudSync()
+{
+    if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Cloud Sync"));
+    dlg.resize(440, 250);
+    auto* v = new QVBoxLayout(&dlg);
+    v->addWidget(new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, settings "
+        "and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."), &dlg));
+    auto* status = new QLabel(&dlg); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
+    v->addWidget(status);
+    auto* signIn = new QPushButton(tr("Sign in with Google"), &dlg);
+    auto* signOut = new QPushButton(tr("Sign out"), &dlg);
+    auto* setup = new QPushButton(tr("Set up sign-in…"), &dlg);
+    v->addWidget(signIn); v->addWidget(signOut); v->addWidget(setup);
+
+    auto refresh = [this, status, signIn, signOut, setup] {
+        const bool cfg = CloudSync::isConfigured();
+        const bool in = cloud_->isSignedIn();
+        setup->setVisible(!cfg);
+        signIn->setVisible(cfg && !in);
+        signOut->setVisible(in);
+        if (!cfg) status->setText(tr("Google sign-in isn’t set up yet. Click “Set up sign-in…” to paste your "
+                                     "OAuth client id + secret (one-time)."));
+        else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
+        else status->setText(tr("Not signed in."));
+    };
+    refresh();
+
+    connect(signIn, &QPushButton::clicked, &dlg, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
+    connect(signOut, &QPushButton::clicked, &dlg, [this] { cloud_->signOut(); });
+    connect(setup, &QPushButton::clicked, &dlg, [this, &dlg, refresh] {
+        bool ok = false;
+        const QString id = QInputDialog::getText(&dlg, tr("OAuth client id"), tr("Google OAuth client id:"),
+                                                  QLineEdit::Normal, QString(), &ok);
+        if (!ok || id.trimmed().isEmpty()) return;
+        const QString sec = QInputDialog::getText(&dlg, tr("OAuth client secret"), tr("Google OAuth client secret:"),
+                                                  QLineEdit::Normal, QString(), &ok);
+        if (!ok) return;
+        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        s.setValue(QStringLiteral("cloud/clientId"), id.trimmed());
+        s.setValue(QStringLiteral("cloud/clientSecret"), sec.trimmed());
+        s.sync();
+        refresh();
+    });
+    connect(cloud_.get(), &CloudSync::signedIn, &dlg, [refresh](const QString&) { refresh(); });
+    connect(cloud_.get(), &CloudSync::signInFailed, &dlg, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
+    connect(cloud_.get(), &CloudSync::signedOut, &dlg, [refresh] { refresh(); });
 
     auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
     connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);

@@ -13,6 +13,7 @@ class PdfView;
 class LibraryView;
 class HomeView;
 class AddonManager;
+class CloudSync;
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -42,6 +43,7 @@ private slots:
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    void openCloudSync();     // Google Drive sign-in + sync panel
     void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
     void openEmulatorSettings();
     void openInputMapping();
@@ -81,6 +83,7 @@ private:
     LibraryView* library_ = nullptr;
     HomeView* home_ = nullptr;
     std::unique_ptr<AddonManager> addons_;
+    std::unique_ptr<CloudSync> cloud_;
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
