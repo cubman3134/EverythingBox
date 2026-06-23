@@ -32,6 +32,7 @@ private slots:
     void doSearch();
     void installAddon();
     void addByUrl();       // add a remote (HTTP) addon by its URL
+    void removeSelected(); // remove the selected source (URL for remote, files for local)
     void browseAddons();   // open the add-on registry browser
     void configureAddon();
     void reloadAddons();

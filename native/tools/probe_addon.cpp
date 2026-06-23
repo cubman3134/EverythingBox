@@ -199,6 +199,9 @@ static int probeRemote(const QString& url, const QString& catalogId)
                d.valid ? "yes" : "no", d.title.toUtf8().constData(), int(d.facts.size()),
                d.imageUrl.isEmpty() ? "(none)" : "set");
         for (const MediaFact& fc : d.facts) printf("    %s: %s\n", fc.label.toUtf8().constData(), fc.value.toUtf8().constData());
+        const QString stream = mgr.resolveStreamSync(&a, *pick);
+        printf("resolveStream(%s) -> %s\n", pick->title.toUtf8().constData(),
+               stream.isEmpty() ? "(no stream - would open the detail page)" : stream.toUtf8().constData());
     }
 
     const MediaItem* cont = nullptr;

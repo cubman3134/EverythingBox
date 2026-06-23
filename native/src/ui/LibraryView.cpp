@@ -26,6 +26,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     auto* install = new QPushButton(tr("Install Addon…"), this);
     auto* addUrl = new QPushButton(tr("Add by URL…"), this);
     auto* configure = new QPushButton(tr("Configure…"), this);
+    auto* removeBtn = new QPushButton(tr("Remove"), this);
     auto* reload = new QPushButton(tr("Reload"), this);
     search_ = new QLineEdit(this);
     search_->setPlaceholderText(tr("Search the selected source…"));
@@ -34,6 +35,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     connect(install, &QPushButton::clicked, this, &LibraryView::installAddon);
     connect(addUrl, &QPushButton::clicked, this, &LibraryView::addByUrl);
     connect(configure, &QPushButton::clicked, this, &LibraryView::configureAddon);
+    connect(removeBtn, &QPushButton::clicked, this, &LibraryView::removeSelected);
     connect(reload, &QPushButton::clicked, this, &LibraryView::reloadAddons);
     connect(searchBtn, &QPushButton::clicked, this, &LibraryView::doSearch);
     connect(search_, &QLineEdit::returnPressed, this, &LibraryView::doSearch);
@@ -46,6 +48,7 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     tools->addWidget(install);
     tools->addWidget(addUrl);
     tools->addWidget(configure);
+    tools->addWidget(removeBtn);
     tools->addWidget(reload);
     tools->addWidget(search_, 1);
     tools->addWidget(searchBtn);
@@ -83,7 +86,8 @@ void LibraryView::refreshSources()
     // All media sources are listed; the checkbox enables/disables each one (persisted).
     for (LoadedAddon* s : mgr_->sources())
     {
-        const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+        QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+        if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
         auto* item = new QListWidgetItem(name, sourceList_);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
         item->setCheckState(mgr_->isEnabled(s->manifest.id) ? Qt::Checked : Qt::Unchecked);
@@ -189,6 +193,25 @@ void LibraryView::addByUrl()
     if (!okPressed || url.trimmed().isEmpty()) return;
     status_->setText(tr("Fetching addon…"));
     mgr_->addRemoteSource(url.trimmed()); // async; remoteSourceResult reports the outcome
+}
+
+void LibraryView::removeSelected()
+{
+    const int row = sourceList_->currentRow();
+    if (row < 0 || row >= sourceRefs_.size()) { status_->setText(tr("Select a source to remove.")); return; }
+    LoadedAddon* s = sourceRefs_[row];
+    const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+    const bool remote = (s->transport == LoadedAddon::RemoteHttp);
+
+    if (QMessageBox::question(this, tr("Remove addon"),
+            remote ? tr("Remove the remote source “%1”? (Only the saved URL is removed.)").arg(name)
+                   : tr("Remove the addon “%1” and delete its files?").arg(name))
+        != QMessageBox::Yes)
+        return;
+
+    const bool ok = remote ? mgr_->removeRemoteSource(s->baseUrl) : mgr_->removeAddon(s->manifest.id);
+    if (ok) { refreshSources(); status_->setText(tr("Removed “%1”.").arg(name)); }
+    else      status_->setText(tr("Couldn't remove “%1”.").arg(name));
 }
 
 void LibraryView::configureAddon()

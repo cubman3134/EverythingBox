@@ -11,6 +11,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -72,6 +73,12 @@ public:
     int requestDetail(LoadedAddon* src, const MediaItem& item, int page);
     int requestSearch(LoadedAddon* src, const QString& query);
     int requestMeta(LoadedAddon* src, const MediaItem& item); // metaReady(reqId, MediaDetail) fires later
+
+    // Resolve a playable URL for a remote item via its /stream endpoint (async; the callback fires on the
+    // GUI thread with the url+mime, or empty strings if there's no stream). JsLocal items already carry url.
+    void resolveStream(LoadedAddon* src, const MediaItem& item,
+                       std::function<void(const QString& url, const QString& mime)> cb);
+    QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
 
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder

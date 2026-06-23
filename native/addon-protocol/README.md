@@ -22,8 +22,24 @@ whether it's served by a **Worker** (dynamic) or by **static files** (GitHub Pag
 | `GET {base}/catalog/{catalogId}/page={n}.json` | `MediaCatalog` | `getCatalog({page})` |
 | `GET {base}/meta/{type}/{id}.json` | `MediaDetail` | `getMeta({id,type})` |
 | `GET {base}/detail/{type}/{id}.json` | `MediaCatalog` (children) | `getDetail({id,type})` |
+| `GET {base}/stream/{type}/{id}.json` | a playable source | (new — resolves the file to play) |
 
 `base` = the manifest URL minus `/manifest.json`. Extras can combine: `/catalog/movies/search=batman&page=2.json`.
+
+### Playback (the `/stream` route)
+
+Catalog/detail items don't carry a playable `url` (metadata and sources are separate). When you open a
+leaf item (movie / episode / track), the app fetches `/stream/{type}/{id}.json` and plays the first source.
+The response is either a single object or a list:
+
+```json
+{ "url": "https://…/video.mp4", "mime": "video/mp4" }
+{ "streams": [ { "url": "https://…/video.mp4", "mime": "video/mp4", "title": "1080p" } ] }
+```
+
+A metadata-only addon (like the TMDB Worker) returns `{ "streams": [] }`, so opening an item shows its
+detail page instead. Direct http(s) URLs play through libmpv; torrent/magnet sources would need a separate
+streaming layer (not built).
 
 ## Two ways to host
 

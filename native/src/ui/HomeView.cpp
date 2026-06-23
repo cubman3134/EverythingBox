@@ -1307,13 +1307,33 @@ void HomeView::activateItem(int row)
         return;
     }
 
+    stack_.last().childRow = row; // remember where we drilled in, so Back restores this position
+    LoadedAddon* addon = stack_.last().addon;
+
+    // A remote leaf (movie / episode / track) carries no url in the catalog - its playable source comes from
+    // the /stream endpoint, fetched on open. If one resolves, play it; otherwise fall back to the detail page.
+    if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp
+        && it.type != QStringLiteral("platform"))
+    {
+        const MediaItem item = it; // copy for the async callback
+        status_->setText(tr("Finding a source for “%1”…").arg(it.title));
+        mgr_->resolveStream(addon, item, [this, addon, item](const QString& url, const QString& mime) {
+            if (!url.isEmpty()) { MediaItem m = item; m.url = url; m.mime = mime; emit openItem(m); }
+            else openDetailLevel(addon, item); // no stream -> show its metadata instead
+        });
+        return;
+    }
+
     // No file yet: open a detail page. Its metadata header describes the item; for a container
     // (TV show / season / album / console) the page also drills into its children below the header.
-    stack_.last().childRow = row; // remember where we drilled in, so Back restores this position
+    openDetailLevel(addon, it);
+}
+
+void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
+{
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); } // drilled below the category root
-    const Level& top = stack_.last();
     Level lvl;
-    lvl.addon = top.addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
+    lvl.addon = addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
     stack_.push_back(lvl);
     loadTop();
 }

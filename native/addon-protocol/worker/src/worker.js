@@ -143,6 +143,9 @@ export default {
       if (parts[0] === "catalog") return json(await catalog(env, parts[1], parseExtras(parts[2])));
       if (parts[0] === "meta") return json(await meta(env, parts[1], parts[2]));
       if (parts[0] === "detail") return json(await detail(env, parts[1], parts[2]));
+      // TMDB is a metadata source with no playable files, so streams are empty. A real stream addon would
+      // return {"streams":[{"url":"...","mime":"..."}]} here (or a single {"url","mime"}).
+      if (parts[0] === "stream") return json({ streams: [] });
       return json({ error: "not found" }, 404);
     } catch (e) {
       return json({ error: String(e && e.message || e) }, 502);

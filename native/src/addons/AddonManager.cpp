@@ -138,6 +138,12 @@ static QUrl remoteMetaUrl(const QString& base, const QString& type, const QStrin
                + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
 }
 
+static QUrl remoteStreamUrl(const QString& base, const QString& type, const QString& id)
+{
+    return QUrl(base + QStringLiteral("/stream/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+               + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
+}
+
 // Resolve a (possibly relative) item URL/thumbnail returned by a remote addon against its base URL.
 static QString resolveRemoteUrl(const QString& url, const QString& base)
 {
@@ -177,6 +183,22 @@ static QString manifestCacheKey(const QString& base)
 {
     const QByteArray h = QCryptographicHash::hash(base.toUtf8(), QCryptographicHash::Md5).toHex();
     return QStringLiteral("addon.remote.manifest.") + QString::fromUtf8(h);
+}
+
+// A /stream response is either {"url":"...","mime":"..."} or {"streams":[{"url","mime"}...]}; take the
+// first playable url and resolve it against the addon base. Returns url (and mime via out-param).
+static QString parseStreamJson(const QByteArray& body, const QString& base, QString* mime = nullptr)
+{
+    const QJsonObject o = QJsonDocument::fromJson(body).object();
+    QJsonObject src = o;
+    if (!o.contains(QStringLiteral("url")))
+    {
+        const QJsonArray streams = o.value(QStringLiteral("streams")).toArray();
+        if (streams.isEmpty()) return {};
+        src = streams.first().toObject();
+    }
+    if (mime) *mime = src.value(QStringLiteral("mime")).toString();
+    return resolveRemoteUrl(src.value(QStringLiteral("url")).toString(), base);
 }
 
 // --- AddonManager ------------------------------------------------------------------------------------
@@ -467,6 +489,29 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
         emit metaReady(reqId, d);
     });
     return reqId;
+}
+
+void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
+                                 std::function<void(const QString&, const QString&)> cb)
+{
+    if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString()); return; }
+    const QString base = src->baseUrl;
+    QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [reply, base, cb] {
+        reply->deleteLater();
+        QString url, mime;
+        if (reply->error() == QNetworkReply::NoError) url = parseStreamJson(reply->readAll(), base, &mime);
+        cb(url, mime);
+    });
+}
+
+QString AddonManager::resolveStreamSync(LoadedAddon* src, const MediaItem& item)
+{
+    if (!src || src->transport != LoadedAddon::RemoteHttp) return {};
+    return parseStreamJson(httpGetBlocking(remoteStreamUrl(src->baseUrl, item.type, item.id)), src->baseUrl);
 }
 
 // ---- install / remove ------------------------------------------------------------------------------

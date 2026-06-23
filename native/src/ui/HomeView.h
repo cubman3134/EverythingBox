@@ -69,6 +69,7 @@ private:
     void showXmb();                  // show the PS3 XMB layout (categories + item column)
     void activateNav(const QString& navKey); // open a carousel entry (media type, catalog item, or Home)
     void activateItem(int row);      // open/drill a catalog item by row (shared by grid + carousel)
+    void openDetailLevel(LoadedAddon* addon, const MediaItem& it); // push + show an item's detail page
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]
     void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
