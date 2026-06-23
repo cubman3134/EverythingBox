@@ -1,4 +1,4 @@
-# Project Goliath
+# My Media Vault
 
 A native, cross-platform **media hub** — video, audio (with playlists), libretro
 emulation, EPUB/PDF readers, and a sandboxed JavaScript addon system — built as a

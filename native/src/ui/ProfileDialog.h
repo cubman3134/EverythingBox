@@ -1,4 +1,4 @@
-// "Who's using Goliath?" — pick an existing profile or create one. Shown at startup (mustChoose: there is
+// "Who's using My Media Vault?" — pick an existing profile or create one. Shown at startup (mustChoose: there is
 // no Cancel; closing without a choice means the app won't proceed) and from the Home profile button (where
 // Cancel just keeps the current profile). On accept, selectedId() is the chosen/created profile id.
 #pragma once

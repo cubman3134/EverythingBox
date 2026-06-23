@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "type": "media-source",
   "entry": "main.js",
-  "author": "Goliath",
+  "author": "My Media Vault",
   "description": "All-in-one metadata catalog: Movies & TV (TMDB), Games (IGDB / SteamGridDB), Music (MusicBrainz), Books (Google Books, with Open Library as a keyless fallback), Comics (Comic Vine) and Manga (AniList, keyless). Drill into a TV show for its episodes, a comic series for its issues, or an album for its tracks.",
   "permissions": ["network"],
   "minAppVersion": "0.1.0",

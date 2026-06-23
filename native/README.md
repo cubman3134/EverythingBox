@@ -1,4 +1,4 @@
-# Project Goliath — native (Qt/C++)
+# My Media Vault — native (Qt/C++)
 
 The re-platform off Unity. A native cross-platform media hub: video (everything, via **libmpv**),
 emulation (**libretro** cores, including hardware-rendered ones), plus the readers/addons ported from the
@@ -25,7 +25,7 @@ engine — which is what makes both all-format video and libretro first-class.
 | `EpubBook` + `EbookView` (unzip + OPF/spine/TOC parse; page-by-page XHTML render, contents panel, font sizing, per-book resume) | **builds + verified** - parses the bundled Austen book (64 chapters, 61 TOC entries) via `probe_epub` |
 | `PdfView` (QtPdf/PDFium: page-by-page render, zoom/fit-width, per-file resume) | **builds + verified** - QtPdf renders a round-tripped PDF via `probe_pdf` (cross-platform PDFium) |
 | Input: remapping UI (controller + keyboard, per-port profiles), multi-player ports 1–4, rumble, turbo/autofire | **builds + deployed** - SDL enum/defaults cross-checked; live pad behaviour pending hardware |
-| `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `goliath.exe` (runnable copy at `C:\Goliath-app`, cores auto-download to `cores\`) |
+| `MainWindow` + `main.cpp` (Open Video / Audio / Game / Document / Library / Settings / Save+Load State, stacked views, transport) | **builds** -> `MyMediaVault.exe` (runnable copy at `C:\Goliath-app`, cores auto-download to `cores\`) |
 | Ports from C#: ✅ epub · ✅ PDF · ✅ audio · ✅ JS addons (Duktape) | all ported; remaining Unity-only bits intentionally dropped |
 
 ## Layout
@@ -63,7 +63,7 @@ Already set up on this machine:
 - **QtPdf module** (PDF reading) — installed into the Qt prefix via `aqt install-qt windows desktop 6.8.3
   win64_msvc2022_64 -m qtpdf` (PDFium bundled; cross-platform). Deploy needs `Qt6Pdf.dll` + `Qt6PdfWidgets.dll`.
 
-Configure + build (this exact command builds `goliath.exe` cleanly):
+Configure + build (this exact command builds `MyMediaVault.exe` cleanly):
 ```
 cmake -S native -B build -DGOLIATH_BUILD_APP=ON ^
   -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" ^
@@ -73,12 +73,12 @@ cmake --build build --config Release
 ```
 Make it runnable (copy Qt + mpv + SDL2 DLLs next to the exe):
 ```
-C:\Qt\6.8.3\msvc2022_64\bin\windeployqt.exe build\Release\goliath.exe --release
+C:\Qt\6.8.3\msvc2022_64\bin\windeployqt.exe build\Release\MyMediaVault.exe --release
 copy C:\mpv-dev\libmpv-2.dll build\Release\
 copy C:\SDL2\lib\x64\SDL2.dll build\Release\
-build\Release\goliath.exe
+build\Release\MyMediaVault.exe
 ```
-A ready-to-run copy is already deployed at **`C:\Goliath-app\goliath.exe`** — double-click it,
+A ready-to-run copy is already deployed at **`C:\Goliath-app\MyMediaVault.exe`** — double-click it,
 **Open Video…**, and pick an MKV.
 
 To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv_*` exports to `mpv.def`
