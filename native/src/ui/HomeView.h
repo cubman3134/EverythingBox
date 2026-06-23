@@ -90,6 +90,7 @@ private:
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
     void showMeta(const MediaDetail& detail);
     void hideMeta();
+    void styleMetaPanel(bool dark);  // theme the detail card: dark+light-text vs light+dark-text
     void updateChrome();
     void updateStatus();
 

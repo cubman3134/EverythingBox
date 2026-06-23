@@ -447,6 +447,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     metaOverview_ = new QTextBrowser(meta_);
     metaOverview_->setFrameShape(QFrame::NoFrame);
     metaOverview_->setOpenExternalLinks(false);
+    metaOverview_->viewport()->setAutoFillBackground(false); // let the (themed) card show through
     metaOverview_->setVisible(false);
     mc->addWidget(metaOverview_, 1);
     mh->addLayout(mc, 1);
@@ -531,6 +532,9 @@ void HomeView::refresh()
 {
     g_theme = ThemeStore::current(); // the active profile's colour theme
     applyThemeFont();
+    // A theme with a dark background image (low dim) wants a dark, light-text detail card so it stays
+    // readable AND fits the theme; light themes get a light, dark-text card.
+    styleMetaPanel(!g_theme.background.isEmpty() && g_theme.backgroundDim < 0.30);
 
     // Reflect the active profile in the top-bar button: the avatar as an icon + the name as text.
     if (profileBtn_)
@@ -1370,6 +1374,32 @@ void HomeView::hideMeta()
 {
     pendingMetaReqId_ = -1; // invalidate any in-flight metadata / cover load
     meta_->setVisible(false);
+}
+
+// Theme the detail card. Colours are set EXPLICITLY (not via palette) because a stylesheet on the panel
+// breaks Qt's palette propagation to the child labels - which on a dark-mode OS would otherwise render
+// them in the default light text, i.e. light-on-light. Dark themes get a dark card with light text.
+void HomeView::styleMetaPanel(bool dark)
+{
+    if (!meta_) return;
+    if (dark)
+    {
+        meta_->setStyleSheet(QStringLiteral(
+            "QFrame#metaHeader{background:rgba(18,26,42,0.84);border:1px solid rgba(255,255,255,0.16);border-radius:12px;}"));
+        if (metaTitle_)    metaTitle_->setStyleSheet(QStringLiteral("font-size:15pt;color:#eef2f7;"));
+        if (metaFacts_)    metaFacts_->setStyleSheet(QStringLiteral("color:#c7cfdb;"));
+        if (metaOverview_) metaOverview_->setStyleSheet(QStringLiteral(
+            "QTextBrowser{background:transparent;color:#dfe5ee;border:none;}"));
+    }
+    else
+    {
+        meta_->setStyleSheet(QStringLiteral(
+            "QFrame#metaHeader{background:rgba(255,255,255,0.96);border:1px solid rgba(0,0,0,0.12);border-radius:12px;}"));
+        if (metaTitle_)    metaTitle_->setStyleSheet(QStringLiteral("font-size:15pt;color:#1b1b1b;"));
+        if (metaFacts_)    metaFacts_->setStyleSheet(QStringLiteral("color:#2a2d33;"));
+        if (metaOverview_) metaOverview_->setStyleSheet(QStringLiteral(
+            "QTextBrowser{background:transparent;color:#26282c;border:none;}"));
+    }
 }
 
 void HomeView::loadMore()
