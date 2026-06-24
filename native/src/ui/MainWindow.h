@@ -19,6 +19,7 @@ class QSlider;
 class QLabel;
 class QListWidget;
 class QFrame;
+class QPushButton;
 class QTimer;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
@@ -90,6 +91,7 @@ private:
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
+    QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;

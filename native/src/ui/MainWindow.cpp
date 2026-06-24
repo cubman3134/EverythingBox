@@ -138,12 +138,28 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     mc->addWidget(fullScreen);
     mediaControls_->hide();
 
+    // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).
+    videoBack_ = new QPushButton(tr("‹ Back"), player_);
+    videoBack_->setObjectName(QStringLiteral("videoBack"));
+    videoBack_->setStyleSheet(QStringLiteral(
+        "#videoBack { background: rgba(20,20,24,0.85); color:#e8e8e8; border:none; border-radius:8px;"
+        " padding:8px 16px; font-weight:bold; }"
+        "#videoBack:hover { background: rgba(45,45,52,0.95); }"));
+    videoBack_->setCursor(Qt::PointingHandCursor);
+    videoBack_->setToolTip(tr("Exit the movie"));
+    videoBack_->hide();
+    videoBack_->installEventFilter(this); // keep the overlay alive while hovering it
+    connect(videoBack_, &QPushButton::clicked, this, [this] {
+        player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome();
+    });
+
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
         // Hide after the inactivity timeout (mouse movement re-reveals via the event filter). In full
         // screen also blank the cursor so nothing lingers over the movie.
         mediaControls_->hide();
+        videoBack_->hide();
         if (isFullScreen() && stack_->currentWidget() == playerPage_)
             player_->setCursor(Qt::BlankCursor);
     });
@@ -184,7 +200,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     connect(seek_, &QSlider::sliderReleased, this, &MainWindow::onSeekReleased);
     // Hide the transport when leaving the player page.
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
-        if (stack_->currentWidget() != playerPage_) mediaControls_->hide(); });
+        if (stack_->currentWidget() != playerPage_) { mediaControls_->hide(); videoBack_->hide(); } });
 
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
@@ -197,7 +213,7 @@ MainWindow::~MainWindow() = default; // AddonManager is complete in this transla
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
-    if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_))
+    if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_))
         revealMediaControls();
     return QMainWindow::eventFilter(obj, event);
 }
@@ -260,6 +276,8 @@ void MainWindow::revealMediaControls()
     positionMediaControls();
     mediaControls_->show();
     mediaControls_->raise();
+    videoBack_->show();
+    videoBack_->raise();
     controlsHideTimer_->start(2500);
 }
 
@@ -270,6 +288,8 @@ void MainWindow::positionMediaControls()
     const int h = mediaControls_->sizeHint().height();
     mediaControls_->setGeometry(margin, player_->height() - h - margin,
                                 player_->width() - 2 * margin, h);
+    videoBack_->adjustSize();
+    videoBack_->move(margin, margin); // top-left
 }
 
 void MainWindow::openFile()
