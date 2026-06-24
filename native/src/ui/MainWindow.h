@@ -50,6 +50,7 @@ private slots:
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel
+    void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
     void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
     void openEmulatorSettings();

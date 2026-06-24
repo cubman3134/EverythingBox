@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QWidget>
 #include <QScrollArea>
+#include <QStackedWidget>
 #include <QMessageBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -21,10 +22,19 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 {
     setWindowTitle(tr("Emulator Settings — Cores per System"));
 
-    auto* v = new QVBoxLayout(this);
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    stack_ = new QStackedWidget(this);
+    root->addWidget(stack_);
+
+    // Page 0: the cores-per-system list. The per-core options editor is pushed as page 1 on demand
+    // (in-place, no popup window) and removed when the user leaves it.
+    auto* mainPage = new QWidget(stack_);
+    stack_->addWidget(mainPage);
+    auto* v = new QVBoxLayout(mainPage);
 
     auto* intro = new QLabel(tr("Choose the libretro core for each system, and tune per-core options. "
-                                "Controller and keyboard mapping is in “Input Mapping…”."), this);
+                                "Controller and keyboard mapping is in “Input Mapping…”."), mainPage);
     intro->setWordWrap(true);
     v->addWidget(intro);
 
@@ -102,25 +112,30 @@ void SettingsDialog::editOptions(const QString& systemId)
     const std::vector<CoreOption> opts = tmp.options(); // copy out before unloading
     tmp.unload();
 
-    if (opts.empty())
-    {
-        QMessageBox::information(this, tr("No options"),
-                                 tr("The core '%1' doesn't expose any configurable options.").arg(core));
-        return;
-    }
+    // Build the options editor as an in-place page (no popup window).
+    auto* page = new QWidget(stack_);
+    auto* outer = new QVBoxLayout(page);
 
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("%1 — Core Options").arg(core));
-    auto* outer = new QVBoxLayout(&dlg);
+    auto* header = new QHBoxLayout();
+    auto* back = new QPushButton(tr("‹ Back"), page);
+    auto* title = new QLabel(tr("<b>%1 — Core Options</b>").arg(core), page);
+    header->addWidget(back);
+    header->addSpacing(8);
+    header->addWidget(title, 1);
+    outer->addLayout(header);
 
     // Cores can expose dozens of options, so make the list scrollable.
-    auto* scroll = new QScrollArea(&dlg);
+    auto* scroll = new QScrollArea(page);
     scroll->setWidgetResizable(true);
     auto* inner = new QWidget;
     auto* form = new QFormLayout(inner);
 
     QHash<QString, QComboBox*> optCombos;
-    for (const CoreOption& o : opts)
+    if (opts.empty())
+    {
+        form->addRow(new QLabel(tr("This core doesn't expose any configurable options.")));
+    }
+    else for (const CoreOption& o : opts)
     {
         const QString key = QString::fromStdString(o.key);
         auto* c = new QComboBox(inner);
@@ -140,17 +155,26 @@ void SettingsDialog::editOptions(const QString& systemId)
     scroll->setWidget(inner);
     outer->addWidget(scroll, 1);
 
-    auto* note = new QLabel(tr("Changes take effect the next time you open a game with this core."), &dlg);
+    auto* note = new QLabel(tr("Changes take effect the next time you open a game with this core."), page);
     note->setWordWrap(true);
     outer->addWidget(note);
 
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, &dlg);
-    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, page);
     outer->addWidget(box);
-    dlg.resize(480, 560);
 
-    if (dlg.exec() == QDialog::Accepted)
+    auto leave = [this, page] {
+        stack_->setCurrentIndex(0);   // back to the cores list
+        stack_->removeWidget(page);
+        page->deleteLater();
+    };
+    connect(box, &QDialogButtonBox::accepted, this, [this, core, optCombos, leave] {
         for (auto it = optCombos.constBegin(); it != optCombos.constEnd(); ++it)
             Settings::setOptionValue(core, it.key(), it.value()->currentData().toString());
+        leave();
+    });
+    connect(box, &QDialogButtonBox::rejected, this, leave);
+    connect(back, &QPushButton::clicked, this, leave);
+
+    stack_->addWidget(page);
+    stack_->setCurrentWidget(page);
 }

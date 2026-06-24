@@ -869,22 +869,7 @@ void MainWindow::openCloudSync()
         connect(signIn, &QPushButton::clicked, this, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
         connect(signOut, &QPushButton::clicked, this, [this] { cloud_->signOut(); });
         connect(syncNow, &QPushButton::clicked, this, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
-        connect(setup, &QPushButton::clicked, this, [this, refresh] {
-            QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
-            bool ok = false;
-            const QString id = QInputDialog::getText(this, tr("OAuth client id"),
-                tr("Google OAuth client id (Desktop-app type):"), QLineEdit::Normal,
-                s.value(QStringLiteral("cloud/clientId")).toString(), &ok);
-            if (!ok || id.trimmed().isEmpty()) return;
-            const QString sec = QInputDialog::getText(this, tr("OAuth client secret"), tr("Google OAuth client secret:"),
-                QLineEdit::Normal, s.value(QStringLiteral("cloud/clientSecret")).toString(), &ok);
-            if (!ok) return;
-            s.setValue(QStringLiteral("cloud/clientId"), id.trimmed());
-            s.setValue(QStringLiteral("cloud/clientSecret"), sec.trimmed());
-            s.sync();
-            cloud_->signOut();
-            refresh();
-        });
+        connect(setup, &QPushButton::clicked, this, [this] { openCloudClientSetup(); });
         // Context = status (recreated each time the panel is built) -> these auto-disconnect on rebuild.
         connect(cloud_.get(), &CloudSync::signedIn, status, [this, refresh](const QString&) {
             refresh(); raise(); activateWindow(); cloudSyncNow();
@@ -892,6 +877,50 @@ void MainWindow::openCloudSync()
         connect(cloud_.get(), &CloudSync::signInFailed, status, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
         connect(cloud_.get(), &CloudSync::signedOut, status, [refresh] { refresh(); });
     }, [this] { openSettingsHub(); });
+}
+
+// Inline form (no popup) to paste the Google OAuth client id/secret used for Drive sign-in.
+void MainWindow::openCloudClientSetup()
+{
+    showPanel(tr("Sign-in client"), [this](QVBoxLayout* v) {
+        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        auto* intro = new QLabel(tr("Paste a Google <b>Desktop-app</b> OAuth client (from the Google Cloud "
+            "console). The secret is non-confidential for desktop apps."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
+        v->addWidget(intro);
+
+        auto* idLabel = new QLabel(tr("Client id"));
+        idLabel->setStyleSheet(QStringLiteral("font-weight:bold;"));
+        v->addWidget(idLabel);
+        auto* idEdit = new QLineEdit(s.value(QStringLiteral("cloud/clientId")).toString());
+        idEdit->setMinimumHeight(34);
+        idEdit->setPlaceholderText(tr("…apps.googleusercontent.com"));
+        v->addWidget(idEdit);
+
+        auto* secLabel = new QLabel(tr("Client secret"));
+        secLabel->setStyleSheet(QStringLiteral("font-weight:bold;"));
+        v->addWidget(secLabel);
+        auto* secEdit = new QLineEdit(s.value(QStringLiteral("cloud/clientSecret")).toString());
+        secEdit->setMinimumHeight(34);
+        secEdit->setPlaceholderText(tr("GOCSPX-…"));
+        v->addWidget(secEdit);
+
+        auto* err = new QLabel(); err->setStyleSheet(QStringLiteral("color:#c0392b;font-size:13px;"));
+        v->addWidget(err);
+
+        auto* save = panelRow(tr("Save"));
+        connect(save, &QPushButton::clicked, this, [this, idEdit, secEdit, err] {
+            const QString id = idEdit->text().trimmed();
+            if (id.isEmpty()) { err->setText(tr("Enter a client id.")); return; }
+            QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            s.setValue(QStringLiteral("cloud/clientId"), id);
+            s.setValue(QStringLiteral("cloud/clientSecret"), secEdit->text().trimmed());
+            s.sync();
+            cloud_->signOut();    // a new client invalidates the old sign-in
+            openCloudSync();      // back to the sync panel (now configured)
+        });
+        v->addWidget(save);
+    }, [this] { openCloudSync(); });
 }
 
 // Conflict-aware sync: pull when the cloud is newer, push when this device has changes, prompt when both.

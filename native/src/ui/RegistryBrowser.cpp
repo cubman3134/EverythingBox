@@ -93,6 +93,20 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     top->addWidget(reload);
     v->addLayout(top);
 
+    // Inline "add registry" row, revealed by the Add button (instead of a popup input dialog).
+    auto* addRow = new QWidget(this);
+    addRow->setVisible(false);
+    auto* addH = new QHBoxLayout(addRow);
+    addH->setContentsMargins(0, 0, 0, 0);
+    auto* urlEdit = new QLineEdit(addRow);
+    urlEdit->setPlaceholderText(tr("Registry index URL (raw GitHub)"));
+    auto* addOk = new QPushButton(tr("Add"), addRow);
+    auto* addCancel = new QPushButton(tr("Cancel"), addRow);
+    addH->addWidget(urlEdit, 1);
+    addH->addWidget(addOk);
+    addH->addWidget(addCancel);
+    v->addWidget(addRow);
+
     registriesLayout_ = new QVBoxLayout();
     v->addLayout(registriesLayout_);
 
@@ -120,16 +134,21 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     v->addLayout(bottom);
 
     connect(reload, &QPushButton::clicked, this, [this] { fetchAll(); });
-    connect(add, &QPushButton::clicked, this, [this] {
-        bool ok = false;
-        const QString url = QInputDialog::getText(this, tr("Add registry"),
-            tr("Registry index URL (raw GitHub):"), QLineEdit::Normal, QString(), &ok).trimmed();
-        if (!ok || url.isEmpty()) return;
+    connect(add, &QPushButton::clicked, this, [addRow, urlEdit] {
+        addRow->setVisible(true); urlEdit->clear(); urlEdit->setFocus();
+    });
+    auto commitAdd = [this, addRow, urlEdit] {
+        const QString url = urlEdit->text().trimmed();
+        if (url.isEmpty()) { addRow->setVisible(false); return; }
         QStringList extras = extraRegistries();
         if (!extras.contains(url)) { extras << url; saveExtras(extras); }
+        addRow->setVisible(false);
         renderRegistryRows();
         fetchAll();
-    });
+    };
+    connect(addOk, &QPushButton::clicked, this, commitAdd);
+    connect(urlEdit, &QLineEdit::returnPressed, this, commitAdd);
+    connect(addCancel, &QPushButton::clicked, this, [addRow] { addRow->setVisible(false); });
 
     renderRegistryRows();
     updateRepoLink();

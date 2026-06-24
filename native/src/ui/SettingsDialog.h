@@ -3,6 +3,7 @@
 #include <QHash>
 
 class QComboBox;
+class QStackedWidget;
 
 // Emulator settings: which libretro core each system uses, and per-core options (resolution/BIOS/...).
 // Input remapping lives in its own window (ControllerRemapDialog), reached from the main toolbar.
@@ -21,4 +22,5 @@ private:
     void editOptions(const QString& systemId);
 
     QHash<QString, QComboBox*> combos_; // systemId -> core combo
+    QStackedWidget* stack_ = nullptr;   // page 0 = cores list, page 1 = (transient) per-core options editor
 };

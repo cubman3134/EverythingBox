@@ -3,8 +3,10 @@
 // Cancel just keeps the current profile). On accept, selectedId() is the chosen/created profile id.
 #pragma once
 #include <QDialog>
+#include <functional>
 
 class QVBoxLayout;
+class QStackedWidget;
 
 class ProfileDialog : public QDialog
 {
@@ -17,10 +19,12 @@ private:
     void rebuild();         // (re)draw the list of profile rows
     void createProfile();   // prompt for a name + icon and add it (auto-selects the new profile)
     void editProfile(const QString& id); // rename / re-pick the icon of an existing profile
-    // Shared name + cute-icon picker, pre-filled from (name, icon); returns true if confirmed.
-    bool pickNameAndIcon(QString& name, QString& icon);
+    // Shared name + cute-icon picker shown as an in-place page (no popup); onAccept(name, icon) runs on OK.
+    void showPicker(const QString& title, const QString& name, const QString& icon,
+                    const std::function<void(const QString& name, const QString& icon)>& onAccept);
 
     bool mustChoose_ = false;
     QString selectedId_;
     QVBoxLayout* rows_ = nullptr;
+    QStackedWidget* stack_ = nullptr; // page 0 = profile list, page 1 = (transient) name/icon picker
 };
