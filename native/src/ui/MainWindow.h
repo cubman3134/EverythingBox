@@ -77,6 +77,8 @@ private:
     void openVideoPath(const QString& path);
     void openAudioPath(const QString& path);    // queue the whole folder, starting at this file
     void openGamePath(const QString& path);
+    void openStreamPrompt();                    // inline form to paste a stream/URL link
+    void openStreamUrl(const QString& url);     // stream an http(s) audio/video link via libmpv
     void openDocumentPath(const QString& path); // .epub / .pdf by extension
     void setAudioQueue(const QStringList& files, int startIndex);
     void playTrack(int index);

@@ -1592,6 +1592,16 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             open.url = kind; // carries the kind for onItemActivated
             items_.push_back(open);
         }
+        // For the timed-media views, also offer streaming a direct link (routes to the inline URL form).
+        if (kind == QStringLiteral("video") || kind == QStringLiteral("audio"))
+        {
+            MediaItem stream;
+            stream.id = QStringLiteral("_stream");
+            stream.type = QStringLiteral("_open"); // reuse the +-tile + requestOpenFile routing
+            stream.title = tr("Stream from a link…");
+            stream.url = QStringLiteral("stream");  // the kind handled by onRequestOpenFile
+            items_.push_back(stream);
+        }
         from = 0;
     }
     else
@@ -1689,8 +1699,9 @@ void HomeView::updateStatus()
 
     QStringList crumbs;
     for (const Level& l : stack_) crumbs << l.title;
-    // Don't count the leading "open a file" item as a catalog result.
-    const int count = items_.size() - ((!items_.isEmpty() && items_.first().type == QStringLiteral("_open")) ? 1 : 0);
+    // Don't count the leading "open a file" / "stream a link" items as catalog results.
+    int count = 0;
+    for (const MediaItem& it : items_) if (it.type != QStringLiteral("_open")) ++count;
     const bool leafDetail = !stack_.isEmpty() && stack_.last().detail && !stack_.last().item.expandable
                             && stack_.last().item.type != QStringLiteral("platform");
     QString tail;

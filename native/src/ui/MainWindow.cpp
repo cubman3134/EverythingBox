@@ -20,6 +20,7 @@
 #include <QInputDialog>
 #include <QSettings>
 #include <QLineEdit>
+#include <QUrl>
 #include <QCheckBox>
 #include <QComboBox>
 #include "SettingsDialog.h"
@@ -70,6 +71,8 @@ static QSettings& store()
                        QSettings::IniFormat);
     return s;
 }
+
+static QPushButton* panelRow(const QString& label); // large TV-friendly menu row (defined below)
 
 // Stable, path-derived key prefix for one file's resume state (shared by video / audio / audiobooks).
 static QString mediaResumeKey(const QString& path)
@@ -618,6 +621,54 @@ void MainWindow::openGamePath(const QString& rom)
         statusBar()->showMessage(tr("Can't run game: %1").arg(err), 6000);
 }
 
+// Inline form (no popup) to paste a link and stream it. libmpv handles http(s) and most streaming
+// protocols (HLS, etc.) for both audio and video; audio-only streams show the "now playing" overlay.
+void MainWindow::openStreamPrompt()
+{
+    showPanel(tr("Stream from a link"), [this](QVBoxLayout* v) {
+        auto* intro = new QLabel(tr("Paste a direct audio or video link (http/https, HLS, etc.) to stream it."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
+        v->addWidget(intro);
+
+        auto* url = new QLineEdit();
+        url->setMinimumHeight(34);
+        url->setPlaceholderText(tr("https://example.com/stream.m3u8"));
+        v->addWidget(url);
+
+        auto* err = new QLabel(); err->setStyleSheet(QStringLiteral("color:#c0392b;font-size:13px;"));
+        v->addWidget(err);
+
+        auto play = [this, url, err] {
+            const QString link = url->text().trimmed();
+            if (!link.contains(QStringLiteral("://"))) { err->setText(tr("Enter a full http(s) link.")); return; }
+            openStreamUrl(link);
+        };
+        auto* playBtn = panelRow(tr("▶  Play"));
+        connect(playBtn, &QPushButton::clicked, this, play);
+        connect(url, &QLineEdit::returnPressed, this, play);
+        v->addWidget(playBtn);
+    }, [this] { openHome(); });
+}
+
+void MainWindow::openStreamUrl(const QString& url)
+{
+    retro_->stop();
+    book_->persist();
+    pdf_->persist();
+    comic_->persist();
+    clearAudioQueue();      // saves+clears any previous timed media
+    beginResume(url);       // resume position keyed by the link (seekable streams pick up where you left off)
+    stack_->setCurrentWidget(playerPage_);
+    player_->play(url);
+    revealMediaControls();
+    // A readable title for the Recent list: the link's file name, else its host, else the raw link.
+    const QUrl u(url);
+    QString title = u.fileName();
+    if (title.isEmpty()) title = u.host();
+    if (title.isEmpty()) title = url;
+    RecentStore::add({ url, title, QStringLiteral("video"), QString() });
+}
+
 void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
@@ -680,16 +731,20 @@ void MainWindow::onRequestOpenFile(const QString& kind)
     else if (kind == QStringLiteral("audio"))    openAudio();
     else if (kind == QStringLiteral("game"))     openGame();
     else if (kind == QStringLiteral("document")) openDocument();
+    else if (kind == QStringLiteral("stream"))   openStreamPrompt();
 }
 
 void MainWindow::openRecent(const QString& path, const QString& kind)
 {
-    if (!QFileInfo::exists(path))
+    // A streamed link has no local file to check; route it straight to libmpv.
+    const bool isUrl = path.contains(QStringLiteral("://"));
+    if (!isUrl && !QFileInfo::exists(path))
     {
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), 5000);
         return;
     }
-    if (kind == QStringLiteral("video"))         openVideoPath(path);
+    if (isUrl)                                   openStreamUrl(path);
+    else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
     else if (kind == QStringLiteral("game"))     openGamePath(path);
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
