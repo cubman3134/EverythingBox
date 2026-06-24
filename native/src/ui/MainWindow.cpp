@@ -325,7 +325,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Arrow-key / remote navigation for the inline settings pages: Up/Down (and Left/Right) move focus
     // between rows, Enter/Select activates the focused row, Backspace goes back. Reaches MainWindow because
     // the panel rows (buttons/checkboxes) don't consume the arrow keys themselves.
-    if (stack_->currentWidget() == panelPage_)
+    if (stack_->currentWidget() == panelPage_ && !panelDialog_) // an embedded dialog drives its own keys
     {
         switch (e->key())
         {
@@ -650,16 +650,14 @@ void MainWindow::openRecent(const QString& path, const QString& kind)
 
 void MainWindow::onSwitchProfile()
 {
-    const Profile before = ProfileStore::current();
-    ProfileDialog dlg(/*mustChoose*/ false, this);
-    if (dlg.exec() == QDialog::Accepted && !dlg.selectedId().isEmpty())
-        ProfileStore::setCurrent(dlg.selectedId());
-
-    const Profile after = ProfileStore::current();
-    if (after.id != before.id)
-        openHome(); // switched user (or a deletion repointed "current") -> full refresh + this user's recents
-    else if (after.name != before.name || after.icon != before.icon)
-        home_->refresh(); // edited the active profile -> update the avatar / name button
+    auto* dlg = new ProfileDialog(/*mustChoose*/ false, this);
+    showDialogPanel(tr("Profiles"), dlg, [this, dlg](int result) {
+        if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
+            ProfileStore::setCurrent(dlg->selectedId());
+        // This entry point lives on Home; openHome() switches back and refreshes for the active profile
+        // (covers a switched user, a deletion repointing "current", or an edited name/icon).
+        openHome();
+    }, [this] { openHome(); });
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)
@@ -730,6 +728,7 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->addStretch(1);
     panelScroll_->setWidget(content); // deletes the previous content widget
     stack_->setCurrentWidget(panelPage_);
+    panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     // Drop focus onto the first interactive row so arrow keys / a remote work without a click first.
     // Deferred a tick so the new content widget is laid out and its children are focusable.
     QTimer::singleShot(0, this, [this] {
@@ -742,6 +741,19 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
             { child->setFocus(); return; }
         }
     });
+}
+
+void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
+                                 const std::function<void(int)>& onFinished,
+                                 const std::function<void()>& onBack)
+{
+    dlg->setWindowFlags(Qt::Widget); // render inline instead of as a separate top-level window
+    // Queued: the handler navigates away (deleting this dialog), so it must run AFTER QDialog::done()
+    // returns rather than mid-emission, or we'd free the dialog out from under its own call stack.
+    connect(dlg, &QDialog::finished, this, onFinished, Qt::QueuedConnection);
+    showPanel(title, [dlg](QVBoxLayout* v) { v->addWidget(dlg); }, onBack);
+    panelDialog_ = dlg; // its own widgets handle the keyboard; suppress the panel's row arrow-nav
+    dlg->setFocus();
 }
 
 // A large, left-aligned menu row for the inline settings pages (TV/remote-friendly target size).
@@ -956,9 +968,10 @@ void MainWindow::openThemes()
         }
         auto* browse = panelRow(tr("Browse Themes…"));
         connect(browse, &QPushButton::clicked, this, [this] {
-            RegistryBrowser rb(RegistryBrowser::Themes, nullptr, this); // still a popup (phase 2)
-            rb.exec();
-            openThemes();
+            auto* rb = new RegistryBrowser(RegistryBrowser::Themes, nullptr, this);
+            showDialogPanel(tr("Browse Themes"), rb,
+                            [this](int) { home_->applyTheme(); openThemes(); }, // refresh after installs
+                            [this] { openThemes(); });
         });
         v->addWidget(browse);
     }, [this] { openSettingsHub(); });
@@ -969,16 +982,18 @@ void MainWindow::openEmulatorSettings()
     // The dialog loads cores headlessly to read their options; only one libretro core can be live at a
     // time (the C ABI routes through a global), so stop any running game first.
     retro_->stop();
-    SettingsDialog dlg(this);
-    dlg.exec();
+    auto* dlg = new SettingsDialog(this);
+    showDialogPanel(tr("Emulator Settings"), dlg, [this](int) { openSettingsHub(); },
+                    [this] { openSettingsHub(); });
 }
 
 void MainWindow::openInputMapping()
 {
     // Stop the game so the remap dialog has sole use of the controller (for "press a button" capture).
     retro_->stop();
-    ControllerRemapDialog dlg(retro_->gamepad(), retro_->keymap(), this);
-    dlg.exec();
+    auto* dlg = new ControllerRemapDialog(retro_->gamepad(), retro_->keymap(), this);
+    showDialogPanel(tr("Input Mapping"), dlg, [this](int) { openSettingsHub(); },
+                    [this] { openSettingsHub(); });
 }
 
 void MainWindow::onDuration(double seconds)

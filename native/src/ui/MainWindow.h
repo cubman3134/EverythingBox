@@ -87,6 +87,11 @@ private:
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
                    const std::function<void()>& onBack);
+    // Host an existing QDialog inline as a panel page (no separate window). The dialog keeps its own
+    // Save/Cancel box; onFinished runs when it accepts/rejects, onBack when the panel's Back is used.
+    void showDialogPanel(const QString& title, class QDialog* dlg,
+                         const std::function<void(int result)>& onFinished,
+                         const std::function<void()>& onBack);
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
@@ -110,6 +115,7 @@ private:
     QScrollArea* panelScroll_ = nullptr;
     QLabel* panelTitle_ = nullptr;
     QWidget* panelReturnTo_ = nullptr;     // the page to return to when the top-level panel's Back is hit
+    QWidget* panelDialog_ = nullptr;       // an embedded dialog hosted in the panel (owns keyboard nav), or null
     std::function<void()> panelOnBack_;
     double duration_ = 0.0;
     bool sliderDown_ = false;
