@@ -93,6 +93,12 @@ private:
     void showDialogPanel(const QString& title, class QDialog* dlg,
                          const std::function<void(int result)>& onFinished,
                          const std::function<void()>& onBack);
+    // Inline "Sync conflict" chooser (no popup): a message + two action rows + Back.
+    void showSyncConflictPanel(const QString& message,
+                               const QString& primaryLabel, const std::function<void()>& onPrimary,
+                               const QString& secondaryLabel, const std::function<void()>& onSecondary,
+                               const std::function<void()>& onBack);
+    void maybeResolveStartupConflict(); // surface a deferred startup conflict in-window after first show
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
@@ -121,6 +127,8 @@ private:
     double duration_ = 0.0;
     bool sliderDown_ = false;
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
+    bool forceClose_ = false;        // set once exit-sync is resolved, so closeEvent stops deferring the quit
+    bool exitWatchdogActive_ = false; // the exit network watchdog is armed (disarmed while awaiting a choice)
 
     QStringList tracks_;     // current audio queue (absolute paths)
     int trackIndex_ = -1;    // index into tracks_, or -1 when not playing a queue

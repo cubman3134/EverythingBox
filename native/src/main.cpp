@@ -27,18 +27,10 @@ static void cloudPullAtStartup()
         if (!st.reached || !st.hasRemote || !st.remoteChanged) { loop.quit(); return; }
         if (st.localChanged)
         {
-            // Both sides changed since the last sync -> let the user decide.
-            QMessageBox box(QMessageBox::Warning, QObject::tr("Sync conflict"),
-                QObject::tr("Your Google Drive has newer changes from another device, and this device also has "
-                            "unsynced changes.\n\nUse the cloud's data (replace this device), or keep this device "
-                            "(it will overwrite the cloud later)?"));
-            QPushButton* useCloud = box.addButton(QObject::tr("Use cloud data"), QMessageBox::AcceptRole);
-            box.addButton(QObject::tr("Keep this device"), QMessageBox::RejectRole);
-            box.exec();
-            if (box.clickedButton() == useCloud)
-                cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); });
-            else
-                loop.quit(); // keep local; the exit push will overwrite the cloud
+            // Both sides changed: don't prompt here (no window yet). Flag it so the main window can resolve
+            // it in-window once it's up; keep local for now (the user can still choose to take the cloud).
+            CloudSync::setStartupConflict(true);
+            loop.quit();
         }
         else
         {

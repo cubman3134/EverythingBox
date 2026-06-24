@@ -11,6 +11,7 @@ namespace CoreManager
     QString corePath(const QString& coreName);           // <coresDir>/<core>_libretro.dll
     bool isInstalled(const QString& coreName);
 
-    // Returns the core's .dll path, downloading + extracting it if absent. Empty on failure/cancel.
-    QString ensureCore(const QString& coreName, QWidget* parent = nullptr);
+    // Returns the core's .dll path, downloading + extracting it if absent. Empty on failure/cancel; when it
+    // fails (not a user cancel), *error (if given) holds a message for the caller to show inline.
+    QString ensureCore(const QString& coreName, QWidget* parent = nullptr, QString* error = nullptr);
 }

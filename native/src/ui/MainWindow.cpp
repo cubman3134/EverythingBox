@@ -358,6 +358,8 @@ void MainWindow::showEvent(QShowEvent* event)
         activateWindow();
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
     });
+    // A startup conflict (both sides changed) is surfaced in-window now, after the shell is up.
+    QTimer::singleShot(600, this, [this] { maybeResolveStartupConflict(); });
 }
 
 void MainWindow::revealMediaControls()
@@ -551,9 +553,13 @@ void MainWindow::openGamePath(const QString& rom)
         core = sys->cores.value(0); // catalog default
 
     // No prompt: use the configured core, downloading it from the buildbot if it isn't installed.
-    const QString corePath = CoreManager::ensureCore(core, this);
+    QString dlErr;
+    const QString corePath = CoreManager::ensureCore(core, this, &dlErr);
     if (corePath.isEmpty())
-        return; // cancelled / failed (a message was already shown)
+    {
+        if (!dlErr.isEmpty()) statusBar()->showMessage(dlErr, 6000); // empty = user cancelled the download
+        return;
+    }
 
     player_->stop();
     book_->persist();
@@ -922,6 +928,46 @@ void MainWindow::openCloudClientSetup()
     }, [this] { openCloudSync(); });
 }
 
+// Inline "Sync conflict" chooser (no popup): a message and two action rows, reused by Sync now / startup / exit.
+void MainWindow::showSyncConflictPanel(const QString& message,
+                                       const QString& primaryLabel, const std::function<void()>& onPrimary,
+                                       const QString& secondaryLabel, const std::function<void()>& onSecondary,
+                                       const std::function<void()>& onBack)
+{
+    showPanel(tr("Sync conflict"), [=](QVBoxLayout* v) {
+        auto* msg = new QLabel(message);
+        msg->setWordWrap(true); msg->setStyleSheet(QStringLiteral("font-size:15px;"));
+        v->addWidget(msg);
+        auto* primary = panelRow(primaryLabel);
+        auto* secondary = panelRow(secondaryLabel);
+        connect(primary, &QPushButton::clicked, this, onPrimary);
+        connect(secondary, &QPushButton::clicked, this, onSecondary);
+        v->addWidget(primary); v->addWidget(secondary);
+    }, onBack);
+}
+
+// If startup detected a both-sides-changed conflict, resolve it in-window (now that the window exists).
+void MainWindow::maybeResolveStartupConflict()
+{
+    if (!CloudSync::startupConflict() || !cloud_ || !cloud_->isSignedIn()) return;
+    CloudSync::setStartupConflict(false);
+    cloud_->checkStatus([this](const CloudSync::Status& st) {
+        if (!st.reached || !(st.remoteChanged && st.localChanged)) return;
+        showSyncConflictPanel(
+            tr("Your Google Drive has newer changes from another device, and this device also has unsynced "
+               "changes. Choose which to keep."),
+            tr("Use cloud data — replace this device (restart to apply)"), [this, st] {
+                cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
+                    statusBar()->showMessage(ok ? tr("Downloaded cloud data — restart to apply it.")
+                                                : tr("Sync failed."), 8000);
+                });
+                openHome();
+            },
+            tr("Keep this device — overwrite the cloud on exit"), [this] { openHome(); }, // exit push wins
+            [this] { openHome(); });
+    });
+}
+
 // Conflict-aware sync: pull when the cloud is newer, push when this device has changes, prompt when both.
 void MainWindow::cloudSyncNow()
 {
@@ -934,22 +980,14 @@ void MainWindow::cloudSyncNow()
         if (!st.reached) { statusBar()->showMessage(tr("Couldn't reach Google Drive."), 5000); return; }
         if (st.remoteChanged && st.localChanged)
         {
-            // Inline conflict chooser (no popup): user-initiated sync, so present it as a panel page.
-            showPanel(tr("Sync conflict"), [this, st, pulled, pushed](QVBoxLayout* v) {
-                auto* msg = new QLabel(tr("The cloud has newer changes from another device, and this device "
-                                          "also has unsynced changes. Choose which to keep."));
-                msg->setWordWrap(true); msg->setStyleSheet(QStringLiteral("font-size:15px;"));
-                v->addWidget(msg);
-                auto* useCloud = panelRow(tr("Use cloud data — replace this device"));
-                auto* keepThis = panelRow(tr("Keep this device — overwrite the cloud"));
-                connect(useCloud, &QPushButton::clicked, this, [this, st, pulled] {
-                    cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled); openCloudSync();
-                });
-                connect(keepThis, &QPushButton::clicked, this, [this, pushed] {
-                    cloud_->pushLocal(pushed); openCloudSync();
-                });
-                v->addWidget(useCloud); v->addWidget(keepThis);
-            }, [this] { openCloudSync(); });
+            showSyncConflictPanel(
+                tr("The cloud has newer changes from another device, and this device also has unsynced "
+                   "changes. Choose which to keep."),
+                tr("Use cloud data — replace this device"),
+                [this, st, pulled] { cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled); openCloudSync(); },
+                tr("Keep this device — overwrite the cloud"),
+                [this, pushed] { cloud_->pushLocal(pushed); openCloudSync(); },
+                [this] { openCloudSync(); });
         }
         else if (st.remoteChanged)               cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled);
         else if (st.localChanged || !st.hasRemote) cloud_->pushLocal(pushed);
@@ -960,32 +998,38 @@ void MainWindow::cloudSyncNow()
 void MainWindow::closeEvent(QCloseEvent* e)
 {
     persistAudiobook(); // flush the current audiobook position before anything else on exit
-    // On the way out: push this device's changes, but don't clobber a newer cloud unless the user says so.
-    if (cloud_ && cloud_->isSignedIn())
-    {
-        QEventLoop loop;
-        QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never let quitting hang on the network
-        cloud_->checkStatus([this, &loop](const CloudSync::Status& st) {
-            if (!st.reached) { loop.quit(); return; }
-            if (st.remoteChanged && st.localChanged)
-            {
-                QMessageBox box(QMessageBox::Warning, tr("Sync conflict"),
-                    tr("The cloud has newer changes from another device, and this device has unsynced changes.\n\n"
-                       "Keep this device's data (overwrite the cloud), or discard this device's changes?"), QMessageBox::NoButton, this);
-                QPushButton* keep = box.addButton(tr("Keep this device"), QMessageBox::AcceptRole);
-                box.addButton(tr("Discard mine"), QMessageBox::RejectRole);
-                box.exec();
-                if (box.clickedButton() == keep) cloud_->pushLocal([&loop](bool, const QString&) { loop.quit(); });
-                else loop.quit(); // discard local; next startup pulls the cloud
-            }
-            else if (st.localChanged && !st.remoteChanged)
-                cloud_->pushLocal([&loop](bool, const QString&) { loop.quit(); });
-            else
-                loop.quit(); // nothing to push (or cloud is newer with no local edits -> startup will pull)
-        });
-        loop.exec();
-    }
-    QMainWindow::closeEvent(e);
+
+    // Once exit-sync is resolved (or there's nothing to do), let the close through.
+    if (forceClose_ || !cloud_ || !cloud_->isSignedIn()) { QMainWindow::closeEvent(e); return; }
+
+    // Decide sync before quitting, but WITHOUT a popup: cancel this close, check the cloud asynchronously,
+    // then either push-and-close, or (on a real conflict) show the inline chooser whose buttons finish the
+    // close. A watchdog guarantees a hung network never traps the app open — except while we're waiting on
+    // the user's conflict choice.
+    e->ignore();
+    auto finishClose = [this] { forceClose_ = true; close(); };
+    exitWatchdogActive_ = true;
+    QTimer::singleShot(8000, this, [this, finishClose] { if (exitWatchdogActive_ && !forceClose_) finishClose(); });
+
+    cloud_->checkStatus([this, finishClose](const CloudSync::Status& st) {
+        if (!st.reached) { finishClose(); return; }
+        if (st.remoteChanged && st.localChanged)
+        {
+            exitWatchdogActive_ = false; // the user is deciding; don't force-close under them
+            showSyncConflictPanel(
+                tr("The cloud has newer changes from another device, and this device has unsynced changes. "
+                   "Keep this device's data (overwrite the cloud), or discard this device's changes?"),
+                tr("Keep this device — overwrite the cloud"),
+                [this, finishClose] { cloud_->pushLocal([finishClose](bool, const QString&) { finishClose(); }); },
+                tr("Discard mine — use the cloud next launch"),
+                [finishClose] { finishClose(); },
+                [this] { openHome(); }); // Back: cancel the quit, stay in the app
+        }
+        else if (st.localChanged && !st.remoteChanged)
+            cloud_->pushLocal([finishClose](bool, const QString&) { finishClose(); });
+        else
+            finishClose(); // nothing to push (or cloud newer with no local edits -> startup will pull)
+    });
 }
 
 void MainWindow::openThemes()

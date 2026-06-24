@@ -63,7 +63,7 @@ static bool unzipDllFromMemory(const QByteArray& zipData, const QString& destDir
     return ok;
 }
 
-QString CoreManager::ensureCore(const QString& coreName, QWidget* parent)
+QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QString* error)
 {
     if (isInstalled(coreName))
         return corePath(coreName);
@@ -95,9 +95,8 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent)
     {
         const QString err = reply->errorString();
         reply->deleteLater();
-        if (err != QStringLiteral("Operation canceled")) // user-cancel is silent
-            QMessageBox::warning(parent, QObject::tr("Download failed"),
-                                 QObject::tr("Couldn't download core '%1':\n%2").arg(coreName, err));
+        if (error && err != QStringLiteral("Operation canceled")) // user-cancel is silent
+            *error = QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName, err);
         return QString();
     }
 
@@ -107,8 +106,7 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent)
     QString dll;
     if (!unzipDllFromMemory(data, coresDir(), &dll))
     {
-        QMessageBox::warning(parent, QObject::tr("Install failed"),
-                             QObject::tr("Downloaded '%1' but couldn't extract the core.").arg(coreName));
+        if (error) *error = QObject::tr("Downloaded ‘%1’ but couldn't extract the core.").arg(coreName);
         return QString();
     }
     return isInstalled(coreName) ? corePath(coreName) : dll;

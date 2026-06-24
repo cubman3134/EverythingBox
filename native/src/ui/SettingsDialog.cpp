@@ -105,8 +105,13 @@ void SettingsDialog::editOptions(const QString& systemId)
     status_->hide(); // clear any previous error
 
     // Make sure the core is present (download on first use), then load it headlessly to read its options.
-    const QString corePath = CoreManager::ensureCore(core, this);
-    if (corePath.isEmpty()) return; // cancelled / failed (already reported)
+    QString dlErr;
+    const QString corePath = CoreManager::ensureCore(core, this, &dlErr);
+    if (corePath.isEmpty())
+    {
+        if (!dlErr.isEmpty()) { status_->setText(dlErr); status_->show(); } // empty = user cancelled
+        return;
+    }
 
     LibretroCore tmp;
     std::string err;

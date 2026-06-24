@@ -68,6 +68,10 @@ CloudSync::CloudSync(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
+static bool g_startupConflict = false;
+bool CloudSync::startupConflict() { return g_startupConflict; }
+void CloudSync::setStartupConflict(bool pending) { g_startupConflict = pending; }
+
 bool CloudSync::isConfigured() { return !clientId().isEmpty() && !clientSecret().isEmpty(); }
 bool CloudSync::isSignedIn() const { return !store().value(QStringLiteral("cloud/refreshToken")).toString().isEmpty(); }
 QString CloudSync::accountEmail() const { return store().value(QStringLiteral("cloud/email")).toString(); }
