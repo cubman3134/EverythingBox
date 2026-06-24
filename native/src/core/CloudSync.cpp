@@ -25,10 +25,11 @@
 #include <cstring>
 #include "miniz.h"
 
-// The shared "My Media Vault" Google OAuth client (Desktop type). Paste the values here once the client is
-// created; a settings override (cloud/clientId, cloud/clientSecret) takes precedence for testing.
-static const char* kClientId = "";
-static const char* kClientSecret = "";
+// The shared "My Media Vault" Google OAuth client (Desktop-app type). For desktop/installed apps Google
+// treats the client secret as non-confidential (it can't be hidden in a distributed binary; security comes
+// from PKCE + user consent), so it's embedded here. A settings override (cloud/clientId/clientSecret) wins.
+static const char* kClientId = "993265781329-4n8gj4fgjo96qu01pbdbpg3s26a8ssnh.apps.googleusercontent.com";
+static const char* kClientSecret = "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";
 
 static const char* kAuthUrl  = "https://accounts.google.com/o/oauth2/v2/auth";
 static const char* kTokenUrl = "https://oauth2.googleapis.com/token";
