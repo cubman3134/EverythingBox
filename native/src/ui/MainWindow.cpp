@@ -71,8 +71,15 @@ static QSettings& store()
     return s;
 }
 
-// Stable, path-derived key prefix for one audiobook's resume state.
-static QString audiobookKey(const QString& path)
+// Stable, path-derived key prefix for one file's resume state (shared by video / audio / audiobooks).
+static QString mediaResumeKey(const QString& path)
+{
+    const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
+    return QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
+}
+
+// Pre-generalization audiobooks were stored under "audiobook/"; read those too so in-progress books resume.
+static QString legacyAudiobookKey(const QString& path)
 {
     const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
     return QStringLiteral("audiobook/") + QString::fromLatin1(h) + QStringLiteral("/");
@@ -421,7 +428,8 @@ void MainWindow::openVideoPath(const QString& path)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    clearAudioQueue();
+    clearAudioQueue();      // saves+clears any previous timed media
+    beginResume(path);      // track this video's position (and resume it if we've watched it before)
     stack_->setCurrentWidget(playerPage_);
     player_->play(path);
     revealMediaControls();
@@ -456,16 +464,12 @@ void MainWindow::openAudioPath(const QString& path)
     int start = 0;
     if (fi.suffix().toLower() == QStringLiteral("m4b"))
     {
-        // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder,
-        // and resume where the listener left off.
+        // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder.
+        // (Resume is handled generically for all timed media by playTrack/beginResume.)
         queue = { fi.absoluteFilePath() };
-        audiobookPath_ = fi.absoluteFilePath();
-        audiobookResume_ = store().value(audiobookKey(audiobookPath_) + QStringLiteral("pos"), 0.0).toDouble();
-        lastSavedPos_ = -100.0;
     }
     else
     {
-        audiobookPath_.clear(); // a normal track, not a resumable audiobook
         // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
         QStringList filters;
         for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
@@ -497,9 +501,11 @@ void MainWindow::setAudioQueue(const QStringList& files, int startIndex)
 void MainWindow::playTrack(int index)
 {
     if (index < 0 || index >= tracks_.size()) return;
+    persistResume();              // save where we were in the outgoing track (if any)
     trackIndex_ = index;
     playlist_->setCurrentRow(index);
     statusBar()->showMessage(tr("Track %1 of %2").arg(index + 1).arg(tracks_.size()), 3000);
+    beginResume(tracks_[index]);  // track the new file's position (and resume it if seen before)
     player_->play(tracks_[index]);
 }
 
@@ -515,34 +521,46 @@ void MainWindow::prevTrack()
 
 void MainWindow::onTrackEnded()
 {
-    // A finished audiobook is "done" - clear its resume mark so the next open starts at the beginning.
-    if (!audiobookPath_.isEmpty())
-    {
-        store().remove(audiobookKey(audiobookPath_));
-        store().sync();
-        audiobookPath_.clear();
-        lastSavedPos_ = -100.0;
-        return;
-    }
+    finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
     if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) playTrack(trackIndex_ + 1);
 }
 
-void MainWindow::persistAudiobook()
+void MainWindow::beginResume(const QString& path)
 {
-    if (audiobookPath_.isEmpty() || audioPos_ <= 0.0) return;
-    const QString k = audiobookKey(audiobookPath_);
+    resumePath_ = path;
+    double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
+    if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
+    resumeSeek_ = pos;       // applied once the duration is known (see onDuration)
+    audioPos_ = 0.0;
+    lastSavedPos_ = -100.0;
+}
+
+void MainWindow::persistResume()
+{
+    if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
+    const QString k = mediaResumeKey(resumePath_);
     store().setValue(k + QStringLiteral("pos"), audioPos_);
-    store().setValue(k + QStringLiteral("title"), QFileInfo(audiobookPath_).completeBaseName());
+    store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
     store().sync();
     lastSavedPos_ = audioPos_;
 }
 
+void MainWindow::finishResume()
+{
+    if (resumePath_.isEmpty()) return;
+    store().remove(mediaResumeKey(resumePath_));
+    store().remove(legacyAudiobookKey(resumePath_)); // also clear any legacy audiobook bookmark
+    store().sync();
+    resumePath_.clear();
+    lastSavedPos_ = -100.0;
+}
+
 void MainWindow::clearAudioQueue()
 {
-    persistAudiobook();      // save where we left off before leaving the audiobook
-    audiobookPath_.clear();
-    audiobookResume_ = 0.0;
+    persistResume();      // save where we left off before leaving this media
+    resumePath_.clear();
+    resumeSeek_ = 0.0;
     lastSavedPos_ = -100.0;
     tracks_.clear();
     trackIndex_ = -1;
@@ -1021,7 +1039,7 @@ void MainWindow::cloudSyncNow()
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
-    persistAudiobook(); // flush the current audiobook position before anything else on exit
+    persistResume(); // flush the current media's playback position before anything else on exit
 
     // Once exit-sync is resolved (or there's nothing to do), let the close through.
     if (forceClose_ || !cloud_ || !cloud_->isSignedIn()) { QMainWindow::closeEvent(e); return; }
@@ -1104,10 +1122,11 @@ void MainWindow::openInputMapping()
 void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
-    // Resume an audiobook where the listener left off, now that the file is loaded and its length is known.
-    if (!audiobookPath_.isEmpty() && audiobookResume_ > 1.0 && audiobookResume_ < seconds - 1.0)
-        player_->setPosition(audiobookResume_);
-    audiobookResume_ = 0.0; // one-shot
+    // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
+    // is essentially the end (treat a near-finished file as "watched" and start it fresh).
+    if (!resumePath_.isEmpty() && resumeSeek_ > 1.0 && resumeSeek_ < seconds - 5.0)
+        player_->setPosition(resumeSeek_);
+    resumeSeek_ = 0.0; // one-shot
 }
 
 void MainWindow::onPosition(double seconds)
@@ -1118,8 +1137,8 @@ void MainWindow::onPosition(double seconds)
 
     audioPos_ = seconds;
     // Throttle resume writes so we're not hammering the ini every position tick.
-    if (!audiobookPath_.isEmpty() && std::abs(seconds - lastSavedPos_) >= 5.0)
-        persistAudiobook();
+    if (!resumePath_.isEmpty() && std::abs(seconds - lastSavedPos_) >= 5.0)
+        persistResume();
 }
 
 void MainWindow::onSeekReleased()

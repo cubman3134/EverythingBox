@@ -81,7 +81,10 @@ private:
     void setAudioQueue(const QStringList& files, int startIndex);
     void playTrack(int index);
     void clearAudioQueue();   // leave audio mode (video/game/doc)
-    void persistAudiobook();  // save the current .m4b playback position (resume)
+    // Resume tracking for timed media (video / audio / audiobooks): remember the playback position per file.
+    void beginResume(const QString& path); // start tracking this file (and queue its saved spot to seek to)
+    void persistResume();                  // save the current file's position (throttled / on leave / on exit)
+    void finishResume();                   // a file played to the end -> drop its saved position
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
     void revealMediaControls();
@@ -135,8 +138,8 @@ private:
 
     QStringList tracks_;     // current audio queue (absolute paths)
     int trackIndex_ = -1;    // index into tracks_, or -1 when not playing a queue
-    QString audiobookPath_;  // the .m4b currently playing (for resume), or empty
-    double audiobookResume_ = 0.0; // pending seek target applied once the file loads
+    QString resumePath_;     // the timed-media file (video/audio/audiobook) whose position we track, or empty
+    double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
     double audioPos_ = 0.0;        // last reported playback position
     double lastSavedPos_ = -100.0; // throttle resume writes
 };
