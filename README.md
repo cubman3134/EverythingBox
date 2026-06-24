@@ -4,6 +4,18 @@ A native, cross-platform **media hub** — video, audio (with playlists), libret
 emulation, EPUB/PDF readers, and a sandboxed JavaScript addon system — built as a
 **Qt 6 / C++** shell (the architecture Kodi/Stremio/RetroArch use).
 
+## Download
+
+Grab the latest build for your platform:
+
+| Platform | Download | Notes |
+|----------|----------|-------|
+| **Windows** (x64) | [**MyMediaVault-windows-x64.zip**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-windows-x64.zip) | Unzip anywhere and run `MyMediaVault.exe`. |
+| **macOS** (Apple Silicon) | [**MyMediaVault-macos-arm64.dmg**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-macos-arm64.dmg) | Unsigned build — first launch: right-click the app → **Open**. |
+| **Linux** (x86_64) | [**MyMediaVault-linux-x86_64.AppImage**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
+
+All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version.
+
 This repository is the native app. The previous Unity implementation has been
 removed; its portable logic (EPUB/PDF parsing, the addon model) was reimplemented
 in C++.

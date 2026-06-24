@@ -74,6 +74,8 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(mymediavault PRIVATE mymediavault_libretro Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets Qt6::Concurrent ${MPV_LIBRARY})
     set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
+    # On macOS, produce a MyMediaVault.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
+    set_target_properties(mymediavault PROPERTIES MACOSX_BUNDLE TRUE)
 
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
