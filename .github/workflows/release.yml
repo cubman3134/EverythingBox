@@ -114,7 +114,9 @@ jobs:
 
   # ------------------------------------------------------------------ macOS ---
   macos:
-    runs-on: macos-latest
+    # Pinned (not macos-latest): the newest SDK on the rolling 'latest' image dropped the legacy AGL
+    # framework that the Qt/GL link still references. macos-14 (arm64) ships an SDK that still has it.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
 
