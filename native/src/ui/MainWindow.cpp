@@ -37,6 +37,7 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QPushButton>
+#include <QAbstractButton>
 #include <QSlider>
 #include <QLabel>
 #include <QDialog>
@@ -320,6 +321,27 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Esc leaves full screen (the emulator view consumes its own Esc for the pause menu, so this only
     // fires for the player / readers).
     if (e->key() == Qt::Key_Escape && isFullScreen()) { leaveFullScreen(); return; }
+
+    // Arrow-key / remote navigation for the inline settings pages: Up/Down (and Left/Right) move focus
+    // between rows, Enter/Select activates the focused row, Backspace goes back. Reaches MainWindow because
+    // the panel rows (buttons/checkboxes) don't consume the arrow keys themselves.
+    if (stack_->currentWidget() == panelPage_)
+    {
+        switch (e->key())
+        {
+        case Qt::Key_Down: case Qt::Key_Right:
+            focusNextChild(); return;
+        case Qt::Key_Up: case Qt::Key_Left:
+            focusPreviousChild(); return;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+            if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
+            break;
+        case Qt::Key_Backspace:
+            if (panelOnBack_) { panelOnBack_(); return; }
+            break;
+        default: break;
+        }
+    }
     QMainWindow::keyPressEvent(e);
 }
 
@@ -708,6 +730,18 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->addStretch(1);
     panelScroll_->setWidget(content); // deletes the previous content widget
     stack_->setCurrentWidget(panelPage_);
+    // Drop focus onto the first interactive row so arrow keys / a remote work without a click first.
+    // Deferred a tick so the new content widget is laid out and its children are focusable.
+    QTimer::singleShot(0, this, [this] {
+        if (stack_->currentWidget() != panelPage_) return;
+        QWidget* w = panelScroll_->widget();
+        if (!w) return;
+        for (QWidget* child : w->findChildren<QWidget*>())
+        {
+            if (child->isVisibleTo(w) && child->focusPolicy() & Qt::TabFocus)
+            { child->setFocus(); return; }
+        }
+    });
 }
 
 // A large, left-aligned menu row for the inline settings pages (TV/remote-friendly target size).
