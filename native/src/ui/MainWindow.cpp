@@ -899,10 +899,10 @@ void MainWindow::cloudSyncNow()
             QPushButton* useCloud = box.addButton(tr("Use cloud data"), QMessageBox::AcceptRole);
             box.addButton(tr("Keep this device"), QMessageBox::RejectRole);
             box.exec();
-            if (box.clickedButton() == useCloud) cloud_->applyRemote(st.fileId, st.modifiedIso, pulled);
+            if (box.clickedButton() == useCloud) cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled);
             else                                 cloud_->pushLocal(pushed);
         }
-        else if (st.remoteChanged)               cloud_->applyRemote(st.fileId, st.modifiedIso, pulled);
+        else if (st.remoteChanged)               cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled);
         else if (st.localChanged || !st.hasRemote) cloud_->pushLocal(pushed);
         else                                     statusBar()->showMessage(tr("Already up to date."), 4000);
     });

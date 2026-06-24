@@ -36,13 +36,13 @@ static void cloudPullAtStartup()
             box.addButton(QObject::tr("Keep this device"), QMessageBox::RejectRole);
             box.exec();
             if (box.clickedButton() == useCloud)
-                cloud.applyRemote(st.fileId, st.modifiedIso, [&loop](bool) { loop.quit(); });
+                cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); });
             else
                 loop.quit(); // keep local; the exit push will overwrite the cloud
         }
         else
         {
-            cloud.applyRemote(st.fileId, st.modifiedIso, [&loop](bool) { loop.quit(); }); // remote-only change
+            cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); }); // remote-only change
         }
     });
     loop.exec();

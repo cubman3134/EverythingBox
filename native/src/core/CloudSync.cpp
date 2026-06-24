@@ -247,15 +247,17 @@ void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
 }
 
 void CloudSync::findFile(const QString& folderId, const QString& name,
-                         std::function<void(const QString&, const QString&)> cb)
+                         std::function<void(const QString&, const QString&, const QString&)> cb)
 {
     withAccessToken([this, folderId, name, cb](bool ok) {
-        if (!ok) { cb(QString(), QString()); return; }
+        if (!ok) { cb(QString(), QString(), QString()); return; }
         QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files"));
         QUrlQuery q;
         q.addQueryItem(QStringLiteral("q"), QStringLiteral("name='%1' and '%2' in parents and trashed=false")
                                                 .arg(name, folderId));
-        q.addQueryItem(QStringLiteral("fields"), QStringLiteral("files(id,modifiedTime)"));
+        // appProperties carries the bundle's own content hash, so we can detect "another device changed it"
+        // without depending on Drive's modifiedTime (which our own uploads bump).
+        q.addQueryItem(QStringLiteral("fields"), QStringLiteral("files(id,modifiedTime,appProperties)"));
         u.setQuery(q);
         QNetworkRequest req(u);
         req.setRawHeader("Authorization", "Bearer " + accessToken_.toUtf8());
@@ -264,21 +266,25 @@ void CloudSync::findFile(const QString& folderId, const QString& name,
             reply->deleteLater();
             const QJsonArray files = QJsonDocument::fromJson(reply->readAll()).object()
                                          .value(QStringLiteral("files")).toArray();
-            if (files.isEmpty()) { cb(QString(), QString()); return; }
+            if (files.isEmpty()) { cb(QString(), QString(), QString()); return; }
             const QJsonObject f = files.first().toObject();
-            cb(f.value(QStringLiteral("id")).toString(), f.value(QStringLiteral("modifiedTime")).toString());
+            const QString hash = f.value(QStringLiteral("appProperties")).toObject()
+                                     .value(QStringLiteral("stateHash")).toString();
+            cb(f.value(QStringLiteral("id")).toString(), f.value(QStringLiteral("modifiedTime")).toString(), hash);
         });
     });
 }
 
 void CloudSync::uploadFile(const QString& folderId, const QString& existingId, const QString& name,
-                           const QString& mimeType, const QByteArray& data,
+                           const QString& mimeType, const QByteArray& data, const QString& stateHash,
                            std::function<void(const QString&)> cb)
 {
-    withAccessToken([this, folderId, existingId, name, mimeType, data, cb](bool ok) {
+    withAccessToken([this, folderId, existingId, name, mimeType, data, stateHash, cb](bool ok) {
         if (!ok) { cb(QString()); return; }
         const QByteArray boundary = "mmvb" + randomToken(16).toUtf8();
         QJsonObject meta{ { QStringLiteral("name"), name } };
+        if (!stateHash.isEmpty())
+            meta.insert(QStringLiteral("appProperties"), QJsonObject{ { QStringLiteral("stateHash"), stateHash } });
         if (existingId.isEmpty()) meta.insert(QStringLiteral("parents"), QJsonArray{ folderId });
         QByteArray body;
         body += "--" + boundary + "\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n";
@@ -444,24 +450,37 @@ void CloudSync::checkStatus(std::function<void(const Status&)> cb)
         Status st;
         if (folderId.isEmpty()) { cb(st); return; } // unreachable
         st.reached = true;
-        st.localChanged = (stateHash() != store().value(QStringLiteral("cloud/syncedHash")).toByteArray());
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, cb, st](const QString& id, const QString& modIso) mutable {
+        const QByteArray synced = store().value(QStringLiteral("cloud/syncedHash")).toByteArray();
+        st.localChanged = (stateHash() != synced);
+        findFile(folderId, QString::fromLatin1(kBundleName),
+                 [this, cb, st, synced](const QString& id, const QString& modIso, const QString& remoteHash) mutable {
             st.hasRemote = !id.isEmpty();
             st.fileId = id;
             st.modifiedIso = modIso;
-            st.remoteChanged = st.hasRemote && (modIso != store().value(QStringLiteral("cloud/appliedModified")).toString());
+            st.remoteHash = remoteHash;
+            // The remote differs from our last-synced baseline -> another device pushed. Compare content
+            // hashes (robust); fall back to modifiedTime only for a legacy bundle without the hash stamp.
+            if (!st.hasRemote)
+                st.remoteChanged = false;
+            else if (!remoteHash.isEmpty())
+                st.remoteChanged = (remoteHash.toUtf8() != synced);
+            else
+                st.remoteChanged = (modIso != store().value(QStringLiteral("cloud/appliedModified")).toString());
             cb(st);
         });
     });
 }
 
-void CloudSync::applyRemote(const QString& fileId, const QString& modifiedIso, std::function<void(bool)> cb)
+void CloudSync::applyRemote(const QString& fileId, const QString& modifiedIso, const QString& remoteHash,
+                            std::function<void(bool)> cb)
 {
     if (fileId.isEmpty()) { cb(false); return; }
-    downloadFile(fileId, [this, modifiedIso, cb](bool ok, const QByteArray& data) {
+    downloadFile(fileId, [this, modifiedIso, remoteHash, cb](bool ok, const QByteArray& data) {
         if (!ok || !applyBundle(data)) { cb(false); return; }
         store().setValue(QStringLiteral("cloud/appliedModified"), modifiedIso);
-        store().setValue(QStringLiteral("cloud/syncedHash"), stateHash()); // we now match the remote
+        // Baseline = the remote we just took, so a re-check sees neither side changed (no false conflict).
+        store().setValue(QStringLiteral("cloud/syncedHash"),
+                         remoteHash.isEmpty() ? stateHash() : remoteHash.toUtf8());
         store().sync();
         cb(true);
     });
@@ -473,11 +492,12 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
         if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
         const QByteArray bundle = buildBundle();
         const QByteArray hash = stateHash();
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](const QString& id, const QString&) {
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](const QString& id, const QString&, const QString&) {
             uploadFile(folderId, id, QString::fromLatin1(kBundleName), QStringLiteral("application/zip"), bundle,
+                       QString::fromUtf8(hash),
                        [this, folderId, hash, cb](const QString& newId) {
                 if (newId.isEmpty()) { cb(false, tr("Upload failed.")); return; }
-                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](const QString&, const QString& modIso) {
+                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](const QString&, const QString& modIso, const QString&) {
                     if (!modIso.isEmpty()) store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
                     store().setValue(QStringLiteral("cloud/syncedHash"), hash);
                     store().sync();
