@@ -51,15 +51,31 @@
 #include <QDir>
 #include <QHash>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QMessageBox>
 #include <QStatusBar>
 #include <QChar>
 #include <cmath>
 
-// Audio extensions, shared by the open dialog filter and folder-queue scanning.
+// Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
 static const QStringList kAudioExts = {
-    "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "wma", "alac", "aiff", "aif", "ape", "mka"
+    "mp3", "flac", "ogg", "opus", "wav", "m4a", "m4b", "aac", "wma", "alac", "aiff", "aif", "ape", "mka"
 };
+
+// Per-profile settings store (resume positions, etc.), mirroring the accessor the other views use.
+static QSettings& store()
+{
+    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+                       QSettings::IniFormat);
+    return s;
+}
+
+// Stable, path-derived key prefix for one audiobook's resume state.
+static QString audiobookKey(const QString& path)
+{
+    const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
+    return QStringLiteral("audiobook/") + QString::fromLatin1(h) + QStringLiteral("/");
+}
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 {
@@ -354,10 +370,10 @@ void MainWindow::openAudio()
 {
     // Audio plays through the same libmpv player; an overlay shows the track since there's no picture.
     // Select one file to queue its whole folder, or multi-select to queue exactly those tracks.
+    const QString pattern = QStringLiteral("*.") + kAudioExts.join(QStringLiteral(" *."));
     const QStringList sel = QFileDialog::getOpenFileNames(
         this, tr("Open Audio"), QString(),
-        tr("Audio (*.mp3 *.flac *.ogg *.opus *.wav *.m4a *.aac *.wma *.alac *.aiff *.aif *.ape *.mka);;"
-           "All files (*.*)"));
+        tr("Audio (%1);;All files (*.*)").arg(pattern));
     if (sel.isEmpty()) return;
 
     if (sel.size() == 1) { openAudioPath(sel.first()); return; } // folder queue starting at this track
@@ -373,15 +389,29 @@ void MainWindow::openAudio()
 
 void MainWindow::openAudioPath(const QString& path)
 {
-    // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
     const QFileInfo fi(path);
-    QStringList filters;
-    for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
-    const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
     QStringList queue;
-    for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
-    int start = queue.indexOf(fi.absoluteFilePath());
-    if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
+    int start = 0;
+    if (fi.suffix().toLower() == QStringLiteral("m4b"))
+    {
+        // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder,
+        // and resume where the listener left off.
+        queue = { fi.absoluteFilePath() };
+        audiobookPath_ = fi.absoluteFilePath();
+        audiobookResume_ = store().value(audiobookKey(audiobookPath_) + QStringLiteral("pos"), 0.0).toDouble();
+        lastSavedPos_ = -100.0;
+    }
+    else
+    {
+        audiobookPath_.clear(); // a normal track, not a resumable audiobook
+        // Play the whole containing folder, sorted, starting at this file (the single-select behavior).
+        QStringList filters;
+        for (const QString& ext : kAudioExts) filters << QStringLiteral("*.") + ext;
+        const QFileInfoList entries = QDir(fi.absolutePath()).entryInfoList(filters, QDir::Files, QDir::Name);
+        for (const QFileInfo& e : entries) queue << e.absoluteFilePath();
+        start = queue.indexOf(fi.absoluteFilePath());
+        if (start < 0) { queue = { fi.absoluteFilePath() }; start = 0; }
+    }
 
     retro_->stop();
     book_->persist();
@@ -423,12 +453,35 @@ void MainWindow::prevTrack()
 
 void MainWindow::onTrackEnded()
 {
+    // A finished audiobook is "done" - clear its resume mark so the next open starts at the beginning.
+    if (!audiobookPath_.isEmpty())
+    {
+        store().remove(audiobookKey(audiobookPath_));
+        store().sync();
+        audiobookPath_.clear();
+        lastSavedPos_ = -100.0;
+        return;
+    }
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
     if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) playTrack(trackIndex_ + 1);
 }
 
+void MainWindow::persistAudiobook()
+{
+    if (audiobookPath_.isEmpty() || audioPos_ <= 0.0) return;
+    const QString k = audiobookKey(audiobookPath_);
+    store().setValue(k + QStringLiteral("pos"), audioPos_);
+    store().setValue(k + QStringLiteral("title"), QFileInfo(audiobookPath_).completeBaseName());
+    store().sync();
+    lastSavedPos_ = audioPos_;
+}
+
 void MainWindow::clearAudioQueue()
 {
+    persistAudiobook();      // save where we left off before leaving the audiobook
+    audiobookPath_.clear();
+    audiobookResume_ = 0.0;
+    lastSavedPos_ = -100.0;
     tracks_.clear();
     trackIndex_ = -1;
     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); }
@@ -809,6 +862,7 @@ void MainWindow::cloudSyncNow()
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
+    persistAudiobook(); // flush the current audiobook position before anything else on exit
     // On the way out: push this device's changes, but don't clobber a newer cloud unless the user says so.
     if (cloud_ && cloud_->isSignedIn())
     {
@@ -879,13 +933,25 @@ void MainWindow::openInputMapping()
     dlg.exec();
 }
 
-void MainWindow::onDuration(double seconds) { duration_ = seconds; }
+void MainWindow::onDuration(double seconds)
+{
+    duration_ = seconds;
+    // Resume an audiobook where the listener left off, now that the file is loaded and its length is known.
+    if (!audiobookPath_.isEmpty() && audiobookResume_ > 1.0 && audiobookResume_ < seconds - 1.0)
+        player_->setPosition(audiobookResume_);
+    audiobookResume_ = 0.0; // one-shot
+}
 
 void MainWindow::onPosition(double seconds)
 {
     if (!sliderDown_ && duration_ > 0.0)
         seek_->setValue(static_cast<int>(seconds / duration_ * 1000.0));
     time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
+
+    audioPos_ = seconds;
+    // Throttle resume writes so we're not hammering the ini every position tick.
+    if (!audiobookPath_.isEmpty() && std::abs(seconds - lastSavedPos_) >= 5.0)
+        persistAudiobook();
 }
 
 void MainWindow::onSeekReleased()
