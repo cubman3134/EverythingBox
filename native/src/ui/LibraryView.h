@@ -4,6 +4,7 @@
 #pragma once
 #include <QWidget>
 #include <QVector>
+#include <functional>
 #include "../addons/AddonModels.h"
 
 class AddonManager;
@@ -12,6 +13,8 @@ class QListWidget;
 class QListWidgetItem;
 class QLineEdit;
 class QLabel;
+class QStackedWidget;
+class QDialog;
 
 class LibraryView : public QWidget
 {
@@ -39,8 +42,14 @@ private slots:
 
 private:
     void showCatalog(const MediaCatalog& cat);
+    // Host a sub-page inline (no popup): push it onto the internal stack; the helpers return to the main
+    // list when done. showDialogPage embeds an existing QDialog; pushPage/popPage handle ad-hoc forms.
+    void showDialogPage(QDialog* dlg, const std::function<void(int result)>& onFinished);
+    void pushPage(QWidget* page);
+    void popPage(QWidget* page);
 
     AddonManager* mgr_ = nullptr;
+    QStackedWidget* stack_ = nullptr;  // page 0 = the library UI; sub-pages (browse/configure/confirm) on top
     QListWidget* sourceList_ = nullptr;
     QListWidget* itemList_ = nullptr;
     QLineEdit* search_ = nullptr;

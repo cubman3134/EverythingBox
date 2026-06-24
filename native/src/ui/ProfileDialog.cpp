@@ -89,14 +89,30 @@ void ProfileDialog::rebuild()
             del->setToolTip(tr("Delete this profile"));
             const QString name = p.name;
             connect(del, &QPushButton::clicked, this, [this, id, name] {
-                if (QMessageBox::question(
-                        this, tr("Delete profile"),
-                        tr("Delete “%1”? Their recent list will be removed. This can't be undone.").arg(name))
-                    == QMessageBox::Yes)
-                {
-                    ProfileStore::remove(id);
-                    rebuild();
-                }
+                // Inline confirm page (no popup): push it onto the stack with Delete / Cancel.
+                auto* page = new QWidget(stack_);
+                auto* v = new QVBoxLayout(page);
+                v->addWidget(new QLabel(QStringLiteral("<b>%1</b>").arg(tr("Delete profile")), page));
+                auto* msg = new QLabel(
+                    tr("Delete “%1”? Their recent list will be removed. This can't be undone.").arg(name), page);
+                msg->setWordWrap(true);
+                v->addWidget(msg);
+                v->addStretch(1);
+                auto* box = new QDialogButtonBox(page);
+                auto* confirm = box->addButton(tr("Delete"), QDialogButtonBox::DestructiveRole);
+                box->addButton(QDialogButtonBox::Cancel);
+                v->addWidget(box);
+                auto leave = [this, page] {
+                    stack_->setCurrentIndex(0);
+                    stack_->removeWidget(page);
+                    page->deleteLater();
+                };
+                connect(confirm, &QPushButton::clicked, this, [this, id, leave] {
+                    ProfileStore::remove(id); rebuild(); leave();
+                });
+                connect(box, &QDialogButtonBox::rejected, this, leave);
+                stack_->addWidget(page);
+                stack_->setCurrentWidget(page);
             });
             row->addWidget(del);
         }

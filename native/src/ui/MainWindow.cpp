@@ -542,8 +542,7 @@ void MainWindow::openGamePath(const QString& rom)
     const GameSystem* sys = SystemCatalog::forExtension(ext);
     if (!sys)
     {
-        QMessageBox::warning(this, tr("Unsupported file"),
-                             tr("No system is configured for .%1 files.").arg(ext));
+        statusBar()->showMessage(tr("No system is configured for .%1 files.").arg(ext), 6000);
         return;
     }
 
@@ -568,7 +567,7 @@ void MainWindow::openGamePath(const QString& rom)
         RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
     }
     else
-        QMessageBox::warning(this, tr("Can't run game"), err);
+        statusBar()->showMessage(tr("Can't run game: %1").arg(err), 6000);
 }
 
 void MainWindow::openDocument()
@@ -588,19 +587,19 @@ void MainWindow::openDocumentPath(const QString& f)
 
     if (ext == QStringLiteral("pdf"))
     {
-        if (!pdf_->openPdf(f, &err)) { QMessageBox::warning(this, tr("Can't open PDF"), err); return; }
+        if (!pdf_->openPdf(f, &err)) { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(pdf_);
     }
     else if (ext == QStringLiteral("cbz"))
     {
-        if (!comic_->openComic(f, &err)) { QMessageBox::warning(this, tr("Can't open comic"), err); return; }
+        if (!comic_->openComic(f, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
-        if (!book_->openBook(f, &err)) { QMessageBox::warning(this, tr("Can't open book"), err); return; }
+        if (!book_->openBook(f, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
@@ -675,19 +674,19 @@ void MainWindow::openLibraryItem(const MediaItem& item)
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
-        if (!book_->openBook(url, &err)) { QMessageBox::warning(this, tr("Can't open book"), err); return; }
+        if (!book_->openBook(url, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
     {
-        if (!pdf_->openPdf(url, &err)) { QMessageBox::warning(this, tr("Can't open PDF"), err); return; }
+        if (!pdf_->openPdf(url, &err)) { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(pdf_);
     }
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {
-        if (!comic_->openComic(url, &err)) { QMessageBox::warning(this, tr("Can't open comic"), err); return; }
+        if (!comic_->openComic(url, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
     }
@@ -935,13 +934,22 @@ void MainWindow::cloudSyncNow()
         if (!st.reached) { statusBar()->showMessage(tr("Couldn't reach Google Drive."), 5000); return; }
         if (st.remoteChanged && st.localChanged)
         {
-            QMessageBox box(QMessageBox::Warning, tr("Sync conflict"),
-                tr("The cloud has newer changes from another device, and this device has unsynced changes."), QMessageBox::NoButton, this);
-            QPushButton* useCloud = box.addButton(tr("Use cloud data"), QMessageBox::AcceptRole);
-            box.addButton(tr("Keep this device"), QMessageBox::RejectRole);
-            box.exec();
-            if (box.clickedButton() == useCloud) cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled);
-            else                                 cloud_->pushLocal(pushed);
+            // Inline conflict chooser (no popup): user-initiated sync, so present it as a panel page.
+            showPanel(tr("Sync conflict"), [this, st, pulled, pushed](QVBoxLayout* v) {
+                auto* msg = new QLabel(tr("The cloud has newer changes from another device, and this device "
+                                          "also has unsynced changes. Choose which to keep."));
+                msg->setWordWrap(true); msg->setStyleSheet(QStringLiteral("font-size:15px;"));
+                v->addWidget(msg);
+                auto* useCloud = panelRow(tr("Use cloud data — replace this device"));
+                auto* keepThis = panelRow(tr("Keep this device — overwrite the cloud"));
+                connect(useCloud, &QPushButton::clicked, this, [this, st, pulled] {
+                    cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled); openCloudSync();
+                });
+                connect(keepThis, &QPushButton::clicked, this, [this, pushed] {
+                    cloud_->pushLocal(pushed); openCloudSync();
+                });
+                v->addWidget(useCloud); v->addWidget(keepThis);
+            }, [this] { openCloudSync(); });
         }
         else if (st.remoteChanged)               cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, pulled);
         else if (st.localChanged || !st.hasRemote) cloud_->pushLocal(pushed);

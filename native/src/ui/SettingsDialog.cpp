@@ -77,7 +77,13 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
     note->setWordWrap(true);
     v->addWidget(note);
 
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    status_ = new QLabel(mainPage);
+    status_->setWordWrap(true);
+    status_->setStyleSheet(QStringLiteral("color:#c0392b;"));
+    status_->hide();
+    v->addWidget(status_);
+
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, mainPage);
     connect(box, &QDialogButtonBox::accepted, this, &SettingsDialog::save);
     connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
     v->addWidget(box);
@@ -96,6 +102,7 @@ void SettingsDialog::editOptions(const QString& systemId)
     QComboBox* combo = combos_.value(systemId);
     if (!combo) return;
     const QString core = combo->currentData().toString();
+    status_->hide(); // clear any previous error
 
     // Make sure the core is present (download on first use), then load it headlessly to read its options.
     const QString corePath = CoreManager::ensureCore(core, this);
@@ -105,8 +112,8 @@ void SettingsDialog::editOptions(const QString& systemId)
     std::string err;
     if (!tmp.loadCore(corePath.toStdString(), &err))
     {
-        QMessageBox::warning(this, tr("Can't read options"),
-                             tr("Couldn't load core '%1':\n%2").arg(core, QString::fromStdString(err)));
+        status_->setText(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
+        status_->show();
         return;
     }
     const std::vector<CoreOption> opts = tmp.options(); // copy out before unloading

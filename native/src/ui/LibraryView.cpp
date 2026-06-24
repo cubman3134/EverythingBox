@@ -8,18 +8,27 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSplitter>
+#include <QStackedWidget>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QFileDialog>
-#include <QInputDialog>
-#include <QMessageBox>
 
 LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(mgr)
 {
-    auto* v = new QVBoxLayout(this);
+    auto* root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    stack_ = new QStackedWidget(this);
+    root->addWidget(stack_);
+
+    // Page 0: the library UI. Browse / Configure / Add-by-URL / Remove are pushed as sub-pages in place.
+    auto* mainPage = new QWidget(stack_);
+    stack_->addWidget(mainPage);
+    auto* v = new QVBoxLayout(mainPage);
 
     auto* tools = new QHBoxLayout();
-    auto* homeBtn = new QPushButton(tr("‹ Home"), this);
+    auto* homeBtn = new QPushButton(tr("‹ Home"), mainPage);
     connect(homeBtn, &QPushButton::clicked, this, &LibraryView::homeRequested);
     tools->addWidget(homeBtn);
     auto* browse = new QPushButton(tr("Browse Add-ons…"), this);
@@ -73,6 +82,30 @@ LibraryView::LibraryView(AddonManager* mgr, QWidget* parent) : QWidget(parent), 
     connect(mgr_, &AddonManager::catalogReady, this, &LibraryView::onCatalogReady);
 
     refreshSources();
+}
+
+void LibraryView::pushPage(QWidget* page)
+{
+    stack_->addWidget(page);
+    stack_->setCurrentWidget(page);
+}
+
+void LibraryView::popPage(QWidget* page)
+{
+    stack_->setCurrentIndex(0); // back to the library list
+    stack_->removeWidget(page);
+    page->deleteLater();
+}
+
+void LibraryView::showDialogPage(QDialog* dlg, const std::function<void(int)>& onFinished)
+{
+    dlg->setWindowFlags(Qt::Widget); // render inline instead of as a separate window
+    // Queued: the handler removes/deletes the dialog, so it must run after QDialog::done() returns.
+    connect(dlg, &QDialog::finished, this, [this, dlg, onFinished](int result) {
+        onFinished(result);
+        popPage(dlg);
+    }, Qt::QueuedConnection);
+    pushPage(dlg);
 }
 
 void LibraryView::refreshSources()
@@ -177,7 +210,7 @@ void LibraryView::installAddon()
     QString err;
     if (!mgr_->installPackage(f, &err))
     {
-        QMessageBox::warning(this, tr("Install failed"), err);
+        status_->setText(tr("Install failed: %1").arg(err));
         return;
     }
     refreshSources();
@@ -186,13 +219,25 @@ void LibraryView::installAddon()
 
 void LibraryView::addByUrl()
 {
-    bool okPressed = false;
-    const QString url = QInputDialog::getText(
-        this, tr("Add addon by URL"),
-        tr("Addon URL (its manifest.json or base URL):"), QLineEdit::Normal, QString(), &okPressed);
-    if (!okPressed || url.trimmed().isEmpty()) return;
-    status_->setText(tr("Fetching addon…"));
-    mgr_->addRemoteSource(url.trimmed()); // async; remoteSourceResult reports the outcome
+    // Inline form (no popup) for the addon URL.
+    auto* page = new QWidget(stack_);
+    auto* pv = new QVBoxLayout(page);
+    pv->addWidget(new QLabel(tr("<b>Add add-on by URL</b>"), page));
+    pv->addWidget(new QLabel(tr("Addon URL (its manifest.json or base URL):"), page));
+    auto* edit = new QLineEdit(page);
+    edit->setPlaceholderText(tr("https://…/manifest.json"));
+    pv->addWidget(edit);
+    pv->addStretch(1);
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, page);
+    pv->addWidget(box);
+    connect(box, &QDialogButtonBox::accepted, this, [this, edit, page] {
+        const QString url = edit->text().trimmed();
+        if (!url.isEmpty()) { status_->setText(tr("Fetching addon…")); mgr_->addRemoteSource(url); } // async
+        popPage(page);
+    });
+    connect(box, &QDialogButtonBox::rejected, this, [this, page] { popPage(page); });
+    pushPage(page);
+    edit->setFocus();
 }
 
 void LibraryView::removeSelected()
@@ -203,15 +248,27 @@ void LibraryView::removeSelected()
     const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
     const bool remote = (s->transport == LoadedAddon::RemoteHttp);
 
-    if (QMessageBox::question(this, tr("Remove addon"),
-            remote ? tr("Remove the remote source “%1”? (Only the saved URL is removed.)").arg(name)
-                   : tr("Remove the addon “%1” and delete its files?").arg(name))
-        != QMessageBox::Yes)
-        return;
-
-    const bool ok = remote ? mgr_->removeRemoteSource(s->baseUrl) : mgr_->removeAddon(s->manifest.id);
-    if (ok) { refreshSources(); status_->setText(tr("Removed “%1”.").arg(name)); }
-    else      status_->setText(tr("Couldn't remove “%1”.").arg(name));
+    // Inline confirm page (no popup).
+    auto* page = new QWidget(stack_);
+    auto* pv = new QVBoxLayout(page);
+    pv->addWidget(new QLabel(tr("<b>Remove add-on</b>"), page));
+    auto* msg = new QLabel(remote ? tr("Remove the remote source “%1”? (Only the saved URL is removed.)").arg(name)
+                                  : tr("Remove the addon “%1” and delete its files?").arg(name), page);
+    msg->setWordWrap(true);
+    pv->addWidget(msg);
+    pv->addStretch(1);
+    auto* box = new QDialogButtonBox(page);
+    auto* confirm = box->addButton(tr("Remove"), QDialogButtonBox::DestructiveRole);
+    box->addButton(QDialogButtonBox::Cancel);
+    pv->addWidget(box);
+    connect(confirm, &QPushButton::clicked, this, [this, s, name, remote, page] {
+        const bool ok = remote ? mgr_->removeRemoteSource(s->baseUrl) : mgr_->removeAddon(s->manifest.id);
+        if (ok) { refreshSources(); status_->setText(tr("Removed “%1”.").arg(name)); }
+        else      status_->setText(tr("Couldn't remove “%1”.").arg(name));
+        popPage(page);
+    });
+    connect(box, &QDialogButtonBox::rejected, this, [this, page] { popPage(page); });
+    pushPage(page);
 }
 
 void LibraryView::configureAddon()
@@ -222,9 +279,11 @@ void LibraryView::configureAddon()
         status_->setText(tr("Select a source to configure."));
         return;
     }
-    AddonSettingsDialog dlg(sourceRefs_[row]->manifest, this);
-    if (dlg.exec() == QDialog::Accepted)
-        onSourceChanged(); // re-fetch the catalog so changed config (e.g. an API key) takes effect now
+    auto* dlg = new AddonSettingsDialog(sourceRefs_[row]->manifest, this);
+    showDialogPage(dlg, [this](int result) {
+        if (result == QDialog::Accepted)
+            onSourceChanged(); // re-fetch the catalog so changed config (e.g. an API key) takes effect now
+    });
 }
 
 void LibraryView::reloadAddons()
@@ -235,7 +294,8 @@ void LibraryView::reloadAddons()
 
 void LibraryView::browseAddons()
 {
-    RegistryBrowser dlg(RegistryBrowser::Addons, mgr_, this);
-    dlg.exec();
-    if (dlg.installedSomething()) refreshSources(); // show newly installed add-ons
+    auto* dlg = new RegistryBrowser(RegistryBrowser::Addons, mgr_, this);
+    showDialogPage(dlg, [this, dlg](int) {
+        if (dlg->installedSomething()) refreshSources(); // show newly installed add-ons
+    });
 }
