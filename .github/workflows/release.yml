@@ -111,6 +111,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: MyMediaVault-windows-x64.zip
+          generate_release_notes: true
 
   # ------------------------------------------------------------------ macOS ---
   macos:
@@ -164,6 +165,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: MyMediaVault-macos-arm64.dmg
+          generate_release_notes: true
 
   # ------------------------------------------------------------------ Linux ---
   linux:
@@ -243,3 +245,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: MyMediaVault-linux-x86_64.AppImage
+          generate_release_notes: true
