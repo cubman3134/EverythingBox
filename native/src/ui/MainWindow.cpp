@@ -805,17 +805,14 @@ void MainWindow::openGeneralSettings()
         const QString cur = Settings::subtitleLanguage();
         bool found = false;
         for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
-        if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur);
+        if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur); // keep a previously-set code
         lang->setCurrentIndex(qMax(0, lang->findData(cur)));
-        lang->setEditable(true);
+        // Non-editable: clicking anywhere opens the list (an editable combo only opens via the tiny arrow),
+        // and it's fully arrow/remote navigable.
         lang->setEnabled(on->isChecked());
         connect(on, &QCheckBox::toggled, lang, &QComboBox::setEnabled);
-        // Save on change: named language -> its code; typed text -> the code itself.
-        auto saveLang = [lang] {
-            const int idx = lang->findText(lang->currentText());
-            Settings::setSubtitleLanguage((idx >= 0) ? lang->itemData(idx).toString() : lang->currentText().trimmed());
-        };
-        connect(lang, &QComboBox::currentTextChanged, this, [saveLang](const QString&) { saveLang(); });
+        connect(lang, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                [lang](int idx) { Settings::setSubtitleLanguage(lang->itemData(idx).toString()); }); // save on change
         langRow->addWidget(lang, 1);
         v->addLayout(langRow);
 
