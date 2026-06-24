@@ -33,6 +33,8 @@
 #include <QCloseEvent>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QScrollArea>
+#include <QApplication>
 #include <QPushButton>
 #include <QSlider>
 #include <QLabel>
@@ -92,6 +94,36 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     stack_->addWidget(pdf_);       // index 3 - pdf
     stack_->addWidget(library_);   // index 4 - addon library
     stack_->addWidget(home_);      // index 5 - home / catalog landing
+
+    // Inline settings panel page (Settings / Theme / Cloud Sync / General live here instead of popups).
+    panelPage_ = new QWidget(this);
+    panelPage_->setObjectName(QStringLiteral("settingsPanel"));
+    panelPage_->setStyleSheet(QStringLiteral("#settingsPanel{background:#f4f6f8;}"));
+    auto* pv = new QVBoxLayout(panelPage_);
+    pv->setContentsMargins(0, 0, 0, 0);
+    pv->setSpacing(0);
+    auto* panelHeader = new QWidget(panelPage_);
+    panelHeader->setObjectName(QStringLiteral("panelHeader"));
+    panelHeader->setStyleSheet(QStringLiteral("#panelHeader{background:#2b2f3a;} #panelHeader QLabel{color:#fff;}"));
+    auto* phl = new QHBoxLayout(panelHeader);
+    phl->setContentsMargins(16, 10, 16, 10);
+    auto* panelBack = new QPushButton(tr("‹ Back"), panelHeader);
+    panelBack->setStyleSheet(QStringLiteral(
+        "QPushButton{background:rgba(255,255,255,0.12);color:#fff;border:none;border-radius:8px;"
+        "padding:10px 18px;font-size:16px;font-weight:bold;} QPushButton:hover{background:rgba(255,255,255,0.22);}"));
+    panelBack->setCursor(Qt::PointingHandCursor);
+    connect(panelBack, &QPushButton::clicked, this, [this] { if (panelOnBack_) panelOnBack_(); });
+    panelTitle_ = new QLabel(panelHeader);
+    panelTitle_->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
+    phl->addWidget(panelBack);
+    phl->addSpacing(12);
+    phl->addWidget(panelTitle_, 1);
+    pv->addWidget(panelHeader);
+    panelScroll_ = new QScrollArea(panelPage_);
+    panelScroll_->setWidgetResizable(true);
+    panelScroll_->setFrameShape(QFrame::NoFrame);
+    pv->addWidget(panelScroll_, 1);
+    stack_->addWidget(panelPage_); // index 6 - inline settings panels
 
     auto* central = new QWidget(this);
     auto* v = new QVBoxLayout(central);
@@ -575,155 +607,162 @@ void MainWindow::onThemeChanged(const QColor& background, const QColor& accent)
     Q_UNUSED(accent);
 }
 
+// Swap the inline panel's content and show it. `build` fills a fresh content layout; `onBack` runs when
+// the header Back is pressed (returns to the parent panel or the underlying page).
+void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
+                           const std::function<void()>& onBack)
+{
+    panelTitle_->setText(title);
+    panelOnBack_ = onBack;
+    auto* content = new QWidget;
+    auto* v = new QVBoxLayout(content);
+    v->setContentsMargins(28, 24, 28, 24);
+    v->setSpacing(14);
+    build(v);
+    v->addStretch(1);
+    panelScroll_->setWidget(content); // deletes the previous content widget
+    stack_->setCurrentWidget(panelPage_);
+}
+
+// A large, left-aligned menu row for the inline settings pages (TV/remote-friendly target size).
+static QPushButton* panelRow(const QString& label)
+{
+    auto* b = new QPushButton(label);
+    b->setMinimumHeight(54);
+    b->setCursor(Qt::PointingHandCursor);
+    b->setStyleSheet(QStringLiteral(
+        "QPushButton{font-size:17px;text-align:left;padding:14px 20px;border:1px solid rgba(0,0,0,0.12);"
+        "border-radius:10px;background:rgba(0,0,0,0.04);} QPushButton:hover{background:rgba(0,0,0,0.10);}"
+        "QPushButton:focus{border:2px solid #2C72C9;}"));
+    return b;
+}
+
 void MainWindow::openSettingsHub()
 {
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Settings"));
-    auto* v = new QVBoxLayout(&dlg);
-    v->addWidget(new QLabel(tr("Choose a settings area:"), &dlg));
-
-    auto* general = new QPushButton(tr("General…"), &dlg);
-    auto* theme = new QPushButton(tr("Theme…"), &dlg);
-    auto* emu = new QPushButton(tr("Emulator Settings…"), &dlg);
-    auto* inp = new QPushButton(tr("Input Mapping…"), &dlg);
-    auto* addon = new QPushButton(tr("Addon Settings…"), &dlg);
-    auto* cloud = new QPushButton(tr("Cloud Sync…"), &dlg);
-    connect(general, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openGeneralSettings(); });
-    connect(theme, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openThemes(); });
-    connect(emu, &QPushButton::clicked, this, &MainWindow::openEmulatorSettings);
-    connect(inp, &QPushButton::clicked, this, &MainWindow::openInputMapping);
-    connect(addon, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openLibrary(); });
-    connect(cloud, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openCloudSync(); });
-    v->addWidget(general);
-    v->addWidget(theme);
-    v->addWidget(emu);
-    v->addWidget(inp);
-    v->addWidget(addon);
-    v->addWidget(cloud);
-
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    v->addWidget(box);
-    dlg.exec();
+    // Entering the settings area from a real page: remember it so the top-level Back returns there.
+    if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
+    showPanel(tr("Settings"), [this](QVBoxLayout* v) {
+        auto add = [this, v](const QString& label, std::function<void()> fn) {
+            auto* b = panelRow(label);
+            connect(b, &QPushButton::clicked, this, fn);
+            v->addWidget(b);
+        };
+        add(tr("General"),            [this] { openGeneralSettings(); });
+        add(tr("Theme"),              [this] { openThemes(); });
+        add(tr("Add-ons"),            [this] { openLibrary(); });
+        add(tr("Cloud Sync"),         [this] { openCloudSync(); });
+        add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
+        add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
+    }, [this] { stack_->setCurrentWidget(panelReturnTo_); });
 }
 
 void MainWindow::openGeneralSettings()
 {
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("General Settings"));
-    dlg.resize(380, 200);
-    auto* v = new QVBoxLayout(&dlg);
+    showPanel(tr("General"), [this](QVBoxLayout* v) {
+        auto* heading = new QLabel(tr("Subtitles"));
+        heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(heading);
 
-    v->addWidget(new QLabel(tr("<b>Subtitles</b>"), &dlg));
-    auto* on = new QCheckBox(tr("Show subtitles by default"), &dlg);
-    on->setChecked(Settings::subtitlesOnByDefault());
-    v->addWidget(on);
+        auto* on = new QCheckBox(tr("Show subtitles by default"));
+        on->setStyleSheet(QStringLiteral("font-size:15px;"));
+        on->setChecked(Settings::subtitlesOnByDefault());
+        v->addWidget(on);
+        connect(on, &QCheckBox::toggled, this, [](bool c) { Settings::setSubtitlesOnByDefault(c); }); // save on change
 
-    auto* langRow = new QHBoxLayout();
-    langRow->addWidget(new QLabel(tr("Default language:"), &dlg));
-    auto* lang = new QComboBox(&dlg);
-    // (display name, ISO 639 code). Empty code = no preference / first available track.
-    const QList<QPair<QString, QString>> langs = {
-        { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
-        { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
-        { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
-        { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
-        { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
-        { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
-        { QStringLiteral("Arabic"), QStringLiteral("ara") },
-    };
-    const QString cur = Settings::subtitleLanguage();
-    bool found = false;
-    for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
-    if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur); // keep an unusual stored code
-    lang->setCurrentIndex(qMax(0, lang->findData(cur)));
-    lang->setEditable(true); // also allow typing any ISO 639 code (e.g. "swe")
-    lang->setEnabled(on->isChecked());
-    connect(on, &QCheckBox::toggled, lang, &QComboBox::setEnabled);
-    langRow->addWidget(lang, 1);
-    v->addLayout(langRow);
+        auto* langRow = new QHBoxLayout();
+        langRow->addWidget(new QLabel(tr("Default language:")));
+        auto* lang = new QComboBox();
+        lang->setMinimumHeight(34);
+        const QList<QPair<QString, QString>> langs = {
+            { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
+            { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
+            { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
+            { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
+            { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
+            { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
+            { QStringLiteral("Arabic"), QStringLiteral("ara") },
+        };
+        const QString cur = Settings::subtitleLanguage();
+        bool found = false;
+        for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
+        if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur);
+        lang->setCurrentIndex(qMax(0, lang->findData(cur)));
+        lang->setEditable(true);
+        lang->setEnabled(on->isChecked());
+        connect(on, &QCheckBox::toggled, lang, &QComboBox::setEnabled);
+        // Save on change: named language -> its code; typed text -> the code itself.
+        auto saveLang = [lang] {
+            const int idx = lang->findText(lang->currentText());
+            Settings::setSubtitleLanguage((idx >= 0) ? lang->itemData(idx).toString() : lang->currentText().trimmed());
+        };
+        connect(lang, &QComboBox::currentTextChanged, this, [saveLang](const QString&) { saveLang(); });
+        langRow->addWidget(lang, 1);
+        v->addLayout(langRow);
 
-    v->addWidget(new QLabel(tr("<span style='color:#888;font-size:11px;'>Applies to the next video. Subtitles "
-        "still toggle in-player with the CC button.</span>"), &dlg));
-    v->addStretch(1);
-
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    v->addWidget(box);
-
-    if (dlg.exec() == QDialog::Accepted)
-    {
-        Settings::setSubtitlesOnByDefault(on->isChecked());
-        // If the text matches a named language, store its code; otherwise treat the text as a typed code.
-        const int idx = lang->findText(lang->currentText());
-        const QString code = (idx >= 0) ? lang->itemData(idx).toString() : lang->currentText().trimmed();
-        Settings::setSubtitleLanguage(code);
-    }
+        auto* note = new QLabel(tr("Applies to the next video. Subtitles still toggle in-player with the CC button."));
+        note->setWordWrap(true);
+        note->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(note);
+    }, [this] { openSettingsHub(); });
 }
 
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Cloud Sync"));
-    dlg.resize(440, 250);
-    auto* v = new QVBoxLayout(&dlg);
-    v->addWidget(new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, settings "
-        "and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."), &dlg));
-    auto* status = new QLabel(&dlg); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
-    v->addWidget(status);
-    auto* signIn = new QPushButton(tr("Sign in with Google"), &dlg);
-    auto* syncNow = new QPushButton(tr("Sync now"), &dlg);
-    auto* signOut = new QPushButton(tr("Sign out"), &dlg);
-    auto* setup = new QPushButton(tr("Set up sign-in…"), &dlg);
-    v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(signOut); v->addWidget(setup);
+    showPanel(tr("Cloud Sync"), [this](QVBoxLayout* v) {
+        auto* intro = new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, "
+            "settings and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
+        v->addWidget(intro);
+        auto* status = new QLabel(); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
+        status->setStyleSheet(QStringLiteral("font-size:15px;padding:6px 0;"));
+        v->addWidget(status);
 
-    auto refresh = [this, status, signIn, syncNow, signOut, setup] {
-        const bool cfg = CloudSync::isConfigured();
-        const bool in = cloud_->isSignedIn();
-        setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…")); // always available
-        signIn->setVisible(cfg && !in);
-        syncNow->setVisible(in);
-        signOut->setVisible(in);
-        if (!cfg) status->setText(tr("Google sign-in isn’t set up yet. Click “Set up sign-in…” to paste your "
-                                     "OAuth client id + secret (use a “Desktop app” client)."));
-        else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
-        else status->setText(tr("Not signed in. Client configured — click “Sign in with Google”."));
-    };
-    refresh();
+        auto* signIn = panelRow(tr("Sign in with Google"));
+        auto* syncNow = panelRow(tr("Sync now"));
+        auto* signOut = panelRow(tr("Sign out"));
+        auto* setup = panelRow(tr("Set up sign-in…"));
+        v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(signOut); v->addWidget(setup);
 
-    connect(signIn, &QPushButton::clicked, &dlg, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
-    connect(signOut, &QPushButton::clicked, &dlg, [this] { cloud_->signOut(); });
-    connect(setup, &QPushButton::clicked, &dlg, [this, &dlg, refresh] {
-        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
-        bool ok = false;
-        const QString id = QInputDialog::getText(&dlg, tr("OAuth client id"),
-            tr("Google OAuth client id (Desktop-app type):"), QLineEdit::Normal,
-            s.value(QStringLiteral("cloud/clientId")).toString(), &ok);
-        if (!ok || id.trimmed().isEmpty()) return;
-        const QString sec = QInputDialog::getText(&dlg, tr("OAuth client secret"), tr("Google OAuth client secret:"),
-            QLineEdit::Normal, s.value(QStringLiteral("cloud/clientSecret")).toString(), &ok);
-        if (!ok) return;
-        s.setValue(QStringLiteral("cloud/clientId"), id.trimmed());
-        s.setValue(QStringLiteral("cloud/clientSecret"), sec.trimmed());
-        s.sync();
-        cloud_->signOut(); // the stored token (if any) was for the old client; start clean
+        auto refresh = [this, status, signIn, syncNow, signOut, setup] {
+            const bool cfg = CloudSync::isConfigured();
+            const bool in = cloud_->isSignedIn();
+            setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+            signIn->setVisible(cfg && !in);
+            syncNow->setVisible(in);
+            signOut->setVisible(in);
+            if (!cfg) status->setText(tr("Google sign-in isn’t set up yet — “Set up sign-in…” to paste a Desktop-app client."));
+            else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
+            else status->setText(tr("Not signed in — click “Sign in with Google”."));
+        };
         refresh();
-    });
-    connect(syncNow, &QPushButton::clicked, &dlg, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
-    connect(cloud_.get(), &CloudSync::signedIn, &dlg, [this, refresh](const QString&) {
-        refresh();
-        raise(); activateWindow();   // bring the app back in front of the browser tab
-        cloudSyncNow();              // first sync right after signing in
-    });
-    connect(cloud_.get(), &CloudSync::signInFailed, &dlg, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
-    connect(cloud_.get(), &CloudSync::signedOut, &dlg, [refresh] { refresh(); });
 
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    v->addWidget(box);
-    dlg.exec();
+        connect(signIn, &QPushButton::clicked, this, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
+        connect(signOut, &QPushButton::clicked, this, [this] { cloud_->signOut(); });
+        connect(syncNow, &QPushButton::clicked, this, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
+        connect(setup, &QPushButton::clicked, this, [this, refresh] {
+            QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            bool ok = false;
+            const QString id = QInputDialog::getText(this, tr("OAuth client id"),
+                tr("Google OAuth client id (Desktop-app type):"), QLineEdit::Normal,
+                s.value(QStringLiteral("cloud/clientId")).toString(), &ok);
+            if (!ok || id.trimmed().isEmpty()) return;
+            const QString sec = QInputDialog::getText(this, tr("OAuth client secret"), tr("Google OAuth client secret:"),
+                QLineEdit::Normal, s.value(QStringLiteral("cloud/clientSecret")).toString(), &ok);
+            if (!ok) return;
+            s.setValue(QStringLiteral("cloud/clientId"), id.trimmed());
+            s.setValue(QStringLiteral("cloud/clientSecret"), sec.trimmed());
+            s.sync();
+            cloud_->signOut();
+            refresh();
+        });
+        // Context = status (recreated each time the panel is built) -> these auto-disconnect on rebuild.
+        connect(cloud_.get(), &CloudSync::signedIn, status, [this, refresh](const QString&) {
+            refresh(); raise(); activateWindow(); cloudSyncNow();
+        });
+        connect(cloud_.get(), &CloudSync::signInFailed, status, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
+        connect(cloud_.get(), &CloudSync::signedOut, status, [refresh] { refresh(); });
+    }, [this] { openSettingsHub(); });
 }
 
 // Conflict-aware sync: pull when the cloud is newer, push when this device has changes, prompt when both.
@@ -784,44 +823,27 @@ void MainWindow::closeEvent(QCloseEvent* e)
 
 void MainWindow::openThemes()
 {
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Theme"));
-    dlg.resize(320, 380);
-    auto* v = new QVBoxLayout(&dlg);
-    v->addWidget(new QLabel(tr("Choose a theme:"), &dlg));
-
-    auto* list = new QListWidget(&dlg);
-    auto repopulate = [list] {
-        list->clear();
+    showPanel(tr("Theme"), [this](QVBoxLayout* v) {
         const QString cur = ThemeStore::currentName();
         for (const Theme& t : ThemeStore::all())
         {
-            auto* it = new QListWidgetItem(t.name, list);
-            if (t.name.compare(cur, Qt::CaseInsensitive) == 0) list->setCurrentItem(it);
+            const bool active = (t.name.compare(cur, Qt::CaseInsensitive) == 0);
+            auto* b = panelRow(active ? (t.name + QStringLiteral("   ✓")) : t.name);
+            connect(b, &QPushButton::clicked, this, [this, name = t.name] {
+                ThemeStore::setCurrent(name);
+                home_->applyTheme();
+                openThemes(); // rebuild to move the ✓
+            });
+            v->addWidget(b);
         }
-    };
-    repopulate();
-    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
-    v->addWidget(list, 1);
-
-    auto* browse = new QPushButton(tr("Browse Themes…"), &dlg);
-    connect(browse, &QPushButton::clicked, &dlg, [this, &dlg, repopulate] {
-        RegistryBrowser rb(RegistryBrowser::Themes, nullptr, &dlg);
-        rb.exec();
-        repopulate(); // a newly downloaded theme appears in the list
-    });
-    v->addWidget(browse);
-
-    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    v->addWidget(box);
-
-    if (dlg.exec() == QDialog::Accepted && list->currentItem())
-    {
-        ThemeStore::setCurrent(list->currentItem()->text());
-        home_->applyTheme();
-    }
+        auto* browse = panelRow(tr("Browse Themes…"));
+        connect(browse, &QPushButton::clicked, this, [this] {
+            RegistryBrowser rb(RegistryBrowser::Themes, nullptr, this); // still a popup (phase 2)
+            rb.exec();
+            openThemes();
+        });
+        v->addWidget(browse);
+    }, [this] { openSettingsHub(); });
 }
 
 void MainWindow::openEmulatorSettings()

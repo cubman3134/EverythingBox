@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QColor>
 #include <memory>
+#include <functional>
 #include "../addons/AddonModels.h"
 
 class MpvWidget;
@@ -21,6 +22,8 @@ class QListWidget;
 class QFrame;
 class QPushButton;
 class QTimer;
+class QScrollArea;
+class QVBoxLayout;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
 // with Open Video / Open Game and a transport bar. The shell the rest of the hub grows from.
@@ -79,6 +82,9 @@ private:
     void leaveFullScreen();   // restore windowed: status bar + cursor
     void revealMediaControls();
     void positionMediaControls();
+    // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
+    void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
+                   const std::function<void()>& onBack);
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
@@ -96,6 +102,12 @@ private:
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
+    // Inline settings/panel page (replaces popup dialogs).
+    QWidget* panelPage_ = nullptr;
+    QScrollArea* panelScroll_ = nullptr;
+    QLabel* panelTitle_ = nullptr;
+    QWidget* panelReturnTo_ = nullptr;     // the page to return to when the top-level panel's Back is hit
+    std::function<void()> panelOnBack_;
     double duration_ = 0.0;
     bool sliderDown_ = false;
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show

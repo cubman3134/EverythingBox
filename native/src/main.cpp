@@ -97,6 +97,16 @@ int main(int argc, char** argv)
     QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
 
+    // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
+    // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
+    app.setStyleSheet(QStringLiteral(
+        "QPushButton{min-height:30px;padding:8px 16px;font-size:14px;}"
+        "QLineEdit,QComboBox,QAbstractSpinBox{min-height:30px;padding:5px 10px;font-size:14px;}"
+        "QCheckBox,QRadioButton{font-size:14px;spacing:8px;}"
+        "QCheckBox::indicator,QRadioButton::indicator{width:20px;height:20px;}"
+        "QListWidget::item,QListView::item{min-height:34px;}"
+        "QScrollBar:vertical{width:14px;}QScrollBar:horizontal{height:14px;}"));
+
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
 
