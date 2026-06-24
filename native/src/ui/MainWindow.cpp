@@ -3,6 +3,7 @@
 #include "../emu/RetroView.h"
 #include "../ebook/EbookView.h"
 #include "../pdf/PdfView.h"
+#include "../comic/ComicView.h"
 #include "LibraryView.h"
 #include "HomeView.h"
 #include "ControllerRemapDialog.h"
@@ -66,6 +67,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     retro_ = new RetroView(this);
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
+    comic_ = new ComicView(this);
 
     addons_ = std::make_unique<AddonManager>();
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
@@ -94,6 +96,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     stack_->addWidget(pdf_);       // index 3 - pdf
     stack_->addWidget(library_);   // index 4 - addon library
     stack_->addWidget(home_);      // index 5 - home / catalog landing
+    stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
 
     // Inline settings panel page (Settings / Theme / Cloud Sync / General live here instead of popups).
     panelPage_ = new QWidget(this);
@@ -123,7 +126,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     panelScroll_->setWidgetResizable(true);
     panelScroll_->setFrameShape(QFrame::NoFrame);
     pv->addWidget(panelScroll_, 1);
-    stack_->addWidget(panelPage_); // index 6 - inline settings panels
+    stack_->addWidget(panelPage_); // index 7 - inline settings panels
 
     auto* central = new QWidget(this);
     auto* v = new QVBoxLayout(central);
@@ -208,6 +211,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     connect(home_, &HomeView::settingsRequested, this, &MainWindow::openSettingsHub);
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
+    connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
     connect(library_, &LibraryView::homeRequested, this, &MainWindow::openHome);
     connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
     connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
@@ -338,6 +342,7 @@ void MainWindow::openVideoPath(const QString& path)
     retro_->stop();
     book_->persist();
     pdf_->persist();
+    comic_->persist();
     clearAudioQueue();
     stack_->setCurrentWidget(playerPage_);
     player_->play(path);
@@ -360,6 +365,7 @@ void MainWindow::openAudio()
     retro_->stop();
     book_->persist();
     pdf_->persist();
+    comic_->persist();
     setAudioQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
     const QString first = sel.first();
     RecentStore::add({ first, QFileInfo(first).completeBaseName(), QStringLiteral("audio"), QString() });
@@ -380,6 +386,7 @@ void MainWindow::openAudioPath(const QString& path)
     retro_->stop();
     book_->persist();
     pdf_->persist();
+    comic_->persist();
     setAudioQueue(queue, start);
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
@@ -460,6 +467,7 @@ void MainWindow::openGamePath(const QString& rom)
     player_->stop();
     book_->persist();
     pdf_->persist();
+    comic_->persist();
     clearAudioQueue();
     QString err;
     if (retro_->openGame(corePath, rom, core, &err))
@@ -475,7 +483,8 @@ void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Document"), QString(),
-        tr("Documents (*.epub *.pdf);;EPUB books (*.epub);;PDF documents (*.pdf);;All files (*.*)"));
+        tr("Documents (*.epub *.pdf *.cbz);;EPUB books (*.epub);;PDF documents (*.pdf);;"
+           "Comics (*.cbz);;All files (*.*)"));
     if (f.isEmpty()) return;
     openDocumentPath(f);
 }
@@ -488,19 +497,19 @@ void MainWindow::openDocumentPath(const QString& f)
     if (ext == QStringLiteral("pdf"))
     {
         if (!pdf_->openPdf(f, &err)) { QMessageBox::warning(this, tr("Can't open PDF"), err); return; }
-        player_->stop();
-        retro_->stop();
-        book_->persist();
-        clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(pdf_);
+    }
+    else if (ext == QStringLiteral("cbz"))
+    {
+        if (!comic_->openComic(f, &err)) { QMessageBox::warning(this, tr("Can't open comic"), err); return; }
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        stack_->setCurrentWidget(comic_);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { QMessageBox::warning(this, tr("Can't open book"), err); return; }
-        player_->stop();
-        retro_->stop();
-        pdf_->persist();
-        clearAudioQueue();
+        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
     RecentStore::add({ f, QFileInfo(f).completeBaseName(), QStringLiteral("document"), QString() });
@@ -519,6 +528,7 @@ void MainWindow::openHome()
     retro_->stop();
     book_->persist();
     pdf_->persist();
+    comic_->persist();
     clearAudioQueue();
     home_->refresh();
     stack_->setCurrentWidget(home_);
@@ -576,23 +586,29 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { QMessageBox::warning(this, tr("Can't open book"), err); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
     {
         if (!pdf_->openPdf(url, &err)) { QMessageBox::warning(this, tr("Can't open PDF"), err); return; }
-        player_->stop(); retro_->stop(); book_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(pdf_);
+    }
+    else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
+    {
+        if (!comic_->openComic(url, &err)) { QMessageBox::warning(this, tr("Can't open comic"), err); return; }
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        stack_->setCurrentWidget(comic_);
     }
     else if (type == QStringLiteral("audio"))
     {
-        retro_->stop(); book_->persist(); pdf_->persist();
+        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         setAudioQueue({ url }, 0); // a single-track queue; libmpv also streams http(s) audio
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
-        retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();

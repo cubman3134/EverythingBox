@@ -11,6 +11,7 @@ class MpvWidget;
 class RetroView;
 class EbookView;
 class PdfView;
+class ComicView;
 class LibraryView;
 class HomeView;
 class AddonManager;
@@ -90,6 +91,7 @@ private:
     RetroView* retro_ = nullptr;
     EbookView* book_ = nullptr;
     PdfView* pdf_ = nullptr;
+    ComicView* comic_ = nullptr;
     LibraryView* library_ = nullptr;
     HomeView* home_ = nullptr;
     std::unique_ptr<AddonManager> addons_;

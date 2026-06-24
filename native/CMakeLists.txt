@@ -41,6 +41,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
+        src/comic/ComicView.cpp   src/comic/ComicView.h
         src/addons/AddonModels.cpp  src/addons/AddonModels.h
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
