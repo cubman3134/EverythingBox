@@ -34,6 +34,7 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
     mpv_observe_property(mpv, 0, "duration", MPV_FORMAT_DOUBLE);
     mpv_observe_property(mpv, 0, "media-title", MPV_FORMAT_STRING);
     mpv_observe_property(mpv, 0, "width", MPV_FORMAT_INT64);
+    mpv_observe_property(mpv, 0, "chapters", MPV_FORMAT_INT64); // chapter count -> show/hide chapter nav
 
     mpv_set_wakeup_callback(mpv, onMpvWakeup, this);
 
@@ -160,6 +161,10 @@ void MpvWidget::handleEvent(mpv_event* event)
                 hasVideo_ = true;       // a real video track -> no overlay
                 if (nowPlaying_) nowPlaying_->hide();
             }
+            else if (std::strcmp(prop->name, "chapters") == 0)
+            {
+                emit chapterCountChanged(static_cast<int>(*static_cast<int64_t*>(prop->data)));
+            }
         }
         else if (prop->format == MPV_FORMAT_STRING)
         {
@@ -177,6 +182,7 @@ void MpvWidget::handleEvent(mpv_event* event)
         mediaTitle_.clear();
         if (nowPlaying_) nowPlaying_->hide();
         if (npTimer_) npTimer_->start(400);
+        emit chapterCountChanged(0); // hide chapter nav until the new file reports its own count
         break;
     case MPV_EVENT_END_FILE:
     {
@@ -260,6 +266,19 @@ void MpvWidget::seekRelative(double seconds)
 void MpvWidget::setPosition(double seconds)
 {
     mpv_set_property(mpv, "time-pos", MPV_FORMAT_DOUBLE, &seconds);
+}
+
+void MpvWidget::nextChapter()
+{
+    const char* cmd[] = { "add", "chapter", "1", nullptr };
+    mpv_command_async(mpv, 0, cmd);
+}
+
+void MpvWidget::prevChapter()
+{
+    // "add chapter -1" from just-past a boundary snaps to the chapter start (the usual "skip back" behaviour).
+    const char* cmd[] = { "add", "chapter", "-1", nullptr };
+    mpv_command_async(mpv, 0, cmd);
 }
 
 void MpvWidget::cycleSubtitle()

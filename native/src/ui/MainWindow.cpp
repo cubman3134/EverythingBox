@@ -161,26 +161,35 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
         "#mediaControls QLabel { color: #e8e8e8; }"));
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
+    auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
     auto* rewind = new QPushButton(tr("⏪"), mediaControls_);
     auto* playPause = new QPushButton(tr("⏯"), mediaControls_);
     auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
+    auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     auto* subLoad = new QPushButton(tr("＋Sub"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
+    prevChap->setToolTip(tr("Previous chapter"));
     rewind->setToolTip(tr("Rewind 10s"));
     playPause->setToolTip(tr("Play / Pause"));
     fastFwd->setToolTip(tr("Forward 10s"));
+    nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
     subsBtn->setToolTip(tr("Subtitles: cycle tracks / off"));
     subLoad->setToolTip(tr("Load a subtitle file…"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
+    // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
+    prevChap->hide();
+    nextChap->hide();
     seek_ = new QSlider(Qt::Horizontal, mediaControls_);
     seek_->setRange(0, 1000);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
+    mc->addWidget(prevChap);
     mc->addWidget(rewind);
     mc->addWidget(playPause);
     mc->addWidget(fastFwd);
+    mc->addWidget(nextChap);
     mc->addWidget(stop);
     mc->addWidget(seek_, 1);
     mc->addWidget(time_);
@@ -231,6 +240,14 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     connect(library_, &LibraryView::homeRequested, this, &MainWindow::openHome);
     connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
     connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
+    connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
+    connect(nextChap, &QPushButton::clicked, this, [this] { player_->nextChapter(); revealMediaControls(); });
+    // Reveal the chapter-skip buttons only when the current file actually has chapters.
+    connect(player_, &MpvWidget::chapterCountChanged, this, [prevChap, nextChap](int count) {
+        const bool has = count > 1; // a single "chapter" spanning the whole file is not worth navigating
+        prevChap->setVisible(has);
+        nextChap->setVisible(has);
+    });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { player_->cycleSubtitle(); revealMediaControls(); });
     connect(subLoad, &QPushButton::clicked, this, [this] {

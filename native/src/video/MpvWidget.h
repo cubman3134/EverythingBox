@@ -25,11 +25,14 @@ public:
     void setPosition(double seconds);
     void cycleSubtitle();                     // step through subtitle tracks (… -> off -> 1 -> 2 -> …)
     void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
+    void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
+    void prevChapter();                       // jump to the previous chapter
 
 signals:
     void durationChanged(double seconds);
     void positionChanged(double seconds);
     void endReached();
+    void chapterCountChanged(int count);      // how many chapters the current file has (0 = none)
 
 protected:
     void initializeGL() override;
