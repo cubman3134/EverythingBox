@@ -19,6 +19,8 @@
 #include <QInputDialog>
 #include <QSettings>
 #include <QLineEdit>
+#include <QCheckBox>
+#include <QComboBox>
 #include "SettingsDialog.h"
 
 #include <QWidget>
@@ -560,16 +562,19 @@ void MainWindow::openSettingsHub()
     auto* v = new QVBoxLayout(&dlg);
     v->addWidget(new QLabel(tr("Choose a settings area:"), &dlg));
 
+    auto* general = new QPushButton(tr("General…"), &dlg);
     auto* theme = new QPushButton(tr("Theme…"), &dlg);
     auto* emu = new QPushButton(tr("Emulator Settings…"), &dlg);
     auto* inp = new QPushButton(tr("Input Mapping…"), &dlg);
     auto* addon = new QPushButton(tr("Addon Settings…"), &dlg);
     auto* cloud = new QPushButton(tr("Cloud Sync…"), &dlg);
+    connect(general, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openGeneralSettings(); });
     connect(theme, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openThemes(); });
     connect(emu, &QPushButton::clicked, this, &MainWindow::openEmulatorSettings);
     connect(inp, &QPushButton::clicked, this, &MainWindow::openInputMapping);
     connect(addon, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openLibrary(); });
     connect(cloud, &QPushButton::clicked, this, [this, &dlg] { dlg.accept(); openCloudSync(); });
+    v->addWidget(general);
     v->addWidget(theme);
     v->addWidget(emu);
     v->addWidget(inp);
@@ -580,6 +585,61 @@ void MainWindow::openSettingsHub()
     connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
     v->addWidget(box);
     dlg.exec();
+}
+
+void MainWindow::openGeneralSettings()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("General Settings"));
+    dlg.resize(380, 200);
+    auto* v = new QVBoxLayout(&dlg);
+
+    v->addWidget(new QLabel(tr("<b>Subtitles</b>"), &dlg));
+    auto* on = new QCheckBox(tr("Show subtitles by default"), &dlg);
+    on->setChecked(Settings::subtitlesOnByDefault());
+    v->addWidget(on);
+
+    auto* langRow = new QHBoxLayout();
+    langRow->addWidget(new QLabel(tr("Default language:"), &dlg));
+    auto* lang = new QComboBox(&dlg);
+    // (display name, ISO 639 code). Empty code = no preference / first available track.
+    const QList<QPair<QString, QString>> langs = {
+        { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
+        { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
+        { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
+        { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
+        { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
+        { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
+        { QStringLiteral("Arabic"), QStringLiteral("ara") },
+    };
+    const QString cur = Settings::subtitleLanguage();
+    bool found = false;
+    for (const auto& l : langs) { lang->addItem(l.first, l.second); if (l.second == cur) found = true; }
+    if (!found && !cur.isEmpty()) lang->addItem(tr("%1 (custom)").arg(cur), cur); // keep an unusual stored code
+    lang->setCurrentIndex(qMax(0, lang->findData(cur)));
+    lang->setEditable(true); // also allow typing any ISO 639 code (e.g. "swe")
+    lang->setEnabled(on->isChecked());
+    connect(on, &QCheckBox::toggled, lang, &QComboBox::setEnabled);
+    langRow->addWidget(lang, 1);
+    v->addLayout(langRow);
+
+    v->addWidget(new QLabel(tr("<span style='color:#888;font-size:11px;'>Applies to the next video. Subtitles "
+        "still toggle in-player with the CC button.</span>"), &dlg));
+    v->addStretch(1);
+
+    auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    v->addWidget(box);
+
+    if (dlg.exec() == QDialog::Accepted)
+    {
+        Settings::setSubtitlesOnByDefault(on->isChecked());
+        // If the text matches a named language, store its code; otherwise treat the text as a typed code.
+        const int idx = lang->findText(lang->currentText());
+        const QString code = (idx >= 0) ? lang->itemData(idx).toString() : lang->currentText().trimmed();
+        Settings::setSubtitleLanguage(code);
+    }
 }
 
 void MainWindow::openCloudSync()

@@ -43,6 +43,7 @@ private slots:
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel
     void cloudSyncNow();      // pull (if newer) then push the current state
     void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)

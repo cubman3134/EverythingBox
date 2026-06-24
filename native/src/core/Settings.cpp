@@ -9,6 +9,28 @@ static QSettings& store()
     return s;
 }
 
+bool Settings::subtitlesOnByDefault()
+{
+    return store().value(QStringLiteral("subs/onByDefault"), false).toBool();
+}
+
+void Settings::setSubtitlesOnByDefault(bool on)
+{
+    store().setValue(QStringLiteral("subs/onByDefault"), on);
+    store().sync();
+}
+
+QString Settings::subtitleLanguage()
+{
+    return store().value(QStringLiteral("subs/language")).toString();
+}
+
+void Settings::setSubtitleLanguage(const QString& code)
+{
+    store().setValue(QStringLiteral("subs/language"), code);
+    store().sync();
+}
+
 QString Settings::coreFor(const QString& systemId)
 {
     return store().value(QStringLiteral("cores/") + systemId).toString();

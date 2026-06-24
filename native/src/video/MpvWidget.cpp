@@ -1,4 +1,5 @@
 #include "MpvWidget.h"
+#include "../core/Settings.h"
 #include <QOpenGLContext>
 #include <QMetaObject>
 #include <QLabel>
@@ -215,6 +216,14 @@ void MpvWidget::refreshNowPlaying()
 
 void MpvWidget::play(const QString& url)
 {
+    // Apply the user's subtitle defaults before loading, so they take effect for this video (and changing
+    // them in Settings applies to the next one). "subs-fallback=yes" makes mpv select a sub track even when
+    // none is marked default; "slang" sets the preferred language so the right track is picked.
+    const QString lang = Settings::subtitleLanguage().trimmed();
+    if (!lang.isEmpty()) mpv_set_option_string(mpv, "slang", lang.toUtf8().constData());
+    const bool subsOn = Settings::subtitlesOnByDefault();
+    mpv_set_option_string(mpv, "subs-fallback", subsOn ? "yes" : "no");
+
     QByteArray u = url.toUtf8();
     const char* cmd[] = { "loadfile", u.constData(), nullptr };
     mpv_command_async(mpv, 0, cmd); // mpv copies the args

@@ -4,6 +4,13 @@
 
 namespace Settings
 {
+    // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
+    // 639 code like "eng"; empty = no preference / first available).
+    bool subtitlesOnByDefault();
+    void setSubtitlesOnByDefault(bool on);
+    QString subtitleLanguage();
+    void setSubtitleLanguage(const QString& code);
+
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 
