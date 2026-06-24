@@ -38,11 +38,18 @@ public:
                     std::function<void(const QString& id)> cb);
     void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
 
-    // ---- sync (slice 2) ----
-    // Pull: download + apply the Drive bundle if it's newer than what we last applied. result is one of
-    // "applied" | "current" | "none" | "error". Push: zip the local state and upload it.
-    void pull(std::function<void(const QString& result)> cb);
-    void push(std::function<void(bool ok, const QString& message)> cb);
+    // ---- sync ----
+    struct Status {
+        bool reached = false;       // we could reach Drive
+        bool hasRemote = false;     // a bundle exists on Drive
+        bool remoteChanged = false; // Drive's bundle differs from what we last applied (another device pushed)
+        bool localChanged = false;  // local state differs from what we last synced (this device has edits)
+        QString fileId, modifiedIso;
+    };
+    void checkStatus(std::function<void(const Status&)> cb);                  // query Drive + compare hashes
+    void applyRemote(const QString& fileId, const QString& modifiedIso,       // download + apply a bundle (pull)
+                     std::function<void(bool ok)> cb);
+    void pushLocal(std::function<void(bool ok, const QString& message)> cb);  // zip + upload the local state
 
 signals:
     void signedIn(const QString& email);

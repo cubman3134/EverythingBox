@@ -408,38 +408,79 @@ static bool applyBundle(const QByteArray& data)
     return true;
 }
 
-// ---- pull / push ------------------------------------------------------------------------------------
+// A deterministic fingerprint of the local synced state (settings + addon/theme files), independent of the
+// zip's byte layout. Lets us tell "this device has unsynced edits" from "nothing changed".
+static QByteArray stateHash()
+{
+    QCryptographicHash h(QCryptographicHash::Sha256);
+    QStringList keys;
+    for (const QString& k : store().allKeys()) if (!k.startsWith(QStringLiteral("cloud/"))) keys << k;
+    keys.sort();
+    for (const QString& k : keys)
+    { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
 
-void CloudSync::pull(std::function<void(const QString&)> cb)
+    const QString app = QCoreApplication::applicationDirPath();
+    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes") })
+    {
+        const QString dir = app + QStringLiteral("/") + sub;
+        QStringList files;
+        QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+        while (it.hasNext()) files << it.next();
+        files.sort();
+        for (const QString& f : files)
+        {
+            QFile file(f);
+            if (!file.open(QIODevice::ReadOnly)) continue;
+            h.addData((sub + QStringLiteral("/") + QDir(dir).relativeFilePath(f)).toUtf8());
+            h.addData(QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256));
+        }
+    }
+    return h.result().toHex();
+}
+
+void CloudSync::checkStatus(std::function<void(const Status&)> cb)
 {
     ensureFolder([this, cb](const QString& folderId) {
-        if (folderId.isEmpty()) { cb(QStringLiteral("error")); return; }
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, cb](const QString& id, const QString& modIso) {
-            if (id.isEmpty()) { cb(QStringLiteral("none")); return; } // nothing on Drive yet
-            if (modIso == store().value(QStringLiteral("cloud/appliedModified")).toString())
-            { cb(QStringLiteral("current")); return; }                // already the version we hold
-            downloadFile(id, [this, cb, modIso](bool ok, const QByteArray& data) {
-                if (!ok || !applyBundle(data)) { cb(QStringLiteral("error")); return; }
-                store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
-                store().sync();
-                cb(QStringLiteral("applied"));
-            });
+        Status st;
+        if (folderId.isEmpty()) { cb(st); return; } // unreachable
+        st.reached = true;
+        st.localChanged = (stateHash() != store().value(QStringLiteral("cloud/syncedHash")).toByteArray());
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, cb, st](const QString& id, const QString& modIso) mutable {
+            st.hasRemote = !id.isEmpty();
+            st.fileId = id;
+            st.modifiedIso = modIso;
+            st.remoteChanged = st.hasRemote && (modIso != store().value(QStringLiteral("cloud/appliedModified")).toString());
+            cb(st);
         });
     });
 }
 
-void CloudSync::push(std::function<void(bool, const QString&)> cb)
+void CloudSync::applyRemote(const QString& fileId, const QString& modifiedIso, std::function<void(bool)> cb)
+{
+    if (fileId.isEmpty()) { cb(false); return; }
+    downloadFile(fileId, [this, modifiedIso, cb](bool ok, const QByteArray& data) {
+        if (!ok || !applyBundle(data)) { cb(false); return; }
+        store().setValue(QStringLiteral("cloud/appliedModified"), modifiedIso);
+        store().setValue(QStringLiteral("cloud/syncedHash"), stateHash()); // we now match the remote
+        store().sync();
+        cb(true);
+    });
+}
+
+void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
 {
     ensureFolder([this, cb](const QString& folderId) {
         if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
         const QByteArray bundle = buildBundle();
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, cb](const QString& id, const QString&) {
+        const QByteArray hash = stateHash();
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](const QString& id, const QString&) {
             uploadFile(folderId, id, QString::fromLatin1(kBundleName), QStringLiteral("application/zip"), bundle,
-                       [this, folderId, cb](const QString& newId) {
+                       [this, folderId, hash, cb](const QString& newId) {
                 if (newId.isEmpty()) { cb(false, tr("Upload failed.")); return; }
-                // Record the new server modifiedTime as "applied" so our own push doesn't trigger a pull.
-                findFile(folderId, QString::fromLatin1(kBundleName), [this, cb](const QString&, const QString& modIso) {
-                    if (!modIso.isEmpty()) { store().setValue(QStringLiteral("cloud/appliedModified"), modIso); store().sync(); }
+                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](const QString&, const QString& modIso) {
+                    if (!modIso.isEmpty()) store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
+                    store().setValue(QStringLiteral("cloud/syncedHash"), hash);
+                    store().sync();
                     cb(true, tr("Backed up to Google Drive."));
                 });
             });

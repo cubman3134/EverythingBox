@@ -6,6 +6,8 @@
 #include <QMetaType>
 #include <QEventLoop>
 #include <QTimer>
+#include <QMessageBox>
+#include <QPushButton>
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
@@ -21,7 +23,28 @@ static void cloudPullAtStartup()
     if (!cloud.isSignedIn()) return;
     QEventLoop loop;
     QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never hang startup on a slow/absent network
-    cloud.pull([&loop](const QString&) { loop.quit(); });
+    cloud.checkStatus([&cloud, &loop](const CloudSync::Status& st) {
+        if (!st.reached || !st.hasRemote || !st.remoteChanged) { loop.quit(); return; }
+        if (st.localChanged)
+        {
+            // Both sides changed since the last sync -> let the user decide.
+            QMessageBox box(QMessageBox::Warning, QObject::tr("Sync conflict"),
+                QObject::tr("Your Google Drive has newer changes from another device, and this device also has "
+                            "unsynced changes.\n\nUse the cloud's data (replace this device), or keep this device "
+                            "(it will overwrite the cloud later)?"));
+            QPushButton* useCloud = box.addButton(QObject::tr("Use cloud data"), QMessageBox::AcceptRole);
+            box.addButton(QObject::tr("Keep this device"), QMessageBox::RejectRole);
+            box.exec();
+            if (box.clickedButton() == useCloud)
+                cloud.applyRemote(st.fileId, st.modifiedIso, [&loop](bool) { loop.quit(); });
+            else
+                loop.quit(); // keep local; the exit push will overwrite the cloud
+        }
+        else
+        {
+            cloud.applyRemote(st.fileId, st.modifiedIso, [&loop](bool) { loop.quit(); }); // remote-only change
+        }
+    });
     loop.exec();
 }
 

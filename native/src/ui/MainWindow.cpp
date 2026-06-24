@@ -646,29 +646,57 @@ void MainWindow::openCloudSync()
     dlg.exec();
 }
 
-// Pull newer Drive data (if any), then push the current state. Shown in the status bar.
+// Conflict-aware sync: pull when the cloud is newer, push when this device has changes, prompt when both.
 void MainWindow::cloudSyncNow()
 {
     if (!cloud_ || !cloud_->isSignedIn()) return;
     statusBar()->showMessage(tr("Syncing with Google Drive…"));
-    cloud_->pull([this](const QString& r) {
-        cloud_->push([this, r](bool ok, const QString& msg) {
-            if (r == QStringLiteral("applied"))
-                statusBar()->showMessage(tr("Downloaded newer data — restart to apply it."), 8000);
-            else
-                statusBar()->showMessage(ok ? tr("Synced with Google Drive.") : msg, 5000);
-        });
+    auto pulled = [this](bool ok) { statusBar()->showMessage(ok ? tr("Downloaded cloud data — restart to apply it.")
+                                                                 : tr("Sync failed."), 8000); };
+    auto pushed = [this](bool ok, const QString& m) { statusBar()->showMessage(ok ? tr("Synced with Google Drive.") : m, 5000); };
+    cloud_->checkStatus([this, pulled, pushed](const CloudSync::Status& st) {
+        if (!st.reached) { statusBar()->showMessage(tr("Couldn't reach Google Drive."), 5000); return; }
+        if (st.remoteChanged && st.localChanged)
+        {
+            QMessageBox box(QMessageBox::Warning, tr("Sync conflict"),
+                tr("The cloud has newer changes from another device, and this device has unsynced changes."), QMessageBox::NoButton, this);
+            QPushButton* useCloud = box.addButton(tr("Use cloud data"), QMessageBox::AcceptRole);
+            box.addButton(tr("Keep this device"), QMessageBox::RejectRole);
+            box.exec();
+            if (box.clickedButton() == useCloud) cloud_->applyRemote(st.fileId, st.modifiedIso, pulled);
+            else                                 cloud_->pushLocal(pushed);
+        }
+        else if (st.remoteChanged)               cloud_->applyRemote(st.fileId, st.modifiedIso, pulled);
+        else if (st.localChanged || !st.hasRemote) cloud_->pushLocal(pushed);
+        else                                     statusBar()->showMessage(tr("Already up to date."), 4000);
     });
 }
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
-    // Push the latest state on the way out (best-effort, with a timeout so quitting never hangs).
+    // On the way out: push this device's changes, but don't clobber a newer cloud unless the user says so.
     if (cloud_ && cloud_->isSignedIn())
     {
         QEventLoop loop;
-        QTimer::singleShot(8000, &loop, &QEventLoop::quit);
-        cloud_->push([&loop](bool, const QString&) { loop.quit(); });
+        QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never let quitting hang on the network
+        cloud_->checkStatus([this, &loop](const CloudSync::Status& st) {
+            if (!st.reached) { loop.quit(); return; }
+            if (st.remoteChanged && st.localChanged)
+            {
+                QMessageBox box(QMessageBox::Warning, tr("Sync conflict"),
+                    tr("The cloud has newer changes from another device, and this device has unsynced changes.\n\n"
+                       "Keep this device's data (overwrite the cloud), or discard this device's changes?"), QMessageBox::NoButton, this);
+                QPushButton* keep = box.addButton(tr("Keep this device"), QMessageBox::AcceptRole);
+                box.addButton(tr("Discard mine"), QMessageBox::RejectRole);
+                box.exec();
+                if (box.clickedButton() == keep) cloud_->pushLocal([&loop](bool, const QString&) { loop.quit(); });
+                else loop.quit(); // discard local; next startup pulls the cloud
+            }
+            else if (st.localChanged && !st.remoteChanged)
+                cloud_->pushLocal([&loop](bool, const QString&) { loop.quit(); });
+            else
+                loop.quit(); // nothing to push (or cloud is newer with no local edits -> startup will pull)
+        });
         loop.exec();
     }
     QMainWindow::closeEvent(e);
