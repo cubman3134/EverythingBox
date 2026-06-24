@@ -78,7 +78,8 @@ static QString audiobookKey(const QString& path)
     return QStringLiteral("audiobook/") + QString::fromLatin1(h) + QStringLiteral("/");
 }
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
+MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
+    : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
@@ -356,10 +357,30 @@ void MainWindow::showEvent(QShowEvent* event)
     activateWindow();
     QTimer::singleShot(0, this, [this] {
         activateWindow();
+        if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
+        // A startup conflict (both sides changed) is surfaced in-window now, after the shell is up.
+        QTimer::singleShot(600, this, [this] { maybeResolveStartupConflict(); });
     });
-    // A startup conflict (both sides changed) is surfaced in-window now, after the shell is up.
-    QTimer::singleShot(600, this, [this] { maybeResolveStartupConflict(); });
+}
+
+// Inline "Who's using My Media Vault?" picker, shown once the window is up (replaces the pre-window popup).
+void MainWindow::promptStartupProfile()
+{
+    startupChooseProfile_ = false;
+    auto* dlg = new ProfileDialog(/*mustChoose*/ true, this);
+    showDialogPanel(tr("Who's using My Media Vault?"), dlg, [this, dlg](int result) {
+        if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
+        {
+            ProfileStore::setCurrent(dlg->selectedId());
+            openHome();                    // render for the chosen profile
+            maybeResolveStartupConflict(); // then handle any deferred sync conflict
+        }
+        else
+        {
+            QApplication::quit(); // declined to choose -> exit (matches the old must-choose behaviour)
+        }
+    }, [this] { QApplication::quit(); }); // Back == decline -> exit
 }
 
 void MainWindow::revealMediaControls()
@@ -552,12 +573,15 @@ void MainWindow::openGamePath(const QString& rom)
     if (core.isEmpty())
         core = sys->cores.value(0); // catalog default
 
-    // No prompt: use the configured core, downloading it from the buildbot if it isn't installed.
+    // No prompt: use the configured core, downloading it from the buildbot if it isn't installed. Progress
+    // shows inline in the status bar; failures report there too.
     QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, this, &dlErr);
+    const QString corePath = CoreManager::ensureCore(core, this, &dlErr, [this, core](int pct) {
+        statusBar()->showMessage(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct));
+    });
     if (corePath.isEmpty())
     {
-        if (!dlErr.isEmpty()) statusBar()->showMessage(dlErr, 6000); // empty = user cancelled the download
+        statusBar()->showMessage(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr, 6000);
         return;
     }
 

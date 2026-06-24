@@ -102,22 +102,24 @@ int main(int argc, char** argv)
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
 
-    // A profile must be active before the app opens. One profile -> use it; otherwise (none, or several)
-    // the user picks an existing profile or creates one. Refusing to choose at startup exits the app.
+    // A profile must be active before the app is usable. One profile -> use it. With none or several, the
+    // picker is shown inline once the window is up (chooseProfile); set a provisional current first so the
+    // shell can build, then the inline picker confirms/creates the real choice.
     const QVector<Profile> profiles = ProfileStore::list();
+    const bool chooseProfile = (profiles.size() != 1);
     if (profiles.size() == 1)
     {
         ProfileStore::setCurrent(profiles.first().id);
     }
-    else
+    else if (!profiles.isEmpty())
     {
-        ProfileDialog dlg(/*mustChoose*/ true);
-        if (dlg.exec() != QDialog::Accepted || dlg.selectedId().isEmpty())
-            return 0; // no profile chosen -> don't start
-        ProfileStore::setCurrent(dlg.selectedId());
+        bool valid = false;
+        const QString cur = ProfileStore::currentId();
+        for (const Profile& p : profiles) if (p.id == cur) { valid = true; break; }
+        if (!valid) ProfileStore::setCurrent(profiles.first().id); // provisional until the user picks
     }
 
-    MainWindow window;
+    MainWindow window(chooseProfile);
     window.setWindowTitle(QStringLiteral("My Media Vault"));
     window.resize(1280, 760);
     window.show();

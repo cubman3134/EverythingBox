@@ -63,8 +63,10 @@ static bool unzipDllFromMemory(const QByteArray& zipData, const QString& destDir
     return ok;
 }
 
-QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QString* error)
+QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QString* error,
+                                const std::function<void(int)>& onProgress)
 {
+    Q_UNUSED(parent);
     if (isInstalled(coreName))
         return corePath(coreName);
 
@@ -72,31 +74,26 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QStrin
     const QString url = QStringLiteral("https://buildbot.libretro.com/nightly/windows/x86_64/latest/")
                         + coreName + QStringLiteral("_libretro.dll.zip");
 
-    QProgressDialog progress(QObject::tr("Downloading core '%1'…").arg(coreName),
-                             QObject::tr("Cancel"), 0, 100, parent);
-    progress.setWindowModality(Qt::WindowModal);
-    progress.setMinimumDuration(0);
-    progress.setValue(0);
-
     QNetworkAccessManager nam;
     QNetworkRequest req((QUrl(url)));
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
     QNetworkReply* reply = nam.get(req);
 
+    // Report progress to the caller's inline indicator (no popup). The event loop keeps the UI responsive
+    // while the download runs.
+    if (onProgress) onProgress(0);
     QEventLoop loop;
-    QObject::connect(reply, &QNetworkReply::downloadProgress, &progress, [&](qint64 r, qint64 t) {
-        if (t > 0) progress.setValue(static_cast<int>(r * 100 / t));
+    QObject::connect(reply, &QNetworkReply::downloadProgress, &loop, [&](qint64 r, qint64 t) {
+        if (t > 0 && onProgress) onProgress(static_cast<int>(r * 100 / t));
     });
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    QObject::connect(&progress, &QProgressDialog::canceled, reply, &QNetworkReply::abort);
     loop.exec();
 
     if (reply->error() != QNetworkReply::NoError)
     {
         const QString err = reply->errorString();
         reply->deleteLater();
-        if (error && err != QStringLiteral("Operation canceled")) // user-cancel is silent
-            *error = QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName, err);
+        if (error) *error = QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName, err);
         return QString();
     }
 

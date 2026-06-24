@@ -32,7 +32,8 @@ class MainWindow : public QMainWindow
 {
     Q_OBJECT
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    // chooseProfileAtStart: show the "Who's using…" picker inline after the window opens (0 or >1 profiles).
+    explicit MainWindow(bool chooseProfileAtStart = false, QWidget* parent = nullptr);
     ~MainWindow() override; // out-of-line so unique_ptr<AddonManager> is destroyed where it's complete
 
 private slots:
@@ -99,6 +100,7 @@ private:
                                const QString& secondaryLabel, const std::function<void()>& onSecondary,
                                const std::function<void()>& onBack);
     void maybeResolveStartupConflict(); // surface a deferred startup conflict in-window after first show
+    void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
@@ -129,6 +131,7 @@ private:
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
     bool forceClose_ = false;        // set once exit-sync is resolved, so closeEvent stops deferring the quit
     bool exitWatchdogActive_ = false; // the exit network watchdog is armed (disarmed while awaiting a choice)
+    bool startupChooseProfile_ = false; // show the profile picker inline on first show
 
     QStringList tracks_;     // current audio queue (absolute paths)
     int trackIndex_ = -1;    // index into tracks_, or -1 when not playing a queue

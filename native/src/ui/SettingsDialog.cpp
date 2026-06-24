@@ -105,13 +105,21 @@ void SettingsDialog::editOptions(const QString& systemId)
     status_->hide(); // clear any previous error
 
     // Make sure the core is present (download on first use), then load it headlessly to read its options.
+    // Progress + failures show inline in the status line (no popup).
     QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, this, &dlErr);
+    const QString corePath = CoreManager::ensureCore(core, this, &dlErr, [this, core](int pct) {
+        status_->setText(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct));
+        status_->setStyleSheet(QStringLiteral("color:#555;"));
+        status_->show();
+    });
     if (corePath.isEmpty())
     {
-        if (!dlErr.isEmpty()) { status_->setText(dlErr); status_->show(); } // empty = user cancelled
+        status_->setStyleSheet(QStringLiteral("color:#c0392b;"));
+        status_->setText(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
+        status_->show();
         return;
     }
+    status_->hide(); // clear the progress line on success
 
     LibretroCore tmp;
     std::string err;
