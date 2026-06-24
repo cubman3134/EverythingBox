@@ -47,9 +47,22 @@ jobs:
           Invoke-WebRequest $asset.browser_download_url -OutFile mpv-dev.7z
           New-Item -ItemType Directory -Force -Path mpv | Out-Null
           7z x mpv-dev.7z -ompv | Out-Null
-          # Build an MSVC import library from the shipped module-definition file.
-          $def = Get-ChildItem mpv -Recurse -Filter '*.def' | Select-Object -First 1
-          lib /def:"$($def.FullName)" /name:libmpv-2.dll /out:mpv\mpv.lib /MACHINE:X64
+          $dll = Get-ChildItem mpv -Recurse -Filter 'libmpv-2.dll' | Select-Object -First 1
+          if (-not $dll) { throw 'libmpv-2.dll not found in package' }
+          Write-Host "DLL: $($dll.FullName)"
+          # Build the MSVC import library from the DLL's REAL export names (robust regardless of how the
+          # shipped .def is formatted — the prior def-based lib produced unresolved symbols).
+          $names = & dumpbin /nologo /exports $dll.FullName | ForEach-Object {
+            if ($_ -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+(\S+)') { $Matches[1] }
+          }
+          Write-Host "Parsed $($names.Count) exports"
+          if ($names.Count -lt 20) { throw "Too few exports parsed ($($names.Count))" }
+          "EXPORTS" | Set-Content mpv\libmpv.def -Encoding ascii
+          $names | Add-Content mpv\libmpv.def -Encoding ascii
+          lib /nologo /def:mpv\libmpv.def /name:libmpv-2.dll /out:mpv\mpv.lib /MACHINE:X64
+          if (-not (& dumpbin /nologo /linkermember:1 mpv\mpv.lib | Select-String 'mpv_create')) {
+            throw 'Generated mpv.lib is missing mpv_create'
+          }
           "MPV_DIR=$((Resolve-Path mpv).Path)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Fetch SDL2 (dev)
@@ -207,10 +220,16 @@ jobs:
           chmod +x linuxdeploy*.AppImage
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export EXTRA_QT_PLUGINS="multimedia;tls;networkinformation;imageformats"
+          export OUTPUT=MyMediaVault-linux-x86_64.AppImage
           ./linuxdeploy-x86_64.AppImage --appdir $APPDIR \
             -e build/MyMediaVault -i MyMediaVault.png -d MyMediaVault.desktop \
             --plugin qt --output appimage
-          mv MyMediaVault*.AppImage MyMediaVault-linux-x86_64.AppImage
+          # $OUTPUT sets the produced name; fall back to whatever AppImage was emitted (excluding the tools).
+          if [ ! -f "$OUTPUT" ]; then
+            f=$(find . -maxdepth 1 -name '*.AppImage' ! -name 'linuxdeploy*' | head -n1)
+            mv "$f" "$OUTPUT"
+          fi
+          ls -la "$OUTPUT"
 
       - uses: actions/upload-artifact@v4
         with:
