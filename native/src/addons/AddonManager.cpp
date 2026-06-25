@@ -217,6 +217,179 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
     return QJsonDocument(o).toJson(QJsonDocument::Compact).toBase64(QByteArray::Base64UrlEncoding);
 }
 
+// --- Stremio protocol dialect ------------------------------------------------------------------------
+// Stremio addons are HTTP services with a manifest.json declaring resources (catalog/meta/stream) + types,
+// and routes /catalog/{type}/{id}.json, /meta/{type}/{id}.json, /stream/{type}/{id}.json. We translate
+// those into our MediaCatalog / MediaDetail / MediaItem models so they appear as ordinary catalogs.
+
+// Detect + parse a Stremio manifest into one of our AddonManifests (catalogs keyed "type/id"), plus the
+// declared resources/types. Returns false if it isn't a Stremio manifest.
+static bool parseStremioManifest(const QByteArray& json, AddonManifest* outM, QStringList* outRes, QStringList* outTypes)
+{
+    const QJsonObject o = QJsonDocument::fromJson(json).object();
+    if (!o.contains(QStringLiteral("resources")) || !o.contains(QStringLiteral("types"))) return false;
+
+    AddonManifest m;
+    m.id = o.value(QStringLiteral("id")).toString();
+    m.name = o.value(QStringLiteral("name")).toString(m.id);
+    m.version = o.value(QStringLiteral("version")).toString();
+    m.type = QStringLiteral("media-source"); // present it like one of ours
+    m.description = o.value(QStringLiteral("description")).toString();
+
+    QStringList resources, types;
+    for (const QJsonValue& r : o.value(QStringLiteral("resources")).toArray())
+        resources << (r.isString() ? r.toString() : r.toObject().value(QStringLiteral("name")).toString());
+    for (const QJsonValue& t : o.value(QStringLiteral("types")).toArray()) types << t.toString();
+
+    for (const QJsonValue& cv : o.value(QStringLiteral("catalogs")).toArray())
+    {
+        const QJsonObject c = cv.toObject();
+        const QString ctype = c.value(QStringLiteral("type")).toString();
+        const QString cid = c.value(QStringLiteral("id")).toString();
+        // Skip catalogs that require a search/genre to return anything (no plain landing page).
+        bool requiresExtra = false;
+        for (const QJsonValue& ev : c.value(QStringLiteral("extra")).toArray())
+            if (ev.toObject().value(QStringLiteral("isRequired")).toBool()) { requiresExtra = true; break; }
+        for (const QJsonValue& ev : c.value(QStringLiteral("extraRequired")).toArray())
+            { Q_UNUSED(ev); requiresExtra = true; }
+        if (requiresExtra) continue;
+        AddonCatalog cat;
+        cat.id = ctype + QStringLiteral("/") + cid; // encode type+id for the route
+        cat.type = ctype;                            // drives our icons/routing
+        cat.name = c.value(QStringLiteral("name")).toString(ctype);
+        m.catalogs.push_back(cat);
+    }
+    *outM = m; *outRes = resources; *outTypes = types;
+    return true;
+}
+
+// Build an addon (Stremio dialect if applicable, else our own) from a cached manifest. Returns null on bad data.
+static std::unique_ptr<LoadedAddon> buildRemoteAddon(const QString& base, const QByteArray& manifestJson)
+{
+    AddonManifest manifest; QStringList res, types;
+    const bool isStremio = parseStremioManifest(manifestJson, &manifest, &res, &types);
+    bool ok = isStremio;
+    if (!isStremio) manifest = AddonManifest::fromJson(manifestJson, &ok);
+    if (!ok) return nullptr;
+    if (!isStremio && manifest.type != QStringLiteral("media-source")) return nullptr;
+
+    auto entry = std::make_unique<LoadedAddon>();
+    entry->transport = LoadedAddon::RemoteHttp;
+    entry->baseUrl = base;
+    entry->manifest = manifest;
+    entry->stremio = isStremio;
+    entry->stremioResources = res;
+    entry->stremioTypes = types;
+    return entry;
+}
+
+static QUrl stremioCatalogUrl(const QString& base, const QString& typeSlashId, const QString& query, int page)
+{
+    const int slash = typeSlashId.indexOf(QLatin1Char('/'));
+    const QString type = slash > 0 ? typeSlashId.left(slash) : typeSlashId;
+    const QString id   = slash > 0 ? typeSlashId.mid(slash + 1) : QString();
+    QString u = base + QStringLiteral("/catalog/") + segEnc(type) + QStringLiteral("/") + segEnc(id);
+    QStringList extra;
+    if (!query.isEmpty()) extra << QStringLiteral("search=") + segEnc(query);
+    if (page > 1)         extra << QStringLiteral("skip=") + QString::number((page - 1) * 100); // Stremio paginates by skip
+    if (!extra.isEmpty()) u += QStringLiteral("/") + extra.join(QLatin1Char('&'));
+    return QUrl(u + QStringLiteral(".json"));
+}
+static QUrl stremioMetaUrl(const QString& base, const QString& type, const QString& id)
+{ return QUrl(base + QStringLiteral("/meta/") + segEnc(type) + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json")); }
+static QUrl stremioStreamUrl(const QString& base, const QString& type, const QString& id)
+{ return QUrl(base + QStringLiteral("/stream/") + segEnc(type) + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json")); }
+
+// {metas:[{id,type,name,poster,...}]} -> our catalog. Series are containers (drill into episodes via meta).
+static MediaCatalog parseStremioCatalog(const QByteArray& body)
+{
+    MediaCatalog cat;
+    const QJsonArray metas = QJsonDocument::fromJson(body).object().value(QStringLiteral("metas")).toArray();
+    for (const QJsonValue& mv : metas)
+    {
+        const QJsonObject m = mv.toObject();
+        MediaItem it;
+        it.id = m.value(QStringLiteral("id")).toString();
+        it.type = m.value(QStringLiteral("type")).toString();
+        it.title = m.value(QStringLiteral("name")).toString();
+        it.thumbnailUrl = m.value(QStringLiteral("poster")).toString();
+        it.expandable = (it.type == QStringLiteral("series"));
+        if (!it.id.isEmpty()) cat.items.push_back(it);
+    }
+    cat.hasMore = (metas.size() >= 100); // a full page -> probably more (Stremio doesn't report it)
+    return cat;
+}
+
+static QString joinStremioList(const QJsonArray& a, int max = 6)
+{
+    QStringList parts;
+    for (const QJsonValue& v : a) { parts << v.toString(); if (parts.size() >= max) break; }
+    return parts.join(QStringLiteral(", "));
+}
+
+// {meta:{...}} -> the detail-page header.
+static MediaDetail parseStremioMeta(const QByteArray& body)
+{
+    MediaDetail d;
+    const QJsonObject m = QJsonDocument::fromJson(body).object().value(QStringLiteral("meta")).toObject();
+    if (m.isEmpty()) return d;
+    d.title = m.value(QStringLiteral("name")).toString();
+    d.overview = m.value(QStringLiteral("description")).toString();
+    d.imageUrl = m.value(QStringLiteral("poster")).toString();
+    const QString genres = joinStremioList(m.value(QStringLiteral("genres")).toArray());
+    if (!genres.isEmpty()) d.facts.push_back({ QStringLiteral("Genres"), genres });
+    const QString cast = joinStremioList(m.value(QStringLiteral("cast")).toArray());
+    if (!cast.isEmpty()) d.facts.push_back({ QStringLiteral("Cast"), cast });
+    const QString director = joinStremioList(m.value(QStringLiteral("director")).toArray());
+    if (!director.isEmpty()) d.facts.push_back({ QStringLiteral("Director"), director });
+    const QString rel = m.value(QStringLiteral("releaseInfo")).toString();
+    if (!rel.isEmpty()) d.facts.push_back({ QStringLiteral("Released"), rel });
+    const QString runtime = m.value(QStringLiteral("runtime")).toString();
+    if (!runtime.isEmpty()) d.facts.push_back({ QStringLiteral("Runtime"), runtime });
+    const double imdb = m.value(QStringLiteral("imdbRating")).toString().toDouble();
+    if (imdb > 0) d.facts.push_back({ QStringLiteral("IMDb"), QString::number(imdb) });
+    d.valid = !d.title.isEmpty();
+    return d;
+}
+
+// meta.videos[] -> episode children (id "tt:S:E", typed "series" so /stream/series/<id> resolves).
+static MediaCatalog parseStremioVideos(const QByteArray& body)
+{
+    MediaCatalog cat;
+    const QJsonObject m = QJsonDocument::fromJson(body).object().value(QStringLiteral("meta")).toObject();
+    for (const QJsonValue& vv : m.value(QStringLiteral("videos")).toArray())
+    {
+        const QJsonObject v = vv.toObject();
+        MediaItem it;
+        it.id = v.value(QStringLiteral("id")).toString();
+        it.type = QStringLiteral("series"); // the stream route uses the series type for episodes
+        it.title = v.value(QStringLiteral("name")).toString(v.value(QStringLiteral("title")).toString());
+        const int s = v.value(QStringLiteral("season")).toInt(-1), e = v.value(QStringLiteral("episode")).toInt(-1);
+        if (s >= 0 && e >= 0) it.subtitle = QStringLiteral("S%1 · E%2").arg(s).arg(e);
+        it.thumbnailUrl = v.value(QStringLiteral("thumbnail")).toString();
+        it.expandable = false;
+        if (!it.id.isEmpty()) cat.items.push_back(it);
+    }
+    return cat;
+}
+
+// {streams:[{url|infoHash|ytId|externalUrl, ...}]} -> first directly-playable http(s) url (skips torrents we
+// can't stream without a debrid-configured addon, which already returns an http url here).
+static QString pickStremioStreamUrl(const QByteArray& body, QString* mime = nullptr)
+{
+    for (const QJsonValue& sv : QJsonDocument::fromJson(body).object().value(QStringLiteral("streams")).toArray())
+    {
+        const QJsonObject s = sv.toObject();
+        const QString url = s.value(QStringLiteral("url")).toString();
+        if (url.startsWith(QStringLiteral("http")))
+        {
+            if (mime) *mime = s.value(QStringLiteral("mime")).toString();
+            return url;
+        }
+    }
+    return {};
+}
+
 // --- AddonManager ------------------------------------------------------------------------------------
 
 AddonManager::AddonManager(QObject* parent) : QObject(parent)
@@ -227,6 +400,7 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     root_ = QCoreApplication::applicationDirPath() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
+    seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
 }
 
 void AddonManager::reload()
@@ -258,18 +432,22 @@ void AddonManager::loadRemoteSources()
     {
         const QByteArray mf = store().value(manifestCacheKey(base)).toByteArray();
         if (mf.isEmpty()) continue; // manifest not fetched yet (added on a previous run that failed) - skip
-        bool ok = false;
-        AddonManifest manifest = AddonManifest::fromJson(mf, &ok);
-        if (!ok) continue;
-
-        auto entry = std::make_unique<LoadedAddon>();
-        entry->transport = LoadedAddon::RemoteHttp;
-        entry->baseUrl = base;
-        entry->manifest = manifest;
+        auto entry = buildRemoteAddon(base, mf); // Stremio dialect or our own, auto-detected
+        if (!entry) continue;
         LoadedAddon* raw = entry.get();
         loaded_.push_back(std::move(entry));
         if (raw->isMediaSource()) sources_.push_back(raw);
     }
+}
+
+// Add Cinemeta (Stremio's public movie/series metadata addon) on first run, so movie/series catalogs and
+// IMDB ids work out of the box for any Stremio stream addon the user adds. One-time; the user can remove it.
+void AddonManager::seedDefaultStremioSources()
+{
+    if (store().value(QStringLiteral("addon.stremio.seeded")).toBool()) return;
+    store().setValue(QStringLiteral("addon.stremio.seeded"), true);
+    store().sync();
+    addRemoteSource(QStringLiteral("https://v3-cinemeta.strem.io/manifest.json"));
 }
 
 void AddonManager::loadFolder(const QString& dir)
@@ -444,17 +622,19 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
 {
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
-    QNetworkRequest rq(remoteCatalogUrl(base, catalogId, query, page));
+    const bool stremio = src->stremio;
+    QNetworkRequest rq(stremio ? stremioCatalogUrl(base, catalogId, query, page)
+                               : remoteCatalogUrl(base, catalogId, query, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
         MediaCatalog cat;
         if (reply->error() == QNetworkReply::NoError)
         {
-            cat = MediaCatalog::fromJson(reply->readAll());
+            cat = stremio ? parseStremioCatalog(reply->readAll()) : MediaCatalog::fromJson(reply->readAll());
             for (MediaItem& it : cat.items)
             {
                 it.url = resolveRemoteUrl(it.url, base);
@@ -470,17 +650,20 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
 {
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
-    QNetworkRequest rq(remoteDetailUrl(base, item.type, item.id, page));
+    const bool stremio = src->stremio;
+    // Stremio has no separate "children" route: a series' episodes come from its /meta videos[].
+    QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id)
+                               : remoteDetailUrl(base, item.type, item.id, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
         MediaCatalog cat;
         if (reply->error() == QNetworkReply::NoError)
         {
-            cat = MediaCatalog::fromJson(reply->readAll());
+            cat = stremio ? parseStremioVideos(reply->readAll()) : MediaCatalog::fromJson(reply->readAll());
             for (MediaItem& it : cat.items)
             {
                 it.url = resolveRemoteUrl(it.url, base);
@@ -496,17 +679,18 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
 {
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
-    QNetworkRequest rq(remoteMetaUrl(base, item.type, item.id));
+    const bool stremio = src->stremio;
+    QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id) : remoteMetaUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
         MediaDetail d;
         if (reply->error() == QNetworkReply::NoError)
         {
-            d = MediaDetail::fromJson(reply->readAll());
+            d = stremio ? parseStremioMeta(reply->readAll()) : MediaDetail::fromJson(reply->readAll());
             d.imageUrl = resolveRemoteUrl(d.imageUrl, base);
         }
         emit metaReady(reqId, d);
@@ -514,10 +698,41 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     return reqId;
 }
 
+void AddonManager::resolveStremioStream(const MediaItem& item,
+                                        std::function<void(const QString&, const QString&)> cb)
+{
+    // Query EVERY installed Stremio addon that offers streams for this type (like Stremio aggregates), and
+    // take the first directly-playable http url that comes back.
+    QVector<LoadedAddon*> providers;
+    for (LoadedAddon* s : sources_)
+        if (s->stremio && isEnabled(s->manifest.id) && s->stremioResources.contains(QStringLiteral("stream"))
+            && (s->stremioTypes.isEmpty() || s->stremioTypes.contains(item.type)))
+            providers.push_back(s);
+    if (providers.isEmpty()) { cb(QString(), QString()); return; }
+
+    auto state = std::make_shared<QPair<int, bool>>(providers.size(), false); // {pending, done}
+    for (LoadedAddon* p : providers)
+    {
+        QNetworkRequest rq(stremioStreamUrl(p->baseUrl, item.type, item.id));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [reply, state, cb] {
+            reply->deleteLater();
+            if (state->second) return; // already answered
+            QString url, mime;
+            if (reply->error() == QNetworkReply::NoError) url = pickStremioStreamUrl(reply->readAll(), &mime);
+            if (!url.isEmpty()) { state->second = true; cb(url, mime); return; }
+            if (--state->first == 0 && !state->second) cb(QString(), QString()); // all came back empty
+        });
+    }
+}
+
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
                                  std::function<void(const QString&, const QString&)> cb)
 {
     if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString()); return; }
+    if (src->stremio) { resolveStremioStream(item, cb); return; } // aggregate across Stremio stream addons
     const QString base = src->baseUrl;
     QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
@@ -606,10 +821,10 @@ void AddonManager::addRemoteSource(const QString& url)
         { emit remoteSourceResult(false, tr("Couldn't reach that addon: %1").arg(reply->errorString())); return; }
 
         const QByteArray data = reply->readAll();
-        bool ok = false;
-        const AddonManifest m = AddonManifest::fromJson(data, &ok);
-        if (!ok || m.type != QStringLiteral("media-source"))
-        { emit remoteSourceResult(false, tr("That URL isn't a valid media-source addon.")); return; }
+        auto built = buildRemoteAddon(base, data); // validates (Stremio or our own)
+        if (!built)
+        { emit remoteSourceResult(false, tr("That URL isn't a valid addon.")); return; }
+        const AddonManifest m = built->manifest;
 
         // Persist the URL (once) + cache its manifest. We store ONLY the URL + manifest, never any code.
         QStringList urls = remoteSourceUrls();

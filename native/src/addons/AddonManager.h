@@ -29,9 +29,13 @@ struct LoadedAddon
     QString source;    // JsLocal: entry script text (re-evaluated per request on a worker thread)
     QString baseUrl;   // RemoteHttp: service base URL (the manifest URL minus "/manifest.json")
     bool hasScript = false;
+    // A RemoteHttp addon that speaks the Stremio protocol (catalog/meta/stream resources) instead of ours.
+    bool stremio = false;
+    QStringList stremioResources; // "catalog" / "meta" / "stream" / "subtitles"
+    QStringList stremioTypes;     // "movie" / "series" / ...
     bool isMediaSource() const
     {
-        return manifest.type == QStringLiteral("media-source")
+        return (manifest.type == QStringLiteral("media-source") || stremio)
                && (transport == RemoteHttp || hasScript);
     }
 };
@@ -102,6 +106,10 @@ signals:
 private:
     void loadFolder(const QString& dir);
     void loadRemoteSources();                   // build RemoteHttp addons from the persisted URL list
+    void seedDefaultStremioSources();           // add Cinemeta on first run so movie/series catalogs work
+    // Stremio stream resolution aggregates across every installed Stremio stream addon (à la Stremio).
+    void resolveStremioStream(const MediaItem& item,
+                              std::function<void(const QString& url, const QString& mime)> cb);
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
     int dispatch(const AddonRequest& req);     // run getCatalog/getDetail off-thread, deliver via catalogReady
     int dispatchMeta(const AddonRequest& req); // run getMeta off-thread, deliver via metaReady
