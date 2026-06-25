@@ -74,6 +74,9 @@ private:
     void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
     void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
+    void populateSteamGames();                           // (re)build the Steam games list natively
+    void requestSteamMeta(const MediaItem& item, int reqId); // native detail fetch for a Steam game
+    QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
     void applyGridMode(bool recentList); // switch grid_ between the catalog poster grid and the recent list
@@ -132,6 +135,8 @@ private:
     QVBoxLayout* metaTextCol_ = nullptr; // the reorderable text column (favorite/title/facts/overview)
     QLabel* metaImage_ = nullptr;
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
+    QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
+    int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     QLabel* metaTitle_ = nullptr;
     QLabel* metaFacts_ = nullptr;
     QTextBrowser* metaOverview_ = nullptr;

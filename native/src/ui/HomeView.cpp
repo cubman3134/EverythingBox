@@ -26,6 +26,10 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QUrlQuery>
 #include <QScrollBar>
 #include <QPixmap>
 #include <QPainter>
@@ -489,6 +493,27 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     favBtn_->installEventFilter(this); // Backspace here = Back (the detail page focuses this button)
     mc->addWidget(favBtn_, 0, Qt::AlignLeft);
+    // Launch button, shown on a Steam game's info page (hidden otherwise). Sits in the "favorite" slot.
+    playBtn_ = new QPushButton(tr("▶  Play"), meta_);
+    playBtn_->setCursor(Qt::PointingHandCursor);
+    playBtn_->setVisible(false);
+    playBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#3FA95E;border:2px solid #2E7D45;border-radius:6px;"
+        "padding:6px 18px;color:#fff;font-weight:bold;}"
+        "QPushButton:hover{background:#48BE6B;}"
+        "QPushButton:focus{background:#54CE78;border-color:#1E5E32;}"));
+    connect(playBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem& it = stack_.last().item;
+        if (it.mime == QStringLiteral("steamgame"))
+        {
+            MediaItem m = it;
+            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
+            emit openItem(m); // MainWindow launches the steam:// URL
+        }
+    });
+    playBtn_->installEventFilter(this); // Backspace here = Back
+    mc->addWidget(playBtn_, 0, Qt::AlignLeft);
     metaTitle_ = new QLabel(meta_);
     metaTitle_->setWordWrap(true);
     metaTitle_->setTextFormat(Qt::RichText);
@@ -839,8 +864,8 @@ void HomeView::focusContent()
         carousel_->setFocus(Qt::OtherFocusReason);
     else if (grid_->isVisible() && grid_->count() > 0)
         grid_->setFocus(Qt::OtherFocusReason);
-    else if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
-        favBtn_->setFocus(Qt::OtherFocusReason); // a leaf detail page -> the Favorite button is the content
+    else if (meta_ && meta_->isVisible() && detailActionButton())
+        detailActionButton()->setFocus(Qt::OtherFocusReason); // a leaf detail page -> its action button
     else if (activeTypeButton_)
         activeTypeButton_->setFocus(Qt::OtherFocusReason);
 }
@@ -950,6 +975,7 @@ void HomeView::layoutMetaSections(const QString& itemType)
     if (order.isEmpty()) order = { "favorite", "title", "facts", "overview" };
 
     metaTextCol_->removeWidget(favBtn_);
+    if (playBtn_) metaTextCol_->removeWidget(playBtn_);
     metaTextCol_->removeWidget(metaTitle_);
     metaTextCol_->removeWidget(metaFacts_);
     metaTextCol_->removeWidget(metaOverview_);
@@ -958,7 +984,9 @@ void HomeView::layoutMetaSections(const QString& itemType)
     auto place = [&](const QString& key) {
         if (added.contains(key)) return;
         added.insert(key);
-        if (key == "favorite")      metaTextCol_->addWidget(favBtn_, 0, Qt::AlignLeft);
+        // The action slot holds both Play (Steam) and Favorite; only the relevant one is visible.
+        if (key == "favorite")      { if (playBtn_) metaTextCol_->addWidget(playBtn_, 0, Qt::AlignLeft);
+                                      metaTextCol_->addWidget(favBtn_, 0, Qt::AlignLeft); }
         else if (key == "title")    metaTextCol_->addWidget(metaTitle_);
         else if (key == "facts")    metaTextCol_->addWidget(metaFacts_);
         else if (key == "overview") metaTextCol_->addWidget(metaOverview_, 1);
@@ -966,6 +994,14 @@ void HomeView::layoutMetaSections(const QString& itemType)
     for (const QString& k : order) place(k);
     for (const QString& k : { QStringLiteral("favorite"), QStringLiteral("title"),
                               QStringLiteral("facts"), QStringLiteral("overview") }) place(k);
+}
+
+// The focusable action on the current detail page: Play for a Steam game, otherwise Favorite.
+QWidget* HomeView::detailActionButton() const
+{
+    if (playBtn_ && playBtn_->isVisible()) return playBtn_;
+    if (favBtn_  && favBtn_->isVisible())  return favBtn_;
+    return nullptr;
 }
 
 void HomeView::focusTypeButton(int idx)
@@ -1025,8 +1061,8 @@ void HomeView::focusChrome(QWidget* from, int dir)
 // Favorite button first; otherwise go straight to the top chrome.
 void HomeView::focusUpFromColumn()
 {
-    if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
-        favBtn_->setFocus(Qt::OtherFocusReason);
+    if (meta_ && meta_->isVisible() && detailActionButton())
+        detailActionButton()->setFocus(Qt::OtherFocusReason);
     else
         focusChromeRow();
 }
@@ -1065,8 +1101,12 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Steam");
     stack_.push_back(lvl);
+    populateSteamGames(); // also re-run by loadTop() when Back returns to this level
+}
 
-    // Build the games natively from the local Steam library (no addon request).
+// (Re)build the Steam games grid/column natively from the local library (no addon request).
+void HomeView::populateSteamGames()
+{
     MediaCatalog cat;
     cat.title = tr("Steam");
     for (const SteamGame& g : SteamLibrary::installedGames())
@@ -1075,7 +1115,7 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
         it.id = QStringLiteral("steam:") + g.appid;
         it.type = QStringLiteral("game");
         it.title = g.name;
-        it.url = SteamLibrary::launchUrl(g.appid);  // steam:// -> MainWindow launches it
+        it.mime = QStringLiteral("steamgame"); // no url -> clicking opens the info page; Play launches it
         it.thumbnailUrl = SteamLibrary::posterUrl(g.appid);
         cat.items.push_back(it);
     }
@@ -1284,8 +1324,8 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (k == Qt::Key_Backspace) { goBack(); return true; }
             return false;
         }
-        // --- Detail page: the Favorite button ---
-        if (obj == favBtn_)
+        // --- Detail page: the action button (Favorite, or Play for a Steam game) ---
+        if (obj == favBtn_ || (playBtn_ && obj == playBtn_))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
             if (k == Qt::Key_Down) // drop into the child column (container detail), if any is shown
@@ -1295,7 +1335,8 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (col) focusContent();
                 return true;
             }
-            if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space) { favBtn_->click(); return true; }
+            if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
+            { if (auto* b = qobject_cast<QPushButton*>(obj)) b->click(); return true; }
             if (k == Qt::Key_Backspace) { goBack(); return true; }
             return false;
         }
@@ -1328,8 +1369,8 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (firstItem && cur &&
                     grid_->visualItemRect(cur).top() <= grid_->visualItemRect(firstItem).top())
                 {
-                    if (meta_ && meta_->isVisible() && favBtn_ && favBtn_->isVisible())
-                        favBtn_->setFocus(Qt::OtherFocusReason);      // container detail -> Favorite button
+                    if (meta_ && meta_->isVisible() && detailActionButton())
+                        detailActionButton()->setFocus(Qt::OtherFocusReason); // container detail -> action button
                     else if (carouselMode_)     showCarousel();        // back up to the carousel
                     else if (activeTypeButton_) activeTypeButton_->setFocus(Qt::OtherFocusReason); // to the tabs
                     else                        focusChromeRow();     // no tabs -> up to the chrome
@@ -1477,6 +1518,9 @@ void HomeView::loadTop()
     if (stack_.isEmpty()) return;
     const Level& top = stack_.last();
 
+    // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
+    if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
+
     const bool container = top.detail && top.item.expandable;       // has children to drill into
     const bool wantMeta  = top.detail && top.item.type != QStringLiteral("platform"); // console is not "media"
 
@@ -1497,7 +1541,7 @@ void HomeView::loadTop()
         updateStatus();
         // The grid/carousel that held focus is now hidden; park focus on the Favorite button so the
         // detail page still has a keyboard target (and Backspace routes to Back via its event filter).
-        if (favBtn_ && meta_->isVisible()) favBtn_->setFocus(Qt::OtherFocusReason);
+        if (meta_->isVisible()) { if (QWidget* a = detailActionButton()) a->setFocus(Qt::OtherFocusReason); }
         return;
     }
 
@@ -1544,9 +1588,64 @@ void HomeView::requestMeta(const MediaItem& item)
         metaLayout_->setAlignment(metaImage_, Qt::AlignTop);
     }
 
+    // A Steam game's info page: show Play (not Favorite) and fetch its details natively from the store.
+    const bool isSteam = (item.mime == QStringLiteral("steamgame"));
+    if (playBtn_) playBtn_->setVisible(isSteam);
+    if (favBtn_)  favBtn_->setVisible(!isSteam);
+
     layoutMetaSections(item.type); // order the text rows per the theme
     meta_->setVisible(true);
+    if (isSteam)
+    {
+        pendingMetaReqId_ = (steamMetaSeq_ -= 1); // a unique (negative) id for the async store fetch guard
+        requestSteamMeta(item, pendingMetaReqId_);
+        return;
+    }
     pendingMetaReqId_ = mgr_->requestMeta(stack_.last().addon, item);
+}
+
+// Build a Steam game's detail page: cover from the library art immediately, then enrich (synopsis, genres,
+// developer, release date, Metacritic) from Steam's public store appdetails API. Best-effort; no key needed.
+void HomeView::requestSteamMeta(const MediaItem& item, int reqId)
+{
+    MediaDetail d0;
+    d0.title = item.title;
+    d0.imageUrl = item.thumbnailUrl; // the vertical capsule
+    d0.valid = true;
+    showMeta(d0); // show the cover + title straight away
+
+    const QString appid = item.id.mid(QStringLiteral("steam:").size());
+    QUrl u(QStringLiteral("https://store.steampowered.com/api/appdetails"));
+    QUrlQuery q; q.addQueryItem(QStringLiteral("appids"), appid); q.addQueryItem(QStringLiteral("l"), QStringLiteral("english"));
+    u.setQuery(q);
+    QNetworkRequest req(u);
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam_->get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, appid, item, reqId] {
+        reply->deleteLater();
+        if (reqId != pendingMetaReqId_ || reply->error() != QNetworkReply::NoError) return; // stale / failed
+        const QJsonObject entry = QJsonDocument::fromJson(reply->readAll()).object().value(appid).toObject();
+        if (!entry.value(QStringLiteral("success")).toBool()) return; // keep the minimal cover+title
+        const QJsonObject data = entry.value(QStringLiteral("data")).toObject();
+        MediaDetail d;
+        d.title = data.value(QStringLiteral("name")).toString(item.title);
+        d.overview = data.value(QStringLiteral("short_description")).toString();
+        d.imageUrl = item.thumbnailUrl;
+        QStringList genres;
+        for (const QJsonValue& v : data.value(QStringLiteral("genres")).toArray())
+            genres << v.toObject().value(QStringLiteral("description")).toString();
+        if (!genres.isEmpty()) d.facts.push_back({ tr("Genres"), genres.join(QStringLiteral(", ")) });
+        QStringList devs;
+        for (const QJsonValue& v : data.value(QStringLiteral("developers")).toArray()) devs << v.toString();
+        if (!devs.isEmpty()) d.facts.push_back({ tr("Developer"), devs.join(QStringLiteral(", ")) });
+        const QString rel = data.value(QStringLiteral("release_date")).toObject().value(QStringLiteral("date")).toString();
+        if (!rel.isEmpty()) d.facts.push_back({ tr("Released"), rel });
+        const int mc = data.value(QStringLiteral("metacritic")).toObject().value(QStringLiteral("score")).toInt();
+        if (mc > 0) d.facts.push_back({ tr("Metacritic"), QString::number(mc) });
+        d.valid = true;
+        if (reqId == pendingMetaReqId_) showMeta(d);
+    });
 }
 
 void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
