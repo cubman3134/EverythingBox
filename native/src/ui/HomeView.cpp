@@ -483,12 +483,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         "QPushButton:focus{background:#54CE78;border-color:#1E5E32;}"));
     connect(playBtn_, &QPushButton::clicked, this, [this] {
         if (stack_.isEmpty() || !stack_.last().detail) return;
-        const MediaItem& it = stack_.last().item;
+        const Level& top = stack_.last();
+        const MediaItem it = top.item;
         if (it.mime == QStringLiteral("steamgame"))
         {
             MediaItem m = it;
             m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
             emit openItem(m); // MainWindow launches the steam:// URL
+            return;
+        }
+        if (top.addon && top.addon->stremio) // resolve a playable stream across the installed stream addons
+        {
+            LoadedAddon* addon = top.addon;
+            status_->setText(tr("Finding a stream for “%1”…").arg(it.title));
+            playBtn_->setEnabled(false);
+            mgr_->resolveStream(addon, it, [this, it](const QString& url, const QString& mime) {
+                playBtn_->setEnabled(true);
+                if (!url.isEmpty()) { MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                else status_->setText(tr("No playable stream found. Torrent-only results need a debrid link "
+                                         "(configure your stream addon with a debrid service)."));
+            });
         }
     });
     playBtn_->installEventFilter(this); // Backspace here = Back
@@ -1453,7 +1467,8 @@ void HomeView::activateItem(int row)
 
     // A remote leaf (movie / episode / track) carries no url in the catalog - its playable source comes from
     // the /stream endpoint, fetched on open. If one resolves, play it; otherwise fall back to the detail page.
-    if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp
+    // (Stremio items instead open the info page, which has a Play button that resolves on demand.)
+    if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
         && it.type != QStringLiteral("platform"))
     {
         const MediaItem item = it; // copy for the async callback
@@ -1617,10 +1632,12 @@ void HomeView::requestMeta(const MediaItem& item)
         metaLayout_->setAlignment(metaImage_, Qt::AlignTop);
     }
 
-    // A Steam game's info page: show Play (plus Favorite — Steam games favourite like normal media) and
-    // fetch its details natively from the store.
+    // Show a Play button for launchable leaves: Steam games, and Stremio movies/episodes (which resolve a
+    // stream on demand). Series/containers don't get one (you play their episodes).
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
-    if (playBtn_) playBtn_->setVisible(isSteam);
+    const bool isStremioPlayable = !stack_.isEmpty() && stack_.last().addon
+                                   && stack_.last().addon->stremio && !item.expandable;
+    if (playBtn_) playBtn_->setVisible(isSteam || isStremioPlayable);
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
