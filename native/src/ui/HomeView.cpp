@@ -687,16 +687,6 @@ void HomeView::refresh()
         }
     }
 
-    // A native "Steam" category (no addon): the machine's installed Steam library, navigable like a console.
-    if (SteamLibrary::isAvailable() && !SteamLibrary::installedGames().isEmpty())
-    {
-        auto* btn = new QPushButton(tr("Steam"), this);
-        connect(btn, &QPushButton::clicked, this, &HomeView::selectSteam);
-        makeTab(btn, QStringLiteral("steam"), QStringLiteral("game"));
-        navTargets_.push_back({ QStringLiteral("steam"), false, nullptr,
-                                QStringLiteral("steam"), QStringLiteral("game"), tr("Steam") });
-    }
-
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -801,9 +791,8 @@ void HomeView::activateNav(const QString& navKey)
                 xmb_->setAtRoot(true);
                 xmb_->clearItems();              // clear the old column while the new one loads
             }
-            if (t.isHome)                                  selectRecent(); // Home -> recents list / XMB column
-            else if (t.navKey == QStringLiteral("steam"))  selectSteam();  // native Steam library
-            else          selectType(t.addon, t.catalogId, t.type, t.name); // addon catalog -> item view
+            if (t.isHome) selectRecent();    // Home -> the recents list / XMB column
+            else          selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
             return;
         }
 }
@@ -1068,19 +1057,16 @@ void HomeView::selectRecent()
     renderRecents();
 }
 
-void HomeView::selectSteam()
+// Drill into the synthetic "Steam" console (a child of the Games catalog): list the local Steam library as
+// games. Pushed as a detail level so Back returns to the Games console list.
+void HomeView::openSteamConsole(const MediaItem& consoleItem)
 {
-    recentView_ = false;
-    applyGridMode(/*recentList*/ false);
-    styleTypeButtons(QStringLiteral("steam"));
-    search_->clear();
-    stack_.clear();
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
-    lvl.addon = nullptr; lvl.detail = false;
-    lvl.catalogId = QStringLiteral("steam"); lvl.catalogType = QStringLiteral("game"); lvl.title = tr("Steam");
+    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Steam");
     stack_.push_back(lvl);
 
-    // Build the catalog natively from the local Steam library (no addon request).
+    // Build the games natively from the local Steam library (no addon request).
     MediaCatalog cat;
     cat.title = tr("Steam");
     for (const SteamGame& g : SteamLibrary::installedGames())
@@ -1243,7 +1229,10 @@ QString HomeView::openKindForView() const
     if (stack_.isEmpty()) return QString();
     const Level& top = stack_.last();
     if (top.detail)
+    {
+        if (top.item.mime == QStringLiteral("steam:console")) return QString(); // Steam games aren't ROM files
         return (top.item.type == QStringLiteral("platform")) ? QStringLiteral("game") : QString(); // games per-console
+    }
     const QString& t = top.catalogType;
     auto reg = g_typeVisuals.constFind(t); // addon-declared file-open kind for a custom type
     if (reg != g_typeVisuals.constEnd() && !reg->openKind.isEmpty()) return reg->openKind;
@@ -1402,6 +1391,10 @@ void HomeView::activateItem(int row)
     }
 
     stack_.last().childRow = row; // remember where we drilled in, so Back restores this position
+
+    // The synthetic Steam console drills into the local library natively (not via the addon).
+    if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
+
     LoadedAddon* addon = stack_.last().addon;
 
     // A remote leaf (movie / episode / track) carries no url in the catalog - its playable source comes from
@@ -1696,6 +1689,19 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             stream.title = tr("Stream from a link…");
             stream.url = QStringLiteral("stream");  // the kind handled by onRequestOpenFile
             items_.push_back(stream);
+        }
+        // On the Games console list, surface the local Steam library as a native "Steam" console.
+        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty()
+            && stack_.last().catalogType == QStringLiteral("game")
+            && SteamLibrary::isAvailable() && !SteamLibrary::installedGames().isEmpty())
+        {
+            MediaItem steam;
+            steam.id = QStringLiteral("steam:console");
+            steam.type = QStringLiteral("platform"); // a console (drills into its games)
+            steam.title = tr("Steam");
+            steam.expandable = true;
+            steam.mime = QStringLiteral("steam:console"); // marker -> drilled natively, not via the addon
+            items_.push_back(steam);
         }
         from = 0;
     }
