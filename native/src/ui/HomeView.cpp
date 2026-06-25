@@ -466,7 +466,35 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     metaTextCol_ = new QVBoxLayout();
     auto* mc = metaTextCol_;
     mc->setSpacing(8);
-    favBtn_ = new QPushButton(tr("☆ Favorite"), meta_);
+    // Action row on the detail header: Play (Steam games) and/or Favorite, side by side. Only the relevant
+    // buttons are visible; Left/Right move between them. The row sits in the theme's "favorite" slot.
+    actionRow_ = new QWidget(meta_);
+    auto* arl = new QHBoxLayout(actionRow_);
+    arl->setContentsMargins(0, 0, 0, 0);
+    arl->setSpacing(8);
+
+    playBtn_ = new QPushButton(tr("▶  Play"), actionRow_);
+    playBtn_->setCursor(Qt::PointingHandCursor);
+    playBtn_->setVisible(false); // shown only for Steam games
+    playBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#3FA95E;border:2px solid #2E7D45;border-radius:6px;"
+        "padding:6px 18px;color:#fff;font-weight:bold;}"
+        "QPushButton:hover{background:#48BE6B;}"
+        "QPushButton:focus{background:#54CE78;border-color:#1E5E32;}"));
+    connect(playBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem& it = stack_.last().item;
+        if (it.mime == QStringLiteral("steamgame"))
+        {
+            MediaItem m = it;
+            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
+            emit openItem(m); // MainWindow launches the steam:// URL
+        }
+    });
+    playBtn_->installEventFilter(this); // Backspace here = Back
+    arl->addWidget(playBtn_);
+
+    favBtn_ = new QPushButton(tr("☆ Favorite"), actionRow_);
     favBtn_->setCursor(Qt::PointingHandCursor);
     favBtn_->setStyleSheet(QStringLiteral(
         "QPushButton{background:#FFF1CC;border:2px solid #E0A92E;border-radius:6px;"
@@ -492,28 +520,10 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         }
     });
     favBtn_->installEventFilter(this); // Backspace here = Back (the detail page focuses this button)
-    mc->addWidget(favBtn_, 0, Qt::AlignLeft);
-    // Launch button, shown on a Steam game's info page (hidden otherwise). Sits in the "favorite" slot.
-    playBtn_ = new QPushButton(tr("▶  Play"), meta_);
-    playBtn_->setCursor(Qt::PointingHandCursor);
-    playBtn_->setVisible(false);
-    playBtn_->setStyleSheet(QStringLiteral(
-        "QPushButton{background:#3FA95E;border:2px solid #2E7D45;border-radius:6px;"
-        "padding:6px 18px;color:#fff;font-weight:bold;}"
-        "QPushButton:hover{background:#48BE6B;}"
-        "QPushButton:focus{background:#54CE78;border-color:#1E5E32;}"));
-    connect(playBtn_, &QPushButton::clicked, this, [this] {
-        if (stack_.isEmpty() || !stack_.last().detail) return;
-        const MediaItem& it = stack_.last().item;
-        if (it.mime == QStringLiteral("steamgame"))
-        {
-            MediaItem m = it;
-            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
-            emit openItem(m); // MainWindow launches the steam:// URL
-        }
-    });
-    playBtn_->installEventFilter(this); // Backspace here = Back
-    mc->addWidget(playBtn_, 0, Qt::AlignLeft);
+    arl->addWidget(favBtn_);
+    arl->addStretch(1);
+    mc->addWidget(actionRow_);
+
     metaTitle_ = new QLabel(meta_);
     metaTitle_->setWordWrap(true);
     metaTitle_->setTextFormat(Qt::RichText);
@@ -974,8 +984,7 @@ void HomeView::layoutMetaSections(const QString& itemType)
     QStringList order = g_theme.detail.order;
     if (order.isEmpty()) order = { "favorite", "title", "facts", "overview" };
 
-    metaTextCol_->removeWidget(favBtn_);
-    if (playBtn_) metaTextCol_->removeWidget(playBtn_);
+    metaTextCol_->removeWidget(actionRow_);
     metaTextCol_->removeWidget(metaTitle_);
     metaTextCol_->removeWidget(metaFacts_);
     metaTextCol_->removeWidget(metaOverview_);
@@ -984,9 +993,7 @@ void HomeView::layoutMetaSections(const QString& itemType)
     auto place = [&](const QString& key) {
         if (added.contains(key)) return;
         added.insert(key);
-        // The action slot holds both Play (Steam) and Favorite; only the relevant one is visible.
-        if (key == "favorite")      { if (playBtn_) metaTextCol_->addWidget(playBtn_, 0, Qt::AlignLeft);
-                                      metaTextCol_->addWidget(favBtn_, 0, Qt::AlignLeft); }
+        if (key == "favorite")      metaTextCol_->addWidget(actionRow_); // Play + Favorite row
         else if (key == "title")    metaTextCol_->addWidget(metaTitle_);
         else if (key == "facts")    metaTextCol_->addWidget(metaFacts_);
         else if (key == "overview") metaTextCol_->addWidget(metaOverview_, 1);
@@ -1335,6 +1342,12 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (col) focusContent();
                 return true;
             }
+            if (k == Qt::Key_Left || k == Qt::Key_Right) // move between Play and Favorite when both are shown
+            {
+                QWidget* other = (obj == playBtn_) ? static_cast<QWidget*>(favBtn_) : static_cast<QWidget*>(playBtn_);
+                if (other && other->isVisible()) other->setFocus(Qt::OtherFocusReason);
+                return true;
+            }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
             { if (auto* b = qobject_cast<QPushButton*>(obj)) b->click(); return true; }
             if (k == Qt::Key_Backspace) { goBack(); return true; }
@@ -1468,6 +1481,22 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
 
 void HomeView::openFavorite(const MediaItem& favItem)
 {
+    // A favourited Steam game has no source addon - reopen its native info page (rooted at Home).
+    if (favItem.id.startsWith(QStringLiteral("steam:")))
+    {
+        recentView_ = false;
+        applyGridMode(/*recentList*/ false);
+        styleTypeButtons(QStringLiteral("home"));
+        stack_.clear();
+        MediaItem mi = favItem;
+        mi.mime = QStringLiteral("steamgame"); // restore the marker (drops the "fav:" tag)
+        mi.url.clear();
+        Level lvl;
+        lvl.addon = nullptr; lvl.detail = true; lvl.item = mi; lvl.title = mi.title;
+        stack_.push_back(lvl);
+        loadTop();
+        return;
+    }
     // Resolve the favourite's source addon and open its detail page (rooted at Home so Back returns here).
     const QString addonId = favItem.mime.mid(4); // strip "fav:"
     LoadedAddon* addon = nullptr;
@@ -1588,10 +1617,11 @@ void HomeView::requestMeta(const MediaItem& item)
         metaLayout_->setAlignment(metaImage_, Qt::AlignTop);
     }
 
-    // A Steam game's info page: show Play (not Favorite) and fetch its details natively from the store.
+    // A Steam game's info page: show Play (plus Favorite — Steam games favourite like normal media) and
+    // fetch its details natively from the store.
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
     if (playBtn_) playBtn_->setVisible(isSteam);
-    if (favBtn_)  favBtn_->setVisible(!isSteam);
+    if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
     meta_->setVisible(true);

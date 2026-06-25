@@ -134,6 +134,7 @@ private:
     QBoxLayout* metaLayout_ = nullptr;  // image<->text arrangement (poster/banner/text)
     QVBoxLayout* metaTextCol_ = nullptr; // the reorderable text column (favorite/title/facts/overview)
     QLabel* metaImage_ = nullptr;
+    QWidget* actionRow_ = nullptr;    // holds Play + Favorite on the detail header
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
