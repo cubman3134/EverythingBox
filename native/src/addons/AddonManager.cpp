@@ -373,22 +373,27 @@ static MediaCatalog parseStremioVideos(const QByteArray& body)
     return cat;
 }
 
-// {streams:[{url|infoHash|ytId|externalUrl, ...}]} -> first directly-playable http(s) url (skips torrents we
-// can't stream without a debrid-configured addon, which already returns an http url here).
-static QString pickStremioStreamUrl(const QByteArray& body, QString* mime = nullptr)
+// One candidate stream from a /stream response: either a direct http url, or a torrent to resolve via debrid.
+struct StremioStreamOpt { QString url; QString mime; QString infoHash; int fileIdx = -1; };
+
+// {streams:[{url|infoHash|fileIdx|...}]} -> all candidates, in the addon's order (best first, by convention).
+static QVector<StremioStreamOpt> parseStremioStreams(const QByteArray& body)
 {
+    QVector<StremioStreamOpt> out;
     for (const QJsonValue& sv : QJsonDocument::fromJson(body).object().value(QStringLiteral("streams")).toArray())
     {
         const QJsonObject s = sv.toObject();
-        const QString url = s.value(QStringLiteral("url")).toString();
-        if (url.startsWith(QStringLiteral("http")))
-        {
-            if (mime) *mime = s.value(QStringLiteral("mime")).toString();
-            return url;
-        }
+        StremioStreamOpt o;
+        o.url = s.value(QStringLiteral("url")).toString();
+        o.mime = s.value(QStringLiteral("mime")).toString();
+        o.infoHash = s.value(QStringLiteral("infoHash")).toString();
+        o.fileIdx = s.contains(QStringLiteral("fileIdx")) ? s.value(QStringLiteral("fileIdx")).toInt() : -1;
+        if (o.url.startsWith(QStringLiteral("http")) || !o.infoHash.isEmpty()) out.push_back(o);
     }
-    return {};
+    return out;
 }
+
+static QString torboxApiKey() { store().sync(); return store().value(QStringLiteral("debrid/torbox/apikey")).toString().trimmed(); }
 
 // --- AddonManager ------------------------------------------------------------------------------------
 
@@ -698,11 +703,112 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     return reqId;
 }
 
+// The TorBox debrid REST API. Resolving a cached torrent to a stream URL is a small async chain:
+//   checkcached -> createtorrent -> mylist(files) -> requestdl.
+static const char* kTorBoxApi = "https://api.torbox.app/v1/api";
+
+void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
+                                         std::function<void(const QString&)> cb)
+{
+    const QString key = torboxApiKey();
+    if (key.isEmpty() || infoHash.isEmpty()) { cb(QString()); return; }
+    const QByteArray bearer = "Bearer " + key.toUtf8();
+
+    // 1) Only stream torrents TorBox already has cached (otherwise it'd just queue a download).
+    QUrl chk(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/checkcached"));
+    QUrlQuery cq; cq.addQueryItem(QStringLiteral("hash"), infoHash.toLower());
+    cq.addQueryItem(QStringLiteral("format"), QStringLiteral("object"));
+    chk.setQuery(cq);
+    QNetworkRequest rq(chk);
+    rq.setRawHeader("Authorization", bearer);
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, infoHash, fileIdx, key, bearer, cb] {
+        reply->deleteLater();
+        const QJsonObject data = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toObject();
+        if (data.isEmpty()) { cb(QString()); return; } // not cached -> can't stream it now
+
+        // 2) Add the (cached) magnet to the account to obtain a torrent_id.
+        const QByteArray boundary = "tbb" + QCryptographicHash::hash(infoHash.toUtf8(), QCryptographicHash::Md5).toHex().left(12);
+        QByteArray fb;
+        fb += "--" + boundary + "\r\nContent-Disposition: form-data; name=\"magnet\"\r\n\r\n";
+        fb += "magnet:?xt=urn:btih:" + infoHash.toUtf8() + "\r\n--" + boundary + "--\r\n";
+        QNetworkRequest cr((QUrl(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/createtorrent"))));
+        cr.setRawHeader("Authorization", bearer);
+        cr.setHeader(QNetworkRequest::ContentTypeHeader, "multipart/form-data; boundary=" + boundary);
+        cr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        QNetworkReply* cre = nam_->post(cr, fb);
+        connect(cre, &QNetworkReply::finished, this, [this, cre, fileIdx, key, bearer, cb] {
+            cre->deleteLater();
+            const QJsonObject cd = QJsonDocument::fromJson(cre->readAll()).object().value(QStringLiteral("data")).toObject();
+            const QString torrentId = QString::number(cd.value(QStringLiteral("torrent_id")).toVariant().toLongLong());
+            if (torrentId.isEmpty() || torrentId == QStringLiteral("0")) { cb(QString()); return; }
+
+            // 3) List the torrent's files to choose one (the episode by index, else the largest video).
+            QUrl ml(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/mylist"));
+            QUrlQuery mq; mq.addQueryItem(QStringLiteral("id"), torrentId); mq.addQueryItem(QStringLiteral("bypass_cache"), QStringLiteral("true"));
+            ml.setQuery(mq);
+            QNetworkRequest mr(ml);
+            mr.setRawHeader("Authorization", bearer);
+            mr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+            QNetworkReply* mre = nam_->get(mr);
+            connect(mre, &QNetworkReply::finished, this, [this, mre, torrentId, fileIdx, key, cb] {
+                mre->deleteLater();
+                const QJsonValue dv = QJsonDocument::fromJson(mre->readAll()).object().value(QStringLiteral("data"));
+                const QJsonObject td = dv.isArray() ? dv.toArray().first().toObject() : dv.toObject(); // id-> object or [object]
+                const QJsonArray files = td.value(QStringLiteral("files")).toArray();
+                if (files.isEmpty()) { cb(QString()); return; }
+                int chosen = -1; qint64 bestSize = -1;
+                static const QStringList vids = { ".mkv", ".mp4", ".avi", ".m4v", ".webm", ".ts", ".mov" };
+                for (int i = 0; i < files.size(); ++i)
+                {
+                    const QJsonObject f = files[i].toObject();
+                    const QString name = f.value(QStringLiteral("name")).toString().toLower();
+                    bool isVid = false; for (const QString& e : vids) if (name.endsWith(e)) { isVid = true; break; }
+                    if (!isVid) continue;
+                    const qint64 sz = f.value(QStringLiteral("size")).toVariant().toLongLong();
+                    if (sz > bestSize) { bestSize = sz; chosen = i; }
+                }
+                if (fileIdx >= 0 && fileIdx < files.size()) chosen = fileIdx; // honour the addon's episode pick
+                if (chosen < 0) chosen = 0;
+                const QString fileId = QString::number(files[chosen].toObject().value(QStringLiteral("id")).toVariant().toLongLong());
+
+                // 4) Ask for the direct download/stream link.
+                QUrl dl(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/requestdl"));
+                QUrlQuery dq; dq.addQueryItem(QStringLiteral("token"), key);
+                dq.addQueryItem(QStringLiteral("torrent_id"), torrentId); dq.addQueryItem(QStringLiteral("file_id"), fileId);
+                dl.setQuery(dq);
+                QNetworkRequest dr(dl);
+                dr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+                QNetworkReply* dre = nam_->get(dr);
+                connect(dre, &QNetworkReply::finished, this, [dre, cb] {
+                    dre->deleteLater();
+                    const QJsonValue d = QJsonDocument::fromJson(dre->readAll()).object().value(QStringLiteral("data"));
+                    cb(d.toString());
+                });
+            });
+        });
+    });
+}
+
+// Try each torrent candidate in turn via TorBox until one is cached + resolves (clean member recursion).
+static void resolveTorBoxList(AddonManager* mgr, std::shared_ptr<QVector<StremioStreamOpt>> opts, int idx,
+                              std::function<void(const QString&, const QString&)> cb)
+{
+    while (idx < opts->size() && opts->at(idx).infoHash.isEmpty()) ++idx;
+    if (idx >= opts->size()) { cb(QString(), QString()); return; }
+    const StremioStreamOpt o = opts->at(idx);
+    mgr->resolveTorBoxInfoHash(o.infoHash, o.fileIdx, [mgr, opts, idx, cb](const QString& url) {
+        if (!url.isEmpty()) cb(url, QString());
+        else resolveTorBoxList(mgr, opts, idx + 1, cb); // not cached/resolvable -> next
+    });
+}
+
 void AddonManager::resolveStremioStream(const MediaItem& item,
                                         std::function<void(const QString&, const QString&)> cb)
 {
-    // Query EVERY installed Stremio addon that offers streams for this type (like Stremio aggregates), and
-    // take the first directly-playable http url that comes back.
+    // Query EVERY installed Stremio addon that offers streams for this type (like Stremio aggregates), collect
+    // all candidate streams, then play the first direct http url - or resolve the first cached torrent via TorBox.
     QVector<LoadedAddon*> providers;
     for (LoadedAddon* s : sources_)
         if (s->stremio && isEnabled(s->manifest.id) && s->stremioResources.contains(QStringLiteral("stream"))
@@ -710,20 +816,25 @@ void AddonManager::resolveStremioStream(const MediaItem& item,
             providers.push_back(s);
     if (providers.isEmpty()) { cb(QString(), QString()); return; }
 
-    auto state = std::make_shared<QPair<int, bool>>(providers.size(), false); // {pending, done}
+    auto opts = std::make_shared<QVector<StremioStreamOpt>>();
+    auto pending = std::make_shared<int>(providers.size());
     for (LoadedAddon* p : providers)
     {
         QNetworkRequest rq(stremioStreamUrl(p->baseUrl, item.type, item.id));
         rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(rq);
-        connect(reply, &QNetworkReply::finished, this, [reply, state, cb] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, opts, pending, cb] {
             reply->deleteLater();
-            if (state->second) return; // already answered
-            QString url, mime;
-            if (reply->error() == QNetworkReply::NoError) url = pickStremioStreamUrl(reply->readAll(), &mime);
-            if (!url.isEmpty()) { state->second = true; cb(url, mime); return; }
-            if (--state->first == 0 && !state->second) cb(QString(), QString()); // all came back empty
+            if (reply->error() == QNetworkReply::NoError) *opts += parseStremioStreams(reply->readAll());
+            if (--*pending != 0) return; // wait for every provider
+
+            // Prefer a direct http url (instant).
+            for (const StremioStreamOpt& o : *opts)
+                if (o.url.startsWith(QStringLiteral("http"))) { cb(o.url, o.mime); return; }
+            // Otherwise resolve torrents through TorBox, trying each in order until one is cached + resolves.
+            if (torboxApiKey().isEmpty()) { cb(QString(), QString()); return; }
+            resolveTorBoxList(this, opts, 0, cb);
         });
     }
 }

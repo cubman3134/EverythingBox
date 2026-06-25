@@ -1005,6 +1005,27 @@ void MainWindow::openGeneralSettings()
         note->setWordWrap(true);
         note->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(note);
+
+        // --- Streaming (Debrid): a TorBox API key turns Stremio torrent results into playable streams. ---
+        v->addSpacing(10);
+        auto* dHeading = new QLabel(tr("Streaming (Debrid)"));
+        dHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dHeading);
+        v->addWidget(new QLabel(tr("TorBox API key")));
+        auto* tbKey = new QLineEdit(store().value(QStringLiteral("debrid/torbox/apikey")).toString());
+        tbKey->setMinimumHeight(34);
+        tbKey->setPlaceholderText(tr("Paste your TorBox API key"));
+        v->addWidget(tbKey);
+        connect(tbKey, &QLineEdit::editingFinished, this, [tbKey] {
+            store().setValue(QStringLiteral("debrid/torbox/apikey"), tbKey->text().trimmed());
+            store().sync();
+        });
+        auto* dNote = new QLabel(tr("Lets Stremio torrent addons (Debridio, Torrentio…) play: cached torrents "
+            "are resolved to a stream through your TorBox account. Find the key at torbox.app → Settings → API. "
+            "Stored on this device."));
+        dNote->setWordWrap(true);
+        dNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(dNote);
     }, [this] { openSettingsHub(); });
 }
 

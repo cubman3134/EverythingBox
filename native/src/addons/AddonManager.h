@@ -83,6 +83,9 @@ public:
     void resolveStream(LoadedAddon* src, const MediaItem& item,
                        std::function<void(const QString& url, const QString& mime)> cb);
     QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
+    // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
+    void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
+                               std::function<void(const QString& url)> cb);
 
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder
