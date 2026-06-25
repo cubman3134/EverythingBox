@@ -142,10 +142,13 @@ void ProfileDialog::showPicker(const QString& title, const QString& name, const 
     auto chosen = std::make_shared<QString>(icon.isEmpty() ? QString::fromUtf8(kProfileIcons[0]) : icon);
     auto iconButtons = std::make_shared<QVector<QPushButton*>>();
     const int cols = 8, count = int(sizeof(kProfileIcons) / sizeof(kProfileIcons[0]));
+    // padding:0 + min-width:0 override the global QPushButton padding (8px 16px), which would otherwise
+    // squeeze the emoji into a sliver of the 42x42 button and crop it.
     auto highlight = [iconButtons](QPushButton* sel) {
         for (QPushButton* b : *iconButtons)
-            b->setStyleSheet(b == sel ? QStringLiteral("font-size:20px; border:2px solid #5b8cff; border-radius:6px;")
-                                      : QStringLiteral("font-size:20px; border:1px solid #555; border-radius:6px;"));
+            b->setStyleSheet(b == sel
+                ? QStringLiteral("font-size:22px; padding:0; min-width:0; border:2px solid #5b8cff; border-radius:6px;")
+                : QStringLiteral("font-size:22px; padding:0; min-width:0; border:1px solid #555; border-radius:6px;"));
     };
     QPushButton* chosenBtn = nullptr;
     for (int i = 0; i < count; ++i)
