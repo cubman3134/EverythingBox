@@ -14,8 +14,9 @@
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
 
-// If signed in to Google Drive, pull a newer state bundle BEFORE the app reads any settings, so the
-// session starts from the latest synced profiles/favorites/addons/themes. Best-effort with a timeout.
+// If signed in to Google Drive, ALWAYS pull the latest state bundle BEFORE the app reads any settings, so
+// every session starts from the cloud's profiles/favorites/addons/themes (the exit push saved them last
+// time). Best-effort with a timeout so a slow/absent network never hangs startup.
 static void cloudPullAtStartup()
 {
     if (!CloudSync::isConfigured()) return;
@@ -24,18 +25,8 @@ static void cloudPullAtStartup()
     QEventLoop loop;
     QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never hang startup on a slow/absent network
     cloud.checkStatus([&cloud, &loop](const CloudSync::Status& st) {
-        if (!st.reached || !st.hasRemote || !st.remoteChanged) { loop.quit(); return; }
-        if (st.localChanged)
-        {
-            // Both sides changed: don't prompt here (no window yet). Flag it so the main window can resolve
-            // it in-window once it's up; keep local for now (the user can still choose to take the cloud).
-            CloudSync::setStartupConflict(true);
-            loop.quit();
-        }
-        else
-        {
-            cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); }); // remote-only change
-        }
+        if (!st.reached || !st.hasRemote) { loop.quit(); return; }
+        cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); }); // always take the cloud
     });
     loop.exec();
 }

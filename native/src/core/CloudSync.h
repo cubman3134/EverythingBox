@@ -21,11 +21,6 @@ public:
 
     static bool isConfigured();          // an OAuth client id/secret is available (embedded or in settings)
     bool isSignedIn() const;             // we hold a refresh token
-
-    // Set at startup when a both-sides-changed conflict is detected (so it can be resolved in-window after
-    // the main window is up, instead of a popup before it exists). Read + cleared by the main window.
-    static bool startupConflict();
-    static void setStartupConflict(bool pending);
     QString accountEmail() const;        // the signed-in Google account (cached), or empty
 
     void signIn();                       // run the browser consent flow; emits signedIn()/signInFailed()
