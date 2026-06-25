@@ -43,8 +43,48 @@
 #include <QColor>
 #include <QPalette>
 #include <QUrl>
+#include <QSettings>
+#include <QCryptographicHash>
+#include <QCoreApplication>
 
 static const QSize kPoster(140, 200);
+
+// Per-profile settings store (shared ini); used here to read media resume progress.
+static QSettings& settingsStore()
+{
+    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+                       QSettings::IniFormat);
+    return s;
+}
+
+// Resume progress (0..1) for a played media path/url, or -1 if none. Mirrors MainWindow's key scheme
+// (resume/<md5-of-path>/{pos,dur}); a bar shows only once both a position and a duration are known.
+static double resumeFraction(const QString& url)
+{
+    if (url.isEmpty()) return -1.0;
+    const QByteArray h = QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
+    const QString k = QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
+    const double pos = settingsStore().value(k + QStringLiteral("pos"), 0.0).toDouble();
+    const double dur = settingsStore().value(k + QStringLiteral("dur"), 0.0).toDouble();
+    if (pos <= 1.0 || dur <= 1.0) return -1.0;
+    return qBound(0.0, pos / dur, 1.0);
+}
+
+// Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place).
+static QIcon iconWithProgress(QPixmap pm, const QString& url)
+{
+    const double frac = resumeFraction(url);
+    if (frac >= 0.0 && !pm.isNull())
+    {
+        QPainter p(&pm);
+        const int barH = qMax(4, pm.height() / 36);
+        const int y = pm.height() - barH;
+        p.fillRect(QRect(0, y, pm.width(), barH), QColor(0, 0, 0, 140));                  // track
+        p.fillRect(QRect(0, y, int(pm.width() * frac), barH), QColor(0xE5, 0x3E, 0x3E));  // watched portion
+        p.end();
+    }
+    return QIcon(pm);
+}
 static const int kTopBtnHeight = 34; // all top-bar buttons (tabs + chrome) share this height
 
 // Addon-defined media-type visuals, keyed by media type. Populated from every addon's manifest
@@ -763,7 +803,10 @@ void HomeView::fillXmbFromItems(int from)
         const MediaItem& it = items_[i];
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
-        entries.push_back({ QStringLiteral("item:") + QString::number(i), it.title, c, it.thumbnailUrl });
+        QString label = it.title;
+        const double frac = resumeFraction(it.url); // "how far in" for a partly-played movie/episode
+        if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
+        entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
 
     if (from > 0) { xmb_->addItems(entries); return; } // paged append
@@ -1022,6 +1065,7 @@ void HomeView::renderRecents()
     items_.clear();
     thumbQueue_.clear();
     grid_->show();
+    settingsStore().sync(); // pick up resume positions written by the player since the last render
 
     const QSize iconSz(44, 44);
 
@@ -1087,9 +1131,13 @@ void HomeView::renderRecents()
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             items_.push_back(it);
 
-            auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title, grid_);
+            // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
+            const double frac = resumeFraction(it.url);
+            QString label = QStringLiteral("  ") + it.title;
+            if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
+            auto* w = new QListWidgetItem(label, grid_);
             w->setSizeHint(QSize(0, 52));
-            w->setIcon(defaultIcon(it.type, iconSz));
+            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), it.url));
         }
     }
 
@@ -1581,6 +1629,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         applyGridMode(/*recentList*/ false); // ensure the poster grid (recents may have left it in list mode)
         grid_->clear();
         items_.clear();
+        settingsStore().sync(); // fresh resume positions for the progress bars
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
         const QString kind = openKindForView();
         if (!kind.isEmpty())
@@ -1622,8 +1671,9 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             w->setIcon(plusIcon(kPoster));
         else
         {
-            // Type-based placeholder; a real poster (if any) overwrites it in loadThumbnails().
-            if (it.type != QStringLiteral("info")) w->setIcon(defaultIcon(it.type, kPoster));
+            // Type-based placeholder (+ resume bar if started); a real poster overwrites it in loadThumbnails().
+            if (it.type != QStringLiteral("info"))
+                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), it.url));
             if (it.expandable) w->setToolTip(tr("Open for episodes/tracks"));
         }
     }
@@ -1664,7 +1714,10 @@ void HomeView::fillCarouselFromItems(int from)
         const MediaItem& it = items_[i];
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
-        entries.push_back({ QStringLiteral("item:") + QString::number(i), it.title, c, it.thumbnailUrl });
+        QString label = it.title;
+        const double frac = resumeFraction(it.url); // "how far in" for a partly-played movie/episode
+        if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
+        entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
 
     if (from > 0) { carousel_->addEntries(entries); return; } // paged append -> extend in place
@@ -1728,7 +1781,8 @@ void HomeView::loadThumbnails(int fromIndex)
         {
             const QPixmap pm(url);
             if (!pm.isNull())
-                w->setIcon(QIcon(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
+                                            items_[i].url));
             continue;
         }
         thumbQueue_.push_back(i); // remote: fetched by pumpThumbnails(), capped so we don't flood the host
@@ -1750,20 +1804,22 @@ void HomeView::pumpThumbnails()
         if (url.isEmpty() || !url.startsWith(QStringLiteral("http"))) continue;
         QListWidgetItem* w = grid_->item(i);
         const int gen = generation_;
+        const QString itemUrl = items_[i].url; // the playable path/url, for the resume-progress lookup
 
         QNetworkRequest req((QUrl(url)));
         req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;
-        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl] {
             reply->deleteLater();
             --thumbActive_;
             if (gen == generation_ && reply->error() == QNetworkReply::NoError) // else navigated away / failed
             {
                 QPixmap pm;
                 if (pm.loadFromData(reply->readAll()))
-                    w->setIcon(QIcon(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                    w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
+                                                itemUrl));
             }
             pumpThumbnails(); // a slot freed up - start the next queued poster
         });

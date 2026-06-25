@@ -544,6 +544,7 @@ void MainWindow::persistResume()
     if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
     const QString k = mediaResumeKey(resumePath_);
     store().setValue(k + QStringLiteral("pos"), audioPos_);
+    store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
     store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
     store().sync();
     lastSavedPos_ = audioPos_;
