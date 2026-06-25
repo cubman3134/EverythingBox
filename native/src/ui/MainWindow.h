@@ -106,6 +106,7 @@ private:
                                const std::function<void()>& onBack);
     void maybeResolveStartupConflict(); // surface a deferred startup conflict in-window after first show
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
+    QWidget* firstPanelRow() const;     // the first focusable row in the current panel content (or null)
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
@@ -128,6 +129,7 @@ private:
     QWidget* panelPage_ = nullptr;
     QScrollArea* panelScroll_ = nullptr;
     QLabel* panelTitle_ = nullptr;
+    QPushButton* panelBack_ = nullptr;     // the panel header's Back button (arrow-key reachable from the top)
     QWidget* panelReturnTo_ = nullptr;     // the page to return to when the top-level panel's Back is hit
     QWidget* panelDialog_ = nullptr;       // an embedded dialog hosted in the panel (owns keyboard nav), or null
     std::function<void()> panelOnBack_;

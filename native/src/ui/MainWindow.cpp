@@ -138,15 +138,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     panelHeader->setStyleSheet(QStringLiteral("#panelHeader{background:#2b2f3a;} #panelHeader QLabel{color:#fff;}"));
     auto* phl = new QHBoxLayout(panelHeader);
     phl->setContentsMargins(16, 10, 16, 10);
-    auto* panelBack = new QPushButton(tr("‹ Back"), panelHeader);
-    panelBack->setStyleSheet(QStringLiteral(
-        "QPushButton{background:rgba(255,255,255,0.12);color:#fff;border:none;border-radius:8px;"
-        "padding:10px 18px;font-size:16px;font-weight:bold;} QPushButton:hover{background:rgba(255,255,255,0.22);}"));
-    panelBack->setCursor(Qt::PointingHandCursor);
-    connect(panelBack, &QPushButton::clicked, this, [this] { if (panelOnBack_) panelOnBack_(); });
+    panelBack_ = new QPushButton(tr("‹ Back"), panelHeader);
+    panelBack_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:rgba(255,255,255,0.12);color:#fff;border:2px solid transparent;border-radius:8px;"
+        "padding:10px 18px;font-size:16px;font-weight:bold;} QPushButton:hover{background:rgba(255,255,255,0.22);}"
+        "QPushButton:focus{background:rgba(90,140,255,0.55);border:2px solid #fff;}")); // visible when arrowed-to
+    panelBack_->setCursor(Qt::PointingHandCursor);
+    connect(panelBack_, &QPushButton::clicked, this, [this] { if (panelOnBack_) panelOnBack_(); });
     panelTitle_ = new QLabel(panelHeader);
     panelTitle_->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
-    phl->addWidget(panelBack);
+    phl->addWidget(panelBack_);
     phl->addSpacing(12);
     phl->addWidget(panelTitle_, 1);
     pv->addWidget(panelHeader);
@@ -341,8 +342,12 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         switch (e->key())
         {
         case Qt::Key_Down: case Qt::Key_Right:
+            // From the header Back button, drop into the first content row; otherwise advance normally.
+            if (focusWidget() == panelBack_) { if (QWidget* r = firstPanelRow()) { r->setFocus(Qt::TabFocusReason); return; } }
             focusNextChild(); return;
         case Qt::Key_Up: case Qt::Key_Left:
+            // From the top content row, go up to the Back button (scroll-area focus chain won't reach it).
+            if (panelBack_ && focusWidget() == firstPanelRow()) { panelBack_->setFocus(Qt::TabFocusReason); return; }
             focusPreviousChild(); return;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
@@ -836,14 +841,19 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     // Deferred a tick so the new content widget is laid out and its children are focusable.
     QTimer::singleShot(0, this, [this] {
         if (stack_->currentWidget() != panelPage_) return;
-        QWidget* w = panelScroll_->widget();
-        if (!w) return;
-        for (QWidget* child : w->findChildren<QWidget*>())
-        {
-            if (child->isVisibleTo(w) && child->focusPolicy() & Qt::TabFocus)
-            { child->setFocus(); return; }
-        }
+        if (QWidget* first = firstPanelRow()) first->setFocus();
     });
+}
+
+// The first focusable row in the current panel content (used for initial focus and Up→Back wrap-around).
+QWidget* MainWindow::firstPanelRow() const
+{
+    QWidget* w = panelScroll_->widget();
+    if (!w) return nullptr;
+    for (QWidget* child : w->findChildren<QWidget*>())
+        if (child->isVisibleTo(w) && (child->focusPolicy() & Qt::TabFocus))
+            return child;
+    return nullptr;
 }
 
 void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
