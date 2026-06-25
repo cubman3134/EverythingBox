@@ -73,6 +73,7 @@ private:
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]
     void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
+    void selectSteam();              // show the local Steam library as a games catalog (native, not an addon)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
     void applyGridMode(bool recentList); // switch grid_ between the catalog poster grid and the recent list

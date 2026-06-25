@@ -21,6 +21,7 @@
 #include <QSettings>
 #include <QLineEdit>
 #include <QUrl>
+#include <QDesktopServices>
 #include <QCheckBox>
 #include <QComboBox>
 #include "SettingsDialog.h"
@@ -826,6 +827,13 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
         statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), 4000);
+        return;
+    }
+    // A Steam game: hand it to the Steam client to launch (it handles install/run).
+    if (item.url.startsWith(QStringLiteral("steam://")))
+    {
+        QDesktopServices::openUrl(QUrl(item.url));
+        statusBar()->showMessage(tr("Launching “%1” via Steam…").arg(item.title), 5000);
         return;
     }
     const QString url = item.url;

@@ -5,6 +5,7 @@
 #include "../core/FavoritesStore.h"
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
+#include "../core/SteamLibrary.h"
 #include "CarouselView.h"
 #include "XmbView.h"
 #include <QHash>
@@ -685,6 +686,17 @@ void HomeView::refresh()
             if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = name; first = false; }
         }
     }
+
+    // A native "Steam" category (no addon): the machine's installed Steam library, navigable like a console.
+    if (SteamLibrary::isAvailable() && !SteamLibrary::installedGames().isEmpty())
+    {
+        auto* btn = new QPushButton(tr("Steam"), this);
+        connect(btn, &QPushButton::clicked, this, &HomeView::selectSteam);
+        makeTab(btn, QStringLiteral("steam"), QStringLiteral("game"));
+        navTargets_.push_back({ QStringLiteral("steam"), false, nullptr,
+                                QStringLiteral("steam"), QStringLiteral("game"), tr("Steam") });
+    }
+
     typeBar_->addStretch(1);
 
     // Carousel layout (ES/RetroBat-style): the media types become a spinning carousel; the tab strip hides.
@@ -789,8 +801,9 @@ void HomeView::activateNav(const QString& navKey)
                 xmb_->setAtRoot(true);
                 xmb_->clearItems();              // clear the old column while the new one loads
             }
-            if (t.isHome) selectRecent();    // Home -> the recents list / XMB column
-            else          selectType(t.addon, t.catalogId, t.type, t.name); // catalog -> item view
+            if (t.isHome)                                  selectRecent(); // Home -> recents list / XMB column
+            else if (t.navKey == QStringLiteral("steam"))  selectSteam();  // native Steam library
+            else          selectType(t.addon, t.catalogId, t.type, t.name); // addon catalog -> item view
             return;
         }
 }
@@ -1053,6 +1066,39 @@ void HomeView::selectRecent()
     loading_ = false;
     hasMore_ = false;
     renderRecents();
+}
+
+void HomeView::selectSteam()
+{
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("steam"));
+    search_->clear();
+    stack_.clear();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = false;
+    lvl.catalogId = QStringLiteral("steam"); lvl.catalogType = QStringLiteral("game"); lvl.title = tr("Steam");
+    stack_.push_back(lvl);
+
+    // Build the catalog natively from the local Steam library (no addon request).
+    MediaCatalog cat;
+    cat.title = tr("Steam");
+    for (const SteamGame& g : SteamLibrary::installedGames())
+    {
+        MediaItem it;
+        it.id = QStringLiteral("steam:") + g.appid;
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.url = SteamLibrary::launchUrl(g.appid);  // steam:// -> MainWindow launches it
+        it.thumbnailUrl = SteamLibrary::posterUrl(g.appid);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
 }
 
 void HomeView::renderRecents()
