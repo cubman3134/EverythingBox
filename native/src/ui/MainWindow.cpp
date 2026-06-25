@@ -171,7 +171,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mediaControls_->setObjectName(QStringLiteral("mediaControls"));
     mediaControls_->setStyleSheet(QStringLiteral(
         "#mediaControls { background: rgba(20,20,24,0.85); border-radius: 10px; }"
-        "#mediaControls QLabel { color: #e8e8e8; }"));
+        "#mediaControls QLabel { color: #e8e8e8; }"
+        "#mediaControls QPushButton:focus { background: rgba(90,140,255,0.80); border-radius:6px; }")); // arrowed-to
     auto* mc = new QHBoxLayout(mediaControls_);
     mc->setContentsMargins(12, 8, 12, 8);
     auto* prevChap = new QPushButton(tr("⏮"), mediaControls_);
@@ -210,14 +211,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(subLoad);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
+    // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, subsBtn, subLoad, fullScreen };
 
     // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).
     videoBack_ = new QPushButton(tr("‹ Back"), player_);
     videoBack_->setObjectName(QStringLiteral("videoBack"));
     videoBack_->setStyleSheet(QStringLiteral(
-        "#videoBack { background: rgba(20,20,24,0.85); color:#e8e8e8; border:none; border-radius:8px;"
+        "#videoBack { background: rgba(20,20,24,0.85); color:#e8e8e8; border:2px solid transparent; border-radius:8px;"
         " padding:8px 16px; font-weight:bold; }"
-        "#videoBack:hover { background: rgba(45,45,52,0.95); }"));
+        "#videoBack:hover { background: rgba(45,45,52,0.95); }"
+        "#videoBack:focus { background: rgba(90,140,255,0.80); border:2px solid #fff; }")); // arrowed-to
     videoBack_->setCursor(Qt::PointingHandCursor);
     videoBack_->setToolTip(tr("Exit the movie"));
     videoBack_->hide();
@@ -358,7 +362,41 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         default: break;
         }
     }
+
+    // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
+    // Up reaches the top-left Back, Down returns to the transport row, Enter/Select activates, Space
+    // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
+    if (stack_->currentWidget() == playerPage_)
+    {
+        switch (e->key())
+        {
+        case Qt::Key_Right: revealMediaControls(); stepPlayerFocus(+1); return;
+        case Qt::Key_Left:  revealMediaControls(); stepPlayerFocus(-1); return;
+        case Qt::Key_Up:    revealMediaControls(); if (videoBack_) videoBack_->setFocus(Qt::TabFocusReason); return;
+        case Qt::Key_Down:  revealMediaControls(); stepPlayerFocus(0); return;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+            revealMediaControls();
+            if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
+            player_->togglePause(); return;          // nothing focused -> play/pause
+        case Qt::Key_Space: player_->togglePause(); revealMediaControls(); return;
+        case Qt::Key_Backspace:
+            player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome(); return;
+        default: break;
+        }
+    }
     QMainWindow::keyPressEvent(e);
+}
+
+// Move keyboard focus across the visible transport buttons (dir +1/-1), or land on the row (dir 0).
+void MainWindow::stepPlayerFocus(int dir)
+{
+    QVector<QPushButton*> vis;
+    for (QPushButton* b : playerButtons_) if (b && b->isVisible()) vis.push_back(b);
+    if (vis.isEmpty()) return;
+    int idx = vis.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+    if (idx < 0) idx = (dir < 0 ? vis.size() - 1 : 0); // entering the row from Back / nowhere
+    else if (dir != 0) idx = (idx + dir + vis.size()) % vis.size();
+    vis[idx]->setFocus(Qt::TabFocusReason);
 }
 
 void MainWindow::showEvent(QShowEvent* event)

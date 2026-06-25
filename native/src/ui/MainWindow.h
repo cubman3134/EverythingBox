@@ -2,6 +2,7 @@
 #include <QMainWindow>
 
 #include <QStringList>
+#include <QVector>
 #include <QColor>
 #include <memory>
 #include <functional>
@@ -91,6 +92,7 @@ private:
     void leaveFullScreen();   // restore windowed: status bar + cursor
     void revealMediaControls();
     void positionMediaControls();
+    void stepPlayerFocus(int dir); // arrow-key focus across the transport buttons (dir +1/-1, or 0 = enter row)
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
                    const std::function<void()>& onBack);
@@ -121,6 +123,7 @@ private:
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
     QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie
+    QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
