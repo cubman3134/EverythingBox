@@ -720,20 +720,47 @@ void HomeView::refresh()
 
     bool first = true;
     LoadedAddon* firstAddon = nullptr; QString firstCat, firstType, firstName;
+
+    auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
+
+    // Gather every enabled catalog. Movie/series get a SINGLE tab sourced from a Stremio (IMDB) addon when one
+    // is installed - so there's one "Movies"/"TV" tab and debrid streams resolve - hiding the duplicate
+    // non-Stremio movie/series catalogs. All other catalogs (music, books, games, …) are kept as-is.
+    struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
+    QVector<CatRef> all;
     for (LoadedAddon* s : mgr_->sources())
     {
         if (!mgr_->isEnabled(s->manifest.id)) continue;
-        const QVector<AddonCatalog> cats = mgr_->catalogs(s);
-        for (const AddonCatalog& c : cats)
-        {
-            const QString name = c.name; // just the catalog name (e.g. "Movies"), no addon prefix
-            auto* btn = new QPushButton(name, this);
-            LoadedAddon* addon = s; const QString cid = c.id, ctype = c.type;
-            connect(btn, &QPushButton::clicked, this, [this, addon, cid, ctype, name] { selectType(addon, cid, ctype, name); });
-            makeTab(btn, cid, ctype);
-            navTargets_.push_back({ cid, false, addon, cid, ctype, name });
-            if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = name; first = false; }
-        }
+        for (const AddonCatalog& c : mgr_->catalogs(s)) all.push_back({ s, c });
+    }
+    int movieIdx = -1, seriesIdx = -1;
+    for (int i = 0; i < all.size(); ++i)
+    {
+        if (all[i].addon->stremio && all[i].cat.type == QStringLiteral("movie") && movieIdx < 0) movieIdx = i;
+        if (all[i].addon->stremio && isSeriesType(all[i].cat.type) && seriesIdx < 0) seriesIdx = i;
+    }
+    const bool hasStremioMovie = movieIdx >= 0, hasStremioSeries = seriesIdx >= 0;
+
+    auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
+        auto* btn = new QPushButton(display, this);
+        const QString cid = c.id, ctype = c.type;
+        connect(btn, &QPushButton::clicked, this, [this, addon, cid, ctype, display] { selectType(addon, cid, ctype, display); });
+        makeTab(btn, cid, ctype);
+        navTargets_.push_back({ cid, false, addon, cid, ctype, display });
+        if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; first = false; }
+    };
+
+    // Lead with the unified Movies / TV tabs (Stremio-sourced) when available.
+    if (movieIdx >= 0)  addCat(all[movieIdx].addon,  all[movieIdx].cat,  tr("Movies"));
+    if (seriesIdx >= 0) addCat(all[seriesIdx].addon, all[seriesIdx].cat, tr("TV"));
+    for (int i = 0; i < all.size(); ++i)
+    {
+        if (i == movieIdx || i == seriesIdx) continue;                       // already shown as Movies/TV
+        const bool isMovie = (all[i].cat.type == QStringLiteral("movie"));
+        const bool isSeries = isSeriesType(all[i].cat.type);
+        if (isMovie && hasStremioMovie) continue;   // hidden: replaced by the unified Movies tab
+        if (isSeries && hasStremioSeries) continue; // hidden: replaced by the unified TV tab
+        addCat(all[i].addon, all[i].cat, all[i].cat.name);
     }
 
     typeBar_->addStretch(1);
