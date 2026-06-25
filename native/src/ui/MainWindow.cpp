@@ -343,21 +343,33 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // fires for the player / readers).
     if (e->key() == Qt::Key_Escape && isFullScreen()) { leaveFullScreen(); return; }
 
-    // Arrow-key / remote navigation for the inline settings pages: Up/Down (and Left/Right) move focus
-    // between rows, Enter/Select activates the focused row, Backspace goes back. Reaches MainWindow because
-    // the panel rows (buttons/checkboxes) don't consume the arrow keys themselves.
+    // Arrow-key / remote navigation for the inline settings pages. Up/Down (and Left/Right) move focus
+    // within a bounded ring of the Back button + the visible content rows, so the selection can NEVER be
+    // lost to an off-screen widget (the generic focusNextChild/PreviousChild can wander out of the panel).
     if (stack_->currentWidget() == panelPage_ && !panelDialog_) // an embedded dialog drives its own keys
     {
-        switch (e->key())
+        const int key = e->key();
+        const bool prev = (key == Qt::Key_Up   || key == Qt::Key_Left);
+        const bool next = (key == Qt::Key_Down || key == Qt::Key_Right);
+        if (prev || next)
         {
-        case Qt::Key_Down: case Qt::Key_Right:
-            // From the header Back button, drop into the first content row; otherwise advance normally.
-            if (focusWidget() == panelBack_) { if (QWidget* r = firstPanelRow()) { r->setFocus(Qt::TabFocusReason); return; } }
-            focusNextChild(); return;
-        case Qt::Key_Up: case Qt::Key_Left:
-            // From the top content row, go up to the Back button (scroll-area focus chain won't reach it).
-            if (panelBack_ && focusWidget() == firstPanelRow()) { panelBack_->setFocus(Qt::TabFocusReason); return; }
-            focusPreviousChild(); return;
+            QVector<QWidget*> ring;
+            if (panelBack_) ring.push_back(panelBack_);          // index 0: header Back
+            if (QWidget* w = panelScroll_->widget())
+                for (QWidget* c : w->findChildren<QWidget*>())
+                    if (c->isVisibleTo(w) && (c->focusPolicy() & Qt::TabFocus))
+                        ring.push_back(c);
+            if (!ring.isEmpty())
+            {
+                int idx = ring.indexOf(focusWidget());
+                if (idx < 0) idx = next ? 0 : ring.size() - 1; // focus was elsewhere -> grab an end
+                else         idx = qBound(0, idx + (next ? 1 : -1), ring.size() - 1); // clamp (never wrap off)
+                ring[idx]->setFocus(Qt::TabFocusReason);
+            }
+            return;
+        }
+        switch (key)
+        {
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
             break;
