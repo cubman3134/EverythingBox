@@ -233,6 +233,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
+        // While a transport button / Back holds keyboard focus, the user is navigating with arrow keys -
+        // keep the controls up (just re-check later) instead of hiding them out from under the cursor.
+        QWidget* fw = focusWidget();
+        if (fw && (fw == videoBack_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
+        {
+            controlsHideTimer_->start(2500);
+            return;
+        }
         // Hide after the inactivity timeout (mouse movement re-reveals via the event filter). In full
         // screen also blank the cursor so nothing lingers over the movie.
         mediaControls_->hide();
