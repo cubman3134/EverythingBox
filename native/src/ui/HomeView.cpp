@@ -1942,6 +1942,10 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
 
 void HomeView::populate(const MediaCatalog& cat, bool append)
 {
+    // If the user is typing in the search box (live search), rebuilding the view below can steal focus
+    // (the carousel/grid grab it). Remember, and hand focus back at the end so typing isn't interrupted.
+    const bool keepSearchFocus = search_ && search_->hasFocus();
+
     int from;
     if (!append)
     {
@@ -2028,6 +2032,14 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // Returning via Back: select + scroll to the item we'd drilled into (the carousel/xmb already restore the
     // page-1 case via their fill funcs; this also pages further in when the item was loaded by infinite-scroll).
     maybeRestoreSelection();
+
+    // Live search: give focus back to the search box if rebuilding the view took it (keep the cursor there).
+    if (keepSearchFocus && search_ && !search_->hasFocus())
+    {
+        search_->setFocus(Qt::OtherFocusReason);
+        search_->deselect();   // keep the caret at the end rather than selecting all the typed text
+        searchEditing_ = true; // stay in type mode (FocusOut had flipped it off)
+    }
 }
 
 // Scroll to / select the row we last drilled into (stack childRow). If it hasn't been loaded yet (it was on a
