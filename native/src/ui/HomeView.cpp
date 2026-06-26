@@ -194,6 +194,18 @@ static QString chromeButtonStyle(const QColor& c)
         .arg(c.name(), c.lighter(112).name(), c.lighter(135).name());
 }
 
+// The Back button always blends into the top bar: its fill stays the background colour in every state
+// (no hover/focus lightening). Focus still draws a white inset border for keyboard/controller users.
+static QString backButtonStyle(const QColor& c)
+{
+    return QString(
+        "QPushButton{background:%1;color:white;border:none;border-radius:0;padding:8px 16px;font-weight:bold;}"
+        "QPushButton:hover{background:%1;}"
+        "QPushButton:focus{background:%1;border:2px solid white;padding:6px 14px;}"
+        "QPushButton:disabled{background:%1;color:rgba(255,255,255,0.55);}")
+        .arg(c.name());
+}
+
 static QString chromeEditStyle(const QColor& c, int radius)
 {
     // Light *tint* of the accent (not pure white) and no border, so no white edge shows next to the buttons.
@@ -1051,7 +1063,7 @@ void HomeView::styleTypeButtons(const QString& activeKey)
     // The chrome buttons (Back, profile, Settings) take the accent colour; the search box stays light.
     themeColor_ = activeColor;
     const QString cb = chromeButtonStyle(activeColor);
-    if (back_)        back_->setStyleSheet(cb);
+    if (back_)        back_->setStyleSheet(backButtonStyle(activeColor)); // always matches the bar background
     if (profileBtn_)  profileBtn_->setStyleSheet(cb);
     if (settingsBtn_) settingsBtn_->setStyleSheet(cb);
     if (search_)      search_->setStyleSheet(chromeEditStyle(activeColor, g_theme.cornerRadius));
