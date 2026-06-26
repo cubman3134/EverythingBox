@@ -45,7 +45,8 @@ private slots:
     void openDocument(); // ebooks (.epub) + PDFs (.pdf), dispatched by extension
     void openHome();
     void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
-    void openRecent(const QString& path, const QString& kind); // re-open a Home "Recent" entry
+    void openRecent(const QString& path, const QString& kind,
+                    const QString& resumeKey = QString(), const QString& title = QString()); // re-open a Home "Recent" entry
     void onSwitchProfile();                      // pick/create a profile from the Home profile button
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
@@ -86,7 +87,8 @@ private:
     void openAudioPath(const QString& path);    // queue the whole folder, starting at this file
     void openGamePath(const QString& path);
     void openStreamPrompt();                    // inline form to paste a stream/URL link
-    void openStreamUrl(const QString& url);     // stream an http(s) audio/video link via libmpv
+    void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
+                       const QString& title = QString()); // stream an http(s) audio/video link via libmpv
     void openDocumentPath(const QString& path); // .epub / .pdf by extension
     void setAudioQueue(const QStringList& files, int startIndex);
     void playTrack(int index);

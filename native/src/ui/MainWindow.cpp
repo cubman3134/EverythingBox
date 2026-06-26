@@ -757,23 +757,26 @@ void MainWindow::openStreamPrompt()
     }, [this] { openHome(); });
 }
 
-void MainWindow::openStreamUrl(const QString& url)
+void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
 {
     retro_->stop();
     book_->persist();
     pdf_->persist();
     comic_->persist();
     clearAudioQueue();      // saves+clears any previous timed media
-    beginResume(url);       // resume position keyed by the link (seekable streams pick up where you left off)
+    // Resume + Recent keyed by the stable id when given (a re-opened catalog stream), else by the link itself.
+    const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
+    beginResume(rkey);
     stack_->setCurrentWidget(playerPage_);
     player_->play(url);
     revealMediaControls();
-    // A readable title for the Recent list: the link's file name, else its host, else the raw link.
+    // A readable title for the Recent list: the supplied title, else the link's file name / host / raw link.
     const QUrl u(url);
-    QString title = u.fileName();
-    if (title.isEmpty()) title = u.host();
-    if (title.isEmpty()) title = url;
-    RecentStore::add({ url, title, QStringLiteral("video"), QString() });
+    QString t = title;
+    if (t.isEmpty()) t = u.fileName();
+    if (t.isEmpty()) t = u.host();
+    if (t.isEmpty()) t = url;
+    RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
 }
 
 void MainWindow::openDocument()
@@ -841,7 +844,8 @@ void MainWindow::onRequestOpenFile(const QString& kind)
     else if (kind == QStringLiteral("stream"))   openStreamPrompt();
 }
 
-void MainWindow::openRecent(const QString& path, const QString& kind)
+void MainWindow::openRecent(const QString& path, const QString& kind,
+                            const QString& resumeKey, const QString& title)
 {
     // A streamed link has no local file to check; route it straight to libmpv.
     const bool isUrl = path.contains(QStringLiteral("://"));
@@ -850,7 +854,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind)
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), 5000);
         return;
     }
-    if (isUrl)                                   openStreamUrl(path);
+    if (isUrl)                                   openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
     else if (kind == QStringLiteral("game"))     openGamePath(path);

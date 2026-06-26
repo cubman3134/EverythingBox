@@ -84,6 +84,14 @@ static double resumeFraction(const QString& url)
     return qBound(0.0, pos / dur, 1.0);
 }
 
+// The key a played item's resume position is stored under: its stable addon id when it has one (a streamed
+// URL changes every resolution), else its url/path. Matches MainWindow::openLibraryItem's resume keying, so a
+// movie shows "continue watching" progress whether it's a catalog poster or a Recent row.
+static QString resumeKeyFor(const MediaItem& it)
+{
+    return it.id.isEmpty() ? it.url : it.id;
+}
+
 // Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place).
 static QIcon iconWithProgress(QPixmap pm, const QString& url)
 {
@@ -946,7 +954,7 @@ void HomeView::fillXmbFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(it.url); // "how far in" for a partly-played movie/episode
+        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
@@ -1310,20 +1318,19 @@ void HomeView::renderRecents()
         {
             MediaItem it;
             it.url = r.path;                         // re-open target
+            it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
             it.type = iconTypeForKind(r.kind);       // drives the placeholder icon
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
-            // Resume is keyed by the recent's stable key (streamed items) or its path (local files).
-            const QString rkey = r.key.isEmpty() ? r.path : r.key;
-            const double frac = resumeFraction(rkey);
+            const double frac = resumeFraction(resumeKeyFor(it));
             QString label = QStringLiteral("  ") + it.title;
             if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
             auto* w = new QListWidgetItem(label, grid_);
             w->setSizeHint(QSize(0, 52));
-            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), rkey));
+            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), resumeKeyFor(it)));
         }
     }
 
@@ -1536,7 +1543,7 @@ void HomeView::activateItem(int row)
     {
         if (it.type == QStringLiteral("rechdr")) return;                 // a group header, not actionable
         if (it.mime.startsWith(QStringLiteral("fav:"))) { openFavorite(it); return; } // a favourite -> detail
-        if (!it.url.isEmpty()) emit openRecent(it.url, it.mime);         // a recent -> re-open the file
+        if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title); // a recent -> re-open
         return;
     }
 
@@ -2019,7 +2026,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         {
             // Type-based placeholder (+ resume bar if started); a real poster overwrites it in loadThumbnails().
             if (it.type != QStringLiteral("info"))
-                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), it.url));
+                w->setIcon(iconWithProgress(defaultIcon(it.type, kPoster).pixmap(kPoster), resumeKeyFor(it)));
             if (it.expandable) w->setToolTip(tr("Open for episodes/tracks"));
         }
     }
@@ -2086,7 +2093,7 @@ void HomeView::fillCarouselFromItems(int from)
         if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr")) continue;
         const QColor c = (it.type == QStringLiteral("_open")) ? QColor(0x6A, 0x6E, 0x78) : typeColor(it.type);
         QString label = it.title;
-        const double frac = resumeFraction(it.url); // "how far in" for a partly-played movie/episode
+        const double frac = resumeFraction(resumeKeyFor(it)); // "how far in" for a partly-played movie/episode
         if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
         entries.push_back({ QStringLiteral("item:") + QString::number(i), label, c, it.thumbnailUrl });
     }
