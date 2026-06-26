@@ -805,17 +805,12 @@ void HomeView::refresh()
 
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
-    // Gather every enabled catalog, then show ONE tab per media type so two addons that both offer (say)
-    // Movies don't make two "Movies" tabs. Which source wins a type is type-aware: video types lean on a
-    // streaming addon (Stremio's debrid, or a self-hosted library like Allarr), while reading/listening/game
-    // catalogs lean on the bundled local addon (AIO Catalog), whose MangaDex/Comic Vine/Books integrations
-    // actually return content (a remote library may declare those types but serve nothing).
-    auto isStreamingType = [&](const QString& t) {
-        return t == QStringLiteral("movie") || isSeriesType(t) || t == QStringLiteral("episode");
-    };
-    auto sourceScore = [&](LoadedAddon* a, const QString& type) {
-        if (isStreamingType(type)) return a->stremio ? 2 : (a->transport == LoadedAddon::RemoteHttp ? 1 : 0);
-        return (a->transport == LoadedAddon::RemoteHttp || a->stremio) ? 0 : 1; // else prefer the local catalog
+    // Gather every enabled catalog, then show ONE tab per media type. A non-Stremio remote addon (e.g. Allarr)
+    // is a file/stream provider only - it never owns a catalog tab; the bundled local catalog (AIO Catalog),
+    // and any Stremio catalog, provide browsing + metadata. When only such a provider declares a type, it can
+    // still surface (its score ties the 0 floor), but a real catalog source always wins.
+    auto sourceScore = [](LoadedAddon* a) {
+        return (a->transport == LoadedAddon::RemoteHttp && !a->stremio) ? 0 : 1;
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
@@ -826,8 +821,8 @@ void HomeView::refresh()
     }
     QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
-    auto wins = [&](const CatRef& c) { return sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0); };
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -1896,7 +1891,7 @@ void HomeView::showMeta(const MediaDetail& d)
         const QString t = stack_.last().item.type;
         const QString stremioType = (t == QStringLiteral("episode")) ? QStringLiteral("series")
                                   : (t == QStringLiteral("movie"))   ? QStringLiteral("movie") : QString();
-        if (!stremioType.isEmpty() && mgr_->hasStremioStreamProvider(stremioType))
+        if (!stremioType.isEmpty() && mgr_->hasStreamProvider(stremioType))
         {
             playImdbId_ = d.imdbStreamId;
             playStremioType_ = stremioType;

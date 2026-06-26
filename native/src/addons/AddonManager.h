@@ -89,9 +89,11 @@ public:
     // Resolve a manga chapter item (id "mangadexch:{ids}") to its ordered page image URLs via MangaDex (async).
     void resolveMangaChapterPages(const QString& chapterItemId,
                                   std::function<void(const QStringList& pageUrls)> cb);
-    // True if at least one enabled Stremio stream addon (Torrentio/Allarr/…) serves this type ("movie"/"series").
-    bool hasStremioStreamProvider(const QString& type) const;
-    // Resolve a playable source for an IMDB stream id ("tt123" or "ttShow:s:e") across the Stremio stream addons.
+    // True if at least one enabled stream source serves this type: a Stremio stream addon, or a non-Stremio
+    // remote media-source used as a file provider (e.g. Allarr).
+    bool hasStreamProvider(const QString& type) const;
+    // Resolve a playable source for an IMDB stream id ("tt123" or "ttShow:s:e"): try the file provider(s)
+    // (Allarr) first, then the Stremio stream addons.
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
                              std::function<void(const QString& url, const QString& mime)> cb);
 
@@ -125,6 +127,10 @@ private:
     // Stremio stream resolution aggregates across every installed Stremio stream addon (à la Stremio).
     void resolveStremioStream(const MediaItem& item,
                               std::function<void(const QString& url, const QString& mime)> cb);
+    // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
+    void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
+                                  const QString& type, const QString& imdbStreamId,
+                                  std::function<void(const QString& url, const QString& mime)> cb);
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
     int dispatch(const AddonRequest& req);     // run getCatalog/getDetail off-thread, deliver via catalogReady
     int dispatchMeta(const AddonRequest& req); // run getMeta off-thread, deliver via metaReady
