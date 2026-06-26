@@ -614,7 +614,14 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     grid_->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     grid_->viewport()->installEventFilter(this); // wheel speed
     grid_->installEventFilter(this);             // Up at the top row -> back to the tabs
-    connect(grid_, &QListWidget::itemClicked, this, &HomeView::onItemActivated); // single click opens
+    // Single click: move the cursor to the item that was actually clicked (not whatever was "current"),
+    // scroll it fully into view, then open it.
+    connect(grid_, &QListWidget::itemClicked, this, [this](QListWidgetItem* it) {
+        if (!it) return;
+        grid_->setCurrentItem(it);
+        grid_->scrollToItem(it, QAbstractItemView::EnsureVisible);
+        activateItem(grid_->row(it));
+    });
 
     // Right-click a favourite on the Home list to remove it.
     grid_->setContextMenuPolicy(Qt::CustomContextMenu);
