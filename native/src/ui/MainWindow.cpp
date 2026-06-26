@@ -891,13 +891,18 @@ void MainWindow::openLibraryItem(const MediaItem& item)
 
     // Documents (CBZ/EPUB/PDF) open through file-based readers (miniz / epub / PDFium), which need a
     // local path. When an addon hands us a remote http(s) document, fetch it to a cache file first,
-    // then re-enter with the local path. Pick the reader extension from the url, else the media type.
+    // then re-enter with the local path. Pick the reader extension from the url, else the mime (debrid
+    // links often have no extension), else the media type. Audio mimes/types are left for libmpv.
     if (lower.startsWith(QStringLiteral("http://")) || lower.startsWith(QStringLiteral("https://")))
     {
+        const QString mime = item.mime.toLower();
         QString ext;
         if      (lower.endsWith(QStringLiteral(".cbz")))  ext = QStringLiteral(".cbz");
         else if (lower.endsWith(QStringLiteral(".epub"))) ext = QStringLiteral(".epub");
         else if (lower.endsWith(QStringLiteral(".pdf")))  ext = QStringLiteral(".pdf");
+        else if (mime.contains(QStringLiteral("epub")))   ext = QStringLiteral(".epub");
+        else if (mime.contains(QStringLiteral("pdf")))    ext = QStringLiteral(".pdf");
+        else if (mime.contains(QStringLiteral("comicbook")) || mime.contains(QStringLiteral("cbz"))) ext = QStringLiteral(".cbz");
         else if (type == QStringLiteral("comic") || type == QStringLiteral("manga")) ext = QStringLiteral(".cbz");
         else if (type == QStringLiteral("ebook") || type == QStringLiteral("book"))  ext = QStringLiteral(".epub");
         else if (type == QStringLiteral("pdf"))  ext = QStringLiteral(".pdf");
