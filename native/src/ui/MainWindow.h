@@ -26,6 +26,7 @@ class QPushButton;
 class QTimer;
 class QScrollArea;
 class QVBoxLayout;
+class QNetworkAccessManager;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
 // with Open Video / Open Game and a transport bar. The shell the rest of the hub grows from.
@@ -49,6 +50,9 @@ private slots:
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
+    // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
+    // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
+    void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel
@@ -113,6 +117,7 @@ private:
     HomeView* home_ = nullptr;
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
+    QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player

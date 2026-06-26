@@ -58,6 +58,10 @@
 #include <QMessageBox>
 #include <QStatusBar>
 #include <QChar>
+#include <QStandardPaths>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
 #include <cmath>
 
 // Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
@@ -841,6 +845,21 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     const QString lower = url.toLower();
     QString err;
 
+    // Documents (CBZ/EPUB/PDF) open through file-based readers (miniz / epub / PDFium), which need a
+    // local path. When an addon hands us a remote http(s) document, fetch it to a cache file first,
+    // then re-enter with the local path. Pick the reader extension from the url, else the media type.
+    if (lower.startsWith(QStringLiteral("http://")) || lower.startsWith(QStringLiteral("https://")))
+    {
+        QString ext;
+        if      (lower.endsWith(QStringLiteral(".cbz")))  ext = QStringLiteral(".cbz");
+        else if (lower.endsWith(QStringLiteral(".epub"))) ext = QStringLiteral(".epub");
+        else if (lower.endsWith(QStringLiteral(".pdf")))  ext = QStringLiteral(".pdf");
+        else if (type == QStringLiteral("comic") || type == QStringLiteral("manga")) ext = QStringLiteral(".cbz");
+        else if (type == QStringLiteral("ebook") || type == QStringLiteral("book"))  ext = QStringLiteral(".epub");
+        else if (type == QStringLiteral("pdf"))  ext = QStringLiteral(".pdf");
+        if (!ext.isEmpty()) { fetchRemoteDocumentThenOpen(item, ext); return; }
+    }
+
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
@@ -871,6 +890,58 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         player_->play(url);
         revealMediaControls();
     }
+}
+
+void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext)
+{
+    // Cache by url hash so re-opening the same document doesn't re-download it.
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+                        + QStringLiteral("/remote-docs");
+    QDir().mkpath(dir);
+    const QString hash = QString::fromUtf8(
+        QCryptographicHash::hash(item.url.toUtf8(), QCryptographicHash::Sha1).toHex());
+    const QString localPath = dir + QStringLiteral("/") + hash + ext;
+
+    auto openLocal = [this, item, localPath] {
+        MediaItem local = item;
+        local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
+        openLibraryItem(local);
+    };
+
+    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { openLocal(); return; }
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+
+    QNetworkRequest rq{QUrl(item.url)};
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = docNam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, localPath, openLocal, title = item.title] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(title, reply->errorString()), 6000);
+            return;
+        }
+        const QByteArray body = reply->readAll();
+        QFile f(localPath + QStringLiteral(".part"));
+        if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
+        {
+            f.close(); f.remove();
+            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
+            return;
+        }
+        f.close();
+        QFile::remove(localPath);
+        if (!QFile::rename(localPath + QStringLiteral(".part"), localPath))
+        {
+            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+            return;
+        }
+        statusBar()->clearMessage();
+        openLocal();
+    });
 }
 
 void MainWindow::onThemeChanged(const QColor& background, const QColor& accent)
