@@ -93,6 +93,16 @@ static QString resumeKeyFor(const MediaItem& it)
     return it.id.isEmpty() ? it.url : it.id;
 }
 
+// Forget the saved resume position (pos/dur/title) for a media key, so it starts from the beginning next
+// time. Mirrors MainWindow's resume keying (resume/<md5-of-key>/…).
+static void clearResume(const QString& key)
+{
+    if (key.isEmpty()) return;
+    const QByteArray h = QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
+    settingsStore().remove(QStringLiteral("resume/") + QString::fromLatin1(h)); // removes the whole group
+    settingsStore().sync();
+}
+
 // Build a metadata-lookup item from a source item that embeds an IMDB id (e.g. Allarr "mv:tt123" or an
 // episode "ep:tt123:1:2"). Returns an item a provider addon (AIO Catalog) can map IMDB->TMDB for; the id is
 // empty when no IMDB id is present.
@@ -1620,8 +1630,13 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
     QAction* remove = menu.addAction(fav ? tr("Remove from Favorites") : tr("Remove from Recent"));
     if (menu.exec(globalPos) != remove) return;
-    if (fav) FavoritesStore::remove(it.id);
-    else     RecentStore::remove(it.url.isEmpty() ? resumeKeyFor(it) : it.url);
+    if (fav)
+        FavoritesStore::remove(it.id);
+    else
+    {
+        RecentStore::remove(it.url.isEmpty() ? resumeKeyFor(it) : it.url);
+        clearResume(resumeKeyFor(it)); // also forget where you left off, so it starts fresh next time
+    }
     renderRecents(); // refresh the Home list
 }
 
