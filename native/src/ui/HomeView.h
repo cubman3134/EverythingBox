@@ -94,6 +94,7 @@ private:
     QString openKindForView() const; // file-open kind to offer in the current view, or "" for none
     void loadTop();
     void loadMore();                       // fetch + append the next page (infinite scroll)
+    void maybeRestoreSelection();          // on Back, scroll to the drilled-into item (paging in if needed)
     void issueRequest(bool append);        // dispatch an async page request for the current view
     void populate(const MediaCatalog& cat, bool append);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
@@ -133,6 +134,7 @@ private:
     QLabel* status_ = nullptr;
     QLabel* toast_ = nullptr;          // floating notification (Play/Read progress + errors)
     QTimer* toastTimer_ = nullptr;     // auto-hides the toast
+    QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
@@ -161,6 +163,7 @@ private:
     int thumbActive_ = 0;        // remote poster loads currently in flight
     int generation_ = 0;         // bumped on each fresh load so stale async thumbnails are ignored
     int currentPage_ = 1;        // last page loaded for the current view
+    int pendingRestoreRow_ = -1; // on Back: keep paging until this row is loaded, then scroll to it
     bool hasMore_ = false;       // the addon says another page exists
     bool loading_ = false;       // a page fetch is in progress (guards re-entrant scroll triggers)
     int pendingReqId_ = -1;      // in-flight async request; results with a different id are stale

@@ -430,6 +430,13 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     search_->setFixedHeight(kTopBtnHeight - 8); // slightly shorter -> small top/bottom margin (centred)
     search_->setFrame(false); // no native frame -> no white edge beside the profile button
     connect(search_, &QLineEdit::returnPressed, this, &HomeView::doSearch);
+    // Live search: re-run the query a short beat after the user stops typing (debounced so we don't fire a
+    // request per keystroke). Enter still searches immediately via returnPressed.
+    searchTimer_ = new QTimer(this);
+    searchTimer_->setSingleShot(true);
+    connect(searchTimer_, &QTimer::timeout, this, &HomeView::doSearch);
+    // Only when the user is actually typing (has focus) - not when code clears the box on a tab switch.
+    connect(search_, &QLineEdit::textChanged, this, [this] { if (searchTimer_ && search_->hasFocus()) searchTimer_->start(300); });
     topRow->addSpacing(6);    // small margin around the search box only (buttons stay flush)
     topRow->addWidget(search_);
     topRow->addSpacing(6);
@@ -1637,6 +1644,7 @@ void HomeView::doSearch()
 void HomeView::loadTop()
 {
     if (stack_.isEmpty()) return;
+    pendingRestoreRow_ = -1; // fresh view: any in-progress "page toward the drilled item" restore is moot
     const Level& top = stack_.last();
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
@@ -2017,16 +2025,33 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         fillXmbFromItems(from); // the active category's vertical column
     }
-    else if (!append)
+    // Returning via Back: select + scroll to the item we'd drilled into (the carousel/xmb already restore the
+    // page-1 case via their fill funcs; this also pages further in when the item was loaded by infinite-scroll).
+    maybeRestoreSelection();
+}
+
+// Scroll to / select the row we last drilled into (stack childRow). If it hasn't been loaded yet (it was on a
+// later page), keep fetching pages until it is, then land on it. Bounded so a bad hasMore_ can't loop forever.
+void HomeView::maybeRestoreSelection()
+{
+    if (stack_.isEmpty()) return;
+    const int row = stack_.last().childRow;
+    if (row < 0) { pendingRestoreRow_ = -1; return; }
+
+    if (row < items_.size())
     {
-        // Grid layout: returning via Back restores the row we'd drilled into (otherwise no selection).
-        const int restoreRow = stack_.isEmpty() ? -1 : stack_.last().childRow;
-        if (restoreRow >= 0 && restoreRow < grid_->count())
+        if (carouselMode_) { if (pendingRestoreRow_ >= 0) fillCarouselFromItems(0); } // rebuild to select the key
+        else if (xmbMode_) { /* the XMB column restores its own position on rebuild */ }
+        else if (grid_ && row < grid_->count())
         {
-            grid_->setCurrentRow(restoreRow);
-            grid_->scrollToItem(grid_->item(restoreRow), QAbstractItemView::PositionAtCenter);
+            grid_->setCurrentRow(row);
+            grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
         }
+        pendingRestoreRow_ = -1;
+        return;
     }
+    if (hasMore_ && !loading_ && currentPage_ < 25) { pendingRestoreRow_ = row; loadMore(); } // page toward it
+    else pendingRestoreRow_ = -1;                                                             // give up
 }
 
 // Build (from==0) or extend (append) the carousel from items_[from..], skipping guidance rows. Box art comes
@@ -2059,7 +2084,7 @@ void HomeView::fillCarouselFromItems(int from)
     carousel_->setWrap(!hasMore_);
     carousel_->show();
     carousel_->raise();
-    carousel_->setFocus(Qt::OtherFocusReason);
+    if (!(search_ && search_->hasFocus())) carousel_->setFocus(Qt::OtherFocusReason); // keep typing during live search
 }
 
 void HomeView::updateStatus()

@@ -218,6 +218,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     seek_ = new QSlider(Qt::Horizontal, mediaControls_);
     seek_->setRange(0, 1000);
     time_ = new QLabel(QStringLiteral("0:00 / 0:00"), mediaControls_);
+    // Volume: a speaker/mute toggle + a compact slider. Remembered across sessions in the ini.
+    muteBtn_ = new QPushButton(tr("🔊"), mediaControls_);
+    muteBtn_->setToolTip(tr("Mute / unmute"));
+    volume_ = new QSlider(Qt::Horizontal, mediaControls_);
+    volume_->setRange(0, 100);
+    volume_->setFixedWidth(90);
+    volume_->setToolTip(tr("Volume"));
     mc->addWidget(prevChap);
     mc->addWidget(rewind);
     mc->addWidget(playPause);
@@ -226,12 +233,35 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(stop);
     mc->addWidget(seek_, 1);
     mc->addWidget(time_);
+    mc->addWidget(muteBtn_);
+    mc->addWidget(volume_);
     mc->addWidget(subsBtn);
     mc->addWidget(subLoad);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, subsBtn, subLoad, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, subLoad, fullScreen };
+
+    // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
+    // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
+    {
+        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
+        volume_->setValue(qBound(0, vol, 100));
+        player_->setVolume(volume_->value());
+    }
+    connect(volume_, &QSlider::valueChanged, this, [this](int v) {
+        if (muted_ && v > 0) { muted_ = false; muteBtn_->setText(QStringLiteral("🔊")); player_->setMuted(false); }
+        player_->setVolume(v);
+        muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : QStringLiteral("🔊"));
+        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        s.setValue(QStringLiteral("player/volume"), v);
+    });
+    connect(muteBtn_, &QPushButton::clicked, this, [this] {
+        muted_ = !muted_;
+        player_->setMuted(muted_);
+        muteBtn_->setText(muted_ ? QStringLiteral("🔇") : (volume_->value() == 0 ? QStringLiteral("🔇") : QStringLiteral("🔊")));
+    });
 
     // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).
     videoBack_ = new QPushButton(tr("‹ Back"), player_);

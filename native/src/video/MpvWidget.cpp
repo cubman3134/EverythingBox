@@ -303,6 +303,18 @@ void MpvWidget::togglePause()
     mpv_command_async(mpv, 0, cmd);
 }
 
+void MpvWidget::setVolume(int percent)
+{
+    double v = percent < 0 ? 0.0 : (percent > 130 ? 130.0 : double(percent));
+    mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &v);
+}
+
+void MpvWidget::setMuted(bool muted)
+{
+    int flag = muted ? 1 : 0;
+    mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag);
+}
+
 void MpvWidget::seekRelative(double seconds)
 {
     QByteArray s = QByteArray::number(seconds);
