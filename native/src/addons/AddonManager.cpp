@@ -488,6 +488,14 @@ void AddonManager::seedDefaultStremioSources()
             if (u.contains(QStringLiteral("debridio"), Qt::CaseInsensitive)) removeRemoteSource(u);
     }
 
+    // One-time: drop Cinemeta at the user's request.
+    if (!store().value(QStringLiteral("addon.cinemeta.removed")).toBool())
+    {
+        store().setValue(QStringLiteral("addon.cinemeta.removed"), true); store().sync();
+        for (const QString& u : remoteSourceUrls())
+            if (u.contains(QStringLiteral("cinemeta"), Qt::CaseInsensitive)) removeRemoteSource(u);
+    }
+
     // One-time: seed Torrentio as a stream source. It returns infoHashes (raw torrents); our TorBox resolver
     // (Settings -> General -> Streaming) turns the cached ones into playable links - no third-party debrid.
     if (!store().value(QStringLiteral("addon.torrentio.seeded")).toBool())
