@@ -54,6 +54,14 @@
 
 static const QSize kPoster(140, 200);
 
+// Media types that open in a reader (manga/comic image series, ebooks, PDFs). Their detail page is a
+// container of chapters/issues, so it gets a "Read" button that jumps into the first one.
+static bool isReadableType(const QString& t)
+{
+    return t == QStringLiteral("manga") || t == QStringLiteral("comic")
+        || t == QStringLiteral("book") || t == QStringLiteral("ebook");
+}
+
 // Per-profile settings store (shared ini); used here to read media resume progress.
 static QSettings& settingsStore()
 {
@@ -490,6 +498,18 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             MediaItem m = it;
             m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
             emit openItem(m); // MainWindow launches the steam:// URL
+            return;
+        }
+        if (isReadableType(it.type)) // a manga/comic/book container -> open its first chapter/issue
+        {
+            for (int i = 0; i < items_.size(); ++i)
+            {
+                const QString t = items_[i].type;
+                if (t == QStringLiteral("info") || t == QStringLiteral("rechdr")) continue; // skip guidance/headers
+                activateItem(i); // reuses the leaf-open path (direct url, or resolve-then-open)
+                return;
+            }
+            status_->setText(tr("No chapters available to read yet."));
             return;
         }
         if (top.addon && top.addon->stremio) // resolve a playable stream across the installed stream addons
@@ -1660,11 +1680,17 @@ void HomeView::requestMeta(const MediaItem& item)
     }
 
     // Show a Play button for launchable leaves: Steam games, and Stremio movies/episodes (which resolve a
-    // stream on demand). Series/containers don't get one (you play their episodes).
+    // stream on demand). A manga/comic/book container instead gets a "Read" button that opens its first
+    // chapter/issue. Plain series/containers don't get one (you play/open their children individually).
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
     const bool isStremioPlayable = !stack_.isEmpty() && stack_.last().addon
                                    && stack_.last().addon->stremio && !item.expandable;
-    if (playBtn_) playBtn_->setVisible(isSteam || isStremioPlayable);
+    const bool isReadable = isReadableType(item.type) && item.expandable;
+    if (playBtn_)
+    {
+        playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
+        playBtn_->setVisible(isSteam || isStremioPlayable || isReadable);
+    }
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
