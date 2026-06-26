@@ -786,9 +786,12 @@ void HomeView::refresh()
 
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
-    // Gather every enabled catalog. Movie/series get a SINGLE tab sourced from a Stremio (IMDB) addon when one
-    // is installed - so there's one "Movies"/"TV" tab and debrid streams resolve - hiding the duplicate
-    // non-Stremio movie/series catalogs. All other catalogs (music, books, games, …) are kept as-is.
+    // Gather every enabled catalog, then show ONE tab per media type so two addons that both offer (say)
+    // Movies don't make two "Movies" tabs. The source preferred for a type is: a Stremio addon (IMDB +
+    // debrid) > any other remote addon (e.g. a self-hosted library like Allarr) > the bundled local addon.
+    auto sourceScore = [](LoadedAddon* a) {
+        return a->stremio ? 2 : (a->transport == LoadedAddon::RemoteHttp ? 1 : 0);
+    };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
     for (LoadedAddon* s : mgr_->sources())
@@ -796,13 +799,10 @@ void HomeView::refresh()
         if (!mgr_->isEnabled(s->manifest.id)) continue;
         for (const AddonCatalog& c : mgr_->catalogs(s)) all.push_back({ s, c });
     }
-    int movieIdx = -1, seriesIdx = -1;
-    for (int i = 0; i < all.size(); ++i)
-    {
-        if (all[i].addon->stremio && all[i].cat.type == QStringLiteral("movie") && movieIdx < 0) movieIdx = i;
-        if (all[i].addon->stremio && isSeriesType(all[i].cat.type) && seriesIdx < 0) seriesIdx = i;
-    }
-    const bool hasStremioMovie = movieIdx >= 0, hasStremioSeries = seriesIdx >= 0;
+    QHash<QString, int> bestScore; // best source score available per media type
+    for (const CatRef& c : all)
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -813,17 +813,18 @@ void HomeView::refresh()
         if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; first = false; }
     };
 
-    // Lead with the unified Movies / TV tabs (Stremio-sourced) when available.
-    if (movieIdx >= 0)  addCat(all[movieIdx].addon,  all[movieIdx].cat,  tr("Movies"));
-    if (seriesIdx >= 0) addCat(all[seriesIdx].addon, all[seriesIdx].cat, tr("TV"));
-    for (int i = 0; i < all.size(); ++i)
+    // Lead with a single Movies tab, then a single TV tab (from the preferred source), then every other
+    // winning catalog. Same-type catalogs from a non-preferred source are dropped (no duplicate tabs).
+    bool didMovie = false, didSeries = false;
+    for (const CatRef& c : all)
+        if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie) { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
+    for (const CatRef& c : all)
+        if (wins(c) && isSeriesType(c.cat.type) && !didSeries) { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
+    for (const CatRef& c : all)
     {
-        if (i == movieIdx || i == seriesIdx) continue;                       // already shown as Movies/TV
-        const bool isMovie = (all[i].cat.type == QStringLiteral("movie"));
-        const bool isSeries = isSeriesType(all[i].cat.type);
-        if (isMovie && hasStremioMovie) continue;   // hidden: replaced by the unified Movies tab
-        if (isSeries && hasStremioSeries) continue; // hidden: replaced by the unified TV tab
-        addCat(all[i].addon, all[i].cat, all[i].cat.name);
+        if (!wins(c)) continue;
+        if (c.cat.type == QStringLiteral("movie") || isSeriesType(c.cat.type)) continue; // already led with Movies/TV
+        addCat(c.addon, c.cat, c.cat.name);
     }
 
     typeBar_->addStretch(1);
