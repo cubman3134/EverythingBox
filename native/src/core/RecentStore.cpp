@@ -38,6 +38,7 @@ QVector<RecentItem> RecentStore::list()
         it.title = o.value(QStringLiteral("title")).toString();
         it.kind  = o.value(QStringLiteral("kind")).toString();
         it.thumb = o.value(QStringLiteral("thumb")).toString();
+        it.key   = o.value(QStringLiteral("key")).toString();
         if (!it.path.isEmpty()) out.push_back(it);
     }
     return out;
@@ -47,8 +48,13 @@ void RecentStore::add(const RecentItem& item)
 {
     if (item.path.isEmpty()) return;
     QVector<RecentItem> items = list();
-    for (int i = items.size() - 1; i >= 0; --i)        // drop any prior entry for the same file
-        if (items[i].path == item.path) items.remove(i);
+    // De-dup by stable key when present (a streamed item's path/URL changes per session), else by path.
+    const QString ident = item.key.isEmpty() ? item.path : item.key;
+    for (int i = items.size() - 1; i >= 0; --i)
+    {
+        const QString other = items[i].key.isEmpty() ? items[i].path : items[i].key;
+        if (other == ident) items.remove(i);
+    }
     items.prepend(item);                               // newest first
     while (items.size() > kMaxRecents) items.removeLast();
 
@@ -60,6 +66,7 @@ void RecentStore::add(const RecentItem& item)
         o.insert(QStringLiteral("title"), it.title);
         o.insert(QStringLiteral("kind"), it.kind);
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
+        if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         arr.append(o);
     }
     store().setValue(recentsKey(),

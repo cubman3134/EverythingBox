@@ -7,10 +7,12 @@
 
 struct RecentItem
 {
-    QString path;   // absolute file path to re-open
+    QString path;   // absolute file path / URL to re-open
     QString title;  // display label
     QString kind;   // "video" | "audio" | "document" | "game"
     QString thumb;  // optional poster image (path or http url); empty -> a type placeholder is drawn
+    QString key;    // stable identity for resume + de-dup (e.g. an addon item id); empty -> use path. A
+                    // streamed item's URL changes each session, so resume/de-dup key on this instead.
 };
 
 namespace RecentStore

@@ -935,9 +935,15 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+        // Resume + Recent are keyed by the item's stable id when it has one (a debrid/stream URL changes every
+        // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
+        const QString rkey = item.id.isEmpty() ? url : item.id;
+        beginResume(rkey);
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();
+        const QString title = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
+        RecentStore::add({ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey });
     }
 }
 

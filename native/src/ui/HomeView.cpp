@@ -1316,12 +1316,14 @@ void HomeView::renderRecents()
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
-            const double frac = resumeFraction(it.url);
+            // Resume is keyed by the recent's stable key (streamed items) or its path (local files).
+            const QString rkey = r.key.isEmpty() ? r.path : r.key;
+            const double frac = resumeFraction(rkey);
             QString label = QStringLiteral("  ") + it.title;
             if (frac >= 0.0) label += QStringLiteral("    ·  %1%").arg(int(frac * 100.0));
             auto* w = new QListWidgetItem(label, grid_);
             w->setSizeHint(QSize(0, 52));
-            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), it.url));
+            w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), rkey));
         }
     }
 
