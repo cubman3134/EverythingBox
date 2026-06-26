@@ -18,8 +18,11 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
     // window. This must be set before mpv_initialize - without it mpv uses the default 'gpu' output and
     // pops a separate window.
     mpv_set_option_string(mpv, "vo", "libmpv");
-    // Hardware decoding where available; safe fallback to software.
-    mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // Hardware decoding where available. Use a "-copy" mode: the GPU decodes, but frames are copied through
+    // system memory before we upload them to our OpenGL surface. Direct GPU interop with the libmpv render
+    // API can corrupt frames on some drivers (HEVC/10-bit shows "colored pixels everywhere"); copying avoids
+    // that at a small bandwidth cost, while still keeping decode off the CPU.
+    mpv_set_option_string(mpv, "hwdec", "auto-copy");
     // Network/debrid streams arrive in bursts and at high bitrate; buffer generously so playback doesn't
     // stutter. A big forward demuxer cache + reading well ahead smooths over the source's pacing, and on an
     // underrun we wait until a couple of seconds are buffered before resuming (rather than stutter-resuming).
