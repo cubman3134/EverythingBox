@@ -13,6 +13,10 @@
 .DS_Store
 Thumbs.db
 
+# Cloudflare Wrangler local cache/state
+.wrangler/
+node_modules/
+
 # Misc
 *.log
 
