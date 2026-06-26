@@ -970,6 +970,68 @@ QString AddonManager::resolveStreamSync(LoadedAddon* src, const MediaItem& item)
         httpGetBlocking(remoteStreamUrl(src->baseUrl, item.type, item.id), remoteConfigHeader(src)), src->baseUrl);
 }
 
+// MangaDex page resolution. A chapter item id is "mangadexch:{verId1,verId2,...}" - all the language
+// versions of one chapter number. We pick the English version (when several exist), then ask MangaDex's
+// at-home server for that chapter's image host + filenames, and build the ordered page URLs.
+void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
+                                            std::function<void(const QStringList&)> cb)
+{
+    static const QString kMdxApi = QStringLiteral("https://api.mangadex.org");
+    QString csv = chapterItemId;
+    const int colon = csv.indexOf(QLatin1Char(':'));
+    if (colon >= 0) csv = csv.mid(colon + 1);
+    const QStringList ids = csv.split(QLatin1Char(','), Qt::SkipEmptyParts);
+    if (ids.isEmpty()) { cb({}); return; }
+
+    // Given a single chapter id, fetch its at-home server and assemble the page URLs.
+    auto fetchPages = [this, cb](const QString& chapterId) {
+        QNetworkRequest rq((QUrl(kMdxApi + QStringLiteral("/at-home/server/") + chapterId)));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setTransferTimeout(15000);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [reply, cb] {
+            reply->deleteLater();
+            QStringList urls;
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
+                const QString base = o.value(QStringLiteral("baseUrl")).toString();
+                const QJsonObject ch = o.value(QStringLiteral("chapter")).toObject();
+                const QString hash = ch.value(QStringLiteral("hash")).toString();
+                if (!base.isEmpty() && !hash.isEmpty())
+                    for (const QJsonValue& f : ch.value(QStringLiteral("data")).toArray())
+                        urls << base + QStringLiteral("/data/") + hash + QStringLiteral("/") + f.toString();
+            }
+            cb(urls);
+        });
+    };
+
+    if (ids.size() == 1) { fetchPages(ids.first()); return; }
+
+    // Several versions: prefer the English one (fall back to the representative id if none is English).
+    QUrl q(kMdxApi + QStringLiteral("/chapter"));
+    QUrlQuery qq;
+    qq.addQueryItem(QStringLiteral("translatedLanguage[]"), QStringLiteral("en"));
+    qq.addQueryItem(QStringLiteral("limit"), QStringLiteral("1"));
+    for (const QString& id : ids) qq.addQueryItem(QStringLiteral("ids[]"), id);
+    q.setQuery(qq);
+    QNetworkRequest rq(q);
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setTransferTimeout(15000);
+    QNetworkReply* reply = nam_->get(rq);
+    const QString fallback = ids.first();
+    connect(reply, &QNetworkReply::finished, this, [reply, fallback, fetchPages] {
+        reply->deleteLater();
+        QString pick = fallback;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            const QJsonArray data = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
+            if (!data.isEmpty()) { const QString id = data.first().toObject().value(QStringLiteral("id")).toString(); if (!id.isEmpty()) pick = id; }
+        }
+        fetchPages(pick);
+    });
+}
+
 // ---- install / remove ------------------------------------------------------------------------------
 
 bool AddonManager::installPackage(const QString& addonPackagePath, QString* error)

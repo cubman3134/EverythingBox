@@ -53,6 +53,9 @@ private slots:
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
+    // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
+    // then hand it to the comic reader (which gives natural page order + resume for free).
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel

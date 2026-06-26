@@ -33,6 +33,7 @@ public:
 
 signals:
     void openItem(const MediaItem& item);
+    void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls); // manga chapter
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind); // re-open a "Recent" tab entry
     void settingsRequested();                  // the "Settings" button in the top bar

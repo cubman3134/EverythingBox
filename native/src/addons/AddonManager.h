@@ -86,6 +86,9 @@ public:
     // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
     void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                                std::function<void(const QString& url)> cb);
+    // Resolve a manga chapter item (id "mangadexch:{ids}") to its ordered page image URLs via MangaDex (async).
+    void resolveMangaChapterPages(const QString& chapterItemId,
+                                  std::function<void(const QStringList& pageUrls)> cb);
 
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder

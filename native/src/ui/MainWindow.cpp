@@ -63,6 +63,10 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <cmath>
+#include <cstring>
+#include <memory>
+
+#include "miniz.h"
 
 // Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
 static const QStringList kAudioExts = {
@@ -108,6 +112,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
     home_ = new HomeView(addons_.get(), this);
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
+    connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
 
     // The player page pairs the libmpv surface with a playlist panel (shown only for audio queues).
     playlist_ = new QListWidget(this);
@@ -942,6 +947,81 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         statusBar()->clearMessage();
         openLocal();
     });
+}
+
+void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
+{
+    if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), 5000); return; }
+
+    // Cache the assembled chapter as a CBZ keyed by the chapter id, so re-opening it is instant and the
+    // comic reader's path-based resume remembers your page.
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + QStringLiteral("/manga");
+    QDir().mkpath(dir);
+    const QString hash = QString::fromUtf8(QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
+    const QString cbzPath = dir + QStringLiteral("/") + hash + QStringLiteral(".cbz");
+
+    auto openCbz = [this, cbzPath, title] {
+        QString err;
+        if (!comic_->openComic(cbzPath, &err))
+        { statusBar()->showMessage(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        stack_->setCurrentWidget(comic_);
+    };
+
+    if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    statusBar()->showMessage(tr("Downloading “%1” (%2 pages)…").arg(title).arg(pageUrls.size()));
+
+    // Fetch every page (in parallel), stored by index so the archive keeps the right order. When the last
+    // one finishes, pack them into the CBZ and open it.
+    auto pages = std::make_shared<QVector<QByteArray>>(pageUrls.size());
+    auto remaining = std::make_shared<int>(pageUrls.size());
+    for (int i = 0; i < pageUrls.size(); ++i)
+    {
+        QNetworkRequest rq{QUrl(pageUrls[i])};
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(20000);
+        QNetworkReply* reply = docNam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, i, pages, remaining, pageUrls, cbzPath, title, openCbz] {
+            reply->deleteLater();
+            if (reply->error() == QNetworkReply::NoError) (*pages)[i] = reply->readAll();
+            if (--*remaining != 0) return; // wait for every page
+
+            // Pack the downloaded pages into a CBZ (store, not deflate - the images are already compressed).
+            const QString partPath = cbzPath + QStringLiteral(".part");
+            QFile::remove(partPath);
+            mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
+            if (!mz_zip_writer_init_file(&zip, partPath.toUtf8().constData(), 0))
+            { statusBar()->showMessage(tr("Couldn't assemble “%1”.").arg(title), 6000); return; }
+
+            int added = 0;
+            for (int p = 0; p < pages->size(); ++p)
+            {
+                const QByteArray& d = (*pages)[p];
+                if (d.isEmpty()) continue; // a page that failed to download - skip it
+                const QString lu = pageUrls[p].toLower();
+                QString ext = QStringLiteral(".jpg");
+                for (const QString& e : { QStringLiteral(".png"), QStringLiteral(".jpeg"),
+                                          QStringLiteral(".webp"), QStringLiteral(".gif") })
+                    if (lu.endsWith(e)) { ext = e; break; }
+                const QString name = QStringLiteral("%1").arg(p + 1, 5, 10, QLatin1Char('0')) + ext; // natural order
+                if (mz_zip_writer_add_mem(&zip, name.toUtf8().constData(), d.constData(), size_t(d.size()), 0)) ++added;
+            }
+            mz_zip_writer_finalize_archive(&zip);
+            mz_zip_writer_end(&zip);
+
+            if (added == 0)
+            { QFile::remove(partPath); statusBar()->showMessage(tr("Couldn't download any pages for “%1”.").arg(title), 6000); return; }
+            QFile::remove(cbzPath);
+            if (!QFile::rename(partPath, cbzPath))
+            { statusBar()->showMessage(tr("Couldn't save “%1”.").arg(title), 6000); return; }
+            statusBar()->clearMessage();
+            openCbz();
+        });
+    }
 }
 
 void MainWindow::onThemeChanged(const QColor& background, const QColor& accent)

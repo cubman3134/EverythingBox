@@ -54,12 +54,11 @@
 
 static const QSize kPoster(140, 200);
 
-// Media types that open in a reader (manga/comic image series, ebooks, PDFs). Their detail page is a
-// container of chapters/issues, so it gets a "Read" button that jumps into the first one.
-static bool isReadableType(const QString& t)
+// A specific chapter/issue leaf that we can resolve to readable page images. Its detail page gets a
+// "Read" button. (Manga chapters resolve via MangaDex; comic issues are metadata-only for now.)
+static bool isReadableChapter(const QString& t)
 {
-    return t == QStringLiteral("manga") || t == QStringLiteral("comic")
-        || t == QStringLiteral("book") || t == QStringLiteral("ebook");
+    return t == QStringLiteral("manga_chapter");
 }
 
 // Per-profile settings store (shared ini); used here to read media resume progress.
@@ -500,16 +499,18 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             emit openItem(m); // MainWindow launches the steam:// URL
             return;
         }
-        if (isReadableType(it.type)) // a manga/comic/book container -> open its first chapter/issue
+        if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
         {
-            for (int i = 0; i < items_.size(); ++i)
-            {
-                const QString t = items_[i].type;
-                if (t == QStringLiteral("info") || t == QStringLiteral("rechdr")) continue; // skip guidance/headers
-                activateItem(i); // reuses the leaf-open path (direct url, or resolve-then-open)
-                return;
-            }
-            status_->setText(tr("No chapters available to read yet."));
+            status_->setText(tr("Loading “%1”…").arg(it.title));
+            playBtn_->setEnabled(false);
+            const QString key = it.id, title = it.title;
+            mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
+                playBtn_->setEnabled(true);
+                if (pages.isEmpty())
+                    status_->setText(tr("Couldn't load pages for “%1”.").arg(title));
+                else
+                    emit openImagePages(title, key, pages);
+            });
             return;
         }
         if (top.addon && top.addon->stremio) // resolve a playable stream across the installed stream addons
@@ -1680,12 +1681,12 @@ void HomeView::requestMeta(const MediaItem& item)
     }
 
     // Show a Play button for launchable leaves: Steam games, and Stremio movies/episodes (which resolve a
-    // stream on demand). A manga/comic/book container instead gets a "Read" button that opens its first
-    // chapter/issue. Plain series/containers don't get one (you play/open their children individually).
+    // stream on demand). A specific manga chapter gets a "Read" button that resolves its pages. Plain
+    // series/containers (a manga title, a TV show) don't get one - you open their chapters/episodes.
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
     const bool isStremioPlayable = !stack_.isEmpty() && stack_.last().addon
                                    && stack_.last().addon->stremio && !item.expandable;
-    const bool isReadable = isReadableType(item.type) && item.expandable;
+    const bool isReadable = isReadableChapter(item.type);
     if (playBtn_)
     {
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
