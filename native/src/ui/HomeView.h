@@ -43,6 +43,7 @@ signals:
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed
     void paintEvent(QPaintEvent* event) override;           // draw the theme background image, if any
+    void resizeEvent(QResizeEvent* event) override;         // keep the toast centred
 
 private slots:
     void onItemActivated();
@@ -97,6 +98,8 @@ private:
     void populate(const MediaCatalog& cat, bool append);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
+    void showToast(const QString& text, int ms = 4500); // prominent transient notification over the view
+    void repositionToast();                             // re-centre the toast near the bottom of the view
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
     void showMeta(const MediaDetail& detail);
     void hideMeta();
@@ -128,6 +131,8 @@ private:
     QPushButton* settingsBtn_ = nullptr; // the "Settings" button
     QColor themeColor_;                  // the active tab's colour (drives bars/buttons/headers)
     QLabel* status_ = nullptr;
+    QLabel* toast_ = nullptr;          // floating notification (Play/Read progress + errors)
+    QTimer* toastTimer_ = nullptr;     // auto-hides the toast
     QNetworkAccessManager* nam_ = nullptr;
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).

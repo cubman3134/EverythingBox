@@ -18,6 +18,8 @@
 #include <QMenu>
 #include <QLineEdit>
 #include <QLabel>
+#include <QTimer>
+#include <QResizeEvent>
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -501,40 +503,40 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         }
         if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
         {
-            status_->setText(tr("Loading “%1”…").arg(it.title));
+            showToast(tr("Loading “%1”…").arg(it.title), 20000);
             playBtn_->setEnabled(false);
             const QString key = it.id, title = it.title;
             mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
                 playBtn_->setEnabled(true);
                 if (pages.isEmpty())
-                    status_->setText(tr("No readable pages for “%1”. Licensed/official English chapters "
-                                        "aren't hosted here — try another chapter or title.").arg(title));
-                else
-                    emit openImagePages(title, key, pages);
+                    showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
+                                 "aren't hosted here — try another chapter or title.").arg(title), 7000);
+                else { if (toast_) toast_->hide(); emit openImagePages(title, key, pages); }
             });
             return;
         }
         if (top.addon && top.addon->stremio) // resolve a playable stream across the installed stream addons
         {
             LoadedAddon* addon = top.addon;
-            status_->setText(tr("Finding a stream for “%1”…").arg(it.title));
+            showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             mgr_->resolveStream(addon, it, [this, it](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else status_->setText(tr("No playable source for “%1”. The stream addon returned no usable "
-                                         "links — try another title, or re-check your addon's debrid setup.").arg(it.title));
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                else showToast(tr("No playable source for “%1”. The stream addon returned no usable "
+                                  "links — try another title, or re-check your addon's debrid setup.").arg(it.title), 7000);
             });
             return;
         }
         if (!playImdbId_.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
         {
-            status_->setText(tr("Finding a stream for “%1”…").arg(it.title));
+            showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             mgr_->resolveStreamByImdb(playStremioType_, playImdbId_, [this, it](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else status_->setText(tr("No playable source for “%1”. No stream addon returned a usable link.").arg(it.title));
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
+                                  "(check that Allarr is configured and returning results).").arg(it.title), 7000);
             });
             return;
         }
@@ -661,6 +663,20 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     // existing status_->setText(...) calls remain harmless.
     status_ = new QLabel(this);
     status_->hide();
+
+    // A floating toast for Play/Read progress + errors (the old bottom status strip was removed, so plain
+    // status_->setText messages were invisible). Centred near the bottom; auto-hides after a few seconds.
+    toast_ = new QLabel(this);
+    toast_->setVisible(false);
+    toast_->setWordWrap(true);
+    toast_->setAlignment(Qt::AlignCenter);
+    toast_->setTextInteractionFlags(Qt::NoTextInteraction);
+    toast_->setStyleSheet(QStringLiteral(
+        "QLabel{background:rgba(18,20,26,0.95);color:#f4f6f8;border:1px solid rgba(255,255,255,0.18);"
+        "border-radius:10px;padding:12px 22px;font-size:12pt;font-weight:600;}"));
+    toastTimer_ = new QTimer(this);
+    toastTimer_->setSingleShot(true);
+    connect(toastTimer_, &QTimer::timeout, this, [this] { if (toast_) toast_->hide(); });
 
     connect(mgr_, &AddonManager::catalogReady, this, &HomeView::onCatalogReady);
     connect(mgr_, &AddonManager::metaReady, this, &HomeView::onMetaReady);
@@ -1533,10 +1549,10 @@ void HomeView::activateItem(int row)
         && it.type != QStringLiteral("platform"))
     {
         const MediaItem item = it; // copy for the async callback
-        status_->setText(tr("Finding a source for “%1”…").arg(it.title));
+        showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
         mgr_->resolveStream(addon, item, [this, addon, item](const QString& url, const QString& mime) {
-            if (!url.isEmpty()) { MediaItem m = item; m.url = url; m.mime = mime; emit openItem(m); }
-            else openDetailLevel(addon, item); // no stream -> show its metadata instead
+            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = item; m.url = url; m.mime = mime; emit openItem(m); }
+            else { if (toast_) toast_->hide(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
         });
         return;
     }
@@ -1580,7 +1596,7 @@ void HomeView::openFavorite(const MediaItem& favItem)
         if (s->manifest.id == addonId) { addon = s; break; }
     if (!addon)
     {
-        status_->setText(tr("That favourite's source addon isn't available."));
+        showToast(tr("That favourite's source addon isn't available."), 6000);
         return;
     }
 
@@ -1832,6 +1848,33 @@ void HomeView::hideMeta()
 {
     pendingMetaReqId_ = -1; // invalidate any in-flight metadata / cover load
     meta_->setVisible(false);
+}
+
+void HomeView::showToast(const QString& text, int ms)
+{
+    if (!toast_) return;
+    toast_->setText(text);
+    toast_->setMaximumWidth(qMax(240, int(width() * 0.7)));
+    toast_->adjustSize();
+    repositionToast();
+    toast_->show();
+    toast_->raise();
+    if (toastTimer_) toastTimer_->start(ms);
+}
+
+void HomeView::repositionToast()
+{
+    if (!toast_ || toast_->isHidden()) return;
+    toast_->adjustSize();
+    const int x = (width() - toast_->width()) / 2;
+    const int y = height() - toast_->height() - 48; // floats just above the bottom edge
+    toast_->move(qMax(8, x), qMax(8, y));
+}
+
+void HomeView::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    repositionToast();
 }
 
 // Theme the detail card. Colours are set EXPLICITLY (not via palette) because a stylesheet on the panel
