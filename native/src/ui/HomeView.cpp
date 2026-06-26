@@ -488,7 +488,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     // Only when the user is actually typing (has focus) - not when code clears the box on a tab switch.
     connect(search_, &QLineEdit::textChanged, this, [this] { if (searchTimer_ && search_->hasFocus()) searchTimer_->start(300); });
     topRow->addSpacing(6);    // small margin around the search box only (buttons stay flush)
-    topRow->addWidget(search_);
+    topRow->addWidget(search_, 0, Qt::AlignVCenter); // centre it in the bar so it isn't clipped at the bottom
     topRow->addSpacing(6);
 
     profileBtn_ = new QPushButton(this);
