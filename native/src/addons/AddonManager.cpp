@@ -981,10 +981,12 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
     const int colon = csv.indexOf(QLatin1Char(':'));
     if (colon >= 0) csv = csv.mid(colon + 1);
     const QStringList ids = csv.split(QLatin1Char(','), Qt::SkipEmptyParts);
+    streamLog(QStringLiteral("manga: resolve %1 (%2 version id(s))").arg(chapterItemId).arg(ids.size()));
     if (ids.isEmpty()) { cb({}); return; }
 
     // Given a single chapter id, fetch its at-home server and assemble the page URLs.
     auto fetchPages = [this, cb](const QString& chapterId) {
+        streamLog(QStringLiteral("manga: at-home for chapter %1").arg(chapterId));
         QNetworkRequest rq((QUrl(kMdxApi + QStringLiteral("/at-home/server/") + chapterId)));
         rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         rq.setTransferTimeout(15000);
@@ -992,7 +994,9 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
         connect(reply, &QNetworkReply::finished, this, [reply, cb] {
             reply->deleteLater();
             QStringList urls;
-            if (reply->error() == QNetworkReply::NoError)
+            if (reply->error() != QNetworkReply::NoError)
+                streamLog(QStringLiteral("manga: at-home error: %1").arg(reply->errorString()));
+            else
             {
                 const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
                 const QString base = o.value(QStringLiteral("baseUrl")).toString();
@@ -1001,18 +1005,20 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
                 if (!base.isEmpty() && !hash.isEmpty())
                     for (const QJsonValue& f : ch.value(QStringLiteral("data")).toArray())
                         urls << base + QStringLiteral("/data/") + hash + QStringLiteral("/") + f.toString();
+                else
+                    streamLog(QStringLiteral("manga: at-home missing baseUrl/hash"));
             }
+            streamLog(QStringLiteral("manga: resolved %1 page(s)").arg(urls.size()));
             cb(urls);
         });
     };
 
-    if (ids.size() == 1) { fetchPages(ids.first()); return; }
-
-    // Several versions: prefer the English one (fall back to the representative id if none is English).
+    // Fetch every version's metadata at once so we can skip "external" releases (licensed chapters hosted
+    // off-site, which have NO page images on MangaDex) and prefer an English *hosted* version - falling back
+    // to any hosted version (e.g. a non-English fan translation) so something readable opens when one exists.
     QUrl q(kMdxApi + QStringLiteral("/chapter"));
     QUrlQuery qq;
-    qq.addQueryItem(QStringLiteral("translatedLanguage[]"), QStringLiteral("en"));
-    qq.addQueryItem(QStringLiteral("limit"), QStringLiteral("1"));
+    qq.addQueryItem(QStringLiteral("limit"), QString::number(ids.size()));
     for (const QString& id : ids) qq.addQueryItem(QStringLiteral("ids[]"), id);
     q.setQuery(qq);
     QNetworkRequest rq(q);
@@ -1020,15 +1026,28 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
     rq.setTransferTimeout(15000);
     QNetworkReply* reply = nam_->get(rq);
     const QString fallback = ids.first();
-    connect(reply, &QNetworkReply::finished, this, [reply, fallback, fetchPages] {
+    connect(reply, &QNetworkReply::finished, this, [reply, fallback, cb, fetchPages] {
         reply->deleteLater();
-        QString pick = fallback;
+        QString englishHosted, anyHosted, anyHostedLang;
         if (reply->error() == QNetworkReply::NoError)
         {
             const QJsonArray data = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
-            if (!data.isEmpty()) { const QString id = data.first().toObject().value(QStringLiteral("id")).toString(); if (!id.isEmpty()) pick = id; }
+            for (const QJsonValue& dv : data)
+            {
+                const QJsonObject d = dv.toObject(), a = d.value(QStringLiteral("attributes")).toObject();
+                const bool external = !a.value(QStringLiteral("externalUrl")).toString().isEmpty();
+                const int pages = a.value(QStringLiteral("pages")).toInt();
+                if (external || pages <= 0) continue;          // no hosted page images for this version
+                const QString id = d.value(QStringLiteral("id")).toString();
+                const QString lang = a.value(QStringLiteral("translatedLanguage")).toString();
+                if (anyHosted.isEmpty()) { anyHosted = id; anyHostedLang = lang; }
+                if (lang == QStringLiteral("en") && englishHosted.isEmpty()) englishHosted = id;
+            }
         }
-        fetchPages(pick);
+        if (!englishHosted.isEmpty()) { streamLog(QStringLiteral("manga: using English hosted version")); fetchPages(englishHosted); return; }
+        if (!anyHosted.isEmpty()) { streamLog(QStringLiteral("manga: no English pages; using hosted '%1' version").arg(anyHostedLang)); fetchPages(anyHosted); return; }
+        streamLog(QStringLiteral("manga: all versions are external/licensed - no hosted pages anywhere"));
+        cb({}); // nothing has hosted pages (every version is an off-site licensed release)
     });
 }
 

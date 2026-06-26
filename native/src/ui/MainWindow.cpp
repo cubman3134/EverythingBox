@@ -65,8 +65,17 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <QDateTime>
 
 #include "miniz.h"
+
+// One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
+static void mwLog(const QString& msg)
+{
+    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
+}
 
 // Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
 static const QStringList kAudioExts = {
@@ -951,6 +960,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
 
 void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
 {
+    mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
     if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), 5000); return; }
 
     // Cache the assembled chapter as a CBZ keyed by the chapter id, so re-opening it is instant and the
@@ -963,9 +973,10 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     auto openCbz = [this, cbzPath, title] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
-        { statusBar()->showMessage(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
+        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); statusBar()->showMessage(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
+        mwLog(QStringLiteral("openImagePages: reader shown"));
     };
 
     if (QFileInfo::exists(cbzPath) && QFileInfo(cbzPath).size() > 0) { openCbz(); return; } // already cached
@@ -1013,12 +1024,14 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             mz_zip_writer_finalize_archive(&zip);
             mz_zip_writer_end(&zip);
 
+            mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
             if (added == 0)
             { QFile::remove(partPath); statusBar()->showMessage(tr("Couldn't download any pages for “%1”.").arg(title), 6000); return; }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
-            { statusBar()->showMessage(tr("Couldn't save “%1”.").arg(title), 6000); return; }
+            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); statusBar()->showMessage(tr("Couldn't save “%1”.").arg(title), 6000); return; }
             statusBar()->clearMessage();
+            mwLog(QStringLiteral("openImagePages: opening reader"));
             openCbz();
         });
     }

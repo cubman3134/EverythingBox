@@ -507,7 +507,8 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
                 playBtn_->setEnabled(true);
                 if (pages.isEmpty())
-                    status_->setText(tr("Couldn't load pages for “%1”.").arg(title));
+                    status_->setText(tr("No readable pages for “%1”. Licensed/official English chapters "
+                                        "aren't hosted here — try another chapter or title.").arg(title));
                 else
                     emit openImagePages(title, key, pages);
             });
