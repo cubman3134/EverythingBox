@@ -82,6 +82,7 @@ private:
     QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
+    void showItemContextMenu(int row, const QPoint& globalPos); // Home: remove a Recent/Favorite entry
     void applyGridMode(bool recentList); // switch grid_ between the catalog poster grid and the recent list
     void styleTypeButtons(const QString& activeKey); // colour the top tabs + tint the catalogue background
     void applyThemeFont();           // set the app font family/scale from the active theme

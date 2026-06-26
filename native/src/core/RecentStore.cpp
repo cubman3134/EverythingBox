@@ -74,6 +74,31 @@ void RecentStore::add(const RecentItem& item)
     store().sync();
 }
 
+void RecentStore::remove(const QString& pathOrKey)
+{
+    if (pathOrKey.isEmpty()) return;
+    QVector<RecentItem> items = list();
+    bool changed = false;
+    for (int i = items.size() - 1; i >= 0; --i)
+        if (items[i].path == pathOrKey || (!items[i].key.isEmpty() && items[i].key == pathOrKey))
+        { items.remove(i); changed = true; }
+    if (!changed) return;
+
+    QJsonArray arr;
+    for (const RecentItem& it : items)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("path"), it.path);
+        o.insert(QStringLiteral("title"), it.title);
+        o.insert(QStringLiteral("kind"), it.kind);
+        if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
+        if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
+        arr.append(o);
+    }
+    store().setValue(recentsKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+    store().sync();
+}
+
 void RecentStore::clear()
 {
     store().remove(recentsKey());

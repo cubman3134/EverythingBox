@@ -44,6 +44,7 @@ signals:
     void backRequested();
     void navUpOffTop();                              // Up pressed at the top item -> leave for the chrome row
     void currentChanged(int itemIndex, int total);   // focused item moved (drives load-more)
+    void itemContextMenu(const QString& itemKey, const QPoint& globalPos); // right-click an item
 
 protected:
     void paintEvent(QPaintEvent*) override;

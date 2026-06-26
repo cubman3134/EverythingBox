@@ -352,6 +352,8 @@ void XmbView::mousePressEvent(QMouseEvent* e)
     {
         int j = int(std::lround(itemPos_ + (y - itemTop) / itemGap));
         j = qBound(0, j, items_.size() - 1);
+        if (e->button() == Qt::RightButton)
+        { emit itemContextMenu(items_[j].navKey, e->globalPosition().toPoint()); return; } // remove from Recent, …
         if (j == itemIndex_) emit activated(currentItemKey());
         else                 animateItemTo(j);
         return;

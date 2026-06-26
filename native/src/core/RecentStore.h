@@ -19,5 +19,6 @@ namespace RecentStore
 {
     QVector<RecentItem> list();          // newest first
     void add(const RecentItem& item);    // move-to-front + de-dup by path + cap
+    void remove(const QString& pathOrKey); // drop the entry whose path or key matches
     void clear();
 }

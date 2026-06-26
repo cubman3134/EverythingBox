@@ -634,20 +634,8 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     // Right-click a favourite on the Home list to remove it.
     grid_->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(grid_, &QListWidget::customContextMenuRequested, this, [this](const QPoint& pos) {
-        if (!recentView_) return;
         QListWidgetItem* w = grid_->itemAt(pos);
-        if (!w) return;
-        const int row = grid_->row(w);
-        if (row < 0 || row >= items_.size()) return;
-        if (!items_[row].mime.startsWith(QStringLiteral("fav:"))) return; // only favourites
-        const QString favId = items_[row].id;
-        QMenu menu(this);
-        QAction* remove = menu.addAction(tr("Remove from Favorites"));
-        if (menu.exec(grid_->viewport()->mapToGlobal(pos)) == remove)
-        {
-            FavoritesStore::remove(favId);
-            renderRecents(); // refresh the Home list
-        }
+        if (w) showItemContextMenu(grid_->row(w), grid_->viewport()->mapToGlobal(pos));
     });
     // Infinite scroll: when the user nears the bottom, pull the next page (if the addon has one).
     connect(grid_->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
@@ -678,6 +666,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(xmb_, &XmbView::navUpOffTop, this, [this] { focusUpFromColumn(); });
     connect(xmb_, &XmbView::currentChanged, this, [this](int idx, int total) {
         if (total > 0 && idx >= total - 2) loadMore(); // near the end -> pull the next page
+    });
+    connect(xmb_, &XmbView::itemContextMenu, this, [this](const QString& key, const QPoint& gp) {
+        if (key.startsWith(QStringLiteral("item:"))) showItemContextMenu(key.mid(5).toInt(), gp);
     });
     v->addWidget(xmb_, 1);
 
@@ -1592,6 +1583,22 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
     lvl.addon = addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
     stack_.push_back(lvl);
     loadTop();
+}
+
+// Right-click on the Home list: offer to remove the Recent or Favorite under the cursor.
+void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
+{
+    if (!recentView_ || row < 0 || row >= items_.size()) return;
+    const MediaItem& it = items_[row];
+    if (it.type == QStringLiteral("rechdr") || it.type == QStringLiteral("info")) return; // a header, not actionable
+
+    QMenu menu(this);
+    const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
+    QAction* remove = menu.addAction(fav ? tr("Remove from Favorites") : tr("Remove from Recent"));
+    if (menu.exec(globalPos) != remove) return;
+    if (fav) FavoritesStore::remove(it.id);
+    else     RecentStore::remove(it.url.isEmpty() ? resumeKeyFor(it) : it.url);
+    renderRecents(); // refresh the Home list
 }
 
 void HomeView::openFavorite(const MediaItem& favItem)
