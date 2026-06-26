@@ -138,6 +138,10 @@ private:
     QWidget* actionRow_ = nullptr;    // holds Play + Favorite on the detail header
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
+    // TMDB->IMDB bridge: when a non-Stremio catalog item (e.g. AIO Catalog) supplies an IMDB stream id via
+    // getMeta, Play resolves it through the installed Stremio stream addons. Set in showMeta for the open item.
+    QString playImdbId_;              // "tt123" (movie) or "ttShow:s:e" (episode), else empty
+    QString playStremioType_;         // "movie" / "series"
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     QLabel* metaTitle_ = nullptr;
     QLabel* metaFacts_ = nullptr;

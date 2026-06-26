@@ -525,6 +525,18 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
                 else status_->setText(tr("No playable source for “%1”. The stream addon returned no usable "
                                          "links — try another title, or re-check your addon's debrid setup.").arg(it.title));
             });
+            return;
+        }
+        if (!playImdbId_.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
+        {
+            status_->setText(tr("Finding a stream for “%1”…").arg(it.title));
+            playBtn_->setEnabled(false);
+            mgr_->resolveStreamByImdb(playStremioType_, playImdbId_, [this, it](const QString& url, const QString& mime) {
+                playBtn_->setEnabled(true);
+                if (!url.isEmpty()) { MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                else status_->setText(tr("No playable source for “%1”. No stream addon returned a usable link.").arg(it.title));
+            });
+            return;
         }
     });
     playBtn_->installEventFilter(this); // Backspace here = Back
@@ -1688,6 +1700,7 @@ void HomeView::requestMeta(const MediaItem& item)
     const bool isStremioPlayable = !stack_.isEmpty() && stack_.last().addon
                                    && stack_.last().addon->stremio && !item.expandable;
     const bool isReadable = isReadableChapter(item.type);
+    playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
@@ -1775,6 +1788,22 @@ void HomeView::showMeta(const MediaDetail& d)
     metaOverview_->setVisible(!d.overview.isEmpty());
 
     meta_->setVisible(true);
+
+    // TMDB->IMDB bridge: a non-Stremio catalog item (AIO Catalog movie/episode) that supplied an IMDB stream
+    // id can be played through the installed Stremio stream addons (Allarr/Torrentio) - reveal a Play button.
+    if (!d.imdbStreamId.isEmpty() && !stack_.isEmpty() && stack_.last().detail
+        && !(stack_.last().addon && stack_.last().addon->stremio)) // Stremio items already get one in requestMeta
+    {
+        const QString t = stack_.last().item.type;
+        const QString stremioType = (t == QStringLiteral("episode")) ? QStringLiteral("series")
+                                  : (t == QStringLiteral("movie"))   ? QStringLiteral("movie") : QString();
+        if (!stremioType.isEmpty() && mgr_->hasStremioStreamProvider(stremioType))
+        {
+            playImdbId_ = d.imdbStreamId;
+            playStremioType_ = stremioType;
+            if (playBtn_) { playBtn_->setText(tr("▶  Play")); playBtn_->setVisible(true); }
+        }
+    }
 
     if (d.imageUrl.isEmpty()) return; // keep the type placeholder set in requestMeta()
     const int myMeta = pendingMetaReqId_;

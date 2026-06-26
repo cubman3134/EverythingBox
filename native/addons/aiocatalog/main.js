@@ -110,15 +110,17 @@ function tmdbEpisodes(showId, seasonNo) {
 
 function tmdbMovieMeta(id) {
     var key = getConfig("tmdbApiKey"); if (!key) return "{}";
-    var r = J(httpGet(TMDB + "/movie/" + id + "?api_key=" + key));
+    // append external_ids so we can carry the IMDB id (lets IMDB-only stream addons resolve a TMDB title).
+    var r = J(httpGet(TMDB + "/movie/" + id + "?api_key=" + key + "&append_to_response=external_ids"));
     if (!r || r.success === false) return "{}";
     var facts = [];
     if (r.release_date) facts.push(metaFact("Released", r.release_date));
     if (r.runtime)      facts.push(metaFact("Runtime", r.runtime + " min"));
     if (r.vote_average) facts.push(metaFact("Rating", rating10(r.vote_average)));
     if (r.genres && r.genres.length) facts.push(metaFact("Genres", namesOf(r.genres, "name")));
+    var imdb = (r.external_ids && r.external_ids.imdb_id) || "";
     return metaResult({ title: r.title || r.name, subtitle: r.tagline || "", overview: r.overview || "",
-        image: r.poster_path ? TMDB_IMG_LG + r.poster_path : "", facts: facts });
+        image: r.poster_path ? TMDB_IMG_LG + r.poster_path : "", facts: facts, imdbStreamId: imdb });
 }
 
 function tmdbSeriesMeta(id) {
@@ -156,8 +158,12 @@ function tmdbEpisodeMeta(showId, season, ep) {
     if (r.air_date)     facts.push(metaFact("Air date", r.air_date));
     if (r.runtime)      facts.push(metaFact("Runtime", r.runtime + " min"));
     if (r.vote_average) facts.push(metaFact("Rating", rating10(r.vote_average)));
+    // Stremio series streams are keyed by the SHOW's IMDB id + season + episode ("ttShow:season:ep").
+    var ids = J(httpGet(TMDB + "/tv/" + showId + "/external_ids?api_key=" + key));
+    var showImdb = (ids && ids.imdb_id) || "";
+    var streamId = showImdb ? (showImdb + ":" + season + ":" + ep) : "";
     return metaResult({ title: r.name || ("Episode " + ep), subtitle: "", overview: r.overview || "",
-        image: r.still_path ? TMDB_IMG_LG + r.still_path : "", facts: facts });
+        image: r.still_path ? TMDB_IMG_LG + r.still_path : "", facts: facts, imdbStreamId: streamId });
 }
 
 // ---------------------------------------------------------------------------- IGDB (games)

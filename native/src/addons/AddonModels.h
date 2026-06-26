@@ -89,6 +89,10 @@ struct MediaDetail
     QString overview;          // synopsis / description (may contain plain text)
     QString imageUrl;          // larger cover/poster (http or local)
     QVector<MediaFact> facts;  // labelled key/value rows
+    // Stremio stream id for this item, when the addon can supply one (e.g. a TMDB catalog mapping to IMDB):
+    // "tt123" for a movie, "ttShow:season:episode" for an episode. Lets stream addons (Torrentio/Allarr)
+    // resolve a playable source for a catalog whose own ids aren't IMDB.
+    QString imdbStreamId;
     bool valid = false;        // false = addon returned nothing usable (header stays hidden)
 
     static MediaDetail fromJson(const QByteArray& json);

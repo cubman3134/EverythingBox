@@ -100,6 +100,7 @@ MediaDetail MediaDetail::fromJson(const QByteArray& json)
     d.subtitle = o.value(QStringLiteral("subtitle")).toString();
     d.overview = o.value(QStringLiteral("overview")).toString();
     d.imageUrl = o.value(QStringLiteral("image")).toString();
+    d.imdbStreamId = o.value(QStringLiteral("imdbStreamId")).toString();
     for (const QJsonValue& v : o.value(QStringLiteral("facts")).toArray())
     {
         if (!v.isObject()) continue;

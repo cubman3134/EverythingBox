@@ -944,6 +944,23 @@ void AddonManager::resolveStremioStream(const MediaItem& item,
     }
 }
 
+bool AddonManager::hasStremioStreamProvider(const QString& type) const
+{
+    for (LoadedAddon* s : sources_)
+        if (s->stremio && isEnabled(s->manifest.id) && s->stremioResources.contains(QStringLiteral("stream"))
+            && (s->stremioTypes.isEmpty() || s->stremioTypes.contains(type)))
+            return true;
+    return false;
+}
+
+void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
+                                       std::function<void(const QString&, const QString&)> cb)
+{
+    if (imdbStreamId.isEmpty()) { cb(QString(), QString()); return; }
+    MediaItem it; it.type = type; it.id = imdbStreamId; // synthetic item the Stremio stream addons understand
+    resolveStremioStream(it, cb);
+}
+
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
                                  std::function<void(const QString&, const QString&)> cb)
 {
