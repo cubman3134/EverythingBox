@@ -500,8 +500,8 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             mgr_->resolveStream(addon, it, [this, it](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
                 if (!url.isEmpty()) { MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else status_->setText(tr("No playable stream found. Torrent-only results need a debrid link "
-                                         "(configure your stream addon with a debrid service)."));
+                else status_->setText(tr("No playable source for “%1”. The stream addon returned no usable "
+                                         "links — try another title, or re-check your addon's debrid setup.").arg(it.title));
             });
         }
     });
