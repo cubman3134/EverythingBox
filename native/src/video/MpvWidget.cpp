@@ -20,6 +20,15 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
     mpv_set_option_string(mpv, "vo", "libmpv");
     // Hardware decoding where available; safe fallback to software.
     mpv_set_option_string(mpv, "hwdec", "auto-safe");
+    // Network/debrid streams arrive in bursts and at high bitrate; buffer generously so playback doesn't
+    // stutter. A big forward demuxer cache + reading well ahead smooths over the source's pacing, and on an
+    // underrun we wait until a couple of seconds are buffered before resuming (rather than stutter-resuming).
+    mpv_set_option_string(mpv, "cache", "yes");
+    mpv_set_option_string(mpv, "demuxer-max-bytes", "512MiB");
+    mpv_set_option_string(mpv, "demuxer-max-back-bytes", "128MiB");
+    mpv_set_option_string(mpv, "cache-secs", "120");
+    mpv_set_option_string(mpv, "cache-pause-wait", "2");
+    mpv_set_option_string(mpv, "network-timeout", "60");
     // Subtitles: embedded tracks are auto-selected by mpv and rendered into our FBO (subs + OSD composite
     // through the render API). "sub-auto=fuzzy" also pulls in sidecar files (movie.srt, movie.eng.srt, …)
     // sitting next to the video, not just exact-name matches.
