@@ -1332,6 +1332,7 @@ void HomeView::renderRecents()
             it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
             it.type = iconTypeForKind(r.kind);       // drives the placeholder icon
+            it.thumbnailUrl = r.thumb;               // the real poster (streamed media records it), else a placeholder
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             items_.push_back(it);
 
@@ -1345,7 +1346,7 @@ void HomeView::renderRecents()
         }
     }
 
-    loadThumbnails(0); // favourites have posters; recents don't (harmlessly skipped)
+    loadThumbnails(0); // load posters for recents/favourites that have one (else the placeholder stays)
     updateChrome();
     updateStatus();
 
@@ -2212,7 +2213,7 @@ void HomeView::loadThumbnails(int fromIndex)
             const QPixmap pm(url);
             if (!pm.isNull())
                 w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                            items_[i].url));
+                                            resumeKeyFor(items_[i])));
             continue;
         }
         thumbQueue_.push_back(i); // remote: fetched by pumpThumbnails(), capped so we don't flood the host
@@ -2234,7 +2235,7 @@ void HomeView::pumpThumbnails()
         if (url.isEmpty() || !url.startsWith(QStringLiteral("http"))) continue;
         QListWidgetItem* w = grid_->item(i);
         const int gen = generation_;
-        const QString itemUrl = items_[i].url; // the playable path/url, for the resume-progress lookup
+        const QString itemUrl = resumeKeyFor(items_[i]); // stable key for the resume-progress overlay
 
         QNetworkRequest req((QUrl(url)));
         req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
