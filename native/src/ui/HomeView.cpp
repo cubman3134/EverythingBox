@@ -1769,6 +1769,15 @@ void HomeView::requestMeta(const MediaItem& item)
         return;
     }
     pendingMetaReqId_ = mgr_->requestMeta(stack_.last().addon, item);
+
+    // Show the catalog poster + title right away (guarded by the request id we just set), so the info page
+    // has a cover immediately - and still shows one if the addon returns no /meta at all (e.g. Allarr). A
+    // valid /meta result later overrides this with the addon's own cover + facts + synopsis.
+    if (!item.thumbnailUrl.isEmpty())
+    {
+        MediaDetail d0; d0.title = item.title; d0.imageUrl = item.thumbnailUrl; d0.valid = true;
+        showMeta(d0);
+    }
 }
 
 // Build a Steam game's detail page: cover from the library art immediately, then enrich (synopsis, genres,
