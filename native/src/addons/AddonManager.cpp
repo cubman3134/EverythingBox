@@ -536,6 +536,10 @@ QVector<AddonCatalog> AddonManager::catalogs(LoadedAddon* src) const
 {
     if (!src) return {};
     if (!src->manifest.catalogs.isEmpty()) return src->manifest.catalogs;
+    // A remote addon with no declared catalogs has nothing to browse - e.g. a stream-only resolver like
+    // Allarr/Torrentio (resources:["stream"], catalogs:[]). Don't synthesize a phantom media-type tab for it.
+    if (src->transport == LoadedAddon::RemoteHttp) return {};
+    // A local script addon with no declared catalogs implicitly exposes a single "mixed" catalog.
     AddonCatalog c;
     c.name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
     c.type = QStringLiteral("mixed");
