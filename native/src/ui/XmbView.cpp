@@ -326,22 +326,37 @@ void XmbView::wheelEvent(QWheelEvent* e)
 void XmbView::mousePressEvent(QMouseEvent* e)
 {
     setFocus(Qt::MouseFocusReason); // so the keyboard works after a click
-    if (items_.isEmpty()) { QWidget::mousePressEvent(e); return; }
+    if (cats_.isEmpty()) { QWidget::mousePressEvent(e); return; }
 
-    // Map the click's y to an item using the same column geometry paintEvent draws with: the focused row sits
-    // at itemTop, each row itemGap apart, sliding by itemPos_. A click below the category bar selects that row
-    // (scrolling it to the cross); clicking the already-focused row opens it.
-    const double H = height();
+    // Same geometry paintEvent draws with: categories sit on the horizontal bar at barY (spaced catGap,
+    // sliding by catPos_); the active category's items run down from itemTop (spaced itemGap, sliding itemPos_).
+    const double W = width(), H = height();
     const double barY    = H * 0.40;
+    const double crossX  = W * 0.24;
+    const double catGap  = 120.0;
     const double itemTop = barY + 74.0;
     const double itemGap = 52.0;
-    const double y = e->position().y();
-    if (y <= barY + 6.0) { QWidget::mousePressEvent(e); return; } // not in the item column
+    const double x = e->position().x(), y = e->position().y();
 
-    int j = int(std::lround(itemPos_ + (y - itemTop) / itemGap));
-    j = qBound(0, j, items_.size() - 1);
-    if (j == itemIndex_) emit activated(currentItemKey()); // click the focused item -> open it
-    else                 animateItemTo(j);                 // otherwise slide it to the cross (scroll to it)
+    // Category bar: a horizontal band around barY. Click a tile to switch to that category.
+    if (std::fabs(y - barY) <= 34.0)
+    {
+        int i = int(std::lround(catPos_ + (x - crossX) / catGap));
+        i = qBound(0, i, cats_.size() - 1);
+        if (i != catIndex_) { animateCatTo(i); emit categoryChanged(activeCategoryKey()); }
+        return;
+    }
+
+    // Item column: below the bar. Click a row to slide it to the cross; click the focused row to open it.
+    if (!items_.isEmpty() && y > barY + 34.0)
+    {
+        int j = int(std::lround(itemPos_ + (y - itemTop) / itemGap));
+        j = qBound(0, j, items_.size() - 1);
+        if (j == itemIndex_) emit activated(currentItemKey());
+        else                 animateItemTo(j);
+        return;
+    }
+    QWidget::mousePressEvent(e);
 }
 
 void XmbView::resizeEvent(QResizeEvent*) { update(); }
