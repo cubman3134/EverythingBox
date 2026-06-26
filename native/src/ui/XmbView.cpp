@@ -4,6 +4,7 @@
 #include <QPaintEvent>
 #include <QKeyEvent>
 #include <QWheelEvent>
+#include <QMouseEvent>
 #include <QVariantAnimation>
 #include <QEasingCurve>
 #include <QFont>
@@ -320,6 +321,27 @@ void XmbView::wheelEvent(QWheelEvent* e)
     const int d = e->angleDelta().y() != 0 ? e->angleDelta().y() : e->angleDelta().x();
     if (d > 0) animateItemTo(itemIndex_ - 1);
     else if (d < 0) animateItemTo(itemIndex_ + 1);
+}
+
+void XmbView::mousePressEvent(QMouseEvent* e)
+{
+    setFocus(Qt::MouseFocusReason); // so the keyboard works after a click
+    if (items_.isEmpty()) { QWidget::mousePressEvent(e); return; }
+
+    // Map the click's y to an item using the same column geometry paintEvent draws with: the focused row sits
+    // at itemTop, each row itemGap apart, sliding by itemPos_. A click below the category bar selects that row
+    // (scrolling it to the cross); clicking the already-focused row opens it.
+    const double H = height();
+    const double barY    = H * 0.40;
+    const double itemTop = barY + 74.0;
+    const double itemGap = 52.0;
+    const double y = e->position().y();
+    if (y <= barY + 6.0) { QWidget::mousePressEvent(e); return; } // not in the item column
+
+    int j = int(std::lround(itemPos_ + (y - itemTop) / itemGap));
+    j = qBound(0, j, items_.size() - 1);
+    if (j == itemIndex_) emit activated(currentItemKey()); // click the focused item -> open it
+    else                 animateItemTo(j);                 // otherwise slide it to the cross (scroll to it)
 }
 
 void XmbView::resizeEvent(QResizeEvent*) { update(); }

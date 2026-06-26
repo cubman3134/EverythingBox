@@ -49,6 +49,7 @@ protected:
     void paintEvent(QPaintEvent*) override;
     void keyPressEvent(QKeyEvent*) override;
     void wheelEvent(QWheelEvent*) override;
+    void mousePressEvent(QMouseEvent*) override; // click an item row to scroll to it (open the focused one)
     void resizeEvent(QResizeEvent*) override;
 
 private:
