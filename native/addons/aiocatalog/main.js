@@ -772,10 +772,28 @@ function getDetail(argJson) {
     return JSON.stringify({ title: "", items: [] });
 }
 
+// Map an IMDB id to TMDB metadata, so another addon's IMDB-keyed item (e.g. Allarr "mv:tt123") can be
+// enriched with our TMDB synopsis/facts. id form: "imdb:movie:tt123" / "imdb:series:tt123" /
+// "imdb:episode:tt123:S:E".
+function imdbMeta(parts) {
+    var key = getConfig("tmdbApiKey"); if (!key) return "{}";
+    var sub = parts[1], imdb = parts[2];
+    var f = J(httpGet(TMDB + "/find/" + imdb + "?api_key=" + key + "&external_source=imdb_id"));
+    if (!f) return "{}";
+    if (sub === "movie") {
+        var mr = f.movie_results || []; if (!mr.length) return "{}";
+        return tmdbMovieMeta(mr[0].id);
+    }
+    var tr = f.tv_results || []; if (!tr.length) return "{}";
+    if (sub === "episode") return tmdbEpisodeMeta(tr[0].id, parts[3], parts[4]);
+    return tmdbSeriesMeta(tr[0].id);
+}
+
 // Per-item metadata for the detail header. Returns "{}" when nothing useful is available.
 function getMeta(argJson) {
     var a = J(argJson) || {};
     var id = a.id || "", parts = id.split(":");
+    if (parts[0] === "imdb")  return imdbMeta(parts);                          // imdb:{movie|series|episode}:tt…
     if (a.type === "movie")   return tmdbMovieMeta(parts[2]);                  // tmdb:movie:{id}
     if (a.type === "series")  return tmdbSeriesMeta(parts[2]);                 // tmdb:tv:{id}
     if (a.type === "season")  return tmdbSeasonMeta(parts[2], parts[3]);       // tmdb:season:{show}:{n}

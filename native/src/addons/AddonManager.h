@@ -106,6 +106,10 @@ public:
     bool isEnabled(const QString& id) const;
     void setEnabled(const QString& id, bool enabled);
 
+    // A local script addon (other than `exclude`) that has a catalog of `type` and can supply metadata for an
+    // IMDB id - used to enrich a movie/episode whose own source addon returns no /meta (e.g. Allarr via AIO).
+    LoadedAddon* metaProviderFor(LoadedAddon* exclude, const QString& type) const;
+
     QString addonsRoot() const { return root_; }
 
 signals:

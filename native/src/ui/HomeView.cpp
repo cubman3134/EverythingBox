@@ -20,6 +20,7 @@
 #include <QLabel>
 #include <QTimer>
 #include <QResizeEvent>
+#include <QRegularExpression>
 #include <QPushButton>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -90,6 +91,25 @@ static double resumeFraction(const QString& url)
 static QString resumeKeyFor(const MediaItem& it)
 {
     return it.id.isEmpty() ? it.url : it.id;
+}
+
+// Build a metadata-lookup item from a source item that embeds an IMDB id (e.g. Allarr "mv:tt123" or an
+// episode "ep:tt123:1:2"). Returns an item a provider addon (AIO Catalog) can map IMDB->TMDB for; the id is
+// empty when no IMDB id is present.
+static MediaItem imdbMetaItem(const MediaItem& src)
+{
+    static const QRegularExpression re(QStringLiteral("(tt\\d+)(?::(\\d+):(\\d+))?"));
+    const QRegularExpressionMatch m = re.match(src.id);
+    MediaItem mi;
+    if (!m.hasMatch()) return mi;
+    const QString imdb = m.captured(1);
+    if (!m.captured(2).isEmpty()) // tt…:S:E -> an episode
+    { mi.type = QStringLiteral("series"); mi.id = QStringLiteral("imdb:episode:") + imdb + QStringLiteral(":") + m.captured(2) + QStringLiteral(":") + m.captured(3); }
+    else if (src.type == QStringLiteral("movie"))
+    { mi.type = QStringLiteral("movie");  mi.id = QStringLiteral("imdb:movie:") + imdb; }
+    else                          // a show (series / tv)
+    { mi.type = QStringLiteral("series"); mi.id = QStringLiteral("imdb:series:") + imdb; }
+    return mi;
 }
 
 // Overlay a "continue watching" progress bar along the bottom of a poster pixmap (in place).
@@ -1706,6 +1726,8 @@ void HomeView::loadTop()
 
 void HomeView::requestMeta(const MediaItem& item)
 {
+    metaItem_ = item;             // remembered for the meta fallback in onMetaReady
+    metaFallbackTried_ = false;
     // Show the header straight away with a placeholder cover + the item's own title;
     // onMetaReady() fills in the facts, synopsis and real cover when they arrive.
     metaTitle_->setText(item.title.toHtmlEscaped());
@@ -1827,8 +1849,17 @@ void HomeView::requestSteamMeta(const MediaItem& item, int reqId)
 void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
 {
     if (requestId != pendingMetaReqId_) return; // stale (navigated away / newer item)
-    if (!detail.valid) return;                  // nothing usable; keep the placeholder header
-    showMeta(detail);
+    if (detail.valid) { showMeta(detail); return; }
+
+    // The source addon returned no metadata. If this is a movie/episode with an embedded IMDB id and another
+    // installed addon (e.g. AIO Catalog) can supply metadata, enrich from it - once - so the info page isn't bare.
+    if (metaFallbackTried_) return; // keep the placeholder cover+title
+    metaFallbackTried_ = true;
+    MediaItem mi = imdbMetaItem(metaItem_);
+    if (mi.id.isEmpty() || stack_.isEmpty()) return;
+    LoadedAddon* prov = mgr_->metaProviderFor(stack_.last().addon, mi.type);
+    if (!prov) return;
+    pendingMetaReqId_ = mgr_->requestMeta(prov, mi); // its onMetaReady (now valid) will showMeta()
 }
 
 void HomeView::showMeta(const MediaDetail& d)

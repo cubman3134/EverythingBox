@@ -1179,6 +1179,16 @@ bool AddonManager::isEnabled(const QString& id) const
     return store().value(QStringLiteral("addon.enabled.") + id, true).toBool();
 }
 
+LoadedAddon* AddonManager::metaProviderFor(LoadedAddon* exclude, const QString& type) const
+{
+    for (LoadedAddon* s : sources_)
+    {
+        if (s == exclude || !s->hasScript || !isEnabled(s->manifest.id)) continue; // local script addon (AIO)
+        for (const AddonCatalog& c : catalogs(s)) if (c.type == type) return s;
+    }
+    return nullptr;
+}
+
 void AddonManager::setEnabled(const QString& id, bool enabled)
 {
     store().setValue(QStringLiteral("addon.enabled.") + id, enabled);
