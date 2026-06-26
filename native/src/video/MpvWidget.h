@@ -49,6 +49,7 @@ private:
     static void onMpvWakeup(void* ctx);                       // event wakeup callback (any thread)
     static void* getProcAddress(void* ctx, const char* name); // GL loader for mpv
     void handleEvent(mpv_event* event);
+    void logVideoInfo(); // append the loaded video's codec/resolution/pixfmt/hwdec to the debug log
 
     mpv_handle* mpv = nullptr;
     mpv_render_context* mpv_gl = nullptr;

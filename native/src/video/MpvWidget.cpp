@@ -5,8 +5,19 @@
 #include <QLabel>
 #include <QTimer>
 #include <QResizeEvent>
+#include <QFile>
+#include <QCoreApplication>
+#include <QDateTime>
 #include <stdexcept>
 #include <cstring>
+
+// One-line append to <app>/stream_debug.log, shared with the addon stream/manga tracing.
+static void videoLog(const QString& msg)
+{
+    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
+}
 
 MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
 {
@@ -170,8 +181,10 @@ void MpvWidget::handleEvent(mpv_event* event)
         {
             if (std::strcmp(prop->name, "width") == 0 && *static_cast<int64_t*>(prop->data) > 0)
             {
+                const bool firstFrame = !hasVideo_;
                 hasVideo_ = true;       // a real video track -> no overlay
                 if (nowPlaying_) nowPlaying_->hide();
+                if (firstFrame) QTimer::singleShot(700, this, [this] { logVideoInfo(); }); // let hwdec settle
             }
             else if (std::strcmp(prop->name, "chapters") == 0)
             {
@@ -208,6 +221,28 @@ void MpvWidget::handleEvent(mpv_event* event)
     default:
         break;
     }
+}
+
+void MpvWidget::logVideoInfo()
+{
+    if (!mpv) return;
+    auto getS = [this](const char* prop) {
+        char* s = mpv_get_property_string(mpv, prop);
+        QString r = s ? QString::fromUtf8(s) : QStringLiteral("?");
+        if (s) mpv_free(s);
+        return r;
+    };
+    // codec + container format, decoded geometry/pixel format, the hwdec that actually engaged, frame rate,
+    // and the colour transfer/primaries (to spot HDR content being shown on an SDR path).
+    videoLog(QStringLiteral("video: codec='") + getS("video-codec")
+             + QStringLiteral("' fmt=") + getS("video-format")
+             + QStringLiteral(" ") + getS("video-params/w") + QStringLiteral("x") + getS("video-params/h")
+             + QStringLiteral(" pixfmt=") + getS("video-params/pixelformat")
+             + QStringLiteral(" hwdec-current=") + getS("hwdec-current")
+             + QStringLiteral(" fps=") + getS("container-fps")
+             + QStringLiteral(" transfer=") + getS("video-params/gamma")
+             + QStringLiteral(" primaries=") + getS("video-params/primaries")
+             + QStringLiteral(" bitrate=") + getS("video-bitrate"));
 }
 
 void MpvWidget::resizeEvent(QResizeEvent* e)
