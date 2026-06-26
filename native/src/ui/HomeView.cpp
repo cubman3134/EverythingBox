@@ -530,7 +530,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             });
             return;
         }
-        if (top.addon && top.addon->stremio) // resolve a playable stream across the installed stream addons
+        if (top.addon && top.addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
         {
             LoadedAddon* addon = top.addon;
             showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
@@ -538,8 +538,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             mgr_->resolveStream(addon, it, [this, it](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
                 if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else showToast(tr("No playable source for “%1”. The stream addon returned no usable "
-                                  "links — try another title, or re-check your addon's debrid setup.").arg(it.title), 7000);
+                else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
             });
             return;
         }
@@ -1557,11 +1556,13 @@ void HomeView::activateItem(int row)
 
     LoadedAddon* addon = stack_.last().addon;
 
-    // A remote leaf (movie / episode / track) carries no url in the catalog - its playable source comes from
-    // the /stream endpoint, fetched on open. If one resolves, play it; otherwise fall back to the detail page.
-    // (Stremio items instead open the info page, which has a Play button that resolves on demand.)
+    // A remote leaf (track, a manga/comic document, …) carries no url in the catalog - its source comes from
+    // the /stream endpoint, fetched on open: resolve and open it directly. Movies/episodes instead open an
+    // info page (with a Play button that resolves on demand), like Stremio items - so this skips those types.
+    const bool playableInfoType = it.type == QStringLiteral("movie") || it.type == QStringLiteral("series")
+                               || it.type == QStringLiteral("tv")    || it.type == QStringLiteral("episode");
     if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
-        && it.type != QStringLiteral("platform"))
+        && it.type != QStringLiteral("platform") && !playableInfoType)
     {
         const MediaItem item = it; // copy for the async callback
         showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
@@ -1741,18 +1742,21 @@ void HomeView::requestMeta(const MediaItem& item)
         metaLayout_->setAlignment(metaImage_, Qt::AlignTop);
     }
 
-    // Show a Play button for launchable leaves: Steam games, and Stremio movies/episodes (which resolve a
-    // stream on demand). A specific manga chapter gets a "Read" button that resolves its pages. Plain
-    // series/containers (a manga title, a TV show) don't get one - you open their chapters/episodes.
+    // Show a Play button for launchable leaves: Steam games, and movie/episode leaves from a remote addon
+    // (Stremio, or a self-hosted library like Allarr) - they resolve a stream on demand. A specific manga
+    // chapter gets a "Read" button instead. Plain containers (a TV show, a manga title) get neither.
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
-    const bool isStremioPlayable = !stack_.isEmpty() && stack_.last().addon
-                                   && stack_.last().addon->stremio && !item.expandable;
+    const bool isRemotePlayable = !stack_.isEmpty() && stack_.last().addon && !item.expandable
+        && stack_.last().addon->transport == LoadedAddon::RemoteHttp
+        && (stack_.last().addon->stremio
+            || item.type == QStringLiteral("movie") || item.type == QStringLiteral("series")
+            || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode"));
     const bool isReadable = isReadableChapter(item.type);
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
-        playBtn_->setVisible(isSteam || isStremioPlayable || isReadable);
+        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable);
     }
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
