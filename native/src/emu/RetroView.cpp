@@ -266,6 +266,7 @@ void RetroView::keyReleaseEvent(QKeyEvent* e)
 
 int16_t RetroView::inputState(unsigned port, unsigned device, unsigned index, unsigned id)
 {
+    if (!inputActive_) return 0; // split screen: only the focused pane's game receives controller/keyboard
     if (port >= Gamepad::kMaxPlayers) return 0;
     if (device == RETRO_DEVICE_JOYPAD)
     {
@@ -280,6 +281,18 @@ int16_t RetroView::inputState(unsigned port, unsigned device, unsigned index, un
     if (device == RETRO_DEVICE_ANALOG)
         return pad_.axis(port, index, id); // analog sticks (keyboard has none)
     return 0;
+}
+
+void RetroView::setVolume(qreal v) // 0.0..1.0; lets each split pane mix at its own level
+{
+    volume_ = qBound(0.0, v, 1.0);
+    if (audioSink_) audioSink_->setVolume(volume_);
+}
+
+void RetroView::setInputActive(bool active)
+{
+    inputActive_ = active;
+    if (!active) pressedKeys_.clear(); // drop any held keys so they don't stick when focus leaves
 }
 
 void RetroView::loadTurbo()
@@ -324,6 +337,7 @@ void RetroView::startAudio(int sampleRate)
 
     audioSink_ = new QAudioSink(dev, fmt, this);
     audioSink_->setBufferSize(fmt.bytesForDuration(100000)); // ~100 ms
+    audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
     audioBytesPerSec_ = sampleRate * 2 * 2;                  // stereo S16
     audioIo_ = audioSink_->start();                          // push mode: write samples to this
 }

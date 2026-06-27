@@ -6,6 +6,8 @@
 #include "../comic/ComicView.h"
 #include "LibraryView.h"
 #include "HomeView.h"
+#include "SplitView.h"
+#include "MediaPane.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
 #include "../core/SystemCatalog.h"
@@ -177,6 +179,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     panelScroll_->setFrameShape(QFrame::NoFrame);
     pv->addWidget(panelScroll_, 1);
     stack_->addWidget(panelPage_); // index 7 - inline settings panels
+    // The split screen (index 8) is created lazily on first use (it spins up a second set of media engines),
+    // so users who never split pay nothing for it - see enterSplitScreen().
 
     auto* central = new QWidget(this);
     auto* v = new QVBoxLayout(central);
@@ -403,6 +407,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // F11 toggles full screen anywhere in the window (Esc leaves it - see keyPressEvent).
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
     connect(fsShortcut, &QShortcut::activated, this, &MainWindow::toggleFullScreen);
+    auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
+    connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
     stack_->setCurrentWidget(home_); // the catalog landing screen is shown first
 }
@@ -620,6 +626,7 @@ void MainWindow::openFile()
 
 void MainWindow::openVideoPath(const QString& path)
 {
+    if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     retro_->stop();
     book_->persist();
@@ -802,6 +809,15 @@ void MainWindow::openGamePath(const QString& rom)
         return;
     }
 
+    // Split screen: run the ROM in the focused pane's own emulator instead of the full-screen one.
+    if (splitTarget_)
+    {
+        splitTarget_->openGame(corePath, rom, core);
+        RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
+        finishSplitOpen();
+        return;
+    }
+
     player_->stop();
     book_->persist();
     pdf_->persist();
@@ -848,6 +864,7 @@ void MainWindow::openStreamPrompt()
 
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
 {
+    if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -872,6 +889,7 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl)
 {
+    if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
     clearAudioQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
@@ -903,6 +921,15 @@ void MainWindow::openDocumentPath(const QString& f)
 {
     const QString ext = QFileInfo(f).suffix().toLower();
     QString err;
+
+    if (splitTarget_)
+    {
+        if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
+        else if (ext == QStringLiteral("cbz")) splitTarget_->openComic(f);
+        else splitTarget_->openBook(f); // .epub
+        finishSplitOpen();
+        return;
+    }
 
     if (ext == QStringLiteral("pdf"))
     {
@@ -943,6 +970,43 @@ void MainWindow::openHome()
     if (isFullScreen()) leaveFullScreen(); // exiting media (e.g. a movie) must drop back to a normal window
     home_->refresh();
     stack_->setCurrentWidget(home_);
+}
+
+void MainWindow::enterSplitScreen()
+{
+    if (!splitView_) // first use: build the split view + its per-pane engines and wire it up
+    {
+        splitView_ = new SplitView(this);
+        stack_->addWidget(splitView_);
+        connect(splitView_, &SplitView::exitRequested, this, &MainWindow::exitSplitScreen);
+        connect(splitView_, &SplitView::openHereRequested, this, [this](MediaPane* pane) {
+            splitTarget_ = pane;                 // the next opened item loads into this pane
+            stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
+            home_->focusContent();
+        });
+    }
+    // Park the full-screen views (don't leave a movie playing behind the split) and show the empty split.
+    player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+    if (isFullScreen()) leaveFullScreen();
+    splitMode_ = true;
+    splitTarget_ = nullptr;
+    stack_->setCurrentWidget(splitView_);
+}
+
+void MainWindow::exitSplitScreen()
+{
+    splitMode_ = false;
+    splitTarget_ = nullptr;
+    if (splitView_) splitView_->clearAll(); // stop both panes' engines
+    openHome();
+}
+
+void MainWindow::finishSplitOpen()
+{
+    // The item just opened into splitTarget_; return to the split view and focus that pane.
+    if (splitTarget_) splitView_->focusPane(splitTarget_);
+    splitTarget_ = nullptr;
+    stack_->setCurrentWidget(splitView_);
 }
 
 void MainWindow::onRequestOpenFile(const QString& kind)
@@ -1033,6 +1097,23 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const QString romExt = QFileInfo(QUrl(url).path()).suffix().toLower();
         if (!romExt.isEmpty() && (type == QStringLiteral("game") || SystemCatalog::forExtension(romExt) != nullptr))
         { fetchRemoteDocumentThenOpen(item, QStringLiteral(".") + romExt); return; }
+    }
+
+    // Split screen: the item is now a local file (remote docs/ROMs were fetched above) or a streamable URL -
+    // load it into the focused pane instead of the full-screen views. Games fall through to openGamePath,
+    // which is split-aware (it needs to resolve the core first).
+    if (splitTarget_)
+    {
+        if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
+        { splitTarget_->openBook(url); finishSplitOpen(); return; }
+        if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
+        { splitTarget_->openPdf(url); finishSplitOpen(); return; }
+        if (lower.endsWith(QStringLiteral(".cbz")))
+        { splitTarget_->openComic(url); finishSplitOpen(); return; }
+        const bool isGame = (type == QStringLiteral("game")
+                             || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
+        if (!isGame) // video / audio / audiobook all play through the pane's own libmpv
+        { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
     }
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
@@ -1299,6 +1380,7 @@ void MainWindow::openSettingsHub()
         add(tr("Theme"),              [this] { openThemes(); });
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
+        add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });

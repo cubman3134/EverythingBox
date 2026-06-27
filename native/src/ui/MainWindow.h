@@ -44,6 +44,9 @@ private slots:
     void openGame();
     void openDocument(); // ebooks (.epub) + PDFs (.pdf), dispatched by extension
     void openHome();
+    void enterSplitScreen();   // open the two-pane split screen (both panes empty)
+    void exitSplitScreen();    // leave split mode, stop both panes
+    void finishSplitOpen();    // after an item loads into splitTarget_, return to the split view
     void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
     void openRecent(const QString& path, const QString& kind,
                     const QString& resumeKey = QString(), const QString& title = QString()); // re-open a Home "Recent" entry
@@ -127,6 +130,9 @@ private:
     ComicView* comic_ = nullptr;
     LibraryView* library_ = nullptr;
     HomeView* home_ = nullptr;
+    class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
+    class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
+    bool splitMode_ = false;                 // currently showing the split screen
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file

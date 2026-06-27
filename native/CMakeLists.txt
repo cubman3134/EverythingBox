@@ -48,6 +48,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonManager.cpp src/addons/AddonManager.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
+        src/ui/MediaPane.cpp      src/ui/MediaPane.h
+        src/ui/SplitView.cpp      src/ui/SplitView.h
         src/ui/AddonSettingsDialog.cpp src/ui/AddonSettingsDialog.h
         src/ui/ProfileDialog.cpp  src/ui/ProfileDialog.h
         src/ui/RegistryBrowser.cpp src/ui/RegistryBrowser.h
