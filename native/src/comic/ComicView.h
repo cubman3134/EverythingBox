@@ -42,11 +42,14 @@ private:
     void rescale();
     void updateLabel();
 
+    bool spreadActive() const; // currently showing two pages side by side (book mode)
+
     QVector<QByteArray> pages_; // each entry = one page's encoded image bytes (jpg/png/…)
     int current_ = 0;
     QImage image_;             // the decoded current page
     qreal zoom_ = 1.0;
     bool fit_ = true;          // fit-to-width vs. manual zoom
+    bool twoUp_ = false;       // viewport is wide enough to pair pages book-style (set during rescale)
     QString path_;
 
     QScrollArea* scroll_ = nullptr;

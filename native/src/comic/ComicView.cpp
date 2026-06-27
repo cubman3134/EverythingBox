@@ -14,6 +14,8 @@
 #include <QFileInfo>
 #include <QCollator>
 #include <QPixmap>
+#include <QPainter>
+#include <QColor>
 #include <algorithm>
 #include <cstring>
 
@@ -170,19 +172,56 @@ void ComicView::showPage(int index)
     scroll_->verticalScrollBar()->setValue(0); // start each page at the top
 }
 
+// Show two pages at once (like an open book) when it makes sense: only in fit-width mode, for portrait
+// pages, and on a wide landscape viewport - never on a narrow / phone-width window (or for a page that's
+// itself a landscape spread).
+bool ComicView::spreadActive() const
+{
+    return fit_ && twoUp_ && current_ + 1 < pages_.size();
+}
+
 void ComicView::rescale()
 {
     if (image_.isNull()) { imageLabel_->clear(); return; }
+    const int vw = qMax(64, scroll_->viewport()->width() - 4); // fill the viewport width (scale up or down)
+    const int vh = qMax(64, scroll_->viewport()->height());
+
+    twoUp_ = fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
+
+    if (twoUp_ && current_ + 1 < pages_.size())
+    {
+        QImage right;
+        right.loadFromData(pages_[current_ + 1]);
+        if (!right.isNull())
+        {
+            // Normalise both pages to a common height, lay them side by side, then fit the spread to width.
+            const int h = qMax(image_.height(), right.height());
+            const QImage l = image_.height() == h ? image_ : image_.scaledToHeight(h, Qt::SmoothTransformation);
+            const QImage r = right.height()  == h ? right  : right.scaledToHeight(h, Qt::SmoothTransformation);
+            const int gap = 10;
+            const double scale = double(vw) / double(l.width() + gap + r.width());
+            const int outH = qMax(1, int(h * scale));
+            const int lw = int(l.width() * scale), rw = int(r.width() * scale), g = int(gap * scale);
+            const int x0 = qMax(0, (vw - (lw + g + rw)) / 2); // centre the spread
+
+            QImage canvas(vw, outH, QImage::Format_RGB32);
+            canvas.fill(QColor(0x15, 0x17, 0x1c));
+            QPainter p(&canvas);
+            p.setRenderHint(QPainter::SmoothPixmapTransform);
+            p.drawImage(QRect(x0, 0, lw, outH), l);            // first page on the left
+            p.drawImage(QRect(x0 + lw + g, 0, rw, outH), r);   // next page on the right
+            p.end();
+
+            const QPixmap pm = QPixmap::fromImage(canvas);
+            imageLabel_->setPixmap(pm);
+            imageLabel_->resize(qMax(pm.width(), scroll_->viewport()->width()), pm.height());
+            return;
+        }
+    }
+
     QPixmap pm = QPixmap::fromImage(image_);
-    if (fit_)
-    {
-        const int w = qMax(64, scroll_->viewport()->width() - 4); // fill the viewport width (scale up or down)
-        pm = pm.scaledToWidth(w, Qt::SmoothTransformation);
-    }
-    else
-    {
-        pm = pm.scaled(image_.size() * zoom_, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    }
+    if (fit_) pm = pm.scaledToWidth(vw, Qt::SmoothTransformation);
+    else      pm = pm.scaled(image_.size() * zoom_, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     imageLabel_->setPixmap(pm);
     // Let the label fill the viewport width so the page stays centred; height tracks the (tall) page so it scrolls.
     imageLabel_->resize(qMax(pm.width(), scroll_->viewport()->width()), pm.height());
@@ -190,14 +229,22 @@ void ComicView::rescale()
 
 void ComicView::updateLabel()
 {
-    pageLabel_->setText(tr("%1  —  Page %2 / %3")
-                            .arg(QFileInfo(path_).fileName())
-                            .arg(current_ + 1)
-                            .arg(pages_.size()));
+    const QString where = spreadActive()
+        ? tr("Pages %1–%2 / %3").arg(current_ + 1).arg(current_ + 2).arg(pages_.size())
+        : tr("Page %1 / %2").arg(current_ + 1).arg(pages_.size());
+    pageLabel_->setText(QFileInfo(path_).fileName() + QStringLiteral("  —  ") + where);
 }
 
-void ComicView::nextPage() { if (current_ < pages_.size() - 1) showPage(current_ + 1); }
-void ComicView::prevPage() { if (current_ > 0) showPage(current_ - 1); }
+void ComicView::nextPage()
+{
+    if (current_ >= pages_.size() - 1) return;
+    showPage(qMin(current_ + (spreadActive() ? 2 : 1), pages_.size() - 1)); // advance a whole spread in book mode
+}
+void ComicView::prevPage()
+{
+    if (current_ <= 0) return;
+    showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
+}
 
 void ComicView::zoomIn()  { fit_ = false; zoom_ = qMin(5.0, zoom_ * 1.2); rescale(); }
 void ComicView::zoomOut() { fit_ = false; zoom_ = qMax(0.2, zoom_ / 1.2); rescale(); }
@@ -219,5 +266,5 @@ void ComicView::keyPressEvent(QKeyEvent* e)
 void ComicView::resizeEvent(QResizeEvent* e)
 {
     QWidget::resizeEvent(e);
-    if (fit_ && !image_.isNull()) rescale(); // refit to the new width
+    if (fit_ && !image_.isNull()) { rescale(); updateLabel(); } // refit to the new width (may toggle the spread)
 }
