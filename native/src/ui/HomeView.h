@@ -36,6 +36,7 @@ public:
 
 signals:
     void openItem(const MediaItem& item);
+    void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls); // manga chapter
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind,
@@ -153,6 +154,19 @@ private:
     QWidget* actionRow_ = nullptr;    // holds Play + Favorite on the detail header
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
+    QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
+    // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
+    // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.
+    struct DlNode { LoadedAddon* addon = nullptr; MediaItem item; QString parentTitle; QString parentType; };
+    QList<DlNode> dlQueue_;
+    DlNode dlDetailNode_, dlMetaNode_; // the node whose detail/meta request is currently in flight
+    int dlDetailReq_ = -1, dlMetaReq_ = -1;
+    int dlQueued_ = 0;                  // files emitted for download this crawl
+    bool dlBusy_ = false;
+    void startDownload();              // begin a crawl from the current detail item
+    void dlNext();                     // process the next queued node
+    void dlResolveLeaf(const DlNode& node); // resolve one leaf's source, then continue
+    void dlEmit(const MediaItem& it, const QString& url, const QString& mime); // queue a resolved file
     // TMDB->IMDB bridge: when a non-Stremio catalog item (e.g. AIO Catalog) supplies an IMDB stream id via
     // getMeta, Play resolves it through the installed Stremio stream addons. Set in showMeta for the open item.
     QString playImdbId_;              // "tt123" (movie) or "ttShow:s:e" (episode), else empty

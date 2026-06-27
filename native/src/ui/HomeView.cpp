@@ -689,6 +689,19 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     });
     favBtn_->installEventFilter(this); // Backspace here = Back (the detail page focuses this button)
     arl->addWidget(favBtn_);
+
+    downloadBtn_ = new QPushButton(tr("⬇ Download"), actionRow_);
+    downloadBtn_->setCursor(Qt::PointingHandCursor);
+    downloadBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#DDEBFF;border:2px solid #5A8CFF;border-radius:6px;"
+        "padding:6px 14px;color:#1A3A7A;font-weight:bold;}"
+        "QPushButton:hover{background:#C6DBFF;}"
+        "QPushButton:focus{background:#A9C8FF;border-color:#2E5BC9;}"));
+    downloadBtn_->setVisible(false); // shown in requestMeta() for downloadable items
+    connect(downloadBtn_, &QPushButton::clicked, this, [this] { startDownload(); });
+    downloadBtn_->installEventFilter(this);
+    arl->addWidget(downloadBtn_);
+
     arl->addStretch(1);
     mc->addWidget(actionRow_);
 
@@ -1708,6 +1721,110 @@ void HomeView::requestNextSource()
     else                   mgr_->resolveStream(lastPlay_.addon, item, onResolved, attempt);
 }
 
+// ---- download crawl: resolve one item (or a whole series/season) to files, queued to MainWindow ----------
+
+void HomeView::startDownload()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    if (dlBusy_) { showToast(tr("A download is already being prepared…"), 4000); return; }
+    const Level& top = stack_.last();
+    DlNode root;
+    root.addon = top.addon;
+    root.item = top.item;
+    if (stack_.size() >= 2) { root.parentTitle = stack_.at(stack_.size() - 2).item.title;
+                              root.parentType  = stack_.at(stack_.size() - 2).item.type; }
+    dlQueue_.clear();
+    dlQueue_.append(root);
+    dlQueued_ = 0;
+    dlBusy_ = true;
+    showToast(top.item.expandable ? tr("Preparing downloads for “%1”…").arg(top.item.title)
+                                  : tr("Preparing download for “%1”…").arg(top.item.title), 30000);
+    dlNext();
+}
+
+void HomeView::dlNext()
+{
+    if (dlQueue_.isEmpty())
+    {
+        dlBusy_ = false;
+        showToast(dlQueued_ > 0 ? tr("Queued %1 item(s) to download — they’ll appear in Recent.").arg(dlQueued_)
+                                : tr("Nothing here could be downloaded."), 6000);
+        return;
+    }
+    const DlNode node = dlQueue_.takeFirst();
+    if (node.item.expandable)
+    {
+        dlDetailNode_ = node;
+        dlDetailReq_ = mgr_->requestDetail(node.addon, node.item, 1); // children -> onCatalogReady crawl branch
+    }
+    else
+    {
+        dlResolveLeaf(node);
+    }
+}
+
+void HomeView::dlResolveLeaf(const DlNode& node)
+{
+    const MediaItem it = node.item;
+    // Can't pull as a single file: a Steam launch, or a page-based manga chapter.
+    if (it.mime == QStringLiteral("steamgame") || isReadableChapter(it.type)) { dlNext(); return; }
+
+    const bool localBridge = node.addon && node.addon->transport != LoadedAddon::RemoteHttp
+        && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
+            || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
+    if (localBridge)
+    {
+        const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
+        QString query;
+        if (it.type == QStringLiteral("comic_issue"))
+        {
+            const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
+            const auto m = re.match(it.title);
+            query = (node.parentTitle + QLatin1Char(' ') + (m.hasMatch() ? m.captured(1) : QString())).trimmed();
+        }
+        else if (it.type == QStringLiteral("game"))
+        {
+            const QString console = (node.parentType == QStringLiteral("platform")) ? node.parentTitle : QString();
+            query = (it.title + QLatin1Char(' ') + console).trimmed();
+        }
+        else
+        {
+            const QString author = it.subtitle.section(QStringLiteral(" · "), 0, 0).trimmed();
+            query = (it.title + QLatin1Char(' ') + author).trimmed();
+        }
+        if (query.isEmpty()) query = it.title;
+        mgr_->resolveDocumentByQuery(query, catType, [this, it](const QString& url, const QString& mime, const QString&) {
+            if (!url.isEmpty()) dlEmit(it, url, mime);
+            dlNext();
+        });
+        return;
+    }
+    if (node.addon && node.addon->transport == LoadedAddon::RemoteHttp) // file provider OR Stremio: its /stream
+    {
+        mgr_->resolveStream(node.addon, it, [this, it](const QString& url, const QString& mime) {
+            if (!url.isEmpty()) dlEmit(it, url, mime);
+            dlNext();
+        });
+        return;
+    }
+    // A movie/episode browsed from a local catalog (AIO): fetch its /meta to learn the IMDB id, then bridge.
+    if (it.type == QStringLiteral("movie") || it.type == QStringLiteral("episode")
+        || it.type == QStringLiteral("series") || it.type == QStringLiteral("tv"))
+    {
+        dlMetaNode_ = node;
+        dlMetaReq_ = mgr_->requestMeta(node.addon, it); // -> onMetaReady crawl branch
+        return;
+    }
+    dlNext(); // unknown / non-downloadable leaf
+}
+
+void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime)
+{
+    MediaItem m = it; m.url = url; m.mime = mime;
+    emit downloadItem(m);
+    ++dlQueued_;
+}
+
 void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); } // drilled below the category root
@@ -1914,6 +2031,17 @@ void HomeView::requestMeta(const MediaItem& item)
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
         playBtn_->setVisible(isSteam || isRemotePlayable || isReadable || isBridgedAudio || isBridgedGame);
     }
+    if (downloadBtn_)
+    {
+        // Downloadable: a resolvable leaf (anything but a Steam launch or a page-based manga chapter), or a
+        // container we can crawl (a series/season -> episodes, a comic volume -> issues).
+        const bool dlLeaf = !item.expandable
+            && (isRemotePlayable || isRemoteReadable || isBridgedReadable || isBridgedAudio || isBridgedGame);
+        const bool dlContainer = item.expandable
+            && (item.type == QStringLiteral("series") || item.type == QStringLiteral("tv")
+                || item.type == QStringLiteral("season") || item.type == QStringLiteral("comic"));
+        downloadBtn_->setVisible(dlLeaf || dlContainer);
+    }
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
@@ -1982,6 +2110,23 @@ void HomeView::requestSteamMeta(const MediaItem& item, int reqId)
 
 void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
 {
+    if (requestId == dlMetaReq_) // a download crawl's item meta arrived: bridge it by IMDB id, then continue
+    {
+        dlMetaReq_ = -1;
+        const MediaItem it = dlMetaNode_.item;
+        const QString imdb = detail.imdbStreamId;
+        if (!imdb.isEmpty())
+        {
+            const QString stremioType = (it.type == QStringLiteral("movie")) ? QStringLiteral("movie")
+                                                                              : QStringLiteral("series");
+            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it](const QString& url, const QString& mime) {
+                if (!url.isEmpty()) dlEmit(it, url, mime);
+                dlNext();
+            });
+        }
+        else dlNext(); // no IMDB id -> can't resolve this one
+        return;
+    }
     if (requestId != pendingMetaReqId_) return; // stale (navigated away / newer item)
     if (detail.valid) { showMeta(detail); return; }
 
@@ -2135,6 +2280,22 @@ void HomeView::issueRequest(bool append)
 
 void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
 {
+    if (requestId == dlDetailReq_) // a download crawl's children arrived: queue them depth-first, then continue
+    {
+        dlDetailReq_ = -1;
+        const DlNode parent = dlDetailNode_;
+        QList<DlNode> kids;
+        for (const MediaItem& child : cat.items)
+        {
+            if (child.type == QStringLiteral("info") || child.type == QStringLiteral("rechdr")) continue;
+            DlNode n; n.addon = parent.addon; n.item = child;
+            n.parentTitle = parent.item.title; n.parentType = parent.item.type;
+            kids.append(n);
+        }
+        for (int i = kids.size() - 1; i >= 0; --i) dlQueue_.prepend(kids[i]); // process this container's content first
+        dlNext();
+        return;
+    }
     if (requestId != pendingReqId_) return; // a superseded request (navigated away / newer page)
     loading_ = false;
     currentPage_ = pendingPage_;

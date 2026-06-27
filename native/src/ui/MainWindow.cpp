@@ -57,6 +57,7 @@
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
+#include <QRegularExpression>
 #include <QHash>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -151,6 +152,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
     home_ = new HomeView(addons_.get(), this);
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
+    connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
     connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
 
     // The player page pairs the libmpv surface with a playlist panel (shown only for audio queues).
@@ -1294,6 +1296,143 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(body.size()));
         statusBar()->clearMessage();
         openLocal();
+    });
+}
+
+// ---- library downloads (save for keeps to <app>/downloads, add to Recent) --------------------------------
+
+namespace {
+// A filesystem-safe file name from a media title.
+QString safeFileName(const QString& title)
+{
+    QString s = title;
+    s.replace(QRegularExpression(QStringLiteral("[\\\\/:*?\"<>|\\r\\n\\t]")), QStringLiteral("_"));
+    s = s.simplified();
+    return s.isEmpty() ? QStringLiteral("download") : s.left(150);
+}
+// The extension to save a resolved item under: url suffix, else mime, else media type.
+QString downloadExt(const MediaItem& item)
+{
+    const QString lower = QUrl(item.url).path().toLower();
+    const QString mime = item.mime.toLower();
+    const QString type = item.type.toLower();
+    for (const QString& e : { QStringLiteral(".mkv"), QStringLiteral(".mp4"), QStringLiteral(".avi"),
+         QStringLiteral(".m4v"), QStringLiteral(".mov"), QStringLiteral(".webm"), QStringLiteral(".cbz"),
+         QStringLiteral(".epub"), QStringLiteral(".pdf"), QStringLiteral(".mobi"), QStringLiteral(".m4b"),
+         QStringLiteral(".mp3"), QStringLiteral(".m4a"), QStringLiteral(".flac"), QStringLiteral(".gba"),
+         QStringLiteral(".gb"), QStringLiteral(".gbc"), QStringLiteral(".nes"), QStringLiteral(".sfc"),
+         QStringLiteral(".smc"), QStringLiteral(".md"), QStringLiteral(".gen"), QStringLiteral(".smd"),
+         QStringLiteral(".n64"), QStringLiteral(".z64"), QStringLiteral(".pce"), QStringLiteral(".ws"),
+         QStringLiteral(".a26"), QStringLiteral(".cue"), QStringLiteral(".chd") })
+        if (lower.endsWith(e)) return e;
+    if (mime.contains(QStringLiteral("epub"))) return QStringLiteral(".epub");
+    if (mime.contains(QStringLiteral("pdf")))  return QStringLiteral(".pdf");
+    if (mime.contains(QStringLiteral("comicbook")) || mime.contains(QStringLiteral("cbz"))) return QStringLiteral(".cbz");
+    if (mime.startsWith(QStringLiteral("audio/"))) return mime.contains(QStringLiteral("mpeg")) ? QStringLiteral(".mp3") : QStringLiteral(".m4a");
+    if (mime.startsWith(QStringLiteral("video/"))) return QStringLiteral(".mp4");
+    if (type == QStringLiteral("comic") || type == QStringLiteral("comic_issue") || type == QStringLiteral("manga")) return QStringLiteral(".cbz");
+    if (type == QStringLiteral("book"))      return QStringLiteral(".epub");
+    if (type == QStringLiteral("audiobook")) return QStringLiteral(".m4a");
+    if (type == QStringLiteral("game"))
+    { const QString e = QFileInfo(QUrl(item.url).path()).suffix(); return e.isEmpty() ? QStringLiteral(".bin") : QStringLiteral(".") + e; }
+    return QStringLiteral(".mkv"); // a movie/episode default
+}
+// The Recent "kind" so re-opening routes to the right view.
+QString downloadKind(const QString& type, const QString& ext)
+{
+    if (type == QStringLiteral("audiobook") || ext == QStringLiteral(".mp3") || ext == QStringLiteral(".m4a")
+        || ext == QStringLiteral(".m4b") || ext == QStringLiteral(".flac")) return QStringLiteral("audio");
+    if (ext == QStringLiteral(".cbz") || ext == QStringLiteral(".epub") || ext == QStringLiteral(".pdf")
+        || ext == QStringLiteral(".mobi")) return QStringLiteral("document");
+    if (type == QStringLiteral("game") || SystemCatalog::forExtension(ext.mid(1)) != nullptr) return QStringLiteral("game");
+    return QStringLiteral("video");
+}
+} // namespace
+
+void MainWindow::enqueueDownload(const MediaItem& item)
+{
+    if (item.url.isEmpty()) return;
+    downloadQueue_.append(item);
+    mwLog(QStringLiteral("download(library): queued \"%1\" (%2 in queue)").arg(item.title).arg(downloadQueue_.size()));
+    if (!downloadBusy_) startNextDownload();
+}
+
+void MainWindow::startNextDownload()
+{
+    if (downloadQueue_.isEmpty())
+    {
+        downloadBusy_ = false;
+        statusBar()->showMessage(tr("Downloads complete."), 5000);
+        mwLog(QStringLiteral("download(library): queue drained"));
+        return;
+    }
+    downloadBusy_ = true;
+    const MediaItem item = downloadQueue_.takeFirst();
+    const int remaining = downloadQueue_.size();
+
+    const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/downloads");
+    QDir().mkpath(dir);
+    const QString ext = downloadExt(item);
+    const QString kind = downloadKind(item.type, ext);
+    const QString dest = dir + QStringLiteral("/") + safeFileName(item.title) + ext;
+
+    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) // skip existing, but make sure it's in Recent
+    {
+        mwLog(QStringLiteral("download(library): \"%1\" already downloaded — skipping").arg(item.title));
+        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id });
+        startNextDownload();
+        return;
+    }
+
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    statusBar()->showMessage(tr("Downloading “%1”…%2").arg(item.title,
+                             remaining > 0 ? tr("  (%1 more queued)").arg(remaining) : QString()));
+    mwLog(QStringLiteral("download(library): GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(dest).fileName()));
+
+    QNetworkRequest rq{ QUrl(item.url) };
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = docNam_->get(rq);
+
+    auto humanMB = [](qint64 b) { return QString::number(b / 1048576.0, 'f', 1); };
+    connect(reply, &QNetworkReply::downloadProgress, this,
+            [this, title = item.title, remaining, humanMB, lastPct = -1](qint64 rec, qint64 total) mutable {
+        if (total <= 0) return;
+        const int pct = static_cast<int>(rec * 100 / total);
+        if (pct == lastPct) return;
+        lastPct = pct;
+        statusBar()->showMessage(tr("Downloading “%1”… %2%  (%3 / %4 MB)%5")
+            .arg(title).arg(pct).arg(humanMB(rec), humanMB(total),
+                 remaining > 0 ? tr("  (%1 more)").arg(remaining) : QString()));
+    });
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, dest, kind, title = item.title, thumb = item.thumbnailUrl, id = item.id] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            mwLog(QStringLiteral("download(library): FAILED \"%1\": %2").arg(title, reply->errorString()));
+            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(title, reply->errorString()), 6000);
+            startNextDownload(); // keep the queue moving
+            return;
+        }
+        const QByteArray body = reply->readAll();
+        QFile f(dest + QStringLiteral(".part"));
+        if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
+        {
+            f.close(); f.remove();
+            mwLog(QStringLiteral("download(library): save failed for \"%1\"").arg(title));
+            startNextDownload();
+            return;
+        }
+        f.close();
+        QFile::remove(dest);
+        if (QFile::rename(dest + QStringLiteral(".part"), dest))
+        {
+            mwLog(QStringLiteral("download(library): saved \"%1\" (%2 bytes)").arg(title).arg(body.size()));
+            RecentStore::add({ dest, title, kind, thumb, id }); // appears in Recent, re-openable offline
+        }
+        startNextDownload();
     });
 }
 

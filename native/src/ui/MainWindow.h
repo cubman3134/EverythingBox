@@ -57,6 +57,10 @@ private slots:
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
+    // Download (for keeps) a resolved item to <app>/downloads and add it to Recent. enqueueDownload queues;
+    // startNextDownload runs them one at a time. Fed by HomeView's downloadItem signal (single item or a crawl).
+    void enqueueDownload(const MediaItem& item);
+    void startNextDownload();
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
@@ -135,6 +139,8 @@ private:
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
+    QVector<MediaItem> downloadQueue_;       // pending library downloads (processed one at a time)
+    bool downloadBusy_ = false;
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
