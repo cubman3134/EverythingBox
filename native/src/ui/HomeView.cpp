@@ -848,10 +848,18 @@ void HomeView::refresh()
         if (!mgr_->isEnabled(s->manifest.id)) continue;
         for (const AddonCatalog& c : mgr_->catalogs(s)) all.push_back({ s, c });
     }
-    QHash<QString, int> bestScore; // best source score available per media type
+    QHash<QString, int> bestScore; // best source score available per (bridged) media type
+    QHash<QString, int> typeCount; // how many sources offer each non-bridged type (for disambiguation)
     for (const CatRef& c : all)
+    {
         bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
-    auto wins = [&](const CatRef& c) { return sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0); };
+        if (!isBridgedType(c.cat.type)) ++typeCount[c.cat.type];
+    }
+    // Bridged types (movies/TV) collapse to one preferred source. Non-bridged types (comics/manga/books/…)
+    // show EVERY source's catalog, since the user may want both (e.g. browse aiocatalog AND search Allarr).
+    auto wins = [&](const CatRef& c) {
+        return !isBridgedType(c.cat.type) || sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0);
+    };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -863,7 +871,8 @@ void HomeView::refresh()
     };
 
     // Lead with a single Movies tab, then a single TV tab (from the preferred source), then every other
-    // winning catalog. Same-type catalogs from a non-preferred source are dropped (no duplicate tabs).
+    // winning catalog. When two sources offer the same non-bridged type, append the source name so the
+    // tabs are distinguishable (e.g. "Comics · AIO Catalog" and "Comics · Allarr").
     bool didMovie = false, didSeries = false;
     for (const CatRef& c : all)
         if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie) { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
@@ -873,7 +882,10 @@ void HomeView::refresh()
     {
         if (!wins(c)) continue;
         if (c.cat.type == QStringLiteral("movie") || isSeriesType(c.cat.type)) continue; // already led with Movies/TV
-        addCat(c.addon, c.cat, c.cat.name);
+        QString display = c.cat.name;
+        if (typeCount.value(c.cat.type) > 1 && c.addon)
+            display += QStringLiteral(" · ") + (c.addon->manifest.name.isEmpty() ? c.addon->manifest.id : c.addon->manifest.name);
+        addCat(c.addon, c.cat, display);
     }
 
     typeBar_->addStretch(1);
