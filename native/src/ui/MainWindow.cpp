@@ -1027,6 +1027,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         else if (type == QStringLiteral("ebook") || type == QStringLiteral("book"))  ext = QStringLiteral(".epub");
         else if (type == QStringLiteral("pdf"))  ext = QStringLiteral(".pdf");
         if (!ext.isEmpty()) { fetchRemoteDocumentThenOpen(item, ext); return; }
+
+        // Game ROMs run in the emulator (RetroView), which loads a local file. Fetch the
+        // ROM to a cache file first, keeping its extension so the right core is picked.
+        const QString romExt = QFileInfo(QUrl(url).path()).suffix().toLower();
+        if (!romExt.isEmpty() && (type == QStringLiteral("game") || SystemCatalog::forExtension(romExt) != nullptr))
+        { fetchRemoteDocumentThenOpen(item, QStringLiteral(".") + romExt); return; }
     }
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
@@ -1059,6 +1065,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         setAudioQueue({ url }, 0); // a single-track queue; libmpv also streams http(s) audio
+    }
+    else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
+    {
+        openGamePath(url); // a local ROM path here (remote ROMs were fetched to a file above)
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
