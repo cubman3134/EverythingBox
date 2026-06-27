@@ -102,9 +102,12 @@ public:
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
                              std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     // Find a readable document on a file provider (Allarr) by searching its catalog of `catalogType` for
-    // `query` and resolving the first hit's /stream. Used to read a comic browsed from another addon's catalog.
+    // `query` and resolving the first hit's /stream. Used to read a comic/book/audiobook browsed from another
+    // addon's catalog. providerError is non-empty when the provider couldn't be reached (vs. simply no match),
+    // so the UI can distinguish "Allarr is down" from "Allarr has no copy".
     void resolveDocumentByQuery(const QString& query, const QString& catalogType,
-                                std::function<void(const QString& url, const QString& mime)> cb);
+                                std::function<void(const QString& url, const QString& mime,
+                                                   const QString& providerError)> cb);
 
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder

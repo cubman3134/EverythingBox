@@ -1026,9 +1026,9 @@ void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbS
 }
 
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,
-                                          std::function<void(const QString&, const QString&)> cb)
+                                          std::function<void(const QString&, const QString&, const QString&)> cb)
 {
-    if (query.trimmed().isEmpty()) { cb(QString(), QString()); return; }
+    if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString()); return; }
     // Pick the first enabled file provider (a non-Stremio remote media-source, e.g. Allarr) that exposes a
     // catalog of this type, and use ITS catalog id to search.
     LoadedAddon* prov = nullptr; QString catId;
@@ -1040,31 +1040,35 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
             if (c.type == catalogType) { prov = s; catId = c.id; break; }
         if (prov) break;
     }
-    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString()); return; }
+    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString(), QString()); return; }
 
     const QString base = prov->baseUrl;
     streamLog(QStringLiteral("doc-bridge: searching %1 catalog '%2' for \"%3\"").arg(prov->manifest.id, catId, query));
     QNetworkRequest rq(remoteCatalogUrl(base, catId, query, 1));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(45000); // a provider title search can sweep several indexers; allow time, but don't hang
     { const QByteArray cfg = remoteConfigHeader(prov); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb] {
         reply->deleteLater();
-        MediaItem hit;
-        if (reply->error() == QNetworkReply::NoError)
+        if (reply->error() != QNetworkReply::NoError)
         {
-            MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
-            for (MediaItem& it : cat.items) it.url = resolveRemoteUrl(it.url, base);
-            // Prefer the first openable leaf; fall back to the very first result.
-            for (const MediaItem& it : cat.items) if (!it.expandable) { hit = it; break; }
-            if (hit.id.isEmpty() && hit.url.isEmpty() && !cat.items.isEmpty()) hit = cat.items.first();
-            streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
+            // Couldn't reach the provider (down / refused / timed out) - report it as such, NOT "no match".
+            streamLog(QStringLiteral("doc-bridge: search error: %1").arg(reply->errorString()));
+            cb(QString(), QString(), reply->errorString());
+            return;
         }
-        else streamLog(QStringLiteral("doc-bridge: search error: %1").arg(reply->errorString()));
-        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString()); return; }
-        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime); return; } // already a direct file
-        resolveStream(prov, hit, cb);                              // resolve the leaf's /stream
+        MediaItem hit;
+        MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
+        for (MediaItem& it : cat.items) it.url = resolveRemoteUrl(it.url, base);
+        // Prefer the first openable leaf; fall back to the very first result.
+        for (const MediaItem& it : cat.items) if (!it.expandable) { hit = it; break; }
+        if (hit.id.isEmpty() && hit.url.isEmpty() && !cat.items.isEmpty()) hit = cat.items.first();
+        streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
+        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString()); return; } // reached, but no match
+        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString()); return; } // already a direct file
+        resolveStream(prov, hit, [cb](const QString& url, const QString& mime) { cb(url, mime, QString()); });
     });
 }
 

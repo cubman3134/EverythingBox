@@ -602,10 +602,13 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             const QString title = it.title;
-            mgr_->resolveDocumentByQuery(query, catType, [this, it, title](const QString& url, const QString& mime) {
+            mgr_->resolveDocumentByQuery(query, catType, [this, it, title](const QString& url, const QString& mime, const QString& err) {
                 playBtn_->setEnabled(true);
                 if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else showToast(tr("Couldn't find “%1” from the file provider (Allarr) - no match.").arg(title), 7000);
+                else if (!err.isEmpty())
+                    showToast(tr("Couldn't reach the file provider (Allarr) — is it running? (%1)").arg(err), 8000);
+                else
+                    showToast(tr("The file provider (Allarr) has no copy of “%1”.").arg(title), 7000);
             });
             return;
         }
