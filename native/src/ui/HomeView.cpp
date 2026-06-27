@@ -828,10 +828,14 @@ void HomeView::refresh()
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
     // Gather every enabled catalog, then show ONE tab per media type. The browsable local catalog (AIO
-    // Catalog), and any Stremio catalog, own the tabs; a non-Stremio file provider (Allarr) contributes no
-    // tab of its own - it supplies files for the bridged types (movies/TV resolve through it by IMDB id).
-    auto sourceScore = [](LoadedAddon* a) {
-        return (a->transport == LoadedAddon::RemoteHttp && !a->stremio) ? 0 : 1;
+    // Catalog), and any Stremio catalog, own most tabs; a non-Stremio file provider (Allarr) supplies files
+    // for the bridged types (movies/TV resolve through it by IMDB id) and doesn't add its own tab there.
+    // Exception: Comics - the local Comic Vine catalog is metadata-only (no readable files), so the file
+    // provider (Allarr, which builds the CBZ) owns the Comics tab so comics are actually openable.
+    auto sourceScore = [](LoadedAddon* a, const QString& type) {
+        const bool fileProvider = (a->transport == LoadedAddon::RemoteHttp && !a->stremio);
+        if (type == QStringLiteral("comic")) return fileProvider ? 1 : 0; // readable comics come from the provider
+        return fileProvider ? 0 : 1;
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
@@ -842,8 +846,8 @@ void HomeView::refresh()
     }
     QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
-    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -1598,13 +1602,15 @@ void HomeView::activateItem(int row)
 
     LoadedAddon* addon = stack_.last().addon;
 
-    // A remote leaf (track, a manga/comic document, …) carries no url in the catalog - its source comes from
-    // the /stream endpoint, fetched on open: resolve and open it directly. Movies/episodes instead open an
-    // info page (with a Play button that resolves on demand), like Stremio items - so this skips those types.
-    const bool playableInfoType = it.type == QStringLiteral("movie") || it.type == QStringLiteral("series")
-                               || it.type == QStringLiteral("tv")    || it.type == QStringLiteral("episode");
+    // A remote leaf (a track, etc.) carries no url in the catalog - its source comes from the /stream
+    // endpoint, fetched on open: resolve and open it directly. Movies/episodes (Play) and comics/manga/books
+    // (Read) instead open an info page with a button that resolves on demand, like Stremio items - skip those.
+    const bool infoPageType = it.type == QStringLiteral("movie")  || it.type == QStringLiteral("series")
+                           || it.type == QStringLiteral("tv")     || it.type == QStringLiteral("episode")
+                           || it.type == QStringLiteral("comic")  || it.type == QStringLiteral("manga")
+                           || it.type == QStringLiteral("book");
     if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
-        && it.type != QStringLiteral("platform") && !playableInfoType)
+        && it.type != QStringLiteral("platform") && !infoPageType)
     {
         const MediaItem item = it; // copy for the async callback
         showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
@@ -1791,16 +1797,20 @@ void HomeView::requestMeta(const MediaItem& item)
         metaLayout_->setAlignment(metaImage_, Qt::AlignTop);
     }
 
-    // Show a Play button for launchable leaves: Steam games, and movie/episode leaves from a remote addon
-    // (Stremio, or a self-hosted library like Allarr) - they resolve a stream on demand. A specific manga
-    // chapter gets a "Read" button instead. Plain containers (a TV show, a manga title) get neither.
+    // Show an action button for launchable leaves from a remote addon (Stremio, or a library like Allarr):
+    // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
+    // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
-    const bool isRemotePlayable = !stack_.isEmpty() && stack_.last().addon && !item.expandable
-        && stack_.last().addon->transport == LoadedAddon::RemoteHttp
+    const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
+        && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
+    const bool isRemotePlayable = remoteLeaf
         && (stack_.last().addon->stremio
             || item.type == QStringLiteral("movie") || item.type == QStringLiteral("series")
             || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode"));
-    const bool isReadable = isReadableChapter(item.type);
+    const bool isRemoteReadable = remoteLeaf && !stack_.last().addon->stremio
+        && (item.type == QStringLiteral("comic") || item.type == QStringLiteral("manga")
+            || item.type == QStringLiteral("book"));
+    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable;
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
