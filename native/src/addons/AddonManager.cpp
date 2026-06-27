@@ -702,6 +702,20 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
                 it.thumbnailUrl = resolveRemoteUrl(it.thumbnailUrl, base);
             }
         }
+        else
+        {
+            // Don't fail silently to an empty tab - surface the reason so a misconfigured/unreachable add-on
+            // (e.g. a stale access token -> every request 404s) is diagnosable instead of looking "empty".
+            const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            MediaItem info; info.type = QStringLiteral("info");
+            info.title = http == 404
+                ? tr("Couldn't load this add-on's catalog (HTTP 404). Its URL or access token may be out of date - "
+                     "re-add it in Settings ▸ Add-ons.")
+                : tr("Couldn't reach this add-on: %1").arg(reply->errorString());
+            cat.title = tr("Unavailable");
+            cat.items.push_back(info);
+            streamLog(QStringLiteral("catalog fetch failed (%1): %2").arg(http).arg(reply->errorString()));
+        }
         emit catalogReady(reqId, cat);
     });
     return reqId;
