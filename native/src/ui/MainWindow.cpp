@@ -811,8 +811,11 @@ void MainWindow::openGame()
     openGamePath(rom);
 }
 
-void MainWindow::openGamePath(const QString& rom)
+void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb, const QString& key)
 {
+    // The Recent entry shows the catalog item's name/cover when we have them; otherwise the file name. A
+    // remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
+    const QString recentTitle = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;
     const QString ext = QFileInfo(rom).suffix().toLower();
     const GameSystem* sys = SystemCatalog::forExtension(ext);
     mwLog(QStringLiteral("game: open \"%1\" (.%2) -> system %3")
@@ -849,7 +852,7 @@ void MainWindow::openGamePath(const QString& rom)
     {
         mwLog(QStringLiteral("game: launching in split pane"));
         splitTarget_->openGame(corePath, rom, core);
-        RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
+        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key });
         finishSplitOpen();
         return;
     }
@@ -862,9 +865,9 @@ void MainWindow::openGamePath(const QString& rom)
     QString err;
     if (retro_->openGame(corePath, rom, core, &err))
     {
-        mwLog(QStringLiteral("game: running \"%1\"").arg(QFileInfo(rom).completeBaseName()));
+        mwLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         stack_->setCurrentWidget(retro_);
-        RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
+        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key });
     }
     else
     {
@@ -1060,7 +1063,7 @@ void MainWindow::onRequestOpenFile(const QString& kind)
 }
 
 void MainWindow::openRecent(const QString& path, const QString& kind,
-                            const QString& resumeKey, const QString& title)
+                            const QString& resumeKey, const QString& title, const QString& thumb)
 {
     currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
     // A streamed link has no local file to check; route it straight to libmpv.
@@ -1074,7 +1077,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
-    else if (kind == QStringLiteral("game"))     openGamePath(path);
+    else if (kind == QStringLiteral("game"))     openGamePath(path, title, thumb, resumeKey); // keep its name/cover
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
 }
 
@@ -1193,7 +1196,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
-        openGamePath(url); // a local ROM path here (remote ROMs were fetched to a file above)
+        // Carry the catalog title/cover/id into Recent (the ROM file itself is a hashed cache name).
+        openGamePath(url, item.title, item.thumbnailUrl, item.id);
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {

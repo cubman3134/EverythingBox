@@ -48,8 +48,8 @@ private slots:
     void exitSplitScreen();    // leave split mode, stop both panes
     void finishSplitOpen();    // after an item loads into splitTarget_, return to the split view
     void onRequestOpenFile(const QString& kind); // from Home's "open a file" item
-    void openRecent(const QString& path, const QString& kind,
-                    const QString& resumeKey = QString(), const QString& title = QString()); // re-open a Home "Recent" entry
+    void openRecent(const QString& path, const QString& kind, const QString& resumeKey = QString(),
+                    const QString& title = QString(), const QString& thumb = QString()); // re-open a Home "Recent" entry
     void onSwitchProfile();                      // pick/create a profile from the Home profile button
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
@@ -94,7 +94,10 @@ private:
     // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
     void openVideoPath(const QString& path);
     void openAudioPath(const QString& path);    // queue the whole folder, starting at this file
-    void openGamePath(const QString& path);
+    // title/thumb/key let the Recent entry show the catalog item's name + cover (a remote ROM is cached under
+    // a hashed file name, which would otherwise be displayed); key is the stable id for de-dup.
+    void openGamePath(const QString& path, const QString& title = QString(),
+                      const QString& thumb = QString(), const QString& key = QString());
     void openStreamPrompt();                    // inline form to paste a stream/URL link
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
                        const QString& title = QString()); // stream an http(s) audio/video link via libmpv

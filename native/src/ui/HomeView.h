@@ -39,8 +39,8 @@ signals:
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls); // manga chapter
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
-    void openRecent(const QString& path, const QString& kind,
-                    const QString& resumeKey, const QString& title); // re-open a "Recent" tab entry
+    void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
+                    const QString& title, const QString& thumb); // re-open a "Recent" tab entry
     void settingsRequested();                  // the "Settings" button in the top bar
     void switchProfileRequested();             // the profile button in the top bar
     void themeChanged(const QColor& background, const QColor& accent); // active tab colour changed

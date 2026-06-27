@@ -1653,7 +1653,7 @@ void HomeView::activateItem(int row)
     {
         if (it.type == QStringLiteral("rechdr")) return;                 // a group header, not actionable
         if (it.mime.startsWith(QStringLiteral("fav:"))) { openFavorite(it); return; } // a favourite -> detail
-        if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title); // a recent -> re-open
+        if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); // a recent -> re-open
         return;
     }
 
