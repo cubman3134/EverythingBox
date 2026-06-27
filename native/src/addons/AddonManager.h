@@ -96,6 +96,10 @@ public:
     // (Allarr) first, then the Stremio stream addons.
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
                              std::function<void(const QString& url, const QString& mime)> cb);
+    // Find a readable document on a file provider (Allarr) by searching its catalog of `catalogType` for
+    // `query` and resolving the first hit's /stream. Used to read a comic browsed from another addon's catalog.
+    void resolveDocumentByQuery(const QString& query, const QString& catalogType,
+                                std::function<void(const QString& url, const QString& mime)> cb);
 
     bool installPackage(const QString& addonPackagePath, QString* error = nullptr); // import a .addon (zip)
     bool removeAddon(const QString& id);                                            // delete its folder

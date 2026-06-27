@@ -572,6 +572,27 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             });
             return;
         }
+        if (it.type == QStringLiteral("comic_issue")) // a comic browsed from AIO Catalog -> read it from the file provider
+        {
+            // Bridge the browsed issue to the file provider's (Allarr) search: "<volume name> <issue #>".
+            QString volume;
+            if (stack_.size() >= 2) volume = stack_.at(stack_.size() - 2).item.title.trimmed();
+            QString issueNum;
+            const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
+            const auto m = re.match(it.title);
+            if (m.hasMatch()) issueNum = m.captured(1);
+            QString query = (volume + QLatin1Char(' ') + issueNum).trimmed();
+            if (query.isEmpty()) query = it.title;
+            showToast(tr("Finding “%1” to read…").arg(it.title), 30000);
+            playBtn_->setEnabled(false);
+            const QString title = it.title;
+            mgr_->resolveDocumentByQuery(query, QStringLiteral("comic"), [this, it, title](const QString& url, const QString& mime) {
+                playBtn_->setEnabled(true);
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                else showToast(tr("Couldn't find “%1” to read. The file provider (Allarr) had no match for that issue.").arg(title), 7000);
+            });
+            return;
+        }
         if (top.addon && top.addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
         {
             LoadedAddon* addon = top.addon;
@@ -828,14 +849,12 @@ void HomeView::refresh()
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
     // Gather every enabled catalog, then show ONE tab per media type. The browsable local catalog (AIO
-    // Catalog), and any Stremio catalog, own most tabs; a non-Stremio file provider (Allarr) supplies files
-    // for the bridged types (movies/TV resolve through it by IMDB id) and doesn't add its own tab there.
-    // Exception: Comics - the local Comic Vine catalog is metadata-only (no readable files), so the file
-    // provider (Allarr, which builds the CBZ) owns the Comics tab so comics are actually openable.
-    auto sourceScore = [](LoadedAddon* a, const QString& type) {
+    // Catalog), and any Stremio catalog, own the tabs; a non-Stremio file provider (Allarr) supplies files
+    // (movies/TV resolve through it by IMDB id; comics are read by bridging the browsed title to its search)
+    // and doesn't add its own tab. So comics keep AIO Catalog's browsable list and read via the provider.
+    auto sourceScore = [](LoadedAddon* a) {
         const bool fileProvider = (a->transport == LoadedAddon::RemoteHttp && !a->stremio);
-        if (type == QStringLiteral("comic")) return fileProvider ? 1 : 0; // readable comics come from the provider
-        return fileProvider ? 0 : 1;
+        return fileProvider ? 0 : 1; // a browsable catalog (local/Stremio) wins a tab over a file provider
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
@@ -846,8 +865,8 @@ void HomeView::refresh()
     }
     QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
-    auto wins = [&](const CatRef& c) { return sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0); };
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -1810,7 +1829,10 @@ void HomeView::requestMeta(const MediaItem& item)
     const bool isRemoteReadable = remoteLeaf && !stack_.last().addon->stremio
         && (item.type == QStringLiteral("comic") || item.type == QStringLiteral("manga")
             || item.type == QStringLiteral("book"));
-    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable;
+    // A comic issue browsed from AIO Catalog (Comic Vine, metadata-only): readable if a file provider
+    // (Allarr) is available to supply the actual CBZ, found by bridging the title to its search.
+    const bool isBridgedComic = item.type == QStringLiteral("comic_issue") && mgr_->hasStreamProvider(QStringLiteral("comic"));
+    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable || isBridgedComic;
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {

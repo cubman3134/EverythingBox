@@ -1000,6 +1000,49 @@ void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbS
     resolveFromFileProviders(providers, 0, type, imdbStreamId, cb);
 }
 
+void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,
+                                          std::function<void(const QString&, const QString&)> cb)
+{
+    if (query.trimmed().isEmpty()) { cb(QString(), QString()); return; }
+    // Pick the first enabled file provider (a non-Stremio remote media-source, e.g. Allarr) that exposes a
+    // catalog of this type, and use ITS catalog id to search.
+    LoadedAddon* prov = nullptr; QString catId;
+    for (LoadedAddon* s : sources_)
+    {
+        if (s->transport != LoadedAddon::RemoteHttp || s->stremio || !s->isMediaSource()
+            || !isEnabled(s->manifest.id)) continue;
+        for (const AddonCatalog& c : catalogs(s))
+            if (c.type == catalogType) { prov = s; catId = c.id; break; }
+        if (prov) break;
+    }
+    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString()); return; }
+
+    const QString base = prov->baseUrl;
+    streamLog(QStringLiteral("doc-bridge: searching %1 catalog '%2' for \"%3\"").arg(prov->manifest.id, catId, query));
+    QNetworkRequest rq(remoteCatalogUrl(base, catId, query, 1));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    { const QByteArray cfg = remoteConfigHeader(prov); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb] {
+        reply->deleteLater();
+        MediaItem hit;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            MediaCatalog cat = MediaCatalog::fromJson(reply->readAll());
+            for (MediaItem& it : cat.items) it.url = resolveRemoteUrl(it.url, base);
+            // Prefer the first openable leaf; fall back to the very first result.
+            for (const MediaItem& it : cat.items) if (!it.expandable) { hit = it; break; }
+            if (hit.id.isEmpty() && hit.url.isEmpty() && !cat.items.isEmpty()) hit = cat.items.first();
+            streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
+        }
+        else streamLog(QStringLiteral("doc-bridge: search error: %1").arg(reply->errorString()));
+        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString()); return; }
+        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime); return; } // already a direct file
+        resolveStream(prov, hit, cb);                              // resolve the leaf's /stream
+    });
+}
+
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
                                  std::function<void(const QString&, const QString&)> cb)
 {
