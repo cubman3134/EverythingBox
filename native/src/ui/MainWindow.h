@@ -90,6 +90,10 @@ private:
     void openStreamPrompt();                    // inline form to paste a stream/URL link
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
                        const QString& title = QString()); // stream an http(s) audio/video link via libmpv
+    // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
+    // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
+    void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
+                         const QString& thumbnailUrl = QString());
     void openDocumentPath(const QString& path); // .epub / .pdf by extension
     void setAudioQueue(const QStringList& files, int startIndex);
     void playTrack(int index);

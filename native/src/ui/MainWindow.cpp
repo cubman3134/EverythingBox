@@ -795,6 +795,26 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
     RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
 }
 
+void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
+                                 const QString& thumbnailUrl)
+{
+    retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
+    clearAudioQueue();      // saves+clears any previous timed media, then we build a one-track queue
+    const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
+    tracks_ = QStringList{ url };
+    trackIndex_ = 0;
+    playlist_->clear();
+    playlist_->addItem(t);
+    playlist_->setCurrentRow(0);
+    playlist_->setVisible(true); // the now-playing list (vs. the bare video surface) marks this as audio
+    stack_->setCurrentWidget(playerPage_);
+    const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
+    beginResume(rkey);      // a long audiobook must resume where you left off, keyed by the stable id
+    player_->play(url);
+    revealMediaControls();
+    RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
+}
+
 void MainWindow::openDocument()
 {
     const QString f = QFileDialog::getOpenFileName(
@@ -871,7 +891,8 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), 5000);
         return;
     }
-    if (isUrl)                                   openStreamUrl(path, resumeKey, title);
+    if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
+    else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
     else if (kind == QStringLiteral("game"))     openGamePath(path);
@@ -947,6 +968,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         if (!comic_->openComic(url, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
+    }
+    else if (type == QStringLiteral("audiobook") || item.mime.toLower().startsWith(QStringLiteral("audio/")))
+    {
+        // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
+        // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl);
     }
     else if (type == QStringLiteral("audio"))
     {
