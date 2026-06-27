@@ -827,19 +827,11 @@ void HomeView::refresh()
 
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
-    // Gather every enabled catalog, then show ONE tab per media type. Which source owns a type:
-    //   - Movies/TV are "bridged": the app links a catalog item to a file provider (Allarr) by its IMDB id,
-    //     so the rich local/Stremio catalog owns the tab and the provider just supplies the file.
-    //   - Comics/manga/books/audiobooks have no metadata bridge, so the file provider (Allarr) owns the tab
-    //     directly - its catalog items carry the ids its /stream needs to build + serve the document.
-    //   - Everything else (games, music) falls to whatever catalog declares it (the local addon).
-    auto isBridgedType = [&](const QString& t) {
-        return t == QStringLiteral("movie") || isSeriesType(t) || t == QStringLiteral("episode");
-    };
-    auto sourceScore = [&](LoadedAddon* a, const QString& type) {
-        const bool fileProvider = (a->transport == LoadedAddon::RemoteHttp && !a->stremio);
-        if (!fileProvider) return 1;                 // a real catalog source (local / Stremio)
-        return isBridgedType(type) ? 0 : 2;          // file provider: defers bridged types, owns the rest
+    // Gather every enabled catalog, then show ONE tab per media type. The browsable local catalog (AIO
+    // Catalog), and any Stremio catalog, own the tabs; a non-Stremio file provider (Allarr) contributes no
+    // tab of its own - it supplies files for the bridged types (movies/TV resolve through it by IMDB id).
+    auto sourceScore = [](LoadedAddon* a) {
+        return (a->transport == LoadedAddon::RemoteHttp && !a->stremio) ? 0 : 1;
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
@@ -848,18 +840,10 @@ void HomeView::refresh()
         if (!mgr_->isEnabled(s->manifest.id)) continue;
         for (const AddonCatalog& c : mgr_->catalogs(s)) all.push_back({ s, c });
     }
-    QHash<QString, int> bestScore; // best source score available per (bridged) media type
-    QHash<QString, int> typeCount; // how many sources offer each non-bridged type (for disambiguation)
+    QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)
-    {
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
-        if (!isBridgedType(c.cat.type)) ++typeCount[c.cat.type];
-    }
-    // Bridged types (movies/TV) collapse to one preferred source. Non-bridged types (comics/manga/books/…)
-    // show EVERY source's catalog, since the user may want both (e.g. browse aiocatalog AND search Allarr).
-    auto wins = [&](const CatRef& c) {
-        return !isBridgedType(c.cat.type) || sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0);
-    };
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
@@ -870,9 +854,7 @@ void HomeView::refresh()
         if (first) { firstAddon = addon; firstCat = cid; firstType = ctype; firstName = display; first = false; }
     };
 
-    // Lead with a single Movies tab, then a single TV tab (from the preferred source), then every other
-    // winning catalog. When two sources offer the same non-bridged type, append the source name so the
-    // tabs are distinguishable (e.g. "Comics · AIO Catalog" and "Comics · Allarr").
+    // Lead with a single Movies tab, then a single TV tab, then every other winning catalog (one per type).
     bool didMovie = false, didSeries = false;
     for (const CatRef& c : all)
         if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie) { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
@@ -882,10 +864,7 @@ void HomeView::refresh()
     {
         if (!wins(c)) continue;
         if (c.cat.type == QStringLiteral("movie") || isSeriesType(c.cat.type)) continue; // already led with Movies/TV
-        QString display = c.cat.name;
-        if (typeCount.value(c.cat.type) > 1 && c.addon)
-            display += QStringLiteral(" · ") + (c.addon->manifest.name.isEmpty() ? c.addon->manifest.id : c.addon->manifest.name);
-        addCat(c.addon, c.cat, display);
+        addCat(c.addon, c.cat, c.cat.name);
     }
 
     typeBar_->addStretch(1);
