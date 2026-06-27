@@ -141,10 +141,12 @@ static QUrl remoteMetaUrl(const QString& base, const QString& type, const QStrin
                + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
 }
 
-static QUrl remoteStreamUrl(const QString& base, const QString& type, const QString& id)
+static QUrl remoteStreamUrl(const QString& base, const QString& type, const QString& id, int attempt = 0)
 {
-    return QUrl(base + QStringLiteral("/stream/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
-               + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json"));
+    QString u = base + QStringLiteral("/stream/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
+              + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json");
+    if (attempt > 0) u += QStringLiteral("?n=") + QString::number(attempt); // ask the provider for the n-th best source
+    return QUrl(u);
 }
 
 // Resolve a (possibly relative) item URL/thumbnail returned by a remote addon against its base URL.
@@ -962,6 +964,14 @@ bool AddonManager::hasStreamProvider(const QString& type) const
     return false;
 }
 
+bool AddonManager::hasFileProvider() const
+{
+    for (LoadedAddon* s : sources_)
+        if (s->transport == LoadedAddon::RemoteHttp && !s->stremio && s->isMediaSource() && isEnabled(s->manifest.id))
+            return true;
+    return false;
+}
+
 // The id scheme a non-Stremio file provider (Allarr) expects: "mv:{imdb}" for a movie, "ep:{imdb}:{S}:{E}"
 // for an episode (the imdb stream id already carries :S:E), under the /stream/{movie|series} route.
 static MediaItem fileProviderItem(const QString& type, const QString& imdbStreamId)
@@ -974,30 +984,31 @@ static MediaItem fileProviderItem(const QString& type, const QString& imdbStream
 
 void AddonManager::resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                             const QString& type, const QString& imdbStreamId,
-                                            std::function<void(const QString&, const QString&)> cb)
+                                            std::function<void(const QString&, const QString&)> cb, int attempt)
 {
     if (idx >= providers->size()) // none of the file providers had it -> fall back to Stremio stream addons
     { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb); return; }
     resolveStream(providers->at(idx), fileProviderItem(type, imdbStreamId),
-                  [this, providers, idx, type, imdbStreamId, cb](const QString& url, const QString& mime) {
+                  [this, providers, idx, type, imdbStreamId, cb, attempt](const QString& url, const QString& mime) {
         if (!url.isEmpty()) cb(url, mime);
-        else resolveFromFileProviders(providers, idx + 1, type, imdbStreamId, cb);
-    });
+        else resolveFromFileProviders(providers, idx + 1, type, imdbStreamId, cb, attempt);
+    }, attempt);
 }
 
 void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                                       std::function<void(const QString&, const QString&)> cb)
+                                       std::function<void(const QString&, const QString&)> cb, int attempt)
 {
     if (imdbStreamId.isEmpty()) { cb(QString(), QString()); return; }
     // Prefer the user's file provider(s) - non-Stremio remote media-sources (e.g. Allarr) that serve the
-    // actual files - then fall back to Stremio stream addons.
+    // actual files - then fall back to Stremio stream addons. attempt (?n=K) asks the provider for an
+    // alternate source when the user rejects the current one.
     auto providers = std::make_shared<QVector<LoadedAddon*>>();
     for (LoadedAddon* s : sources_)
         if (s->transport == LoadedAddon::RemoteHttp && !s->stremio && s->isMediaSource() && isEnabled(s->manifest.id))
             providers->push_back(s);
     if (providers->isEmpty())
     { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb); return; }
-    resolveFromFileProviders(providers, 0, type, imdbStreamId, cb);
+    resolveFromFileProviders(providers, 0, type, imdbStreamId, cb, attempt);
 }
 
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,
@@ -1044,12 +1055,12 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
 }
 
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
-                                 std::function<void(const QString&, const QString&)> cb)
+                                 std::function<void(const QString&, const QString&)> cb, int attempt)
 {
     if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString()); return; }
     if (src->stremio) { resolveStremioStream(item, cb); return; } // aggregate across Stremio stream addons
     const QString base = src->baseUrl;
-    QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id));
+    QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id, attempt));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }

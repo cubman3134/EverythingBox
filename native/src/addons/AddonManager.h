@@ -80,8 +80,10 @@ public:
 
     // Resolve a playable URL for a remote item via its /stream endpoint (async; the callback fires on the
     // GUI thread with the url+mime, or empty strings if there's no stream). JsLocal items already carry url.
+    // attempt (?n=K) selects which source a file provider returns: 0 = best, 1 = next best, … - so the user
+    // can reject a release and ask for another. Stremio sources ignore it.
     void resolveStream(LoadedAddon* src, const MediaItem& item,
-                       std::function<void(const QString& url, const QString& mime)> cb);
+                       std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
     // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
     void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
@@ -92,10 +94,13 @@ public:
     // True if at least one enabled stream source serves this type: a Stremio stream addon, or a non-Stremio
     // remote media-source used as a file provider (e.g. Allarr).
     bool hasStreamProvider(const QString& type) const;
+    // True if any enabled non-Stremio remote media-source (a file provider, e.g. Allarr) is installed - i.e.
+    // a source whose /stream supports alternate-source selection (?n=K).
+    bool hasFileProvider() const;
     // Resolve a playable source for an IMDB stream id ("tt123" or "ttShow:s:e"): try the file provider(s)
     // (Allarr) first, then the Stremio stream addons.
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                             std::function<void(const QString& url, const QString& mime)> cb);
+                             std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     // Find a readable document on a file provider (Allarr) by searching its catalog of `catalogType` for
     // `query` and resolving the first hit's /stream. Used to read a comic browsed from another addon's catalog.
     void resolveDocumentByQuery(const QString& query, const QString& catalogType,
@@ -134,7 +139,7 @@ private:
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,
-                                  std::function<void(const QString& url, const QString& mime)> cb);
+                                  std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
     int dispatch(const AddonRequest& req);     // run getCatalog/getDetail off-thread, deliver via catalogReady
     int dispatchMeta(const AddonRequest& req); // run getMeta off-thread, deliver via metaReady

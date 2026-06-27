@@ -67,6 +67,9 @@ struct MediaItem
     QString url;           // playable location (file/http) - empty until a file is associated
     QString mime;
     bool expandable = false; // a container (series/season/album): clicking fetches its children via getDetail
+    // Set when a file provider (Allarr) resolved this playable and can serve an alternate source on demand
+    // (its /stream supports ?n=K). Drives the player/reader's "Issue with Streaming" button. Not serialized.
+    bool nextSourceCapable = false;
 };
 
 struct MediaCatalog

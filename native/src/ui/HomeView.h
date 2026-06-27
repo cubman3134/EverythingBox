@@ -30,6 +30,9 @@ public:
     void refresh();      // rebuild the media-type bar from the currently installed addons
     void applyTheme();   // re-read the active theme and recolour the current view
     void focusContent(); // put keyboard focus on the carousel / active tab / grid so arrows work
+    // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
+    // the player/reader "Issue with Streaming" button. No-op (with a toast) when there's nothing to retry.
+    void requestNextSource();
 
 signals:
     void openItem(const MediaItem& item);
@@ -40,6 +43,9 @@ signals:
     void settingsRequested();                  // the "Settings" button in the top bar
     void switchProfileRequested();             // the profile button in the top bar
     void themeChanged(const QColor& background, const QColor& accent); // active tab colour changed
+    // Outcome of requestNextSource(): ok=true means a new source is being opened (openItem follows); ok=false
+    // carries a message to show the user. Surfaced by MainWindow over the player/reader (HomeView is hidden).
+    void nextSourceResult(bool ok, const QString& message);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed
@@ -151,6 +157,15 @@ private:
     // getMeta, Play resolves it through the installed Stremio stream addons. Set in showMeta for the open item.
     QString playImdbId_;              // "tt123" (movie) or "ttShow:s:e" (episode), else empty
     QString playStremioType_;         // "movie" / "series"
+    // The last playable opened from a file provider (Allarr), so "Issue with Streaming" can re-resolve an
+    // alternate source. viaImdb -> resolveStreamByImdb(type,imdbId,n); else resolveStream(addon,item,n).
+    struct NextSourceCtx {
+        LoadedAddon* addon = nullptr; // direct path: the file-provider addon
+        MediaItem item;               // the item to re-open (its id/type drive the re-resolve)
+        bool viaImdb = false;         // bridged movies/TV
+        QString imdbType, imdbId;     // imdb path: resolveStreamByImdb args
+        int attempt = 0;              // last ?n= used (0 = best)
+    } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     QLabel* metaTitle_ = nullptr;
     QLabel* metaFacts_ = nullptr;

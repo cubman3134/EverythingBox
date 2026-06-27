@@ -106,6 +106,8 @@ private:
     void leaveFullScreen();   // restore windowed: status bar + cursor
     void revealMediaControls();
     void positionMediaControls();
+    void showPlayerNotice(const QString& msg, int ms = 6000); // centred transient message over the player
+    void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
     void stepPlayerFocus(int dir); // arrow-key focus across the transport buttons (dir +1/-1, or 0 = enter row)
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
     void showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
@@ -132,6 +134,10 @@ private:
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
     QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie
+    QPushButton* streamIssueBtn_ = nullptr; // top-left "Issue with Streaming" overlay (next to Back) for Allarr media
+    bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
+    QLabel* playerNotice_ = nullptr;        // transient centred message over the player (works in full screen)
+    QTimer* playerNoticeTimer_ = nullptr;
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;

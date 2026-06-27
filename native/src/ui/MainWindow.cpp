@@ -285,6 +285,37 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome();
     });
 
+    // "Issue with Streaming" overlay next to Back: asks Allarr for the next-best source for the current item
+    // (movies/TV/audiobooks). Only shown when the open media came from a file provider that supports it.
+    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), player_);
+    streamIssueBtn_->setObjectName(QStringLiteral("streamIssue"));
+    streamIssueBtn_->setStyleSheet(QStringLiteral(
+        "#streamIssue { background: rgba(20,20,24,0.85); color:#e8e8e8; border:2px solid transparent; border-radius:8px;"
+        " padding:8px 16px; font-weight:bold; }"
+        "#streamIssue:hover { background: rgba(45,45,52,0.95); }"
+        "#streamIssue:focus { background: rgba(90,140,255,0.80); border:2px solid #fff; }"));
+    streamIssueBtn_->setCursor(Qt::PointingHandCursor);
+    streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
+    streamIssueBtn_->hide();
+    streamIssueBtn_->installEventFilter(this);
+    connect(streamIssueBtn_, &QPushButton::clicked, this, [this] {
+        showPlayerNotice(tr("Finding another source…"), 30000);
+        home_->requestNextSource();
+    });
+
+    // Transient centred message over the player for next-source feedback (visible in full screen, where the
+    // status bar isn't). Hidden by default.
+    playerNotice_ = new QLabel(player_);
+    playerNotice_->setObjectName(QStringLiteral("playerNotice"));
+    playerNotice_->setStyleSheet(QStringLiteral(
+        "#playerNotice { background: rgba(20,20,24,0.90); color:#f2f2f2; border-radius:8px; padding:10px 18px;"
+        " font-size:15px; font-weight:bold; }"));
+    playerNotice_->setAlignment(Qt::AlignCenter);
+    playerNotice_->hide();
+    playerNoticeTimer_ = new QTimer(this);
+    playerNoticeTimer_->setSingleShot(true);
+    connect(playerNoticeTimer_, &QTimer::timeout, this, [this] { if (playerNotice_) playerNotice_->hide(); });
+
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
@@ -293,10 +324,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // navigating and fade out a few seconds after you stop. Clear keyboard focus so the next arrow press
         // cleanly re-reveals and re-focuses a button. In full screen also blank the cursor.
         QWidget* fw = focusWidget();
-        if (fw && (fw == videoBack_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
+        if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
             fw->clearFocus();
         mediaControls_->hide();
         videoBack_->hide();
+        streamIssueBtn_->hide();
         if (isFullScreen() && stack_->currentWidget() == playerPage_)
             player_->setCursor(Qt::BlankCursor);
     });
@@ -325,6 +357,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
+    // Reader "Issue with Streaming": ask the file provider for the next source and re-open the new file.
+    connect(book_, &EbookView::streamIssueRequested, this, [this] {
+        showNextSourceFeedback(tr("Finding another source…")); home_->requestNextSource(); });
+    connect(pdf_,  &PdfView::streamIssueRequested,   this, [this] {
+        showNextSourceFeedback(tr("Finding another source…")); home_->requestNextSource(); });
+    // Result of a next-source request: on success the new file opens itself; on failure show why.
+    connect(home_, &HomeView::nextSourceResult, this, [this](bool ok, const QString& msg) {
+        if (ok) { if (playerNotice_) playerNotice_->hide(); }
+        else    { showNextSourceFeedback(msg); }
+    });
     connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
     connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
     connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
@@ -369,7 +411,8 @@ MainWindow::~MainWindow() = default; // AddonManager is complete in this transla
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
-    if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_))
+    if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
+                                               || obj == streamIssueBtn_))
         revealMediaControls();
     return QMainWindow::eventFilter(obj, event);
 }
@@ -524,6 +567,7 @@ void MainWindow::revealMediaControls()
     mediaControls_->raise();
     videoBack_->show();
     videoBack_->raise();
+    if (currentNextSourceCapable_) { streamIssueBtn_->show(); streamIssueBtn_->raise(); }
     controlsHideTimer_->start(4000); // a comfortable "few seconds" of grace before fading out
 }
 
@@ -536,6 +580,33 @@ void MainWindow::positionMediaControls()
                                 player_->width() - 2 * margin, h);
     videoBack_->adjustSize();
     videoBack_->move(margin, margin); // top-left
+    streamIssueBtn_->adjustSize();
+    streamIssueBtn_->move(margin + videoBack_->width() + 10, margin); // just right of Back
+    if (playerNotice_ && playerNotice_->isVisible())
+    {
+        playerNotice_->adjustSize();
+        playerNotice_->move((player_->width() - playerNotice_->width()) / 2, margin + videoBack_->height() + 14);
+    }
+}
+
+void MainWindow::showPlayerNotice(const QString& msg, int ms)
+{
+    if (!playerNotice_) return;
+    playerNotice_->setText(msg);
+    playerNotice_->adjustSize();
+    const int margin = 16;
+    playerNotice_->move((player_->width() - playerNotice_->width()) / 2, margin + videoBack_->height() + 14);
+    playerNotice_->show();
+    playerNotice_->raise();
+    playerNoticeTimer_->start(ms);
+}
+
+void MainWindow::showNextSourceFeedback(const QString& msg)
+{
+    // Over the player while playing (the status bar may be hidden in full screen); otherwise the status bar
+    // (the book/PDF readers keep it visible).
+    if (stack_->currentWidget() == playerPage_) showPlayerNotice(msg);
+    else                                        statusBar()->showMessage(msg, 6000);
 }
 
 void MainWindow::openFile()
@@ -549,6 +620,7 @@ void MainWindow::openFile()
 
 void MainWindow::openVideoPath(const QString& path)
 {
+    currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     retro_->stop();
     book_->persist();
     pdf_->persist();
@@ -584,6 +656,7 @@ void MainWindow::openAudio()
 
 void MainWindow::openAudioPath(const QString& path)
 {
+    currentNextSourceCapable_ = false; // a local file/folder has no Allarr alternate source
     const QFileInfo fi(path);
     QStringList queue;
     int start = 0;
@@ -775,6 +848,7 @@ void MainWindow::openStreamPrompt()
 
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
 {
+    currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
     pdf_->persist();
@@ -884,6 +958,7 @@ void MainWindow::onRequestOpenFile(const QString& kind)
 void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title)
 {
+    currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
     // A streamed link has no local file to check; route it straight to libmpv.
     const bool isUrl = path.contains(QStringLiteral("://"));
     if (!isUrl && !QFileInfo::exists(path))
@@ -913,6 +988,9 @@ void MainWindow::onSwitchProfile()
 
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
+    // Whether the player/reader should offer "Issue with Streaming" for this item (an Allarr-resolved file
+    // whose source can be swapped). Preserved across the remote-document download round-trip (item is copied).
+    currentNextSourceCapable_ = item.nextSourceCapable;
     if (item.url.isEmpty())
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
@@ -955,12 +1033,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         if (!book_->openBook(url, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+        book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(book_);
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
     {
         if (!pdf_->openPdf(url, &err)) { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
+        pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(pdf_);
     }
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive

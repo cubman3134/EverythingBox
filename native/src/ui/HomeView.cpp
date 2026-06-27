@@ -596,22 +596,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         if (top.addon && top.addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
         {
             LoadedAddon* addon = top.addon;
+            const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
+            lastPlay_ = { addon, it, false, {}, {}, 0 };
             showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
-            mgr_->resolveStream(addon, it, [this, it](const QString& url, const QString& mime) {
+            mgr_->resolveStream(addon, it, [this, it, fileProvider](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
                 else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
             });
             return;
         }
         if (!playImdbId_.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
         {
+            lastPlay_ = { nullptr, it, true, playStremioType_, playImdbId_, 0 };
+            const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
             showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
-            mgr_->resolveStreamByImdb(playStremioType_, playImdbId_, [this, it](const QString& url, const QString& mime) {
+            mgr_->resolveStreamByImdb(playStremioType_, playImdbId_, [this, it, fileProvider](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
                 else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                                   "(check that Allarr is configured and returning results).").arg(it.title), 7000);
             });
@@ -1632,9 +1636,11 @@ void HomeView::activateItem(int row)
         && it.type != QStringLiteral("platform") && !infoPageType)
     {
         const MediaItem item = it; // copy for the async callback
+        const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
+        lastPlay_ = { addon, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
-        mgr_->resolveStream(addon, item, [this, addon, item](const QString& url, const QString& mime) {
-            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = item; m.url = url; m.mime = mime; emit openItem(m); }
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider](const QString& url, const QString& mime) {
+            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
             else { if (toast_) toast_->hide(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
         });
         return;
@@ -1643,6 +1649,26 @@ void HomeView::activateItem(int row)
     // No file yet: open a detail page. Its metadata header describes the item; for a container
     // (TV show / season / album / console) the page also drills into its children below the header.
     openDetailLevel(addon, it);
+}
+
+void HomeView::requestNextSource()
+{
+    // Nothing opened from a file provider yet (or it came from a Stremio source, which has no ?n=).
+    if (!lastPlay_.viaImdb && !lastPlay_.addon) { emit nextSourceResult(false, tr("No alternate source to try.")); return; }
+
+    const int attempt = lastPlay_.attempt + 1; // advance only on success, so a failed try can be repeated
+    const MediaItem item = lastPlay_.item;
+
+    auto onResolved = [this, item, attempt](const QString& url, const QString& mime) {
+        if (url.isEmpty()) { emit nextSourceResult(false, tr("No other source available for “%1”.").arg(item.title)); return; }
+        lastPlay_.attempt = attempt;
+        MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = true;
+        emit nextSourceResult(true, QString());
+        emit openItem(m); // re-opens in the right view (player/reader); resume keys on the stable id
+    };
+
+    if (lastPlay_.viaImdb) mgr_->resolveStreamByImdb(lastPlay_.imdbType, lastPlay_.imdbId, onResolved, attempt);
+    else                   mgr_->resolveStream(lastPlay_.addon, item, onResolved, attempt);
 }
 
 void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)

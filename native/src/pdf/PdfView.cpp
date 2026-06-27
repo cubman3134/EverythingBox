@@ -36,6 +36,10 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
 
     auto* bar = new QHBoxLayout();
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
+    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), this);
+    streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
+    streamIssueBtn_->setVisible(false); // shown only for remote (Allarr) books
+    connect(streamIssueBtn_, &QPushButton::clicked, this, &PdfView::streamIssueRequested);
     auto* homeBtn = new QPushButton(tr("Home"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
     auto* next = new QPushButton(tr("Next ›"), this);
@@ -56,6 +60,7 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     connect(doc_, &QPdfDocument::statusChanged, this, &PdfView::updateLabel);
 
     bar->addWidget(backBtn);
+    bar->addWidget(streamIssueBtn_);
     bar->addWidget(homeBtn);
     bar->addWidget(zoomOutBtn);
     bar->addWidget(zoomInBtn);
@@ -96,6 +101,8 @@ bool PdfView::openPdf(const QString& path, QString* error)
     updateLabel();
     return true;
 }
+
+void PdfView::setStreamIssueVisible(bool on) { if (streamIssueBtn_) streamIssueBtn_->setVisible(on); }
 
 void PdfView::persist()
 {

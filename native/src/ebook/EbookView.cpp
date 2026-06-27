@@ -50,6 +50,10 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
 
     auto* bar = new QHBoxLayout();
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
+    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), this);
+    streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
+    streamIssueBtn_->setVisible(false); // shown only for remote (Allarr) books
+    connect(streamIssueBtn_, &QPushButton::clicked, this, &EbookView::streamIssueRequested);
     auto* homeBtn = new QPushButton(tr("Home"), this);
     auto* contents = new QPushButton(tr("Contents"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
@@ -69,6 +73,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     connect(browser_->verticalScrollBar(), &QScrollBar::valueChanged, this, &EbookView::updatePageLabel);
 
     bar->addWidget(backBtn);
+    bar->addWidget(streamIssueBtn_);
     bar->addWidget(homeBtn);
     bar->addWidget(contents);
     bar->addWidget(smaller);
@@ -105,6 +110,8 @@ bool EbookView::openBook(const QString& path, QString* error)
     browser_->setFocus();
     return true;
 }
+
+void EbookView::setStreamIssueVisible(bool on) { if (streamIssueBtn_) streamIssueBtn_->setVisible(on); }
 
 void EbookView::restoreState()
 {
