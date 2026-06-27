@@ -55,6 +55,12 @@ public:
     const retro_system_info& systemInfo() const { return sysInfo_; }
     const retro_system_av_info& avInfo() const { return avInfo_; }
 
+    // Emulated memory access (for RetroAchievements). memoryData/Size wrap retro_get_memory_*; memoryMap()
+    // returns the core's address-space descriptors (or nullptr if it didn't publish any).
+    void* memoryData(unsigned id) const { return retro_get_memory_data_ ? retro_get_memory_data_(id) : nullptr; }
+    size_t memorySize(unsigned id) const { return retro_get_memory_size_ ? retro_get_memory_size_(id) : 0; }
+    const retro_memory_map* memoryMap() const { return memoryMap_.num_descriptors ? &memoryMap_ : nullptr; }
+
     // Core options the loaded core exposes. Populated during loadCore() for cores that register
     // options in retro_set_environment/retro_init (most of them) - so this is usable headlessly,
     // without a game, to drive a settings UI.
@@ -101,6 +107,8 @@ private:
     size_t (*retro_serialize_size_)() = nullptr;
     bool (*retro_serialize_)(void*, size_t) = nullptr;
     bool (*retro_unserialize_)(const void*, size_t) = nullptr;
+    void* (*retro_get_memory_data_)(unsigned) = nullptr;
+    size_t (*retro_get_memory_size_)(unsigned) = nullptr;
 
     // ---- libretro callbacks (static -> routed to current_) ----
     static LibretroCore* current_;
@@ -121,6 +129,8 @@ private:
     std::vector<uint8_t> frame_;   // BGRA8888
     unsigned frameW_ = 0, frameH_ = 0;
     std::vector<uint8_t> gameData_; // kept alive while the game is loaded
+    std::vector<retro_memory_descriptor> memDescriptors_; // copied from SET_MEMORY_MAPS (achievements)
+    retro_memory_map memoryMap_{};
 
     std::vector<CoreOption> options_;             // definitions, in menu order
     std::map<std::string, std::string> optionValues_; // key -> current value (c_str() served to the core)

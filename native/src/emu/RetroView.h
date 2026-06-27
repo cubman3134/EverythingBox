@@ -38,6 +38,7 @@ public:
     void setPaused(bool paused);          // freeze/resume emulation (used by the Esc menu)
     void setVolume(qreal v);              // 0.0..1.0 audio level (per-pane mixing in split screen)
     void setInputActive(bool active);     // when false, ignore controller/keyboard (unfocused split pane)
+    void setAchievements(class Achievements* a) { ach_ = a; } // RetroAchievements (full-screen emulator only)
 
 signals:
     void statusMessage(const QString& text); // surfaced by the main window (save/load feedback)
@@ -75,6 +76,7 @@ private:
     bool paused_ = false;
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
     qreal volume_ = 1.0;      // audio mix level for this instance
+    class Achievements* ach_ = nullptr; // set only on the full-screen emulator
     int frameIntervalMs_ = 16;
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
 

@@ -67,6 +67,7 @@ private slots:
     void cloudSyncNow();      // pull (if newer) then push the current state
     void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
     void openDebug();         // diagnostic log viewer (refresh / clear / open file location)
+    void openRetroAchievements(); // RetroAchievements sign-in panel
     void openEmulatorSettings();
     void openInputMapping();
     void nextTrack();
@@ -133,6 +134,7 @@ private:
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
     bool splitMode_ = false;                 // currently showing the split screen
+    class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file

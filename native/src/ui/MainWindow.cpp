@@ -8,6 +8,7 @@
 #include "HomeView.h"
 #include "SplitView.h"
 #include "MediaPane.h"
+#include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
 #include "../core/SystemCatalog.h"
@@ -118,6 +119,19 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
     comic_ = new ComicView(this);
+
+    // RetroAchievements: one client, attached to the full-screen emulator. Logs in silently if a token was
+    // saved, and announces unlocks. Split-screen panes don't participate (one active game at a time).
+    ach_ = new Achievements(this);
+    retro_->setAchievements(ach_);
+    connect(ach_, &Achievements::achievementUnlocked, this, [this](const QString& title, const QString&, int pts) {
+        statusBar()->showMessage(tr("🏆  Achievement unlocked: %1  (%2 pts)").arg(title).arg(pts), 8000);
+    });
+    connect(ach_, &Achievements::gameLoaded, this, [this](bool ok, const QString& title, int unlocked, int total) {
+        if (ok && total > 0)
+            statusBar()->showMessage(tr("🏆  %1 — %2/%3 achievements").arg(title).arg(unlocked).arg(total), 6000);
+    });
+    ach_->tryLoginWithStoredToken();
 
     addons_ = std::make_unique<AddonManager>();
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
@@ -1381,6 +1395,7 @@ void MainWindow::openSettingsHub()
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
+        add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
@@ -1592,6 +1607,55 @@ void MainWindow::openThemes()
                             [this] { openThemes(); });
         });
         v->addWidget(browse);
+    }, [this] { openSettingsHub(); });
+}
+
+void MainWindow::openRetroAchievements()
+{
+    showPanel(tr("RetroAchievements"), [this](QVBoxLayout* v) {
+        auto* intro = new QLabel(tr("Sign in with your <b>RetroAchievements</b> account to earn achievements while "
+            "playing. Your password is exchanged for a token (stored locally) and not kept. Softcore for now — "
+            "save states stay enabled."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
+        v->addWidget(intro);
+
+        auto* status = new QLabel(this);
+        status->setStyleSheet(QStringLiteral("font-size:14px;font-weight:bold;"));
+        v->addWidget(status);
+
+        if (ach_ && ach_->isLoggedIn())
+        {
+            status->setText(tr("Signed in as %1.").arg(ach_->username()));
+            auto* out = panelRow(tr("Sign Out"));
+            connect(out, &QPushButton::clicked, this, [this] { if (ach_) ach_->logout(); openRetroAchievements(); });
+            v->addWidget(out);
+            return;
+        }
+
+        auto* userEdit = new QLineEdit(); userEdit->setMinimumHeight(34); userEdit->setPlaceholderText(tr("Username"));
+        v->addWidget(new QLabel(tr("Username")));
+        v->addWidget(userEdit);
+        auto* passEdit = new QLineEdit(); passEdit->setMinimumHeight(34);
+        passEdit->setEchoMode(QLineEdit::Password); passEdit->setPlaceholderText(tr("Password"));
+        v->addWidget(new QLabel(tr("Password")));
+        v->addWidget(passEdit);
+
+        auto* signIn = panelRow(tr("Sign In"));
+        auto doLogin = [this, userEdit, passEdit, status] {
+            if (!ach_ || userEdit->text().trimmed().isEmpty() || passEdit->text().isEmpty())
+            { status->setText(tr("Enter your username and password.")); return; }
+            status->setText(tr("Signing in…"));
+            ach_->loginWithPassword(userEdit->text().trimmed(), passEdit->text());
+        };
+        connect(signIn, &QPushButton::clicked, this, doLogin);
+        connect(passEdit, &QLineEdit::returnPressed, this, doLogin);
+        v->addWidget(signIn);
+
+        // Reflect the async result; on success rebuild the panel to show the signed-in state.
+        connect(ach_, &Achievements::loginResult, status, [this, status](bool ok, const QString& msg) {
+            if (ok) openRetroAchievements();
+            else    status->setText(tr("Sign-in failed: %1").arg(msg));
+        });
     }, [this] { openSettingsHub(); });
 }
 

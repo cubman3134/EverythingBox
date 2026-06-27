@@ -1,5 +1,6 @@
 #include "RetroView.h"
 #include "../core/Settings.h"
+#include "../core/Achievements.h"
 #include <QTimer>
 #include <QPainter>
 #include <QKeyEvent>
@@ -111,11 +112,15 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     timer_->start(frameIntervalMs_);
     running_ = true;
     setFocus();
+    // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
+    if (ach_)
+        ach_->loadGame(&core_, Achievements::consoleIdForExtension(QFileInfo(romPath).suffix().toLower()), romPath);
     return true;
 }
 
 void RetroView::stop()
 {
+    if (ach_) ach_->unloadGame();
     if (timer_) timer_->stop();
     running_ = false;
     paused_ = false;
@@ -181,6 +186,7 @@ void RetroView::tick()
         emit statusMessage(tr("The emulator core crashed and was stopped."));
         return;
     }
+    if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
     update();
 }
 

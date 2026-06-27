@@ -76,6 +76,8 @@ bool LibretroCore::loadCore(const std::string& corePath, std::string* error)
     resolve("retro_serialize_size", (void**)&retro_serialize_size_);
     resolve("retro_serialize", (void**)&retro_serialize_);
     resolve("retro_unserialize", (void**)&retro_unserialize_);
+    resolve("retro_get_memory_data", (void**)&retro_get_memory_data_); // for RetroAchievements memory reads
+    resolve("retro_get_memory_size", (void**)&retro_get_memory_size_);
 
     if (!retro_init_ || !retro_run_ || !retro_load_game_ || !retro_get_system_info_)
     { if (error) *error = "core is missing required libretro exports"; unload(); return false; }
@@ -264,6 +266,16 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
         self->pixelFormat_ = *(const retro_pixel_format*)data;
         return true;
+    case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
+    {
+        // The core describes its address space (used by RetroAchievements to map achievement addresses to
+        // the right RAM regions). Copy the descriptor array; the core keeps the pointed-to strings alive.
+        const auto* mm = (const retro_memory_map*)data;
+        self->memDescriptors_.assign(mm->descriptors, mm->descriptors + mm->num_descriptors);
+        self->memoryMap_.descriptors = self->memDescriptors_.data();
+        self->memoryMap_.num_descriptors = (unsigned)self->memDescriptors_.size();
+        return true;
+    }
     case RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY:
         *(const char**)data = self->systemDir.c_str(); return true;
     case RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY:
