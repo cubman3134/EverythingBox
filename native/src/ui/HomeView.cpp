@@ -1631,7 +1631,7 @@ void HomeView::activateItem(int row)
     const bool infoPageType = it.type == QStringLiteral("movie")  || it.type == QStringLiteral("series")
                            || it.type == QStringLiteral("tv")     || it.type == QStringLiteral("episode")
                            || it.type == QStringLiteral("comic")  || it.type == QStringLiteral("manga")
-                           || it.type == QStringLiteral("book");
+                           || it.type == QStringLiteral("book")   || it.type == QStringLiteral("audiobook");
     if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
         && it.type != QStringLiteral("platform") && !infoPageType)
     {
@@ -1851,7 +1851,8 @@ void HomeView::requestMeta(const MediaItem& item)
     const bool isRemotePlayable = remoteLeaf
         && (stack_.last().addon->stremio
             || item.type == QStringLiteral("movie") || item.type == QStringLiteral("series")
-            || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode"));
+            || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode")
+            || item.type == QStringLiteral("audiobook"));
     const bool isRemoteReadable = remoteLeaf && !stack_.last().addon->stremio
         && (item.type == QStringLiteral("comic") || item.type == QStringLiteral("manga")
             || item.type == QStringLiteral("book"));
