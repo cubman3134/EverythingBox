@@ -82,6 +82,18 @@ static void mwLog(const QString& msg)
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
 
+// A log-safe rendering of a URL: scheme://host[:port]/…/<filename>. Drops the path's middle segments (which
+// can carry an addon access token) and the query string (which can carry debrid keys), so logs never leak secrets.
+static QString logSafeUrl(const QString& url)
+{
+    const QUrl u(url);
+    if (u.scheme().isEmpty()) return QFileInfo(url).fileName(); // a local path
+    const QString file = QFileInfo(u.path()).fileName();
+    return u.scheme() + QStringLiteral("://") + u.host()
+         + (u.port() > 0 ? QStringLiteral(":") + QString::number(u.port()) : QString())
+         + QStringLiteral("/…/") + file;
+}
+
 // Audio extensions, shared by the open dialog filter and folder-queue scanning. (m4b = MP4/AAC audiobooks.)
 static const QStringList kAudioExts = {
     "mp3", "flac", "ogg", "opus", "wav", "m4a", "m4b", "aac", "wma", "alac", "aiff", "aif", "ape", "mka"
@@ -801,8 +813,11 @@ void MainWindow::openGamePath(const QString& rom)
 {
     const QString ext = QFileInfo(rom).suffix().toLower();
     const GameSystem* sys = SystemCatalog::forExtension(ext);
+    mwLog(QStringLiteral("game: open \"%1\" (.%2) -> system %3")
+              .arg(QFileInfo(rom).fileName(), ext, sys ? sys->id : QStringLiteral("(none)")));
     if (!sys)
     {
+        mwLog(QStringLiteral("game: no system for .%1 — aborting").arg(ext));
         statusBar()->showMessage(tr("No system is configured for .%1 files.").arg(ext), 6000);
         return;
     }
@@ -810,6 +825,8 @@ void MainWindow::openGamePath(const QString& rom)
     QString core = Settings::coreFor(sys->id);
     if (core.isEmpty())
         core = sys->cores.value(0); // catalog default
+    mwLog(QStringLiteral("game: core '%1' for system %2 (configured=%3)")
+              .arg(core, sys->id, Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes")));
 
     // No prompt: use the configured core, downloading it from the buildbot if it isn't installed. Progress
     // shows inline in the status bar; failures report there too.
@@ -819,13 +836,16 @@ void MainWindow::openGamePath(const QString& rom)
     });
     if (corePath.isEmpty())
     {
+        mwLog(QStringLiteral("game: core '%1' unavailable: %2").arg(core, dlErr.isEmpty() ? QStringLiteral("download failed") : dlErr));
         statusBar()->showMessage(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr, 6000);
         return;
     }
+    mwLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
 
     // Split screen: run the ROM in the focused pane's own emulator instead of the full-screen one.
     if (splitTarget_)
     {
+        mwLog(QStringLiteral("game: launching in split pane"));
         splitTarget_->openGame(corePath, rom, core);
         RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
         finishSplitOpen();
@@ -840,11 +860,15 @@ void MainWindow::openGamePath(const QString& rom)
     QString err;
     if (retro_->openGame(corePath, rom, core, &err))
     {
+        mwLog(QStringLiteral("game: running \"%1\"").arg(QFileInfo(rom).completeBaseName()));
         stack_->setCurrentWidget(retro_);
         RecentStore::add({ rom, QFileInfo(rom).completeBaseName(), QStringLiteral("game"), QString() });
     }
     else
+    {
+        mwLog(QStringLiteral("game: openGame failed: %1").arg(err));
         statusBar()->showMessage(tr("Can't run game: %1").arg(err), 6000);
+    }
 }
 
 // Inline form (no popup) to paste a link and stream it. libmpv handles http(s) and most streaming
@@ -1069,6 +1093,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // Whether the player/reader should offer "Issue with Streaming" for this item (an Allarr-resolved file
     // whose source can be swapped). Preserved across the remote-document download round-trip (item is copied).
     currentNextSourceCapable_ = item.nextSourceCapable;
+    mwLog(QStringLiteral("open: \"%1\" type=%2 mime=%3 src=%4%5")
+              .arg(item.title, item.type.isEmpty() ? QStringLiteral("?") : item.type,
+                   item.mime.isEmpty() ? QStringLiteral("-") : item.mime, logSafeUrl(item.url),
+                   splitTarget_ ? QStringLiteral(" [->split pane]") : QString()));
     if (item.url.isEmpty())
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
@@ -1196,10 +1224,17 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         openLibraryItem(local);
     };
 
-    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0) { openLocal(); return; }
+    if (QFileInfo::exists(localPath) && QFileInfo(localPath).size() > 0)
+    {
+        mwLog(QStringLiteral("download: cache hit for \"%1\" (%2 bytes %3) — opening")
+                  .arg(item.title).arg(QFileInfo(localPath).size()).arg(ext));
+        openLocal();
+        return;
+    }
 
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
     statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+    mwLog(QStringLiteral("download: GET %1 -> %2%3").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName(), ext));
 
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
@@ -1211,7 +1246,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     // don't thrash the status bar on every packet.
     auto humanMB = [](qint64 bytes) { return QString::number(bytes / 1048576.0, 'f', 1); };
     connect(reply, &QNetworkReply::downloadProgress, this,
-            [this, title = item.title, humanMB, lastPct = -1](qint64 received, qint64 total) mutable {
+            [this, title = item.title, humanMB, lastPct = -1, lastLog = -1](qint64 received, qint64 total) mutable {
         QString msg;
         if (total > 0)
         {
@@ -1220,6 +1255,9 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             lastPct = pct;
             msg = tr("Downloading “%1”… %2%  (%3 / %4 MB)")
                       .arg(title).arg(pct).arg(humanMB(received), humanMB(total));
+            if (pct >= lastLog + 25 || pct == 100) // log every ~25% so the trace isn't spammed
+            { lastLog = pct; mwLog(QStringLiteral("download: \"%1\" %2%% (%3/%4 MB)")
+                                       .arg(title).arg(pct).arg(humanMB(received), humanMB(total))); }
         }
         else
         {
@@ -1232,6 +1270,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
+            mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
             statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(title, reply->errorString()), 6000);
             return;
         }
@@ -1240,6 +1279,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
         {
             f.close(); f.remove();
+            mwLog(QStringLiteral("download: save failed for \"%1\" (%2 bytes)").arg(title).arg(body.size()));
             statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
             return;
         }
@@ -1247,9 +1287,11 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         QFile::remove(localPath);
         if (!QFile::rename(localPath + QStringLiteral(".part"), localPath))
         {
+            mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
             statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
             return;
         }
+        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(body.size()));
         statusBar()->clearMessage();
         openLocal();
     });
