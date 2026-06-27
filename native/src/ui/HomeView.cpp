@@ -614,7 +614,15 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             LoadedAddon* addon = top.addon;
             const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
             lastPlay_ = { addon, it, false, {}, {}, 0 };
-            showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
+            // A type-aware "looking…" line: the host addon may search indexers, open a
+            // ROM pack, or extract a file before it can hand back a URL, so this can sit
+            // for a few seconds. (Download progress is shown separately once it resolves.)
+            const QString lookingMsg =
+                it.type == QStringLiteral("game")  ? tr("Looking for the ROM for “%1”…").arg(it.title)
+              : (it.type == QStringLiteral("movie") || it.type == QStringLiteral("series"))
+                                                   ? tr("Finding a stream for “%1”…").arg(it.title)
+                                                   : tr("Looking for “%1”…").arg(it.title);
+            showToast(lookingMsg, 30000);
             playBtn_->setEnabled(false);
             mgr_->resolveStream(addon, it, [this, it, fileProvider](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
