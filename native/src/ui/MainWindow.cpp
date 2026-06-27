@@ -224,8 +224,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     muteBtn_ = new QPushButton(tr("🔊"), mediaControls_);
     muteBtn_->setToolTip(tr("Mute / unmute"));
     volume_ = new QSlider(Qt::Horizontal, mediaControls_);
-    volume_->setRange(0, 100);
-    volume_->setFixedWidth(90);
+    volume_->setRange(0, 200); // 0..200%: above 100% is software amplification ("boost"), VLC-style
+    volume_->setFixedWidth(120);
     volume_->setToolTip(tr("Volume"));
     mc->addWidget(prevChap);
     mc->addWidget(rewind);
@@ -249,20 +249,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     {
         QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
-        volume_->setValue(qBound(0, vol, 100));
+        volume_->setValue(qBound(0, vol, 200));
         player_->setVolume(volume_->value());
+        volume_->setToolTip(tr("Volume: %1%").arg(volume_->value()));
     }
     connect(volume_, &QSlider::valueChanged, this, [this](int v) {
         if (muted_ && v > 0) { muted_ = false; muteBtn_->setText(QStringLiteral("🔊")); player_->setMuted(false); }
         player_->setVolume(v);
-        muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : QStringLiteral("🔊"));
+        // Speaker shows mute at 0, plain at 1..100, and a "boost" badge above 100%.
+        muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
+        volume_->setToolTip(tr("Volume: %1%").arg(v));
         QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         s.setValue(QStringLiteral("player/volume"), v);
     });
     connect(muteBtn_, &QPushButton::clicked, this, [this] {
         muted_ = !muted_;
         player_->setMuted(muted_);
-        muteBtn_->setText(muted_ ? QStringLiteral("🔇") : (volume_->value() == 0 ? QStringLiteral("🔇") : QStringLiteral("🔊")));
+        const int v = volume_->value();
+        muteBtn_->setText(muted_ || v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
     });
 
     // Top-left "Back" overlay to exit the movie. Shown/hidden with the transport (on mouse move).

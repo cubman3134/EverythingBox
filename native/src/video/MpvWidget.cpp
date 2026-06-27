@@ -43,6 +43,9 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
     mpv_set_option_string(mpv, "cache-secs", "120");
     mpv_set_option_string(mpv, "cache-pause-wait", "2");
     mpv_set_option_string(mpv, "network-timeout", "60");
+    // Allow software amplification above 100% (VLC-style "boost"). mpv defaults volume-max to 130; raise it
+    // to 200 so the volume slider can push a quiet source louder than its original level.
+    mpv_set_option_string(mpv, "volume-max", "200");
     // Subtitles: embedded tracks are auto-selected by mpv and rendered into our FBO (subs + OSD composite
     // through the render API). "sub-auto=fuzzy" also pulls in sidecar files (movie.srt, movie.eng.srt, …)
     // sitting next to the video, not just exact-name matches.
@@ -305,7 +308,7 @@ void MpvWidget::togglePause()
 
 void MpvWidget::setVolume(int percent)
 {
-    double v = percent < 0 ? 0.0 : (percent > 130 ? 130.0 : double(percent));
+    double v = percent < 0 ? 0.0 : (percent > 200 ? 200.0 : double(percent));
     mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &v);
 }
 

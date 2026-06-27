@@ -133,7 +133,7 @@ private:
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;
-    QSlider* volume_ = nullptr;        // player volume (0..100)
+    QSlider* volume_ = nullptr;        // player volume (0..200; above 100% = software boost)
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
     bool muted_ = false;
     // Inline settings/panel page (replaces popup dialogs).

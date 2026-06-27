@@ -27,7 +27,7 @@ public:
     void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
     void prevChapter();                       // jump to the previous chapter
-    void setVolume(int percent);              // 0..130 (mpv's range); 100 = original level
+    void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level
     void setMuted(bool muted);
 
 signals:
