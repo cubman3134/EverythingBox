@@ -846,6 +846,7 @@ void MainWindow::openHome()
     pdf_->persist();
     comic_->persist();
     clearAudioQueue();
+    if (isFullScreen()) leaveFullScreen(); // exiting media (e.g. a movie) must drop back to a normal window
     home_->refresh();
     stack_->setCurrentWidget(home_);
 }
