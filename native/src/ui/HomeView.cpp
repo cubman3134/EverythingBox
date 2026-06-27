@@ -827,12 +827,19 @@ void HomeView::refresh()
 
     auto isSeriesType = [](const QString& t) { return t == QStringLiteral("series") || t == QStringLiteral("tv"); };
 
-    // Gather every enabled catalog, then show ONE tab per media type. A non-Stremio remote addon (e.g. Allarr)
-    // is a file/stream provider only - it never owns a catalog tab; the bundled local catalog (AIO Catalog),
-    // and any Stremio catalog, provide browsing + metadata. When only such a provider declares a type, it can
-    // still surface (its score ties the 0 floor), but a real catalog source always wins.
-    auto sourceScore = [](LoadedAddon* a) {
-        return (a->transport == LoadedAddon::RemoteHttp && !a->stremio) ? 0 : 1;
+    // Gather every enabled catalog, then show ONE tab per media type. Which source owns a type:
+    //   - Movies/TV are "bridged": the app links a catalog item to a file provider (Allarr) by its IMDB id,
+    //     so the rich local/Stremio catalog owns the tab and the provider just supplies the file.
+    //   - Comics/manga/books/audiobooks have no metadata bridge, so the file provider (Allarr) owns the tab
+    //     directly - its catalog items carry the ids its /stream needs to build + serve the document.
+    //   - Everything else (games, music) falls to whatever catalog declares it (the local addon).
+    auto isBridgedType = [&](const QString& t) {
+        return t == QStringLiteral("movie") || isSeriesType(t) || t == QStringLiteral("episode");
+    };
+    auto sourceScore = [&](LoadedAddon* a, const QString& type) {
+        const bool fileProvider = (a->transport == LoadedAddon::RemoteHttp && !a->stremio);
+        if (!fileProvider) return 1;                 // a real catalog source (local / Stremio)
+        return isBridgedType(type) ? 0 : 2;          // file provider: defers bridged types, owns the rest
     };
     struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
     QVector<CatRef> all;
@@ -843,8 +850,8 @@ void HomeView::refresh()
     }
     QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
-    auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
+        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon, c.cat.type));
+    auto wins = [&](const CatRef& c) { return sourceScore(c.addon, c.cat.type) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
         auto* btn = new QPushButton(display, this);
