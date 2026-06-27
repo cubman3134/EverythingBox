@@ -1205,6 +1205,29 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = docNam_->get(rq);
+
+    // Live download feedback: a percentage when the server sends a Content-Length, else
+    // the running byte count. Throttled to whole-percent / changed-text updates so we
+    // don't thrash the status bar on every packet.
+    auto humanMB = [](qint64 bytes) { return QString::number(bytes / 1048576.0, 'f', 1); };
+    connect(reply, &QNetworkReply::downloadProgress, this,
+            [this, title = item.title, humanMB, lastPct = -1](qint64 received, qint64 total) mutable {
+        QString msg;
+        if (total > 0)
+        {
+            const int pct = static_cast<int>(received * 100 / total);
+            if (pct == lastPct) return;            // same percent — skip the update
+            lastPct = pct;
+            msg = tr("Downloading “%1”… %2%  (%3 / %4 MB)")
+                      .arg(title).arg(pct).arg(humanMB(received), humanMB(total));
+        }
+        else
+        {
+            msg = tr("Downloading “%1”… %2 MB").arg(title, humanMB(received));
+        }
+        statusBar()->showMessage(msg);
+    });
+
     connect(reply, &QNetworkReply::finished, this, [this, reply, localPath, openLocal, title = item.title] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
