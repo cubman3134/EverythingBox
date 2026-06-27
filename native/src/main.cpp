@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QIcon>
 #include <QFile>
+#include <QFileInfo>
 #include <QSettings>
 #include <QStringList>
 #include <QMetaType>
@@ -8,11 +9,37 @@
 #include <QTimer>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QDateTime>
+#include <QMutex>
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
+
+// Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
+// viewer reads this file.
+static QString logPath() { return QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"); }
+
+// Route Qt diagnostics (qDebug/qInfo/qWarning/qCritical, plus internal Qt/library messages) to the log file.
+// As a GUI-subsystem app there is no console, so this is the only place errors are recorded. Thread-safe.
+static void appLogHandler(QtMsgType type, const QMessageLogContext&, const QString& msg)
+{
+    static QMutex mtx; QMutexLocker lock(&mtx);
+    const char* lvl = type == QtDebugMsg ? "DEBUG" : type == QtInfoMsg ? "INFO"
+                    : type == QtWarningMsg ? "WARN" : type == QtCriticalMsg ? "ERROR" : "FATAL";
+    QFile f(logPath());
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  [")
+                 + QString::fromLatin1(lvl) + QStringLiteral("] ") + msg + QStringLiteral("\n")).toUtf8());
+}
+
+// Keep the log from growing without bound: if it's over ~1 MB at startup, drop it and start fresh.
+static void capLogAtStartup()
+{
+    const QFileInfo fi(logPath());
+    if (fi.exists() && fi.size() > 1024 * 1024) QFile::remove(logPath());
+}
 
 // If signed in to Google Drive, ALWAYS pull the latest state bundle BEFORE the app reads any settings, so
 // every session starts from the cloud's profiles/favorites/addons/themes (the exit push saved them last
@@ -76,6 +103,8 @@ int main(int argc, char** argv)
     std::setlocale(LC_NUMERIC, "C");
 
     QApplication app(argc, argv);
+    capLogAtStartup();                      // trim a runaway log before we start appending to it
+    qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
     QApplication::setApplicationName(QStringLiteral("My Media Vault"));
     QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));

@@ -77,6 +77,10 @@ if(MYMEDIAVAULT_BUILD_APP)
     set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
     # On macOS, produce a MyMediaVault.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(mymediavault PROPERTIES MACOSX_BUNDLE TRUE)
+    # On Windows, build as a GUI-subsystem app so no console window opens alongside the main window.
+    # qt_add_executable links Qt's EntryPoint, which supplies the WinMain that forwards to main(); all
+    # diagnostics go to the log file instead of the console (see main.cpp's message handler).
+    set_target_properties(mymediavault PROPERTIES WIN32_EXECUTABLE TRUE)
 
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)

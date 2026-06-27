@@ -24,6 +24,8 @@
 #include <QDesktopServices>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QPlainTextEdit>
+#include <QScrollBar>
 #include "SettingsDialog.h"
 
 #include <QWidget>
@@ -1177,6 +1179,7 @@ void MainWindow::openSettingsHub()
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
+        add(tr("Debug"),              [this] { openDebug(); });
     }, [this] { stack_->setCurrentWidget(panelReturnTo_); });
 }
 
@@ -1385,6 +1388,55 @@ void MainWindow::openThemes()
                             [this] { openThemes(); });
         });
         v->addWidget(browse);
+    }, [this] { openSettingsHub(); });
+}
+
+void MainWindow::openDebug()
+{
+    showPanel(tr("Debug"), [this](QVBoxLayout* v) {
+        const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log");
+
+        auto* intro = new QLabel(tr("Diagnostic log. Errors and stream-resolution traces are recorded here "
+                                    "(no API keys or tokens are written). The log is kept in the app folder "
+                                    "and trimmed automatically when it gets large."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
+        v->addWidget(intro);
+
+        auto* pathLbl = new QLabel(path);
+        pathLbl->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        pathLbl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        v->addWidget(pathLbl);
+
+        auto* view = new QPlainTextEdit();
+        view->setReadOnly(true);
+        view->setLineWrapMode(QPlainTextEdit::NoWrap);
+        view->setStyleSheet(QStringLiteral("font-family:Consolas,'Courier New',monospace;font-size:12px;"));
+        v->addWidget(view, 1);
+
+        // Show the tail (newest entries) so a long log stays responsive; scroll to the bottom.
+        auto loadLog = [view, path] {
+            QFile f(path);
+            QString text = f.open(QIODevice::ReadOnly | QIODevice::Text)
+                               ? QString::fromUtf8(f.readAll()) : tr("(no log entries yet)");
+            const QStringList lines = text.split(QLatin1Char('\n'));
+            constexpr int keep = 500;
+            view->setPlainText(lines.size() > keep ? lines.mid(lines.size() - keep).join(QLatin1Char('\n')) : text);
+            view->verticalScrollBar()->setValue(view->verticalScrollBar()->maximum());
+        };
+        loadLog();
+
+        auto* row = new QHBoxLayout();
+        auto* refresh = new QPushButton(tr("Refresh"));
+        auto* clear   = new QPushButton(tr("Clear log"));
+        auto* openLoc = new QPushButton(tr("Open file location"));
+        row->addWidget(refresh); row->addWidget(clear); row->addWidget(openLoc); row->addStretch(1);
+        v->addLayout(row);
+
+        connect(refresh, &QPushButton::clicked, this, [loadLog] { loadLog(); });
+        connect(clear,   &QPushButton::clicked, this, [path, loadLog] { QFile::remove(path); loadLog(); });
+        connect(openLoc, &QPushButton::clicked, this, [path] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+        });
     }, [this] { openSettingsHub(); });
 }
 
