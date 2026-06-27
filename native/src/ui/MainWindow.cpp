@@ -1571,6 +1571,7 @@ void MainWindow::cloudSyncNow()
 void MainWindow::closeEvent(QCloseEvent* e)
 {
     persistResume(); // flush the current media's playback position before anything else on exit
+    retro_->stop();  // flush battery-RAM saves before the cloud push captures them (no-op if no game running)
 
     // Already pushed (or nothing to do)? let the close through.
     if (forceClose_ || !cloud_ || !cloud_->isSignedIn()) { QMainWindow::closeEvent(e); return; }

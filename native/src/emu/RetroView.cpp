@@ -17,6 +17,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <cstring>
 
 RetroView::RetroView(QWidget* parent) : QWidget(parent)
 {
@@ -101,6 +102,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         return false;
     }
     romPath_ = romPath;
+    loadSram(); // restore battery-backed in-game saves before the game starts
     double fps = core_.avInfo().timing.fps;
     if (fps <= 0.0) fps = 60.0;
     startAudio(static_cast<int>(core_.avInfo().timing.sample_rate));
@@ -120,6 +122,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
 
 void RetroView::stop()
 {
+    if (core_.gameLoaded()) saveSram(); // persist battery RAM before tearing the core down
     if (ach_) ach_->unloadGame();
     if (timer_) timer_->stop();
     running_ = false;
@@ -187,6 +190,7 @@ void RetroView::tick()
         return;
     }
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
+    if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
     update();
 }
 
@@ -195,6 +199,36 @@ QString RetroView::statePath() const
     const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/states");
     QDir().mkpath(dir);
     return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".state");
+}
+
+QString RetroView::sramPath() const
+{
+    const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/saves");
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".srm");
+}
+
+// Battery-backed RAM (in-game saves) is frontend-managed: restore it into the core's SAVE_RAM after loading,
+// and write it back out so progress survives closing the game (and can sync to Drive).
+void RetroView::loadSram()
+{
+    void* dst = core_.memoryData(RETRO_MEMORY_SAVE_RAM);
+    const size_t sz = core_.memorySize(RETRO_MEMORY_SAVE_RAM);
+    if (!dst || sz == 0) return; // this game has no battery save
+    QFile f(sramPath());
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QByteArray bytes = f.readAll();
+    std::memcpy(dst, bytes.constData(), qMin(size_t(bytes.size()), sz));
+}
+
+void RetroView::saveSram()
+{
+    const void* src = core_.memoryData(RETRO_MEMORY_SAVE_RAM);
+    const size_t sz = core_.memorySize(RETRO_MEMORY_SAVE_RAM);
+    if (!src || sz == 0) return;
+    QFile f(sramPath());
+    if (f.open(QIODevice::WriteOnly))
+        f.write(reinterpret_cast<const char*>(src), qint64(sz));
 }
 
 bool RetroView::saveState(QString* error)

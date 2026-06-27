@@ -59,6 +59,9 @@ private:
     void showMenu();
     void hideMenu();
     QString statePath() const; // <app>/states/<romBaseName>.state
+    QString sramPath() const;  // <app>/saves/<romBaseName>.srm  (battery-backed in-game saves)
+    void loadSram();           // restore battery RAM after a game loads
+    void saveSram();           // persist battery RAM (on stop, exit, and periodically)
     int16_t inputState(unsigned port, unsigned device, unsigned index, unsigned id);
     void updateControllerPorts(); // enable/disable core ports 0..3 as controllers come and go
     void loadTurbo();             // read turbo/autofire config from Settings
@@ -77,6 +80,7 @@ private:
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
     qreal volume_ = 1.0;      // audio mix level for this instance
     class Achievements* ach_ = nullptr; // set only on the full-screen emulator
+    int sramAutosaveCounter_ = 0;       // frames since the last battery-RAM autosave
     int frameIntervalMs_ = 16;
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
 

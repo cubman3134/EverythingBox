@@ -366,6 +366,8 @@ static QByteArray buildBundle()
     const QString app = QCoreApplication::applicationDirPath();
     zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"));
     zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
+    zipAddDir(z, app + QStringLiteral("/saves"),  QStringLiteral("saves"));   // emulator battery saves (.srm)
+    zipAddDir(z, app + QStringLiteral("/states"), QStringLiteral("states"));  // emulator save states (.state)
 
     void* buf = nullptr; size_t sz = 0;
     mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
@@ -400,7 +402,8 @@ static bool applyBundle(const QByteArray& data)
                 if (!it.key().startsWith(QStringLiteral("cloud/"))) store().setValue(it.key(), it.value().toString());
             store().sync();
         }
-        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/")))
+        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/"))
+                 || name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/")))
         {
             // Restrict to the app dir (defend against path traversal in archive names).
             const QString dest = QDir::cleanPath(app + QStringLiteral("/") + name);
@@ -426,7 +429,8 @@ static QByteArray stateHash()
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
 
     const QString app = QCoreApplication::applicationDirPath();
-    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes") })
+    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes"),
+                                QStringLiteral("saves"), QStringLiteral("states") })
     {
         const QString dir = app + QStringLiteral("/") + sub;
         QStringList files;
