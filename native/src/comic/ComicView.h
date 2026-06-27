@@ -24,6 +24,7 @@ public:
 
 signals:
     void homeRequested();
+    void backRequested(); // return to the previous screen (e.g. the chapter list) without resetting Home
 
 protected:
     void keyPressEvent(QKeyEvent*) override;

@@ -22,6 +22,7 @@ public:
 
 signals:
     void homeRequested();
+    void backRequested(); // return to the previous screen (the catalog/list) without resetting Home
 
 protected:
     void keyPressEvent(QKeyEvent*) override;

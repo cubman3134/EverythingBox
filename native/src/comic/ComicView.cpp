@@ -54,7 +54,8 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     scroll_->setWidget(imageLabel_);
 
     auto* bar = new QHBoxLayout();
-    auto* homeBtn = new QPushButton(tr("‹ Home"), this);
+    auto* backBtn = new QPushButton(tr("‹ Back"), this);
+    auto* homeBtn = new QPushButton(tr("Home"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
     auto* next = new QPushButton(tr("Next ›"), this);
     auto* zoomOutBtn = new QPushButton(tr("−"), this);
@@ -63,6 +64,7 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     pageLabel_ = new QLabel(this);
     pageLabel_->setAlignment(Qt::AlignCenter);
 
+    connect(backBtn, &QPushButton::clicked, this, &ComicView::backRequested);
     connect(homeBtn, &QPushButton::clicked, this, &ComicView::homeRequested);
     connect(prev, &QPushButton::clicked, this, &ComicView::prevPage);
     connect(next, &QPushButton::clicked, this, &ComicView::nextPage);
@@ -70,6 +72,7 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     connect(zoomInBtn, &QPushButton::clicked, this, &ComicView::zoomIn);
     connect(fit, &QPushButton::clicked, this, &ComicView::fitWidth);
 
+    bar->addWidget(backBtn);
     bar->addWidget(homeBtn);
     bar->addWidget(zoomOutBtn);
     bar->addWidget(zoomInBtn);
@@ -208,6 +211,7 @@ void ComicView::keyPressEvent(QKeyEvent* e)
     case Qt::Key_Left:  case Qt::Key_PageUp:                       prevPage(); return;
     case Qt::Key_Plus:  case Qt::Key_Equal:                        zoomIn();   return;
     case Qt::Key_Minus:                                           zoomOut();  return;
+    case Qt::Key_Backspace: case Qt::Key_Escape:                  emit backRequested(); return;
     default: QWidget::keyPressEvent(e);
     }
 }

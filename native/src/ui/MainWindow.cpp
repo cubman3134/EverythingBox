@@ -309,6 +309,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
     connect(library_, &LibraryView::homeRequested, this, &MainWindow::openHome);
+    // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
+    // from is still there (openHome() rebuilds Home from the root, which loses that position).
+    auto returnFromReader = [this] {
+        book_->persist(); pdf_->persist(); comic_->persist();
+        stack_->setCurrentWidget(home_);
+        home_->focusContent();
+    };
+    connect(comic_, &ComicView::backRequested, this, returnFromReader);
+    connect(book_,  &EbookView::backRequested, this, returnFromReader);
+    connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
     connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
     connect(fastFwd, &QPushButton::clicked, this, [this] { player_->seekRelative(10.0); revealMediaControls(); });
     connect(prevChap, &QPushButton::clicked, this, [this] { player_->prevChapter(); revealMediaControls(); });
