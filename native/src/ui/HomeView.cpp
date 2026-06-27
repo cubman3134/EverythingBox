@@ -572,12 +572,13 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             });
             return;
         }
-        // A metadata-only item browsed from a LOCAL catalog (AIO Catalog) - comic issue / book / audiobook -
-        // whose actual file the file provider (Allarr) supplies. Bridge it by searching the provider's
-        // catalog of that type for a title-built query, then open the first match.
+        // A metadata-only item browsed from a LOCAL catalog (AIO Catalog) - comic issue / book / audiobook /
+        // retro game - whose actual file the file provider (Allarr) supplies. Bridge it by searching the
+        // provider's catalog of that type for a query built from the title (+ its context), then open the
+        // first match. A game's console (the platform we drilled in from) tags the search and picks the core.
         const bool localBridge = top.addon && top.addon->transport != LoadedAddon::RemoteHttp
             && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
-                || it.type == QStringLiteral("audiobook"));
+                || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
         if (localBridge)
         {
             const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
@@ -591,6 +592,15 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
                 const auto m = re.match(it.title);
                 query = (volume + QLatin1Char(' ') + (m.hasMatch() ? m.captured(1) : QString())).trimmed();
             }
+            else if (it.type == QStringLiteral("game"))
+            {
+                // "<game> <console>": the console is the platform we drilled in from; Allarr parses the
+                // trailing console name to tag its ROM search and choose the file extensions to look for.
+                QString console;
+                if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
+                    console = stack_.at(stack_.size() - 2).item.title.trimmed();
+                query = (it.title + QLatin1Char(' ') + console).trimmed();
+            }
             else
             {
                 // Book / audiobook: "<title> <author>" (the subtitle is "Author · Year").
@@ -598,7 +608,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
                 query = (it.title + QLatin1Char(' ') + author).trimmed();
             }
             if (query.isEmpty()) query = it.title;
-            const bool read = (it.type != QStringLiteral("audiobook"));
+            const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
             showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             const QString title = it.title;
@@ -1886,12 +1896,15 @@ void HomeView::requestMeta(const MediaItem& item)
     const bool isBridgedReadable = canBridge
         && (item.type == QStringLiteral("comic_issue") || item.type == QStringLiteral("book"));
     const bool isBridgedAudio = canBridge && item.type == QStringLiteral("audiobook");
+    // A game browsed from AIO Catalog (IGDB, metadata-only): playable if the provider (Allarr) can supply the
+    // ROM, found by bridging "<game> <console>" to its retro-games search. The console is the parent platform.
+    const bool isBridgedGame = canBridge && item.type == QStringLiteral("game");
     const bool isReadable = isReadableChapter(item.type) || isRemoteReadable || isBridgedReadable;
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
-        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable || isBridgedAudio);
+        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable || isBridgedAudio || isBridgedGame);
     }
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 

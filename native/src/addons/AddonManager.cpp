@@ -431,6 +431,32 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     QDir().mkpath(root_);
     reload();
     seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
+    refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest
+}
+
+void AddonManager::refreshRemoteManifests()
+{
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    for (const QString& base : remoteSourceUrls())
+    {
+        QNetworkRequest rq((QUrl(base + QStringLiteral("/manifest.json"))));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(15000);
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) return;           // offline/down -> keep cached manifest
+            const QByteArray data = reply->readAll();
+            if (data.isEmpty() || !buildRemoteAddon(base, data)) return;    // ignore junk / invalid
+            if (data == store().value(manifestCacheKey(base)).toByteArray()) return; // unchanged -> nothing to do
+            streamLog(QStringLiteral("manifest refresh: %1 changed - reloading").arg(base));
+            store().setValue(manifestCacheKey(base), data);
+            store().sync();
+            reload();              // rebuild sources from the refreshed cache
+            emit sourcesChanged(); // the UI rebuilds its tabs, picking up new catalogs (e.g. retro games)
+        });
+    }
 }
 
 void AddonManager::reload()
