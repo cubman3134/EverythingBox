@@ -572,24 +572,40 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             });
             return;
         }
-        if (it.type == QStringLiteral("comic_issue")) // a comic browsed from AIO Catalog -> read it from the file provider
+        // A metadata-only item browsed from a LOCAL catalog (AIO Catalog) - comic issue / book / audiobook -
+        // whose actual file the file provider (Allarr) supplies. Bridge it by searching the provider's
+        // catalog of that type for a title-built query, then open the first match.
+        const bool localBridge = top.addon && top.addon->transport != LoadedAddon::RemoteHttp
+            && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
+                || it.type == QStringLiteral("audiobook"));
+        if (localBridge)
         {
-            // Bridge the browsed issue to the file provider's (Allarr) search: "<volume name> <issue #>".
-            QString volume;
-            if (stack_.size() >= 2) volume = stack_.at(stack_.size() - 2).item.title.trimmed();
-            QString issueNum;
-            const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
-            const auto m = re.match(it.title);
-            if (m.hasMatch()) issueNum = m.captured(1);
-            QString query = (volume + QLatin1Char(' ') + issueNum).trimmed();
+            const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
+            QString query;
+            if (it.type == QStringLiteral("comic_issue"))
+            {
+                // "<volume name> <issue #>" - the volume is the level we drilled in from.
+                QString volume;
+                if (stack_.size() >= 2) volume = stack_.at(stack_.size() - 2).item.title.trimmed();
+                const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
+                const auto m = re.match(it.title);
+                query = (volume + QLatin1Char(' ') + (m.hasMatch() ? m.captured(1) : QString())).trimmed();
+            }
+            else
+            {
+                // Book / audiobook: "<title> <author>" (the subtitle is "Author · Year").
+                const QString author = it.subtitle.section(QStringLiteral(" · "), 0, 0).trimmed();
+                query = (it.title + QLatin1Char(' ') + author).trimmed();
+            }
             if (query.isEmpty()) query = it.title;
-            showToast(tr("Finding “%1” to read…").arg(it.title), 30000);
+            const bool read = (it.type != QStringLiteral("audiobook"));
+            showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             const QString title = it.title;
-            mgr_->resolveDocumentByQuery(query, QStringLiteral("comic"), [this, it, title](const QString& url, const QString& mime) {
+            mgr_->resolveDocumentByQuery(query, catType, [this, it, title](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
                 if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
-                else showToast(tr("Couldn't find “%1” to read. The file provider (Allarr) had no match for that issue.").arg(title), 7000);
+                else showToast(tr("Couldn't find “%1” from the file provider (Allarr) - no match.").arg(title), 7000);
             });
             return;
         }
@@ -1858,13 +1874,21 @@ void HomeView::requestMeta(const MediaItem& item)
             || item.type == QStringLiteral("book"));
     // A comic issue browsed from AIO Catalog (Comic Vine, metadata-only): readable if a file provider
     // (Allarr) is available to supply the actual CBZ, found by bridging the title to its search.
-    const bool isBridgedComic = item.type == QStringLiteral("comic_issue") && mgr_->hasStreamProvider(QStringLiteral("comic"));
-    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable || isBridgedComic;
+    // A metadata-only leaf browsed from a LOCAL catalog (AIO Catalog) whose actual file the file provider
+    // (Allarr) can supply by title: a comic issue or book is read; an audiobook is played. (Comic Vine /
+    // Google Books carry no file themselves, so without a provider these would offer nothing.)
+    const bool localLeaf = !item.expandable && !stack_.isEmpty() && stack_.last().addon
+        && stack_.last().addon->transport != LoadedAddon::RemoteHttp;
+    const bool canBridge = localLeaf && mgr_->hasFileProvider();
+    const bool isBridgedReadable = canBridge
+        && (item.type == QStringLiteral("comic_issue") || item.type == QStringLiteral("book"));
+    const bool isBridgedAudio = canBridge && item.type == QStringLiteral("audiobook");
+    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable || isBridgedReadable;
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
         playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
-        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable);
+        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable || isBridgedAudio);
     }
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
