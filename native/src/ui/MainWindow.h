@@ -100,13 +100,19 @@ private:
                       const QString& thumb = QString(), const QString& key = QString());
     void openStreamPrompt();                    // inline form to paste a stream/URL link
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
-                       const QString& title = QString()); // stream an http(s) audio/video link via libmpv
+                       const QString& title = QString()); // route an http(s) link (or .m3u/.m3u8) to libmpv
+    void playStream(const QString& url, const QString& resumeKey = QString(),
+                    const QString& title = QString());    // play a single resolved link via libmpv
+    // .m3u/.m3u8 playlists: openM3u reads the file/URL, handleM3u dispatches its contents - an HLS manifest
+    // streams via libmpv, an IPTV/media list becomes a channel queue, a PlayStation disc list opens the emulator.
+    void openM3u(const QString& src, const QString& title = QString());
+    void handleM3u(const QString& src, const QString& text, const QString& title);
     // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString());
     void openDocumentPath(const QString& path); // .epub / .pdf by extension
-    void setAudioQueue(const QStringList& files, int startIndex);
+    void setAudioQueue(const QStringList& files, int startIndex, const QStringList& titles = {});
     void playTrack(int index);
     void clearAudioQueue();   // leave audio mode (video/game/doc)
     // Resume tracking for timed media (video / audio / audiobooks): remember the playback position per file.

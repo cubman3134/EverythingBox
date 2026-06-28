@@ -100,6 +100,73 @@ static const QStringList kAudioExts = {
     "mp3", "flac", "ogg", "opus", "wav", "m4a", "m4b", "aac", "wma", "alac", "aiff", "aif", "ape", "mka"
 };
 
+// ---- .m3u / .m3u8 playlist support ------------------------------------------------------------
+// Three flavours share this extension: an HLS manifest (segment list / master) which libmpv streams
+// directly; an IPTV-style media playlist (a list of channel/track URLs) which we turn into a queue;
+// and a PlayStation multi-disc list which the emulator loads. handleM3u() tells them apart.
+namespace {
+struct M3uEntry { QString title; QString url; };
+
+// True when the URL/path points at a playlist file (ignoring any ?query).
+bool isM3uRef(const QString& s)
+{
+    QString p = s;
+    const int q = p.indexOf(QLatin1Char('?'));
+    if (q >= 0) p = p.left(q);
+    p = p.toLower();
+    return p.endsWith(QStringLiteral(".m3u")) || p.endsWith(QStringLiteral(".m3u8"));
+}
+
+// HLS manifests carry #EXT-X-* tags (TARGETDURATION, STREAM-INF, MEDIA-SEQUENCE, …); a plain media
+// playlist has only #EXTM3U/#EXTINF and full entry URLs. The former is one stream for libmpv to chew.
+bool isHlsManifest(const QString& text) { return text.contains(QStringLiteral("#EXT-X-")); }
+
+// Parse #EXTINF titles + entry URLs, resolving relative entries against the playlist's own location.
+QVector<M3uEntry> parseM3u(const QString& text, const QString& src)
+{
+    QVector<M3uEntry> out;
+    const bool srcIsUrl = src.contains(QStringLiteral("://"));
+    const int slash = src.lastIndexOf(QLatin1Char('/'));
+    const QString base = srcIsUrl ? (slash >= 0 ? src.left(slash + 1) : src)
+                                  : (QFileInfo(src).absolutePath() + QLatin1Char('/'));
+    QString title;
+    const QStringList lines = text.split(QRegularExpression(QStringLiteral("[\\r\\n]+")), Qt::SkipEmptyParts);
+    for (QString line : lines)
+    {
+        line = line.trimmed();
+        if (line.isEmpty()) continue;
+        if (line.startsWith(QStringLiteral("#EXTINF")))
+        {
+            const int c = line.indexOf(QLatin1Char(','));
+            if (c >= 0) title = line.mid(c + 1).trimmed(); // text after the last comma is the display name
+            continue;
+        }
+        if (line.startsWith(QLatin1Char('#'))) continue; // any other directive
+        QString url;
+        if (line.contains(QStringLiteral("://")))        url = line;                              // absolute
+        else if (srcIsUrl)                               url = QUrl(base).resolved(QUrl(line)).toString();
+        else if (QFileInfo(line).isAbsolute())           url = line;
+        else                                             url = base + line;                       // relative to file
+        out.push_back({ title.isEmpty() ? QFileInfo(line).fileName() : title, url });
+        title.clear();
+    }
+    return out;
+}
+
+// A PlayStation multi-disc list: every entry is a disc image the libretro core can swap between.
+bool looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
+{
+    if (entries.isEmpty()) return false;
+    static const QStringList disc = { "cue", "chd", "bin", "iso", "pbp", "img", "ccd" };
+    for (const M3uEntry& e : entries)
+    {
+        const QString path = QUrl(e.url).path().isEmpty() ? e.url : QUrl(e.url).path();
+        if (!disc.contains(QFileInfo(path).suffix().toLower())) return false;
+    }
+    return true;
+}
+} // namespace
+
 // Per-profile settings store (resume positions, etc.), mirroring the accessor the other views use.
 static QSettings& store()
 {
@@ -647,13 +714,15 @@ void MainWindow::openFile()
 {
     const QString f = QFileDialog::getOpenFileName(
         this, tr("Open Video"), QString(),
-        tr("Video (*.mkv *.mp4 *.avi *.mov *.webm *.m4v *.wmv *.flv *.ts *.m2ts);;All files (*.*)"));
+        tr("Video (*.mkv *.mp4 *.avi *.mov *.webm *.m4v *.wmv *.flv *.ts *.m2ts);;"
+           "Playlists (*.m3u *.m3u8);;All files (*.*)"));
     if (f.isEmpty()) return;
     openVideoPath(f);
 }
 
 void MainWindow::openVideoPath(const QString& path)
 {
+    if (isM3uRef(path)) { openM3u(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     retro_->stop();
@@ -720,11 +789,13 @@ void MainWindow::openAudioPath(const QString& path)
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
-void MainWindow::setAudioQueue(const QStringList& files, int startIndex)
+void MainWindow::setAudioQueue(const QStringList& files, int startIndex, const QStringList& titles)
 {
     tracks_ = files;
     playlist_->clear();
-    for (const QString& f : tracks_) playlist_->addItem(QFileInfo(f).completeBaseName());
+    for (int i = 0; i < tracks_.size(); ++i)
+        playlist_->addItem(i < titles.size() && !titles[i].isEmpty()
+                               ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
     playlist_->setVisible(true);
     stack_->setCurrentWidget(playerPage_);
     playTrack(startIndex);
@@ -881,7 +952,8 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
 void MainWindow::openStreamPrompt()
 {
     showPanel(tr("Stream from a link"), [this](QVBoxLayout* v) {
-        auto* intro = new QLabel(tr("Paste a direct audio or video link (http/https, HLS, etc.) to stream it."));
+        auto* intro = new QLabel(tr("Paste a direct audio or video link (http/https, HLS, or an .m3u/.m3u8 "
+                                    "playlist) to stream it."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
         v->addWidget(intro);
 
@@ -908,6 +980,14 @@ void MainWindow::openStreamPrompt()
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
 {
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
+    // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else
+    // is a single link libmpv can play straight away. openM3u() routes back here for the HLS case.
+    if (isM3uRef(url)) { openM3u(url, title); return; }
+    playStream(url, resumeKey, title);
+}
+
+void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
+{
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -927,6 +1007,72 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
     if (t.isEmpty()) t = u.host();
     if (t.isEmpty()) t = url;
     RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+}
+
+// Read an .m3u/.m3u8 (local file or remote URL), then hand its text to handleM3u() for dispatch.
+void MainWindow::openM3u(const QString& src, const QString& title)
+{
+    if (!src.contains(QStringLiteral("://")))
+    {
+        QFile f(src);
+        QString text;
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text)) text = QString::fromUtf8(f.readAll());
+        handleM3u(src, text, title.isEmpty() ? QFileInfo(src).completeBaseName() : title);
+        return;
+    }
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    statusBar()->showMessage(tr("Loading playlist…"));
+    mwLog(QStringLiteral("m3u: GET %1").arg(logSafeUrl(src)));
+    QNetworkRequest rq{ QUrl(src) };
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = docNam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, src, title] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            // Couldn't fetch the manifest text (auth, headers, live-only) - let libmpv try the URL itself.
+            mwLog(QStringLiteral("m3u: fetch failed (%1) -> player").arg(reply->errorString()));
+            playStream(src, QString(), title);
+            return;
+        }
+        handleM3u(src, QString::fromUtf8(reply->readAll()), title);
+    });
+}
+
+void MainWindow::handleM3u(const QString& src, const QString& text, const QString& title)
+{
+    if (isHlsManifest(text))                       // a single adaptive stream: libmpv handles the segments
+    {
+        mwLog(QStringLiteral("m3u: HLS manifest -> player"));
+        playStream(src, QString(), title);
+        return;
+    }
+    const QVector<M3uEntry> entries = parseM3u(text, src);
+    if (entries.isEmpty())                         // not a recognisable list - best effort: play the URL
+    {
+        mwLog(QStringLiteral("m3u: no entries -> player"));
+        playStream(src, QString(), title);
+        return;
+    }
+    if (looksLikeDiscPlaylist(entries))            // PlayStation multi-disc: the emulator swaps discs itself
+    {
+        mwLog(QStringLiteral("m3u: %1-disc playlist -> emulator").arg(entries.size()));
+        openGamePath(src, title);
+        return;
+    }
+    // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
+    mwLog(QStringLiteral("m3u: %1 entries -> queue").arg(entries.size()));
+    QStringList urls, titles;
+    for (const M3uEntry& e : entries) { urls << e.url; titles << e.title; }
+    currentNextSourceCapable_ = false;
+    retro_->stop();
+    book_->persist();
+    pdf_->persist();
+    comic_->persist();
+    setAudioQueue(urls, 0, titles);
+    RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
+                       QStringLiteral("video"), QString(), src });
 }
 
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
@@ -1119,6 +1265,16 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     const QString type = item.type.toLower();
     const QString lower = url.toLower();
     QString err;
+
+    // Playlists (IPTV channel lists / HLS streams) must be handled before the ROM check below: ".m3u" is
+    // also the PlayStation multi-disc extension, so it would otherwise be fetched as a game. openM3u()
+    // re-checks the contents and still routes a genuine disc list to the emulator.
+    if (isM3uRef(lower))
+    {
+        if (splitTarget_) { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
+        openM3u(url, item.title);
+        return;
+    }
 
     // Documents (CBZ/EPUB/PDF) open through file-based readers (miniz / epub / PDFium), which need a
     // local path. When an addon hands us a remote http(s) document, fetch it to a cache file first,
