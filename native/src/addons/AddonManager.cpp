@@ -98,12 +98,16 @@ static QString itemArg(const MediaItem& item)
         { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type } }).toJson(QJsonDocument::Compact));
 }
 
-static QString catalogArg(const QString& catalogId, const QString& query, int page)
+static QString catalogArg(const QString& catalogId, const QString& query, int page,
+                          const QMap<QString, QString>& filters = {})
 {
     QJsonObject a;
     if (!catalogId.isEmpty()) a.insert(QStringLiteral("catalog"), catalogId);
     if (!query.isEmpty())     a.insert(QStringLiteral("query"), query);
     a.insert(QStringLiteral("page"), page);
+    // Selected filters (genre/year/rating/sort) -> the addon's getCatalog applies them.
+    for (auto it = filters.constBegin(); it != filters.constEnd(); ++it)
+        if (!it.value().isEmpty()) a.insert(it.key(), it.value());
     return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact));
 }
 
@@ -117,11 +121,14 @@ static QString catalogArg(const QString& catalogId, const QString& query, int pa
 //   {base}/meta/{type}/{id}.json               -> the detail-header metadata
 static QString segEnc(const QString& s) { return QString::fromUtf8(QUrl::toPercentEncoding(s)); }
 
-static QUrl remoteCatalogUrl(const QString& base, const QString& catalogId, const QString& query, int page)
+static QUrl remoteCatalogUrl(const QString& base, const QString& catalogId, const QString& query, int page,
+                             const QMap<QString, QString>& filters = {})
 {
     QString u = base + QStringLiteral("/catalog/") + segEnc(catalogId.isEmpty() ? QStringLiteral("default") : catalogId);
     QStringList extra;
     if (!query.isEmpty()) extra << QStringLiteral("search=") + segEnc(query);
+    for (auto it = filters.constBegin(); it != filters.constEnd(); ++it) // genre=/year=/rating=/sort=
+        if (!it.value().isEmpty()) extra << it.key() + QLatin1Char('=') + segEnc(it.value());
     if (page > 1)         extra << QStringLiteral("page=") + QString::number(page);
     if (!extra.isEmpty()) u += QStringLiteral("/") + extra.join(QLatin1Char('&'));
     return QUrl(u + QStringLiteral(".json"));
@@ -676,11 +683,12 @@ int AddonManager::requestMeta(LoadedAddon* src, const MediaItem& item)
     return dispatchMeta(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
 }
 
-int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
+int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                                 const QMap<QString, QString>& filters)
 {
     if (!src) return -1;
-    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteCatalog(src, catalogId, query, page);
-    return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page)));
+    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteCatalog(src, catalogId, query, page, filters);
+    return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page, filters)));
 }
 
 int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page)
@@ -705,13 +713,14 @@ int AddonManager::requestSearch(LoadedAddon* src, const QString& query)
 
 // ---- remote (HTTP) dispatch: async on the GUI thread, same catalogReady/metaReady result signals ----
 
-int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page)
+int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                                        const QMap<QString, QString>& filters)
 {
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
     const bool stremio = src->stremio;
     QNetworkRequest rq(stremio ? stremioCatalogUrl(base, catalogId, query, page)
-                               : remoteCatalogUrl(base, catalogId, query, page));
+                               : remoteCatalogUrl(base, catalogId, query, page, filters));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }

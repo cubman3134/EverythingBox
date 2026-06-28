@@ -87,6 +87,22 @@ MediaCatalog MediaCatalog::fromJson(const QByteArray& json)
     c.hasMore = o.value(QStringLiteral("hasMore")).toBool();
     for (const QJsonValue& v : o.value(QStringLiteral("items")).toArray())
         if (v.isObject()) c.items.push_back(itemFromJson(v.toObject()));
+    // Optional filter declarations: each has a key/label and a list of {value,label} options.
+    for (const QJsonValue& fv : o.value(QStringLiteral("filters")).toArray())
+    {
+        if (!fv.isObject()) continue;
+        const QJsonObject fo = fv.toObject();
+        CatalogFilter cf;
+        cf.key = fo.value(QStringLiteral("key")).toString();
+        cf.label = fo.value(QStringLiteral("label")).toString();
+        for (const QJsonValue& ov : fo.value(QStringLiteral("options")).toArray())
+        {
+            const QJsonObject oo = ov.toObject();
+            cf.options.push_back({ oo.value(QStringLiteral("value")).toString(),
+                                   oo.value(QStringLiteral("label")).toString() });
+        }
+        if (!cf.key.isEmpty() && !cf.options.isEmpty()) c.filters.push_back(cf);
+    }
     return c;
 }
 

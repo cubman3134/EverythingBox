@@ -43,20 +43,43 @@ var TMDB = "https://api.themoviedb.org/3";
 var TMDB_IMG = "https://image.tmdb.org/t/p/w342";
 var TMDB_IMG_LG = "https://image.tmdb.org/t/p/w500"; // detail-header covers
 
-function tmdbList(kind, query, page) {
-    page = page1(page);
-    var key = getConfig("tmdbApiKey");
-    var label = kind === "tv" ? "TV Shows" : "Movies";
-    if (!key) return info(label, "Set your TMDB API key in Configure… to load " + kind + ".");
-    var path = kind === "tv" ? "tv" : "movie";
-    var url = query
-        ? TMDB + "/search/" + path + "?api_key=" + key + "&page=" + page + "&query=" + enc(query)
-        : TMDB + "/trending/" + path + "/week?api_key=" + key + "&page=" + page;
-    var r = J(httpGet(url));
-    if (!r || !r.results) return info(label, "Could not reach TMDB (check your key / connection).");
+// TMDB genre id -> name. Movies and TV use different genre sets.
+var TMDB_MOVIE_GENRES = [["28","Action"],["12","Adventure"],["16","Animation"],["35","Comedy"],["80","Crime"],
+    ["99","Documentary"],["18","Drama"],["10751","Family"],["14","Fantasy"],["36","History"],["27","Horror"],
+    ["10402","Music"],["9648","Mystery"],["10749","Romance"],["878","Sci-Fi"],["53","Thriller"],["10752","War"],["37","Western"]];
+var TMDB_TV_GENRES = [["10759","Action & Adventure"],["16","Animation"],["35","Comedy"],["80","Crime"],
+    ["99","Documentary"],["18","Drama"],["10751","Family"],["10762","Kids"],["9648","Mystery"],
+    ["10765","Sci-Fi & Fantasy"],["10768","War & Politics"],["37","Western"]];
+
+function optList(pairs, anyLabel) {
+    var o = [{ value: "", label: anyLabel }];
+    for (var i = 0; i < pairs.length; i++) o.push({ value: pairs[i][0], label: pairs[i][1] });
+    return o;
+}
+function yearOptions() {
+    var cy = 2026; try { cy = new Date().getFullYear(); } catch (e) {}
+    var o = [{ value: "", label: "Any year" }];
+    for (var y = cy; y >= 1960; y--) o.push({ value: String(y), label: String(y) });
+    return o;
+}
+function tmdbFilters(kind) {
+    return [
+        { key: "genre", label: "Genre", options: optList(kind === "tv" ? TMDB_TV_GENRES : TMDB_MOVIE_GENRES, "Any genre") },
+        { key: "year",  label: "Year",  options: yearOptions() },
+        { key: "rating", label: "Min rating", options: [
+            { value: "", label: "Any" }, { value: "9", label: "9+" }, { value: "8", label: "8+" },
+            { value: "7", label: "7+" }, { value: "6", label: "6+" }, { value: "5", label: "5+" }] },
+        { key: "sort", label: "Sort", options: [
+            { value: "", label: "Popular" }, { value: "top", label: "Top rated" }, { value: "new", label: "Newest" }] }
+    ];
+}
+function resultF(title, items, hasMore, filters) {
+    return JSON.stringify({ title: title, items: items, hasMore: !!hasMore, filters: filters });
+}
+function tmdbItems(results, kind, path) {
     var items = [];
-    for (var i = 0; i < r.results.length; i++) {
-        var m = r.results[i];
+    for (var i = 0; i < results.length; i++) {
+        var m = results[i];
         items.push({
             id: "tmdb:" + path + ":" + m.id,
             title: m.title || m.name,
@@ -67,7 +90,42 @@ function tmdbList(kind, query, page) {
             url: ""
         });
     }
-    return result(label, items, r.page < r.total_pages);
+    return items;
+}
+
+function tmdbList(kind, query, page, f) {
+    page = page1(page); f = f || {};
+    var key = getConfig("tmdbApiKey");
+    var label = kind === "tv" ? "TV Shows" : "Movies";
+    if (!key) return info(label, "Set your TMDB API key in Configure… to load " + kind + ".");
+    var path = kind === "tv" ? "tv" : "movie";
+    var filters = tmdbFilters(kind);
+
+    if (query) {
+        // /search can't filter server-side, so filter + sort this page of results client-side.
+        var sr = J(httpGet(TMDB + "/search/" + path + "?api_key=" + key + "&page=" + page + "&query=" + enc(query)));
+        if (!sr || !sr.results) return info(label, "Could not reach TMDB.");
+        var rows = sr.results;
+        if (f.genre)  rows = rows.filter(function (m) { return (m.genre_ids || []).indexOf(parseInt(f.genre, 10)) >= 0; });
+        if (f.rating) rows = rows.filter(function (m) { return (m.vote_average || 0) >= parseFloat(f.rating); });
+        if (f.year)   rows = rows.filter(function (m) { return year(m.release_date || m.first_air_date) === f.year; });
+        if (f.sort === "top") rows.sort(function (a, b) { return (b.vote_average || 0) - (a.vote_average || 0); });
+        else if (f.sort === "new") rows.sort(function (a, b) {
+            return (b.release_date || b.first_air_date || "").localeCompare(a.release_date || a.first_air_date || ""); });
+        return resultF(label, tmdbItems(rows, kind, path), sr.page < sr.total_pages, filters);
+    }
+
+    // No query: TMDB /discover applies every filter server-side.
+    var sort = f.sort === "top" ? "vote_average.desc"
+             : f.sort === "new" ? (kind === "tv" ? "first_air_date.desc" : "primary_release_date.desc")
+             : "popularity.desc";
+    var url = TMDB + "/discover/" + path + "?api_key=" + key + "&page=" + page + "&sort_by=" + sort + "&vote_count.gte=50";
+    if (f.genre)  url += "&with_genres=" + enc(f.genre);
+    if (f.rating) url += "&vote_average.gte=" + enc(f.rating);
+    if (f.year)   url += (kind === "tv" ? "&first_air_date_year=" : "&primary_release_year=") + enc(f.year);
+    var r = J(httpGet(url));
+    if (!r || !r.results) return info(label, "Could not reach TMDB (check your key / connection).");
+    return resultF(label, tmdbItems(r.results, kind, path), r.page < r.total_pages, filters);
 }
 
 function tmdbSeasons(showId) {
@@ -748,8 +806,9 @@ function getCatalog(argJson) {
     var cat = a.catalog || "movies";
     var q = a.query || "";
     var p = a.page || 1;
-    if (cat === "movies") return tmdbList("movie", q, p);
-    if (cat === "tv")     return tmdbList("tv", q, p);
+    var f = { genre: a.genre || "", year: a.year || "", rating: a.rating || "", sort: a.sort || "" };
+    if (cat === "movies") return tmdbList("movie", q, p, f);
+    if (cat === "tv")     return tmdbList("tv", q, p, f);
     if (cat === "games")  return gamesCatalog(q, p);
     if (cat === "music")  return mbAlbums(q, p);
     if (cat === "books")  return booksCatalog(q, p);

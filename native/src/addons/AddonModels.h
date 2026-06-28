@@ -25,6 +25,15 @@ struct AddonCatalog
     QString type;  // "movie" | "series" | "game" | "album" | ... (hint for routing/icons)
 };
 
+// A user-selectable catalog filter (genre / year / rating / sort), advertised by a catalog response so the
+// UI can render the right dropdowns per screen. The first option is the "Any / default" choice.
+struct CatalogFilter
+{
+    QString key;     // "genre" | "year" | "rating" | "sort" - sent back as the selected param
+    QString label;   // dropdown label, e.g. "Genre"
+    QVector<QPair<QString, QString>> options; // (value, label); value "" = no filter
+};
+
 // A media type an addon defines, so new types (beyond the built-ins) get their own visuals. The app keys
 // a registry by `type`; a catalog/item of that type then uses this colour + icon. Built-in types still
 // have hand-drawn defaults; these override/extend them. `openKind` ties an "Open a file" action to the type.
@@ -77,6 +86,7 @@ struct MediaCatalog
     QString title;
     QVector<MediaItem> items;
     bool hasMore = false; // the addon reports another page is available (drives infinite scroll)
+    QVector<CatalogFilter> filters; // filters this catalog supports (drives the per-screen filter dropdowns)
 
     static MediaCatalog fromJson(const QByteArray& json);
 };

@@ -5,11 +5,15 @@
 #include <QWidget>
 #include <QVector>
 #include <QColor>
+#include <QMap>
+#include <QList>
 #include "../addons/AddonModels.h"
 
 class AddonManager;
 struct LoadedAddon;
 class CarouselView;
+class QComboBox;
+class QHBoxLayout;
 class XmbView;
 class QListWidget;
 class QLineEdit;
@@ -69,6 +73,7 @@ private:
         QString catalogId;
         QString catalogType;     // media type of a top-level catalog (movie/series/game/album/book)
         QString query;
+        QMap<QString, QString> filters; // selected catalog filters (genre/year/rating/sort) for this level
         MediaItem item;          // the container we drilled into (when detail)
         QString title;
         int childRow = -1;       // items_ index last drilled into from this level (restored on Back)
@@ -136,6 +141,12 @@ private:
     QString lastMediaKey_;           // last media type entered (to re-highlight on return to the carousel)
     QListWidget* grid_ = nullptr;
     QLineEdit* search_ = nullptr;
+    QWidget* filterBar_ = nullptr;       // row of filter dropdowns above the grid (per-catalog, dynamic)
+    QHBoxLayout* filterLayout_ = nullptr;
+    QList<QComboBox*> filterCombos_;     // current filter dropdowns (each carries its filter key)
+    QString filterSig_;                  // signature of the shown filters, to avoid rebuilding on every reload
+    void rebuildFilterBar(const QVector<CatalogFilter>& filters); // sync the dropdowns to a catalog's filters
+    void onFilterChanged();              // a dropdown changed -> re-run the current catalog with the selection
     QPushButton* back_ = nullptr;
     QPushButton* profileBtn_ = nullptr;  // shows the active profile; click to switch
     QPushButton* settingsBtn_ = nullptr; // the "Settings" button

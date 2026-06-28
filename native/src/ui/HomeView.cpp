@@ -18,6 +18,7 @@
 #include <QMenu>
 #include <QLineEdit>
 #include <QLabel>
+#include <QComboBox>
 #include <QTimer>
 #include <QResizeEvent>
 #include <QRegularExpression>
@@ -758,6 +759,15 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         QScrollBar* sb = grid_->verticalScrollBar();
         if (sb->maximum() > 0 && value >= sb->maximum() - 8) loadMore();
     });
+    // Filter bar: a row of per-catalog dropdowns (Genre/Year/Rating/Sort) above the grid. Built dynamically
+    // from each catalog's advertised filters; hidden when a catalog has none (or in carousel/XMB layouts).
+    filterBar_ = new QWidget(this);
+    filterLayout_ = new QHBoxLayout(filterBar_);
+    filterLayout_->setContentsMargins(12, 2, 12, 6);
+    filterLayout_->setSpacing(8);
+    filterBar_->setVisible(false);
+    v->addWidget(filterBar_);
+
     v->addWidget(grid_, 1);
 
     // The media-type carousel (shown instead of the grid landing when the theme's layout is "carousel").
@@ -1908,7 +1918,8 @@ void HomeView::goBack()
 void HomeView::doSearch()
 {
     if (stack_.isEmpty()) return;
-    // Search re-runs the base media-type catalog with the query (drops any drill-down).
+    // Search re-runs the base media-type catalog with the query (drops any drill-down). Selected filters on
+    // the base level are kept, so search and filters combine.
     Level base = stack_.first();
     base.detail = false;
     base.childRow = -1; // a fresh result set -> land on the first item, not the old drill position
@@ -1918,11 +1929,70 @@ void HomeView::doSearch()
     loadTop();
 }
 
+void HomeView::rebuildFilterBar(const QVector<CatalogFilter>& filters)
+{
+    if (!filterBar_) return;
+    if (filters.isEmpty() || carouselMode_ || xmbMode_) // nothing to filter, or a layout without the bar
+    {
+        filterBar_->setVisible(false);
+        filterSig_.clear();
+        return;
+    }
+    // A signature of the available filters, so we only rebuild the combos when the set changes (switching
+    // catalogs) - not on every reload (which would recreate the combos and re-fire their change signals).
+    QString sig;
+    for (const CatalogFilter& f : filters) sig += f.key + QLatin1Char('#') + QString::number(f.options.size()) + QLatin1Char(';');
+    if (sig == filterSig_) { filterBar_->setVisible(true); return; }
+    filterSig_ = sig;
+
+    for (QComboBox* c : filterCombos_) c->deleteLater();
+    filterCombos_.clear();
+    QLayoutItem* li;
+    while ((li = filterLayout_->takeAt(0)) != nullptr) { if (li->widget()) li->widget()->deleteLater(); delete li; }
+
+    const QMap<QString, QString> selected = stack_.isEmpty() ? QMap<QString, QString>() : stack_.last().filters;
+    for (const CatalogFilter& f : filters)
+    {
+        auto* lbl = new QLabel(f.label + QStringLiteral(":"), filterBar_);
+        lbl->setStyleSheet(QStringLiteral("color:#cfd3da;font-size:12px;"));
+        filterLayout_->addWidget(lbl);
+        auto* combo = new QComboBox(filterBar_);
+        combo->setProperty("filterKey", f.key);
+        combo->setMinimumWidth(110);
+        for (const auto& opt : f.options) combo->addItem(opt.second, opt.first);
+        const int idx = combo->findData(selected.value(f.key));
+        combo->setCurrentIndex(idx >= 0 ? idx : 0);
+        connect(combo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) { onFilterChanged(); });
+        filterCombos_.push_back(combo);
+        filterLayout_->addWidget(combo);
+    }
+    filterLayout_->addStretch(1);
+    filterBar_->setVisible(true);
+}
+
+void HomeView::onFilterChanged()
+{
+    if (stack_.isEmpty()) return;
+    QMap<QString, QString> sel;
+    for (QComboBox* c : filterCombos_)
+    {
+        const QString key = c->property("filterKey").toString();
+        const QString val = c->currentData().toString();
+        if (!key.isEmpty() && !val.isEmpty()) sel.insert(key, val);
+    }
+    stack_.last().filters = sel;
+    stack_.last().childRow = -1;
+    issueRequest(false); // reload page 1 with the new filters (keeps the current search query)
+}
+
 void HomeView::loadTop()
 {
     if (stack_.isEmpty()) return;
     pendingRestoreRow_ = -1; // fresh view: any in-progress "page toward the drilled item" restore is moot
     const Level& top = stack_.last();
+
+    // Filters belong to catalog screens only — hide the bar whenever we're on an item's detail page.
+    if (top.detail && filterBar_) { filterBar_->setVisible(false); filterSig_.clear(); }
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
@@ -2275,7 +2345,7 @@ void HomeView::issueRequest(bool append)
     status_->setText(append ? tr("Loading more…") : tr("Loading…"));
 
     pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page)
-                               : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page);
+                               : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
 }
 
 void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
@@ -2301,6 +2371,8 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
     currentPage_ = pendingPage_;
     hasMore_ = cat.hasMore;
     populate(cat, pendingAppend_);
+    // Sync the filter dropdowns to this catalog (only on a fresh load, and only for a catalog level).
+    if (!pendingAppend_ && !stack_.isEmpty() && !stack_.last().detail) rebuildFilterBar(cat.filters);
 }
 
 void HomeView::populate(const MediaCatalog& cat, bool append)

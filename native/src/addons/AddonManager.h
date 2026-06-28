@@ -11,6 +11,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <QMap>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -76,7 +77,9 @@ public:
     // ---- asynchronous (used by the UI) ----
     // Return a request id; catalogReady(reqId, result) fires later on the GUI thread. The UI ignores
     // results whose id it has superseded.
-    int requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page);
+    // filters maps a CatalogFilter key (genre/year/rating/sort) to the selected value (empty = unfiltered).
+    int requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                       const QMap<QString, QString>& filters = {});
     int requestDetail(LoadedAddon* src, const MediaItem& item, int page);
     int requestSearch(LoadedAddon* src, const QString& query);
     int requestMeta(LoadedAddon* src, const MediaItem& item); // metaReady(reqId, MediaDetail) fires later
@@ -150,7 +153,8 @@ private:
     int dispatch(const AddonRequest& req);     // run getCatalog/getDetail off-thread, deliver via catalogReady
     int dispatchMeta(const AddonRequest& req); // run getMeta off-thread, deliver via metaReady
     // Remote dispatch: async HTTP on the GUI thread (I/O-bound, so no worker thread), same result signals.
-    int dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page);
+    int dispatchRemoteCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                              const QMap<QString, QString>& filters = {});
     int dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, int page);
     int dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item);
 
