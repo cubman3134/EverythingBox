@@ -2284,7 +2284,13 @@ void HomeView::showToast(const QString& text, int ms)
     repositionToast();
     toast_->show();
     toast_->raise();
-    if (toastTimer_) toastTimer_->start(ms);
+    if (toastTimer_) { if (ms > 0) toastTimer_->start(ms); else toastTimer_->stop(); } // ms<=0 => sticky
+}
+
+void HomeView::hideToast()
+{
+    if (toast_) toast_->hide();
+    if (toastTimer_) toastTimer_->stop();
 }
 
 void HomeView::repositionToast()

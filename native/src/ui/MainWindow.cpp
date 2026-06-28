@@ -1542,6 +1542,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     const QString localPath = dir + QStringLiteral("/") + hash + ext;
 
     auto openLocal = [this, item, localPath] {
+        home_->hideToast(); // resolve+download feedback done; the content view takes over
         MediaItem local = item;
         local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
         openLibraryItem(local);
@@ -1557,6 +1558,9 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
 
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
     statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+    // Continue the feedback in the same toast that showed "Finding/Looking…", so the file-pull progress
+    // appears where the user is already looking (not just the status bar). Sticky until it opens/fails.
+    home_->showToast(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2%3").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName(), ext));
 
     QNetworkRequest rq{QUrl(item.url)};
@@ -1587,6 +1591,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             msg = tr("Downloading “%1”… %2 MB").arg(title, humanMB(received));
         }
         statusBar()->showMessage(msg);
+        home_->showToast(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, localPath, openLocal, title = item.title] {
@@ -1594,7 +1599,9 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         if (reply->error() != QNetworkReply::NoError)
         {
             mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
-            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(title, reply->errorString()), 6000);
+            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
+            statusBar()->showMessage(e, 6000);
+            home_->showToast(e, 6000);
             return;
         }
         const QByteArray body = reply->readAll();
@@ -1604,6 +1611,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             f.close(); f.remove();
             mwLog(QStringLiteral("download: save failed for \"%1\" (%2 bytes)").arg(title).arg(body.size()));
             statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
+            home_->showToast(tr("Couldn't save “%1” to cache.").arg(title), 6000);
             return;
         }
         f.close();
@@ -1612,6 +1620,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         {
             mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
             statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+            home_->showToast(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
             return;
         }
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(body.size()));

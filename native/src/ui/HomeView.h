@@ -38,6 +38,11 @@ public:
     // the player/reader "Issue with Streaming" button. No-op (with a toast) when there's nothing to retry.
     void requestNextSource();
 
+    // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast
+    // going through the download phase (the "info as we pull the file" feedback the user wanted there).
+    void showToast(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
+    void hideToast();                                   // dismiss it now (e.g. the content view takes over)
+
 signals:
     void openItem(const MediaItem& item);
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
@@ -113,7 +118,6 @@ private:
     void populate(const MediaCatalog& cat, bool append);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
-    void showToast(const QString& text, int ms = 4500); // prominent transient notification over the view
     void repositionToast();                             // re-centre the toast near the bottom of the view
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
     void showMeta(const MediaDetail& detail);
