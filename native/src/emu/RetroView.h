@@ -3,12 +3,15 @@
 #pragma once
 #include <QWidget>
 #include <QByteArray>
+#include <QImage>
+#include <QMutex>
 #include <set>
 #include "LibretroCore.h"   // mymediavault_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 
 class QTimer;
+class QThread;
 class QAudioSink;
 class QIODevice;
 class QFrame;
@@ -39,6 +42,9 @@ public:
     void setVolume(qreal v);              // 0.0..1.0 audio level (per-pane mixing in split screen)
     void setInputActive(bool active);     // when false, ignore controller/keyboard (unfocused split pane)
     void setAchievements(class Achievements* a) { ach_ = a; } // RetroAchievements (full-screen emulator only)
+    // Run emulation on a dedicated worker thread instead of the GUI timer. Used for split-screen panes so the
+    // game isn't throttled by the other pane's video rendering on the shared GUI thread. Call before openGame.
+    void setThreaded(bool on) { threaded_ = on; }
 
 signals:
     void statusMessage(const QString& text); // surfaced by the main window (save/load feedback)
@@ -51,10 +57,16 @@ protected:
     void keyReleaseEvent(QKeyEvent*) override;
 
 private slots:
-    void tick();
+    void tick();          // GUI-thread frame step (non-threaded mode)
+    void stepWorker();    // worker-thread frame step (threaded mode; runs on emuThread_)
+    void pollInput();     // GUI-thread input poll -> snapshot (threaded mode)
 
 private:
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
+    void startEmu();           // begin the frame loop after a game loads (GUI timer or worker thread)
+    void stopEmu();            // stop the loop / tear down the worker thread
+    void publishFrame();       // copy the core's frame for the GUI to paint (threaded mode)
+    int16_t resolveInput(unsigned port, unsigned device, unsigned index, unsigned id); // raw input resolve (GUI)
     void toggleMenu();
     void showMenu();
     void hideMenu();
@@ -78,6 +90,17 @@ private:
     bool running_ = false;
     bool paused_ = false;
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
+
+    // ---- threaded mode (split-screen panes): emulation runs on emuThread_, painted on the GUI thread ----
+    bool threaded_ = false;
+    QThread* emuThread_ = nullptr;   // owns emuTimer_ + the audio sink; runs stepWorker()
+    QTimer* emuTimer_ = nullptr;     // frame pacer, lives on emuThread_
+    QTimer* inputTimer_ = nullptr;   // GUI: poll the pad + build the input snapshot
+    QMutex frameMutex_;              // guards frameImg_ (worker writes, GUI paints)
+    QImage frameImg_;                // last frame handed from the worker to the GUI
+    QMutex inputMutex_;              // guards the input snapshot below
+    int snapBtn_[4] = { 0, 0, 0, 0 };        // per-port RetroPad button bitmask (worker reads)
+    int16_t snapAxis_[4][2][2] = {};         // per-port analog [index L/R][id X/Y]
     qreal volume_ = 1.0;      // audio mix level for this instance
     class Achievements* ach_ = nullptr; // set only on the full-screen emulator
     int sramAutosaveCounter_ = 0;       // frames since the last battery-RAM autosave

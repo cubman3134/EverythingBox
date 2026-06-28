@@ -17,6 +17,7 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QVBoxLayout>
+#include <QThread>
 #include <cstring>
 
 RetroView::RetroView(QWidget* parent) : QWidget(parent)
@@ -94,7 +95,11 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         }
     core_.onInput = [this](unsigned p, unsigned d, unsigned i, unsigned id) { return inputState(p, d, i, id); };
     core_.onAudio = [this](const int16_t* data, size_t frames) { pushAudio(data, frames); };
-    core_.onRumble = [this](unsigned port, unsigned effect, uint16_t strength) { pad_.setRumble(port, effect, strength); };
+    core_.onRumble = [this](unsigned port, unsigned effect, uint16_t strength) {
+        // In threaded mode the core fires this on the worker thread; the pad (SDL) is owned by the GUI thread.
+        if (threaded_) QMetaObject::invokeMethod(this, [this, port, effect, strength] { pad_.setRumble(port, effect, strength); }, Qt::QueuedConnection);
+        else pad_.setRumble(port, effect, strength);
+    };
     if (!core_.loadGame(romPath.toStdString(), &err))
     {
         if (error) *error = QString::fromStdString(err);
@@ -105,14 +110,13 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     loadSram(); // restore battery-backed in-game saves before the game starts
     double fps = core_.avInfo().timing.fps;
     if (fps <= 0.0) fps = 60.0;
-    startAudio(static_cast<int>(core_.avInfo().timing.sample_rate));
-    portsMask_ = -1;            // force a fresh port setup for this game
+    portsMask_ = -1;            // force a fresh port setup for this game (done here while nothing else runs)
     updateControllerPorts();
     loadTurbo();
     frameIntervalMs_ = qMax(1, static_cast<int>(1000.0 / fps));
     paused_ = false;
-    timer_->start(frameIntervalMs_);
     running_ = true;
+    startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
     setFocus();
     // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
     if (ach_)
@@ -120,17 +124,104 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     return true;
 }
 
+void RetroView::startEmu()
+{
+    if (!threaded_)
+    {
+        startAudio(static_cast<int>(core_.avInfo().timing.sample_rate));
+        timer_->start(frameIntervalMs_);
+        return;
+    }
+    // Threaded: emulate on a worker thread so the other split pane's video rendering on the GUI thread can't
+    // throttle the game. The pacer + audio live on the worker; input is snapshotted from the GUI; frames are
+    // handed back for the GUI to paint.
+    const int sr = static_cast<int>(core_.avInfo().timing.sample_rate);
+    emuThread_ = new QThread(this);
+    emuTimer_ = new QTimer();                 // no parent; affined to the worker thread below
+    emuTimer_->setInterval(frameIntervalMs_);
+    emuTimer_->moveToThread(emuThread_);
+    connect(emuTimer_, &QTimer::timeout, this, &RetroView::stepWorker, Qt::DirectConnection); // runs on emuThread_
+    connect(emuThread_, &QThread::started, this, [this, sr] { startAudio(sr); emuTimer_->start(); }, Qt::DirectConnection);
+    if (!inputTimer_) { inputTimer_ = new QTimer(this); connect(inputTimer_, &QTimer::timeout, this, &RetroView::pollInput); }
+    inputTimer_->start(frameIntervalMs_);
+    emuThread_->start();
+}
+
+void RetroView::stopEmu()
+{
+    if (!threaded_)
+    {
+        if (timer_) timer_->stop();
+        stopAudio();
+        return;
+    }
+    if (inputTimer_) inputTimer_->stop();
+    if (emuThread_)
+    {
+        // Stop the pacer + audio ON the worker thread, then join so no frame is in flight before we unload.
+        QMetaObject::invokeMethod(emuTimer_, [this] { emuTimer_->stop(); }, Qt::BlockingQueuedConnection);
+        QMetaObject::invokeMethod(emuTimer_, [this] { stopAudio(); }, Qt::BlockingQueuedConnection);
+        emuThread_->quit();
+        emuThread_->wait();
+        delete emuTimer_;  emuTimer_ = nullptr;
+        delete emuThread_; emuThread_ = nullptr;
+    }
+}
+
+void RetroView::stepWorker() // runs on emuThread_
+{
+    if (!running_ || paused_) return;
+    core_.runFrame();
+    if (core_.crashed())
+    {
+        running_ = false;
+        QMetaObject::invokeMethod(this, [this] {
+            stop(); emit statusMessage(tr("The emulator core crashed and was stopped.")); }, Qt::QueuedConnection);
+        return;
+    }
+    publishFrame();
+    if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // worker owns the core here
+}
+
+void RetroView::publishFrame() // worker -> GUI handoff
+{
+    const unsigned w = core_.frameWidth(), h = core_.frameHeight();
+    if (!core_.frameBGRA() || !w || !h) return;
+    {
+        QMutexLocker lk(&frameMutex_);
+        frameImg_ = QImage(core_.frameBGRA(), int(w), int(h), int(w * 4), QImage::Format_RGB32).copy();
+    }
+    QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+}
+
+void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publish a snapshot for the worker
+{
+    pad_.poll();
+    if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
+    turboOn_ = turboCounter_ < turboHalfPeriod_;
+    int btn[4] = { 0, 0, 0, 0 }; int16_t ax[4][2][2] = {};
+    for (unsigned p = 0; p < Gamepad::kMaxPlayers && p < 4; ++p)
+    {
+        for (unsigned id = 0; id < Gamepad::kRetroPadButtons && id < 32; ++id)
+            if (resolveInput(p, RETRO_DEVICE_JOYPAD, 0, id)) btn[p] |= (1 << id);
+        for (unsigned idx = 0; idx < 2; ++idx)
+            for (unsigned id = 0; id < 2; ++id) ax[p][idx][id] = resolveInput(p, RETRO_DEVICE_ANALOG, idx, id);
+    }
+    QMutexLocker lk(&inputMutex_);
+    for (int p = 0; p < 4; ++p) { snapBtn_[p] = btn[p];
+        for (int i = 0; i < 2; ++i) for (int j = 0; j < 2; ++j) snapAxis_[p][i][j] = ax[p][i][j]; }
+}
+
 void RetroView::stop()
 {
     if (core_.gameLoaded()) saveSram(); // persist battery RAM before tearing the core down
     if (ach_) ach_->unloadGame();
-    if (timer_) timer_->stop();
     running_ = false;
+    stopEmu();          // stop the GUI timer or the worker thread (+ its audio); no core access afterward
     paused_ = false;
     hideMenu();
     pressedKeys_.clear();
     pad_.stopRumble();
-    stopAudio();
     core_.unload();
     update();
 }
@@ -138,6 +229,13 @@ void RetroView::stop()
 void RetroView::setPaused(bool paused)
 {
     paused_ = paused;
+    if (threaded_)
+    {
+        if (emuTimer_)
+            QMetaObject::invokeMethod(emuTimer_, [this, paused] {
+                if (paused) emuTimer_->stop(); else if (running_) emuTimer_->start(frameIntervalMs_); }, Qt::QueuedConnection);
+        return;
+    }
     if (!timer_) return;
     if (paused) timer_->stop();
     else if (running_) timer_->start(frameIntervalMs_);
@@ -234,6 +332,7 @@ void RetroView::saveSram()
 bool RetroView::saveState(QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
+    if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
     std::vector<uint8_t> data;
     if (!core_.saveState(data))
     {
@@ -254,6 +353,7 @@ bool RetroView::saveState(QString* error)
 bool RetroView::loadState(QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
+    if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
     QFile f(statePath());
     if (!f.exists()) { if (error) *error = tr("No saved state for this game yet."); return false; }
     if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn't read the save-state file."); return false; }
@@ -271,6 +371,18 @@ void RetroView::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.fillRect(rect(), Qt::black);
+
+    if (threaded_) // paint the worker's last handed-off frame (never touch the core from the GUI thread)
+    {
+        QMutexLocker lk(&frameMutex_);
+        if (frameImg_.isNull()) return;
+        const QSize t = frameImg_.size().scaled(size(), Qt::KeepAspectRatio);
+        const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        p.drawImage(dst, frameImg_);
+        return;
+    }
+
     if (!core_.hasFrame()) return;
 
     const unsigned w = core_.frameWidth(), h = core_.frameHeight();
@@ -306,6 +418,21 @@ void RetroView::keyReleaseEvent(QKeyEvent* e)
 
 int16_t RetroView::inputState(unsigned port, unsigned device, unsigned index, unsigned id)
 {
+    // Threaded mode: this runs on the worker thread, so read the snapshot the GUI publishes (pollInput),
+    // never the live pad/keyboard (owned by the GUI thread).
+    if (threaded_)
+    {
+        if (port >= 4) return 0;
+        QMutexLocker lk(&inputMutex_);
+        if (device == RETRO_DEVICE_JOYPAD) return (snapBtn_[port] >> id) & 1;
+        if (device == RETRO_DEVICE_ANALOG && index < 2 && id < 2) return snapAxis_[port][index][id];
+        return 0;
+    }
+    return resolveInput(port, device, index, id);
+}
+
+int16_t RetroView::resolveInput(unsigned port, unsigned device, unsigned index, unsigned id)
+{
     if (!inputActive_) return 0; // split screen: only the focused pane's game receives controller/keyboard
     if (port >= Gamepad::kMaxPlayers) return 0;
     if (device == RETRO_DEVICE_JOYPAD)
@@ -326,7 +453,10 @@ int16_t RetroView::inputState(unsigned port, unsigned device, unsigned index, un
 void RetroView::setVolume(qreal v) // 0.0..1.0; lets each split pane mix at its own level
 {
     volume_ = qBound(0.0, v, 1.0);
-    if (audioSink_) audioSink_->setVolume(volume_);
+    if (threaded_ && emuTimer_) // the sink lives on the worker thread - apply there
+        QMetaObject::invokeMethod(emuTimer_, [this] { if (audioSink_) audioSink_->setVolume(volume_); }, Qt::QueuedConnection);
+    else if (audioSink_)
+        audioSink_->setVolume(volume_);
 }
 
 void RetroView::setInputActive(bool active)

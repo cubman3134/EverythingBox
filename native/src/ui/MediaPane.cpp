@@ -53,6 +53,7 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
     }
     player_ = new MpvWidget(stack_);
     retro_  = new RetroView(stack_);
+    retro_->setThreaded(true); // a split pane: emulate on a worker thread so the other pane's video can't throttle it
     book_   = new EbookView(stack_);
     pdf_    = new PdfView(stack_);
     comic_  = new ComicView(stack_);
