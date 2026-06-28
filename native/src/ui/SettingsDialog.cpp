@@ -42,6 +42,7 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 
     for (const auto& sys : SystemCatalog::systems())
     {
+        if (!sys.externalEmulator.isEmpty()) continue; // standalone emulators have no libretro core to pick
         auto* combo = new QComboBox(this);
         for (const QString& core : sys.cores)
         {
@@ -92,8 +93,9 @@ SettingsDialog::SettingsDialog(QWidget* parent) : QDialog(parent)
 void SettingsDialog::save()
 {
     for (const auto& sys : SystemCatalog::systems())
-        if (QComboBox* c = combos_.value(sys.id))
-            Settings::setCoreFor(sys.id, c->currentData().toString());
+        if (sys.externalEmulator.isEmpty())
+            if (QComboBox* c = combos_.value(sys.id))
+                Settings::setCoreFor(sys.id, c->currentData().toString());
     accept();
 }
 

@@ -14,6 +14,8 @@
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
+#include "../core/EmulatorRegistry.h"
+#include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
@@ -898,6 +900,13 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         return;
     }
 
+    // Standalone-emulator systems (GameCube/Wii → Dolphin) launch an external process instead of a core.
+    if (!sys->externalEmulator.isEmpty())
+    {
+        launchExternalGame(sys, rom, recentTitle, thumb, key);
+        return;
+    }
+
     QString core = Settings::coreFor(sys->id);
     if (core.isEmpty())
         core = sys->cores.value(0); // catalog default
@@ -945,6 +954,158 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         mwLog(QStringLiteral("game: openGame failed: %1").arg(err));
         statusBar()->showMessage(tr("Can't run game: %1").arg(err), 6000);
     }
+}
+
+// ---- External (standalone) emulators: the RetroBat / ES-DE launch-and-monitor model -----------------
+
+void MainWindow::ensureEmu()
+{
+    if (emu_) return;
+    emu_ = new EmulatorManager(this);
+
+    connect(emu_, &EmulatorManager::status, this, [this](const QString& t, int pct) {
+        const QString line = pct >= 0 ? tr("%1  %2%").arg(t).arg(pct) : t;
+        statusBar()->showMessage(line);
+        if (emuPage_ && stack_->currentWidget() == emuPage_)
+        {
+            emuLabel_->setText(line);
+            emuStopBtn_->setVisible(false);
+        }
+    });
+    connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
+        ensureEmuPage();
+        emuLabel_->setText(tr("Playing in %1.\n\nClose the %1 window to return to My Media Vault.").arg(name));
+        emuStopBtn_->setVisible(true);
+        if (!pendingEmuRom_.isEmpty()) // record now that it actually started
+            RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
+                               pendingEmuThumb_, pendingEmuKey_ });
+    });
+    connect(emu_, &EmulatorManager::finished, this, [this](int code) {
+        mwLog(QStringLiteral("emu: process exited (code %1)").arg(code));
+        if (stack_->currentWidget() == emuPage_) openHome();
+    });
+    connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {
+        statusBar()->showMessage(tr("%1 is installed.").arg(name), 5000);
+    });
+    connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
+        mwLog(QStringLiteral("emu: failed: %1").arg(msg));
+        statusBar()->showMessage(msg, 9000);
+        if (stack_->currentWidget() == emuPage_) openHome();
+    });
+}
+
+void MainWindow::ensureEmuPage()
+{
+    if (emuPage_) return;
+    emuPage_ = new QWidget(this);
+    emuPage_->setStyleSheet(QStringLiteral("background:#0e1014;"));
+    auto* v = new QVBoxLayout(emuPage_);
+    v->addStretch(1);
+    emuLabel_ = new QLabel(tr("Starting…"), emuPage_);
+    emuLabel_->setAlignment(Qt::AlignCenter);
+    emuLabel_->setWordWrap(true);
+    emuLabel_->setStyleSheet(QStringLiteral("color:#e8e8e8;font-size:20px;"));
+    v->addWidget(emuLabel_);
+    v->addSpacing(18);
+    emuStopBtn_ = new QPushButton(tr("Force-close emulator"), emuPage_);
+    emuStopBtn_->setFixedWidth(240);
+    emuStopBtn_->setVisible(false);
+    connect(emuStopBtn_, &QPushButton::clicked, this, [this] { if (emu_) emu_->terminateGame(); });
+    v->addWidget(emuStopBtn_, 0, Qt::AlignHCenter);
+    v->addStretch(1);
+    stack_->addWidget(emuPage_);
+}
+
+void MainWindow::launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
+                                    const QString& thumb, const QString& key)
+{
+    const ExternalEmulator* em = EmulatorRegistry::byId(sys->externalEmulator);
+    if (!em)
+    {
+        mwLog(QStringLiteral("game: external emulator '%1' not registered").arg(sys->externalEmulator));
+        statusBar()->showMessage(tr("No emulator is configured for %1.").arg(sys->name), 6000);
+        return;
+    }
+    if (splitTarget_) // a standalone emulator owns its own window; it can't embed in a split pane
+    {
+        statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
+        finishSplitOpen();
+    }
+    ensureEmu();
+    if (emu_->busy())
+    {
+        statusBar()->showMessage(tr("An emulator is already running."), 4000);
+        return;
+    }
+    // Hand the screen + audio to the external emulator: stop our own playback first.
+    player_->stop();
+    retro_->stop();
+    book_->persist(); pdf_->persist(); comic_->persist();
+    clearAudioQueue();
+
+    pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key;
+    ensureEmuPage();
+    emuLabel_->setText(EmulatorManager::isInstalled(*em)
+                           ? tr("Starting %1…").arg(em->displayName)
+                           : tr("%1 isn't installed yet — downloading it…").arg(em->displayName));
+    emuStopBtn_->setVisible(false);
+    stack_->setCurrentWidget(emuPage_);
+    mwLog(QStringLiteral("game: external -> %1 \"%2\"").arg(em->displayName, QFileInfo(rom).fileName()));
+    emu_->play(*em, rom);
+}
+
+void MainWindow::openEmulatorManager()
+{
+    showPanel(tr("Emulators"), [this](QVBoxLayout* v) {
+        auto* intro = new QLabel(tr("Standalone emulators are kept in their own folder and launched to play "
+            "their systems (Dolphin runs GameCube/Wii). They open in their own window — close the emulator "
+            "to come back here."));
+        intro->setWordWrap(true);
+        intro->setStyleSheet(QStringLiteral("color:#bbb;font-size:13px;"));
+        v->addWidget(intro);
+
+        // The emulators folder (RetroBat/ES-DE "emulators/<name>" layout); repoint it at an existing copy.
+        auto* folderRow = new QHBoxLayout();
+        folderRow->addWidget(new QLabel(tr("Folder:")));
+        auto* folderVal = new QLabel(EmulatorManager::emulatorsRoot());
+        folderVal->setStyleSheet(QStringLiteral("color:#9cf;"));
+        folderVal->setWordWrap(true);
+        folderRow->addWidget(folderVal, 1);
+        auto* change = new QPushButton(tr("Change…"));
+        connect(change, &QPushButton::clicked, this, [this] {
+            const QString d = QFileDialog::getExistingDirectory(this, tr("Emulators folder"),
+                                                                EmulatorManager::emulatorsRoot());
+            if (!d.isEmpty()) { EmulatorManager::setEmulatorsRoot(d); openEmulatorManager(); }
+        });
+        folderRow->addWidget(change);
+        v->addLayout(folderRow);
+
+        v->addSpacing(10);
+        for (const ExternalEmulator& em : EmulatorRegistry::all())
+        {
+            auto* name = new QLabel(QStringLiteral("<b>%1</b>").arg(em.displayName));
+            name->setStyleSheet(QStringLiteral("font-size:16px;"));
+            v->addWidget(name);
+
+            const QString bin = EmulatorManager::resolveBinary(em);
+            auto* st = new QLabel(bin.isEmpty() ? tr("Not installed.") : tr("Installed: %1").arg(bin));
+            st->setStyleSheet(bin.isEmpty() ? QStringLiteral("color:#e0a030;") : QStringLiteral("color:#7fc77f;"));
+            st->setWordWrap(true);
+            v->addWidget(st);
+
+            auto* dl = new QPushButton(bin.isEmpty() ? tr("Download %1").arg(em.displayName)
+                                                     : tr("Re-download / Update %1").arg(em.displayName));
+            const ExternalEmulator emCopy = em;
+            connect(dl, &QPushButton::clicked, this, [this, emCopy] {
+                ensureEmu();
+                if (emu_->busy()) { statusBar()->showMessage(tr("An emulator operation is already running."), 4000); return; }
+                statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
+                emu_->install(emCopy);
+            });
+            v->addWidget(dl);
+            v->addSpacing(8);
+        }
+    }, [this] { openSettingsHub(); });
 }
 
 // Inline form (no popup) to paste a link and stream it. libmpv handles http(s) and most streaming
@@ -1760,6 +1921,7 @@ void MainWindow::openSettingsHub()
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
+        add(tr("Emulators"),          [this] { openEmulatorManager(); });   // standalone emulators (Dolphin…)
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });

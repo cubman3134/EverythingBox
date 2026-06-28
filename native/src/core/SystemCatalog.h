@@ -11,6 +11,9 @@ struct GameSystem
     QString name;           // display name
     QStringList extensions; // lowercase, no leading dot
     QStringList cores;      // candidate libretro core base names; [0] is the default
+    // Non-empty => this system runs in a standalone emulator launched as a child process (see
+    // EmulatorRegistry), not an in-process libretro core. The value is the ExternalEmulator id.
+    QString externalEmulator;
 };
 
 namespace SystemCatalog
@@ -40,6 +43,12 @@ namespace SystemCatalog
                          { "mednafen_wswan" } },
             { "a2600",   "Atari 2600",                        { "a26" },
                          { "stella" } },
+            // Standalone (not a libretro core): GameCube/Wii are GPU-rendered, so they run in Dolphin,
+            // launched as a child process. .iso is unclaimed by any system above; if a PS2/PSP system is
+            // added later (also .iso) these will need ROM-folder disambiguation, ES-DE style.
+            { "gc",      "GameCube / Wii (Dolphin)",
+                         { "rvz", "iso", "gcm", "gcz", "ciso", "wia", "wbfs", "wad" },
+                         {}, "dolphin" },
         };
         return list;
     }

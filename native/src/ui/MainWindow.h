@@ -27,6 +27,9 @@ class QTimer;
 class QScrollArea;
 class QVBoxLayout;
 class QNetworkAccessManager;
+class QLabel;
+class EmulatorManager;
+struct GameSystem;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
 // with Open Video / Open Game and a transport bar. The shell the rest of the hub grows from.
@@ -98,6 +101,13 @@ private:
     // a hashed file name, which would otherwise be displayed); key is the stable id for de-dup.
     void openGamePath(const QString& path, const QString& title = QString(),
                       const QString& thumb = QString(), const QString& key = QString());
+    // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
+    // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
+    void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
+                            const QString& thumb, const QString& key);
+    void ensureEmu();        // lazily create EmulatorManager + wire its signals
+    void ensureEmuPage();    // lazily build the "playing in <emulator>" wait page
+    void openEmulatorManager(); // Settings > Emulators: folder + per-emulator install status
     void openStreamPrompt();                    // inline form to paste a stream/URL link
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
                        const QString& title = QString()); // route an http(s) link (or .m3u/.m3u8) to libmpv
@@ -153,6 +163,13 @@ private:
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
+
+    // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
+    EmulatorManager* emu_ = nullptr;
+    QWidget* emuPage_ = nullptr;
+    QLabel* emuLabel_ = nullptr;
+    QPushButton* emuStopBtn_ = nullptr;
+    QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_; // Recent entry, added on launch
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player

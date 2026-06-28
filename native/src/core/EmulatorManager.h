@@ -1,0 +1,54 @@
+// Installs (download + extract) and runs standalone emulators, monitoring the child process until it
+// exits - the RetroBat / ES-DE launcher model. One instance is reused; only one external game runs at a
+// time. Auto-install is currently implemented for Windows (fetch the emulator's official archive and
+// extract it with the bundled bsdtar); other OSes report a manual-install message.
+#pragma once
+#include <QObject>
+#include <QString>
+#include "EmulatorRegistry.h"
+
+class QNetworkAccessManager;
+class QProcess;
+
+class EmulatorManager : public QObject
+{
+    Q_OBJECT
+public:
+    explicit EmulatorManager(QObject* parent = nullptr);
+
+    // Where emulators live, "<root>/<id>/". Configurable so it can point at an existing RetroBat/ES-DE
+    // "emulators" folder; defaults to <app>/emulators.
+    static QString emulatorsRoot();
+    static void setEmulatorsRoot(const QString& dir);
+    static QString installDir(const ExternalEmulator& em);
+    static QString resolveBinary(const ExternalEmulator& em); // existing binary path, or "" if not installed
+    static bool isInstalled(const ExternalEmulator& em) { return !resolveBinary(em).isEmpty(); }
+
+    void play(const ExternalEmulator& em, const QString& rom); // ensure installed, then boot + monitor
+    void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
+    void terminateGame();                                      // force-close the running emulator
+    bool busy() const { return busy_; }
+
+signals:
+    void status(const QString& text, int pct);  // pct < 0 => indeterminate (download/extract progress)
+    void launched(const QString& displayName);  // the emulator process started
+    void finished(int exitCode);                // the emulator process exited (return to the app)
+    void installed(const QString& displayName); // install-only completed
+    void failed(const QString& message);
+
+private:
+    void startInstall();
+    void fetchArtifactList();
+    void downloadArchive(const QString& url);
+    void extractArchive();
+    void launch(const QString& binary);
+    QString platformArtifact() const;
+
+    QNetworkAccessManager* nam_ = nullptr;
+    QProcess* game_ = nullptr;
+    ExternalEmulator em_;
+    QString rom_;
+    QString archivePath_;
+    bool launchAfterInstall_ = false;
+    bool busy_ = false;
+};
