@@ -691,14 +691,16 @@ int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, con
     return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page, filters)));
 }
 
-int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page)
+int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page,
+                                const QMap<QString, QString>& filters)
 {
     if (!src) return -1;
     if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteDetail(src, item, page);
-    const QString arg = QString::fromUtf8(QJsonDocument(QJsonObject{
-        { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
-        { QStringLiteral("page"), page } }).toJson(QJsonDocument::Compact));
-    return dispatch(buildRequest(src, QStringLiteral("getDetail"), arg));
+    QJsonObject a{ { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type },
+                   { QStringLiteral("page"), page } };
+    for (auto it = filters.constBegin(); it != filters.constEnd(); ++it) // genre/sort for a container's children
+        if (!it.value().isEmpty()) a.insert(it.key(), it.value());
+    return dispatch(buildRequest(src, QStringLiteral("getDetail"), QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact))));
 }
 
 int AddonManager::requestSearch(LoadedAddon* src, const QString& query)

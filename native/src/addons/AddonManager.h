@@ -80,7 +80,8 @@ public:
     // filters maps a CatalogFilter key (genre/year/rating/sort) to the selected value (empty = unfiltered).
     int requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                        const QMap<QString, QString>& filters = {});
-    int requestDetail(LoadedAddon* src, const MediaItem& item, int page);
+    int requestDetail(LoadedAddon* src, const MediaItem& item, int page,
+                      const QMap<QString, QString>& filters = {}); // filters apply to a container's children (e.g. a console's games)
     int requestSearch(LoadedAddon* src, const QString& query);
     int requestMeta(LoadedAddon* src, const MediaItem& item); // metaReady(reqId, MediaDetail) fires later
 

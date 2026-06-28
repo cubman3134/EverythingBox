@@ -1991,13 +1991,13 @@ void HomeView::loadTop()
     pendingRestoreRow_ = -1; // fresh view: any in-progress "page toward the drilled item" restore is moot
     const Level& top = stack_.last();
 
-    // Filters belong to catalog screens only — hide the bar whenever we're on an item's detail page.
-    if (top.detail && filterBar_) { filterBar_->setVisible(false); filterSig_.clear(); }
-
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
 
     const bool container = top.detail && top.item.expandable;       // has children to drill into
+    // A leaf detail page (a movie/episode info page) has no child list to filter -> hide the bar. A container
+    // detail (a console's games, a series' seasons) can advertise filters via its children response.
+    if (top.detail && !container && filterBar_) { filterBar_->setVisible(false); filterSig_.clear(); }
     const bool wantMeta  = top.detail && top.item.type != QStringLiteral("platform"); // console is not "media"
 
     if (wantMeta) requestMeta(top.item);
@@ -2344,7 +2344,7 @@ void HomeView::issueRequest(bool append)
     loading_ = true;
     status_->setText(append ? tr("Loading more…") : tr("Loading…"));
 
-    pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page)
+    pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters)
                                : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
 }
 
@@ -2371,8 +2371,9 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
     currentPage_ = pendingPage_;
     hasMore_ = cat.hasMore;
     populate(cat, pendingAppend_);
-    // Sync the filter dropdowns to this catalog (only on a fresh load, and only for a catalog level).
-    if (!pendingAppend_ && !stack_.isEmpty() && !stack_.last().detail) rebuildFilterBar(cat.filters);
+    // Sync the filter dropdowns to whatever this response advertises (a catalog, or a container's children
+    // like a console's games). Only on a fresh load - paging keeps the current filters.
+    if (!pendingAppend_) rebuildFilterBar(cat.filters);
 }
 
 void HomeView::populate(const MediaCatalog& cat, bool append)

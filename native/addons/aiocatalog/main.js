@@ -315,28 +315,48 @@ function igdbConsoles() {
     return JSON.stringify({ title: "Games by Console", items: items });
 }
 
+// IGDB genre id -> name (stable integer ids).
+var IGDB_GENRES = [["2","Point & Click"],["4","Fighting"],["5","Shooter"],["7","Music"],["8","Platform"],
+    ["9","Puzzle"],["10","Racing"],["11","RTS"],["12","RPG"],["13","Simulator"],["14","Sport"],["15","Strategy"],
+    ["16","Turn-based"],["24","Tactical"],["25","Hack & Slash"],["31","Adventure"],["32","Indie"],["33","Arcade"],
+    ["34","Visual Novel"],["35","Card & Board"]];
+function gameFilters() {
+    return [
+        { key: "genre", label: "Genre", options: optList(IGDB_GENRES, "Any genre") },
+        { key: "sort", label: "Sort", options: [
+            { value: "", label: "Top rated" }, { value: "new", label: "Newest" }, { value: "name", label: "Name" }] }
+    ];
+}
+function igdbSort(f) {
+    return f.sort === "new" ? "first_release_date desc" : f.sort === "name" ? "name asc" : "rating desc";
+}
+
 // Games catalog: browse-by-console when there's no query; search across all platforms when there is.
-function gamesCatalog(query, page) {
+function gamesCatalog(query, page, f) {
+    f = f || {};
     if (query) {
         page = page1(page);
         if (!igdbCreds()) return info("Games", "Set your IGDB (Twitch) client id + secret in Configure… to search games.");
-        var r = igdbQuery('search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date; ' +
-                          'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
+        var body = 'search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date; ';
+        if (f.genre) body += 'where genres = (' + parseInt(f.genre, 10) + '); ';
+        body += 'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';';
+        var r = igdbQuery(body);
         if (!r) return info("Games", "Could not authenticate with IGDB (check client id/secret).");
-        return result("Games: " + query, igdbToItems(r), r.length === PAGE);
+        return resultF("Games: " + query, igdbToItems(r), r.length === PAGE, gameFilters());
     }
-    return igdbConsoles(); // static list, no paging
+    return igdbConsoles(); // static list, no paging (filters appear once you drill into a console)
 }
 
-function igdbPlatformGames(platformId, page) {
-    page = page1(page);
+function igdbPlatformGames(platformId, page, f) {
+    page = page1(page); f = f || {};
     if (!igdbCreds()) return info("Games", "Set your IGDB (Twitch) client id + secret in Configure… to load games.");
-    var r = igdbQuery('fields name,cover.image_id,first_release_date,rating; ' +
-                      'where platforms = (' + platformId + ') & cover != null; sort rating desc; ' +
+    var where = "where platforms = (" + platformId + ") & cover != null";
+    if (f.genre) where += " & genres = (" + parseInt(f.genre, 10) + ")";
+    var r = igdbQuery('fields name,cover.image_id,first_release_date,rating; ' + where + '; sort ' + igdbSort(f) + '; ' +
                       'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
     if (!r) return info("Games", "Could not load games for this console.");
-    if (!r.length && page === 1) return info("Games", "No games found for this console.");
-    return result("Games", igdbToItems(r), r.length === PAGE);
+    if (!r.length && page === 1) return resultF("Games", [{ id: "_info", title: "No games match these filters.", type: "info" }], false, gameFilters());
+    return resultF("Games", igdbToItems(r), r.length === PAGE, gameFilters());
 }
 
 function igdbGameMeta(id) {
@@ -682,11 +702,32 @@ function mdxCover(mangaId, rels) {
     return "";
 }
 
-function mangaCatalog(query, page) {
-    page = page1(page);
+// MangaDex genre tag UUIDs (stable). Used as includedTags[] to filter the catalog.
+var MDX_GENRES = [["391b0423-d847-456f-aff0-8b0cfc03066b","Action"],["87cc87cd-a395-47af-b27a-93258283bbc6","Adventure"],
+    ["4d32cc48-9f00-4cca-9b5a-a839f0764984","Comedy"],["b9af3a63-f058-46de-a9a0-e0c13906197a","Drama"],
+    ["cdc58593-87dd-415e-bbc0-2ec27bf404cc","Fantasy"],["cdad7e68-1419-41dd-bdce-27753074a640","Horror"],
+    ["ee968100-4191-4968-93d3-f82d72be7e46","Mystery"],["3b60b75c-a2d7-4860-ab56-05f391bb889c","Psychological"],
+    ["423e2eae-a7a2-4a8b-ac03-a8351462d71d","Romance"],["256c8bd9-4904-4360-bf4f-508a76d67183","Sci-Fi"],
+    ["e5301a23-ebd9-49dd-a0cb-2add944c7fe9","Slice of Life"],["69964a64-2f90-4d33-beeb-f3ed2875eb4c","Sports"],
+    ["eabc5b4c-6aff-42f3-b657-3e90cbd00b75","Supernatural"]];
+function mangaFilters() {
+    return [
+        { key: "genre", label: "Genre", options: optList(MDX_GENRES, "Any genre") },
+        { key: "sort", label: "Sort", options: [
+            { value: "", label: "Popular" }, { value: "top", label: "Top rated" },
+            { value: "updated", label: "Recently updated" }, { value: "new", label: "Newest" }] }
+    ];
+}
+
+function mangaCatalog(query, page, f) {
+    page = page1(page); f = f || {};
     var offset = (page - 1) * PAGE;
     var url = MDX + "/manga?limit=" + PAGE + "&offset=" + offset + "&includes[]=cover_art" + mdxRatings();
-    url += query ? ("&title=" + enc(query)) : "&order[followedCount]=desc&hasAvailableChapters=true";
+    if (query)   url += "&title=" + enc(query);
+    if (f.genre) url += "&includedTags[]=" + enc(f.genre);
+    var order = f.sort === "top" ? "rating" : f.sort === "new" ? "year"
+              : f.sort === "updated" ? "latestUploadedChapter" : "followedCount";
+    url += "&order[" + order + "]=desc&hasAvailableChapters=true";
     var r = J(httpGet(url));
     if (!r || !r.data) return info("Manga", "Could not reach MangaDex.");
     var items = [];
@@ -699,7 +740,7 @@ function mangaCatalog(query, page) {
             expandable: true, url: ""
         });
     }
-    return result("Manga", items, (offset + PAGE) < (r.total || 0));
+    return resultF("Manga", items, (offset + PAGE) < (r.total || 0), mangaFilters());
 }
 
 function numOr(v, dflt) { var n = parseFloat(v); return isNaN(n) ? dflt : n; }
@@ -809,23 +850,24 @@ function getCatalog(argJson) {
     var f = { genre: a.genre || "", year: a.year || "", rating: a.rating || "", sort: a.sort || "" };
     if (cat === "movies") return tmdbList("movie", q, p, f);
     if (cat === "tv")     return tmdbList("tv", q, p, f);
-    if (cat === "games")  return gamesCatalog(q, p);
+    if (cat === "games")  return gamesCatalog(q, p, f);
     if (cat === "music")  return mbAlbums(q, p);
     if (cat === "books")  return booksCatalog(q, p);
     if (cat === "audiobooks") return booksCatalog(q, p, "audiobook"); // same data, audio-typed
     if (cat === "comics") return comicsCatalog(q, p);
-    if (cat === "manga")  return mangaCatalog(q, p);
+    if (cat === "manga")  return mangaCatalog(q, p, f);
     return info("AIO Catalog", "Pick a media type.");
 }
 
 function getDetail(argJson) {
     var a = J(argJson) || {};
     var p = a.page || 1;
+    var f = { genre: a.genre || "", sort: a.sort || "" };
     var parts = (a.id || "").split(":");
     if (a.type === "series")   return tmdbSeasons(parts[2]);              // tmdb:tv:{id} (all seasons)
     if (a.type === "season")   return tmdbEpisodes(parts[2], parts[3]);   // tmdb:season:{show}:{n} (all episodes)
     if (a.type === "album")    return mbTracks(parts[2]);                 // mb:rg:{id} (all tracks)
-    if (a.type === "platform") return igdbPlatformGames(parts[1], p);     // igdbplatform:{id} (paged)
+    if (a.type === "platform") return igdbPlatformGames(parts[1], p, f);  // igdbplatform:{id} (paged, filterable)
     if (a.type === "comic")    return cvIssues(parts[2], p);              // comicvine:volume:{id} (issues, paged)
     if (a.type === "manga")    return mangaChapters(parts[1], p);         // mangadex:{id} (chapters, paged)
     return JSON.stringify({ title: "", items: [] });
