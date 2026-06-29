@@ -52,6 +52,9 @@ namespace SystemCatalog
             { "3ds",     "Nintendo 3DS (Azahar)",
                          { "3ds", "cci", "cxi", "cia", "3dsx" },
                          {}, "azahar" },
+            { "nds",     "Nintendo DS (melonDS)",
+                         { "nds", "dsi", "srl" },
+                         {}, "melonds" },
         };
         return list;
     }

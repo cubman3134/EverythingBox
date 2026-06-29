@@ -5,6 +5,8 @@
 #pragma once
 #include <QObject>
 #include <QString>
+#include <QList>
+#include <QPair>
 #include "EmulatorRegistry.h"
 
 class QNetworkAccessManager;
@@ -44,7 +46,8 @@ private:
     void fetchArtifactList();
     void downloadArchive(const QString& url);
     void installDownloaded();   // dispatch the downloaded artifact by format (per OS)
-    void extractArchive();      // .zip / .7z  (bsdtar)
+    void extractArchive();      // .zip / .7z  (per-OS extractor candidates)
+    void tryExtract(const QList<QPair<QString, QStringList>>& cmds, int index); // run candidates until one works
     void installDmg();          // macOS .dmg  (hdiutil mount -> copy .app)
     void installAppImage();     // Linux .AppImage (move + chmod +x)
     void installFlatpak();      // Linux .flatpak (flatpak install --user)

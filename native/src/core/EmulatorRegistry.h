@@ -76,6 +76,23 @@ namespace EmulatorRegistry
                 QStringLiteral("azahar.appimage"), // -> azahar.AppImage (the plain, non-wayland desktop build)
                 QString(),                         // not a Flatpak
             },
+            {
+                // Nintendo DS. melonDS ships a .zip for every OS (Win: melonDS.exe, mac: melonDS.app,
+                // Linux: an AppImage inside the zip). CLI: boots a positional ROM, -f = full screen.
+                QStringLiteral("melonds"), QStringLiteral("melonDS"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("-f"),   // fullscreenArgs
+                QString(),              // windowedArgs (default is windowed)
+                QStringLiteral("https://melonds.kuribo64.net/"),
+                { QStringLiteral("melonDS.exe") },
+                { QStringLiteral("melonDS.app/Contents/MacOS/melonDS"), QStringLiteral("melonDS.app") },
+                { QStringLiteral("melonDS-x86_64.AppImage"), QStringLiteral("melonDS") },
+                QStringLiteral("https://api.github.com/repos/melonDS-emu/melonDS/releases/latest"),
+                QStringLiteral("windows-x86_64"),  // -> melonDS-<ver>-windows-x86_64.zip
+                QStringLiteral("macos-universal"), // -> melonDS-<ver>-macOS-universal.zip
+                QStringLiteral("appimage-x86_64"), // -> melonDS-<ver>-appimage-x86_64.zip (portable AppImage)
+                QString(),                         // not a Flatpak
+            },
         };
         return list;
     }

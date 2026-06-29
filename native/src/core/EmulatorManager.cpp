@@ -257,34 +257,52 @@ void EmulatorManager::installDownloaded()
 void EmulatorManager::extractArchive()
 {
     emit status(tr("Extracting %1…").arg(em_.displayName), -1);
-    // bsdtar (libarchive) reads .zip and .7z. Windows ships it at System32\tar.exe (the GNU tar that may be
-    // first on PATH can't); macOS's /usr/bin/tar is bsdtar (handles .zip - the format our macOS artifacts use).
+    const QString a = QDir::toNativeSeparators(archivePath_);
+    const QString dir = QDir::toNativeSeparators(installDir(em_));
+    const bool isZip = archivePath_.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive);
+
+    // bsdtar (libarchive) reads .zip and .7z. Windows ships it at System32\tar.exe and macOS at /usr/bin/tar;
+    // Linux's GNU tar can't read .zip/.7z, so fall back to bsdtar/unzip/7z there. Try each until one works.
+    QList<QPair<QString, QStringList>> cmds;
 #if defined(Q_OS_WIN)
-    const QString tar = QStringLiteral("C:/Windows/System32/tar.exe");
+    cmds.append({ QStringLiteral("C:/Windows/System32/tar.exe"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
+#elif defined(Q_OS_MACOS)
+    cmds.append({ QStringLiteral("tar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
 #else
-    const QString tar = QStringLiteral("tar");
+    cmds.append({ QStringLiteral("bsdtar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
+    if (isZip) cmds.append({ QStringLiteral("unzip"), { QStringLiteral("-o"), a, QStringLiteral("-d"), dir } });
+    else       cmds.append({ QStringLiteral("7z"), { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + dir, a } });
+    cmds.append({ QStringLiteral("tar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } }); // .tar.* last resort
 #endif
+    tryExtract(cmds, 0);
+}
+
+// Run extractor candidates in order; the first that starts and exits 0 wins. (Lets Linux fall back from
+// bsdtar to unzip/7z without us having to probe which tools are installed.)
+void EmulatorManager::tryExtract(const QList<QPair<QString, QStringList>>& cmds, int index)
+{
+    if (index >= cmds.size())
+    {
+        QFile::remove(archivePath_); archivePath_.clear(); busy_ = false;
+        emit failed(tr("Couldn't extract %1. You can install it manually from %2 into %3.")
+                        .arg(em_.displayName, em_.homepage, installDir(em_)));
+        return;
+    }
     QProcess* p = new QProcess(this);
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, p](int code, QProcess::ExitStatus) {
-        p->deleteLater();
-        QFile::remove(archivePath_); archivePath_.clear();
-        if (code != 0)
+            [this, p, cmds, index](int code, QProcess::ExitStatus st) {
+        if (st == QProcess::NormalExit && code == 0)
         {
-            busy_ = false;
-            emit failed(tr("Couldn't extract %1. You can install it manually from %2 into %3.")
-                            .arg(em_.displayName, em_.homepage, installDir(em_)));
-            return;
+            p->deleteLater();
+            QFile::remove(archivePath_); archivePath_.clear();
+            finishInstall();
         }
-        finishInstall();
+        else { p->deleteLater(); tryExtract(cmds, index + 1); }   // this tool failed; try the next
     });
-    p->start(tar, { QStringLiteral("-xf"), QDir::toNativeSeparators(archivePath_),
-                    QStringLiteral("-C"), QDir::toNativeSeparators(installDir(em_)) });
-    if (!p->waitForStarted(5000))
-    {
-        p->deleteLater(); QFile::remove(archivePath_); busy_ = false;
-        emit failed(tr("Couldn't run the archive extractor."));
-    }
+    connect(p, &QProcess::errorOccurred, this, [this, p, cmds, index](QProcess::ProcessError e) {
+        if (e == QProcess::FailedToStart) { p->deleteLater(); tryExtract(cmds, index + 1); } // tool not installed
+    });
+    p->start(cmds[index].first, cmds[index].second);
 }
 
 // macOS: mount the .dmg, copy the .app bundle into the install dir, detach.
@@ -398,6 +416,16 @@ void EmulatorManager::launch(const QString& binary)
         program = QStringLiteral("flatpak");
         args = QStringList{ QStringLiteral("run"), binary.mid(fpPrefix.size()) } + args;
     }
+#if !defined(Q_OS_WIN)
+    else
+    {
+        // Ensure the extracted binary / AppImage is executable (zip extraction may not preserve the bit).
+        const QFileInfo fi(binary);
+        if (fi.exists())
+            QFile::setPermissions(binary, fi.permissions() | QFileDevice::ExeOwner
+                                          | QFileDevice::ExeGroup | QFileDevice::ExeOther);
+    }
+#endif
 
     game_ = new QProcess(this);
     if (!isFlatpak) game_->setWorkingDirectory(QFileInfo(binary).absolutePath());
