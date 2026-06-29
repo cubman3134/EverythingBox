@@ -456,7 +456,10 @@ void EmulatorManager::launch(const QString& binary)
     QStringList args;
     const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts); // empties (e.g. blank {fs}) dropped
     for (QString a : parts)
-        args << (a.contains(QStringLiteral("{rom}")) ? a.replace(QStringLiteral("{rom}"), rom_) : a);
+    {
+        if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), rom_);
+        if (!a.isEmpty()) args << a; // drop a blank {rom} (a no-game launch, e.g. opening an emulator's own UI)
+    }
 
     // A Flatpak "binary" is the sentinel "flatpak-run:<appId>": run via `flatpak run <appId> <emu args>`.
     QString program = binary;

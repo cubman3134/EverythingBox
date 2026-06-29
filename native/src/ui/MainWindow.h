@@ -30,6 +30,7 @@ class QNetworkAccessManager;
 class QLabel;
 class EmulatorManager;
 struct GameSystem;
+struct ExternalEmulator;
 
 // Minimal media-hub window: a stacked surface holding the libmpv video view and the libretro game view,
 // with Open Video / Open Game and a transport bar. The shell the rest of the hub grows from.
@@ -106,6 +107,10 @@ private:
     // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
                             const QString& thumb, const QString& key);
+    // Run a standalone emulator: stop our playback, show the wait page, minimise, and launch (auto-installing
+    // if needed). rom empty => open the emulator's own UI (e.g. TeknoParrot, or another emulator for setup).
+    void runEmulator(const ExternalEmulator& em, const QString& rom = QString(), const QString& title = QString(),
+                     const QString& thumb = QString(), const QString& key = QString());
     void ensureEmu();        // lazily create EmulatorManager + wire its signals
     void ensureEmuPage();    // lazily build the "playing in <emulator>" wait page
     void openEmulatorManager(); // Settings > Emulators: folder + per-emulator install status

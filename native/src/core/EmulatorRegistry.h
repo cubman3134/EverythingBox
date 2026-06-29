@@ -301,6 +301,24 @@ namespace EmulatorRegistry
                 QStringLiteral("linux64"),   // -> builds/BigPEmu_Linux64_v<ver>.tar.gz (not LinuxARM64)
                 QString(),                   // not a Flatpak
             },
+            {
+                // TeknoParrot - a Windows-only loader for modern PC-based arcade games. It is a launcher UI
+                // (games are added/configured inside it), not a per-ROM emulator, so it has no ROM template
+                // or SystemCatalog system: install and open it from Settings > Emulators. No macOS/Linux build.
+                QStringLiteral("teknoparrot"), QStringLiteral("TeknoParrot"),
+                QString(),   // argsTemplate: launched with no game (opens its own UI)
+                QString(),   // fullscreenArgs
+                QString(),   // windowedArgs
+                QStringLiteral("https://teknoparrot.com/"),
+                { QStringLiteral("TeknoParrotUi.exe") },
+                { },         // no macOS build
+                { },         // no Linux build
+                QStringLiteral("https://api.github.com/repos/teknogods/TeknoParrotUI/releases/latest"),
+                QStringLiteral("teknoparrot"), // -> TeknoParrotUi.zip
+                QString(),                     // macArtifact: none
+                QString(),                     // linuxArtifact: none
+                QString(),                     // not a Flatpak
+            },
         };
         return list;
     }

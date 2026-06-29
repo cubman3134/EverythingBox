@@ -1056,6 +1056,12 @@ void MainWindow::launchExternalGame(const GameSystem* sys, const QString& rom, c
         statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
         finishSplitOpen();
     }
+    runEmulator(*em, rom, title, thumb, key);
+}
+
+void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, const QString& title,
+                             const QString& thumb, const QString& key)
+{
     ensureEmu();
     if (emu_->busy())
     {
@@ -1070,13 +1076,14 @@ void MainWindow::launchExternalGame(const GameSystem* sys, const QString& rom, c
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key;
     ensureEmuPage();
-    emuLabel_->setText(EmulatorManager::isInstalled(*em)
-                           ? tr("Starting %1…").arg(em->displayName)
-                           : tr("%1 isn't installed yet — downloading it…").arg(em->displayName));
+    emuLabel_->setText(EmulatorManager::isInstalled(em)
+                           ? tr("Starting %1…").arg(em.displayName)
+                           : tr("%1 isn't installed yet — downloading it…").arg(em.displayName));
     emuStopBtn_->setVisible(false);
     stack_->setCurrentWidget(emuPage_);
-    mwLog(QStringLiteral("game: external -> %1 \"%2\"").arg(em->displayName, QFileInfo(rom).fileName()));
-    emu_->play(*em, rom);
+    mwLog(QStringLiteral("emu: run %1 \"%2\"")
+              .arg(em.displayName, rom.isEmpty() ? QStringLiteral("(no game)") : QFileInfo(rom).fileName()));
+    emu_->play(em, rom);
 }
 
 void MainWindow::openEmulatorManager()
@@ -1123,16 +1130,23 @@ void MainWindow::openEmulatorManager()
             st->setWordWrap(true);
             v->addWidget(st);
 
+            const ExternalEmulator emCopy = em;
+            auto* btnRow = new QHBoxLayout();
             auto* dl = new QPushButton(bin.isEmpty() ? tr("Download %1").arg(em.displayName)
                                                      : tr("Re-download / Update %1").arg(em.displayName));
-            const ExternalEmulator emCopy = em;
             connect(dl, &QPushButton::clicked, this, [this, emCopy] {
                 ensureEmu();
                 if (emu_->busy()) { statusBar()->showMessage(tr("An emulator operation is already running."), 4000); return; }
                 statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
                 emu_->install(emCopy);
             });
-            v->addWidget(dl);
+            btnRow->addWidget(dl, 1);
+            // Launch the emulator with no game - opens its own UI. Primary use for launcher-style emulators
+            // (TeknoParrot); for the others it's handy for first-run setup (BIOS/firmware/keys).
+            auto* launchBtn = new QPushButton(tr("Launch"));
+            connect(launchBtn, &QPushButton::clicked, this, [this, emCopy] { runEmulator(emCopy); });
+            btnRow->addWidget(launchBtn);
+            v->addLayout(btnRow);
             v->addSpacing(8);
         }
     }, [this] { openSettingsHub(); });
