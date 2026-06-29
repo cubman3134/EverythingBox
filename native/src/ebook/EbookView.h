@@ -42,6 +42,11 @@ public:
     double progress() const { return pageCount_ > 1 ? double(page_) / (pageCount_ - 1) : 0.0; }
     void   setProgress(double f) { setCurrentPage(pageCount_ > 1 ? int(f * (pageCount_ - 1) + 0.5) : 0); }
 
+    // Reading position as a document character offset - stable across repagination (resize / font change),
+    // unlike a page index. topTextPosition() is the first character on the current page.
+    int  topTextPosition() const;
+    void scrollToTextPosition(int pos);
+
 signals:
     void prevRequested();   // left half clicked
     void nextRequested();   // right half clicked
@@ -57,6 +62,7 @@ protected:
 
 private:
     void relayout();
+    int  pageForTextPosition(int pos) const; // which page contains a document offset
 
     QTextDocument* doc_ = nullptr;
     int   page_ = 0;
@@ -119,6 +125,7 @@ private:
     int chapter_ = -1;
     int fontPt_ = 14;
     bool streamVisible_ = false;
-    double restoreProgress_ = -1.0; // page fraction to resume at once the chapter is laid out
+    int    restorePos_ = -1;       // document offset to resume at once the chapter is laid out (-1 = none)
+    double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
     static constexpr int kMenuHeight = 56; // overlay menu height; the page reserves this much up top
 };

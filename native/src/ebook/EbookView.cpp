@@ -15,6 +15,8 @@
 #include <QPainter>
 #include <QTextDocument>
 #include <QTextBlock>
+#include <QTextLayout>
+#include <QTextLine>
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -117,6 +119,37 @@ void BookPageWidget::relayout()
     emit layoutChanged();
 }
 
+int BookPageWidget::topTextPosition() const
+{
+    if (!doc_) return 0;
+    const qreal pageH = doc_->pageSize().height();
+    // The character at the top-left of the current page, in document offset terms.
+    return qMax(0, doc_->documentLayout()->hitTest(QPointF(1.0, page_ * pageH + 1.0), Qt::FuzzyHit));
+}
+
+int BookPageWidget::pageForTextPosition(int pos) const
+{
+    const qreal pageH = doc_->pageSize().height();
+    if (!doc_ || pageH <= 0) return 0;
+
+    const QTextBlock block = doc_->findBlock(pos);
+    if (!block.isValid()) return 0;
+
+    // Document-space y of that character: the block's top, plus the offset of its line within the block.
+    qreal y = doc_->documentLayout()->blockBoundingRect(block).top();
+    if (QTextLayout* layout = block.layout(); layout && layout->lineCount() > 0)
+    {
+        const QTextLine line = layout->lineForTextPosition(qMax(0, pos - block.position()));
+        if (line.isValid()) y += line.y();
+    }
+    return qBound(0, int(y / pageH), pageCount_ - 1);
+}
+
+void BookPageWidget::scrollToTextPosition(int pos)
+{
+    setCurrentPage(pageForTextPosition(pos));
+}
+
 int BookPageWidget::countPages(const QString& html, const QString& baseDir) const
 {
     // Lay the chapter out in a throwaway document with the live view's exact font and page geometry, so its
@@ -133,7 +166,9 @@ int BookPageWidget::countPages(const QString& html, const QString& baseDir) cons
 
 void BookPageWidget::resizeEvent(QResizeEvent*)
 {
+    const int pos = topTextPosition(); // anchor to the text before the geometry (and page count) changes
     relayout();
+    scrollToTextPosition(pos);          // ...then land on whatever page now holds it
     update();
 }
 
@@ -314,15 +349,12 @@ bool EbookView::openBook(const QString& path, QString* error)
     }
     tocList_->setVisible(false);
 
-    restoreState(); // sets fontPt_, the chapter to resume at, and restoreProgress_
+    restoreState(); // sets fontPt_, the chapter to resume at, and the resume offset/fraction
     page_->setFontPointSize(fontPt_);
     loadChapter(chapter_ >= 0 ? chapter_ : 0);
-    if (restoreProgress_ >= 0.0)
-    {
-        page_->setProgress(restoreProgress_); // resume the page within the chapter
-        restoreProgress_ = -1.0;
-        persist();
-    }
+    if (restorePos_ >= 0)        page_->scrollToTextPosition(restorePos_); // exact spot, size-independent
+    else if (restoreFrac_ >= 0)  page_->setProgress(restoreFrac_);         // legacy save
+    restorePos_ = -1; restoreFrac_ = -1.0;
     recomputeBookPages(); // tally the book's pages, then show "page x / y"
     updatePageLabel();
     revealMenu();      // flash the controls so they're discoverable, then auto-hide
@@ -339,9 +371,17 @@ void EbookView::setStreamIssueVisible(bool on)
 void EbookView::restoreState()
 {
     fontPt_ = qBound(8, store().value(QStringLiteral("ebook/fontSize"), 14).toInt(), 40);
-    chapter_ = store().value(bookKey(book_->sourcePath()) + QStringLiteral("chapter"), 0).toInt();
+    const QString k = bookKey(book_->sourcePath());
+    chapter_ = store().value(k + QStringLiteral("chapter"), 0).toInt();
     if (chapter_ < 0 || chapter_ >= book_->chapterFiles().size()) chapter_ = 0;
-    restoreProgress_ = store().value(bookKey(book_->sourcePath()) + QStringLiteral("scroll"), 0.0).toDouble();
+
+    // Resume by document offset (stable across repagination). Older saves only have a page fraction, so
+    // keep it as a fallback when there's no stored offset.
+    const QVariant pos = store().value(k + QStringLiteral("pos"));
+    restorePos_  = pos.isValid() ? pos.toInt() : -1;
+    restoreFrac_ = restorePos_ < 0
+        ? store().value(k + QStringLiteral("scroll"), -1.0).toDouble()
+        : -1.0;
 }
 
 void EbookView::persist()
@@ -350,7 +390,7 @@ void EbookView::persist()
     store().setValue(QStringLiteral("ebook/fontSize"), fontPt_);
     const QString k = bookKey(book_->sourcePath());
     store().setValue(k + QStringLiteral("chapter"), chapter_);
-    store().setValue(k + QStringLiteral("scroll"), page_->progress());
+    store().setValue(k + QStringLiteral("pos"), page_->topTextPosition()); // where in the text, not which page
     store().setValue(k + QStringLiteral("title"), book_->title());
     store().sync();
 }
@@ -399,21 +439,21 @@ void EbookView::prevPage()
 
 void EbookView::biggerFont()
 {
-    const double p = page_->progress();
+    const int pos = page_->topTextPosition();
     fontPt_ = qMin(40, fontPt_ + 2);
     page_->setFontPointSize(fontPt_);
-    page_->setProgress(p); // stay roughly where you were after the reflow
-    recomputeBookPages();  // the whole book just repaginated
+    page_->scrollToTextPosition(pos); // stay on the same text after the reflow
+    recomputeBookPages();             // the whole book just repaginated
     updatePageLabel();
     persist();
 }
 
 void EbookView::smallerFont()
 {
-    const double p = page_->progress();
+    const int pos = page_->topTextPosition();
     fontPt_ = qMax(8, fontPt_ - 2);
     page_->setFontPointSize(fontPt_);
-    page_->setProgress(p);
+    page_->scrollToTextPosition(pos);
     recomputeBookPages();
     updatePageLabel();
     persist();

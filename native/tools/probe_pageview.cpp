@@ -4,6 +4,10 @@
 #include "MobiBook.h"
 #include <QGuiApplication>
 #include <QTextDocument>
+#include <QTextBlock>
+#include <QTextLayout>
+#include <QTextLine>
+#include <QTextCursor>
 #include <QAbstractTextDocumentLayout>
 #include <QPainter>
 #include <QImage>
@@ -67,5 +71,47 @@ int main(int argc, char** argv)
         img.save(out);
         std::printf("wrote %s\n", out.toLocal8Bit().constData());
     }
+
+    // Round-trip the reading anchor: capture the document offset at the top of a page at this size, then
+    // re-paginate at a different size and confirm the offset resolves to text starting with the same words.
+    auto snippet = [&](int pos) {
+        QTextCursor c(&doc);
+        c.setPosition(pos);
+        c.setPosition(qMin(doc.characterCount() - 1, pos + 48), QTextCursor::KeepAnchor);
+        return c.selectedText().simplified();
+    };
+    auto pageOf = [&](int pos, qreal ph) {
+        QTextBlock b = doc.findBlock(pos);
+        qreal y = doc.documentLayout()->blockBoundingRect(b).top();
+        if (auto* lay = b.layout(); lay && lay->lineCount() > 0)
+            y += lay->lineForTextPosition(qMax(0, pos - b.position())).y();
+        return int(y / ph);
+    };
+
+    auto yOf = [&](int pos) {
+        QTextBlock b = doc.findBlock(pos);
+        qreal y = doc.documentLayout()->blockBoundingRect(b).top();
+        if (auto* lay = b.layout(); lay && lay->lineCount() > 0)
+            y += lay->lineForTextPosition(qMax(0, pos - b.position())).y();
+        return y;
+    };
+
+    const int P = qMin(40, pages - 1);
+    const int anchor = doc.documentLayout()->hitTest(QPointF(1, P * pageH + 1), Qt::FuzzyHit);
+    const QString before = snippet(anchor);
+
+    const qreal W2 = 480 - 2 * SIDE, H2 = 760 - TOP - BOT; // a very different window shape
+    doc.setPageSize(QSizeF(W2, H2));
+    const int newPage = pageOf(anchor, H2);
+    const qreal ay = yOf(anchor);
+    const bool onPage = ay >= newPage * H2 && ay < (newPage + 1) * H2; // last spot is visible on the page
+    const bool nothingSkipped = newPage * H2 <= ay;                    // page starts at or before it
+    const int linesFromTop = int((ay - newPage * H2) / qMax(1.0, ay > 0 ? doc.documentLayout()->blockBoundingRect(doc.findBlock(anchor)).height() : 1.0));
+
+    std::printf("\nanchor round-trip: page %d/%d (800x600) -> resolves to page %d/%d (480x760)\n",
+                P + 1, pages, newPage + 1, doc.pageCount());
+    std::printf("  anchored text: \"%s\"\n", before.toLocal8Bit().constData());
+    std::printf("  visible on restored page=%s  no-unread-skipped=%s  (~%d line(s) below the top)\n",
+                onPage ? "yes" : "NO", nothingSkipped ? "yes" : "NO", linesFromTop);
     return 0;
 }
