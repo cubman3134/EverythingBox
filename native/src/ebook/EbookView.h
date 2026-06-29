@@ -3,7 +3,8 @@
 // jumps between chapters. Reading position + font size persist per book. Mirrors the Unity ereader UX.
 #pragma once
 #include <QWidget>
-#include "EpubBook.h"
+#include <memory>
+#include "EbookSource.h"
 
 class QTextBrowser;
 class QListWidget;
@@ -45,7 +46,7 @@ private:
     void applyFont();
     void restoreState();
 
-    EpubBook book_;
+    std::unique_ptr<EbookSource> book_; // EpubBook or MobiBook, chosen by file content in openBook()
     QPushButton* streamIssueBtn_ = nullptr; // "Issue with Streaming" (hidden unless a remote book)
     QTextBrowser* browser_ = nullptr;
     QListWidget* tocList_ = nullptr;

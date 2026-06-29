@@ -49,7 +49,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/ebook/EbookSource.h
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
+        src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
@@ -109,6 +111,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)
     target_compile_definitions(probe_epub PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_epub PRIVATE Qt6::Core)
+
+    # Console harness for the MOBI parser (Qt Core only).
+    add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp)
+    target_include_directories(probe_mobi PRIVATE src src/ebook)
+    target_link_libraries(probe_mobi PRIVATE Qt6::Core)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)

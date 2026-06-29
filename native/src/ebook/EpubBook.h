@@ -7,29 +7,23 @@
 #include <QStringList>
 #include <QVector>
 #include <QHash>
+#include "EbookSource.h"
 
-struct EpubTocEntry
-{
-    QString title;
-    QString href; // spine file name only (no '#fragment'/directory), for matching a chapter
-    int depth = 0;
-};
-
-class EpubBook
+class EpubBook : public EbookSource
 {
 public:
-    bool open(const QString& epubPath, QString* error = nullptr);
-    bool isOpen() const { return !chapterFiles_.isEmpty(); }
+    bool open(const QString& epubPath, QString* error = nullptr) override;
+    bool isOpen() const override { return !chapterFiles_.isEmpty(); }
 
-    const QString& title() const { return title_; }
-    const QString& author() const { return author_; }
-    const QString& sourcePath() const { return sourcePath_; } // original .epub path (per-book settings key)
+    const QString& title() const override { return title_; }
+    const QString& author() const override { return author_; }
+    const QString& sourcePath() const override { return sourcePath_; } // original .epub path (per-book settings key)
 
-    const QStringList& chapterFiles() const { return chapterFiles_; } // absolute paths, spine order
-    const QVector<EpubTocEntry>& toc() const { return toc_; }
+    const QStringList& chapterFiles() const override { return chapterFiles_; } // absolute paths, spine order
+    const QVector<EpubTocEntry>& toc() const override { return toc_; }
 
     // Chapter index whose file name matches a TOC href (or -1).
-    int chapterIndexForHref(const QString& hrefFileName) const;
+    int chapterIndexForHref(const QString& hrefFileName) const override;
 
 private:
     bool extract(const QString& epubPath, const QString& destDir, QString* error);

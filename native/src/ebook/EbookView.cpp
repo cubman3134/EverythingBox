@@ -1,6 +1,9 @@
 #include "EbookView.h"
+#include "EpubBook.h"
+#include "MobiBook.h"
 #include "../core/AppPaths.h"
 
+#include <QFile>
 #include <QTextBrowser>
 #include <QListWidget>
 #include <QLabel>
@@ -30,8 +33,22 @@ static QString bookKey(const QString& path)
     return QStringLiteral("ebook/") + QString::fromLatin1(h) + QStringLiteral("/");
 }
 
+// Sniff the file and create the matching parser. MOBI is detected by the PalmDB signature at offset 60
+// (works even when an Allarr book was cached under a ".epub" name); anything else is treated as EPUB.
+static std::unique_ptr<EbookSource> makeSource(const QString& path)
+{
+    QFile f(path);
+    QByteArray head;
+    if (f.open(QIODevice::ReadOnly)) { head = f.read(68); f.close(); }
+    const QByteArray sig = head.mid(60, 8);
+    if (sig == QByteArray("BOOKMOBI") || sig == QByteArray("TEXtREAd"))
+        return std::make_unique<MobiBook>();
+    return std::make_unique<EpubBook>();
+}
+
 EbookView::EbookView(QWidget* parent) : QWidget(parent)
 {
+    book_ = std::make_unique<EpubBook>(); // a valid (closed) source until a book is opened
     browser_ = new QTextBrowser(this);
     browser_->setOpenLinks(false);   // we drive chapter flow ourselves; handle clicks via anchorClicked
     connect(browser_, &QTextBrowser::anchorClicked, this, &EbookView::onAnchorClicked);
@@ -96,10 +113,11 @@ bool EbookView::openBook(const QString& path, QString* error)
 {
     persist(); // save the book we're leaving, if any
 
-    if (!book_.open(path, error)) return false;
+    book_ = makeSource(path); // EPUB or MOBI, by file content
+    if (!book_->open(path, error)) return false;
 
     tocList_->clear();
-    for (const EpubTocEntry& e : book_.toc())
+    for (const EpubTocEntry& e : book_->toc())
     {
         auto* item = new QListWidgetItem(e.title, tocList_);
         item->setData(Qt::UserRole, e.href);
@@ -118,26 +136,26 @@ void EbookView::restoreState()
 {
     fontPt_ = store().value(QStringLiteral("ebook/fontSize"), 14).toInt();
     fontPt_ = qBound(8, fontPt_, 40);
-    chapter_ = store().value(bookKey(book_.sourcePath()) + QStringLiteral("chapter"), 0).toInt();
-    if (chapter_ < 0 || chapter_ >= book_.chapterFiles().size()) chapter_ = 0;
+    chapter_ = store().value(bookKey(book_->sourcePath()) + QStringLiteral("chapter"), 0).toInt();
+    if (chapter_ < 0 || chapter_ >= book_->chapterFiles().size()) chapter_ = 0;
 }
 
 void EbookView::persist()
 {
-    if (!book_.isOpen() || chapter_ < 0) return;
+    if (!book_->isOpen() || chapter_ < 0) return;
     store().setValue(QStringLiteral("ebook/fontSize"), fontPt_);
-    const QString k = bookKey(book_.sourcePath());
+    const QString k = bookKey(book_->sourcePath());
     store().setValue(k + QStringLiteral("chapter"), chapter_);
     QScrollBar* sb = browser_->verticalScrollBar();
     const double frac = sb->maximum() > 0 ? double(sb->value()) / sb->maximum() : 0.0;
     store().setValue(k + QStringLiteral("scroll"), frac);
-    store().setValue(k + QStringLiteral("title"), book_.title());
+    store().setValue(k + QStringLiteral("title"), book_->title());
     store().sync();
 }
 
 void EbookView::loadChapter(int index, bool toBottom)
 {
-    const QStringList& files = book_.chapterFiles();
+    const QStringList& files = book_->chapterFiles();
     if (files.isEmpty()) return;
     chapter_ = qBound(0, index, files.size() - 1);
 
@@ -166,17 +184,17 @@ void EbookView::applyFont()
 
 void EbookView::nextPage()
 {
-    if (!book_.isOpen()) return;
+    if (!book_->isOpen()) return;
     QScrollBar* sb = browser_->verticalScrollBar();
     if (sb->value() < sb->maximum())
         sb->setValue(qMin(sb->maximum(), sb->value() + sb->pageStep()));
-    else if (chapter_ < book_.chapterFiles().size() - 1)
+    else if (chapter_ < book_->chapterFiles().size() - 1)
         loadChapter(chapter_ + 1);
 }
 
 void EbookView::prevPage()
 {
-    if (!book_.isOpen()) return;
+    if (!book_->isOpen()) return;
     QScrollBar* sb = browser_->verticalScrollBar();
     if (sb->value() > 0)
         sb->setValue(qMax(0, sb->value() - sb->pageStep()));
@@ -196,7 +214,7 @@ void EbookView::onTocActivated()
 {
     QListWidgetItem* item = tocList_->currentItem();
     if (!item) return;
-    const int idx = book_.chapterIndexForHref(item->data(Qt::UserRole).toString());
+    const int idx = book_->chapterIndexForHref(item->data(Qt::UserRole).toString());
     if (idx >= 0) loadChapter(idx);
 }
 
@@ -211,7 +229,7 @@ void EbookView::onAnchorClicked(const QUrl& url)
 
     // Otherwise resolve the target file to a spine chapter and jump there (then to its anchor, if any).
     const QString file = QFileInfo(url.path()).fileName();
-    const int idx = book_.chapterIndexForHref(file);
+    const int idx = book_->chapterIndexForHref(file);
     if (idx < 0) return; // external or unmatched link - ignore rather than navigate away
 
     if (idx != chapter_) loadChapter(idx); // already on it? just move to the anchor below
@@ -221,14 +239,14 @@ void EbookView::onAnchorClicked(const QUrl& url)
 
 void EbookView::updatePageLabel()
 {
-    if (!book_.isOpen()) { pageLabel_->clear(); return; }
+    if (!book_->isOpen()) { pageLabel_->clear(); return; }
     QScrollBar* sb = browser_->verticalScrollBar();
     const int step = qMax(1, sb->pageStep());
     const int pages = sb->maximum() / step + 1;
     const int page = sb->value() / step + 1;
     pageLabel_->setText(tr("%1  —  Chapter %2/%3 · Page %4/%5")
-                            .arg(book_.title())
-                            .arg(chapter_ + 1).arg(book_.chapterFiles().size())
+                            .arg(book_->title())
+                            .arg(chapter_ + 1).arg(book_->chapterFiles().size())
                             .arg(qMin(page, pages)).arg(pages));
 }
 
