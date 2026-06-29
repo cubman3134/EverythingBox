@@ -285,6 +285,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(stack_, 1);
     setCentralWidget(central);
+    statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media
     // transport overlay, the emulator Esc menu, and per-view Home buttons).
 
@@ -531,7 +532,6 @@ void MainWindow::resizeEvent(QResizeEvent* event)
 void MainWindow::leaveFullScreen()
 {
     showNormal();
-    statusBar()->show();       // restore the bottom bar
     player_->unsetCursor();    // restore the cursor
 }
 
