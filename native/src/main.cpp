@@ -18,6 +18,9 @@
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
 
+// App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
+static constexpr const char* kAppVersion = "0.2.0";
+
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
 static QString logPath() { return AppPaths::dataDir() + QStringLiteral("/stream_debug.log"); }
@@ -108,6 +111,7 @@ int main(int argc, char** argv)
     qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
     QApplication::setApplicationName(QStringLiteral("My Media Vault"));
     QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
+    QApplication::setApplicationVersion(QString::fromLatin1(kAppVersion));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
 
     // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views

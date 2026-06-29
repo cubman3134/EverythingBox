@@ -61,7 +61,11 @@ Intent hand-off to installed Android emulator apps.
       SDK, `QT_ANDROID_PACKAGE_SOURCE_DIR`, `QT_ANDROID_EXTRA_LIBS` for the cross-compiled mpv/SDL2), and the
       desktop-only console `probe_*` tools are guarded out. `qt_add_executable` already makes the shared lib
       + APK target on Android. `WIN32_EXECUTABLE`/`MACOSX_BUNDLE` are no-ops off their platforms.
-- [ ] Fill in `native/android/AndroidManifest.xml` + `res/` (see `native/android/README.md`).
+- [x] `native/android/AndroidManifest.xml` written (Qt 6 template + phone `LAUNCHER` and TV
+      `LEANBACK_LAUNCHER`, touchscreen/leanback `required=false`, INTERNET/storage perms) + placeholder
+      `res/drawable/icon.png`/`banner.png`. Version wired (`project(VERSION 0.2.0)` -> `QT_ANDROID_VERSION_*`).
+- [ ] Replace the placeholder `banner.png` with a real 320×180 TV banner; verify the manifest against the
+      installed Qt-for-Android template.
 - [ ] Cross-compile + point `-DMPV_LIBRARY=`/`-DSDL2_LIBRARY=` at the Android `.so` deps (Phase 2).
 - [ ] `AndroidManifest.xml`: app name/icon, `INTERNET` permission, storage access (Scoped Storage /
       `MANAGE_EXTERNAL_STORAGE` or SAF for ROM/media folders), gamepad/`android.hardware.gamepad`.

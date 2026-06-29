@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative LANGUAGES C CXX)
+project(MyMediaVaultNative VERSION 0.2.0 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -145,9 +145,13 @@ if(MYMEDIAVAULT_BUILD_APP)
     # qt_add_executable already produces the shared library + APK target on Android.
     # -----------------------------------------------------------------------------------------------------
     if(ANDROID)
+        # versionCode is a monotonic integer: major*10000 + minor*100 + patch (0.2.0 -> 200).
+        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*10000 + ${PROJECT_VERSION_MINOR}*100 + ${PROJECT_VERSION_PATCH}")
         set_target_properties(mymediavault PROPERTIES
             QT_ANDROID_MIN_SDK_VERSION 24
             QT_ANDROID_TARGET_SDK_VERSION 34
+            QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
+            QT_ANDROID_VERSION_CODE "${MMV_ANDROID_VERSION_CODE}"
             QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android") # custom manifest/res/assets overlay
         # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). Point the
         # MPV_LIBRARY/SDL2_LIBRARY cache vars at the cross-compiled .so builds.
