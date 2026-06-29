@@ -93,14 +93,42 @@ void BookPageWidget::setCurrentPage(int p)
     update();
 }
 
+void BookPageWidget::setTopInset(int px)
+{
+    topMargin_ = qMax(0, px);
+    relayout();
+    update();
+}
+
+void BookPageWidget::setFooter(const QString& s)
+{
+    if (footer_ == s) return;
+    footer_ = s;
+    update();
+}
+
 void BookPageWidget::relayout()
 {
-    const qreal w = qMax(1.0, qreal(width())  - 2 * margin_);
-    const qreal h = qMax(1.0, qreal(height()) - 2 * margin_);
+    const qreal w = qMax(1.0, qreal(width())  - 2 * sideMargin_);
+    const qreal h = qMax(1.0, qreal(height()) - topMargin_ - botMargin_);
     doc_->setPageSize(QSizeF(w, h));        // paginate by line into h-tall pages (no line is ever split)
     pageCount_ = qMax(1, doc_->pageCount());
     page_ = qBound(0, page_, pageCount_ - 1);
     emit layoutChanged();
+}
+
+int BookPageWidget::countPages(const QString& html, const QString& baseDir) const
+{
+    // Lay the chapter out in a throwaway document with the live view's exact font and page geometry, so its
+    // page count matches what this widget would show - without touching the on-screen document.
+    BookDocument d;
+    d.setDocumentMargin(0);
+    d.setDefaultStyleSheet(doc_->defaultStyleSheet());
+    d.setBaseUrl(QUrl::fromLocalFile(baseDir + QStringLiteral("/")));
+    d.setHtml(html);
+    d.setDefaultFont(doc_->defaultFont());
+    d.setPageSize(doc_->pageSize());
+    return qMax(1, d.pageCount());
 }
 
 void BookPageWidget::resizeEvent(QResizeEvent*)
@@ -117,16 +145,29 @@ void BookPageWidget::paintEvent(QPaintEvent*)
 
     const qreal pageW = doc_->pageSize().width();
     const qreal pageH = doc_->pageSize().height();
+
+    p.save();
     // Clip to the page's content rectangle so a line belonging to the next page can never paint into our
-    // bottom margin - belt-and-braces on top of QTextDocument's line-clean pagination.
-    p.setClipRect(QRectF(margin_, margin_, pageW, pageH));
-    p.translate(margin_, margin_);
+    // margins - belt-and-braces on top of QTextDocument's line-clean pagination.
+    p.setClipRect(QRectF(sideMargin_, topMargin_, pageW, pageH));
+    p.translate(sideMargin_, topMargin_);
     p.translate(0, -page_ * pageH);        // bring this page's slice up to the top margin
 
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette = palette();               // text drawn in QPalette::Text
     ctx.clip = QRectF(0, page_ * pageH, pageW, pageH);
     doc_->documentLayout()->draw(&p, ctx);
+    p.restore();
+
+    // Page-number footer, centered in the bottom margin in a muted colour.
+    if (!footer_.isEmpty())
+    {
+        QColor ink = palette().color(QPalette::Text);
+        ink.setAlpha(140);
+        p.setPen(ink);
+        p.drawText(QRectF(0, height() - botMargin_, width(), botMargin_),
+                   Qt::AlignHCenter | Qt::AlignVCenter, footer_);
+    }
 }
 
 void BookPageWidget::mousePressEvent(QMouseEvent* e)
@@ -135,13 +176,12 @@ void BookPageWidget::mousePressEvent(QMouseEvent* e)
 
     // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
     const qreal pageH = doc_->pageSize().height();
-    const QPointF docPos(pos.x() - margin_, pos.y() - margin_ + page_ * pageH);
+    const QPointF docPos(pos.x() - sideMargin_, pos.y() - topMargin_ + page_ * pageH);
     const QString href = doc_->documentLayout()->anchorAt(docPos);
     if (!href.isEmpty()) { emit anchorClicked(href); return; }
 
-    const int topZone = qMax(64, height() / 8);
-    if (pos.y() < topZone)             { emit menuRequested(); return; }
-    if (pos.x() < width() / 2)           emit prevRequested();
+    if (pos.y() < topMargin_)           { emit menuRequested(); return; } // the strip the menu lives in
+    if (pos.x() < width() / 2)            emit prevRequested();
     else                                 emit nextRequested();
 }
 
@@ -187,6 +227,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     book_ = std::make_unique<EpubBook>(); // a valid (closed) source until a book is opened
 
     page_ = new BookPageWidget(this);
+    page_->setTopInset(kMenuHeight); // reserve the menu's strip up top so it never covers text
     connect(page_, &BookPageWidget::nextRequested, this, &EbookView::nextPage);
     connect(page_, &BookPageWidget::prevRequested, this, &EbookView::prevPage);
     connect(page_, &BookPageWidget::menuRequested, this, &EbookView::revealMenu);
@@ -249,6 +290,12 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     menuTimer_->setSingleShot(true);
     connect(menuTimer_, &QTimer::timeout, this, &EbookView::hideMenuIfIdle);
 
+    // Resizing changes the page geometry, so the book-wide page total has to be re-tallied; debounce it so a
+    // drag doesn't re-paginate every chapter on every pixel.
+    repagTimer_ = new QTimer(this);
+    repagTimer_->setSingleShot(true);
+    connect(repagTimer_, &QTimer::timeout, this, [this] { recomputeBookPages(); updatePageLabel(); });
+
     setFocusPolicy(Qt::StrongFocus);
 }
 
@@ -274,9 +321,10 @@ bool EbookView::openBook(const QString& path, QString* error)
     {
         page_->setProgress(restoreProgress_); // resume the page within the chapter
         restoreProgress_ = -1.0;
-        updatePageLabel();
         persist();
     }
+    recomputeBookPages(); // tally the book's pages, then show "page x / y"
+    updatePageLabel();
     revealMenu();      // flash the controls so they're discoverable, then auto-hide
     setFocus();
     return true;
@@ -355,6 +403,7 @@ void EbookView::biggerFont()
     fontPt_ = qMin(40, fontPt_ + 2);
     page_->setFontPointSize(fontPt_);
     page_->setProgress(p); // stay roughly where you were after the reflow
+    recomputeBookPages();  // the whole book just repaginated
     updatePageLabel();
     persist();
 }
@@ -365,6 +414,7 @@ void EbookView::smallerFont()
     fontPt_ = qMax(8, fontPt_ - 2);
     page_->setFontPointSize(fontPt_);
     page_->setProgress(p);
+    recomputeBookPages();
     updatePageLabel();
     persist();
 }
@@ -413,23 +463,61 @@ void EbookView::hideMenuIfIdle()
 
 void EbookView::layoutOverlays()
 {
-    const int menuH = menu_->sizeHint().height();
-    menu_->setGeometry(0, 0, width(), menuH > 0 ? menuH : 52);
-    tocList_->setGeometry(0, menu_->height(), qMin(340, width() / 3), height() - menu_->height());
+    // Fixed height kept in lock-step with the page's top inset, so the menu sits exactly over the reserved
+    // strip and never overlaps the text.
+    menu_->setGeometry(0, 0, width(), kMenuHeight);
+    tocList_->setGeometry(0, kMenuHeight, qMin(340, width() / 3), height() - kMenuHeight);
 }
 
 void EbookView::resizeEvent(QResizeEvent*)
 {
     layoutOverlays();
+    if (book_->isOpen()) repagTimer_->start(180); // re-tally the book's pages once the drag settles
+}
+
+void EbookView::recomputeBookPages()
+{
+    const QStringList& files = book_->chapterFiles();
+    chapterStart_.resize(files.size());
+    if (files.isEmpty() || page_->width() <= 0 || page_->height() <= 0) { totalPages_ = 0; return; }
+
+    int acc = 0;
+    for (int i = 0; i < files.size(); ++i)
+    {
+        chapterStart_[i] = acc;
+        if (i == chapter_)
+        {
+            acc += page_->pageCount(); // current chapter is already laid out - reuse it
+            continue;
+        }
+        QFile f(files[i]);
+        QString html;
+        if (f.open(QIODevice::ReadOnly)) { html = QString::fromUtf8(f.readAll()); f.close(); }
+        acc += page_->countPages(html, QFileInfo(files[i]).absolutePath());
+    }
+    totalPages_ = acc;
+}
+
+int EbookView::globalPage() const
+{
+    const int base = (chapter_ >= 0 && chapter_ < chapterStart_.size()) ? chapterStart_[chapter_] : 0;
+    return base + page_->currentPage() + 1;
 }
 
 void EbookView::updatePageLabel()
 {
-    if (!book_->isOpen()) { pageLabel_->clear(); return; }
-    pageLabel_->setText(tr("%1  —  Ch %2/%3 · Page %4/%5")
+    if (!book_->isOpen()) { pageLabel_->clear(); page_->setFooter(QString()); return; }
+
+    // Bottom-of-page footer: book-wide "page x / y" (falls back to the chapter's own count if the tally
+    // isn't ready yet).
+    const int total = totalPages_ > 0 ? totalPages_ : page_->pageCount();
+    const int cur   = totalPages_ > 0 ? globalPage() : page_->currentPage() + 1;
+    page_->setFooter(tr("%1 / %2").arg(cur).arg(total));
+
+    // Menu label keeps the title + chapter context.
+    pageLabel_->setText(tr("%1  —  Ch %2/%3")
                             .arg(book_->title())
-                            .arg(chapter_ + 1).arg(book_->chapterFiles().size())
-                            .arg(page_->currentPage() + 1).arg(page_->pageCount()));
+                            .arg(chapter_ + 1).arg(book_->chapterFiles().size()));
 }
 
 void EbookView::keyPressEvent(QKeyEvent* e)

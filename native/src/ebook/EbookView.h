@@ -24,6 +24,12 @@ public:
 
     void setContent(const QString& html, const QString& baseDir); // baseDir resolves relative images
     void setFontPointSize(int pt);
+    void setTopInset(int px);          // reserve space up top so the menu bar overlays margin, not text
+    void setFooter(const QString& s);  // small centered line painted in the bottom margin (page x / y)
+
+    // Page count this chapter's HTML would paginate to at the current font/size, without disturbing the
+    // live view - used to total a book's pages across chapters.
+    int  countPages(const QString& html, const QString& baseDir) const;
 
     int  pageCount() const { return pageCount_; }
     int  currentPage() const { return page_; }
@@ -56,7 +62,10 @@ private:
     int   page_ = 0;
     int   pageCount_ = 1;
     int   fontPt_ = 14;
-    qreal margin_ = 40.0; // page inset (paper margin) on every side
+    qreal sideMargin_ = 40.0; // left/right paper margin
+    qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text
+    qreal botMargin_  = 40.0; // leaves room for the page-number footer
+    QString footer_;
 };
 
 class EbookView : public QWidget
@@ -94,6 +103,8 @@ private:
     void loadChapter(int index, bool toLast = false);
     void restoreState();
     void layoutOverlays();
+    void recomputeBookPages(); // tally each chapter's page count for a book-wide "page x / y"
+    int  globalPage() const;   // 1-based page within the whole book at the current spot
 
     std::unique_ptr<EbookSource> book_; // EpubBook / MobiBook / PdfTextBook, chosen by file content
     BookPageWidget* page_ = nullptr;
@@ -102,8 +113,12 @@ private:
     QListWidget* tocList_ = nullptr;    // contents panel (overlay, toggled)
     QLabel* pageLabel_ = nullptr;
     QTimer* menuTimer_ = nullptr;
+    QTimer* repagTimer_ = nullptr;      // debounces book-wide repagination after a resize
+    QVector<int> chapterStart_;         // cumulative page offset where each chapter begins
+    int totalPages_ = 0;                // book-wide page total at the current font/size
     int chapter_ = -1;
     int fontPt_ = 14;
     bool streamVisible_ = false;
     double restoreProgress_ = -1.0; // page fraction to resume at once the chapter is laid out
+    static constexpr int kMenuHeight = 56; // overlay menu height; the page reserves this much up top
 };

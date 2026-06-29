@@ -30,13 +30,13 @@ int main(int argc, char** argv)
     if (f.open(QIODevice::ReadOnly)) { html = QString::fromUtf8(f.readAll()); f.close(); }
 
     const int W = 800, H = 600;
-    const qreal M = 40.0;
+    const qreal SIDE = 40.0, TOP = 56.0, BOT = 40.0; // mirrors BookPageWidget (top inset clears the menu)
     QTextDocument doc;
     doc.setDocumentMargin(0);
     doc.setDefaultStyleSheet(QStringLiteral("body{margin:0;} p{margin:0 0 0.7em 0;}"));
     doc.setHtml(html);
     QFont font = doc.defaultFont(); font.setPointSize(14); doc.setDefaultFont(font);
-    doc.setPageSize(QSizeF(W - 2 * M, H - 2 * M));
+    doc.setPageSize(QSizeF(W - 2 * SIDE, H - TOP - BOT));
     const int pages = doc.pageCount();
     std::printf("title=\"%s\" pages=%d pageSize=%gx%g\n",
                 book.title().toLocal8Bit().constData(), pages, doc.pageSize().width(), doc.pageSize().height());
@@ -48,13 +48,20 @@ int main(int argc, char** argv)
         QImage img(W, H, QImage::Format_RGB32);
         img.fill(Qt::white);
         QPainter p(&img);
-        p.setClipRect(QRectF(M, M, pageW, pageH));
-        p.translate(M, M);
+        // A grey band where the overlay menu would sit, to confirm text clears it.
+        p.fillRect(QRectF(0, 0, W, TOP), QColor(230, 230, 230));
+        p.save();
+        p.setClipRect(QRectF(SIDE, TOP, pageW, pageH));
+        p.translate(SIDE, TOP);
         p.translate(0, -pg * pageH);
         QAbstractTextDocumentLayout::PaintContext ctx;
         ctx.palette.setColor(QPalette::Text, Qt::black);
         ctx.clip = QRectF(0, pg * pageH, pageW, pageH);
         doc.documentLayout()->draw(&p, ctx);
+        p.restore();
+        QColor ink(0, 0, 0, 140); p.setPen(ink);
+        p.drawText(QRectF(0, H - BOT, W, BOT), Qt::AlignHCenter | Qt::AlignVCenter,
+                   QString("%1 / %2").arg(pg + 1).arg(pages));
         p.end();
         const QString out = outdir + QStringLiteral("/page-%1.png").arg(pg);
         img.save(out);
