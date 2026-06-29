@@ -1513,9 +1513,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         else if (type == QStringLiteral("pdf"))  ext = QStringLiteral(".pdf");
         if (!ext.isEmpty()) { fetchRemoteDocumentThenOpen(item, ext); return; }
 
-        // Game ROMs run in the emulator (RetroView), which loads a local file. Fetch the
-        // ROM to a cache file first, keeping its extension so the right core is picked.
-        const QString romExt = QFileInfo(QUrl(url).path()).suffix().toLower();
+        // Game ROMs run in the emulator (RetroView / external), which loads a local file. Fetch the
+        // ROM to a cache file first, keeping its extension so the right core is picked. Take the extension
+        // from the url, else the mime — a debrid link (e.g. a Switch game) has no filename in its path, so
+        // the addon passes the rom type as an "application/x-<ext>" mime (mirrors the document fallback above).
+        QString romExt = QFileInfo(QUrl(url).path()).suffix().toLower();
+        if (romExt.isEmpty() && type == QStringLiteral("game"))
+        {
+            QString cand = mime.section(QLatin1Char('/'), -1).section(QLatin1Char(';'), 0, 0);
+            if (cand.startsWith(QStringLiteral("x-"))) cand = cand.mid(2);
+            if (SystemCatalog::forExtension(cand) != nullptr) romExt = cand;
+        }
         if (!romExt.isEmpty() && (type == QStringLiteral("game") || SystemCatalog::forExtension(romExt) != nullptr))
         { fetchRemoteDocumentThenOpen(item, QStringLiteral(".") + romExt); return; }
     }
