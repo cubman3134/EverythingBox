@@ -96,6 +96,22 @@ Intent hand-off to installed Android emulator apps.
       (CoreManager downloads the `_android.so` core, RetroView runs it with JIT).
 - [ ] Sign a release APK (keystore) for distribution.
 
+## Android TV
+The same APK runs on Android TV (Shield, Chromecast/Google TV, smart TVs) — it's the same runtime, no
+separate target. This app is a **strong TV fit**: it's already D-pad/remote-navigable (TV's hard
+requirement — no touch), controllers are common on TV (good for the in-process cores), and a libmpv media
+hub on a television is the natural use case. The phone weakness (touch-awkward Widgets) is a non-issue on TV.
+
+For a proper TV experience / Play-on-TV, the manifest needs:
+- [ ] `LEANBACK_LAUNCHER` intent-filter + `android:banner` (320×180) → shows on the TV home screen.
+- [ ] `<uses-feature touchscreen required="false">` and `<uses-feature software.leanback required="false">`
+      → installable on TVs.
+- [ ] Confirm D-pad (`KEYCODE_DPAD_*` → Qt arrow keys) reaches focus/navigation; handle TV Back.
+- [ ] (Optional) `armeabi-v7a` ABI for very old 32-bit TV boxes — `arm64-v8a` covers modern devices.
+
+Without the leanback bits it still **sideloads and runs** on a TV; it just won't appear in the TV launcher
+rows. External standalone emulators stay gated off (in-process cores + a controller are the TV story).
+
 ## Distribution note
 Downloading a core `.so` and `dlopen`-ing it is **against Google Play policy** (the RetroArch reason).
 Options: (a) ship **sideload APK / F-Droid** and keep the download-on-demand model, or (b) for Play,
