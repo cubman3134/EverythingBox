@@ -979,9 +979,21 @@ void MainWindow::ensureEmu()
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
             RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
                                pendingEmuThumb_, pendingEmuKey_ });
+        // Step aside so the emulator is unobstructed and in front; we restore when it exits. (Our window is
+        // often full screen and would otherwise sit on top of the freshly-launched emulator.)
+        emuReturnState_ = windowState();
+        showMinimized();
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         mwLog(QStringLiteral("emu: process exited (code %1)").arg(code));
+        if (isMinimized()) // come back to where we were before handing off to the emulator
+        {
+            if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
+            else if (emuReturnState_ & Qt::WindowMaximized) showMaximized();
+            else                                            showNormal();
+            raise();
+            activateWindow();
+        }
         if (stack_->currentWidget() == emuPage_) openHome();
     });
     connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {

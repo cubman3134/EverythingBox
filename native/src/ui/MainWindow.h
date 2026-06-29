@@ -170,6 +170,7 @@ private:
     QLabel* emuLabel_ = nullptr;
     QPushButton* emuStopBtn_ = nullptr;
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_; // Recent entry, added on launch
+    Qt::WindowStates emuReturnState_ = Qt::WindowNoState; // our window state to restore after the emulator exits
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
