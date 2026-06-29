@@ -1503,7 +1503,29 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         else if (mime.contains(QStringLiteral("pdf")))    ext = QStringLiteral(".pdf");
         else if (mime.contains(QStringLiteral("comicbook")) || mime.contains(QStringLiteral("cbz"))) ext = QStringLiteral(".cbz");
         else if (type == QStringLiteral("comic") || type == QStringLiteral("manga")) ext = QStringLiteral(".cbz");
-        else if (type == QStringLiteral("ebook") || type == QStringLiteral("book"))  ext = QStringLiteral(".epub");
+        else if (type == QStringLiteral("ebook") || type == QStringLiteral("book"))
+        {
+            // The reader handles EPUB (PDF/CBZ are caught above). Book providers (Allarr) also serve MOBI/
+            // AZW3/etc., which the EPUB parser can't read - detect those and say so clearly, instead of
+            // silently failing by saving the MOBI under a ".epub" name and handing it to the EPUB parser
+            // (which just shows nothing). An extension-less / debrid book link is assumed EPUB as before.
+            const QString realExt = QFileInfo(QUrl(url).path()).suffix().toLower();
+            static const QStringList unreadable = { QStringLiteral("mobi"), QStringLiteral("azw"),
+                QStringLiteral("azw3"), QStringLiteral("azw4"), QStringLiteral("kfx"), QStringLiteral("fb2"),
+                QStringLiteral("lit"), QStringLiteral("lrf"), QStringLiteral("pdb") };
+            if (unreadable.contains(realExt) || mime.contains(QStringLiteral("mobipocket")) || mime.contains(QStringLiteral("azw")))
+            {
+                const QString fmt = realExt.isEmpty() ? tr("an unsupported format") : realExt.toUpper();
+                const QString msg = tr("“%1” came back as %2 — the reader only opens EPUB and PDF. "
+                                       "Try another title or source.").arg(item.title, fmt);
+                mwLog(QStringLiteral("doc: unsupported book format '%1' (mime %2) for \"%3\"")
+                          .arg(realExt, mime, item.title));
+                statusBar()->showMessage(msg, 9000);
+                home_->showToast(msg, 9000);
+                return;
+            }
+            ext = QStringLiteral(".epub"); // a real EPUB, or an extension-less EPUB link
+        }
         else if (type == QStringLiteral("pdf"))  ext = QStringLiteral(".pdf");
         if (!ext.isEmpty()) { fetchRemoteDocumentThenOpen(item, ext); return; }
 
