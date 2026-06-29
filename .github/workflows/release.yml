@@ -249,11 +249,10 @@ jobs:
           generate_release_notes: true
 
   # ---------------------------------------------------------------- Android ---
-  # Android / Android TV APK (arm64). Marked continue-on-error while the libmpv-for-Android piece is being
-  # dialed in, so a red Android build never blocks the Windows/macOS/Linux releases. The one piece this job
-  # can't self-provide is a libmpv built for Android - set a repo variable MPV_ANDROID_LIB_URL pointing at an
-  # archive that contains include/mpv/*.h + lib/arm64-v8a/libmpv.so (or swap in a build step). The rest of
-  # the pipeline (Qt-for-Android, NDK, qt-cmake -> androiddeployqt -> APK) is here. See native/docs/android-port.md.
+  # Android / Android TV APK (arm64). Self-provisioning: pulls a prebuilt libmpv (+ ffmpeg) from Maven
+  # Central and the mpv headers from the mpv repo, then qt-cmake -> androiddeployqt -> APK. Marked
+  # continue-on-error until a CI run confirms the Qt-for-Android/NDK wiring, so a red Android build never
+  # blocks the Windows/macOS/Linux releases. See native/docs/android-port.md.
   android:
     runs-on: ubuntu-22.04
     continue-on-error: true
@@ -299,22 +298,28 @@ jobs:
           modules: 'qtmultimedia qtpdf'
           cache: true
 
-      - name: Provide libmpv for Android      # <-- the iteration point (see job comment)
+      - name: Provide libmpv for Android
         env:
-          MPV_ANDROID_LIB_URL: ${{ vars.MPV_ANDROID_LIB_URL }}
+          # Prebuilt libmpv (+ its ffmpeg stack) for arm64 from the Jellyfin/jdtech AAR on Maven Central, and
+          # matching public mpv headers (the AAR ships none). Override LIBMPV_AAR_URL via a repo variable to
+          # pin a different prebuilt.
+          LIBMPV_AAR_URL: ${{ vars.LIBMPV_AAR_URL || 'https://repo1.maven.org/maven2/dev/jdtech/mpv/libmpv/1.0.0/libmpv-1.0.0.aar' }}
+          MPV_HEADERS_TAG: 'v0.40.0'
         run: |
           set -e
-          if [ -z "$MPV_ANDROID_LIB_URL" ]; then
-            echo "::error::Set the MPV_ANDROID_LIB_URL repo variable to an archive with include/mpv/*.h + lib/arm64-v8a/libmpv.so."
-            exit 1
-          fi
-          mkdir -p mpv-android && curl -L "$MPV_ANDROID_LIB_URL" -o mpv.archive
-          tar -xf mpv.archive -C mpv-android 2>/dev/null || unzip -o mpv.archive -d mpv-android
-          so=$(find mpv-android -name 'libmpv.so' | head -n1)
-          inc=$(dirname "$(find mpv-android -path '*mpv/client.h' | head -n1)")/..
-          [ -n "$so" ] && [ -d "$inc" ] || { echo "libmpv.so / mpv headers not found in archive"; find mpv-android | head; exit 1; }
-          echo "MPV_LIBRARY=$(realpath "$so")" >> "$GITHUB_ENV"
-          echo "MPV_INCLUDE_DIR=$(realpath "$inc")" >> "$GITHUB_ENV"
+          curl -fL "$LIBMPV_AAR_URL" -o libmpv.aar
+          mkdir -p mpv-android/libs mpv-android/include/mpv
+          unzip -o -j libmpv.aar 'jni/arm64-v8a/*.so' -d mpv-android/libs
+          # libplayer.so is jdtech's JNI wrapper (unused); libc++_shared.so is provided by the NDK/Qt - drop
+          # both so they aren't bundled twice. libmpv.so + the libav*/libsw* deps are kept and ride along.
+          rm -f mpv-android/libs/libplayer.so mpv-android/libs/libc++_shared.so
+          ls -la mpv-android/libs
+          for h in client.h render.h render_gl.h stream_cb.h; do
+            curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/${MPV_HEADERS_TAG}/include/mpv/$h" \
+              -o "mpv-android/include/mpv/$h"
+          done
+          echo "MPV_LIBRARY=$(realpath mpv-android/libs/libmpv.so)" >> "$GITHUB_ENV"
+          echo "MPV_INCLUDE_DIR=$(realpath mpv-android/include)" >> "$GITHUB_ENV"
 
       - name: Configure (qt-cmake)
         run: |

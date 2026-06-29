@@ -13,7 +13,7 @@ Grab the latest build for your platform:
 | **Windows** (x64) | [**MyMediaVault-windows-x64.zip**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-windows-x64.zip) | Unzip anywhere and run `MyMediaVault.exe`. |
 | **macOS** (Apple Silicon) | [**MyMediaVault-macos-arm64.dmg**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-macos-arm64.dmg) | Unsigned build — first launch: right-click the app → **Open**. |
 | **Linux** (x86_64) | [**MyMediaVault-linux-x86_64.AppImage**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
-| **Android / Android TV** (arm64) | _CI build (in progress)_ | APK runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. The CI APK job is wired but pending the libmpv-for-Android dependency. See [Android / Android TV](#android--android-tv). |
+| **Android / Android TV** (arm64) | _CI build (validating)_ | APK runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. The CI APK job is wired and self-provisions libmpv; pending a CI run to confirm. See [Android / Android TV](#android--android-tv). |
 
 Current version: **0.2.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
 
@@ -61,10 +61,11 @@ libretro cores** (Android allows JIT + `dlopen`; `CoreManager` fetches the right
 downloaded desktop executables — and are gated off the Android build.
 
 A CI job (`android` in [`release.yml`](.github/workflows/release.yml)) builds the APK automatically and
-attaches it to releases — it installs the Qt-for-Android kit + NDK and runs `qt-cmake` → `androiddeployqt`.
-The one piece it can't self-provide is **`libmpv` built for Android**: set a repo variable
-`MPV_ANDROID_LIB_URL` pointing at an archive with `include/mpv/*.h` + `lib/arm64-v8a/libmpv.so` (or swap in
-a build step). The job is `continue-on-error`, so it never blocks the desktop releases while that's dialed in.
+attaches it to releases — it installs the Qt-for-Android kit + NDK, **self-provisions `libmpv`** (a prebuilt
+arm64 build + its ffmpeg stack from the Jellyfin/jdtech AAR on Maven Central, with mpv headers from the mpv
+repo), and runs `qt-cmake` → `androiddeployqt`. The job is `continue-on-error` until a CI run confirms the
+toolchain wiring, so it never blocks the desktop releases. (Override the prebuilt via the `LIBMPV_AAR_URL`
+repo variable.)
 
 To **build locally** instead, you need the same: the Android toolchain and `libmpv`/`SDL2` cross-compiled
 for the target ABI:

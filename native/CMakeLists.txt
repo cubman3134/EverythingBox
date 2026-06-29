@@ -153,10 +153,12 @@ if(MYMEDIAVAULT_BUILD_APP)
             QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
             QT_ANDROID_VERSION_CODE "${MMV_ANDROID_VERSION_CODE}"
             QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android") # custom manifest/res/assets overlay
-        # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). Point the
-        # MPV_LIBRARY/SDL2_LIBRARY cache vars at the cross-compiled .so builds.
+        # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). libmpv pulls
+        # in its ffmpeg stack (libav*/libsw*), so bundle every .so sitting next to MPV_LIBRARY, not just it.
         if(MPV_LIBRARY)
-            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${MPV_LIBRARY}")
+            get_filename_component(_mmv_mpvdir "${MPV_LIBRARY}" DIRECTORY)
+            file(GLOB _mmv_mpvlibs "${_mmv_mpvdir}/*.so")
+            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_mpvlibs})
         endif()
         if(SDL2_LIBRARY)
             set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")

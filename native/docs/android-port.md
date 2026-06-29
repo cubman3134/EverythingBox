@@ -96,9 +96,11 @@ Intent hand-off to installed Android emulator apps.
 
 ## Phase 5 — Package & test
 - [x] CI job added (`android` in `.github/workflows/release.yml`, `continue-on-error`): installs the
-      Qt-for-Android kit + NDK, runs `qt-cmake` → `androiddeployqt`, uploads the APK + attaches it to
-      releases. The gate is the `MPV_ANDROID_LIB_URL` repo variable (a prebuilt libmpv-for-Android, or swap
-      in a build step) — until that's set the job fails fast without affecting the desktop releases.
+      Qt-for-Android kit + NDK, **self-provisions libmpv** (prebuilt arm64 `.so` + ffmpeg from the
+      Jellyfin/jdtech AAR on Maven Central; mpv headers from the mpv repo; CMake bundles them via
+      `QT_ANDROID_EXTRA_LIBS`), runs `qt-cmake` → `androiddeployqt`, uploads the APK + attaches it to
+      releases. Verified: the prebuilt `.so` exports every C-API/render symbol the app uses. Needs a CI run
+      to confirm the Qt-for-Android/NDK/`QT_HOST_PATH` wiring (the likely first-iteration spot).
 - [ ] `androiddeployqt` → debug APK; install to a device/emulator via `adb install`.
 - [ ] Verify: catalog browse, a movie (libmpv), a comic/book/PDF, and an NES/SNES/GBA ROM
       (CoreManager downloads the `_android.so` core, RetroView runs it with JIT).
