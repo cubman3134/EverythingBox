@@ -110,6 +110,25 @@ namespace EmulatorRegistry
                 QStringLiteral("appimage"),    // -> Cemu-<ver>-x86_64.AppImage (direct AppImage)
                 QString(),                     // not a Flatpak
             },
+            {
+                // Nintendo Switch. The original Ryujinx was discontinued (Nintendo, 2024); Ryubing is the
+                // maintained fork, released via its own Forgejo (GitHub-compatible API). Win .zip ->
+                // publish/Ryujinx.exe, macOS .app.tar.gz, Linux direct .AppImage. CLI: positional ROM,
+                // --fullscreen for full screen.
+                QStringLiteral("ryujinx"), QStringLiteral("Ryujinx (Ryubing)"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("--fullscreen"), // fullscreenArgs
+                QString(),                      // windowedArgs (default is windowed)
+                QStringLiteral("https://ryujinx.app/"),
+                { QStringLiteral("Ryujinx.exe"), QStringLiteral("publish/Ryujinx.exe") },
+                { QStringLiteral("Ryujinx.app/Contents/MacOS/Ryujinx"), QStringLiteral("Ryujinx.app") },
+                { QStringLiteral("ryujinx.AppImage"), QStringLiteral("Ryujinx") },
+                QStringLiteral("https://git.ryujinx.app/api/v1/repos/ryubing/ryujinx/releases/latest"),
+                QStringLiteral("win_x64"),         // -> ryujinx-<ver>-win_x64.zip
+                QStringLiteral("macos_universal"), // -> ryujinx-<ver>-macos_universal.app.tar.gz
+                QStringLiteral("x64.appimage"),    // -> ryujinx-<ver>-x64.AppImage (not arm64)
+                QString(),                         // not a Flatpak
+            },
         };
         return list;
     }

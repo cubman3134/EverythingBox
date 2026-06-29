@@ -58,6 +58,9 @@ namespace SystemCatalog
             { "wiiu",    "Wii U (Cemu)",
                          { "wud", "wux", "wua", "rpx" },
                          {}, "cemu" },
+            { "switch",  "Nintendo Switch (Ryujinx)",
+                         { "nsp", "xci", "nca", "nro" },
+                         {}, "ryujinx" },
         };
         return list;
     }
