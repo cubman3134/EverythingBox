@@ -89,4 +89,38 @@ namespace SystemCatalog
                 return &s;
         return nullptr;
     }
+
+    // Map a console/platform display name (as the catalog labels it, e.g. "PSP", "GameCube", "Wii U") to a
+    // system. Lets a game route to the right emulator when its file extension is shared across consoles
+    // (PSP .iso vs GameCube .iso). Returns nullptr for consoles we don't emulate (caller falls back to the
+    // extension). Order matters: the most specific names are tested first.
+    inline const GameSystem* forConsoleName(const QString& consoleName)
+    {
+        const QString n = consoleName.toLower().trimmed();
+        if (n.isEmpty()) return nullptr;
+        auto has = [&](const char* s) { return n.contains(QLatin1String(s)); };
+        QString id;
+        if      (has("vita"))                                              id = QStringLiteral("psvita");
+        else if (has("psp") || has("playstation portable"))               id = QStringLiteral("psp");
+        else if (has("switch"))                                           id = QStringLiteral("switch");
+        else if (has("wii u") || has("wiiu"))                             id = QStringLiteral("wiiu");
+        else if (has("wii") || has("gamecube") || has("gcn"))             id = QStringLiteral("gc");
+        else if (has("3ds"))                                              id = QStringLiteral("3ds");
+        else if (has("nintendo ds") || has("nds"))                        id = QStringLiteral("nds");
+        else if (has("nintendo 64") || has("n64"))                        id = QStringLiteral("n64");
+        else if (has("snes") || has("super nintendo") || has("super famicom")) id = QStringLiteral("snes");
+        else if (has("game boy advance") || has("gba"))                   id = QStringLiteral("gba");
+        else if (has("game boy") || has("gbc"))                           id = QStringLiteral("gb");
+        else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
+        else if (has("genesis") || has("mega drive") || has("master system")
+                 || has("game gear") || has("sg-1000"))                   id = QStringLiteral("genesis");
+        else if (has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
+        else if (has("wonderswan"))                                       id = QStringLiteral("ws");
+        else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
+        // PlayStation last (after Vita/PSP); only PS1 maps - PS2/3/4/5 have no emulator yet.
+        else if (has("playstation 2") || has("playstation 3")
+                 || has("playstation 4") || has("playstation 5"))         id = QString();
+        else if (has("playstation") || has("psx") || has("ps1") || has("psone")) id = QStringLiteral("psx");
+        return id.isEmpty() ? nullptr : byId(id);
+    }
 }

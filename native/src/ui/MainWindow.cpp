@@ -884,15 +884,28 @@ void MainWindow::openGame()
     openGamePath(rom);
 }
 
-void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb, const QString& key)
+void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb, const QString& key,
+                             const QString& systemHint)
 {
     // The Recent entry shows the catalog item's name/cover when we have them; otherwise the file name. A
     // remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
     const QString recentTitle = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;
     const QString ext = QFileInfo(rom).suffix().toLower();
-    const GameSystem* sys = SystemCatalog::forExtension(ext);
-    mwLog(QStringLiteral("game: open \"%1\" (.%2) -> system %3")
-              .arg(QFileInfo(rom).fileName(), ext, sys ? sys->id : QStringLiteral("(none)")));
+    // Prefer the console/platform the game was opened from (when known): it disambiguates extensions shared
+    // across systems (PSP .iso vs GameCube .iso, PSP .pbp vs PlayStation .pbp). Fall back to the extension.
+    const GameSystem* sys = nullptr;
+    if (!systemHint.isEmpty())
+    {
+        sys = SystemCatalog::byId(systemHint);
+        if (!sys) sys = SystemCatalog::forConsoleName(systemHint);
+    }
+    const bool byHint = sys != nullptr;
+    if (!sys) sys = SystemCatalog::forExtension(ext);
+    mwLog(QStringLiteral("game: open \"%1\" (.%2)%3 -> system %4")
+              .arg(QFileInfo(rom).fileName(), ext,
+                   systemHint.isEmpty() ? QString() : QStringLiteral(" hint=\"%1\"%2").arg(systemHint,
+                       byHint ? QString() : QStringLiteral("(unmatched)")),
+                   sys ? sys->id : QStringLiteral("(none)")));
     if (!sys)
     {
         mwLog(QStringLiteral("game: no system for .%1 — aborting").arg(ext));
@@ -1530,8 +1543,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
-        // Carry the catalog title/cover/id into Recent (the ROM file itself is a hashed cache name).
-        openGamePath(url, item.title, item.thumbnailUrl, item.id);
+        // Carry the catalog title/cover/id into Recent (the ROM file itself is a hashed cache name), and the
+        // console/platform hint so the right emulator is picked even when the extension is shared.
+        openGamePath(url, item.title, item.thumbnailUrl, item.id, item.systemHint);
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {

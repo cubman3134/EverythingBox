@@ -79,6 +79,9 @@ struct MediaItem
     // Set when a file provider (Allarr) resolved this playable and can serve an alternate source on demand
     // (its /stream supports ?n=K). Drives the player/reader's "Issue with Streaming" button. Not serialized.
     bool nextSourceCapable = false;
+    // For games: the console/platform this was opened from (e.g. "PSP", "GameCube"). Lets the launcher pick
+    // the right emulator even when the file extension is shared (PSP .iso vs GameCube .iso). Not serialized.
+    QString systemHint;
 };
 
 struct MediaCatalog

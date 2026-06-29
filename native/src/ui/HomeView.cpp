@@ -552,6 +552,11 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         if (stack_.isEmpty() || !stack_.last().detail) return;
         const Level& top = stack_.last();
         const MediaItem it = top.item;
+        // The console/platform we drilled in from (if any). Stamped onto a resolved game so the launcher can
+        // pick the right emulator even when the file extension is shared (e.g. a PSP .iso vs a GameCube .iso).
+        QString console;
+        if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
+            console = stack_.at(stack_.size() - 2).item.title.trimmed();
         if (it.mime == QStringLiteral("steamgame"))
         {
             MediaItem m = it;
@@ -595,11 +600,8 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             }
             else if (it.type == QStringLiteral("game"))
             {
-                // "<game> <console>": the console is the platform we drilled in from; Allarr parses the
-                // trailing console name to tag its ROM search and choose the file extensions to look for.
-                QString console;
-                if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
-                    console = stack_.at(stack_.size() - 2).item.title.trimmed();
+                // "<game> <console>": Allarr parses the trailing console name to tag its ROM search and
+                // choose the file extensions to look for. (console is computed once at the top of the handler.)
                 query = (it.title + QLatin1Char(' ') + console).trimmed();
             }
             else
@@ -613,9 +615,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
             playBtn_->setEnabled(false);
             const QString title = it.title;
-            mgr_->resolveDocumentByQuery(query, catType, [this, it, title](const QString& url, const QString& mime, const QString& err) {
+            mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; emit openItem(m); }
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
                 else if (!err.isEmpty())
                     showToast(tr("Couldn't reach the file provider (Allarr) — is it running? (%1)").arg(err), 8000);
                 else
@@ -638,9 +640,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
                                                    : tr("Looking for “%1”…").arg(it.title);
             showToast(lookingMsg, 30000);
             playBtn_->setEnabled(false);
-            mgr_->resolveStream(addon, it, [this, it, fileProvider](const QString& url, const QString& mime) {
+            mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
                 playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
+                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
                 else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
             });
             return;

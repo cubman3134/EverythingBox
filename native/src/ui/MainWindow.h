@@ -100,7 +100,8 @@ private:
     // title/thumb/key let the Recent entry show the catalog item's name + cover (a remote ROM is cached under
     // a hashed file name, which would otherwise be displayed); key is the stable id for de-dup.
     void openGamePath(const QString& path, const QString& title = QString(),
-                      const QString& thumb = QString(), const QString& key = QString());
+                      const QString& thumb = QString(), const QString& key = QString(),
+                      const QString& systemHint = QString()); // console/platform name to pick the system over the file ext
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
     // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
