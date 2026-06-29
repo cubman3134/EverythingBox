@@ -210,6 +210,24 @@ namespace EmulatorRegistry
                 QStringLiteral("x64.appimage"),        // -> DuckStation-x64.AppImage (not SSE2/arm)
                 QString(),                             // not a Flatpak
             },
+            {
+                // PlayStation 2. PCSX2, GitHub single repo: Windows .7z (pcsx2-qt.exe at root), macOS .tar.xz
+                // (PCSX2.app), Linux a direct .AppImage. CLI: -batch boots & exits when stopped, path after
+                // "--", -fullscreen/-nofullscreen. (installer/symbols assets skipped by the filters.)
+                QStringLiteral("pcsx2"), QStringLiteral("PCSX2"),
+                QStringLiteral("-batch {fs} -- {rom}"),
+                QStringLiteral("-fullscreen"),    // fullscreenArgs
+                QStringLiteral("-nofullscreen"),  // windowedArgs
+                QStringLiteral("https://pcsx2.net/downloads/"),
+                { QStringLiteral("pcsx2-qt.exe") },
+                { QStringLiteral("PCSX2.app/Contents/MacOS/PCSX2"), QStringLiteral("PCSX2.app") },
+                { QStringLiteral("pcsx2.AppImage"), QStringLiteral("pcsx2-qt") },
+                QStringLiteral("https://api.github.com/repos/PCSX2/pcsx2/releases/latest"),
+                QStringLiteral("windows-x64-qt"), // -> pcsx2-<ver>-windows-x64-Qt.7z (not installer/symbols)
+                QStringLiteral("macos"),          // -> pcsx2-<ver>-macos-Qt.tar.xz
+                QStringLiteral("appimage-x64"),   // -> pcsx2-<ver>-linux-appimage-x64-Qt.AppImage (not flatpak)
+                QString(),                        // not a Flatpak
+            },
         };
         return list;
     }

@@ -77,6 +77,11 @@ namespace SystemCatalog
             { "ps3",     "PlayStation 3 (RPCS3)",
                          { "pkg" },
                          {}, "rpcs3" },
+            // PS2 .iso/.chd/.cso all collide with earlier systems (GameCube/PlayStation/PSP), so this claims
+            // no extensions - PS2 games route here via the console hint ("PlayStation 2") set from the shelf.
+            { "ps2",     "PlayStation 2 (PCSX2)",
+                         {},
+                         {}, "pcsx2" },
         };
         return list;
     }
@@ -126,7 +131,8 @@ namespace SystemCatalog
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
         // PlayStation last (after Vita/PSP). Specific consoles before the generic PS1 match.
         else if (has("playstation 3") || has("ps3"))                      id = QStringLiteral("ps3");
-        else if (has("playstation 2") || has("playstation 4") || has("playstation 5")) id = QString(); // no emulator yet
+        else if (has("playstation 2") || has("ps2"))                      id = QStringLiteral("ps2");
+        else if (has("playstation 4") || has("playstation 5"))            id = QString(); // no emulator yet
         else if (has("playstation") || has("psx") || has("ps1") || has("psone")) id = QStringLiteral("psx");
         return id.isEmpty() ? nullptr : byId(id);
     }

@@ -204,7 +204,9 @@ void EmulatorManager::fetchArtifactList()
                         || name.endsWith(QStringLiteral(".appimage"), Qt::CaseInsensitive)
                         || name.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive)
                         || name.endsWith(QStringLiteral(".tar.gz"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".tgz"), Qt::CaseInsensitive)))
+                        || name.endsWith(QStringLiteral(".tgz"), Qt::CaseInsensitive)
+                        || name.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive)
+                        || name.endsWith(QStringLiteral(".txz"), Qt::CaseInsensitive)))
                 {
                     url = o.value(QStringLiteral("browser_download_url")).toString();
                     break;
