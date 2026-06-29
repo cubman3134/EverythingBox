@@ -13,6 +13,7 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QScrollBar>
+#include <QFontMetrics>
 #include <QKeyEvent>
 #include <QSettings>
 #include <QCoreApplication>
@@ -56,7 +57,7 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     browser_->setOpenLinks(false);   // we drive chapter flow ourselves; handle clicks via anchorClicked
     connect(browser_, &QTextBrowser::anchorClicked, this, &EbookView::onAnchorClicked);
     browser_->setFrameShape(QFrame::NoFrame);
-    browser_->document()->setDefaultStyleSheet(QStringLiteral("body { margin: 28px; } img { max-width: 100%; }"));
+    browser_->document()->setDefaultStyleSheet(QStringLiteral("body { margin: 28px 28px 52px 28px; } img { max-width: 100%; }"));
 
     tocList_ = new QListWidget(this);
     tocList_->setVisible(false); // hidden until "Contents" is pressed
@@ -185,12 +186,22 @@ void EbookView::applyFont()
     browser_->document()->setDefaultFont(f);
 }
 
+// How far a page-flip scrolls. We advance by a little less than a full viewport so the page overlaps the
+// previous one by ~2 lines - otherwise a line straddling the bottom edge (right above the toolbar) gets cut
+// in half and lost. The overlap scales with the font, so it stays correct as the reader sizes text up.
+int EbookView::pageScrollStep() const
+{
+    QScrollBar* sb = browser_->verticalScrollBar();
+    const int line = QFontMetrics(browser_->document()->defaultFont()).lineSpacing();
+    return qMax(line, sb->pageStep() - 2 * line);
+}
+
 void EbookView::nextPage()
 {
     if (!book_->isOpen()) return;
     QScrollBar* sb = browser_->verticalScrollBar();
     if (sb->value() < sb->maximum())
-        sb->setValue(qMin(sb->maximum(), sb->value() + sb->pageStep()));
+        sb->setValue(qMin(sb->maximum(), sb->value() + pageScrollStep()));
     else if (chapter_ < book_->chapterFiles().size() - 1)
         loadChapter(chapter_ + 1);
 }
@@ -200,7 +211,7 @@ void EbookView::prevPage()
     if (!book_->isOpen()) return;
     QScrollBar* sb = browser_->verticalScrollBar();
     if (sb->value() > 0)
-        sb->setValue(qMax(0, sb->value() - sb->pageStep()));
+        sb->setValue(qMax(0, sb->value() - pageScrollStep()));
     else if (chapter_ > 0)
         loadChapter(chapter_ - 1, /*toBottom*/ true);
 }

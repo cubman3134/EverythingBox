@@ -43,6 +43,7 @@ private slots:
 
 private:
     void loadChapter(int index, bool toBottom = false);
+    int pageScrollStep() const; // viewport-minus-overlap, so flipped pages don't cut the bottom line
     void applyFont();
     void restoreState();
 
