@@ -52,6 +52,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ebook/EbookSource.h
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
         src/ebook/MobiBook.cpp    src/ebook/MobiBook.h
+        src/ebook/PdfTextBook.cpp src/ebook/PdfTextBook.h
         src/ebook/EbookView.cpp   src/ebook/EbookView.h
         src/pdf/PdfView.cpp       src/pdf/PdfView.h
         src/comic/ComicView.cpp   src/comic/ComicView.h
@@ -116,6 +117,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp)
     target_include_directories(probe_mobi PRIVATE src src/ebook)
     target_link_libraries(probe_mobi PRIVATE Qt6::Core)
+
+    # Console harness for the PDF -> reflow-text reader (needs QtPdf).
+    add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
+    target_include_directories(probe_pdftext PRIVATE src src/ebook)
+    target_link_libraries(probe_pdftext PRIVATE Qt6::Gui Qt6::Pdf)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)

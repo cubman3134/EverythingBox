@@ -1540,10 +1540,21 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
     {
-        if (!pdf_->openPdf(url, &err)) { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
-        pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
-        stack_->setCurrentWidget(pdf_);
+        // Prefer the reflowable reader (font sizing / pagination like EPUB) for text PDFs - this is mainly a
+        // book app. Fall back to the fixed page-image view for scanned PDFs that have no text layer.
+        if (book_->openBook(url, &err))
+        {
+            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+            book_->setStreamIssueVisible(currentNextSourceCapable_);
+            stack_->setCurrentWidget(book_);
+        }
+        else if (pdf_->openPdf(url, &err))
+        {
+            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
+            pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
+            stack_->setCurrentWidget(pdf_);
+        }
+        else { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); }
     }
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {

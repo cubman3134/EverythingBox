@@ -1,6 +1,7 @@
 #include "EbookView.h"
 #include "EpubBook.h"
 #include "MobiBook.h"
+#include "PdfTextBook.h"
 #include "../core/AppPaths.h"
 
 #include <QFile>
@@ -43,6 +44,8 @@ static std::unique_ptr<EbookSource> makeSource(const QString& path)
     const QByteArray sig = head.mid(60, 8);
     if (sig == QByteArray("BOOKMOBI") || sig == QByteArray("TEXtREAd"))
         return std::make_unique<MobiBook>();
+    if (head.startsWith("%PDF-"))            // a text PDF read as a reflowable book (font sizing)
+        return std::make_unique<PdfTextBook>();
     return std::make_unique<EpubBook>();
 }
 
