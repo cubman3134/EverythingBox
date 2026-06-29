@@ -1,7 +1,6 @@
 name: Build & Release
 
-# Builds the native app for Windows, macOS, Linux, and Android (the Android job is
-# continue-on-error while its libmpv dep is being dialed in - see the job comment).
+# Builds the native app for Windows, macOS, Linux, and Android / Android TV.
 # On a version tag (v*) the artifacts are attached to a GitHub Release; on a manual
 # run they're uploaded as workflow artifacts so the build can be tested without publishing.
 on:
@@ -250,12 +249,10 @@ jobs:
 
   # ---------------------------------------------------------------- Android ---
   # Android / Android TV APK (arm64). Self-provisioning: pulls a prebuilt libmpv (+ ffmpeg) from Maven
-  # Central and the mpv headers from the mpv repo, then qt-cmake -> androiddeployqt -> APK. Marked
-  # continue-on-error until a CI run confirms the Qt-for-Android/NDK wiring, so a red Android build never
-  # blocks the Windows/macOS/Linux releases. See native/docs/android-port.md.
+  # Central and the mpv headers from the mpv repo, then qt-cmake -> androiddeployqt -> APK.
+  # See native/docs/android-port.md.
   android:
     runs-on: ubuntu-22.04
-    continue-on-error: true
     env:
       QT_ANDROID_ARCH: android_arm64_v8a
       NDK_VERSION: '26.1.10909125'   # Qt 6.8's recommended NDK (r26b)
@@ -334,12 +331,6 @@ jobs:
 
       - name: Build APK
         run: cmake --build build-android
-
-      - name: Show generated manifest (on failure)
-        if: failure()
-        run: |
-          f=$(find build-android -name AndroidManifest.xml -path '*android-build*' | head -n1)
-          echo "=== generated: $f ==="; cat -n "$f" 2>/dev/null || echo "(not generated)"
 
       - name: Collect APK
         run: |
