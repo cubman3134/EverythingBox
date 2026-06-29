@@ -54,6 +54,7 @@ private:
     void finishInstall();       // common tail: locate the binary, then launch or report "installed"
     void launch(const QString& binary);
     QString platformArtifact() const;
+    QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl
 
     QNetworkAccessManager* nam_ = nullptr;
     QProcess* game_ = nullptr;

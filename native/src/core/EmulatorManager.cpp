@@ -140,6 +140,18 @@ QString EmulatorManager::platformArtifact() const
 #endif
 }
 
+QString EmulatorManager::platformUpdateUrl() const
+{
+#if defined(Q_OS_WIN)
+    if (!em_.winUpdateUrl.isEmpty()) return em_.winUpdateUrl;
+#elif defined(Q_OS_MACOS)
+    if (!em_.macUpdateUrl.isEmpty()) return em_.macUpdateUrl;
+#else
+    if (!em_.linuxUpdateUrl.isEmpty()) return em_.linuxUpdateUrl;
+#endif
+    return em_.updateJsonUrl; // shared source (most emulators)
+}
+
 void EmulatorManager::startInstall()
 {
     fetchArtifactList(); // resolves the per-OS artifact URL, then downloadArchive() -> installDownloaded()
@@ -148,7 +160,7 @@ void EmulatorManager::startInstall()
 void EmulatorManager::fetchArtifactList()
 {
     emit status(tr("Looking up the latest %1…").arg(em_.displayName), -1);
-    QNetworkRequest rq{ QUrl(em_.updateJsonUrl) };
+    QNetworkRequest rq{ QUrl(platformUpdateUrl()) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
@@ -270,7 +282,11 @@ void EmulatorManager::extractArchive()
 #if defined(Q_OS_WIN)
     cmds.append({ QStringLiteral("C:/Windows/System32/tar.exe"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
 #elif defined(Q_OS_MACOS)
-    cmds.append({ QStringLiteral("tar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
+    cmds.append({ QStringLiteral("tar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } }); // .zip (and .7z if libarchive has lzma)
+    if (!isZip) { // .7z (e.g. RPCS3 mac) - macOS has no bundled 7z, so fall back to p7zip if installed
+        cmds.append({ QStringLiteral("7z"),  { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + dir, a } });
+        cmds.append({ QStringLiteral("7za"), { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + dir, a } });
+    }
 #else
     cmds.append({ QStringLiteral("bsdtar"), { QStringLiteral("-xf"), a, QStringLiteral("-C"), dir } });
     if (isZip) cmds.append({ QStringLiteral("unzip"), { QStringLiteral("-o"), a, QStringLiteral("-d"), dir } });

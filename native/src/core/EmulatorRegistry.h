@@ -31,6 +31,10 @@ struct ExternalEmulator
     QString macArtifact;
     QString linuxArtifact;
     QString flatpakAppId;  // non-empty => Linux build is a Flatpak: install via flatpak, launch via "flatpak run"
+    // Some emulators publish each OS from a separate repo; when set, these override updateJsonUrl for that OS.
+    QString winUpdateUrl;
+    QString macUpdateUrl;
+    QString linuxUpdateUrl;
 };
 
 namespace EmulatorRegistry
@@ -163,6 +167,28 @@ namespace EmulatorRegistry
                 QStringLiteral("macos-latest"),    // -> macos-latest.dmg (Intel; runs on Apple Silicon via Rosetta)
                 QStringLiteral("x86_64.appimage"), // -> Vita3K-x86_64.AppImage
                 QString(),                         // not a Flatpak
+            },
+            {
+                // PlayStation 3. RPCS3 publishes each OS from a SEPARATE GitHub repo: Windows .7z
+                // (rpcs3.exe at root), macOS .7z (rpcs3.app), Linux a direct .AppImage. CLI: positional
+                // (S)ELF boots; --fullscreen only applies with --no-gui, which also boots straight to the
+                // game (no GUI). Leaving the toggle off keeps the GUI (needed once to install firmware).
+                QStringLiteral("rpcs3"), QStringLiteral("RPCS3"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("--no-gui --fullscreen"), // fullscreenArgs
+                QString(),                               // windowedArgs (empty -> opens the GUI + boots the game)
+                QStringLiteral("https://rpcs3.net/download"),
+                { QStringLiteral("rpcs3.exe") },
+                { QStringLiteral("rpcs3.app/Contents/MacOS/rpcs3"), QStringLiteral("rpcs3.app") },
+                { QStringLiteral("rpcs3.AppImage"), QStringLiteral("rpcs3") },
+                QString(),                               // updateJsonUrl (per-OS repos below)
+                QStringLiteral("win64"),                 // -> ..._win64_msvc.7z (skips the .sha256)
+                QStringLiteral("macos"),                 // -> ..._macos.7z
+                QStringLiteral("linux64"),               // -> ..._linux64.AppImage
+                QString(),                               // not a Flatpak
+                QStringLiteral("https://api.github.com/repos/RPCS3/rpcs3-binaries-win/releases/latest"),
+                QStringLiteral("https://api.github.com/repos/RPCS3/rpcs3-binaries-mac/releases/latest"),
+                QStringLiteral("https://api.github.com/repos/RPCS3/rpcs3-binaries-linux/releases/latest"),
             },
         };
         return list;
