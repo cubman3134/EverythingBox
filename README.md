@@ -13,7 +13,7 @@ Grab the latest build for your platform:
 | **Windows** (x64) | [**MyMediaVault-windows-x64.zip**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-windows-x64.zip) | Unzip anywhere and run `MyMediaVault.exe`. |
 | **macOS** (Apple Silicon) | [**MyMediaVault-macos-arm64.dmg**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-macos-arm64.dmg) | Unsigned build — first launch: right-click the app → **Open**. |
 | **Linux** (x86_64) | [**MyMediaVault-linux-x86_64.AppImage**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
-| **Android / Android TV** (arm64) | _build from source_ | APK runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. See [Android / Android TV](#android--android-tv). |
+| **Android / Android TV** (arm64) | _CI build (in progress)_ | APK runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. The CI APK job is wired but pending the libmpv-for-Android dependency. See [Android / Android TV](#android--android-tv). |
 
 Current version: **0.2.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
 
@@ -60,8 +60,14 @@ libretro cores** (Android allows JIT + `dlopen`; `CoreManager` fetches the right
 **standalone modern-console emulators** (Dolphin/PCSX2/RPCS3/…) are **desktop-only** — Android can't launch
 downloaded desktop executables — and are gated off the Android build.
 
-**Build is from source** (no prebuilt APK yet). It needs the Android toolchain and two native deps
-cross-compiled for the target ABI — `libmpv` (the real gate) and `SDL2`:
+A CI job (`android` in [`release.yml`](.github/workflows/release.yml)) builds the APK automatically and
+attaches it to releases — it installs the Qt-for-Android kit + NDK and runs `qt-cmake` → `androiddeployqt`.
+The one piece it can't self-provide is **`libmpv` built for Android**: set a repo variable
+`MPV_ANDROID_LIB_URL` pointing at an archive with `include/mpv/*.h` + `lib/arm64-v8a/libmpv.so` (or swap in
+a build step). The job is `continue-on-error`, so it never blocks the desktop releases while that's dialed in.
+
+To **build locally** instead, you need the same: the Android toolchain and `libmpv`/`SDL2` cross-compiled
+for the target ABI:
 
 ```
 # 1) Install Android SDK + NDK and the Qt-for-Android 6.8.3 arm64 kit.

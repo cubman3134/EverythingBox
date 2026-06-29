@@ -95,6 +95,10 @@ Intent hand-off to installed Android emulator apps.
 - [ ] **Permissions flow**: request storage at runtime (API 23+); pick ROM/media folders via SAF.
 
 ## Phase 5 — Package & test
+- [x] CI job added (`android` in `.github/workflows/release.yml`, `continue-on-error`): installs the
+      Qt-for-Android kit + NDK, runs `qt-cmake` → `androiddeployqt`, uploads the APK + attaches it to
+      releases. The gate is the `MPV_ANDROID_LIB_URL` repo variable (a prebuilt libmpv-for-Android, or swap
+      in a build step) — until that's set the job fails fast without affecting the desktop releases.
 - [ ] `androiddeployqt` → debug APK; install to a device/emulator via `adb install`.
 - [ ] Verify: catalog browse, a movie (libmpv), a comic/book/PDF, and an NES/SNES/GBA ROM
       (CoreManager downloads the `_android.so` core, RetroView runs it with JIT).

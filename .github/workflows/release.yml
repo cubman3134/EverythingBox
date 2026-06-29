@@ -1,8 +1,9 @@
 name: Build & Release
 
-# Builds the native app for Windows, macOS and Linux. On a version tag (v*) the
-# artifacts are attached to a GitHub Release; on a manual run they're uploaded as
-# workflow artifacts so the build can be tested without publishing.
+# Builds the native app for Windows, macOS, Linux, and Android (the Android job is
+# continue-on-error while its libmpv dep is being dialed in - see the job comment).
+# On a version tag (v*) the artifacts are attached to a GitHub Release; on a manual
+# run they're uploaded as workflow artifacts so the build can be tested without publishing.
 on:
   push:
     tags: ['v*']
@@ -245,4 +246,106 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: MyMediaVault-linux-x86_64.AppImage
+          generate_release_notes: true
+
+  # ---------------------------------------------------------------- Android ---
+  # Android / Android TV APK (arm64). Marked continue-on-error while the libmpv-for-Android piece is being
+  # dialed in, so a red Android build never blocks the Windows/macOS/Linux releases. The one piece this job
+  # can't self-provide is a libmpv built for Android - set a repo variable MPV_ANDROID_LIB_URL pointing at an
+  # archive that contains include/mpv/*.h + lib/arm64-v8a/libmpv.so (or swap in a build step). The rest of
+  # the pipeline (Qt-for-Android, NDK, qt-cmake -> androiddeployqt -> APK) is here. See native/docs/android-port.md.
+  android:
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    env:
+      QT_ANDROID_ARCH: android_arm64_v8a
+      NDK_VERSION: '26.1.10909125'   # Qt 6.8's recommended NDK (r26b)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK + NDK
+        uses: android-actions/setup-android@v3
+      - name: Install NDK + platform
+        run: |
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-34" "build-tools;34.0.0"
+          echo "ANDROID_NDK_ROOT=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+
+      # Host Qt (tools: moc/rcc/androiddeployqt run on the runner) ...
+      - name: Install Qt (host desktop)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtmultimedia qtpdf'
+          cache: true
+      - name: Remember host Qt
+        run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
+      # ... and the Android (arm64) Qt that we actually link against.
+      - name: Install Qt (Android arm64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: linux
+          target: android
+          arch: ${{ env.QT_ANDROID_ARCH }}
+          modules: 'qtmultimedia qtpdf'
+          cache: true
+
+      - name: Provide libmpv for Android      # <-- the iteration point (see job comment)
+        env:
+          MPV_ANDROID_LIB_URL: ${{ vars.MPV_ANDROID_LIB_URL }}
+        run: |
+          set -e
+          if [ -z "$MPV_ANDROID_LIB_URL" ]; then
+            echo "::error::Set the MPV_ANDROID_LIB_URL repo variable to an archive with include/mpv/*.h + lib/arm64-v8a/libmpv.so."
+            exit 1
+          fi
+          mkdir -p mpv-android && curl -L "$MPV_ANDROID_LIB_URL" -o mpv.archive
+          tar -xf mpv.archive -C mpv-android 2>/dev/null || unzip -o mpv.archive -d mpv-android
+          so=$(find mpv-android -name 'libmpv.so' | head -n1)
+          inc=$(dirname "$(find mpv-android -path '*mpv/client.h' | head -n1)")/..
+          [ -n "$so" ] && [ -d "$inc" ] || { echo "libmpv.so / mpv headers not found in archive"; find mpv-android | head; exit 1; }
+          echo "MPV_LIBRARY=$(realpath "$so")" >> "$GITHUB_ENV"
+          echo "MPV_INCLUDE_DIR=$(realpath "$inc")" >> "$GITHUB_ENV"
+
+      - name: Configure (qt-cmake)
+        run: |
+          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \
+            -DQT_HOST_PATH="$QT_HOST_ROOT" \
+            -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
+            -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
+            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DMPV_INCLUDE_DIR="$MPV_INCLUDE_DIR" \
+            -DMPV_LIBRARY="$MPV_LIBRARY"
+          # SDL2-for-Android (gamepad) is optional; omitted here, so the first APK builds without controller input.
+
+      - name: Build APK
+        run: cmake --build build-android
+
+      - name: Collect APK
+        run: |
+          apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | head -n1)
+          [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | head -n1)
+          [ -n "$apk" ] || { echo "No APK produced"; find build-android -name '*.apk' -o -name '*.aab'; exit 1; }
+          cp "$apk" MyMediaVault-android-arm64.apk
+          ls -la MyMediaVault-android-arm64.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyMediaVault-android-arm64
+          path: MyMediaVault-android-arm64.apk
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MyMediaVault-android-arm64.apk
           generate_release_notes: true
