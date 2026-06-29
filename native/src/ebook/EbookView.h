@@ -16,6 +16,11 @@ class QTextDocument;
 
 // Renders one page of a chapter and turns clicks into page/menu requests. The owner (EbookView) drives
 // chapter flow; this widget only knows how to paginate and paint the chapter it was given.
+//
+// Pages flow from a "top" text offset rather than an absolute page grid: the page always begins exactly at
+// the first character of topPos_'s line and shows as many whole lines as fit. So the first word never moves
+// when the window resizes or the font changes - we just re-find the line for the same offset. A separate
+// from-the-start walk yields the "page x / y" counts for the footer.
 class BookPageWidget : public QWidget
 {
     Q_OBJECT
@@ -27,24 +32,25 @@ public:
     void setTopInset(int px);          // reserve space up top so the menu bar overlays margin, not text
     void setFooter(const QString& s);  // small centered line painted in the bottom margin (page x / y)
 
-    // Page count this chapter's HTML would paginate to at the current font/size, without disturbing the
+    // Page count this chapter's HTML would paginate to at the current geometry/font, without disturbing the
     // live view - used to total a book's pages across chapters.
     int  countPages(const QString& html, const QString& baseDir) const;
 
-    int  pageCount() const { return pageCount_; }
-    int  currentPage() const { return page_; }
-    bool atFirst() const { return page_ <= 0; }
-    bool atLast()  const { return page_ >= pageCount_ - 1; }
-    void setCurrentPage(int p);
-    void showFirstPage() { setCurrentPage(0); }
-    void showLastPage()  { setCurrentPage(pageCount_ - 1); }
+    int  pageCount() const { return qMax(1, int(pageTops_.size())); }
+    int  currentPage() const { return curPage_; } // 0-based, for the from-start grid (footer only)
+    bool atFirst() const;
+    bool atLast()  const;
+    void showFirstPage();
+    void showLastPage();
+    bool pageForward();   // advance one page by whole lines; false if already at the chapter's end
+    bool pageBackward();  // retreat one page by whole lines; false if already at the chapter's start
 
-    double progress() const { return pageCount_ > 1 ? double(page_) / (pageCount_ - 1) : 0.0; }
-    void   setProgress(double f) { setCurrentPage(pageCount_ > 1 ? int(f * (pageCount_ - 1) + 0.5) : 0); }
+    // Legacy resume: map an old saved page fraction onto a top offset.
+    void setProgress(double f);
 
     // Reading position as a document character offset - stable across repagination (resize / font change),
     // unlike a page index. topTextPosition() is the first character on the current page.
-    int  topTextPosition() const;
+    int  topTextPosition() const { return topPos_; }
     void scrollToTextPosition(int pos);
 
 signals:
@@ -61,12 +67,22 @@ protected:
     void mouseMoveEvent(QMouseEvent*) override;
 
 private:
-    void relayout();
-    int  pageForTextPosition(int pos) const; // which page contains a document offset
+    struct LineGeom { qreal y; qreal h; int pos; }; // document-space top, height, and start offset of a line
+
+    void relayout();           // re-lay the document and rebuild lines_/pageTops_, keeping topPos_'s line
+    void rebuildLines();       // flatten the laid-out document into lines_
+    void buildPageTops();      // walk lines_ from the start into whole-line pages (for the x / y count)
+    qreal contentH() const { return qMax(1.0, qreal(height()) - topMargin_ - botMargin_); }
+    int  lineIndexForPos(int pos) const;     // index into lines_ of the line containing a document offset
+    int  lastFittingLine(int startLine) const; // last whole line that fits a page starting at startLine
+    void snapTopToLine();      // pull topPos_ back to the start of its line
+    void recomputeCurrentPage(); // curPage_ = which from-start page holds topPos_
 
     QTextDocument* doc_ = nullptr;
-    int   page_ = 0;
-    int   pageCount_ = 1;
+    QVector<LineGeom> lines_;  // every line in the chapter, in order
+    QVector<int> pageTops_;    // start offset of each from-start page (footer numbering)
+    int   topPos_ = 0;         // document offset of the first line shown
+    int   curPage_ = 0;        // 0-based current page in the from-start grid
     int   fontPt_ = 14;
     qreal sideMargin_ = 40.0; // left/right paper margin
     qreal topMargin_  = 56.0; // clears the overlay menu so it never covers text

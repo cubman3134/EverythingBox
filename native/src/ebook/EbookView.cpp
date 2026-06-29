@@ -74,7 +74,7 @@ void BookPageWidget::setContent(const QString& html, const QString& baseDir)
     QFont f = doc_->defaultFont();
     f.setPointSize(fontPt_);
     doc_->setDefaultFont(f);
-    page_ = 0;
+    topPos_ = 0;
     relayout();
     update();
 }
@@ -86,12 +86,6 @@ void BookPageWidget::setFontPointSize(int pt)
     f.setPointSize(pt);
     doc_->setDefaultFont(f);
     relayout();
-    update();
-}
-
-void BookPageWidget::setCurrentPage(int p)
-{
-    page_ = qBound(0, p, pageCount_ - 1);
     update();
 }
 
@@ -109,66 +103,189 @@ void BookPageWidget::setFooter(const QString& s)
     update();
 }
 
+// Re-lay the document at the current width and rebuild the line table. topPos_ (a document offset) is kept,
+// then snapped to the start of whatever line now holds it - so the same words stay at the top of the page.
 void BookPageWidget::relayout()
 {
-    const qreal w = qMax(1.0, qreal(width())  - 2 * sideMargin_);
-    const qreal h = qMax(1.0, qreal(height()) - topMargin_ - botMargin_);
-    doc_->setPageSize(QSizeF(w, h));        // paginate by line into h-tall pages (no line is ever split)
-    pageCount_ = qMax(1, doc_->pageCount());
-    page_ = qBound(0, page_, pageCount_ - 1);
+    doc_->setTextWidth(qMax(1.0, qreal(width()) - 2 * sideMargin_));
+    rebuildLines();
+    buildPageTops();
+    snapTopToLine();
+    recomputeCurrentPage();
     emit layoutChanged();
 }
 
-int BookPageWidget::topTextPosition() const
+void BookPageWidget::rebuildLines()
 {
-    if (!doc_) return 0;
-    const qreal pageH = doc_->pageSize().height();
-    // The character at the top-left of the current page, in document offset terms.
-    return qMax(0, doc_->documentLayout()->hitTest(QPointF(1.0, page_ * pageH + 1.0), Qt::FuzzyHit));
+    lines_.clear();
+    QAbstractTextDocumentLayout* lay = doc_->documentLayout();
+    for (QTextBlock b = doc_->begin(); b.isValid(); b = b.next())
+    {
+        QTextLayout* tl = b.layout();
+        const qreal blockTop = lay->blockBoundingRect(b).top();
+        for (int i = 0; i < tl->lineCount(); ++i)
+        {
+            const QTextLine line = tl->lineAt(i);
+            lines_.push_back({ blockTop + line.y(), line.height(), b.position() + line.textStart() });
+        }
+    }
+    if (lines_.isEmpty()) lines_.push_back({ 0.0, 1.0, 0 });
 }
 
-int BookPageWidget::pageForTextPosition(int pos) const
+// Group lines into pages from the start, each holding as many whole lines as fit the content height. Used
+// only to total/number pages for the footer; the on-screen page flows from topPos_, not this grid.
+void BookPageWidget::buildPageTops()
 {
-    const qreal pageH = doc_->pageSize().height();
-    if (!doc_ || pageH <= 0) return 0;
-
-    const QTextBlock block = doc_->findBlock(pos);
-    if (!block.isValid()) return 0;
-
-    // Document-space y of that character: the block's top, plus the offset of its line within the block.
-    qreal y = doc_->documentLayout()->blockBoundingRect(block).top();
-    if (QTextLayout* layout = block.layout(); layout && layout->lineCount() > 0)
+    pageTops_.clear();
+    int i = 0;
+    while (i < lines_.size())
     {
-        const QTextLine line = layout->lineForTextPosition(qMax(0, pos - block.position()));
-        if (line.isValid()) y += line.y();
+        pageTops_.push_back(lines_[i].pos);
+        i = lastFittingLine(i) + 1;
     }
-    return qBound(0, int(y / pageH), pageCount_ - 1);
+    if (pageTops_.isEmpty()) pageTops_.push_back(0);
+}
+
+int BookPageWidget::lineIndexForPos(int pos) const
+{
+    // Last line whose start is <= pos (lines_ is ordered by position).
+    int lo = 0, hi = lines_.size() - 1, ans = 0;
+    while (lo <= hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (lines_[mid].pos <= pos) { ans = mid; lo = mid + 1; }
+        else                          hi = mid - 1;
+    }
+    return ans;
+}
+
+int BookPageWidget::lastFittingLine(int startLine) const
+{
+    const qreal ph = contentH();
+    const qreal y0 = lines_[startLine].y;
+    int m = startLine;
+    while (m + 1 < lines_.size() && (lines_[m + 1].y + lines_[m + 1].h - y0) <= ph)
+        ++m;
+    return m; // always >= startLine, so paging makes progress even if one line exceeds the page
+}
+
+void BookPageWidget::snapTopToLine()
+{
+    topPos_ = lines_[lineIndexForPos(topPos_)].pos;
+}
+
+void BookPageWidget::recomputeCurrentPage()
+{
+    // Which from-start page holds topPos_ (largest pageTop <= topPos_).
+    int lo = 0, hi = pageTops_.size() - 1, ans = 0;
+    while (lo <= hi)
+    {
+        const int mid = (lo + hi) / 2;
+        if (pageTops_[mid] <= topPos_) { ans = mid; lo = mid + 1; }
+        else                             hi = mid - 1;
+    }
+    curPage_ = ans;
+}
+
+bool BookPageWidget::atFirst() const { return lineIndexForPos(topPos_) <= 0; }
+
+bool BookPageWidget::atLast() const
+{
+    return lastFittingLine(lineIndexForPos(topPos_)) + 1 >= lines_.size();
+}
+
+void BookPageWidget::showFirstPage()
+{
+    topPos_ = lines_.first().pos;
+    recomputeCurrentPage();
+    update();
+}
+
+void BookPageWidget::showLastPage()
+{
+    topPos_ = pageTops_.last(); // the from-start grid's final page top shows the chapter's tail
+    recomputeCurrentPage();
+    update();
+}
+
+bool BookPageWidget::pageForward()
+{
+    const int next = lastFittingLine(lineIndexForPos(topPos_)) + 1;
+    if (next >= lines_.size()) return false; // nothing more in this chapter
+    topPos_ = lines_[next].pos;
+    recomputeCurrentPage();
+    update();
+    return true;
+}
+
+bool BookPageWidget::pageBackward()
+{
+    const int start = lineIndexForPos(topPos_);
+    if (start <= 0) return false;
+    // The previous page ends just above the current top: walk back from start-1 while the lines still fit.
+    const qreal endBottom = lines_[start - 1].y + lines_[start - 1].h;
+    int s = start - 1;
+    while (s - 1 >= 0 && (endBottom - lines_[s - 1].y) <= contentH()) --s;
+    topPos_ = lines_[s].pos;
+    recomputeCurrentPage();
+    update();
+    return true;
+}
+
+void BookPageWidget::setProgress(double f)
+{
+    const int p = pageTops_.size() > 1 ? int(f * (pageTops_.size() - 1) + 0.5) : 0;
+    topPos_ = pageTops_[qBound(0, p, int(pageTops_.size()) - 1)];
+    recomputeCurrentPage();
+    update();
 }
 
 void BookPageWidget::scrollToTextPosition(int pos)
 {
-    setCurrentPage(pageForTextPosition(pos));
+    topPos_ = lines_[lineIndexForPos(pos)].pos; // the page starts exactly at this line
+    recomputeCurrentPage();
+    update();
 }
 
 int BookPageWidget::countPages(const QString& html, const QString& baseDir) const
 {
-    // Lay the chapter out in a throwaway document with the live view's exact font and page geometry, so its
-    // page count matches what this widget would show - without touching the on-screen document.
+    // Count whole-line pages for a chapter in a throwaway document with the live view's font and width -
+    // without touching the on-screen document.
     BookDocument d;
     d.setDocumentMargin(0);
     d.setDefaultStyleSheet(doc_->defaultStyleSheet());
     d.setBaseUrl(QUrl::fromLocalFile(baseDir + QStringLiteral("/")));
     d.setHtml(html);
     d.setDefaultFont(doc_->defaultFont());
-    d.setPageSize(doc_->pageSize());
-    return qMax(1, d.pageCount());
+    d.setTextWidth(doc_->textWidth());
+
+    const qreal ph = contentH();
+    QAbstractTextDocumentLayout* lay = d.documentLayout();
+    QVector<LineGeom> ls;
+    for (QTextBlock b = d.begin(); b.isValid(); b = b.next())
+    {
+        QTextLayout* tl = b.layout();
+        const qreal blockTop = lay->blockBoundingRect(b).top();
+        for (int i = 0; i < tl->lineCount(); ++i)
+            ls.push_back({ blockTop + tl->lineAt(i).y(), tl->lineAt(i).height(), 0 });
+    }
+    if (ls.isEmpty()) return 1;
+
+    int pages = 0, i = 0;
+    while (i < ls.size())
+    {
+        ++pages;
+        const qreal y0 = ls[i].y;
+        int m = i;
+        while (m + 1 < ls.size() && (ls[m + 1].y + ls[m + 1].h - y0) <= ph) ++m;
+        i = m + 1;
+    }
+    return qMax(1, pages);
 }
 
 void BookPageWidget::resizeEvent(QResizeEvent*)
 {
-    const int pos = topTextPosition(); // anchor to the text before the geometry (and page count) changes
-    relayout();
-    scrollToTextPosition(pos);          // ...then land on whatever page now holds it
+    relayout(); // keeps topPos_ - the first word doesn't move
     update();
 }
 
@@ -176,21 +293,22 @@ void BookPageWidget::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.fillRect(rect(), palette().color(QPalette::Base));
-    if (!doc_) return;
+    if (!doc_ || lines_.isEmpty()) return;
 
-    const qreal pageW = doc_->pageSize().width();
-    const qreal pageH = doc_->pageSize().height();
+    const qreal contentW = doc_->textWidth();
+    const int startLine = lineIndexForPos(topPos_);
+    const int endLine = lastFittingLine(startLine);
+    const qreal y0 = lines_[startLine].y;
+    const qreal slice = lines_[endLine].y + lines_[endLine].h - y0; // height of the whole-line page
 
     p.save();
-    // Clip to the page's content rectangle so a line belonging to the next page can never paint into our
-    // margins - belt-and-braces on top of QTextDocument's line-clean pagination.
-    p.setClipRect(QRectF(sideMargin_, topMargin_, pageW, pageH));
-    p.translate(sideMargin_, topMargin_);
-    p.translate(0, -page_ * pageH);        // bring this page's slice up to the top margin
+    // Clip to exactly the lines on this page so neither a partial next line nor the margins get painted.
+    p.setClipRect(QRectF(sideMargin_, topMargin_, contentW, slice));
+    p.translate(sideMargin_, topMargin_ - y0); // map this page's first line to the top margin
 
     QAbstractTextDocumentLayout::PaintContext ctx;
-    ctx.palette = palette();               // text drawn in QPalette::Text
-    ctx.clip = QRectF(0, page_ * pageH, pageW, pageH);
+    ctx.palette = palette();                  // text drawn in QPalette::Text
+    ctx.clip = QRectF(0, y0, contentW, slice);
     doc_->documentLayout()->draw(&p, ctx);
     p.restore();
 
@@ -210,8 +328,8 @@ void BookPageWidget::mousePressEvent(QMouseEvent* e)
     const QPoint pos = e->pos();
 
     // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
-    const qreal pageH = doc_->pageSize().height();
-    const QPointF docPos(pos.x() - sideMargin_, pos.y() - topMargin_ + page_ * pageH);
+    const qreal y0 = lines_.isEmpty() ? 0.0 : lines_[lineIndexForPos(topPos_)].y;
+    const QPointF docPos(pos.x() - sideMargin_, pos.y() - topMargin_ + y0);
     const QString href = doc_->documentLayout()->anchorAt(docPos);
     if (!href.isEmpty()) { emit anchorClicked(href); return; }
 
@@ -420,9 +538,9 @@ void EbookView::loadChapter(int index, bool toLast)
 void EbookView::nextPage()
 {
     if (!book_->isOpen()) return;
-    if (!page_->atLast())                                      page_->setCurrentPage(page_->currentPage() + 1);
-    else if (chapter_ < book_->chapterFiles().size() - 1)      loadChapter(chapter_ + 1);
-    else                                                       return;
+    if (page_->pageForward())                             { /* moved within the chapter */ }
+    else if (chapter_ < book_->chapterFiles().size() - 1)   loadChapter(chapter_ + 1);
+    else                                                    return;
     updatePageLabel();
     persist();
 }
@@ -430,9 +548,9 @@ void EbookView::nextPage()
 void EbookView::prevPage()
 {
     if (!book_->isOpen()) return;
-    if (!page_->atFirst())     page_->setCurrentPage(page_->currentPage() - 1);
-    else if (chapter_ > 0)     loadChapter(chapter_ - 1, /*toLast*/ true);
-    else                       return;
+    if (page_->pageBackward())   { /* moved within the chapter */ }
+    else if (chapter_ > 0)         loadChapter(chapter_ - 1, /*toLast*/ true);
+    else                           return;
     updatePageLabel();
     persist();
 }

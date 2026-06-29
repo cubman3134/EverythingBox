@@ -1,6 +1,7 @@
-// Headless check of the paginated reader's core: load a long chapter into a QTextDocument paginated by
-// page size (as BookPageWidget does) and render a few pages to PNG so we can eyeball that text is drawn,
-// paginated, and never cut at the page boundary. Usage: probe_pageview <book> <outdir>
+// Headless check of the reader's flow-anchored pagination: pages flow from a top text offset, so the first
+// word must stay put when the window resizes. We lay a long chapter out at one width, page partway in, grab
+// the top offset, then re-lay at a different width and confirm the offset still starts the same word. Also
+// renders a page to PNG to eyeball margins + footer. Usage: probe_pageview <book> <outdir>
 #include "MobiBook.h"
 #include <QGuiApplication>
 #include <QTextDocument>
@@ -12,106 +13,101 @@
 #include <QPainter>
 #include <QImage>
 #include <QFile>
-#include <QFileInfo>
-#include <QSizeF>
+#include <QVector>
 #include <cstdio>
+
+struct Line { qreal y, h; int pos; };
+
+static QVector<Line> layout(QTextDocument& doc, const QString& html, int pt, qreal textW)
+{
+    doc.setDocumentMargin(0);
+    doc.setDefaultStyleSheet(QStringLiteral("body{margin:0;} p{margin:0 0 0.7em 0;}"));
+    doc.setHtml(html);
+    QFont f = doc.defaultFont(); f.setPointSize(pt); doc.setDefaultFont(f);
+    doc.setTextWidth(textW);
+
+    QVector<Line> ls;
+    auto* lay = doc.documentLayout();
+    for (QTextBlock b = doc.begin(); b.isValid(); b = b.next())
+    {
+        QTextLayout* tl = b.layout();
+        const qreal top = lay->blockBoundingRect(b).top();
+        for (int i = 0; i < tl->lineCount(); ++i)
+            ls.push_back({ top + tl->lineAt(i).y(), tl->lineAt(i).height(), b.position() + tl->lineAt(i).textStart() });
+    }
+    return ls;
+}
+
+static int lineForPos(const QVector<Line>& ls, int pos)
+{
+    int ans = 0;
+    for (int i = 0; i < ls.size(); ++i) { if (ls[i].pos <= pos) ans = i; else break; }
+    return ans;
+}
+
+static int lastFitting(const QVector<Line>& ls, int start, qreal ph)
+{
+    int m = start;
+    while (m + 1 < ls.size() && (ls[m + 1].y + ls[m + 1].h - ls[start].y) <= ph) ++m;
+    return m;
+}
 
 int main(int argc, char** argv)
 {
     QGuiApplication app(argc, argv);
     if (argc < 3) { std::fprintf(stderr, "usage: probe_pageview <book> <outdir>\n"); return 2; }
-    const QString path = QString::fromLocal8Bit(argv[1]);
-    const QString outdir = QString::fromLocal8Bit(argv[2]);
 
-    MobiBook book;
-    QString err;
-    if (!book.open(path, &err)) { std::fprintf(stderr, "open failed: %s\n", err.toLocal8Bit().constData()); return 1; }
+    MobiBook book; QString err;
+    if (!book.open(QString::fromLocal8Bit(argv[1]), &err)) { std::fprintf(stderr, "open: %s\n", err.toLocal8Bit().constData()); return 1; }
     const QStringList files = book.chapterFiles();
     if (files.isEmpty()) { std::fprintf(stderr, "no chapters\n"); return 1; }
-
-    QFile f(files.first());
-    QString html;
+    QFile f(files.first()); QString html;
     if (f.open(QIODevice::ReadOnly)) { html = QString::fromUtf8(f.readAll()); f.close(); }
 
-    const int W = 800, H = 600;
-    const qreal SIDE = 40.0, TOP = 56.0, BOT = 40.0; // mirrors BookPageWidget (top inset clears the menu)
-    QTextDocument doc;
-    doc.setDocumentMargin(0);
-    doc.setDefaultStyleSheet(QStringLiteral("body{margin:0;} p{margin:0 0 0.7em 0;}"));
-    doc.setHtml(html);
-    QFont font = doc.defaultFont(); font.setPointSize(14); doc.setDefaultFont(font);
-    doc.setPageSize(QSizeF(W - 2 * SIDE, H - TOP - BOT));
-    const int pages = doc.pageCount();
-    std::printf("title=\"%s\" pages=%d pageSize=%gx%g\n",
-                book.title().toLocal8Bit().constData(), pages, doc.pageSize().width(), doc.pageSize().height());
+    const qreal SIDE = 40, TOP = 56, BOT = 40;
+    const QString out(QString::fromLocal8Bit(argv[2]));
 
-    const qreal pageW = doc.pageSize().width(), pageH = doc.pageSize().height();
-    for (int pg : { 0, 1, qMin(2, pages - 1) })
-    {
-        if (pg < 0 || pg >= pages) continue;
-        QImage img(W, H, QImage::Format_RGB32);
-        img.fill(Qt::white);
-        QPainter p(&img);
-        // A grey band where the overlay menu would sit, to confirm text clears it.
-        p.fillRect(QRectF(0, 0, W, TOP), QColor(230, 230, 230));
-        p.save();
-        p.setClipRect(QRectF(SIDE, TOP, pageW, pageH));
-        p.translate(SIDE, TOP);
-        p.translate(0, -pg * pageH);
-        QAbstractTextDocumentLayout::PaintContext ctx;
-        ctx.palette.setColor(QPalette::Text, Qt::black);
-        ctx.clip = QRectF(0, pg * pageH, pageW, pageH);
-        doc.documentLayout()->draw(&p, ctx);
-        p.restore();
-        QColor ink(0, 0, 0, 140); p.setPen(ink);
-        p.drawText(QRectF(0, H - BOT, W, BOT), Qt::AlignHCenter | Qt::AlignVCenter,
-                   QString("%1 / %2").arg(pg + 1).arg(pages));
-        p.end();
-        const QString out = outdir + QStringLiteral("/page-%1.png").arg(pg);
-        img.save(out);
-        std::printf("wrote %s\n", out.toLocal8Bit().constData());
-    }
-
-    // Round-trip the reading anchor: capture the document offset at the top of a page at this size, then
-    // re-paginate at a different size and confirm the offset resolves to text starting with the same words.
-    auto snippet = [&](int pos) {
-        QTextCursor c(&doc);
-        c.setPosition(pos);
-        c.setPosition(qMin(doc.characterCount() - 1, pos + 48), QTextCursor::KeepAnchor);
+    auto firstWords = [&](QTextDocument& d, int pos) {
+        QTextCursor c(&d); c.setPosition(pos);
+        c.setPosition(qMin(d.characterCount() - 1, pos + 40), QTextCursor::KeepAnchor);
         return c.selectedText().simplified();
     };
-    auto pageOf = [&](int pos, qreal ph) {
-        QTextBlock b = doc.findBlock(pos);
-        qreal y = doc.documentLayout()->blockBoundingRect(b).top();
-        if (auto* lay = b.layout(); lay && lay->lineCount() > 0)
-            y += lay->lineForTextPosition(qMax(0, pos - b.position())).y();
-        return int(y / ph);
-    };
 
-    auto yOf = [&](int pos) {
-        QTextBlock b = doc.findBlock(pos);
-        qreal y = doc.documentLayout()->blockBoundingRect(b).top();
-        if (auto* lay = b.layout(); lay && lay->lineCount() > 0)
-            y += lay->lineForTextPosition(qMax(0, pos - b.position())).y();
-        return y;
-    };
+    // --- size A: page partway in, capture the top offset -------------------------------------------------
+    const int WA = 800, HA = 600; const qreal phA = HA - TOP - BOT;
+    QTextDocument a; QVector<Line> la = layout(a, html, 14, WA - 2 * SIDE);
+    int top = la.first().pos;                          // walk forward ~40 pages by whole lines
+    for (int n = 0; n < 40; ++n) { int next = lastFitting(la, lineForPos(la, top), phA) + 1; if (next >= la.size()) break; top = la[next].pos; }
+    const int anchor = top;
+    const QString wordsA = firstWords(a, anchor);
 
-    const int P = qMin(40, pages - 1);
-    const int anchor = doc.documentLayout()->hitTest(QPointF(1, P * pageH + 1), Qt::FuzzyHit);
-    const QString before = snippet(anchor);
+    // --- size B: re-find the line for that offset -------------------------------------------------------
+    const int WB = 480, HB = 760; const qreal phB = HB - TOP - BOT;
+    QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB - 2 * SIDE);
+    const int topB = lb[lineForPos(lb, anchor)].pos;   // snap to the line holding the anchor
+    const QString wordsB = firstWords(b, topB);
 
-    const qreal W2 = 480 - 2 * SIDE, H2 = 760 - TOP - BOT; // a very different window shape
-    doc.setPageSize(QSizeF(W2, H2));
-    const int newPage = pageOf(anchor, H2);
-    const qreal ay = yOf(anchor);
-    const bool onPage = ay >= newPage * H2 && ay < (newPage + 1) * H2; // last spot is visible on the page
-    const bool nothingSkipped = newPage * H2 <= ay;                    // page starts at or before it
-    const int linesFromTop = int((ay - newPage * H2) / qMax(1.0, ay > 0 ? doc.documentLayout()->blockBoundingRect(doc.findBlock(anchor)).height() : 1.0));
+    std::printf("anchor offset %d\n  size A (800w) first words: \"%s\"\n  size B (480w) first words: \"%s\"\n  FIRST WORD MATCH = %s\n",
+                anchor, wordsA.toLocal8Bit().constData(), wordsB.toLocal8Bit().constData(),
+                wordsA == wordsB ? "yes" : "NO");
 
-    std::printf("\nanchor round-trip: page %d/%d (800x600) -> resolves to page %d/%d (480x760)\n",
-                P + 1, pages, newPage + 1, doc.pageCount());
-    std::printf("  anchored text: \"%s\"\n", before.toLocal8Bit().constData());
-    std::printf("  visible on restored page=%s  no-unread-skipped=%s  (~%d line(s) below the top)\n",
-                onPage ? "yes" : "NO", nothingSkipped ? "yes" : "NO", linesFromTop);
+    // --- render size B's page to PNG --------------------------------------------------------------------
+    const int start = lineForPos(lb, topB), end = lastFitting(lb, start, phB);
+    const qreal y0 = lb[start].y, slice = lb[end].y + lb[end].h - y0;
+    QImage img(WB, HB, QImage::Format_RGB32); img.fill(Qt::white);
+    QPainter p(&img);
+    p.fillRect(QRectF(0, 0, WB, TOP), QColor(230, 230, 230)); // menu strip
+    p.save();
+    p.setClipRect(QRectF(SIDE, TOP, WB - 2 * SIDE, slice));
+    p.translate(SIDE, TOP - y0);
+    QAbstractTextDocumentLayout::PaintContext ctx; ctx.palette.setColor(QPalette::Text, Qt::black);
+    ctx.clip = QRectF(0, y0, WB - 2 * SIDE, slice);
+    b.documentLayout()->draw(&p, ctx);
+    p.restore();
+    QColor ink(0, 0, 0, 140); p.setPen(ink);
+    p.drawText(QRectF(0, HB - BOT, WB, BOT), Qt::AlignHCenter | Qt::AlignVCenter, QString("resized page"));
+    p.end();
+    img.save(out + QStringLiteral("/resized.png"));
+    std::printf("wrote %s/resized.png\n", out.toLocal8Bit().constData());
     return 0;
 }
