@@ -190,6 +190,26 @@ namespace EmulatorRegistry
                 QStringLiteral("https://api.github.com/repos/RPCS3/rpcs3-binaries-mac/releases/latest"),
                 QStringLiteral("https://api.github.com/repos/RPCS3/rpcs3-binaries-linux/releases/latest"),
             },
+            {
+                // PlayStation (PS1). DuckStation, GitHub single repo: Windows .zip (the exe is named by build
+                // config, duckstation-qt-x64-ReleaseLTCG.exe), macOS .zip (DuckStation.app), Linux a direct
+                // .AppImage. CLI: positional ROM, -batch exits when the game stops, -fullscreen for full screen.
+                // (The -installer.exe and -symbols.7z assets are skipped by the extension/symbols filters.)
+                QStringLiteral("duckstation"), QStringLiteral("DuckStation"),
+                QStringLiteral("-batch {fs} {rom}"),
+                QStringLiteral("-fullscreen"),    // fullscreenArgs
+                QStringLiteral("-nofullscreen"),  // windowedArgs
+                QStringLiteral("https://www.duckstation.org/"),
+                { QStringLiteral("duckstation-qt-x64-ReleaseLTCG.exe"),
+                  QStringLiteral("duckstation-qt-x64-sse2-ReleaseLTCG.exe") },
+                { QStringLiteral("DuckStation.app/Contents/MacOS/DuckStation"), QStringLiteral("DuckStation.app") },
+                { QStringLiteral("duckstation.AppImage"), QStringLiteral("DuckStation") },
+                QStringLiteral("https://api.github.com/repos/stenzek/duckstation/releases/latest"),
+                QStringLiteral("windows-x64-release"), // -> duckstation-windows-x64-release.zip (not sse2/arm64/installer)
+                QStringLiteral("mac-release"),         // -> duckstation-mac-release.zip
+                QStringLiteral("x64.appimage"),        // -> DuckStation-x64.AppImage (not SSE2/arm)
+                QString(),                             // not a Flatpak
+            },
         };
         return list;
     }

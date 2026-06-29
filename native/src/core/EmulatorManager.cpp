@@ -196,7 +196,8 @@ void EmulatorManager::fetchArtifactList()
             {
                 const QJsonObject o = v.toObject();
                 const QString name = o.value(QStringLiteral("name")).toString();
-                if (name.contains(QStringLiteral("libretro"), Qt::CaseInsensitive)) continue;
+                if (name.contains(QStringLiteral("libretro"), Qt::CaseInsensitive)
+                    || name.contains(QStringLiteral("symbols"), Qt::CaseInsensitive)) continue; // skip core / debug-symbol assets
                 if (name.contains(want, Qt::CaseInsensitive)
                     && (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)
                         || name.endsWith(QStringLiteral(".7z"), Qt::CaseInsensitive)

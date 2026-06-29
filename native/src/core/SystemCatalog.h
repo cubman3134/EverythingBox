@@ -35,8 +35,10 @@ namespace SystemCatalog
                          { "genesis_plus_gx", "picodrive" } },
             { "n64",     "Nintendo 64",                       { "n64", "z64", "v64", "ndd" },
                          { "mupen64plus_next", "parallel_n64" } },
+            // PlayStation runs in standalone DuckStation (auto-downloaded). The libretro cores are kept here
+            // only so removing the externalEmulator line restores the in-process path.
             { "psx",     "PlayStation",                       { "cue", "chd", "pbp", "m3u", "ccd", "exe" },
-                         { "swanstation", "mednafen_psx_hw", "pcsx_rearmed" } },
+                         { "swanstation", "mednafen_psx_hw", "pcsx_rearmed" }, "duckstation" },
             { "pce",     "PC Engine / TurboGrafx-16",         { "pce", "sgx" },
                          { "mednafen_pce", "mednafen_pce_fast" } },
             { "ws",      "WonderSwan",                        { "ws", "wsc" },
