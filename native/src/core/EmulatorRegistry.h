@@ -93,6 +93,23 @@ namespace EmulatorRegistry
                 QStringLiteral("appimage-x86_64"), // -> melonDS-<ver>-appimage-x86_64.zip (portable AppImage)
                 QString(),                         // not a Flatpak
             },
+            {
+                // Wii U. Cemu ships per-OS on GitHub: Windows .zip (extracts to Cemu_<ver>/), macOS .dmg,
+                // Linux a direct .AppImage. CLI: -g <game> loads it, -f = full screen.
+                QStringLiteral("cemu"), QStringLiteral("Cemu"),
+                QStringLiteral("{fs} -g {rom}"),
+                QStringLiteral("-f"),   // fullscreenArgs
+                QString(),              // windowedArgs (default is windowed)
+                QStringLiteral("https://cemu.info/"),
+                { QStringLiteral("Cemu.exe") },
+                { QStringLiteral("Cemu.app/Contents/MacOS/Cemu"), QStringLiteral("Cemu.app") },
+                { QStringLiteral("cemu.AppImage"), QStringLiteral("Cemu") },
+                QStringLiteral("https://api.github.com/repos/cemu-project/Cemu/releases/latest"),
+                QStringLiteral("windows-x64"), // -> cemu-<ver>-windows-x64.zip
+                QStringLiteral("macos"),       // -> cemu-<ver>-macos-12-x64.dmg
+                QStringLiteral("appimage"),    // -> Cemu-<ver>-x86_64.AppImage (direct AppImage)
+                QString(),                     // not a Flatpak
+            },
         };
         return list;
     }

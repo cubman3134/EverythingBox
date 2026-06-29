@@ -188,7 +188,8 @@ void EmulatorManager::fetchArtifactList()
                 if (name.contains(want, Qt::CaseInsensitive)
                     && (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)
                         || name.endsWith(QStringLiteral(".7z"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".appimage"), Qt::CaseInsensitive)))
+                        || name.endsWith(QStringLiteral(".appimage"), Qt::CaseInsensitive)
+                        || name.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive)))
                 {
                     url = o.value(QStringLiteral("browser_download_url")).toString();
                     break;

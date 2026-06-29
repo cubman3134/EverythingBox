@@ -55,6 +55,9 @@ namespace SystemCatalog
             { "nds",     "Nintendo DS (melonDS)",
                          { "nds", "dsi", "srl" },
                          {}, "melonds" },
+            { "wiiu",    "Wii U (Cemu)",
+                         { "wud", "wux", "wua", "rpx" },
+                         {}, "cemu" },
         };
         return list;
     }
