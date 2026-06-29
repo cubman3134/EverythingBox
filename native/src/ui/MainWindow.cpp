@@ -15,6 +15,7 @@
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
+#include "../core/ArchiveRom.h"
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
@@ -888,6 +889,35 @@ void MainWindow::openGame()
 void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb, const QString& key,
                              const QString& systemHint)
 {
+    // Archived ROM (.zip / .7z): extract the inner ROM once and open that. Every libretro core and external
+    // emulator loads from a path, so this single spot handles archives for all of them. If we know the
+    // system (from the hint), narrow the member pick to its extensions; otherwise take the largest file.
+    // The hint carries through the re-entry so disambiguation still works.
+    if (ArchiveRom::isArchive(rom))
+    {
+        QStringList wanted;
+        if (!systemHint.isEmpty())
+        {
+            const GameSystem* hs = SystemCatalog::byId(systemHint);
+            if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
+            if (hs)
+                for (const QString& e : hs->extensions)
+                    wanted << (QStringLiteral(".") + e);
+        }
+        QString aerr;
+        const QString extracted = ArchiveRom::extractToTemp(rom, wanted, &aerr);
+        if (extracted.isEmpty())
+        {
+            mwLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(rom).fileName(), aerr));
+            statusBar()->showMessage(tr("Couldn't open the archived game: %1").arg(aerr), 6000);
+            return;
+        }
+        mwLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
+                  .arg(QFileInfo(extracted).fileName(), QFileInfo(rom).fileName()));
+        openGamePath(extracted, title, thumb, key, systemHint);
+        return;
+    }
+
     // The Recent entry shows the catalog item's name/cover when we have them; otherwise the file name. A
     // remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
     const QString recentTitle = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;

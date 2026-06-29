@@ -36,6 +36,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
+    add_subdirectory(third_party/lzma)     # read-only .7z decoder (LZMA SDK) for archived ROMs, all platforms
 
     # libmpv: install it (e.g. `vcpkg install libmpv`, distro `libmpv-dev`, or a prebuilt SDK) and make it
     # discoverable via CMAKE_PREFIX_PATH / a vcpkg toolchain, or set -DMPV_INCLUDE_DIR= and -DMPV_LIBRARY=.
@@ -77,6 +78,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
+        src/core/SevenZip.cpp     src/core/SevenZip.h
+        src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
@@ -93,7 +96,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         third_party/duktape/duktape.c)
     target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
+    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
