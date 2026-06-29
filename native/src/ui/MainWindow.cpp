@@ -915,9 +915,15 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     }
 
     // Standalone-emulator systems (GameCube/Wii → Dolphin) launch an external process instead of a core.
+    // Not possible on Android (the sandbox can't spawn downloaded desktop executables - see android-port.md).
     if (!sys->externalEmulator.isEmpty())
     {
+#if defined(Q_OS_ANDROID)
+        statusBar()->showMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
+                                     .arg(sys->name), 6000);
+#else
         launchExternalGame(sys, rom, recentTitle, thumb, key);
+#endif
         return;
     }
 
@@ -1976,7 +1982,9 @@ void MainWindow::openSettingsHub()
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
-        add(tr("Emulators"),          [this] { openEmulatorManager(); });   // standalone emulators (Dolphin…)
+#if !defined(Q_OS_ANDROID)
+        add(tr("Emulators"),          [this] { openEmulatorManager(); });   // standalone emulators (Dolphin…) - desktop only
+#endif
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });

@@ -10,9 +10,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_library(mymediavault_libretro STATIC src/libretro/LibretroCore.cpp)
 target_include_directories(mymediavault_libretro PUBLIC src/libretro)
 
-# A console probe that exercises the frontend (no Qt) - used for verification.
-add_executable(probe_core tools/probe_core.cpp)
-target_link_libraries(probe_core PRIVATE mymediavault_libretro)
+# A console probe that exercises the frontend (no Qt) - used for verification. Desktop-only: Android builds
+# the app as a shared library packaged into an APK, so standalone console executables don't fit.
+if(NOT ANDROID)
+    add_executable(probe_core tools/probe_core.cpp)
+    target_link_libraries(probe_core PRIVATE mymediavault_libretro)
+endif()
 
 # ---------------------------------------------------------------------------
 # The Qt application (UI + libmpv video). Needs Qt6 + libmpv installed, so it
@@ -89,6 +92,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     # diagnostics go to the log file instead of the console (see main.cpp's message handler).
     set_target_properties(mymediavault PROPERTIES WIN32_EXECUTABLE TRUE)
 
+    # Console harnesses (desktop-only): standalone executables for headless verification - not built for
+    # Android, where the app is a shared lib + APK.
+    if(NOT ANDROID)
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)
@@ -116,6 +122,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape)
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+    endif() # NOT ANDROID (console probes)
 
     # Gamepad support via SDL2 (optional). Install SDL2 and pass CMAKE_PREFIX_PATH, or
     # -DSDL2_INCLUDE_DIR= and -DSDL2_LIBRARY=. Without it, controller input is simply absent.
@@ -128,5 +135,29 @@ if(MYMEDIAVAULT_BUILD_APP)
         message(STATUS "Gamepad: SDL2 found (${SDL2_LIBRARY})")
     else()
         message(STATUS "Gamepad: SDL2 not found - building without controller input")
+    endif()
+
+    # -----------------------------------------------------------------------------------------------------
+    # Android packaging scaffolding. This sets up the APK metadata; a working build ALSO needs a Qt-for-
+    # Android kit and the native deps (libmpv + ffmpeg, SDL2) cross-compiled for the target ABI and pointed
+    # at via -DMPV_LIBRARY=/-DSDL2_LIBRARY= so they get bundled. See native/docs/android-port.md.
+    # Configure e.g.: <Qt>/android_arm64_v8a/bin/qt-cmake -S native -B build-android -DMYMEDIAVAULT_BUILD_APP=ON
+    # qt_add_executable already produces the shared library + APK target on Android.
+    # -----------------------------------------------------------------------------------------------------
+    if(ANDROID)
+        set_target_properties(mymediavault PROPERTIES
+            QT_ANDROID_MIN_SDK_VERSION 24
+            QT_ANDROID_TARGET_SDK_VERSION 34
+            QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android") # custom manifest/res/assets overlay
+        # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). Point the
+        # MPV_LIBRARY/SDL2_LIBRARY cache vars at the cross-compiled .so builds.
+        if(MPV_LIBRARY)
+            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${MPV_LIBRARY}")
+        endif()
+        if(SDL2_LIBRARY)
+            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")
+        endif()
+        message(STATUS "Configuring Android APK target (ABI: ${CMAKE_ANDROID_ARCH_ABI}). "
+                       "Cores download to the app data dir at runtime; external emulators are disabled.")
     endif()
 endif()

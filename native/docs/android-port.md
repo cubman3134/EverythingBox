@@ -57,10 +57,12 @@ Intent hand-off to installed Android emulator apps.
 - [ ] Stage all `*.so` deps so `androiddeployqt` bundles them in the APK (`ANDROID_EXTRA_LIBS`).
 
 ## Phase 3 — Build system
-- [ ] Add an Android branch to `native/CMakeLists.txt`:
-  - guard `WIN32_EXECUTABLE`, the SDL2/mpv `find_library` paths, and the `probe_*` tools (desktop-only).
-  - set up `qt_add_executable` as a shared lib target for Android + `qt_android_generate_deployment_settings`.
-  - `ANDROID_PACKAGE_SOURCE_DIR` for a custom `AndroidManifest.xml`.
+- [x] Android branch in `native/CMakeLists.txt` (scaffolding) — `if(ANDROID)` packaging block (min/target
+      SDK, `QT_ANDROID_PACKAGE_SOURCE_DIR`, `QT_ANDROID_EXTRA_LIBS` for the cross-compiled mpv/SDL2), and the
+      desktop-only console `probe_*` tools are guarded out. `qt_add_executable` already makes the shared lib
+      + APK target on Android. `WIN32_EXECUTABLE`/`MACOSX_BUNDLE` are no-ops off their platforms.
+- [ ] Fill in `native/android/AndroidManifest.xml` + `res/` (see `native/android/README.md`).
+- [ ] Cross-compile + point `-DMPV_LIBRARY=`/`-DSDL2_LIBRARY=` at the Android `.so` deps (Phase 2).
 - [ ] `AndroidManifest.xml`: app name/icon, `INTERNET` permission, storage access (Scoped Storage /
       `MANAGE_EXTERNAL_STORAGE` or SAF for ROM/media folders), gamepad/`android.hardware.gamepad`.
 - [ ] Bundle the addon JS (`addons/aiocatalog`) and themes as Android assets; resolve them via
@@ -73,10 +75,12 @@ Intent hand-off to installed Android emulator apps.
       `QStandardPaths::AppDataLocation`. Switched every `applicationDirPath()` use (cores, emulators,
       saves, states, downloads, the shared `.ini`, logs, addons/themes roots) across 20 files. Only this
       one function changes per platform.
-- [ ] **External emulators**: compile out / hide `EmulatorManager` + the Settings "Emulators" panel on
-      Android (`#if !defined(Q_OS_ANDROID)`), or replace `runEmulator()` with an Intent launcher
-      (`QJniObject` → `Intent`) to an installed Android emulator app (RetroArch/Dolphin/Citra-Android),
-      passing the ROM URI. No auto-download, no exit monitoring.
+- [x] **External emulators gated** — the two entry points are behind `#if !defined(Q_OS_ANDROID)`: the
+      Settings "Emulators" panel row is hidden, and `openGamePath`'s external-system branch shows a "not
+      supported on Android" message instead of launching. `EmulatorManager` still compiles (harmless,
+      unreachable); fully excluding it from the Android target + an Intent-based hand-off
+      (`QJniObject` → `Intent` to an installed RetroArch/Dolphin-Android, passing the ROM URI) is a
+      follow-up.
 - [ ] **SystemCatalog**: external-emulator systems (Dolphin/Cemu/… `externalEmulator` set) have no
       in-process path → either hide them or route to the Intent launcher on Android.
 - [ ] **Gamepad**: confirm SDL2 controller mapping on Android; expose touch on-screen controls for the
