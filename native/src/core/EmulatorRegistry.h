@@ -146,6 +146,24 @@ namespace EmulatorRegistry
                 QStringLiteral("x86_64.appimage"), // -> PPSSPP-<ver>-anylinux-x86_64.AppImage
                 QString(),                      // not a Flatpak
             },
+            {
+                // PlayStation Vita. Vita3K ships a rolling "continuous" release on GitHub: Windows .zip
+                // (Vita3K.exe at root), macOS .dmg, Linux a direct .AppImage. CLI: positional .vpk/folder
+                // is installed & run; -F/--fullscreen for full screen.
+                QStringLiteral("vita3k"), QStringLiteral("Vita3K"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("--fullscreen"), // fullscreenArgs
+                QString(),                      // windowedArgs (default is windowed)
+                QStringLiteral("https://vita3k.org/"),
+                { QStringLiteral("Vita3K.exe") },
+                { QStringLiteral("Vita3K.app/Contents/MacOS/Vita3K"), QStringLiteral("Vita3K.app") },
+                { QStringLiteral("vita3k.AppImage"), QStringLiteral("Vita3K") },
+                QStringLiteral("https://api.github.com/repos/Vita3K/Vita3K/releases/latest"),
+                QStringLiteral("windows-latest"),  // -> windows-latest.zip (not windows-arm64-latest)
+                QStringLiteral("macos-latest"),    // -> macos-latest.dmg (Intel; runs on Apple Silicon via Rosetta)
+                QStringLiteral("x86_64.appimage"), // -> Vita3K-x86_64.AppImage
+                QString(),                         // not a Flatpak
+            },
         };
         return list;
     }

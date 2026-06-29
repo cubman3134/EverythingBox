@@ -67,6 +67,9 @@ namespace SystemCatalog
             { "psp",     "PlayStation Portable (PPSSPP)",
                          { "cso", "dax", "prx" },
                          {}, "ppsspp" },
+            { "psvita",  "PlayStation Vita (Vita3K)",
+                         { "vpk" },
+                         {}, "vita3k" },
         };
         return list;
     }
