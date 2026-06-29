@@ -5,21 +5,152 @@
 #include "../core/AppPaths.h"
 
 #include <QFile>
-#include <QTextBrowser>
 #include <QListWidget>
 #include <QLabel>
-#include <QSplitter>
+#include <QFrame>
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QScrollBar>
-#include <QFontMetrics>
+#include <QTimer>
+#include <QPainter>
+#include <QTextDocument>
+#include <QTextBlock>
+#include <QAbstractTextDocumentLayout>
+#include <QMouseEvent>
 #include <QKeyEvent>
+#include <QImage>
 #include <QSettings>
-#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QUrl>
 #include <QFileInfo>
+
+// ---- BookPageWidget: paints a single, line-clean page of a QTextDocument -------------------------------
+
+namespace {
+
+// A document that can load a chapter's images from disk (relative to the chapter's folder). QTextDocument's
+// default loadResource doesn't fetch local image files, so EPUB pictures would be blank without this.
+class BookDocument : public QTextDocument
+{
+public:
+    explicit BookDocument(QObject* parent = nullptr) : QTextDocument(parent) {}
+    QVariant loadResource(int type, const QUrl& name) override
+    {
+        if (type == QTextDocument::ImageResource)
+        {
+            const QUrl resolved = name.isRelative() ? baseUrl().resolved(name) : name;
+            const QString local = resolved.isLocalFile() ? resolved.toLocalFile() : resolved.path();
+            QImage img(local);
+            if (!img.isNull()) return img;
+        }
+        return QTextDocument::loadResource(type, name);
+    }
+};
+
+} // namespace
+
+BookPageWidget::BookPageWidget(QWidget* parent) : QWidget(parent)
+{
+    doc_ = new BookDocument(this);
+    doc_->setDocumentMargin(0); // we paint our own paper margin
+    doc_->setDefaultStyleSheet(QStringLiteral(
+        "body{margin:0;} p{margin:0 0 0.7em 0;} img{max-width:100%;}"));
+    QFont f = doc_->defaultFont();
+    f.setPointSize(fontPt_);
+    doc_->setDefaultFont(f);
+
+    setMouseTracking(true);            // so we get moves without a button held -> reveal the menu
+    setAttribute(Qt::WA_OpaquePaintEvent, true);
+    setFocusPolicy(Qt::NoFocus);       // keep keyboard focus on EbookView for arrow paging
+    setCursor(Qt::PointingHandCursor);
+}
+
+void BookPageWidget::setContent(const QString& html, const QString& baseDir)
+{
+    doc_->setBaseUrl(QUrl::fromLocalFile(baseDir + QStringLiteral("/")));
+    doc_->setHtml(html);
+    QFont f = doc_->defaultFont();
+    f.setPointSize(fontPt_);
+    doc_->setDefaultFont(f);
+    page_ = 0;
+    relayout();
+    update();
+}
+
+void BookPageWidget::setFontPointSize(int pt)
+{
+    fontPt_ = pt;
+    QFont f = doc_->defaultFont();
+    f.setPointSize(pt);
+    doc_->setDefaultFont(f);
+    relayout();
+    update();
+}
+
+void BookPageWidget::setCurrentPage(int p)
+{
+    page_ = qBound(0, p, pageCount_ - 1);
+    update();
+}
+
+void BookPageWidget::relayout()
+{
+    const qreal w = qMax(1.0, qreal(width())  - 2 * margin_);
+    const qreal h = qMax(1.0, qreal(height()) - 2 * margin_);
+    doc_->setPageSize(QSizeF(w, h));        // paginate by line into h-tall pages (no line is ever split)
+    pageCount_ = qMax(1, doc_->pageCount());
+    page_ = qBound(0, page_, pageCount_ - 1);
+    emit layoutChanged();
+}
+
+void BookPageWidget::resizeEvent(QResizeEvent*)
+{
+    relayout();
+    update();
+}
+
+void BookPageWidget::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.fillRect(rect(), palette().color(QPalette::Base));
+    if (!doc_) return;
+
+    const qreal pageW = doc_->pageSize().width();
+    const qreal pageH = doc_->pageSize().height();
+    // Clip to the page's content rectangle so a line belonging to the next page can never paint into our
+    // bottom margin - belt-and-braces on top of QTextDocument's line-clean pagination.
+    p.setClipRect(QRectF(margin_, margin_, pageW, pageH));
+    p.translate(margin_, margin_);
+    p.translate(0, -page_ * pageH);        // bring this page's slice up to the top margin
+
+    QAbstractTextDocumentLayout::PaintContext ctx;
+    ctx.palette = palette();               // text drawn in QPalette::Text
+    ctx.clip = QRectF(0, page_ * pageH, pageW, pageH);
+    doc_->documentLayout()->draw(&p, ctx);
+}
+
+void BookPageWidget::mousePressEvent(QMouseEvent* e)
+{
+    const QPoint pos = e->pos();
+
+    // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
+    const qreal pageH = doc_->pageSize().height();
+    const QPointF docPos(pos.x() - margin_, pos.y() - margin_ + page_ * pageH);
+    const QString href = doc_->documentLayout()->anchorAt(docPos);
+    if (!href.isEmpty()) { emit anchorClicked(href); return; }
+
+    const int topZone = qMax(64, height() / 8);
+    if (pos.y() < topZone)             { emit menuRequested(); return; }
+    if (pos.x() < width() / 2)           emit prevRequested();
+    else                                 emit nextRequested();
+}
+
+void BookPageWidget::mouseMoveEvent(QMouseEvent*)
+{
+    emit menuRequested(); // any movement wakes the menu (it re-arms its own auto-hide)
+}
+
+// ---- EbookView: chapter flow, persistence, overlays ---------------------------------------------------
 
 static QSettings& store()
 {
@@ -36,7 +167,8 @@ static QString bookKey(const QString& path)
 }
 
 // Sniff the file and create the matching parser. MOBI is detected by the PalmDB signature at offset 60
-// (works even when an Allarr book was cached under a ".epub" name); anything else is treated as EPUB.
+// (works even when an Allarr book was cached under a ".epub" name); a "%PDF-" header is read as a reflowable
+// text book; anything else is treated as EPUB.
 static std::unique_ptr<EbookSource> makeSource(const QString& path)
 {
     QFile f(path);
@@ -45,7 +177,7 @@ static std::unique_ptr<EbookSource> makeSource(const QString& path)
     const QByteArray sig = head.mid(60, 8);
     if (sig == QByteArray("BOOKMOBI") || sig == QByteArray("TEXtREAd"))
         return std::make_unique<MobiBook>();
-    if (head.startsWith("%PDF-"))            // a text PDF read as a reflowable book (font sizing)
+    if (head.startsWith("%PDF-"))
         return std::make_unique<PdfTextBook>();
     return std::make_unique<EpubBook>();
 }
@@ -53,46 +185,54 @@ static std::unique_ptr<EbookSource> makeSource(const QString& path)
 EbookView::EbookView(QWidget* parent) : QWidget(parent)
 {
     book_ = std::make_unique<EpubBook>(); // a valid (closed) source until a book is opened
-    browser_ = new QTextBrowser(this);
-    browser_->setOpenLinks(false);   // we drive chapter flow ourselves; handle clicks via anchorClicked
-    connect(browser_, &QTextBrowser::anchorClicked, this, &EbookView::onAnchorClicked);
-    browser_->setFrameShape(QFrame::NoFrame);
-    browser_->document()->setDefaultStyleSheet(QStringLiteral("body { margin: 28px 28px 52px 28px; } img { max-width: 100%; }"));
 
+    page_ = new BookPageWidget(this);
+    connect(page_, &BookPageWidget::nextRequested, this, &EbookView::nextPage);
+    connect(page_, &BookPageWidget::prevRequested, this, &EbookView::prevPage);
+    connect(page_, &BookPageWidget::menuRequested, this, &EbookView::revealMenu);
+    connect(page_, &BookPageWidget::anchorClicked, this, &EbookView::onAnchorClicked);
+    connect(page_, &BookPageWidget::layoutChanged, this, &EbookView::updatePageLabel);
+
+    auto* v = new QVBoxLayout(this);
+    v->setContentsMargins(0, 0, 0, 0);
+    v->addWidget(page_);
+
+    // Contents panel (overlay, hidden until "Contents" is pressed).
     tocList_ = new QListWidget(this);
-    tocList_->setVisible(false); // hidden until "Contents" is pressed
-    connect(tocList_, &QListWidget::itemActivated, this, &EbookView::onTocActivated);
+    tocList_->setVisible(false);
+    tocList_->setFocusPolicy(Qt::NoFocus);
     connect(tocList_, &QListWidget::itemClicked, this, &EbookView::onTocActivated);
 
-    split_ = new QSplitter(Qt::Horizontal, this);
-    split_->addWidget(tocList_);
-    split_->addWidget(browser_);
-    split_->setStretchFactor(1, 1);
-    split_->setSizes({ 240, 800 });
-
-    auto* bar = new QHBoxLayout();
-    auto* backBtn = new QPushButton(tr("‹ Back"), this);
-    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), this);
+    // Auto-hiding top menu (overlay).
+    menu_ = new QFrame(this);
+    menu_->setVisible(false);
+    menu_->setAutoFillBackground(true);
+    menu_->setFrameShape(QFrame::StyledPanel);
+    auto* bar = new QHBoxLayout(menu_);
+    bar->setContentsMargins(8, 6, 8, 6);
+    auto* backBtn = new QPushButton(tr("‹ Back"), menu_);
+    streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), menu_);
     streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
-    streamIssueBtn_->setVisible(false); // shown only for remote (Allarr) books
-    connect(streamIssueBtn_, &QPushButton::clicked, this, &EbookView::streamIssueRequested);
-    auto* homeBtn = new QPushButton(tr("Home"), this);
-    auto* contents = new QPushButton(tr("Contents"), this);
-    auto* prev = new QPushButton(tr("‹ Prev"), this);
-    auto* next = new QPushButton(tr("Next ›"), this);
-    auto* smaller = new QPushButton(tr("A−"), this);
-    auto* bigger = new QPushButton(tr("A+"), this);
-    pageLabel_ = new QLabel(this);
+    streamIssueBtn_->setVisible(false);
+    auto* homeBtn  = new QPushButton(tr("Home"), menu_);
+    auto* contents = new QPushButton(tr("Contents"), menu_);
+    auto* smaller  = new QPushButton(tr("A−"), menu_);
+    auto* bigger   = new QPushButton(tr("A+"), menu_);
+    auto* prev     = new QPushButton(tr("‹ Prev"), menu_);
+    auto* next     = new QPushButton(tr("Next ›"), menu_);
+    pageLabel_ = new QLabel(menu_);
     pageLabel_->setAlignment(Qt::AlignCenter);
+    for (QPushButton* b : { backBtn, streamIssueBtn_, homeBtn, contents, smaller, bigger, prev, next })
+        b->setFocusPolicy(Qt::NoFocus); // keep arrow-key focus on the view, not a button
 
-    connect(backBtn, &QPushButton::clicked, this, &EbookView::backRequested);
-    connect(homeBtn, &QPushButton::clicked, this, &EbookView::homeRequested);
+    connect(backBtn,  &QPushButton::clicked, this, &EbookView::backRequested);
+    connect(homeBtn,  &QPushButton::clicked, this, &EbookView::homeRequested);
     connect(contents, &QPushButton::clicked, this, &EbookView::toggleContents);
-    connect(prev, &QPushButton::clicked, this, &EbookView::prevPage);
-    connect(next, &QPushButton::clicked, this, &EbookView::nextPage);
-    connect(smaller, &QPushButton::clicked, this, &EbookView::smallerFont);
-    connect(bigger, &QPushButton::clicked, this, &EbookView::biggerFont);
-    connect(browser_->verticalScrollBar(), &QScrollBar::valueChanged, this, &EbookView::updatePageLabel);
+    connect(smaller,  &QPushButton::clicked, this, &EbookView::smallerFont);
+    connect(bigger,   &QPushButton::clicked, this, &EbookView::biggerFont);
+    connect(prev,     &QPushButton::clicked, this, &EbookView::prevPage);
+    connect(next,     &QPushButton::clicked, this, &EbookView::nextPage);
+    connect(streamIssueBtn_, &QPushButton::clicked, this, &EbookView::streamIssueRequested);
 
     bar->addWidget(backBtn);
     bar->addWidget(streamIssueBtn_);
@@ -105,10 +245,9 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     bar->addWidget(pageLabel_, 1);
     bar->addWidget(next);
 
-    auto* v = new QVBoxLayout(this);
-    v->setContentsMargins(0, 0, 0, 0);
-    v->addWidget(split_, 1);
-    v->addLayout(bar);
+    menuTimer_ = new QTimer(this);
+    menuTimer_->setSingleShot(true);
+    connect(menuTimer_, &QTimer::timeout, this, &EbookView::hideMenuIfIdle);
 
     setFocusPolicy(Qt::StrongFocus);
 }
@@ -117,7 +256,7 @@ bool EbookView::openBook(const QString& path, QString* error)
 {
     persist(); // save the book we're leaving, if any
 
-    book_ = makeSource(path); // EPUB or MOBI, by file content
+    book_ = makeSource(path); // EPUB / MOBI / PDF, by file content
     if (!book_->open(path, error)) return false;
 
     tocList_->clear();
@@ -128,20 +267,33 @@ bool EbookView::openBook(const QString& path, QString* error)
     }
     tocList_->setVisible(false);
 
-    restoreState(); // sets fontPt_ and the chapter to resume at
+    restoreState(); // sets fontPt_, the chapter to resume at, and restoreProgress_
+    page_->setFontPointSize(fontPt_);
     loadChapter(chapter_ >= 0 ? chapter_ : 0);
-    browser_->setFocus();
+    if (restoreProgress_ >= 0.0)
+    {
+        page_->setProgress(restoreProgress_); // resume the page within the chapter
+        restoreProgress_ = -1.0;
+        updatePageLabel();
+        persist();
+    }
+    revealMenu();      // flash the controls so they're discoverable, then auto-hide
+    setFocus();
     return true;
 }
 
-void EbookView::setStreamIssueVisible(bool on) { if (streamIssueBtn_) streamIssueBtn_->setVisible(on); }
+void EbookView::setStreamIssueVisible(bool on)
+{
+    streamVisible_ = on;
+    if (streamIssueBtn_) streamIssueBtn_->setVisible(on);
+}
 
 void EbookView::restoreState()
 {
-    fontPt_ = store().value(QStringLiteral("ebook/fontSize"), 14).toInt();
-    fontPt_ = qBound(8, fontPt_, 40);
+    fontPt_ = qBound(8, store().value(QStringLiteral("ebook/fontSize"), 14).toInt(), 40);
     chapter_ = store().value(bookKey(book_->sourcePath()) + QStringLiteral("chapter"), 0).toInt();
     if (chapter_ < 0 || chapter_ >= book_->chapterFiles().size()) chapter_ = 0;
+    restoreProgress_ = store().value(bookKey(book_->sourcePath()) + QStringLiteral("scroll"), 0.0).toDouble();
 }
 
 void EbookView::persist()
@@ -150,24 +302,22 @@ void EbookView::persist()
     store().setValue(QStringLiteral("ebook/fontSize"), fontPt_);
     const QString k = bookKey(book_->sourcePath());
     store().setValue(k + QStringLiteral("chapter"), chapter_);
-    QScrollBar* sb = browser_->verticalScrollBar();
-    const double frac = sb->maximum() > 0 ? double(sb->value()) / sb->maximum() : 0.0;
-    store().setValue(k + QStringLiteral("scroll"), frac);
+    store().setValue(k + QStringLiteral("scroll"), page_->progress());
     store().setValue(k + QStringLiteral("title"), book_->title());
     store().sync();
 }
 
-void EbookView::loadChapter(int index, bool toBottom)
+void EbookView::loadChapter(int index, bool toLast)
 {
     const QStringList& files = book_->chapterFiles();
     if (files.isEmpty()) return;
     chapter_ = qBound(0, index, files.size() - 1);
 
-    browser_->setSource(QUrl::fromLocalFile(files[chapter_]));
-    applyFont();
-
-    QScrollBar* sb = browser_->verticalScrollBar();
-    sb->setValue(toBottom ? sb->maximum() : 0);
+    QFile f(files[chapter_]);
+    QString html;
+    if (f.open(QIODevice::ReadOnly)) { html = QString::fromUtf8(f.readAll()); f.close(); }
+    page_->setContent(html, QFileInfo(files[chapter_]).absolutePath());
+    if (toLast) page_->showLastPage(); else page_->showFirstPage();
     updatePageLabel();
 
     // Reflect the current chapter in the contents list (best-effort by file name).
@@ -179,49 +329,51 @@ void EbookView::loadChapter(int index, bool toBottom)
     persist();
 }
 
-void EbookView::applyFont()
-{
-    QFont f = browser_->document()->defaultFont();
-    f.setPointSize(fontPt_);
-    browser_->document()->setDefaultFont(f);
-}
-
-// How far a page-flip scrolls. We advance by a little less than a full viewport so the page overlaps the
-// previous one by ~2 lines - otherwise a line straddling the bottom edge (right above the toolbar) gets cut
-// in half and lost. The overlap scales with the font, so it stays correct as the reader sizes text up.
-int EbookView::pageScrollStep() const
-{
-    QScrollBar* sb = browser_->verticalScrollBar();
-    const int line = QFontMetrics(browser_->document()->defaultFont()).lineSpacing();
-    return qMax(line, sb->pageStep() - 2 * line);
-}
-
 void EbookView::nextPage()
 {
     if (!book_->isOpen()) return;
-    QScrollBar* sb = browser_->verticalScrollBar();
-    if (sb->value() < sb->maximum())
-        sb->setValue(qMin(sb->maximum(), sb->value() + pageScrollStep()));
-    else if (chapter_ < book_->chapterFiles().size() - 1)
-        loadChapter(chapter_ + 1);
+    if (!page_->atLast())                                      page_->setCurrentPage(page_->currentPage() + 1);
+    else if (chapter_ < book_->chapterFiles().size() - 1)      loadChapter(chapter_ + 1);
+    else                                                       return;
+    updatePageLabel();
+    persist();
 }
 
 void EbookView::prevPage()
 {
     if (!book_->isOpen()) return;
-    QScrollBar* sb = browser_->verticalScrollBar();
-    if (sb->value() > 0)
-        sb->setValue(qMax(0, sb->value() - pageScrollStep()));
-    else if (chapter_ > 0)
-        loadChapter(chapter_ - 1, /*toBottom*/ true);
+    if (!page_->atFirst())     page_->setCurrentPage(page_->currentPage() - 1);
+    else if (chapter_ > 0)     loadChapter(chapter_ - 1, /*toLast*/ true);
+    else                       return;
+    updatePageLabel();
+    persist();
 }
 
-void EbookView::biggerFont()  { fontPt_ = qMin(40, fontPt_ + 2); applyFont(); updatePageLabel(); persist(); }
-void EbookView::smallerFont() { fontPt_ = qMax(8,  fontPt_ - 2); applyFont(); updatePageLabel(); persist(); }
+void EbookView::biggerFont()
+{
+    const double p = page_->progress();
+    fontPt_ = qMin(40, fontPt_ + 2);
+    page_->setFontPointSize(fontPt_);
+    page_->setProgress(p); // stay roughly where you were after the reflow
+    updatePageLabel();
+    persist();
+}
+
+void EbookView::smallerFont()
+{
+    const double p = page_->progress();
+    fontPt_ = qMax(8, fontPt_ - 2);
+    page_->setFontPointSize(fontPt_);
+    page_->setProgress(p);
+    updatePageLabel();
+    persist();
+}
 
 void EbookView::toggleContents()
 {
+    layoutOverlays();
     tocList_->setVisible(!tocList_->isVisible());
+    if (tocList_->isVisible()) { tocList_->raise(); revealMenu(); }
 }
 
 void EbookView::onTocActivated()
@@ -230,38 +382,54 @@ void EbookView::onTocActivated()
     if (!item) return;
     const int idx = book_->chapterIndexForHref(item->data(Qt::UserRole).toString());
     if (idx >= 0) loadChapter(idx);
+    tocList_->setVisible(false);
 }
 
-void EbookView::onAnchorClicked(const QUrl& url)
+void EbookView::onAnchorClicked(const QString& href)
 {
-    // A fragment with no file part points within the current chapter - just scroll to it.
-    if (url.path().isEmpty() && url.hasFragment())
-    {
-        browser_->scrollToAnchor(url.fragment());
-        return;
-    }
-
-    // Otherwise resolve the target file to a spine chapter and jump there (then to its anchor, if any).
+    const QUrl url(href);
+    if (url.path().isEmpty()) return; // a within-chapter fragment - can't position to it in paged mode
     const QString file = QFileInfo(url.path()).fileName();
     const int idx = book_->chapterIndexForHref(file);
-    if (idx < 0) return; // external or unmatched link - ignore rather than navigate away
+    if (idx >= 0) loadChapter(idx); // external / unmatched links are ignored rather than navigating away
+}
 
-    if (idx != chapter_) loadChapter(idx); // already on it? just move to the anchor below
-    if (url.hasFragment())
-        browser_->scrollToAnchor(url.fragment());
+void EbookView::revealMenu()
+{
+    layoutOverlays();
+    menu_->setVisible(true);
+    menu_->raise();
+    if (tocList_->isVisible()) tocList_->raise();
+    menuTimer_->start(3500);
+}
+
+void EbookView::hideMenuIfIdle()
+{
+    // Keep the menu up while the pointer is over it (or the contents panel) so it's usable.
+    if (menu_->underMouse() || (tocList_->isVisible() && tocList_->underMouse()))
+    { menuTimer_->start(1500); return; }
+    menu_->setVisible(false);
+}
+
+void EbookView::layoutOverlays()
+{
+    const int menuH = menu_->sizeHint().height();
+    menu_->setGeometry(0, 0, width(), menuH > 0 ? menuH : 52);
+    tocList_->setGeometry(0, menu_->height(), qMin(340, width() / 3), height() - menu_->height());
+}
+
+void EbookView::resizeEvent(QResizeEvent*)
+{
+    layoutOverlays();
 }
 
 void EbookView::updatePageLabel()
 {
     if (!book_->isOpen()) { pageLabel_->clear(); return; }
-    QScrollBar* sb = browser_->verticalScrollBar();
-    const int step = qMax(1, sb->pageStep());
-    const int pages = sb->maximum() / step + 1;
-    const int page = sb->value() / step + 1;
-    pageLabel_->setText(tr("%1  —  Chapter %2/%3 · Page %4/%5")
+    pageLabel_->setText(tr("%1  —  Ch %2/%3 · Page %4/%5")
                             .arg(book_->title())
                             .arg(chapter_ + 1).arg(book_->chapterFiles().size())
-                            .arg(qMin(page, pages)).arg(pages));
+                            .arg(page_->currentPage() + 1).arg(page_->pageCount()));
 }
 
 void EbookView::keyPressEvent(QKeyEvent* e)
@@ -270,7 +438,7 @@ void EbookView::keyPressEvent(QKeyEvent* e)
     {
     case Qt::Key_Right: case Qt::Key_PageDown: case Qt::Key_Space: nextPage(); return;
     case Qt::Key_Left:  case Qt::Key_PageUp:                       prevPage(); return;
-    case Qt::Key_Backspace: case Qt::Key_Escape:                  emit backRequested(); return;
+    case Qt::Key_Backspace: case Qt::Key_Escape:                   emit backRequested(); return;
     default: QWidget::keyPressEvent(e);
     }
 }

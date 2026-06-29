@@ -124,6 +124,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_pdftext PRIVATE src src/ebook)
     target_link_libraries(probe_pdftext PRIVATE Qt6::Gui Qt6::Pdf)
 
+    # Renders a few paginated pages to PNG to verify the reader paginates by line (no cut text).
+    add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp)
+    target_include_directories(probe_pageview PRIVATE src src/ebook)
+    target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
+
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)
     target_link_libraries(probe_pdf PRIVATE Qt6::Gui Qt6::Pdf)
