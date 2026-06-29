@@ -159,6 +159,13 @@ void EmulatorManager::startInstall()
 
 void EmulatorManager::fetchArtifactList()
 {
+    if (platformArtifact().isEmpty()) // no build published for this OS (e.g. Xenia has no macOS build)
+    {
+        busy_ = false;
+        emit failed(tr("%1 has no build for this operating system. You can get it from %2.")
+                        .arg(em_.displayName, em_.homepage));
+        return;
+    }
     emit status(tr("Looking up the latest %1…").arg(em_.displayName), -1);
     QNetworkRequest rq{ QUrl(platformUpdateUrl()) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));

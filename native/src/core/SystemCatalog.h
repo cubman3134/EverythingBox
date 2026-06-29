@@ -110,6 +110,11 @@ namespace SystemCatalog
             { "xbox",    "Xbox (xemu)",
                          { "xiso" },
                          {}, "xemu" },
+            // Xbox 360. .iso collides with GameCube/PS2/Xbox; claim .xex (unique to 360) + .zar, and route
+            // .iso games via the console hint ("Xbox 360" -> xbox360).
+            { "xbox360", "Xbox 360 (Xenia)",
+                         { "xex", "zar" },
+                         {}, "xenia" },
         };
         return list;
     }
@@ -173,7 +178,7 @@ namespace SystemCatalog
         else if (has("vic-20") || has("vic20") || has("vic"))             id = QStringLiteral("vic20"); // before commodore->c64
         else if (has("commodore 64") || has("c64") || has("commodore"))   id = QStringLiteral("c64");
         else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
-        else if (has("xbox 360") || has("xbox360"))                       id = QString();          // no emulator yet
+        else if (has("xbox 360") || has("xbox360"))                       id = QStringLiteral("xbox360");
         else if (has("xbox"))                                            id = QStringLiteral("xbox");
         // PlayStation last (after Vita/PSP). Specific consoles before the generic PS1 match.
         else if (has("playstation 3") || has("ps3"))                      id = QStringLiteral("ps3");

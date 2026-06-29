@@ -264,6 +264,24 @@ namespace EmulatorRegistry
                 QStringLiteral("x86_64.appimage"), // -> xemu-<ver>-x86_64.AppImage
                 QString(),                         // not a Flatpak
             },
+            {
+                // Xbox 360. Xenia (Canary fork), GitHub single repo: Windows .7z (xenia_canary.exe), Linux a
+                // direct .AppImage. There is NO macOS build (macArtifact empty -> handled with a clear message).
+                // CLI: positional game (.iso/.xex) boots; gflags --fullscreen=true/false.
+                QStringLiteral("xenia"), QStringLiteral("Xenia (Canary)"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("--fullscreen=true"),  // fullscreenArgs
+                QStringLiteral("--fullscreen=false"), // windowedArgs
+                QStringLiteral("https://xenia.jp/"),
+                { QStringLiteral("xenia_canary.exe"), QStringLiteral("xenia.exe") },
+                { },                                  // no macOS build
+                { QStringLiteral("xenia.AppImage"), QStringLiteral("xenia_canary") },
+                QStringLiteral("https://api.github.com/repos/xenia-canary/xenia-canary/releases/latest"),
+                QStringLiteral("windows"),            // -> xenia_canary_windows.7z
+                QString(),                            // macArtifact: no macOS build
+                QStringLiteral("linux"),              // -> xenia_canary_linux.AppImage
+                QString(),                            // not a Flatpak
+            },
         };
         return list;
     }
