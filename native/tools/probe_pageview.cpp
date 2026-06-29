@@ -19,21 +19,13 @@
 
 struct Line { qreal y, h; int pos; };
 
-// Mirror BookPageWidget: the text column is capped to ~78 chars, so a wider window doesn't reflow.
-static qreal cappedWidth(QTextDocument& doc, int windowW)
-{
-    const qreal avail = windowW - 2 * 40.0; // 40 = side margin
-    const qreal cap = QFontMetricsF(doc.defaultFont()).averageCharWidth() * 78.0;
-    return qMax(1.0, qMin(avail, cap));
-}
-
 static QVector<Line> layout(QTextDocument& doc, const QString& html, int pt, int windowW)
 {
     doc.setDocumentMargin(0);
     doc.setDefaultStyleSheet(QStringLiteral("body{margin:0;} p{margin:0 0 0.7em 0;}"));
     doc.setHtml(html);
     QFont f = doc.defaultFont(); f.setPointSize(pt); doc.setDefaultFont(f);
-    doc.setTextWidth(cappedWidth(doc, windowW));
+    doc.setTextWidth(windowW - 2 * 40.0); // full width (no cap), 40 = side margin
 
     QVector<Line> ls;
     auto* lay = doc.documentLayout();
@@ -97,37 +89,41 @@ int main(int argc, char** argv)
 
     std::printf("anchor offset %d  size A (800w): \"%s\"\n", anchor, wordsA.toLocal8Bit().constData());
 
-    // --- re-find the line for that offset at many widths ------------------------------------------------
-    for (int WB : { 360, 480, 650, 1000, 1200 })
-    {
-        QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB);
-        const int topB = lb[lineForPos(lb, anchor)].pos;   // snap to the line holding the anchor
-        const QString wordsB = firstWords(b, topB);
-        std::printf("  %4dw: top@%d (drift %+d) \"%s\"  %s\n", WB, topB, topB - anchor,
-                    wordsB.toLocal8Bit().constData(), wordsB == wordsA ? "MATCH" : "shift");
-    }
-    const int WB = 1000, HB = 700; const qreal phB = HB - TOP - BOT;
+    // The new model keeps the EXACT offset (no line snap) and renders the first line from it, so the first
+    // word is the anchor word at every width. Render a narrower page (where the anchor is mid-line) using
+    // the same first-line-shift logic, and eyeball that the first word matches.
+    const int WB = 520, HB = 700; const qreal phB = HB - TOP - BOT;
     QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB);
-    const int topB = lb[lineForPos(lb, anchor)].pos;
+    const int startLine = lineForPos(lb, anchor);
+    const qreal cw = WB - 2 * SIDE;
 
-    // --- render size B's page to PNG (wide window -> centred capped column) ------------------------------
-    const qreal cw = cappedWidth(b, WB), cl = qMax(SIDE, (WB - cw) / 2.0);
-    const int start = lineForPos(lb, topB), end = lastFitting(lb, start, phB);
-    const qreal y0 = lb[start].y, slice = lb[end].y + lb[end].h - y0;
+    // anchorX within the line (document coords).
+    qreal anchorX = 0;
+    if (anchor > lb[startLine].pos)
+    {
+        QTextBlock blk = b.findBlock(anchor);
+        QTextLine ln = blk.layout()->lineForTextPosition(anchor - blk.position());
+        if (ln.isValid()) anchorX = ln.cursorToX(anchor - blk.position());
+    }
+    std::printf("  at 520w the anchor is %s its line (anchorX=%.0f)\n",
+                anchor == lb[startLine].pos ? "at the START of" : "MID", anchorX);
+
+    const int endLine = lastFitting(lb, startLine, phB);
+    const qreal y0 = lb[startLine].y, firstH = lb[startLine].h;
     QImage img(WB, HB, QImage::Format_RGB32); img.fill(Qt::white);
     QPainter p(&img);
     p.fillRect(QRectF(0, 0, WB, TOP), QColor(230, 230, 230)); // menu strip
-    p.save();
-    p.setClipRect(QRectF(cl, TOP, cw, slice));
-    p.translate(cl, TOP - y0);
     QAbstractTextDocumentLayout::PaintContext ctx; ctx.palette.setColor(QPalette::Text, Qt::black);
-    ctx.clip = QRectF(0, y0, cw, slice);
-    b.documentLayout()->draw(&p, ctx);
-    p.restore();
-    QColor ink(0, 0, 0, 140); p.setPen(ink);
-    p.drawText(QRectF(0, HB - BOT, WB, BOT), Qt::AlignHCenter | Qt::AlignVCenter, QString("resized page"));
+    p.save(); p.setClipRect(QRectF(SIDE, TOP, cw, firstH)); p.translate(SIDE - anchorX, TOP - y0);
+    ctx.clip = QRectF(anchorX, y0, cw, firstH); b.documentLayout()->draw(&p, ctx); p.restore();
+    if (endLine > startLine)
+    {
+        const qreal y1 = lb[startLine + 1].y, restBottom = lb[endLine].y + lb[endLine].h;
+        p.save(); p.setClipRect(QRectF(SIDE, TOP + firstH, cw, phB - firstH + 2)); p.translate(SIDE, TOP - y0);
+        ctx.clip = QRectF(0, y1, cw, restBottom - y1); b.documentLayout()->draw(&p, ctx); p.restore();
+    }
     p.end();
     img.save(out + QStringLiteral("/resized.png"));
-    std::printf("wrote %s/resized.png\n", out.toLocal8Bit().constData());
+    std::printf("wrote %s/resized.png (top line should start with the anchor word)\n", out.toLocal8Bit().constData());
     return 0;
 }

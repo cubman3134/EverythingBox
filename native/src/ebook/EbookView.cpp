@@ -17,7 +17,6 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QTextLine>
-#include <QFontMetricsF>
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -106,28 +105,20 @@ void BookPageWidget::setFooter(const QString& s)
 
 // Re-lay the document at the current width and rebuild the line table. topPos_ (a document offset) is kept,
 // then snapped to the start of whatever line now holds it - so the same words stay at the top of the page.
-// Text column width, capped to a comfortable measure (~78 characters of the current font) so that widening
-// the window past that just adds side margin instead of reflowing the text. Below the cap it fills the
-// available width. This is what keeps the first word fixed when the window is resized horizontally while
-// still wide enough; it also keeps lines from getting unreadably long.
-qreal BookPageWidget::contentW() const
-{
-    const qreal avail = qreal(width()) - 2 * sideMargin_;
-    const qreal cap = QFontMetricsF(doc_->defaultFont()).averageCharWidth() * 78.0;
-    return qMax(1.0, qMin(avail, cap));
-}
+// Text fills the available width (no column cap) so it gets as big as the window.
+qreal BookPageWidget::contentW() const { return qMax(1.0, qreal(width()) - 2 * sideMargin_); }
+qreal BookPageWidget::contentLeft() const { return sideMargin_; }
 
-qreal BookPageWidget::contentLeft() const
-{
-    return qMax(sideMargin_, (qreal(width()) - contentW()) / 2.0); // centre the column
-}
-
+// Re-lay the document at the current width and rebuild the line table. Crucially, topPos_ (the reading
+// anchor - a document offset) is NOT touched here: a resize must not move the reading position. The page
+// just re-derives which line that offset is on. (Re-snapping on every resize is what used to let a drag
+// accumulate drift.)
 void BookPageWidget::relayout()
 {
     doc_->setTextWidth(contentW());
     rebuildLines();
     buildPageTops();
-    snapTopToLine();
+    topPos_ = qBound(0, topPos_, lines_.last().pos); // keep it valid, but don't snap it to a line start
     recomputeCurrentPage();
     emit layoutChanged();
 }
@@ -184,11 +175,6 @@ int BookPageWidget::lastFittingLine(int startLine) const
     while (m + 1 < lines_.size() && (lines_[m + 1].y + lines_[m + 1].h - y0) <= ph)
         ++m;
     return m; // always >= startLine, so paging makes progress even if one line exceeds the page
-}
-
-void BookPageWidget::snapTopToLine()
-{
-    topPos_ = lines_[lineIndexForPos(topPos_)].pos;
 }
 
 void BookPageWidget::recomputeCurrentPage()
@@ -259,7 +245,7 @@ void BookPageWidget::setProgress(double f)
 
 void BookPageWidget::scrollToTextPosition(int pos)
 {
-    topPos_ = lines_[lineIndexForPos(pos)].pos; // the page starts exactly at this line
+    topPos_ = qBound(0, pos, lines_.last().pos); // exact offset - the page is rendered starting at this word
     recomputeCurrentPage();
     update();
 }
@@ -316,18 +302,35 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     const int startLine = lineIndexForPos(topPos_);
     const int endLine = lastFittingLine(startLine);
     const qreal y0 = lines_[startLine].y;
-    const qreal slice = lines_[endLine].y + lines_[endLine].h - y0; // height of the whole-line page
+    const qreal firstH = lines_[startLine].h;
 
-    p.save();
-    // Clip to exactly the lines on this page so neither a partial next line nor the margins get painted.
-    p.setClipRect(QRectF(cl, topMargin_, cw, slice));
-    p.translate(cl, topMargin_ - y0); // map this page's first line to the top margin of the centred column
+    // If the anchor fell mid-line (after a reflow), shift the first line left so the anchored word sits at
+    // the left edge - so the exact first word stays put. anchorX is 0 when the anchor is a line start.
+    const qreal anchorX = anchorXInLine();
 
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette = palette();                  // text drawn in QPalette::Text
-    ctx.clip = QRectF(0, y0, cw, slice);
+
+    // First line: drawn shifted by anchorX; the words before the anchor fall left of the clip and vanish.
+    p.save();
+    p.setClipRect(QRectF(cl, topMargin_, cw, firstH));
+    p.translate(cl - anchorX, topMargin_ - y0);
+    ctx.clip = QRectF(anchorX, y0, cw, firstH);
     doc_->documentLayout()->draw(&p, ctx);
     p.restore();
+
+    // The remaining whole lines, drawn normally below the first.
+    if (endLine > startLine)
+    {
+        const qreal y1 = lines_[startLine + 1].y;
+        const qreal restBottom = lines_[endLine].y + lines_[endLine].h;
+        p.save();
+        p.setClipRect(QRectF(cl, topMargin_ + firstH, cw, contentH() - firstH + 2));
+        p.translate(cl, topMargin_ - y0);
+        ctx.clip = QRectF(0, y1, cw, restBottom - y1);
+        doc_->documentLayout()->draw(&p, ctx);
+        p.restore();
+    }
 
     // Page-number footer, centered in the bottom margin in a muted colour.
     if (!footer_.isEmpty())
@@ -340,15 +343,36 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     }
 }
 
+// X (document coords) of the anchor character within its line - i.e. how far the first line must shift left
+// so the anchored word starts at the left edge. 0 when the anchor sits at the start of its line.
+qreal BookPageWidget::anchorXInLine() const
+{
+    const int startLine = lineIndexForPos(topPos_);
+    if (lines_.isEmpty() || topPos_ <= lines_[startLine].pos) return 0.0;
+    const QTextBlock blk = doc_->findBlock(topPos_);
+    if (QTextLayout* tl = blk.layout())
+    {
+        const QTextLine ln = tl->lineForTextPosition(topPos_ - blk.position());
+        if (ln.isValid()) return ln.cursorToX(topPos_ - blk.position());
+    }
+    return 0.0;
+}
+
 void BookPageWidget::mousePressEvent(QMouseEvent* e)
 {
     const QPoint pos = e->pos();
 
     // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
-    const qreal y0 = lines_.isEmpty() ? 0.0 : lines_[lineIndexForPos(topPos_)].y;
-    const QPointF docPos(pos.x() - contentLeft(), pos.y() - topMargin_ + y0);
-    const QString href = doc_->documentLayout()->anchorAt(docPos);
-    if (!href.isEmpty()) { emit anchorClicked(href); return; }
+    if (!lines_.isEmpty())
+    {
+        const int startLine = lineIndexForPos(topPos_);
+        const qreal y0 = lines_[startLine].y, firstH = lines_[startLine].h;
+        // The first line is shifted by anchorX; rows below it are not.
+        const qreal shift = (pos.y() < topMargin_ + firstH) ? anchorXInLine() : 0.0;
+        const QPointF docPos(pos.x() - contentLeft() + shift, pos.y() - topMargin_ + y0);
+        const QString href = doc_->documentLayout()->anchorAt(docPos);
+        if (!href.isEmpty()) { emit anchorClicked(href); return; }
+    }
 
     if (pos.y() < topMargin_)           { emit menuRequested(); return; } // the strip the menu lives in
     if (pos.x() < width() / 2)            emit prevRequested();
