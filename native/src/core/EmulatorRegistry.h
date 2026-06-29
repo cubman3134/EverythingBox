@@ -11,9 +11,11 @@ struct ExternalEmulator
 {
     QString id;            // stable key, also the "emulators/<id>" folder name
     QString displayName;   // shown in UI
-    QString argsTemplate;  // command-line args; the literal token {rom} is replaced with the ROM path
-    QString fullscreenArgs; // appended when "launch full screen" is on  (per-emulator; flags differ)
-    QString windowedArgs;   // appended when it's off (keeps the toggle authoritative where the emulator persists it)
+    // Command-line args. {rom} is replaced with the ROM path; {fs} with fullscreenArgs/windowedArgs (so the
+    // emulator's fullscreen flag lands in the right spot - some parsers want options before the file).
+    QString argsTemplate;
+    QString fullscreenArgs; // substituted for {fs} when "launch full screen" is on  (flags differ per emulator)
+    QString windowedArgs;   // substituted for {fs} when it's off (keeps the toggle authoritative)
     QString homepage;      // where to get it manually (shown if auto-install isn't possible)
 
     // Find-rules: candidate binary paths relative to "emulators/<id>/", first match wins. Per-OS because
@@ -37,7 +39,7 @@ namespace EmulatorRegistry
         static const QList<ExternalEmulator> list = {
             {
                 QStringLiteral("dolphin"), QStringLiteral("Dolphin"),
-                QStringLiteral("-b -e {rom}"),   // -b: quit when emulation stops; -e: boot this file
+                QStringLiteral("-b -e {rom} {fs}"),   // -b: quit when emulation stops; -e: boot this file
                 QStringLiteral("-C Dolphin.Display.Fullscreen=True"),   // fullscreenArgs
                 QStringLiteral("-C Dolphin.Display.Fullscreen=False"),  // windowedArgs
                 QStringLiteral("https://dolphin-emu.org/download/"),
@@ -47,10 +49,29 @@ namespace EmulatorRegistry
                   QStringLiteral("dolphin/Dolphin.exe"), QStringLiteral("dolphin-emu/Dolphin.exe") },
                 { QStringLiteral("Dolphin.app/Contents/MacOS/Dolphin"), QStringLiteral("Dolphin.app") },
                 { QStringLiteral("dolphin-emu"), QStringLiteral("Dolphin.AppImage") },
-                QStringLiteral("https://dolphin-emu.org/update/latest/beta/"),
+                QStringLiteral("https://dolphin-emu.org/update/latest/beta/"), // Dolphin-style {artifacts:[{system,url}]}
                 QStringLiteral("Windows x64"),
                 QStringLiteral("macOS (ARM/Intel Universal)"),
                 QStringLiteral("Linux x86_64 (Flatpak)"),
+            },
+            {
+                // Nintendo 3DS. Citra itself was discontinued (Nintendo DMCA, 2024) and has no working
+                // download; Azahar is the maintained successor (Citra + Lime3DS merged). Citra-family CLI:
+                // boots a game by path, -f = full screen. Find-rules also detect an existing Citra/Lime3DS.
+                QStringLiteral("azahar"), QStringLiteral("Azahar (3DS)"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("-f"),   // fullscreenArgs
+                QString(),              // windowedArgs (default is windowed)
+                QStringLiteral("https://azahar-emu.org/"),
+                { QStringLiteral("azahar.exe"), QStringLiteral("citra-qt.exe"),
+                  QStringLiteral("lime3ds-gui.exe"), QStringLiteral("lime3ds.exe") },
+                { QStringLiteral("Azahar.app/Contents/MacOS/azahar"), QStringLiteral("azahar") },
+                { QStringLiteral("azahar"), QStringLiteral("azahar.AppImage") },
+                // GitHub releases API: {assets:[{name, browser_download_url}]} - matched by name substring.
+                QStringLiteral("https://api.github.com/repos/azahar-emu/azahar/releases/latest"),
+                QStringLiteral("windows-msvc"),   // -> azahar-windows-msvc-<ver>.zip (not installer/msys2/libretro)
+                QStringLiteral("macos-universal"),
+                QStringLiteral("linux"),
             },
         };
         return list;

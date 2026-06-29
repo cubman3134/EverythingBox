@@ -49,6 +49,9 @@ namespace SystemCatalog
             { "gc",      "GameCube / Wii (Dolphin)",
                          { "rvz", "iso", "gcm", "gcz", "ciso", "wia", "wbfs", "wad" },
                          {}, "dolphin" },
+            { "3ds",     "Nintendo 3DS (Azahar)",
+                         { "3ds", "cci", "cxi", "cia", "3dsx" },
+                         {}, "azahar" },
         };
         return list;
     }

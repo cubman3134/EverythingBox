@@ -3,6 +3,7 @@
 #include <QCoreApplication>
 #include <QSettings>
 #include <QDir>
+#include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QStandardPaths>
@@ -74,6 +75,18 @@ QString EmulatorManager::resolveBinary(const ExternalEmulator& em)
         if (QFileInfo::exists(p))
             return p;
     }
+    // Fallback: some emulators extract into a version-named subfolder (e.g. azahar-windows-msvc-<ver>/),
+    // so search recursively for the candidate binary by name, preferring the order listed.
+    if (QDir(base).exists())
+    {
+        for (const QString& c : cands)
+        {
+            const QString name = QFileInfo(c).fileName();
+            QDirIterator it(base, QStringList{ name }, QDir::Files, QDirIterator::Subdirectories);
+            if (it.hasNext())
+                return it.next();
+        }
+    }
     return QString();
 }
 
@@ -142,16 +155,36 @@ void EmulatorManager::fetchArtifactList()
             return;
         }
         const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
-        const QJsonArray arts = root.value(QStringLiteral("artifacts")).toArray();
         const QString want = platformArtifact();
         QString url;
-        for (const QJsonValue& v : arts)
+        if (root.contains(QStringLiteral("artifacts")))
         {
-            const QJsonObject o = v.toObject();
-            if (o.value(QStringLiteral("system")).toString() == want)
+            // Dolphin-style update JSON: exact "system" match.
+            for (const QJsonValue& v : root.value(QStringLiteral("artifacts")).toArray())
             {
-                url = o.value(QStringLiteral("url")).toString();
-                break;
+                const QJsonObject o = v.toObject();
+                if (o.value(QStringLiteral("system")).toString() == want)
+                {
+                    url = o.value(QStringLiteral("url")).toString();
+                    break;
+                }
+            }
+        }
+        else if (root.contains(QStringLiteral("assets")))
+        {
+            // GitHub releases API: pick the archive asset whose name contains the platform substring
+            // (e.g. "windows-msvc"); skip installers/other formats by requiring a .zip/.7z.
+            for (const QJsonValue& v : root.value(QStringLiteral("assets")).toArray())
+            {
+                const QJsonObject o = v.toObject();
+                const QString name = o.value(QStringLiteral("name")).toString();
+                if (name.contains(want, Qt::CaseInsensitive)
+                    && (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)
+                        || name.endsWith(QStringLiteral(".7z"), Qt::CaseInsensitive)))
+                {
+                    url = o.value(QStringLiteral("browser_download_url")).toString();
+                    break;
+                }
             }
         }
         if (url.isEmpty())
@@ -238,11 +271,10 @@ void EmulatorManager::extractArchive()
 void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
-    const QString extra = launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs;
-    if (!extra.isEmpty()) tmpl += QLatin1Char(' ') + extra;
+    tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
 
     QStringList args;
-    const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts); // empties (e.g. blank {fs}) dropped
     for (QString a : parts)
         args << (a.contains(QStringLiteral("{rom}")) ? a.replace(QStringLiteral("{rom}"), rom_) : a);
 
