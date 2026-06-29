@@ -1092,6 +1092,11 @@ void MainWindow::openEmulatorManager()
         folderRow->addWidget(change);
         v->addLayout(folderRow);
 
+        auto* fs = new QCheckBox(tr("Launch emulators full screen"));
+        fs->setChecked(EmulatorManager::launchFullscreen());
+        connect(fs, &QCheckBox::toggled, this, [](bool on) { EmulatorManager::setLaunchFullscreen(on); });
+        v->addWidget(fs);
+
         v->addSpacing(10);
         for (const ExternalEmulator& em : EmulatorRegistry::all())
         {

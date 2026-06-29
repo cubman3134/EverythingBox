@@ -24,6 +24,9 @@ public:
     static QString resolveBinary(const ExternalEmulator& em); // existing binary path, or "" if not installed
     static bool isInstalled(const ExternalEmulator& em) { return !resolveBinary(em).isEmpty(); }
 
+    static bool launchFullscreen();          // launch emulators full screen (default true)
+    static void setLaunchFullscreen(bool on);
+
     void play(const ExternalEmulator& em, const QString& rom); // ensure installed, then boot + monitor
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
     void terminateGame();                                      // force-close the running emulator

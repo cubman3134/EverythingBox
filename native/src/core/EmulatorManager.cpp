@@ -38,6 +38,19 @@ void EmulatorManager::setEmulatorsRoot(const QString& dir)
     s.sync();
 }
 
+bool EmulatorManager::launchFullscreen()
+{
+    QSettings s = appIni();
+    return s.value(QStringLiteral("emulators/fullscreen"), true).toBool();
+}
+
+void EmulatorManager::setLaunchFullscreen(bool on)
+{
+    QSettings s = appIni();
+    s.setValue(QStringLiteral("emulators/fullscreen"), on);
+    s.sync();
+}
+
 QString EmulatorManager::installDir(const ExternalEmulator& em)
 {
     const QString d = emulatorsRoot() + QStringLiteral("/") + em.id;
@@ -224,8 +237,12 @@ void EmulatorManager::extractArchive()
 
 void EmulatorManager::launch(const QString& binary)
 {
+    QString tmpl = em_.argsTemplate;
+    const QString extra = launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs;
+    if (!extra.isEmpty()) tmpl += QLatin1Char(' ') + extra;
+
     QStringList args;
-    const QStringList parts = em_.argsTemplate.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     for (QString a : parts)
         args << (a.contains(QStringLiteral("{rom}")) ? a.replace(QStringLiteral("{rom}"), rom_) : a);
 

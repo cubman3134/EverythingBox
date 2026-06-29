@@ -12,6 +12,8 @@ struct ExternalEmulator
     QString id;            // stable key, also the "emulators/<id>" folder name
     QString displayName;   // shown in UI
     QString argsTemplate;  // command-line args; the literal token {rom} is replaced with the ROM path
+    QString fullscreenArgs; // appended when "launch full screen" is on  (per-emulator; flags differ)
+    QString windowedArgs;   // appended when it's off (keeps the toggle authoritative where the emulator persists it)
     QString homepage;      // where to get it manually (shown if auto-install isn't possible)
 
     // Find-rules: candidate binary paths relative to "emulators/<id>/", first match wins. Per-OS because
@@ -36,6 +38,8 @@ namespace EmulatorRegistry
             {
                 QStringLiteral("dolphin"), QStringLiteral("Dolphin"),
                 QStringLiteral("-b -e {rom}"),   // -b: quit when emulation stops; -e: boot this file
+                QStringLiteral("-C Dolphin.Display.Fullscreen=True"),   // fullscreenArgs
+                QStringLiteral("-C Dolphin.Display.Fullscreen=False"),  // windowedArgs
                 QStringLiteral("https://dolphin-emu.org/download/"),
                 // Windows: the official .7z extracts to a "Dolphin-x64/" folder; also accept a flat or
                 // RetroBat/ES-DE-style nested copy so an existing install is detected.
