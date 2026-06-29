@@ -1,4 +1,5 @@
 #include "EmulatorManager.h"
+#include "AppPaths.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -39,7 +40,7 @@ static bool assetMatches(const QString& name, const QString& want)
 
 static QSettings appIni()
 {
-    return QSettings(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    return QSettings(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                      QSettings::IniFormat);
 }
 
@@ -48,7 +49,7 @@ QString EmulatorManager::emulatorsRoot()
     QSettings s = appIni();
     QString d = s.value(QStringLiteral("emulators/root")).toString();
     if (d.isEmpty())
-        d = QCoreApplication::applicationDirPath() + QStringLiteral("/emulators");
+        d = AppPaths::dataDir() + QStringLiteral("/emulators");
     QDir().mkpath(d);
     return d;
 }

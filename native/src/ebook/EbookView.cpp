@@ -1,4 +1,5 @@
 #include "EbookView.h"
+#include "../core/AppPaths.h"
 
 #include <QTextBrowser>
 #include <QListWidget>
@@ -17,7 +18,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

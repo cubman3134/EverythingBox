@@ -1,4 +1,5 @@
 #include <QApplication>
+#include "core/AppPaths.h"
 #include <QIcon>
 #include <QFile>
 #include <QFileInfo>
@@ -19,7 +20,7 @@
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
-static QString logPath() { return QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"); }
+static QString logPath() { return AppPaths::dataDir() + QStringLiteral("/stream_debug.log"); }
 
 // Route Qt diagnostics (qDebug/qInfo/qWarning/qCritical, plus internal Qt/library messages) to the log file.
 // As a GUI-subsystem app there is no console, so this is the only place errors are recorded. Thread-safe.
@@ -64,7 +65,7 @@ static void cloudPullAtStartup()
 // Idempotent: once mymediavault.ini exists this is skipped.
 static void migrateLegacySettings()
 {
-    const QString dir = QCoreApplication::applicationDirPath();
+    const QString dir = AppPaths::dataDir();
     const QString oldIni = dir + QStringLiteral("/goliath.ini");
     const QString newIni = dir + QStringLiteral("/mymediavault.ini");
     if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;

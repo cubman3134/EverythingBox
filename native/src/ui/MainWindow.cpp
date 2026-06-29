@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
 #include "../ebook/EbookView.h"
@@ -80,7 +81,7 @@
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
 static void mwLog(const QString& msg)
 {
-    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"));
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
     if (f.open(QIODevice::Append | QIODevice::Text))
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
@@ -172,7 +173,7 @@ bool looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
 // Per-profile settings store (resume positions, etc.), mirroring the accessor the other views use.
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -348,7 +349,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
     {
-        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
         volume_->setValue(qBound(0, vol, 200));
         player_->setVolume(volume_->value());
@@ -360,7 +361,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // Speaker shows mute at 0, plain at 1..100, and a "boost" badge above 100%.
         muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
         volume_->setToolTip(tr("Volume: %1%").arg(v));
-        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         s.setValue(QStringLiteral("player/volume"), v);
     });
     connect(muteBtn_, &QPushButton::clicked, this, [this] {
@@ -1745,7 +1746,7 @@ void MainWindow::startNextDownload()
     const MediaItem item = downloadQueue_.takeFirst();
     const int remaining = downloadQueue_.size();
 
-    const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/downloads");
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads");
     QDir().mkpath(dir);
     const QString ext = downloadExt(item);
     const QString kind = downloadKind(item.type, ext);
@@ -2098,7 +2099,7 @@ void MainWindow::openCloudSync()
 void MainWindow::openCloudClientSetup()
 {
     showPanel(tr("Sign-in client"), [this](QVBoxLayout* v) {
-        QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         auto* intro = new QLabel(tr("Paste a Google <b>Desktop-app</b> OAuth client (from the Google Cloud "
             "console). The secret is non-confidential for desktop apps."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
@@ -2127,7 +2128,7 @@ void MainWindow::openCloudClientSetup()
         connect(save, &QPushButton::clicked, this, [this, idEdit, secEdit, err] {
             const QString id = idEdit->text().trimmed();
             if (id.isEmpty()) { err->setText(tr("Enter a client id.")); return; }
-            QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
             s.setValue(QStringLiteral("cloud/clientId"), id);
             s.setValue(QStringLiteral("cloud/clientSecret"), secEdit->text().trimmed());
             s.sync();
@@ -2243,7 +2244,7 @@ void MainWindow::openRetroAchievements()
 void MainWindow::openDebug()
 {
     showPanel(tr("Debug"), [this](QVBoxLayout* v) {
-        const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log");
+        const QString path = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
 
         auto* intro = new QLabel(tr("Diagnostic log. Errors and stream-resolution traces are recorded here "
                                     "(no API keys or tokens are written). The log is kept in the app folder "

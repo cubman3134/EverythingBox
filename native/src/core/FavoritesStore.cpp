@@ -1,4 +1,5 @@
 #include "FavoritesStore.h"
+#include "AppPaths.h"
 #include "ProfileStore.h"
 
 #include <QSettings>
@@ -9,7 +10,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

@@ -1,4 +1,5 @@
 #include "RetroView.h"
+#include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include <QTimer>
@@ -294,14 +295,14 @@ void RetroView::tick()
 
 QString RetroView::statePath() const
 {
-    const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/states");
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/states");
     QDir().mkpath(dir);
     return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".state");
 }
 
 QString RetroView::sramPath() const
 {
-    const QString dir = QCoreApplication::applicationDirPath() + QStringLiteral("/saves");
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/saves");
     QDir().mkpath(dir);
     return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".srm");
 }

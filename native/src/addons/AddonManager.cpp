@@ -1,4 +1,5 @@
 #include "AddonManager.h"
+#include "../core/AppPaths.h"
 #include "AddonContext.h"
 #include "JsAddon.h"
 
@@ -28,7 +29,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -44,7 +45,7 @@ static QString resolveUrlIn(const QString& url, const QString& addonDir)
     if (fi.isAbsolute() && fi.exists()) return fi.absoluteFilePath();
     const QString inAddon = QDir::cleanPath(addonDir + QStringLiteral("/") + url);
     if (QFile::exists(inAddon)) return inAddon;
-    const QString inApp = QDir::cleanPath(QCoreApplication::applicationDirPath() + QStringLiteral("/") + url);
+    const QString inApp = QDir::cleanPath(AppPaths::dataDir() + QStringLiteral("/") + url);
     if (QFile::exists(inApp)) return inApp;
     return url;
 }
@@ -422,7 +423,7 @@ static QString torboxApiKey() { store().sync(); return store().value(QStringLite
 // (no API key/token is ever written - callers pass already-masked text).
 static void streamLog(const QString& msg)
 {
-    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"));
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
     if (f.open(QIODevice::Append | QIODevice::Text))
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
@@ -434,7 +435,7 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     qRegisterMetaType<MediaCatalog>("MediaCatalog");
     qRegisterMetaType<MediaDetail>("MediaDetail");
     nam_ = new QNetworkAccessManager(this);
-    root_ = QCoreApplication::applicationDirPath() + QStringLiteral("/addons");
+    root_ = AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
     seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box

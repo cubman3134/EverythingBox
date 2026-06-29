@@ -1,4 +1,5 @@
 #include "Theme.h"
+#include "AppPaths.h"
 #include "ProfileStore.h"
 
 #include <QSettings>
@@ -12,7 +13,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -87,7 +88,7 @@ static Theme parseTheme(const QJsonObject& o, const QString& fallbackName, const
 static QVector<Theme> userThemes()
 {
     QVector<Theme> v;
-    const QString dirPath = QCoreApplication::applicationDirPath() + QStringLiteral("/themes");
+    const QString dirPath = AppPaths::dataDir() + QStringLiteral("/themes");
     const QFileInfoList files = QDir(dirPath).entryInfoList(QStringList() << QStringLiteral("*.json"),
                                                             QDir::Files, QDir::Name);
     for (const QFileInfo& fi : files)

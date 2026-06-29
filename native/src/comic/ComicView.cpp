@@ -1,4 +1,5 @@
 #include "ComicView.h"
+#include "../core/AppPaths.h"
 
 #include <QScrollArea>
 #include <QScrollBar>
@@ -23,7 +24,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

@@ -68,10 +68,11 @@ Intent hand-off to installed Android emulator apps.
 
 ## Phase 4 — Code changes
 - [x] **CoreManager per-OS** — done (`bcf25eb`): fetches `android/.../arm64-v8a/<core>_libretro_android.so`.
-- [ ] **Storage paths**: `QCoreApplication::applicationDirPath()` isn't writable on Android. Route
-      `cores/`, `emulators/` (n/a), `saves/`, `states/`, `downloads/`, the `.ini`, and the cache to
-      `QStandardPaths::AppDataLocation` / `AppLocalDataLocation`. Audit every `applicationDirPath()` use
-      (CoreManager, EmulatorManager, Settings `store()`, RecentStore, CloudSync).
+- [x] **Storage paths** — done. All writable-data paths now go through `AppPaths::dataDir()`
+      (`native/src/core/AppPaths.h`): desktop = the executable dir (unchanged, portable), Android =
+      `QStandardPaths::AppDataLocation`. Switched every `applicationDirPath()` use (cores, emulators,
+      saves, states, downloads, the shared `.ini`, logs, addons/themes roots) across 20 files. Only this
+      one function changes per platform.
 - [ ] **External emulators**: compile out / hide `EmulatorManager` + the Settings "Emulators" panel on
       Android (`#if !defined(Q_OS_ANDROID)`), or replace `runEmulator()` with an Intent launcher
       (`QJniObject` → `Intent`) to an installed Android emulator app (RetroArch/Dolphin/Citra-Android),

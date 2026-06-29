@@ -1,4 +1,5 @@
 #include "RegistryBrowser.h"
+#include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
 
 #include <QVBoxLayout>
@@ -27,7 +28,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -189,7 +190,7 @@ void RegistryBrowser::renderRegistryRows()
 
 QString RegistryBrowser::localDirFor(const QString& id) const
 {
-    const QString app = QCoreApplication::applicationDirPath();
+    const QString app = AppPaths::dataDir();
     if (kind_ == Themes) return app + QStringLiteral("/themes");
     return app + QStringLiteral("/addons/") + id;
 }

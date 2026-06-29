@@ -1,4 +1,5 @@
 #include "CloudSync.h"
+#include "AppPaths.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -41,7 +42,7 @@ static const char* kFolder   = "MyMediaVault";
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
@@ -363,7 +364,7 @@ static QByteArray buildBundle()
     const QByteArray sJson = QJsonDocument(so).toJson(QJsonDocument::Compact);
     mz_zip_writer_add_mem(&z, "settings.json", sJson.constData(), sJson.size(), MZ_DEFAULT_COMPRESSION);
 
-    const QString app = QCoreApplication::applicationDirPath();
+    const QString app = AppPaths::dataDir();
     zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"));
     zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
     zipAddDir(z, app + QStringLiteral("/saves"),  QStringLiteral("saves"));   // emulator battery saves (.srm)
@@ -381,7 +382,7 @@ static bool applyBundle(const QByteArray& data)
 {
     mz_zip_archive z; std::memset(&z, 0, sizeof(z));
     if (!mz_zip_reader_init_mem(&z, data.constData(), data.size(), 0)) return false;
-    const QString app = QCoreApplication::applicationDirPath();
+    const QString app = AppPaths::dataDir();
     const int n = int(mz_zip_reader_get_num_files(&z));
     for (int i = 0; i < n; ++i)
     {
@@ -428,7 +429,7 @@ static QByteArray stateHash()
     for (const QString& k : keys)
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
 
-    const QString app = QCoreApplication::applicationDirPath();
+    const QString app = AppPaths::dataDir();
     for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes"),
                                 QStringLiteral("saves"), QStringLiteral("states") })
     {

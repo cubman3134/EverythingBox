@@ -1,4 +1,5 @@
 #include "Achievements.h"
+#include "AppPaths.h"
 #include "../libretro/LibretroCore.h"
 
 #include <QNetworkAccessManager>
@@ -20,7 +21,7 @@ namespace {
 
 QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

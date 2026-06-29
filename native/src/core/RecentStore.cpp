@@ -1,4 +1,5 @@
 #include "RecentStore.h"
+#include "AppPaths.h"
 #include "ProfileStore.h"
 
 #include <QSettings>
@@ -11,7 +12,7 @@ static const int kMaxRecents = 40;
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

@@ -1,4 +1,5 @@
 #include "CoreManager.h"
+#include "AppPaths.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -17,7 +18,7 @@
 
 QString CoreManager::coresDir()
 {
-    const QString d = QCoreApplication::applicationDirPath() + QStringLiteral("/cores");
+    const QString d = AppPaths::dataDir() + QStringLiteral("/cores");
     QDir().mkpath(d);
     return d;
 }

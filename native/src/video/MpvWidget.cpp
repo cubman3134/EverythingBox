@@ -1,4 +1,5 @@
 #include "MpvWidget.h"
+#include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #include <QOpenGLContext>
 #include <QMetaObject>
@@ -14,7 +15,7 @@
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga tracing.
 static void videoLog(const QString& msg)
 {
-    QFile f(QCoreApplication::applicationDirPath() + QStringLiteral("/stream_debug.log"));
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
     if (f.open(QIODevice::Append | QIODevice::Text))
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }

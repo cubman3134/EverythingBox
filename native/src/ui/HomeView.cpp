@@ -1,4 +1,5 @@
 #include "HomeView.h"
+#include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
 #include "../core/RecentStore.h"
 #include "../core/ProfileStore.h"
@@ -68,7 +69,7 @@ static bool isReadableChapter(const QString& t)
 // Per-profile settings store (shared ini); used here to read media resume progress.
 static QSettings& settingsStore()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }

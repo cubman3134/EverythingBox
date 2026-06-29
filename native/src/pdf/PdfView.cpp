@@ -1,4 +1,5 @@
 #include "PdfView.h"
+#include "../core/AppPaths.h"
 
 #include <QPdfDocument>
 #include <QPdfView>
@@ -15,7 +16,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(QCoreApplication::applicationDirPath() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
 }
