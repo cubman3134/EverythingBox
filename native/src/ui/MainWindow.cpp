@@ -1531,12 +1531,20 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
     }
 
+    // Recent entry for a document: carry the catalog title/cover (the local file is often a hashed cache
+    // name) and key on the stable item id so re-opening de-dups instead of stacking a second entry.
+    auto recordDocument = [&] {
+        const QString t = item.title.isEmpty() ? QFileInfo(url).completeBaseName() : item.title;
+        RecentStore::add({ url, t, QStringLiteral("document"), item.thumbnailUrl, item.id });
+    };
+
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(book_);
+        recordDocument();
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
     {
@@ -1547,12 +1555,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
             stack_->setCurrentWidget(book_);
+            recordDocument();
         }
         else if (pdf_->openPdf(url, &err))
         {
             player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
             pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
             stack_->setCurrentWidget(pdf_);
+            recordDocument();
         }
         else { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); }
     }
@@ -1561,6 +1571,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         if (!comic_->openComic(url, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
+        recordDocument();
     }
     else if (type == QStringLiteral("audiobook") || item.mime.toLower().startsWith(QStringLiteral("audio/")))
     {
