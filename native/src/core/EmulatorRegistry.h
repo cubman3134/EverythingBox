@@ -282,6 +282,25 @@ namespace EmulatorRegistry
                 QStringLiteral("linux"),              // -> xenia_canary_linux.AppImage
                 QString(),                            // not a Flatpak
             },
+            {
+                // Atari Jaguar / Jaguar CD. BigPEmu (closed-source, richwhitehouse.com). No GitHub/JSON API,
+                // so the updateJsonUrl is the download PAGE and the installer scrapes it for the build URL.
+                // Windows .zip (BigPEmu.exe), Linux .tar.gz; no macOS build. Boots a positional ROM; full
+                // screen is an in-app toggle (no CLI flag), so {fs} is empty.
+                QStringLiteral("bigpemu"), QStringLiteral("BigPEmu"),
+                QStringLiteral("{fs} {rom}"),
+                QString(),  // fullscreenArgs (BigPEmu has no fullscreen CLI flag; toggled in-app)
+                QString(),  // windowedArgs
+                QStringLiteral("https://www.richwhitehouse.com/jaguar/index.php?content=download"),
+                { QStringLiteral("BigPEmu.exe") },
+                { },        // no macOS build
+                { QStringLiteral("BigPEmu"), QStringLiteral("bigpemu") },
+                QStringLiteral("https://www.richwhitehouse.com/jaguar/index.php?content=download"), // scraped HTML
+                QStringLiteral("bigpemu_v"), // -> builds/BigPEmu_v<ver>.zip (not WinARM64 / -DEV)
+                QString(),                   // macArtifact: no macOS build
+                QStringLiteral("linux64"),   // -> builds/BigPEmu_Linux64_v<ver>.tar.gz (not LinuxARM64)
+                QString(),                   // not a Flatpak
+            },
         };
         return list;
     }

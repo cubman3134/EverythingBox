@@ -115,6 +115,11 @@ namespace SystemCatalog
             { "xbox360", "Xbox 360 (Xenia)",
                          { "xex", "zar" },
                          {}, "xenia" },
+            // Atari Jaguar + Jaguar CD (BigPEmu). Cart formats are unique here; Jaguar CD images (.cue/.cdi)
+            // collide with PlayStation/Dreamcast and route via the console hint ("Atari Jaguar" -> jaguar).
+            { "jaguar",  "Atari Jaguar / Jaguar CD (BigPEmu)",
+                         { "j64", "jag", "abs", "cof" },
+                         {}, "bigpemu" },
         };
         return list;
     }
@@ -180,6 +185,7 @@ namespace SystemCatalog
         else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
         else if (has("xbox 360") || has("xbox360"))                       id = QStringLiteral("xbox360");
         else if (has("xbox"))                                            id = QStringLiteral("xbox");
+        else if (has("jaguar"))                                          id = QStringLiteral("jaguar"); // Jaguar + Jaguar CD
         // PlayStation last (after Vita/PSP). Specific consoles before the generic PS1 match.
         else if (has("playstation 3") || has("ps3"))                      id = QStringLiteral("ps3");
         else if (has("playstation 2") || has("ps2"))                      id = QStringLiteral("ps2");

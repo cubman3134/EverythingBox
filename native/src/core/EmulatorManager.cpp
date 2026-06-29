@@ -15,6 +15,27 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QRegularExpression>
+
+// Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
+// present a normal browser User-Agent. GitHub and Dolphin accept it too (they just require a non-empty UA).
+static const QString kBrowserUA = QStringLiteral(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+// True if a release asset / download file name is the one we want for this OS: contains the platform marker,
+// has an archive extension, and isn't a core / debug / unsigned / dev build. Shared by the GitHub-asset and
+// HTML-scrape paths.
+static bool assetMatches(const QString& name, const QString& want)
+{
+    if (want.isEmpty()) return false;
+    const QString n = name.toLower();
+    for (const char* s : { "libretro", "symbols", "dbg", "pdb", "unsigned", "dev" })
+        if (n.contains(QLatin1String(s))) return false;
+    if (!n.contains(want.toLower())) return false;
+    for (const char* e : { ".zip", ".7z", ".appimage", ".dmg", ".tar.gz", ".tgz", ".tar.xz", ".txz" })
+        if (n.endsWith(QLatin1String(e))) return true;
+    return false;
+}
 
 static QSettings appIni()
 {
@@ -168,7 +189,7 @@ void EmulatorManager::fetchArtifactList()
     }
     emit status(tr("Looking up the latest %1…").arg(em_.displayName), -1);
     QNetworkRequest rq{ QUrl(platformUpdateUrl()) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply] {
@@ -179,7 +200,8 @@ void EmulatorManager::fetchArtifactList()
             emit failed(tr("Couldn't reach the %1 download server: %2").arg(em_.displayName, reply->errorString()));
             return;
         }
-        const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+        const QByteArray body = reply->readAll();
+        const QJsonObject root = QJsonDocument::fromJson(body).object();
         const QString want = platformArtifact();
         QString url;
         if (root.contains(QStringLiteral("artifacts")))
@@ -197,30 +219,27 @@ void EmulatorManager::fetchArtifactList()
         }
         else if (root.contains(QStringLiteral("assets")))
         {
-            // GitHub releases API: pick the asset whose name contains the platform substring (e.g.
-            // "windows-msvc"); accept a portable archive or AppImage, and never the libretro core.
+            // GitHub releases API: the asset whose name carries the platform marker (e.g. "windows-msvc").
             for (const QJsonValue& v : root.value(QStringLiteral("assets")).toArray())
             {
                 const QJsonObject o = v.toObject();
-                const QString name = o.value(QStringLiteral("name")).toString();
-                if (name.contains(QStringLiteral("libretro"), Qt::CaseInsensitive)
-                    || name.contains(QStringLiteral("symbols"), Qt::CaseInsensitive)
-                    || name.contains(QStringLiteral("dbg"), Qt::CaseInsensitive)
-                    || name.contains(QStringLiteral("pdb"), Qt::CaseInsensitive)
-                    || name.contains(QStringLiteral("unsigned"), Qt::CaseInsensitive)) continue; // skip core / debug / unsigned assets
-                if (name.contains(want, Qt::CaseInsensitive)
-                    && (name.endsWith(QStringLiteral(".zip"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".7z"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".appimage"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".dmg"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".tar.gz"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".tgz"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".tar.xz"), Qt::CaseInsensitive)
-                        || name.endsWith(QStringLiteral(".txz"), Qt::CaseInsensitive)))
+                if (assetMatches(o.value(QStringLiteral("name")).toString(), want))
                 {
                     url = o.value(QStringLiteral("browser_download_url")).toString();
                     break;
                 }
+            }
+        }
+        else
+        {
+            // No JSON API (e.g. BigPEmu): scrape the download page's HTML for a matching build URL.
+            const QString html = QString::fromUtf8(body);
+            QRegularExpression re(QStringLiteral("https?://[^\\s\"'<>]+"));
+            auto it = re.globalMatch(html);
+            while (it.hasNext())
+            {
+                const QString cand = it.next().captured(0);
+                if (assetMatches(cand, want)) { url = cand; break; }
             }
         }
         if (url.isEmpty())
@@ -250,7 +269,7 @@ void EmulatorManager::downloadArchive(const QString& url)
         return;
     }
     QNetworkRequest rq{ QUrl(url) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, kBrowserUA);
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::readyRead, this, [reply, out] { out->write(reply->readAll()); });
