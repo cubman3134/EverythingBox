@@ -2,8 +2,8 @@
 <!--
   My Media Vault - Android / Android TV manifest (Qt 6 template).
   Provided to androiddeployqt via QT_ANDROID_PACKAGE_SOURCE_DIR (see native/CMakeLists.txt). The
-  -- %%INSERT_*%% -- tokens are filled in by androiddeployqt from the build (version, app lib name, ...).
-  Verify against the installed Qt-for-Android template if androiddeployqt complains - the boilerplate can
+  INSERT placeholder tokens are filled in by androiddeployqt from the build (version, app lib name, ...).
+  Verify against the installed Qt-for-Android template if androiddeployqt complains; the boilerplate can
   shift slightly between Qt patch releases.
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
