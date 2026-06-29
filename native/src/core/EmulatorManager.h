@@ -43,7 +43,12 @@ private:
     void startInstall();
     void fetchArtifactList();
     void downloadArchive(const QString& url);
-    void extractArchive();
+    void installDownloaded();   // dispatch the downloaded artifact by format (per OS)
+    void extractArchive();      // .zip / .7z  (bsdtar)
+    void installDmg();          // macOS .dmg  (hdiutil mount -> copy .app)
+    void installAppImage();     // Linux .AppImage (move + chmod +x)
+    void installFlatpak();      // Linux .flatpak (flatpak install --user)
+    void finishInstall();       // common tail: locate the binary, then launch or report "installed"
     void launch(const QString& binary);
     QString platformArtifact() const;
 

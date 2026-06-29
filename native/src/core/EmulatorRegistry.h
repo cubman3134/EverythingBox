@@ -30,6 +30,7 @@ struct ExternalEmulator
     QString winArtifact;
     QString macArtifact;
     QString linuxArtifact;
+    QString flatpakAppId;  // non-empty => Linux build is a Flatpak: install via flatpak, launch via "flatpak run"
 };
 
 namespace EmulatorRegistry
@@ -53,6 +54,7 @@ namespace EmulatorRegistry
                 QStringLiteral("Windows x64"),
                 QStringLiteral("macOS (ARM/Intel Universal)"),
                 QStringLiteral("Linux x86_64 (Flatpak)"),
+                QStringLiteral("org.DolphinEmu.dolphin-emu"), // Linux build is a Flatpak
             },
             {
                 // Nintendo 3DS. Citra itself was discontinued (Nintendo DMCA, 2024) and has no working
@@ -70,8 +72,9 @@ namespace EmulatorRegistry
                 // GitHub releases API: {assets:[{name, browser_download_url}]} - matched by name substring.
                 QStringLiteral("https://api.github.com/repos/azahar-emu/azahar/releases/latest"),
                 QStringLiteral("windows-msvc"),   // -> azahar-windows-msvc-<ver>.zip (not installer/msys2/libretro)
-                QStringLiteral("macos-universal"),
-                QStringLiteral("linux"),
+                QStringLiteral("macos-universal"), // -> azahar-macos-universal-<ver>.zip
+                QStringLiteral("azahar.appimage"), // -> azahar.AppImage (the plain, non-wayland desktop build)
+                QString(),                         // not a Flatpak
             },
         };
         return list;
