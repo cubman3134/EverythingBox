@@ -61,6 +61,12 @@ namespace SystemCatalog
             { "switch",  "Nintendo Switch (Ryujinx)",
                          { "nsp", "xci", "nca", "nro" },
                          {}, "ryujinx" },
+            // PSP shares .iso with GameCube and .pbp/.chd with PlayStation; since routing is by extension
+            // (first match wins, and those systems are listed earlier), PSP can only safely claim its
+            // unambiguous formats here. Disambiguating .iso/.pbp by console needs platform-aware routing.
+            { "psp",     "PlayStation Portable (PPSSPP)",
+                         { "cso", "dax", "prx" },
+                         {}, "ppsspp" },
         };
         return list;
     }

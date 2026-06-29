@@ -129,6 +129,23 @@ namespace EmulatorRegistry
                 QStringLiteral("x64.appimage"),    // -> ryujinx-<ver>-x64.AppImage (not arm64)
                 QString(),                         // not a Flatpak
             },
+            {
+                // PlayStation Portable. PPSSPP ships per-OS on GitHub: Windows .zip (PPSSPPWindows64.exe),
+                // macOS .zip (PPSSPPSDL.app), Linux a direct .AppImage. CLI: positional ROM, --fullscreen.
+                QStringLiteral("ppsspp"), QStringLiteral("PPSSPP"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("--fullscreen"), // fullscreenArgs
+                QString(),                      // windowedArgs (default is windowed)
+                QStringLiteral("https://www.ppsspp.org/download/"),
+                { QStringLiteral("PPSSPPWindows64.exe"), QStringLiteral("PPSSPPWindows.exe") },
+                { QStringLiteral("PPSSPPSDL.app/Contents/MacOS/PPSSPPSDL"), QStringLiteral("PPSSPPSDL.app") },
+                { QStringLiteral("ppsspp.AppImage"), QStringLiteral("PPSSPPSDL") },
+                QStringLiteral("https://api.github.com/repos/hrydgard/ppsspp/releases/latest"),
+                QStringLiteral("Windows-x64"),  // -> PPSSPP-<ver>-Windows-x64.zip (not ARM64)
+                QStringLiteral("macos"),        // -> PPSSPPSDL-macOS-<ver>.zip
+                QStringLiteral("x86_64.appimage"), // -> PPSSPP-<ver>-anylinux-x86_64.AppImage
+                QString(),                      // not a Flatpak
+            },
         };
         return list;
     }
