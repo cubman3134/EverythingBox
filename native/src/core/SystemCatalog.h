@@ -31,7 +31,7 @@ namespace SystemCatalog
                          { "fceumm", "nestopia" } },
             { "snes",    "SNES / Super Famicom",              { "sfc", "smc", "bs", "st" },
                          { "snes9x", "bsnes_mercury_balanced" } },
-            { "genesis", "Genesis / Mega Drive / SMS / GG",   { "md", "gen", "smd", "sms", "gg", "sg" },
+            { "genesis", "Genesis / Mega Drive / SMS / GG",   { "md", "gen", "smd", "sms", "gg" },
                          { "genesis_plus_gx", "picodrive" } },
             { "n64",     "Nintendo 64",                       { "n64", "z64", "v64", "ndd" },
                          { "mupen64plus_next", "parallel_n64" } },
@@ -45,6 +45,24 @@ namespace SystemCatalog
                          { "mednafen_wswan" } },
             { "a2600",   "Atari 2600",                        { "a26" },
                          { "stella" } },
+            // ---- 8/16-bit consoles & home computers (in-process libretro cores, auto-downloaded) ----------
+            // Several share file extensions with each other / earlier systems (e.g. VIC-20 and C64 both use
+            // .prg/.d64), so those collisions are resolved by the console hint (forConsoleName) when a game is
+            // opened from its shelf; the extensions here are the reasonably-unambiguous ones.
+            { "sg1000",       "Sega SG-1000",        { "sg" },                 { "genesis_plus_gx", "bluemsx" } },
+            { "coleco",       "ColecoVision",        { "col" },                { "gearcoleco", "bluemsx" } },
+            { "vectrex",      "Vectrex",             { "vec" },                { "vecx" } },
+            { "intellivision","Intellivision",       { "int" },                { "freeintv" } },
+            { "odyssey2",     "Magnavox Odyssey 2",  { "o2" },                 { "o2em" } },
+            { "channelf",     "Fairchild Channel F", { "chf" },                { "freechaf" } },
+            { "amiga",        "Commodore Amiga",     { "adf", "adz", "hdf", "uae", "dms" }, { "puae", "puae2021" } },
+            { "atarist",      "Atari ST",            { "msa", "stx", "dim" },  { "hatari" } },
+            { "pc98",         "NEC PC-9801",         { "d98", "fdi", "hdi", "98d" }, { "np2kai" } },
+            { "x1",           "Sharp X1",            { "dx1", "2d", "2hd" },   { "x1" } },
+            { "zxspectrum",   "Sinclair ZX Spectrum",{ "tzx", "z80", "szx", "rzx", "scl", "trd", "sna" }, { "fuse" } },
+            { "c64",          "Commodore 64",        { "d64", "t64", "prg", "crt", "g64", "x64", "p00" }, { "vice_x64", "vice_x64sc" } },
+            { "msdos",        "MS-DOS",              { "dosz", "com", "bat", "conf" }, { "dosbox_pure", "dosbox_core" } },
+            { "vic20",        "Commodore VIC-20",    { "20", "40", "60", "a0", "b0" }, { "vice_xvic" } },
             // Standalone (not a libretro core): GameCube/Wii are GPU-rendered, so they run in Dolphin,
             // launched as a child process. .iso is unclaimed by any system above; if a PS2/PSP system is
             // added later (also .iso) these will need ROM-folder disambiguation, ES-DE style.
@@ -131,10 +149,25 @@ namespace SystemCatalog
         else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
         else if (has("dreamcast"))                                        id = QStringLiteral("dreamcast");
         else if (has("genesis") || has("mega drive") || has("master system")
-                 || has("game gear") || has("sg-1000"))                   id = QStringLiteral("genesis");
+                 || has("game gear"))                                     id = QStringLiteral("genesis");
+        else if (has("sg-1000") || has("sg1000"))                         id = QStringLiteral("sg1000");
         else if (has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
         else if (has("wonderswan"))                                       id = QStringLiteral("ws");
+        else if (has("atari st"))                                         id = QStringLiteral("atarist"); // before atari 2600
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
+        // Classic consoles & home computers
+        else if (has("colecovision") || has("coleco"))                    id = QStringLiteral("coleco");
+        else if (has("vectrex"))                                          id = QStringLiteral("vectrex");
+        else if (has("intellivision"))                                    id = QStringLiteral("intellivision");
+        else if (has("odyssey") || has("videopac"))                       id = QStringLiteral("odyssey2");
+        else if (has("channel f") || has("channelf") || has("fairchild")) id = QStringLiteral("channelf");
+        else if (has("amiga"))                                            id = QStringLiteral("amiga");
+        else if (has("pc-9801") || has("pc-9800") || has("pc-98") || has("pc98")) id = QStringLiteral("pc98");
+        else if (has("sharp x1") || n == QLatin1String("x1"))             id = QStringLiteral("x1");
+        else if (has("zx spectrum") || has("spectrum") || has("sinclair")) id = QStringLiteral("zxspectrum");
+        else if (has("vic-20") || has("vic20") || has("vic"))             id = QStringLiteral("vic20"); // before commodore->c64
+        else if (has("commodore 64") || has("c64") || has("commodore"))   id = QStringLiteral("c64");
+        else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
         // PlayStation last (after Vita/PSP). Specific consoles before the generic PS1 match.
         else if (has("playstation 3") || has("ps3"))                      id = QStringLiteral("ps3");
         else if (has("playstation 2") || has("ps2"))                      id = QStringLiteral("ps2");

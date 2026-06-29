@@ -271,8 +271,11 @@ var CONSOLES = [
     // Other classic consoles
     { id: 50, name: "3DO" }, { id: 67, name: "Intellivision" }, { id: 68, name: "ColecoVision" },
     { id: 70, name: "Vectrex" }, { id: 117, name: "Philips CD-i" },
+    { id: 133, name: "Magnavox Odyssey 2" }, { id: 127, name: "Fairchild Channel F" },
     // Home computers
     { id: 25, name: "Amiga" }, { id: 27, name: "MSX" }, { id: 26, name: "ZX Spectrum" },
+    { id: 15, name: "Commodore 64" }, { id: 71, name: "Commodore VIC-20" },
+    { id: 149, name: "NEC PC-9801" }, { id: 77, name: "Sharp X1" },
     // Arcade
     { id: 52, name: "Arcade" }
 ];
