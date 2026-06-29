@@ -246,6 +246,24 @@ namespace EmulatorRegistry
                 QStringLiteral("x86_64.appimage"), // -> flycast-x86_64.AppImage
                 QString(),                         // not a Flatpak
             },
+            {
+                // Original Xbox. xemu (QEMU-based), GitHub single repo: Windows .zip (xemu.exe), macOS .zip
+                // (xemu.app, the signed build), Linux a direct .AppImage. CLI: positional disk image boots,
+                // -full-screen for full screen. (dbg/pdb/unsigned/arm variants are skipped by the filters.)
+                QStringLiteral("xemu"), QStringLiteral("xemu"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("-full-screen"), // fullscreenArgs
+                QString(),                      // windowedArgs (default is windowed)
+                QStringLiteral("https://xemu.app/"),
+                { QStringLiteral("xemu.exe") },
+                { QStringLiteral("xemu.app/Contents/MacOS/xemu"), QStringLiteral("xemu.app") },
+                { QStringLiteral("xemu.AppImage"), QStringLiteral("xemu") },
+                QStringLiteral("https://api.github.com/repos/xemu-project/xemu/releases/latest"),
+                QStringLiteral("windows-x86_64"),  // -> xemu-<ver>-windows-x86_64.zip
+                QStringLiteral("macos-universal"), // -> xemu-<ver>-macos-universal.zip (signed)
+                QStringLiteral("x86_64.appimage"), // -> xemu-<ver>-x86_64.AppImage
+                QString(),                         // not a Flatpak
+            },
         };
         return list;
     }

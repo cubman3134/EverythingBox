@@ -105,6 +105,11 @@ namespace SystemCatalog
             { "dreamcast", "Dreamcast (Flycast)",
                          { "gdi", "cdi", "lst" },
                          {}, "flycast" },
+            // Original Xbox. .iso collides with GameCube/PS2, so claim only .xiso; .iso games route via the
+            // console hint ("Xbox" -> xbox).
+            { "xbox",    "Xbox (xemu)",
+                         { "xiso" },
+                         {}, "xemu" },
         };
         return list;
     }
@@ -168,6 +173,8 @@ namespace SystemCatalog
         else if (has("vic-20") || has("vic20") || has("vic"))             id = QStringLiteral("vic20"); // before commodore->c64
         else if (has("commodore 64") || has("c64") || has("commodore"))   id = QStringLiteral("c64");
         else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
+        else if (has("xbox 360") || has("xbox360"))                       id = QString();          // no emulator yet
+        else if (has("xbox"))                                            id = QStringLiteral("xbox");
         // PlayStation last (after Vita/PSP). Specific consoles before the generic PS1 match.
         else if (has("playstation 3") || has("ps3"))                      id = QStringLiteral("ps3");
         else if (has("playstation 2") || has("ps2"))                      id = QStringLiteral("ps2");
