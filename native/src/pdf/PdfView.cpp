@@ -1,4 +1,6 @@
 #include "PdfView.h"
+
+#if !defined(Q_OS_ANDROID)
 #include "../core/AppPaths.h"
 
 #include <QPdfDocument>
@@ -166,3 +168,43 @@ void PdfView::keyPressEvent(QKeyEvent* e)
     default: QWidget::keyPressEvent(e);
     }
 }
+
+#else // Q_OS_ANDROID -----------------------------------------------------------------------------------
+// Qt's PDF module (QtPdf/PDFium) isn't shipped for Android in the open-source packages, so the PDF reader
+// is a stub here. The class still exists (so MainWindow/MediaPane link unchanged); EPUB, comics, video,
+// audio and emulation are unaffected.
+#include <QLabel>
+#include <QVBoxLayout>
+#include <QKeyEvent>
+
+PdfView::PdfView(QWidget* parent) : QWidget(parent)
+{
+    auto* v = new QVBoxLayout(this);
+    auto* msg = new QLabel(tr("PDF viewing isn't available on this platform."), this);
+    msg->setAlignment(Qt::AlignCenter);
+    msg->setWordWrap(true);
+    v->addWidget(msg);
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+bool PdfView::openPdf(const QString&, QString* error)
+{
+    if (error) *error = tr("PDF viewing isn't available on Android.");
+    return false;
+}
+
+void PdfView::persist() {}
+void PdfView::setStreamIssueVisible(bool) {}
+void PdfView::nextPage() {}
+void PdfView::prevPage() {}
+void PdfView::zoomIn() {}
+void PdfView::zoomOut() {}
+void PdfView::fitWidth() {}
+void PdfView::updateLabel() {}
+
+void PdfView::keyPressEvent(QKeyEvent* e)
+{
+    if (e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Escape) { emit backRequested(); return; }
+    QWidget::keyPressEvent(e);
+}
+#endif

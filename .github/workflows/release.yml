@@ -295,7 +295,7 @@ jobs:
           host: linux
           target: android
           arch: ${{ env.QT_ANDROID_ARCH }}
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia'   # QtPdf isn't published for Android; PdfView is stubbed there
           cache: true
 
       - name: Provide libmpv for Android

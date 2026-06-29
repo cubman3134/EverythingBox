@@ -26,7 +26,13 @@ endif()
 # ---------------------------------------------------------------------------
 option(MYMEDIAVAULT_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
 if(MYMEDIAVAULT_BUILD_APP)
-    find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets Multimedia Network Pdf PdfWidgets Concurrent)
+    # QtPdf (PDFium) isn't shipped for Android in the open-source packages, so it's desktop-only; PdfView is
+    # stubbed on Android (see src/pdf/PdfView.cpp).
+    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent)
+    if(NOT ANDROID)
+        list(APPEND MMV_QT_COMPONENTS Pdf PdfWidgets)
+    endif()
+    find_package(Qt6 REQUIRED COMPONENTS ${MMV_QT_COMPONENTS})
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
@@ -83,7 +89,10 @@ if(MYMEDIAVAULT_BUILD_APP)
         third_party/duktape/duktape.c)
     target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Pdf Qt6::PdfWidgets Qt6::Concurrent ${MPV_LIBRARY})
+    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
+    if(NOT ANDROID)
+        target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
+    endif()
     set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
     # On macOS, produce a MyMediaVault.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(mymediavault PROPERTIES MACOSX_BUNDLE TRUE)
