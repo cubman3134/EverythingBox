@@ -335,6 +335,12 @@ jobs:
       - name: Build APK
         run: cmake --build build-android
 
+      - name: Show generated manifest (on failure)
+        if: failure()
+        run: |
+          f=$(find build-android -name AndroidManifest.xml -path '*android-build*' | head -n1)
+          echo "=== generated: $f ==="; cat -n "$f" 2>/dev/null || echo "(not generated)"
+
       - name: Collect APK
         run: |
           apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | head -n1)
