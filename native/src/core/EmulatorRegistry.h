@@ -228,6 +228,24 @@ namespace EmulatorRegistry
                 QStringLiteral("appimage-x64"),   // -> pcsx2-<ver>-linux-appimage-x64-Qt.AppImage (not flatpak)
                 QString(),                        // not a Flatpak
             },
+            {
+                // Sega Dreamcast. Flycast, GitHub single repo: Windows .zip (flycast.exe), macOS .zip
+                // (Flycast.app), Linux a direct .AppImage. CLI: positional CONTENT boots; settings via
+                // "-config section:key=value", so full screen is "-config window:fullscreen=yes".
+                QStringLiteral("flycast"), QStringLiteral("Flycast"),
+                QStringLiteral("{fs} {rom}"),
+                QStringLiteral("-config window:fullscreen=yes"), // fullscreenArgs
+                QStringLiteral("-config window:fullscreen=no"),  // windowedArgs
+                QStringLiteral("https://github.com/flyinghead/flycast/releases"),
+                { QStringLiteral("flycast.exe") },
+                { QStringLiteral("Flycast.app/Contents/MacOS/Flycast"), QStringLiteral("Flycast.app") },
+                { QStringLiteral("flycast.AppImage"), QStringLiteral("flycast") },
+                QStringLiteral("https://api.github.com/repos/flyinghead/flycast/releases/latest"),
+                QStringLiteral("win64"),           // -> flycast-win64-<ver>.zip (not the .appx)
+                QStringLiteral("macos"),           // -> flycast-macOS-<ver>.zip
+                QStringLiteral("x86_64.appimage"), // -> flycast-x86_64.AppImage
+                QString(),                         // not a Flatpak
+            },
         };
         return list;
     }

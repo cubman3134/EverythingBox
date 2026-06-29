@@ -82,6 +82,11 @@ namespace SystemCatalog
             { "ps2",     "PlayStation 2 (PCSX2)",
                          {},
                          {}, "pcsx2" },
+            // Dreamcast .chd/.cue collide with PlayStation; claim only the unambiguous formats here, and let
+            // the console hint route .chd/.cue games opened from the Dreamcast shelf.
+            { "dreamcast", "Dreamcast (Flycast)",
+                         { "gdi", "cdi", "lst" },
+                         {}, "flycast" },
         };
         return list;
     }
@@ -124,6 +129,7 @@ namespace SystemCatalog
         else if (has("game boy advance") || has("gba"))                   id = QStringLiteral("gba");
         else if (has("game boy") || has("gbc"))                           id = QStringLiteral("gb");
         else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
+        else if (has("dreamcast"))                                        id = QStringLiteral("dreamcast");
         else if (has("genesis") || has("mega drive") || has("master system")
                  || has("game gear") || has("sg-1000"))                   id = QStringLiteral("genesis");
         else if (has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
