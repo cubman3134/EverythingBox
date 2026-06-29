@@ -22,9 +22,51 @@ QString CoreManager::coresDir()
     return d;
 }
 
+// ---- Per-OS libretro core packaging --------------------------------------------------------------------
+// The buildbot ships a different file per platform; pick the right subpath, file name and shared-library
+// extension. NB: Android is also Q_OS_LINUX, so it must be tested first.
+static QString buildbotSubpath()
+{
+#if defined(Q_OS_WIN)
+    return QStringLiteral("windows/x86_64/latest/");
+#elif defined(Q_OS_MACOS)
+  #if defined(Q_PROCESSOR_ARM)
+    return QStringLiteral("apple/osx/arm64/latest/");
+  #else
+    return QStringLiteral("apple/osx/x86_64/latest/");
+  #endif
+#elif defined(Q_OS_ANDROID)
+    return QStringLiteral("android/latest/arm64-v8a/");
+#else
+    return QStringLiteral("linux/x86_64/latest/");
+#endif
+}
+
+static QString libExt()
+{
+#if defined(Q_OS_WIN)
+    return QStringLiteral(".dll");
+#elif defined(Q_OS_MACOS)
+    return QStringLiteral(".dylib");
+#else
+    return QStringLiteral(".so"); // Linux + Android
+#endif
+}
+
+// The core's on-disk file name (also the buildbot file name minus ".zip"). Android cores carry an extra
+// "_android" marker before the .so.
+static QString coreFileName(const QString& coreName)
+{
+#if defined(Q_OS_ANDROID)
+    return coreName + QStringLiteral("_libretro_android.so");
+#else
+    return coreName + QStringLiteral("_libretro") + libExt();
+#endif
+}
+
 QString CoreManager::corePath(const QString& coreName)
 {
-    return coresDir() + QStringLiteral("/") + coreName + QStringLiteral("_libretro.dll");
+    return coresDir() + QStringLiteral("/") + coreFileName(coreName);
 }
 
 bool CoreManager::isInstalled(const QString& coreName)
@@ -32,8 +74,9 @@ bool CoreManager::isInstalled(const QString& coreName)
     return QFile::exists(corePath(coreName));
 }
 
-// Extract the first *.dll from a zip (in memory) into destDir. Returns the written path via outDll.
-static bool unzipDllFromMemory(const QByteArray& zipData, const QString& destDir, QString* outDll)
+// Extract the first shared library (matching ext: .dll/.dylib/.so) from a zip (in memory) into destDir.
+// Returns the written path via outDll.
+static bool unzipLibFromMemory(const QByteArray& zipData, const QString& destDir, const QString& ext, QString* outDll)
 {
     mz_zip_archive zip;
     std::memset(&zip, 0, sizeof(zip));
@@ -48,7 +91,7 @@ static bool unzipDllFromMemory(const QByteArray& zipData, const QString& destDir
         if (!mz_zip_reader_file_stat(&zip, i, &st))
             continue;
         const QString name = QString::fromUtf8(st.m_filename);
-        if (name.endsWith(QStringLiteral(".dll"), Qt::CaseInsensitive))
+        if (name.endsWith(ext, Qt::CaseInsensitive))
         {
             const QString out = destDir + QStringLiteral("/") + QFileInfo(name).fileName();
             if (mz_zip_reader_extract_to_file(&zip, i, out.toUtf8().constData(), 0))
@@ -70,9 +113,10 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QStrin
     if (isInstalled(coreName))
         return corePath(coreName);
 
-    // libretro nightly buildbot (Windows x64). Per-OS handling comes with the mobile/macOS/Linux ports.
-    const QString url = QStringLiteral("https://buildbot.libretro.com/nightly/windows/x86_64/latest/")
-                        + coreName + QStringLiteral("_libretro.dll.zip");
+    // libretro nightly buildbot - the right build for the running OS/arch (Windows .dll, macOS .dylib,
+    // Linux .so, Android _android.so).
+    const QString url = QStringLiteral("https://buildbot.libretro.com/nightly/")
+                        + buildbotSubpath() + coreFileName(coreName) + QStringLiteral(".zip");
 
     QNetworkAccessManager nam;
     QNetworkRequest req((QUrl(url)));
@@ -101,7 +145,7 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QStrin
     reply->deleteLater();
 
     QString dll;
-    if (!unzipDllFromMemory(data, coresDir(), &dll))
+    if (!unzipLibFromMemory(data, coresDir(), libExt(), &dll))
     {
         if (error) *error = QObject::tr("Downloaded ‘%1’ but couldn't extract the core.").arg(coreName);
         return QString();
