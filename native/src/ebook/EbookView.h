@@ -73,6 +73,8 @@ private:
     void rebuildLines();       // flatten the laid-out document into lines_
     void buildPageTops();      // walk lines_ from the start into whole-line pages (for the x / y count)
     qreal contentH() const { return qMax(1.0, qreal(height()) - topMargin_ - botMargin_); }
+    qreal contentW() const;    // text column width: capped to a readable measure, so a wide window doesn't
+    qreal contentLeft() const; // reflow (the column is centered) - keeps the first word put on h-resize
     int  lineIndexForPos(int pos) const;     // index into lines_ of the line containing a document offset
     int  lastFittingLine(int startLine) const; // last whole line that fits a page starting at startLine
     void snapTopToLine();      // pull topPos_ back to the start of its line

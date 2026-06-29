@@ -17,6 +17,7 @@
 #include <QTextBlock>
 #include <QTextLayout>
 #include <QTextLine>
+#include <QFontMetricsF>
 #include <QAbstractTextDocumentLayout>
 #include <QMouseEvent>
 #include <QKeyEvent>
@@ -105,9 +106,25 @@ void BookPageWidget::setFooter(const QString& s)
 
 // Re-lay the document at the current width and rebuild the line table. topPos_ (a document offset) is kept,
 // then snapped to the start of whatever line now holds it - so the same words stay at the top of the page.
+// Text column width, capped to a comfortable measure (~78 characters of the current font) so that widening
+// the window past that just adds side margin instead of reflowing the text. Below the cap it fills the
+// available width. This is what keeps the first word fixed when the window is resized horizontally while
+// still wide enough; it also keeps lines from getting unreadably long.
+qreal BookPageWidget::contentW() const
+{
+    const qreal avail = qreal(width()) - 2 * sideMargin_;
+    const qreal cap = QFontMetricsF(doc_->defaultFont()).averageCharWidth() * 78.0;
+    return qMax(1.0, qMin(avail, cap));
+}
+
+qreal BookPageWidget::contentLeft() const
+{
+    return qMax(sideMargin_, (qreal(width()) - contentW()) / 2.0); // centre the column
+}
+
 void BookPageWidget::relayout()
 {
-    doc_->setTextWidth(qMax(1.0, qreal(width()) - 2 * sideMargin_));
+    doc_->setTextWidth(contentW());
     rebuildLines();
     buildPageTops();
     snapTopToLine();
@@ -295,7 +312,7 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     p.fillRect(rect(), palette().color(QPalette::Base));
     if (!doc_ || lines_.isEmpty()) return;
 
-    const qreal contentW = doc_->textWidth();
+    const qreal cw = contentW(), cl = contentLeft();
     const int startLine = lineIndexForPos(topPos_);
     const int endLine = lastFittingLine(startLine);
     const qreal y0 = lines_[startLine].y;
@@ -303,12 +320,12 @@ void BookPageWidget::paintEvent(QPaintEvent*)
 
     p.save();
     // Clip to exactly the lines on this page so neither a partial next line nor the margins get painted.
-    p.setClipRect(QRectF(sideMargin_, topMargin_, contentW, slice));
-    p.translate(sideMargin_, topMargin_ - y0); // map this page's first line to the top margin
+    p.setClipRect(QRectF(cl, topMargin_, cw, slice));
+    p.translate(cl, topMargin_ - y0); // map this page's first line to the top margin of the centred column
 
     QAbstractTextDocumentLayout::PaintContext ctx;
     ctx.palette = palette();                  // text drawn in QPalette::Text
-    ctx.clip = QRectF(0, y0, contentW, slice);
+    ctx.clip = QRectF(0, y0, cw, slice);
     doc_->documentLayout()->draw(&p, ctx);
     p.restore();
 
@@ -329,7 +346,7 @@ void BookPageWidget::mousePressEvent(QMouseEvent* e)
 
     // An in-book hyperlink (footnote / cross-reference) takes priority over the page-turn zones.
     const qreal y0 = lines_.isEmpty() ? 0.0 : lines_[lineIndexForPos(topPos_)].y;
-    const QPointF docPos(pos.x() - sideMargin_, pos.y() - topMargin_ + y0);
+    const QPointF docPos(pos.x() - contentLeft(), pos.y() - topMargin_ + y0);
     const QString href = doc_->documentLayout()->anchorAt(docPos);
     if (!href.isEmpty()) { emit anchorClicked(href); return; }
 

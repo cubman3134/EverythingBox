@@ -9,6 +9,7 @@
 #include <QTextLayout>
 #include <QTextLine>
 #include <QTextCursor>
+#include <QFontMetricsF>
 #include <QAbstractTextDocumentLayout>
 #include <QPainter>
 #include <QImage>
@@ -18,13 +19,21 @@
 
 struct Line { qreal y, h; int pos; };
 
-static QVector<Line> layout(QTextDocument& doc, const QString& html, int pt, qreal textW)
+// Mirror BookPageWidget: the text column is capped to ~78 chars, so a wider window doesn't reflow.
+static qreal cappedWidth(QTextDocument& doc, int windowW)
+{
+    const qreal avail = windowW - 2 * 40.0; // 40 = side margin
+    const qreal cap = QFontMetricsF(doc.defaultFont()).averageCharWidth() * 78.0;
+    return qMax(1.0, qMin(avail, cap));
+}
+
+static QVector<Line> layout(QTextDocument& doc, const QString& html, int pt, int windowW)
 {
     doc.setDocumentMargin(0);
     doc.setDefaultStyleSheet(QStringLiteral("body{margin:0;} p{margin:0 0 0.7em 0;}"));
     doc.setHtml(html);
     QFont f = doc.defaultFont(); f.setPointSize(pt); doc.setDefaultFont(f);
-    doc.setTextWidth(textW);
+    doc.setTextWidth(cappedWidth(doc, windowW));
 
     QVector<Line> ls;
     auto* lay = doc.documentLayout();
@@ -75,33 +84,44 @@ int main(int argc, char** argv)
 
     // --- size A: page partway in, capture the top offset -------------------------------------------------
     const int WA = 800, HA = 600; const qreal phA = HA - TOP - BOT;
-    QTextDocument a; QVector<Line> la = layout(a, html, 14, WA - 2 * SIDE);
+    QTextDocument a; QVector<Line> la = layout(a, html, 14, WA);
     int top = la.first().pos;                          // walk forward ~40 pages by whole lines
     for (int n = 0; n < 40; ++n) { int next = lastFitting(la, lineForPos(la, top), phA) + 1; if (next >= la.size()) break; top = la[next].pos; }
+    // Force the anchor onto a SOFT-WRAP line (mid-paragraph), the hard case: its start moves when text
+    // reflows, unlike a paragraph start.
+    for (int i = lineForPos(la, top); i < la.size(); ++i)
+        if (a.findBlock(la[i].pos).position() != la[i].pos) { top = la[i].pos; break; }
     const int anchor = top;
     const QString wordsA = firstWords(a, anchor);
+    std::printf("(anchor is a %s)\n", a.findBlock(anchor).position() == anchor ? "paragraph start" : "mid-paragraph wrap");
 
-    // --- size B: re-find the line for that offset -------------------------------------------------------
-    const int WB = 480, HB = 760; const qreal phB = HB - TOP - BOT;
-    QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB - 2 * SIDE);
-    const int topB = lb[lineForPos(lb, anchor)].pos;   // snap to the line holding the anchor
-    const QString wordsB = firstWords(b, topB);
+    std::printf("anchor offset %d  size A (800w): \"%s\"\n", anchor, wordsA.toLocal8Bit().constData());
 
-    std::printf("anchor offset %d\n  size A (800w) first words: \"%s\"\n  size B (480w) first words: \"%s\"\n  FIRST WORD MATCH = %s\n",
-                anchor, wordsA.toLocal8Bit().constData(), wordsB.toLocal8Bit().constData(),
-                wordsA == wordsB ? "yes" : "NO");
+    // --- re-find the line for that offset at many widths ------------------------------------------------
+    for (int WB : { 360, 480, 650, 1000, 1200 })
+    {
+        QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB);
+        const int topB = lb[lineForPos(lb, anchor)].pos;   // snap to the line holding the anchor
+        const QString wordsB = firstWords(b, topB);
+        std::printf("  %4dw: top@%d (drift %+d) \"%s\"  %s\n", WB, topB, topB - anchor,
+                    wordsB.toLocal8Bit().constData(), wordsB == wordsA ? "MATCH" : "shift");
+    }
+    const int WB = 1000, HB = 700; const qreal phB = HB - TOP - BOT;
+    QTextDocument b; QVector<Line> lb = layout(b, html, 14, WB);
+    const int topB = lb[lineForPos(lb, anchor)].pos;
 
-    // --- render size B's page to PNG --------------------------------------------------------------------
+    // --- render size B's page to PNG (wide window -> centred capped column) ------------------------------
+    const qreal cw = cappedWidth(b, WB), cl = qMax(SIDE, (WB - cw) / 2.0);
     const int start = lineForPos(lb, topB), end = lastFitting(lb, start, phB);
     const qreal y0 = lb[start].y, slice = lb[end].y + lb[end].h - y0;
     QImage img(WB, HB, QImage::Format_RGB32); img.fill(Qt::white);
     QPainter p(&img);
     p.fillRect(QRectF(0, 0, WB, TOP), QColor(230, 230, 230)); // menu strip
     p.save();
-    p.setClipRect(QRectF(SIDE, TOP, WB - 2 * SIDE, slice));
-    p.translate(SIDE, TOP - y0);
+    p.setClipRect(QRectF(cl, TOP, cw, slice));
+    p.translate(cl, TOP - y0);
     QAbstractTextDocumentLayout::PaintContext ctx; ctx.palette.setColor(QPalette::Text, Qt::black);
-    ctx.clip = QRectF(0, y0, WB - 2 * SIDE, slice);
+    ctx.clip = QRectF(0, y0, cw, slice);
     b.documentLayout()->draw(&p, ctx);
     p.restore();
     QColor ink(0, 0, 0, 140); p.setPen(ink);
