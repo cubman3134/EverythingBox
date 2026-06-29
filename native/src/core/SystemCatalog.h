@@ -63,6 +63,26 @@ namespace SystemCatalog
             { "c64",          "Commodore 64",        { "d64", "t64", "prg", "crt", "g64", "x64", "p00" }, { "vice_x64", "vice_x64sc" } },
             { "msdos",        "MS-DOS",              { "dosz", "com", "bat", "conf" }, { "dosbox_pure", "dosbox_core" } },
             { "vic20",        "Commodore VIC-20",    { "20", "40", "60", "a0", "b0" }, { "vice_xvic" } },
+            // More consoles / computers / arcade / CD systems. CD and arcade systems share cue/chd/iso/zip
+            // with earlier systems, so they claim only unambiguous extensions (often none) and are routed by
+            // the console hint (forConsoleName) when launched from their shelf.
+            { "atari800",     "Atari 800",           { "atr", "atx", "car", "a52", "cas" }, { "atari800" } },
+            { "apple2",       "Apple II",            { "woz", "do", "po", "2mg", "nib", "dsk" }, { "applewin" } },
+            { "pokemini",     "Pokemon Mini",        { "min" },               { "pokemini" } },
+            { "supervision",  "Watara Supervision",  { "sv" },                { "potator" } },
+            { "gameandwatch", "Nintendo Game & Watch", { "mgw" },             { "gw" } },
+            { "neogeo",       "Neo Geo",             { "neo" },               { "geolith", "fbneo" } },
+            { "32x",          "Sega 32X",            { "32x" },               { "picodrive", "genesis_plus_gx" } },
+            { "daphne",       "Daphne (Laserdisc)",  { "daphne" },            { "dirksimple" } },
+            { "segacd",       "Sega CD / Mega-CD",   { },                     { "genesis_plus_gx", "picodrive" } },
+            { "segacd32x",    "Sega CD 32X",         { },                     { "picodrive" } },
+            { "pcecd",        "PC Engine CD / TurboGrafx-CD", { },            { "mednafen_pce", "mednafen_pce_fast" } },
+            { "pcfx",         "NEC PC-FX",           { },                     { "mednafen_pcfx" } },
+            { "neogeocd",     "Neo Geo CD",          { },                     { "neocd" } },
+            { "3do",          "3DO",                 { },                     { "opera" } },
+            { "cdtv",         "Commodore CDTV",      { },                     { "puae", "puae2021" } },
+            { "naomi",        "Sega Naomi",          { },                     {}, "flycast" },
+            { "naomi2",       "Sega Naomi 2",        { },                     {}, "flycast" },
             // Standalone (not a libretro core): GameCube/Wii are GPU-rendered, so they run in Dolphin,
             // launched as a child process. .iso is unclaimed by any system above; if a PS2/PSP system is
             // added later (also .iso) these will need ROM-folder disambiguation, ES-DE style.
@@ -163,13 +183,30 @@ namespace SystemCatalog
         else if (has("game boy") || has("gbc"))                           id = QStringLiteral("gb");
         else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
         else if (has("dreamcast"))                                        id = QStringLiteral("dreamcast");
+        else if (has("sega cd 32x") || has("mega cd 32x") || has("mega-cd 32x")) id = QStringLiteral("segacd32x");
+        else if (has("sega cd") || has("mega cd") || has("mega-cd") || has("segacd")) id = QStringLiteral("segacd");
+        else if (has("sega 32x") || n == QLatin1String("32x"))            id = QStringLiteral("32x");
         else if (has("genesis") || has("mega drive") || has("master system")
                  || has("game gear"))                                     id = QStringLiteral("genesis");
         else if (has("sg-1000") || has("sg1000"))                         id = QStringLiteral("sg1000");
-        else if (has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
+        else if (has("pc engine cd") || has("turbografx cd") || has("turbo grafx cd") || has("tg-cd")) id = QStringLiteral("pcecd");
+        else if (has("supergrafx") || has("super grafx") || has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
         else if (has("wonderswan"))                                       id = QStringLiteral("ws");
         else if (has("atari st"))                                         id = QStringLiteral("atarist"); // before atari 2600
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
+        else if (has("atari 800") || has("atari 8-bit") || has("atari800")) id = QStringLiteral("atari800");
+        else if (has("apple ii") || has("apple //") || has("apple 2"))     id = QStringLiteral("apple2");
+        else if (has("naomi 2") || has("naomi2"))                         id = QStringLiteral("naomi2");
+        else if (has("naomi"))                                            id = QStringLiteral("naomi");
+        else if (has("daphne") || has("laserdisc"))                       id = QStringLiteral("daphne");
+        else if (has("pokemon mini") || has("poke mini"))                 id = QStringLiteral("pokemini");
+        else if (has("supervision") || has("watara"))                    id = QStringLiteral("supervision");
+        else if (has("game & watch") || has("game and watch") || has("game&watch")) id = QStringLiteral("gameandwatch");
+        else if (has("neo geo pocket") || has("neogeo pocket"))           id = QString();          // NGP/NGPC: no core yet
+        else if (has("neo geo cd") || has("neogeo cd"))                   id = QStringLiteral("neogeocd");
+        else if (has("neo geo") || has("neogeo"))                         id = QStringLiteral("neogeo");
+        else if (has("pc-fx") || has("pcfx"))                             id = QStringLiteral("pcfx");
+        else if (has("3do"))                                             id = QStringLiteral("3do");
         // Classic consoles & home computers
         else if (has("colecovision") || has("coleco"))                    id = QStringLiteral("coleco");
         else if (has("vectrex"))                                          id = QStringLiteral("vectrex");
@@ -180,6 +217,7 @@ namespace SystemCatalog
         else if (has("pc-9801") || has("pc-9800") || has("pc-98") || has("pc98")) id = QStringLiteral("pc98");
         else if (has("sharp x1") || n == QLatin1String("x1"))             id = QStringLiteral("x1");
         else if (has("zx spectrum") || has("spectrum") || has("sinclair")) id = QStringLiteral("zxspectrum");
+        else if (has("cdtv"))                                            id = QStringLiteral("cdtv");  // before commodore->c64
         else if (has("vic-20") || has("vic20") || has("vic"))             id = QStringLiteral("vic20"); // before commodore->c64
         else if (has("commodore 64") || has("c64") || has("commodore"))   id = QStringLiteral("c64");
         else if (has("ms-dos") || has("msdos") || n == QLatin1String("dos")) id = QStringLiteral("msdos");
