@@ -15,6 +15,7 @@
 #include <cstring>
 
 #include "miniz.h"
+#include "BiosCatalog.h"
 
 QString CoreManager::coresDir()
 {
@@ -152,4 +153,52 @@ QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QStrin
         return QString();
     }
     return isInstalled(coreName) ? corePath(coreName) : dll;
+}
+
+QString CoreManager::systemDir()
+{
+    const QString d = AppPaths::dataDir() + QStringLiteral("/system");
+    QDir().mkpath(d);
+    return d;
+}
+
+void CoreManager::ensureBios(const QString& systemId, const QString& destDir,
+                             const std::function<void(const QString&)>& onStatus)
+{
+    const QList<BiosFile>& files = BiosCatalog::forSystem(systemId);
+    if (files.isEmpty())
+        return; // this system needs no BIOS — nothing to do
+
+    QDir().mkpath(destDir);
+    QNetworkAccessManager nam;
+    for (const BiosFile& bf : files)
+    {
+        const QString out = destDir + QStringLiteral("/") + bf.fileName;
+        if (QFile::exists(out))
+            continue; // already have it
+
+        if (onStatus) onStatus(QObject::tr("Downloading BIOS %1…").arg(bf.fileName));
+        QNetworkRequest req((QUrl(bf.url)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = nam.get(req);
+
+        QEventLoop loop;
+        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+        loop.exec();
+
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            const QByteArray data = reply->readAll();
+            QFile f(out);
+            if (f.open(QIODevice::WriteOnly))
+            {
+                f.write(data);
+                f.close();
+            }
+        }
+        // On error: leave the file missing. The core/emulator surfaces "BIOS not found" itself, exactly
+        // as it would have before this feature — best-effort, never blocks the launch.
+        reply->deleteLater();
+    }
 }

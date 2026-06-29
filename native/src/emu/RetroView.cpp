@@ -1,5 +1,6 @@
 #include "RetroView.h"
 #include "../core/AppPaths.h"
+#include "../core/CoreManager.h"
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include <QTimer>
@@ -79,6 +80,9 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
                          const QString& coreName, QString* error)
 {
     stop();
+    // Point the core at <data>/system for BIOS / firmware before it loads (cores read the system directory
+    // during set_environment). MainWindow has already fetched any required BIOS there (CoreManager::ensureBios).
+    core_.systemDir = CoreManager::systemDir().toStdString();
     std::string err;
     if (!core_.loadCore(corePath.toStdString(), &err))
     {

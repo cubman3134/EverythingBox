@@ -52,6 +52,7 @@ private:
     void installAppImage();     // Linux .AppImage (move + chmod +x)
     void installFlatpak();      // Linux .flatpak (flatpak install --user)
     void finishInstall();       // common tail: locate the binary, then launch or report "installed"
+    void prepareBios(const QString& binDir); // fetch + wire up a BIOS for emulators that need one (PCSX2)
     void launch(const QString& binary);
     QString platformArtifact() const;
     QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl

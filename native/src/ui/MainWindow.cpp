@@ -947,6 +947,12 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     }
     mwLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
 
+    // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder. Fetch any that
+    // are missing before the core loads — best-effort, so a failure just falls back to the core's own
+    // "BIOS not found" message rather than blocking the launch.
+    CoreManager::ensureBios(sys->id, CoreManager::systemDir(),
+                            [this](const QString& s) { statusBar()->showMessage(s); });
+
     // Split screen: run the ROM in the focused pane's own emulator instead of the full-screen one.
     if (splitTarget_)
     {

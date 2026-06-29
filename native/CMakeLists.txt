@@ -76,6 +76,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/CoreManager.cpp  src/core/CoreManager.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         src/core/EmulatorRegistry.h
+        src/core/BiosCatalog.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h

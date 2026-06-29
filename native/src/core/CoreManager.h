@@ -19,4 +19,14 @@ namespace CoreManager
     // the download so the caller can render an inline progress indicator (no popup).
     QString ensureCore(const QString& coreName, QWidget* parent = nullptr, QString* error = nullptr,
                        const std::function<void(int percent)>& onProgress = {});
+
+    // <data>/system : the libretro "system" folder, where cores look for BIOS / firmware. Passed to each
+    // core via RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY (see RetroView / LibretroCore).
+    QString systemDir();
+
+    // Download any BIOS files `systemId` needs (BiosCatalog) into destDir, skipping ones already present.
+    // Best-effort and synchronous (blocks on a local event loop, like ensureCore); a failed file is left
+    // missing so the core/emulator reports it as it would have anyway. onStatus(text) reports progress.
+    void ensureBios(const QString& systemId, const QString& destDir,
+                    const std::function<void(const QString& text)>& onStatus = {});
 }

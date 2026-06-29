@@ -17,6 +17,9 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QTextStream>
+#include "CoreManager.h"
+#include "BiosCatalog.h"
 
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
 // present a normal browser User-Agent. GitHub and Dolphin accept it too (they just require a non-empty UA).
@@ -449,6 +452,47 @@ void EmulatorManager::finishInstall()
     else busy_ = false;
 }
 
+// Put a BIOS where a standalone emulator expects it before we boot a game. Which emulators need one (and
+// the system whose BIOS to fetch) comes from BiosCatalog, so the emulator registry stays untouched. For
+// PCSX2: a portable.ini marker beside the exe makes it keep config + bios under our folder; the BIOS image
+// goes in "<dir>/bios"; and a best-effort PCSX2.ini pre-selects that BIOS and skips the first-run wizard so
+// -batch boots cleanly. Everything is best-effort and idempotent — present files are left untouched, and
+// config is only written when absent so we never clobber the user's own settings.
+void EmulatorManager::prepareBios(const QString& binDir)
+{
+    const BiosCatalog::ExternalBios b = BiosCatalog::forExternalEmulator(em_.id);
+    if (b.systemId.isEmpty())
+        return; // this emulator ships everything it needs
+
+    if (b.portable)
+    {
+        const QString marker = binDir + QStringLiteral("/portable.ini");
+        if (!QFile::exists(marker)) { QFile m(marker); if (m.open(QIODevice::WriteOnly)) m.close(); }
+    }
+
+    CoreManager::ensureBios(b.systemId, binDir + QStringLiteral("/bios"),
+                            [this](const QString& s) { emit status(s, -1); });
+
+    const QList<BiosFile>& bios = BiosCatalog::forSystem(b.systemId);
+    if (b.portable && !bios.isEmpty())
+    {
+        const QString inis = binDir + QStringLiteral("/inis");
+        QDir().mkpath(inis);
+        const QString cfg = inis + QStringLiteral("/PCSX2.ini");
+        if (!QFile::exists(cfg))
+        {
+            QFile f(cfg);
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+            {
+                QTextStream ts(&f);
+                ts << "[UI]\n" << "SetupWizardIncomplete = false\n\n"
+                   << "[Filenames]\n" << "BIOS = " << bios.first().fileName << "\n";
+                f.close();
+            }
+        }
+    }
+}
+
 void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
@@ -481,6 +525,11 @@ void EmulatorManager::launch(const QString& binary)
                                           | QFileDevice::ExeGroup | QFileDevice::ExeOther);
     }
 #endif
+
+    // Emulators that can't boot without a copyrighted BIOS (PCSX2): make sure one is in place next to the
+    // binary before launching. Best-effort and only on local (non-Flatpak) installs we control on disk.
+    if (!isFlatpak)
+        prepareBios(QFileInfo(binary).absolutePath());
 
     game_ = new QProcess(this);
     if (!isFlatpak) game_->setWorkingDirectory(QFileInfo(binary).absolutePath());
