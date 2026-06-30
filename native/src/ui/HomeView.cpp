@@ -1441,6 +1441,19 @@ bool HomeView::browseBack()
 
 bool HomeView::browseHasMore() const { return hasMore_ && !loading_; }
 
+// After a Back, the current level's childRow is the item we drilled into. Map it to the (filtered) browse
+// index so the themed column re-selects it instead of jumping to the top. browseItems() must be called first
+// (it rebuilds browseRowMap_). Returns 0 for a fresh level (childRow < 0).
+int HomeView::browseRestoreIndex() const
+{
+    if (stack_.isEmpty()) return 0;
+    const int cr = stack_.last().childRow;
+    if (cr < 0) return 0;
+    for (int i = 0; i < browseRowMap_.size(); ++i)
+        if (browseRowMap_[i] == cr) return i;
+    return 0;
+}
+
 void HomeView::browseLoadMore() { loadMore(); } // pull the next page; onCatalogReady fires browseItemsChanged
 
 void HomeView::searchInBrowse(const QString& query)

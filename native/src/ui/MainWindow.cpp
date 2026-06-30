@@ -322,9 +322,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             if (!tgt) return;
             QQuickItem* r = ThemeEngine::rootItem(tgt);
             if (!r) return;
-            const int keep = appended ? r->property("currentIndex").toInt() : 0;
-            r->setProperty("items", home_->browseItems());
-            r->setProperty("currentIndex", keep);
+            const int cur = r->property("currentIndex").toInt();
+            r->setProperty("items", home_->browseItems()); // rebuilds the row map used by browseRestoreIndex()
+            // Append -> keep the selection; a fresh set -> re-select the row we drilled into (Back), else top.
+            r->setProperty("currentIndex", appended ? cur : home_->browseRestoreIndex());
             if (tgt == themedBrowse_) // the XMB home keeps its "home" view + categories; only browse swaps view/title
             {
                 r->setProperty("currentView", QStringLiteral("browse"));
@@ -1608,7 +1609,7 @@ void MainWindow::showThemedXmb()
     // Show a bucket's catalog list as the column. If the bucket has a single catalog (e.g. Games -> one
     // catalog whose top level IS the console list), open it directly so the column shows its contents (the
     // consoles), skipping a pointless one-item folder.
-    auto showCatalogs = [this](int cat) {
+    auto showCatalogs = [this](int cat, int selectIdx) {
         const QString key = (cat >= 0 && cat < themedXmbCatKeys_.size()) ? themedXmbCatKeys_[cat] : QString();
         themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
@@ -1622,10 +1623,11 @@ void MainWindow::showThemedXmb()
         }
         themedXmbInCatalog_ = false;
         themedXmbAutoOpened_ = false;
-        if (r) { r->setProperty("items", themedXmbCatalogs_); r->setProperty("currentIndex", 0); }
+        const int sel = qBound(0, selectIdx, qMax(0, int(themedXmbCatalogs_.size()) - 1));
+        if (r) { r->setProperty("items", themedXmbCatalogs_); r->setProperty("currentIndex", sel); }
     };
 
-    auto onActivated = [this, settingsIdx, showCatalogs](int itemIdx) {
+    auto onActivated = [this, settingsIdx](int itemIdx) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
         if (cat == settingsIdx) { openSettingsHub(); return; } // the full settings hub: Add-ons, Cloud Sync, Appearance, …
@@ -1634,6 +1636,7 @@ void MainWindow::showThemedXmb()
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
             const QString navKey = themedXmbCatalogs_[itemIdx].toMap().value(QStringLiteral("navKey")).toString();
             if (navKey.isEmpty()) return;
+            themedXmbCatalogIndex_ = itemIdx;       // remember the catalog, so Back re-selects it in the list
             themedXmbInCatalog_ = true;
             if (r) r->setProperty("currentIndex", 0);
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
@@ -1645,9 +1648,9 @@ void MainWindow::showThemedXmb()
         const int cat = r ? r->property("catIndex").toInt() : 0;
         if (themedXmbInCatalog_)
         {
-            if (home_->browseBack()) return;        // popped a deeper level; browseItemsChanged refreshes the column
-            if (themedXmbAutoOpened_) return;       // single-catalog bucket: its contents ARE the root, nothing above
-            showCatalogs(cat);                      // multi-catalog bucket: back out to the catalog list
+            if (home_->browseBack()) return;          // popped a deeper level; browseItemsChanged refreshes the column
+            if (themedXmbAutoOpened_) return;         // single-catalog bucket: its contents ARE the root, nothing above
+            showCatalogs(cat, themedXmbCatalogIndex_); // multi-catalog bucket: back out, re-select the catalog we opened
         }
         // at the bucket root the cross just stays put
     };
@@ -1667,7 +1670,8 @@ void MainWindow::showThemedXmb()
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
         themedHomeIndex_ = r->property("catIndex").toInt();
-        showCatalogs(themedHomeIndex_); // switching bucket resets the column to its catalog list
+        themedXmbCatalogIndex_ = 0;                  // a different bucket starts at the top of its catalog list
+        showCatalogs(themedHomeIndex_, 0); // switching bucket resets the column to its catalog list
     };
 
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
@@ -1684,7 +1688,7 @@ void MainWindow::showThemedXmb()
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
 
-    showCatalogs(startCat); // populate the starting bucket's catalog list
+    showCatalogs(startCat, themedXmbCatalogIndex_); // populate the starting bucket's catalog list (restore on rebuild)
 
     if (!themeWatcher_)
     {

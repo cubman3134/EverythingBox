@@ -58,6 +58,7 @@ public:
     bool browseBack();                       // go up a level; false if already at the catalog root
     bool browseHasMore() const;              // the current level has another page to pull
     void browseLoadMore();                   // pull the next page (no-op if none / already loading)
+    int  browseRestoreIndex() const;         // the browse index of the row we last drilled into (for Back), else 0
 
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
