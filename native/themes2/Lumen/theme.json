@@ -17,7 +17,7 @@
         { "type": "rating", "pos": [0.70, 0.88], "size": [0.16, 0.035], "origin": [0, 0.5], "binding": "selected.rating", "color": "#2D6CDF", "emptyColor": "#D7DAE0" },
 
         { "type": "helpsystem", "pos": [0.5, 0.965], "size": [1, 0.045], "origin": [0.5, 0.5], "color": "#2A2E36", "fontSize": 0.022,
-          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "T", "label": "Theme" } ] }
+          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" }, { "button": "T", "label": "Theme" } ] }
       ]
     }
   }

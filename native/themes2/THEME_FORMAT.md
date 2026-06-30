@@ -31,10 +31,11 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
 - `name`, `author` — shown in the theme picker.
 - `views` — one or more named views, each with the same shape (`background` + `elements`) binding to the
   same data:
-  - `home` — the main screen (the media-type catalogs as a carousel/grid).
+  - `home` — the main screen (the media-type catalogs as a carousel/grid). **/** opens the highlighted
+    catalog and searches within it.
   - `browse` — the "gamelist" shown when you open a catalog: a `grid` of that catalog's items plus a detail
     panel bound to `selected.*` (`title`, `subtitle`, `image`). Navigate to focus, **Enter** to open/drill,
-    **Esc** to go up.
+    **Esc** to go up, **/** to search within the catalog (large catalogs page in as you scroll near the end).
   - `detail` — shown for the focused item when you press **I** (Info); **Esc** returns. Typically a big
     `selected.image`, `selected.title`, `selected.rating`, `selected.overview`.
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.

@@ -17,7 +17,7 @@
         { "type": "rating", "id": "stars",   "pos": [0.835, 0.70], "size": [0.16, 0.035], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
 
         { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
-          "entries": [ { "button": "↑↓", "label": "Move" }, { "button": "Enter", "label": "Open" } ] }
+          "entries": [ { "button": "↑↓", "label": "Move" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" } ] }
       ]
     }
   }
