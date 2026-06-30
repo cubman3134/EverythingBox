@@ -332,6 +332,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                 QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
                 r->setProperty("system", sys);
             }
+            else // the XMB home column: refresh the live metadata panel for the (now current) row
+                refreshThemedMeta(r->property("currentIndex").toInt());
         });
 
         // Opening a movie/book/… from the themed home shows the classic info page (it renders on HomeView, which
@@ -352,6 +354,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             themedReturnAfterDetail_ = false;
             QWidget* back = themedDetailFrom_ ? themedDetailFrom_ : themedHome_;
             if (back) { stack_->setCurrentWidget(back); back->setFocus(Qt::OtherFocusReason); }
+        });
+
+        // Triple/XMB: the live metadata for a browse-item arrived (a skeleton, then synopsis + facts). Merge
+        // it into the cross's metadata panel - but only if it's still the selected row of the open catalog.
+        connect(home_, &HomeView::themedMetaReady, this, [this](int index, const QVariantMap& meta) {
+            if (!themedHomeIsXmb_ || !themedXmbInCatalog_ || stack_->currentWidget() != themedHome_) return;
+            QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+            if (!r || r->property("currentIndex").toInt() != index) return; // moved on -> stale, ignore
+            QVariantMap cur = r->property("selectedMeta").toMap();
+            for (auto it = meta.constBegin(); it != meta.constEnd(); ++it) cur.insert(it.key(), it.value());
+            r->setProperty("selectedMeta", cur);
         });
     }
 #endif
@@ -1605,10 +1618,44 @@ void MainWindow::showThemedHome()
 // Audio / Reading, + a synthetic Settings); the vertical column shows that category's catalogs, and Enter on a
 // catalog drills the column into its live items (Esc returns to the catalog list). Moving across categories
 // resets the column to that bucket's catalog list. Everything stays on the one cross screen.
+// Set the XMB metadata panel's instant skeleton for the browse-item at `idx` (the title/poster/subtitle we
+// already hold), then queue the debounced addon fetch that enriches it with the synopsis + facts. No-op when
+// not on the XMB cross inside a catalog.
+void MainWindow::refreshThemedMeta(int idx)
+{
+    QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+    if (!r || !themedHomeIsXmb_ || !themedXmbInCatalog_) return;
+    const QVariantList col = r->property("items").toList();
+    if (idx < 0 || idx >= col.size()) { r->setProperty("selectedMeta", QVariantMap()); return; }
+    const QVariantMap it = col[idx].toMap();
+    QVariantMap sk; // overwrites the previous row's data (so no stale synopsis lingers while the fetch runs)
+    sk.insert(QStringLiteral("title"), it.value(QStringLiteral("title")));
+    sk.insert(QStringLiteral("subtitle"), it.value(QStringLiteral("subtitle")));
+    sk.insert(QStringLiteral("image"), it.value(QStringLiteral("image")));
+    sk.insert(QStringLiteral("type"), it.value(QStringLiteral("type")));
+    sk.insert(QStringLiteral("favorite"), home_->isThemedLeafFavorite(idx));
+    r->setProperty("selectedMeta", sk);
+    themedMetaWant_ = idx;
+    if (themedMetaTimer_) themedMetaTimer_->start();
+}
+
 void MainWindow::showThemedXmb()
 {
     themedHomeIsXmb_ = true;
     themedXmbInCatalog_ = false;
+
+    // Debounce the live-metadata addon fetch: while you scroll the column the panel tracks instantly off a
+    // skeleton, and only the row you settle on triggers the (networked) synopsis/facts fetch.
+    if (!themedMetaTimer_)
+    {
+        themedMetaTimer_ = new QTimer(this);
+        themedMetaTimer_->setSingleShot(true);
+        themedMetaTimer_->setInterval(160);
+        connect(themedMetaTimer_, &QTimer::timeout, this, [this] {
+            if (themedHomeIsXmb_ && themedXmbInCatalog_ && themedMetaWant_ >= 0)
+                home_->requestThemedMeta(themedMetaWant_);
+        });
+    }
 
     QVariantList cats = home_->categoryItems(); // the buckets that have catalogs (each {title,key,glyph,accent})
     themedXmbCatKeys_.clear();
@@ -1651,6 +1698,9 @@ void MainWindow::showThemedXmb()
     auto showCatalogs = [this, profilesColumn](int cat, int selectIdx) {
         const QString key = (cat >= 0 && cat < themedXmbCatKeys_.size()) ? themedXmbCatKeys_[cat] : QString();
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        // Leaving the items level (to a catalog list / profiles / settings): no leaf is selected, so drop the
+        // metadata panel and any open action chooser. (When a catalog loads, browseItemsChanged repopulates it.)
+        if (r) { r->setProperty("selectedMeta", QVariantMap()); r->setProperty("actionsOpen", false); }
         if (key == QStringLiteral("profiles")) // the Profiles column: scroll to a profile to select it
         {
             themedXmbInCatalog_ = false; themedXmbAutoOpened_ = false;
@@ -1707,7 +1757,20 @@ void MainWindow::showThemedXmb()
             if (r) r->setProperty("currentIndex", 0);
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
         }
-        else home_->browseActivate(itemIdx); // already in a catalog -> open / drill deeper
+        else // inside a catalog: containers drill in-column; a leaf opens the inline Play/Favorite chooser
+        {
+            const QVariantList col = r ? r->property("items").toList() : QVariantList();
+            const bool expandable = itemIdx >= 0 && itemIdx < col.size()
+                                    && col[itemIdx].toMap().value(QStringLiteral("expandable")).toBool();
+            if (expandable) home_->browseActivate(itemIdx); // a series / console / volume -> drill into it
+            else if (r) // a movie / book / game / track / comic issue -> Play or Favorite, right here
+            {
+                r->setProperty("actionItem", itemIdx);
+                r->setProperty("actionFav", home_->isThemedLeafFavorite(itemIdx));
+                r->setProperty("actionIndex", 0);
+                r->setProperty("actionsOpen", true);
+            }
+        }
     };
     auto onBack = [this, showCatalogs] {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
@@ -1739,9 +1802,25 @@ void MainWindow::showThemedXmb()
         themedXmbCatalogIndex_ = 0;                  // a different bucket starts at the top of its catalog list
         showCatalogs(themedHomeIndex_, 0); // switching bucket resets the column to its catalog list
     };
+    // The column selection moved: refresh the live metadata panel for the new row (only while in a catalog).
+    auto onSelect = [this](int idx) { if (themedXmbInCatalog_) refreshThemedMeta(idx); };
+    // The inline chooser fired: 0 = Play the leaf (and close), 1 = toggle Favorite (and stay, so the heart
+    // updates in place; the metadata panel's "★ Favorited" follows too).
+    auto onAction = [this](int which) {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (!r) return;
+        const int idx = r->property("actionItem").toInt();
+        if (which == 0) { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
+        else
+        {
+            home_->favoriteThemedLeaf(idx);
+            r->setProperty("actionFav", home_->isThemedLeafFavorite(idx));
+        }
+    };
 
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
-                                        onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory);
+                                        onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
+                                        onSelect, onAction);
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("categories", cats);

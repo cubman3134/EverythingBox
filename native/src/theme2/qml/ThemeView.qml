@@ -31,12 +31,25 @@ Item {
     signal navigate()              // the selection actually moved (for the host's navigation sound)
     signal details()               // entered the detail view (for the host's "open details" sound)
     signal categoryChanged()       // XMB: moved to another category (host loads its column); read catIndex
+    signal selectionMoved()        // XMB: the column selection moved (host fetches that item's metadata)
+    signal actionChosen(int which) // XMB: chose an inline action on the open leaf (0 = Play, 1 = Favorite)
 
     // XMB (cross) state. categories = the horizontal axis; items = the active category's column; catIndex /
     // currentIndex are the two cursors. xmbMode is on when the active view contains an `xmb` element, which
     // flips Left/Right to category navigation and Up/Down to moving within the column.
     property var categories: []
     property int catIndex: 0
+
+    // XMB live-meta + inline actions (host-driven; the Triple theme reads these). selectedMeta is the data for
+    // the metadata panel beside the cross. actionsOpen shows a Play/Favorite chooser over the selected leaf;
+    // actionIndex is its cursor (0 = Play, 1 = Favorite), actionFav reflects the item's current favourite
+    // state, actionItem is the browse index being acted on (so the host knows which row when an action fires).
+    property var selectedMeta: ({})
+    property bool actionsOpen: false
+    property int actionIndex: 0
+    property bool actionFav: false
+    property int actionItem: -1
+
     readonly property bool xmbMode: {
         if (view && view.elements)
             for (var i = 0; i < view.elements.length; i++)
@@ -55,6 +68,7 @@ Item {
     // focus so the arrow keys work afterwards.
     function gotoItem(i) {
         forceActiveFocus()
+        if (actionsOpen) return                            // the chooser is up; clicks go to its buttons
         var n = items ? items.length : 0
         if (i < 0 || i >= n) return
         if (i === currentIndex) activated(i)               // click the focused item -> press it
@@ -62,6 +76,7 @@ Item {
     }
     function gotoCat(i) {                                   // XMB: click a category to switch to it
         forceActiveFocus()
+        if (actionsOpen) return
         var n = categories ? categories.length : 0
         if (i < 0 || i >= n) return
         if (i === catIndex) {                              // clicking the already-selected category...
@@ -74,10 +89,11 @@ Item {
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
     property int lastNearEnd: -1
-    onItemsChanged: lastNearEnd = -1 // a new/grown set: allow nearEnd() to fire again
+    onItemsChanged: { lastNearEnd = -1; actionsOpen = false } // a new/grown set: re-arm nearEnd, drop any chooser
     onCurrentIndexChanged: {
         var n = items ? items.length : 0
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
+        selectionMoved() // host fetches the newly-selected item's metadata for the live panel (XMB)
     }
 
     // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
@@ -101,6 +117,7 @@ Item {
     property real wheelAccum: 0
     WheelHandler {
         onWheel: function(e) {
+            if (root.actionsOpen) { e.accepted = true; return } // freeze the column while the chooser is up
             root.wheelAccum += e.angleDelta.y
             while (root.wheelAccum >= 120)  { root.vstep(-1); root.wheelAccum -= 120 } // wheel up -> previous
             while (root.wheelAccum <= -120) { root.vstep(1);  root.wheelAccum += 120 } // wheel down -> next
@@ -108,6 +125,17 @@ Item {
         }
     }
     Keys.onPressed: function(e) {
+        // The XMB inline action chooser (Play / Favorite) owns the keys while it's open: Up/Down toggle the
+        // two options, Enter fires the chosen one, Esc dismisses. Everything else is swallowed so the cross
+        // behind it stays put.
+        if (actionsOpen) {
+            if (e.key === Qt.Key_Down || e.key === Qt.Key_Up) { actionIndex = (actionIndex === 0 ? 1 : 0); navigate() }
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
+                                                              { actionChosen(actionIndex) }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { actionsOpen = false }
+            e.accepted = true
+            return
+        }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
             stepCat(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true

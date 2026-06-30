@@ -27,6 +27,8 @@ public:
     std::function<void()> onSearch;
     std::function<void()> onNearEnd;
     std::function<void()> onCategory; // XMB: the category cursor moved (host loads that column)
+    std::function<void(int)> onSelect; // XMB: the column cursor moved to `index` (host fetches its metadata)
+    std::function<void(int)> onAction; // XMB: chose an inline action (0 = Play, 1 = Favorite) on the open item
 
     // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
     QSoundEffect* sndNavigate = nullptr; // selection moved
@@ -43,6 +45,8 @@ public slots:
     void navigate();  // play the navigation sound
     void details();   // play the open-details sound
     void category();  // XMB: category cursor moved
+    void selection(); // XMB: column cursor moved (host fetches the selected item's metadata)
+    void action(int which); // XMB: chose an inline Play/Favorite action
 };
 
 namespace ThemeEngine
@@ -57,7 +61,9 @@ namespace ThemeEngine
                        std::function<void()> onCycle = {},
                        std::function<void()> onSearch = {},
                        std::function<void()> onNearEnd = {},
-                       std::function<void()> onCategory = {});
+                       std::function<void()> onCategory = {},
+                       std::function<void(int)> onSelect = {},
+                       std::function<void(int)> onAction = {});
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);

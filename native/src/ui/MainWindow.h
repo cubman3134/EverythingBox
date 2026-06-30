@@ -181,6 +181,9 @@ private:
     bool themedXmbInCatalog_ = false; // XMB: column shows a catalog's live items (true) vs the catalog list (false)
     bool themedXmbAutoOpened_ = false; // XMB: the bucket's single catalog was opened directly (its contents ARE the root)
     int themedXmbCatalogIndex_ = 0;    // XMB: which catalog in the list we opened, so Back re-selects it
+    QTimer* themedMetaTimer_ = nullptr; // XMB: debounce the live-metadata addon fetch to the settled row
+    int themedMetaWant_ = -1;           // XMB: the browse index that pending fetch is for
+    void refreshThemedMeta(int browseIndex); // XMB: set the panel's skeleton for a row + queue the addon enrich
     bool themedReturnAfterDetail_ = false; // showing the classic info page over a themed home; return on back
     QWidget* themedDetailFrom_ = nullptr;  // the themed widget to return to after the info page
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits

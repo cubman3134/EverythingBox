@@ -570,110 +570,10 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         QString console;
         if (stack_.size() >= 2 && stack_.at(stack_.size() - 2).item.type == QStringLiteral("platform"))
             console = stack_.at(stack_.size() - 2).item.title.trimmed();
-        if (it.mime == QStringLiteral("steamgame"))
-        {
-            MediaItem m = it;
-            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
-            emit openItem(m); // MainWindow launches the steam:// URL
-            return;
-        }
-        if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
-        {
-            showToast(tr("Loading “%1”…").arg(it.title), 20000);
-            playBtn_->setEnabled(false);
-            const QString key = it.id, title = it.title;
-            mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
-                playBtn_->setEnabled(true);
-                if (pages.isEmpty())
-                    showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
-                                 "aren't hosted here — try another chapter or title.").arg(title), 7000);
-                else { if (toast_) toast_->hide(); emit openImagePages(title, key, pages); }
-            });
-            return;
-        }
-        // A metadata-only item browsed from a LOCAL catalog (AIO Catalog) - comic issue / book / audiobook /
-        // retro game - whose actual file the file provider (Allarr) supplies. Bridge it by searching the
-        // provider's catalog of that type for a query built from the title (+ its context), then open the
-        // first match. A game's console (the platform we drilled in from) tags the search and picks the core.
-        const bool localBridge = top.addon && top.addon->transport != LoadedAddon::RemoteHttp
-            && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
-                || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
-        if (localBridge)
-        {
-            const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
-            QString query;
-            if (it.type == QStringLiteral("comic_issue"))
-            {
-                // "<volume name> <issue #>" - the volume is the level we drilled in from.
-                QString volume;
-                if (stack_.size() >= 2) volume = stack_.at(stack_.size() - 2).item.title.trimmed();
-                const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
-                const auto m = re.match(it.title);
-                query = (volume + QLatin1Char(' ') + (m.hasMatch() ? m.captured(1) : QString())).trimmed();
-            }
-            else if (it.type == QStringLiteral("game"))
-            {
-                // "<game> <console>": Allarr parses the trailing console name to tag its ROM search and
-                // choose the file extensions to look for. (console is computed once at the top of the handler.)
-                query = (it.title + QLatin1Char(' ') + console).trimmed();
-            }
-            else
-            {
-                // Book / audiobook: "<title> <author>" (the subtitle is "Author · Year").
-                const QString author = it.subtitle.section(QStringLiteral(" · "), 0, 0).trimmed();
-                query = (it.title + QLatin1Char(' ') + author).trimmed();
-            }
-            if (query.isEmpty()) query = it.title;
-            const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
-            showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
-            playBtn_->setEnabled(false);
-            const QString title = it.title;
-            mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
-                playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
-                else if (!err.isEmpty())
-                    showToast(tr("Couldn't reach the file provider (Allarr) — is it running? (%1)").arg(err), 8000);
-                else
-                    showToast(tr("The file provider (Allarr) has no copy of “%1”.").arg(title), 7000);
-            });
-            return;
-        }
-        if (top.addon && top.addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
-        {
-            LoadedAddon* addon = top.addon;
-            const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
-            lastPlay_ = { addon, it, false, {}, {}, 0 };
-            // A type-aware "looking…" line: the host addon may search indexers, open a
-            // ROM pack, or extract a file before it can hand back a URL, so this can sit
-            // for a few seconds. (Download progress is shown separately once it resolves.)
-            const QString lookingMsg =
-                it.type == QStringLiteral("game")  ? tr("Looking for the ROM for “%1”…").arg(it.title)
-              : (it.type == QStringLiteral("movie") || it.type == QStringLiteral("series"))
-                                                   ? tr("Finding a stream for “%1”…").arg(it.title)
-                                                   : tr("Looking for “%1”…").arg(it.title);
-            showToast(lookingMsg, 30000);
-            playBtn_->setEnabled(false);
-            mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
-                playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
-                else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
-            });
-            return;
-        }
-        if (!playImdbId_.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
-        {
-            lastPlay_ = { nullptr, it, true, playStremioType_, playImdbId_, 0 };
-            const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
-            showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
-            playBtn_->setEnabled(false);
-            mgr_->resolveStreamByImdb(playStremioType_, playImdbId_, [this, it, fileProvider](const QString& url, const QString& mime) {
-                playBtn_->setEnabled(true);
-                if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
-                else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
-                                  "(check that Allarr is configured and returning results).").arg(it.title), 7000);
-            });
-            return;
-        }
+        // The volume/series we drilled in from (used to build a comic issue's bridge query).
+        const QString parentTitle = (stack_.size() >= 2) ? stack_.at(stack_.size() - 2).item.title.trimmed()
+                                                         : QString();
+        resolvePlay(top.addon, it, parentTitle, console, playImdbId_, playStremioType_);
     });
     playBtn_->installEventFilter(this); // Backspace here = Back
     arl->addWidget(playBtn_);
@@ -2203,6 +2103,181 @@ void HomeView::loadTop()
     issueRequest(/*append*/ false);
 }
 
+// Resolve a leaf to a playable/readable source and open it. Pure: every bit of context comes in as an
+// argument (no stack_/detail-page state), so the classic detail Play button and the themed inline Play both
+// reuse it. `parentTitle` is the level we drilled in from (a comic issue's volume); `console` is the platform
+// ancestor (a ROM core hint); `imdbId`/`imdbType` resolve a non-Stremio movie/episode via stream addons.
+void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QString& parentTitle,
+                           const QString& console, const QString& imdbId, const QString& imdbType)
+{
+    if (it.mime == QStringLiteral("steamgame"))
+    {
+        MediaItem m = it;
+        m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
+        emit openItem(m); // MainWindow launches the steam:// URL
+        return;
+    }
+    if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
+    {
+        showToast(tr("Loading “%1”…").arg(it.title), 20000);
+        if (playBtn_) playBtn_->setEnabled(false);
+        const QString key = it.id, title = it.title;
+        mgr_->resolveMangaChapterPages(it.id, [this, key, title](const QStringList& pages) {
+            if (playBtn_) playBtn_->setEnabled(true);
+            if (pages.isEmpty())
+                showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
+                             "aren't hosted here — try another chapter or title.").arg(title), 7000);
+            else { if (toast_) toast_->hide(); emit openImagePages(title, key, pages); }
+        });
+        return;
+    }
+    // A metadata-only item browsed from a LOCAL catalog (AIO Catalog) - comic issue / book / audiobook /
+    // retro game - whose actual file the file provider (Allarr) supplies. Bridge it by searching the
+    // provider's catalog of that type for a query built from the title (+ its context), then open the
+    // first match. A game's console (the platform we drilled in from) tags the search and picks the core.
+    const bool localBridge = addon && addon->transport != LoadedAddon::RemoteHttp
+        && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
+            || it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("game"));
+    if (localBridge)
+    {
+        const QString catType = (it.type == QStringLiteral("comic_issue")) ? QStringLiteral("comic") : it.type;
+        QString query;
+        if (it.type == QStringLiteral("comic_issue"))
+        {
+            const QRegularExpression re(QStringLiteral("#\\s*([0-9]+(?:\\.[0-9]+)?)"));
+            const auto m = re.match(it.title);
+            query = (parentTitle + QLatin1Char(' ') + (m.hasMatch() ? m.captured(1) : QString())).trimmed();
+        }
+        else if (it.type == QStringLiteral("game"))
+            query = (it.title + QLatin1Char(' ') + console).trimmed(); // Allarr parses the trailing console name
+        else
+        {
+            // Book / audiobook: "<title> <author>" (the subtitle is "Author · Year").
+            const QString author = it.subtitle.section(QStringLiteral(" · "), 0, 0).trimmed();
+            query = (it.title + QLatin1Char(' ') + author).trimmed();
+        }
+        if (query.isEmpty()) query = it.title;
+        const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
+        showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
+        if (playBtn_) playBtn_->setEnabled(false);
+        const QString title = it.title;
+        mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
+            if (playBtn_) playBtn_->setEnabled(true);
+            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
+            else if (!err.isEmpty())
+                showToast(tr("Couldn't reach the file provider (Allarr) — is it running? (%1)").arg(err), 8000);
+            else
+                showToast(tr("The file provider (Allarr) has no copy of “%1”.").arg(title), 7000);
+        });
+        return;
+    }
+    if (addon && addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
+    {
+        const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
+        lastPlay_ = { addon, it, false, {}, {}, 0 };
+        const QString lookingMsg =
+            it.type == QStringLiteral("game")  ? tr("Looking for the ROM for “%1”…").arg(it.title)
+          : (it.type == QStringLiteral("movie") || it.type == QStringLiteral("series"))
+                                               ? tr("Finding a stream for “%1”…").arg(it.title)
+                                               : tr("Looking for “%1”…").arg(it.title);
+        showToast(lookingMsg, 30000);
+        if (playBtn_) playBtn_->setEnabled(false);
+        mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
+            if (playBtn_) playBtn_->setEnabled(true);
+            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
+            else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
+        });
+        return;
+    }
+    if (!imdbId.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
+    {
+        lastPlay_ = { nullptr, it, true, imdbType, imdbId, 0 };
+        const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
+        showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
+        if (playBtn_) playBtn_->setEnabled(false);
+        mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider](const QString& url, const QString& mime) {
+            if (playBtn_) playBtn_->setEnabled(true);
+            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
+            else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
+                              "(check that Allarr is configured and returning results).").arg(it.title), 7000);
+        });
+        return;
+    }
+    showToast(tr("Nothing to play for “%1”.").arg(it.title), 5000);
+}
+
+// ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
+
+void HomeView::requestThemedMeta(int idx)
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    themedMetaIndex_ = idx;
+    // A skeleton from what the catalog row already carries, shown at once; the addon /meta enriches it below.
+    QVariantMap base;
+    base.insert(QStringLiteral("index"), idx);
+    base.insert(QStringLiteral("title"), it.title);
+    base.insert(QStringLiteral("subtitle"), it.subtitle);
+    base.insert(QStringLiteral("image"), it.thumbnailUrl);
+    base.insert(QStringLiteral("type"), it.type);
+    base.insert(QStringLiteral("expandable"), it.expandable);
+    base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
+    emit themedMetaReady(idx, base);
+    if (!stack_.last().addon) { themedMetaReq_ = -1; return; }
+    themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches
+}
+
+bool HomeView::isThemedLeafFavorite(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    return FavoritesStore::isFavorite(items_[browseRowMap_[idx]].id);
+}
+
+void HomeView::favoriteThemedLeaf(int idx)
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
+    else
+    {
+        FavoriteItem f;
+        f.addonId = stack_.last().addon ? stack_.last().addon->manifest.id : QString();
+        f.itemId = it.id; f.title = it.title; f.subtitle = it.subtitle;
+        f.type = it.type; f.thumbnailUrl = it.thumbnailUrl; f.expandable = it.expandable;
+        FavoritesStore::add(f);
+    }
+    // Nudge the live panel so its heart reflects the new state.
+    QVariantMap m;
+    m.insert(QStringLiteral("index"), idx);
+    m.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
+    emit themedMetaReady(idx, m);
+}
+
+void HomeView::playThemedLeaf(int idx)
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    const MediaItem it = items_[browseRowMap_[idx]]; // copy (async callbacks outlive items_)
+    LoadedAddon* addon = stack_.last().addon;
+    const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
+    QString console;
+    for (int i = stack_.size() - 1; i >= 0; --i)
+        if (stack_[i].item.type == QStringLiteral("platform")) { console = stack_[i].item.title.trimmed(); break; }
+
+    // A movie/episode from a metadata-only catalog (non-Stremio) needs its IMDB id from /meta before a stream
+    // addon can resolve it - fetch that first, then resolvePlay() with the id (handled in onMetaReady).
+    const bool needsImdb = addon && addon->transport != LoadedAddon::RemoteHttp && !it.expandable
+        && (it.type == QStringLiteral("movie") || it.type == QStringLiteral("episode")
+            || it.type == QStringLiteral("series") || it.type == QStringLiteral("tv"));
+    if (needsImdb)
+    {
+        showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
+        themedPlayAddon_ = addon; themedPlayItem_ = it; themedPlayConsole_ = console;
+        themedPlayReq_ = mgr_->requestMeta(addon, it);
+        return;
+    }
+    resolvePlay(addon, it, parentTitle, console, QString(), QString());
+}
+
 void HomeView::requestMeta(const MediaItem& item)
 {
     metaItem_ = item;             // remembered for the meta fallback in onMetaReady
@@ -2372,6 +2447,39 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
             });
         }
         else dlNext(); // no IMDB id -> can't resolve this one
+        return;
+    }
+    // Triple/XMB theme: the live-panel /meta arrived -> emit the enriched fields (synopsis + facts) for it.
+    if (requestId == themedMetaReq_)
+    {
+        themedMetaReq_ = -1;
+        QVariantMap m;
+        m.insert(QStringLiteral("index"), themedMetaIndex_);
+        m.insert(QStringLiteral("overview"), detail.overview);
+        QVariantList facts;
+        for (const MediaFact& f : detail.facts)
+            facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+        m.insert(QStringLiteral("facts"), facts);
+        if (!detail.imageUrl.isEmpty()) m.insert(QStringLiteral("image"), detail.imageUrl);
+        if (!detail.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), detail.subtitle);
+        emit themedMetaReady(themedMetaIndex_, m);
+        return;
+    }
+    // Triple/XMB theme: a themed Play that needed the IMDB id first -> resolve via stream addons now.
+    if (requestId == themedPlayReq_)
+    {
+        themedPlayReq_ = -1;
+        const QString imdb = detail.imdbStreamId;
+        const QString stremioType = (themedPlayItem_.type == QStringLiteral("episode")) ? QStringLiteral("series")
+                                                                                        : QStringLiteral("movie");
+        if (!imdb.isEmpty() && mgr_->hasStreamProvider(stremioType))
+            resolvePlay(themedPlayAddon_, themedPlayItem_, QString(), themedPlayConsole_, imdb, stremioType);
+        else
+        {
+            if (toast_) toast_->hide();
+            showToast(tr("No stream source for “%1”. No stream addon (e.g. Allarr) returned a playable link.")
+                          .arg(themedPlayItem_.title), 7000);
+        }
         return;
     }
     if (requestId != pendingMetaReqId_) return; // stale (navigated away / newer item)

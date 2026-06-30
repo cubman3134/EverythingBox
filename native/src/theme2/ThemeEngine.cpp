@@ -41,6 +41,8 @@ void ThemeBridge::nearEnd()   { if (onNearEnd) onNearEnd(); }
 void ThemeBridge::navigate()  { playEffect(sndNavigate); }
 void ThemeBridge::details()   { playEffect(sndDetails); }
 void ThemeBridge::category()  { if (onCategory) onCategory(); }
+void ThemeBridge::selection() { if (onSelect && root) onSelect(root->property("currentIndex").toInt()); }
+void ThemeBridge::action(int which) { if (onAction) onAction(which); }
 
 namespace ThemeEngine
 {
@@ -77,7 +79,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
                    QWidget* parent, std::function<void(int)> onActivated,
                    std::function<void()> onBack, std::function<void()> onCycle,
                    std::function<void()> onSearch, std::function<void()> onNearEnd,
-                   std::function<void()> onCategory)
+                   std::function<void()> onCategory, std::function<void(int)> onSelect,
+                   std::function<void(int)> onAction)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -110,6 +113,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onSearch = std::move(onSearch);
         bridge->onNearEnd = std::move(onNearEnd);
         bridge->onCategory = std::move(onCategory);
+        bridge->onSelect = std::move(onSelect);
+        bridge->onAction = std::move(onAction);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -134,6 +139,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(navigate()), bridge, SLOT(navigate()));
         QObject::connect(root, SIGNAL(details()), bridge, SLOT(details()));
         QObject::connect(root, SIGNAL(categoryChanged()), bridge, SLOT(category()));
+        QObject::connect(root, SIGNAL(selectionMoved()), bridge, SLOT(selection()));
+        QObject::connect(root, SIGNAL(actionChosen(int)), bridge, SLOT(action(int)));
     }
 
     QWidget* container = QWidget::createWindowContainer(qv, parent);

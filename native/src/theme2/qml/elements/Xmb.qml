@@ -166,7 +166,8 @@ Item {
             Column {
                 anchors.left: parent.right; anchors.leftMargin: xmb.width * 0.015
                 anchors.verticalCenter: parent.verticalCenter
-                width: xmb.width * 0.5; spacing: xmb.height * 0.004
+                // Kept narrow so it never runs under the metadata panel on the right (the full title shows there).
+                width: xmb.width * 0.30; spacing: xmb.height * 0.004
                 Text {
                     width: parent.width
                     text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
@@ -186,9 +187,99 @@ Item {
             // the row's vertical slot (itemGap) so adjacent rows don't overlap; disabled for faded-out rows.
             MouseArea {
                 anchors.verticalCenter: parent.verticalCenter
-                x: 0; width: parent.width + xmb.width * 0.5; height: xmb.itemGap
+                x: 0; width: parent.width + xmb.width * 0.30; height: xmb.itemGap
                 enabled: row.opacity > 0.1; cursorShape: Qt.PointingHandCursor
                 onClicked: if (xmb.host) xmb.host.gotoItem(row.index)
+            }
+        }
+    }
+
+    // ---- metadata panel for the selected leaf (Triple theme: "all the info beside the item") --------------
+    // Fed live by the host (host.selectedMeta) as the column selection moves: a skeleton from the catalog row
+    // first, then the addon's synopsis + facts when they arrive. Hidden whenever there's nothing selected (the
+    // catalog list, Profiles, Settings - the host leaves selectedMeta empty there).
+    Item {
+        id: meta
+        readonly property var m: (xmb.host && xmb.host.selectedMeta) ? xmb.host.selectedMeta : ({})
+        readonly property bool shown: !!(m && m.title)
+        visible: opacity > 0.01
+        opacity: shown ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
+        x: xmb.width * 0.58; width: xmb.width * 0.38
+        y: xmb.colTop - xmb.itemGap * 0.4; height: xmb.height * 0.74
+
+        Column {
+            anchors.fill: parent; spacing: xmb.height * 0.016
+            Image {
+                width: parent.width * 0.40; height: width * 1.4
+                source: (meta.m && meta.m.image && xmb.host) ? xmb.host.resolve(meta.m.image) : ""
+                fillMode: Image.PreserveAspectCrop; smooth: true; visible: source != ""
+            }
+            Text {
+                width: parent.width; text: meta.m.title ? meta.m.title : ""
+                color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(15, xmb.height * 0.036)
+                wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+            }
+            Text {
+                width: parent.width; visible: !!meta.m.subtitle; text: meta.m.subtitle ? meta.m.subtitle : ""
+                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.024); elide: Text.ElideRight
+            }
+            Text { // facts (rating / genres / released / …) the addon supplied, a few at most
+                width: parent.width; visible: text !== ""; textFormat: Text.RichText
+                text: {
+                    var f = meta.m.facts; if (!f || !f.length) return ""
+                    var out = []
+                    for (var i = 0; i < f.length && i < 4; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
+                    return out.join("&nbsp;&nbsp;&nbsp;")
+                }
+                color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)
+                wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
+            }
+            Text { // synopsis
+                width: parent.width; visible: !!meta.m.overview; text: meta.m.overview ? meta.m.overview : ""
+                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.0225)
+                wrapMode: Text.WordWrap; maximumLineCount: 7; elide: Text.ElideRight; lineHeight: 1.15
+            }
+            Text {
+                visible: !!meta.m.favorite; text: "★  Favorited"
+                color: "#FFD66B"; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.021)
+            }
+        }
+    }
+
+    // ---- inline Play / Favorite chooser over the selected leaf (host.actionsOpen) -------------------------
+    // Opening a leaf shows this instead of jumping anywhere: Up/Down (or click) pick, Enter fires. The host
+    // (C++) plays / favourites the row at host.actionItem and closes it.
+    Rectangle {
+        id: actions
+        visible: opacity > 0.01
+        opacity: (xmb.host && xmb.host.actionsOpen) ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: 130 } }
+        z: 50
+        width: xmb.width * 0.24; height: xmb.height * 0.19
+        x: xmb.crossX + xmb.width * 0.05
+        y: xmb.colTop - xmb.itemGap * 0.5
+        radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
+
+        Column {
+            anchors.centerIn: parent; spacing: parent.height * 0.10; width: parent.width * 0.86
+            Repeater {
+                model: [ { k: 0, label: "▶  Play" },
+                         { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" } ]
+                delegate: Rectangle {
+                    required property var modelData
+                    readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === modelData.k)
+                    width: parent.width; height: actions.height * 0.36; radius: 8
+                    color: sel ? "#3A6FB0" : "#1A222E"
+                    Text {
+                        anchors.centerIn: parent; text: modelData.label
+                        color: "#FFFFFF"; font.bold: sel; font.pixelSize: Math.max(13, xmb.height * 0.03)
+                    }
+                    MouseArea {
+                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                        onClicked: if (xmb.host) { xmb.host.actionIndex = modelData.k; xmb.host.actionChosen(modelData.k) }
+                    }
+                }
             }
         }
     }

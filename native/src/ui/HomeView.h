@@ -60,6 +60,14 @@ public:
     void browseLoadMore();                   // pull the next page (no-op if none / already loading)
     int  browseRestoreIndex() const;         // the browse index of the row we last drilled into (for Back), else 0
 
+    // Triple/XMB theme: live metadata beside the selection + an inline Play/Favorite on a leaf, all without
+    // leaving the themed view. requestThemedMeta() emits themedMetaReady() (a skeleton at once, then the
+    // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
+    void requestThemedMeta(int browseIndex);
+    void playThemedLeaf(int browseIndex);
+    void favoriteThemedLeaf(int browseIndex);
+    bool isThemedLeafFavorite(int browseIndex) const;
+
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
     void searchInBrowse(const QString& query);
@@ -71,6 +79,9 @@ signals:
     // An item that opens a full info page (movie/series/book/comic/…) was activated. The themed host surfaces
     // the classic detail page (it renders here on HomeView, which the themed home otherwise hides).
     void infoPageRequested();
+    // Triple/XMB theme: metadata for the browse-item at `index` (a skeleton first, then enriched). The host
+    // shows it beside the cross. Carries {index,title,subtitle,image,type,overview,facts,favorite,expandable}.
+    void themedMetaReady(int index, const QVariantMap& meta);
 public:
 
     // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast
@@ -156,6 +167,10 @@ private:
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
     void showMeta(const MediaDetail& detail);
     void hideMeta();
+    // Resolve a leaf to a playable/readable source and emit openItem(). Pure (takes all context as args, not
+    // detail-page state), so both the classic detail Play button and the themed inline Play reuse it.
+    void resolvePlay(LoadedAddon* addon, const MediaItem& it, const QString& parentTitle,
+                     const QString& console, const QString& imdbId, const QString& imdbType);
     void styleMetaPanel(bool dark);  // theme the detail card: dark+light-text vs light+dark-text
     void updateChrome();
     void updateStatus();
@@ -230,6 +245,13 @@ private:
         int attempt = 0;              // last ?n= used (0 = best)
     } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
+    // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
+    int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
+    int themedMetaIndex_ = -1;        // the browse index that fetch was for
+    int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
+    MediaItem themedPlayItem_;        // the item that deferred Play is resolving
+    QString themedPlayConsole_;       // its console (ROM core hint), if any
+    LoadedAddon* themedPlayAddon_ = nullptr;
     QLabel* metaTitle_ = nullptr;
     QLabel* metaFacts_ = nullptr;
     QTextBrowser* metaOverview_ = nullptr;
