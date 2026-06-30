@@ -1924,12 +1924,26 @@ void HomeView::goBack()
 void HomeView::doSearch()
 {
     if (stack_.isEmpty()) return;
-    // Search re-runs the base media-type catalog with the query (drops any drill-down). Selected filters on
-    // the base level are kept, so search and filters combine.
+    const QString q = search_->text().trimmed();
+
+    // Searching while drilled into a console scopes the search to THAT console's games (not the whole
+    // catalog): keep the console level and re-run its detail with the query. Clearing the box restores the
+    // full console list. (The addon's getDetail applies the query - e.g. an IGDB name filter.)
+    Level& cur = stack_.last();
+    if (cur.detail && cur.item.type == QStringLiteral("platform"))
+    {
+        cur.query = q;
+        cur.childRow = -1;
+        loadTop();
+        return;
+    }
+
+    // Otherwise, search re-runs the base media-type catalog with the query (drops any drill-down). Selected
+    // filters on the base level are kept, so search and filters combine.
     Level base = stack_.first();
     base.detail = false;
     base.childRow = -1; // a fresh result set -> land on the first item, not the old drill position
-    base.query = search_->text().trimmed();
+    base.query = q;
     stack_.clear();
     stack_.push_back(base);
     loadTop();
@@ -2356,7 +2370,7 @@ void HomeView::issueRequest(bool append)
     loading_ = true;
     status_->setText(append ? tr("Loading more…") : tr("Loading…"));
 
-    pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters)
+    pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters, top.query)
                                : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
 }
 

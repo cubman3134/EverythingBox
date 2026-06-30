@@ -355,6 +355,8 @@ function igdbPlatformGames(platformId, page, f) {
     if (!igdbCreds()) return info("Games", "Set your IGDB (Twitch) client id + secret in Configure… to load games.");
     var where = "where platforms = (" + platformId + ") & cover != null";
     if (f.genre) where += " & genres = (" + parseInt(f.genre, 10) + ")";
+    // Search within this console: a case-insensitive name match, keeping the platform filter.
+    if (f.query) { var q = String(f.query).replace(/["\\]/g, "").replace(/^\s+|\s+$/g, ""); if (q) where += ' & name ~ *"' + q + '"*'; }
     var r = igdbQuery('fields name,cover.image_id,first_release_date,rating; ' + where + '; sort ' + igdbSort(f) + '; ' +
                       'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
     if (!r) return info("Games", "Could not load games for this console.");
@@ -865,7 +867,7 @@ function getCatalog(argJson) {
 function getDetail(argJson) {
     var a = J(argJson) || {};
     var p = a.page || 1;
-    var f = { genre: a.genre || "", sort: a.sort || "" };
+    var f = { genre: a.genre || "", sort: a.sort || "", query: a.query || "" }; // query: search WITHIN this console
     var parts = (a.id || "").split(":");
     if (a.type === "series")   return tmdbSeasons(parts[2]);              // tmdb:tv:{id} (all seasons)
     if (a.type === "season")   return tmdbEpisodes(parts[2], parts[3]);   // tmdb:season:{show}:{n} (all episodes)
