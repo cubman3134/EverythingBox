@@ -1,0 +1,25 @@
+{
+  "name": "XMB",
+  "author": "My Media Vault",
+  "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.5 },
+  "views": {
+    "home": {
+      "background": { "color": "#0A1326" },
+      "elements": [
+        { "type": "wave", "id": "wave", "pos": [0, 0.30], "size": [1, 0.70], "origin": [0, 0], "zIndex": 0,
+          "color": "#3E6FB8", "bands": 3, "segments": 44, "amplitude": 0.05, "speed": 1.0 },
+
+        { "type": "datetime", "id": "clock", "pos": [0.97, 0.08], "size": [0.32, 0.05], "origin": [1, 0.5],
+          "format": "ddd d MMM    hh:mm", "color": "#E8EEF8", "fontSize": 0.028, "align": "right", "opacity": 0.85 },
+
+        { "type": "xmb", "id": "cross", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 2,
+          "color": "#FFFFFF", "subColor": "#C6CEDC", "descColor": "#9AA8C4",
+          "crossX": 0.22, "crossY": 0.32, "catSpacing": 0.135, "itemSpacing": 0.082, "iconSize": 0.12 },
+
+        { "type": "helpsystem", "id": "help", "pos": [0.5, 0.96], "size": [1, 0.05], "origin": [0.5, 0.5],
+          "color": "#E8EEF8", "fontSize": 0.022,
+          "entries": [ { "button": "←→", "label": "Category" }, { "button": "↑↓", "label": "Items" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    }
+  }
+}

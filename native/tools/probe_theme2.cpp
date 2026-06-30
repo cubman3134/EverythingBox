@@ -56,6 +56,15 @@ int main(int argc, char** argv)
 
     const int rw = qEnvironmentVariableIntValue("PROBE_W"), rh = qEnvironmentVariableIntValue("PROBE_H");
     win->resize(rw > 0 ? rw : 1280, rh > 0 ? rh : 720); // PROBE_W/H override -> verify small-size scaling
+    // XMB themes read `categories` (the horizontal axis) off the root; feed a stand-in set so it renders.
+    {
+        const char* catNames[] = { "Game", "Video", "Music", "Photo", "TV", "Live", "Books", "Settings" };
+        const char* catCols[]  = { "#7A5BD0", "#C0392B", "#8E44AD", "#3E8E7E", "#2980B9", "#E23B3B", "#E07A2E", "#5B6470" };
+        QVariantList cats;
+        for (int i = 0; i < 8; ++i) cats << QVariantMap{ { "title", catNames[i] }, { "accent", catCols[i] } };
+        root->setProperty("categories", cats);
+        root->setProperty("catIndex", 0);
+    }
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
     if (argc >= 5) root->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
     // PROBE_VIEW selects which theme view to render (e.g. "detail") - verifies per-view theming.
@@ -63,7 +72,8 @@ int main(int argc, char** argv)
         root->setProperty("currentView", qEnvironmentVariable("PROBE_VIEW"));
 
     win->show();
-    { QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec(); }
+    const int waitMs = qEnvironmentVariableIntValue("PROBE_WAIT") > 0 ? qEnvironmentVariableIntValue("PROBE_WAIT") : 500;
+    { QEventLoop loop; QTimer::singleShot(waitMs, &loop, &QEventLoop::quit); loop.exec(); }
 
     const QImage img = win->grabWindow();
     if (img.isNull() || !img.save(outPng)) { std::fprintf(stderr, "grab/save failed\n"); return 1; }

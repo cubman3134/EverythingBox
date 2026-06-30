@@ -7,6 +7,7 @@
 #include <QQmlContext>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QFile>
 #include <QDir>
 #include <QUrl>
@@ -39,6 +40,7 @@ void ThemeBridge::search()    { if (onSearch) onSearch(); }
 void ThemeBridge::nearEnd()   { if (onNearEnd) onNearEnd(); }
 void ThemeBridge::navigate()  { playEffect(sndNavigate); }
 void ThemeBridge::details()   { playEffect(sndDetails); }
+void ThemeBridge::category()  { if (onCategory) onCategory(); }
 
 namespace ThemeEngine
 {
@@ -74,7 +76,8 @@ QString themeDisplayName(const QString& folder)
 QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                    QWidget* parent, std::function<void(int)> onActivated,
                    std::function<void()> onBack, std::function<void()> onCycle,
-                   std::function<void()> onSearch, std::function<void()> onNearEnd)
+                   std::function<void()> onSearch, std::function<void()> onNearEnd,
+                   std::function<void()> onCategory)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -106,6 +109,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onCycle = std::move(onCycle);
         bridge->onSearch = std::move(onSearch);
         bridge->onNearEnd = std::move(onNearEnd);
+        bridge->onCategory = std::move(onCategory);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -129,6 +133,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(nearEnd()), bridge, SLOT(nearEnd()));
         QObject::connect(root, SIGNAL(navigate()), bridge, SLOT(navigate()));
         QObject::connect(root, SIGNAL(details()), bridge, SLOT(details()));
+        QObject::connect(root, SIGNAL(categoryChanged()), bridge, SLOT(category()));
     }
 
     QWidget* container = QWidget::createWindowContainer(qv, parent);
@@ -143,6 +148,19 @@ QQuickItem* rootItem(QWidget* view)
     QObject* o = view->property("mmvQuickView").value<QObject*>();
     QQuickView* qv = qobject_cast<QQuickView*>(o);
     return qv ? qv->rootObject() : nullptr;
+}
+
+bool homeIsXmb(const QString& themeDir)
+{
+    QFile f(themeDir + QStringLiteral("/theme.json"));
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QJsonObject root = QJsonDocument::fromJson(f.readAll()).object();
+    const QJsonArray els = root.value(QStringLiteral("views")).toObject()
+                               .value(QStringLiteral("home")).toObject()
+                               .value(QStringLiteral("elements")).toArray();
+    for (const QJsonValue& e : els)
+        if (e.toObject().value(QStringLiteral("type")).toString() == QStringLiteral("xmb")) return true;
+    return false;
 }
 
 } // namespace ThemeEngine

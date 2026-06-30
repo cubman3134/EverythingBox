@@ -311,19 +311,25 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         auto* sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")), this);
         connect(sc, &QShortcut::activated, this, [this] { openAppearance(); });
 
-        // Keep the themed browse view mirroring HomeView as it loads / drills / pages. On a page append keep
-        // the selection where it is (the user scrolled down to trigger it); on a fresh set reset to the top.
+        // Keep the themed browse view - or the XMB home's column - mirroring HomeView as it loads / drills /
+        // pages. On a page append keep the selection where it is (the user scrolled to trigger it); on a fresh
+        // set reset to the top.
         connect(home_, &HomeView::browseItemsChanged, this, [this](bool appended) {
-            if (themedBrowse_ && stack_->currentWidget() == themedBrowse_)
-                if (QQuickItem* r = ThemeEngine::rootItem(themedBrowse_))
-                {
-                    const int keep = appended ? r->property("currentIndex").toInt() : 0;
-                    r->setProperty("items", home_->browseItems());
-                    r->setProperty("currentIndex", keep);
-                    r->setProperty("currentView", QStringLiteral("browse"));
-                    QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
-                    r->setProperty("system", sys);
-                }
+            QWidget* tgt = nullptr;
+            if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
+            else if (themedHome_ && themedHomeIsXmb_ && stack_->currentWidget() == themedHome_) tgt = themedHome_;
+            if (!tgt) return;
+            QQuickItem* r = ThemeEngine::rootItem(tgt);
+            if (!r) return;
+            const int keep = appended ? r->property("currentIndex").toInt() : 0;
+            r->setProperty("items", home_->browseItems());
+            r->setProperty("currentIndex", keep);
+            if (tgt == themedBrowse_) // the XMB home keeps its "home" view + categories; only browse swaps view/title
+            {
+                r->setProperty("currentView", QStringLiteral("browse"));
+                QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
+                r->setProperty("system", sys);
+            }
         });
     }
 #endif
@@ -1484,6 +1490,15 @@ QString MainWindow::promptThemedSearch(const QString& scope)
 // T cycles themes. Rebuilt each time so it reflects the current catalogs + theme.
 void MainWindow::showThemedHome()
 {
+    // An XMB theme drives the home as a two-axis cross (categories + live column) instead of a carousel/grid.
+    {
+        const QStringList themes = ThemeEngine::availableThemes();
+        QString tn = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        if (!themes.contains(tn)) tn = themes.value(0, QStringLiteral("Default"));
+        if (ThemeEngine::homeIsXmb(ThemeEngine::themesRoot() + QStringLiteral("/") + tn)) { showThemedXmb(); return; }
+    }
+    themedHomeIsXmb_ = false;
+
     QVariantList items = home_->systemItems();
     QStringList navKeys;
     for (const QVariant& v : items) navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
@@ -1548,6 +1563,91 @@ void MainWindow::showThemedHome()
     }
     themeWatcher_->removePaths(themeWatcher_->files());
     const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName + QStringLiteral("/theme.json");
+    if (QFile::exists(themeFile)) themeWatcher_->addPath(themeFile);
+}
+
+// Themed PS3-style XMB home. The horizontal axis is the media-type categories (+ a synthetic Settings), the
+// vertical axis is the highlighted category's live items - mirrored from HomeView, so moving across categories
+// reloads the column and Enter opens/drills exactly like the classic browser. Stays on one screen (no drill to
+// a separate browse view): the cross itself shows the column.
+void MainWindow::showThemedXmb()
+{
+    themedHomeIsXmb_ = true;
+
+    QVariantList cats = home_->systemItems();
+    themedXmbNavKeys_.clear();
+    for (const QVariant& v : cats) themedXmbNavKeys_ << v.toMap().value(QStringLiteral("navKey")).toString();
+    cats << QVariantMap{ { QStringLiteral("title"), tr("Settings") }, { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+    themedXmbNavKeys_ << QString();                 // the synthetic Settings category (no catalog)
+    const int settingsIdx = int(cats.size()) - 1;
+
+    const QStringList themes = ThemeEngine::availableThemes();
+    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
+    const int startCat = qBound(0, themedHomeIndex_, settingsIdx);
+
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+
+    auto onActivated = [this, settingsIdx](int itemIdx) {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        const int cat = r ? r->property("catIndex").toInt() : 0;
+        if (cat == settingsIdx) { openAppearance(); return; }
+        home_->browseActivate(itemIdx); // open / drill -> browseItemsChanged refreshes the column
+    };
+    auto onBack  = [this] { home_->browseBack(); }; // up a level if drilled; at the category root the cross stays
+    auto onCycle = [this, themes, themeName] {
+        if (themes.isEmpty()) return;
+        const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
+        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        showThemedHome();
+    };
+    auto onSearch = [this] {
+        const QString q = promptThemedSearch(home_->browseTitle());
+        if (!q.isNull()) home_->searchInBrowse(q);
+    };
+    auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
+    auto loadCat = [this, settingsIdx](int cat) {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (cat >= 0 && cat < themedXmbNavKeys_.size() && !themedXmbNavKeys_[cat].isEmpty())
+            home_->activateNav(themedXmbNavKeys_[cat]); // its items land via browseItemsChanged
+        else if (r) r->setProperty("items", QVariantList()); // Settings: empty column
+    };
+    auto onCategory = [this, loadCat] {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (!r) return;
+        themedHomeIndex_ = r->property("catIndex").toInt();
+        loadCat(themedHomeIndex_);
+    };
+
+    QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
+                                        onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory);
+    if (QQuickItem* r = ThemeEngine::rootItem(w))
+    {
+        r->setProperty("categories", cats);
+        r->setProperty("catIndex", startCat);
+    }
+    QWidget* old = themedHome_;
+    themedHome_ = w;
+    stack_->addWidget(w);
+    stack_->setCurrentWidget(w);
+    w->setFocus();
+    if (old) { stack_->removeWidget(old); old->deleteLater(); }
+
+    loadCat(startCat); // populate the starting column now (themedHome_ is current, so the result lands here)
+
+    if (!themeWatcher_)
+    {
+        themeWatcher_ = new QFileSystemWatcher(this);
+        connect(themeWatcher_, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
+            if (themedHomeEnabled() && stack_->currentWidget() == themedHome_)
+                QTimer::singleShot(150, this, [this] {
+                    if (themedHomeEnabled() && stack_->currentWidget() == themedHome_) showThemedHome();
+                });
+        });
+    }
+    themeWatcher_->removePaths(themeWatcher_->files());
+    const QString themeFile = themeDir + QStringLiteral("/theme.json");
     if (QFile::exists(themeFile)) themeWatcher_->addPath(themeFile);
 }
 

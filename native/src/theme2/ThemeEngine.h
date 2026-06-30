@@ -26,6 +26,7 @@ public:
     std::function<void()> onCycle;
     std::function<void()> onSearch;
     std::function<void()> onNearEnd;
+    std::function<void()> onCategory; // XMB: the category cursor moved (host loads that column)
 
     // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
     QSoundEffect* sndNavigate = nullptr; // selection moved
@@ -41,6 +42,7 @@ public slots:
     void nearEnd();
     void navigate();  // play the navigation sound
     void details();   // play the open-details sound
+    void category();  // XMB: category cursor moved
 };
 
 namespace ThemeEngine
@@ -54,10 +56,14 @@ namespace ThemeEngine
                        std::function<void()> onBack = {},
                        std::function<void()> onCycle = {},
                        std::function<void()> onSearch = {},
-                       std::function<void()> onNearEnd = {});
+                       std::function<void()> onNearEnd = {},
+                       std::function<void()> onCategory = {});
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);
+
+    // True if the theme's `home` view contains an `xmb` element (so the host drives it as an XMB cross).
+    bool homeIsXmb(const QString& themeDir);
 
     QString themesRoot();              // <app>/themes2
     QStringList availableThemes();     // subdirectories of themesRoot that contain a theme.json

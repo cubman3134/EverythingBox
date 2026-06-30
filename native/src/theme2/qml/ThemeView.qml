@@ -30,6 +30,25 @@ Item {
     signal nearEnd()               // selection is within a few items of the end: the host pulls the next page
     signal navigate()              // the selection actually moved (for the host's navigation sound)
     signal details()               // entered the detail view (for the host's "open details" sound)
+    signal categoryChanged()       // XMB: moved to another category (host loads its column); read catIndex
+
+    // XMB (cross) state. categories = the horizontal axis; items = the active category's column; catIndex /
+    // currentIndex are the two cursors. xmbMode is on when the active view contains an `xmb` element, which
+    // flips Left/Right to category navigation and Up/Down to moving within the column.
+    property var categories: []
+    property int catIndex: 0
+    readonly property bool xmbMode: {
+        if (view && view.elements)
+            for (var i = 0; i < view.elements.length; i++)
+                if (view.elements[i].type === "xmb") return true
+        return false
+    }
+    function stepCat(d) {
+        var n = categories ? categories.length : 0
+        if (n <= 0) return
+        var ni = Math.max(0, Math.min(n - 1, catIndex + d))
+        if (ni !== catIndex) { catIndex = ni; navigate(); categoryChanged() }
+    }
 
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
@@ -54,7 +73,14 @@ Item {
         if (ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
     }
     Keys.onPressed: function(e) {
-        if (e.key === Qt.Key_Right)                              { step(1);          e.accepted = true }
+        // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
+        if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
+            stepCat(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
+        }
+        else if (xmbMode && (e.key === Qt.Key_Down || e.key === Qt.Key_Up)) {
+            step(e.key === Qt.Key_Down ? 1 : -1); e.accepted = true
+        }
+        else if (e.key === Qt.Key_Right)                        { step(1);          e.accepted = true }
         else if (e.key === Qt.Key_Left)                         { step(-1);         e.accepted = true }
         else if (e.key === Qt.Key_Down)                         { step(gridCols);   e.accepted = true }
         else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
@@ -88,7 +114,7 @@ Item {
     readonly property var elementFiles: ({
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
-        "particles": "Particles"
+        "particles": "Particles", "xmb": "Xmb", "wave": "Wave"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
