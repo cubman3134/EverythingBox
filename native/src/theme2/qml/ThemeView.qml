@@ -26,6 +26,17 @@ Item {
     signal activated(int index)    // Enter on the selected row (host decides what to open)
     signal back()                  // Esc / Back at the root (home) view
     signal cycleTheme()            // T: next theme (the host swaps the theme file)
+    signal searchRequested()       // "/" or search key: the host prompts for a query and runs it
+    signal nearEnd()               // selection is within a few items of the end: the host pulls the next page
+
+    // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
+    // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
+    property int lastNearEnd: -1
+    onItemsChanged: lastNearEnd = -1 // a new/grown set: allow nearEnd() to fire again
+    onCurrentIndexChanged: {
+        var n = items ? items.length : 0
+        if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
+    }
 
     // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
     property int gridCols: {
@@ -55,6 +66,9 @@ Item {
             e.accepted = true
         }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
+        // "/" (or the dedicated Search key) asks the host to prompt for a query. Not in the detail view.
+        else if ((e.key === Qt.Key_Slash || e.key === Qt.Key_Search) && currentView !== "detail")
+                                                                { searchRequested(); e.accepted = true }
     }
 
     // The data context bindings resolve against. Recomputed when the selection changes.
@@ -81,42 +95,55 @@ Item {
         return base + "/" + p
     }
 
-    // --- background -----------------------------------------------------------------------------------
-    Rectangle { anchors.fill: parent; color: T.val(root.view ? root.view.background : null, "color", "#0F1216") }
-    Image {
+    // The whole view fades in on first appear and re-fades whenever the active view switches (home<->browse
+    // <->detail), so transitions read smoothly. Software-backend friendly (just an opacity animation).
+    Item {
+        id: content
         anchors.fill: parent
-        source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))
-        visible: source != "" && status === Image.Ready
-        fillMode: Image.PreserveAspectCrop
-    }
-    Rectangle { anchors.fill: parent; color: "black"; opacity: Number(T.val(root.view ? root.view.background : null, "dim", 0)) }
+        opacity: 0
+        Component.onCompleted: fade.restart()
+        NumberAnimation { id: fade; target: content; property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
 
-    // --- elements -------------------------------------------------------------------------------------
-    Repeater {
-        model: (root.view && root.view.elements) ? root.view.elements : []
-        delegate: Item {
-            id: cell
-            required property var modelData
-            property var el: modelData
-            property var p: el.pos || [0, 0]
-            property var s: el.size || [0.1, 0.1]
-            property var o: el.origin || [0, 0]
-            width:  Number(s[0]) * root.width
-            height: Number(s[1]) * root.height
-            x: Number(p[0]) * root.width  - Number(o[0]) * width
-            y: Number(p[1]) * root.height - Number(o[1]) * height
-            z: Number(el.zIndex || 0)
-            opacity: el.opacity !== undefined ? Number(el.opacity) : 1
-            Loader {
-                anchors.fill: parent
-                source: root.urlFor(cell.el.type)
-                onLoaded: {
-                    if (!item) return
-                    item.el = cell.el
-                    item.host = root
-                    item.ctx = Qt.binding(function() { return root.dataCtx })
+        // --- background -------------------------------------------------------------------------------
+        Rectangle { anchors.fill: parent; color: T.val(root.view ? root.view.background : null, "color", "#0F1216") }
+        Image {
+            anchors.fill: parent
+            source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))
+            visible: source != "" && status === Image.Ready
+            fillMode: Image.PreserveAspectCrop
+        }
+        Rectangle { anchors.fill: parent; color: "black"; opacity: Number(T.val(root.view ? root.view.background : null, "dim", 0)) }
+
+        // --- elements ---------------------------------------------------------------------------------
+        Repeater {
+            model: (root.view && root.view.elements) ? root.view.elements : []
+            delegate: Item {
+                id: cell
+                required property var modelData
+                property var el: modelData
+                property var p: el.pos || [0, 0]
+                property var s: el.size || [0.1, 0.1]
+                property var o: el.origin || [0, 0]
+                width:  Number(s[0]) * root.width
+                height: Number(s[1]) * root.height
+                x: Number(p[0]) * root.width  - Number(o[0]) * width
+                y: Number(p[1]) * root.height - Number(o[1]) * height
+                z: Number(el.zIndex || 0)
+                opacity: el.opacity !== undefined ? Number(el.opacity) : 1
+                Loader {
+                    anchors.fill: parent
+                    source: root.urlFor(cell.el.type)
+                    onLoaded: {
+                        if (!item) return
+                        item.el = cell.el
+                        item.host = root
+                        item.ctx = Qt.binding(function() { return root.dataCtx })
+                    }
                 }
             }
         }
     }
+
+    // Re-run the fade when the active view changes (e.g. opening/closing the detail view).
+    onCurrentViewChanged: fade.restart()
 }

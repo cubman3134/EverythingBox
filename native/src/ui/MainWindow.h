@@ -168,8 +168,12 @@ private:
     void showThemedHome();
     void showThemedBrowse(); // themed gamelist of the current catalog level (driven by HomeView)
     void openAppearance();
+    // Modal prompt for a themed-mode search query (`scope` names what's being searched). Returns a null
+    // QString if the user cancels (empty-but-non-null clears the search).
+    QString promptThemedSearch(const QString& scope);
     QWidget* themedHome_ = nullptr;
     QWidget* themedBrowse_ = nullptr;
+    int themedHomeIndex_ = 0; // remember the highlighted system, so returning from a catalog lands back on it
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

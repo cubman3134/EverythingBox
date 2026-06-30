@@ -3,8 +3,11 @@
 // Usage: probe_theme2 <themeDir> <out.png> [sampleImage] [startIndex]
 #include "ThemeEngine.h"
 #include <QApplication>
+#include <QWidget>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QQuickView>
+#include <QQmlError>
 #include <QEventLoop>
 #include <QTimer>
 #include <QImage>
@@ -41,7 +44,13 @@ int main(int argc, char** argv)
 
     QWidget* w = ThemeEngine::buildView(themeDir, items, system, nullptr);
     QQuickItem* root = ThemeEngine::rootItem(w);
-    if (!root) { std::fprintf(stderr, "no root item (QML failed to load)\n"); return 1; }
+    if (!root)
+    {
+        if (auto* qv = qobject_cast<QQuickView*>(w->property("mmvQuickView").value<QObject*>()))
+            for (const QQmlError& e : qv->errors()) std::fprintf(stderr, "QML: %s\n", e.toString().toUtf8().constData());
+        std::fprintf(stderr, "no root item (QML failed to load)\n");
+        return 1;
+    }
     QQuickWindow* win = root->window(); // the QQuickView embedded by buildView
     if (!win) { std::fprintf(stderr, "no QQuickWindow for root\n"); return 1; }
 

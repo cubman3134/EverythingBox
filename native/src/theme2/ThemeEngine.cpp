@@ -15,6 +15,8 @@
 void ThemeBridge::activated() { if (onActivated && root) onActivated(root->property("currentIndex").toInt()); }
 void ThemeBridge::back()      { if (onBack) onBack(); }
 void ThemeBridge::cycle()     { if (onCycle) onCycle(); }
+void ThemeBridge::search()    { if (onSearch) onSearch(); }
+void ThemeBridge::nearEnd()   { if (onNearEnd) onNearEnd(); }
 
 namespace ThemeEngine
 {
@@ -49,7 +51,8 @@ QString themeDisplayName(const QString& folder)
 
 QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                    QWidget* parent, std::function<void(int)> onActivated,
-                   std::function<void()> onBack, std::function<void()> onCycle)
+                   std::function<void()> onBack, std::function<void()> onCycle,
+                   std::function<void()> onSearch, std::function<void()> onNearEnd)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -79,9 +82,13 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onActivated = std::move(onActivated);
         bridge->onBack = std::move(onBack);
         bridge->onCycle = std::move(onCycle);
+        bridge->onSearch = std::move(onSearch);
+        bridge->onNearEnd = std::move(onNearEnd);
         QObject::connect(root, SIGNAL(activated(int)), bridge, SLOT(activated()));
         QObject::connect(root, SIGNAL(back()), bridge, SLOT(back()));
         QObject::connect(root, SIGNAL(cycleTheme()), bridge, SLOT(cycle()));
+        QObject::connect(root, SIGNAL(searchRequested()), bridge, SLOT(search()));
+        QObject::connect(root, SIGNAL(nearEnd()), bridge, SLOT(nearEnd()));
     }
 
     QWidget* container = QWidget::createWindowContainer(qv, parent);

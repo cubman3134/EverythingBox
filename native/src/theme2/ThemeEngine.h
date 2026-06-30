@@ -23,10 +23,14 @@ public:
     std::function<void(int)> onActivated;
     std::function<void()> onBack;
     std::function<void()> onCycle;
+    std::function<void()> onSearch;
+    std::function<void()> onNearEnd;
 public slots:
     void activated();
     void back();
     void cycle();
+    void search();
+    void nearEnd();
 };
 
 namespace ThemeEngine
@@ -38,7 +42,9 @@ namespace ThemeEngine
                        QWidget* parent = nullptr,
                        std::function<void(int)> onActivated = {},
                        std::function<void()> onBack = {},
-                       std::function<void()> onCycle = {});
+                       std::function<void()> onCycle = {},
+                       std::function<void()> onSearch = {},
+                       std::function<void()> onNearEnd = {});
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);

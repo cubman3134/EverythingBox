@@ -91,6 +91,8 @@
 #include <QLabel>
 #include <QFrame>
 #include <QFileSystemWatcher>
+#include <QInputDialog>
+#include <QLineEdit>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -309,13 +311,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         auto* sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")), this);
         connect(sc, &QShortcut::activated, this, [this] { openAppearance(); });
 
-        // Keep the themed browse view mirroring HomeView as it loads / drills / pages.
-        connect(home_, &HomeView::browseItemsChanged, this, [this] {
+        // Keep the themed browse view mirroring HomeView as it loads / drills / pages. On a page append keep
+        // the selection where it is (the user scrolled down to trigger it); on a fresh set reset to the top.
+        connect(home_, &HomeView::browseItemsChanged, this, [this](bool appended) {
             if (themedBrowse_ && stack_->currentWidget() == themedBrowse_)
                 if (QQuickItem* r = ThemeEngine::rootItem(themedBrowse_))
                 {
+                    const int keep = appended ? r->property("currentIndex").toInt() : 0;
                     r->setProperty("items", home_->browseItems());
-                    r->setProperty("currentIndex", 0);
+                    r->setProperty("currentIndex", keep);
                     r->setProperty("currentView", QStringLiteral("browse"));
                     QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
                     r->setProperty("system", sys);
@@ -1465,6 +1469,16 @@ bool MainWindow::themedHomeEnabled() const
 }
 
 #ifdef MMV_HAVE_QML
+// Modal text prompt for a themed-mode search. A plain Qt dialog (top-level window) sits cleanly above the
+// themed QQuickView. Null return = cancelled; "" = user cleared the box (restores the full list).
+QString MainWindow::promptThemedSearch(const QString& scope)
+{
+    bool ok = false;
+    const QString label = scope.isEmpty() ? tr("Search") : tr("Search %1").arg(scope);
+    const QString q = QInputDialog::getText(this, tr("Search"), label, QLineEdit::Normal, QString(), &ok);
+    return ok ? q.trimmed() : QString(); // QString() is null -> "cancelled"
+}
+
 // Build + show the themed "system view": the media-type catalogs as a themed carousel/grid, plus an
 // Appearance tile. Activating a catalog enters the classic browser for it; Appearance / Esc opens settings;
 // T cycles themes. Rebuilt each time so it reflects the current catalogs + theme.
@@ -1487,7 +1501,7 @@ void MainWindow::showThemedHome()
     auto onActivated = [this, navKeys, appearanceIdx](int idx) {
         if (idx == appearanceIdx) { openAppearance(); return; }
         if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
-        { home_->activateNav(navKeys[idx]); showThemedBrowse(); } // themed gamelist of the catalog
+        { themedHomeIndex_ = idx; home_->activateNav(navKeys[idx]); showThemedBrowse(); } // remember + open catalog
     };
     auto onBack  = [this] { openAppearance(); }; // Esc at the root -> settings (a reliable way back out)
     auto onCycle = [this, themes, themeName] {
@@ -1496,9 +1510,24 @@ void MainWindow::showThemedHome()
         store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
         showThemedHome();
     };
+    // "/" on the highlighted catalog: prompt for a query, open that catalog and search within it.
+    auto onSearch = [this, navKeys, items, appearanceIdx] {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        const int idx = r ? r->property("currentIndex").toInt() : -1;
+        if (idx < 0 || idx == appearanceIdx || idx >= navKeys.size() || navKeys[idx].isEmpty()) return;
+        const QString name = items.value(idx).toMap().value(QStringLiteral("title")).toString();
+        const QString q = promptThemedSearch(name);
+        if (q.isNull()) return; // cancelled
+        home_->activateNav(navKeys[idx]);
+        home_->searchInBrowse(q);
+        showThemedBrowse();
+    };
 
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                        items, system, this, onActivated, onBack, onCycle);
+                                        items, system, this, onActivated, onBack, onCycle, onSearch);
+    // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
+    if (QQuickItem* r = ThemeEngine::rootItem(w))
+        r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
     QWidget* old = themedHome_;
     themedHome_ = w;
     stack_->addWidget(w);
@@ -1540,9 +1569,17 @@ void MainWindow::showThemedBrowse()
         store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
         showThemedBrowse();
     };
+    // "/" searches within the current catalog/console; the result refreshes via browseItemsChanged.
+    auto onSearch = [this] {
+        const QString q = promptThemedSearch(home_->browseTitle());
+        if (!q.isNull()) home_->searchInBrowse(q);
+    };
+    // Selection neared the end -> pull the next page (if any). browseItemsChanged appends + keeps selection.
+    auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
 
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                        home_->browseItems(), system, this, onActivated, onBack, onCycle);
+                                        home_->browseItems(), system, this, onActivated, onBack, onCycle,
+                                        onSearch, onNearEnd);
     if (QQuickItem* r = ThemeEngine::rootItem(w)) r->setProperty("currentView", QStringLiteral("browse"));
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;

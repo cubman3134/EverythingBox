@@ -1379,6 +1379,16 @@ bool HomeView::browseBack()
     return false; // at the catalog root -> the host returns to the themed home
 }
 
+bool HomeView::browseHasMore() const { return hasMore_ && !loading_; }
+
+void HomeView::browseLoadMore() { loadMore(); } // pull the next page; onCatalogReady fires browseItemsChanged
+
+void HomeView::searchInBrowse(const QString& query)
+{
+    if (search_) search_->setText(query); // doSearch() reads the query from the box
+    doSearch();                            // scoped to the current console, else re-runs the base catalog
+}
+
 void HomeView::selectRecent()
 {
     recentView_ = true;
@@ -2563,7 +2573,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         searchEditing_ = true; // stay in type mode (FocusOut had flipped it off)
     }
 
-    emit browseItemsChanged(); // let a themed browse view mirror the new items
+    emit browseItemsChanged(append); // let a themed browse view mirror the new items (append -> keep selection)
 }
 
 // Scroll to / select the row we last drilled into (stack childRow). If it hasn't been loaded yet (it was on a

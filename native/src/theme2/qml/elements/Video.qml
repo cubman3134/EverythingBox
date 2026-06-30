@@ -1,6 +1,8 @@
-// Video element: in the themed layout this is where a preview video plays. Real playback is wired when the
-// engine is hosted inside the app (it has QtMultimedia); here it shows the bound poster with a play badge so
-// themers can place and size it. Themeable corner radius.
+// Video / preview element. True per-item trailer playback would need (a) a preview-video source per item -
+// our catalog/addon data has only posters, no clips - and (b) a GPU render path; the themed view runs on Qt
+// Quick's software backend so it can coexist with the app's libmpv video widget, and QML VideoOutput doesn't
+// render reliably there. So this gives the "live preview" feel that DOES work in software: a slow Ken Burns
+// (zoom + drift) loop over the bound poster, with a play badge. Drops to a static poster if there's no image.
 import QtQuick
 import "../Theme.js" as T
 
@@ -13,14 +15,36 @@ Item {
         anchors.fill: parent
         radius: Number(T.val(el, "radius", 8))
         color: "#0C0E12"
-        clip: true
+        clip: true // keep the zoomed/panned image inside the rounded frame
+
         Image {
+            id: poster
             anchors.fill: parent
             source: host ? host.resolve(T.sourceOf(el, ctx)) : ""
             fillMode: Image.PreserveAspectCrop
             visible: status === Image.Ready
-            opacity: 0.85
+            opacity: 0.9
+            transformOrigin: Item.Center
+
+            // Gentle, continuous motion so a still poster reads as a "preview". Runs only once the image is
+            // ready; the alternating pan + zoom loop indefinitely and restart with each new selection source.
+            // panX has no initializer - the SequentialAnimation below is its value source (can't have both).
+            property real panX
+            transform: Translate { x: poster.panX }
+            SequentialAnimation on scale {
+                running: poster.status === Image.Ready
+                loops: Animation.Infinite
+                NumberAnimation { from: 1.0; to: 1.12; duration: 5000; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 1.12; to: 1.0; duration: 5000; easing.type: Easing.InOutSine }
+            }
+            SequentialAnimation on panX {
+                running: poster.status === Image.Ready
+                loops: Animation.Infinite
+                NumberAnimation { from: -0.04 * poster.width; to: 0.04 * poster.width; duration: 7000; easing.type: Easing.InOutSine }
+                NumberAnimation { from: 0.04 * poster.width; to: -0.04 * poster.width; duration: 7000; easing.type: Easing.InOutSine }
+            }
         }
+
         // Play badge (drawn, so it needs no font glyph).
         Rectangle {
             anchors.centerIn: parent

@@ -158,9 +158,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
 
     # QML theme engine probe: renders a theme dir through ThemeEngine + the qrc-embedded QML (the app path).
+    # Use qt_add_resources (not AUTORCC) for the same reasons as the app: it both reliably registers the
+    # resource in the exe and re-runs rcc when the listed .qml files change (AUTORCC only tracks the .qrc).
     if(MMV_HAVE_QML)
-        add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp resources/theme2.qrc)
-        set_target_properties(probe_theme2 PROPERTIES AUTORCC ON)
+        qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
+        add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp ${MMV_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2)
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick)
     endif()
