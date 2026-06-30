@@ -845,7 +845,7 @@ void HomeView::refresh()
     applyThemeFont();
     // A theme with a dark background image (low dim) wants a dark, light-text detail card so it stays
     // readable AND fits the theme; light themes get a light, dark-text card.
-    styleMetaPanel(!g_theme.background.isEmpty() && g_theme.backgroundDim < 0.30);
+    styleMetaPanel(g_theme.dark || (!g_theme.background.isEmpty() && g_theme.backgroundDim < 0.30));
 
     // Reflect the active profile in the top-bar button: the avatar as an icon + the name as text.
     if (profileBtn_)
@@ -1150,15 +1150,17 @@ void HomeView::styleTypeButtons(const QString& activeKey)
     const QColor activeColor = g_theme.accentFollowsTab ? tabActive : g_theme.accent.lighter(125);
     // The catalogue background is a light tint of the active tab's colour; keep item text readable on it.
     // When the theme has a background image, the grid goes semi-transparent so the image shows behind it.
-    const QColor tint = lightTint(activeColor);
+    const bool dark = g_theme.dark;
+    const QColor tint = dark ? QColor(0x10, 0x13, 0x1A) : lightTint(activeColor); // dark surface, or a light tint
     const bool hasBg = !g_theme.background.isEmpty();
     const QString gridBg = hasBg
         ? QString("rgba(%1,%2,%3,170)").arg(tint.red()).arg(tint.green()).arg(tint.blue())
         : tint.name();
     grid_->setStyleSheet(QString(
-        "QListWidget{background:%1;color:#1b1b1b;border:none;}"
-        "QListWidget::item:selected{background:%2;color:white;}")
-        .arg(gridBg, activeColor.name()));
+        "QListWidget{background:%1;color:%2;border:none;}"
+        "QListWidget::item:selected{background:%3;color:white;}")
+        .arg(gridBg, dark ? QStringLiteral("#e6e9ef") : QStringLiteral("#1b1b1b"),
+             dark ? QColor(0x32, 0x3A, 0x48).name() : activeColor.name()));
 
     // The chrome buttons (Back, profile, Settings) take the accent colour; the search box stays light.
     themeColor_ = activeColor;
@@ -1167,18 +1169,18 @@ void HomeView::styleTypeButtons(const QString& activeKey)
     if (profileBtn_)  profileBtn_->setStyleSheet(cb);
     if (settingsBtn_) settingsBtn_->setStyleSheet(cb);
     if (search_)      search_->setStyleSheet(chromeEditStyle(activeColor, g_theme.cornerRadius));
-    if (status_)      status_->setStyleSheet(QStringLiteral("color:#2a2c30;"));
+    if (status_)      status_->setStyleSheet(dark ? QStringLiteral("color:#aeb4c2;") : QStringLiteral("color:#2a2c30;"));
     // Back the whole top row + the tabs' empty stretch with the accent so no seam shows the light tint.
     if (topBar_)      topBar_->setStyleSheet(QString("#topBar{background:%1;}").arg(activeColor.name()));
     if (typeHost_)    typeHost_->setStyleSheet(QString("#typeHost{background:%1;}").arg(activeColor.name()));
 
-    // The whole home surface goes light (no dark anywhere): set the palette so child text is dark too.
+    // Set the palette so child text matches the surface (dark text on a light theme, light text on the dark one).
     QPalette pal = palette();
     pal.setColor(QPalette::Window, tint);
-    pal.setColor(QPalette::Base, QColor(0xfb, 0xfb, 0xfd));
-    pal.setColor(QPalette::WindowText, QColor(0x22, 0x24, 0x28));
-    pal.setColor(QPalette::Text, QColor(0x1b, 0x1b, 0x1b));
-    pal.setColor(QPalette::Highlight, activeColor);
+    pal.setColor(QPalette::Base, dark ? QColor(0x16, 0x1A, 0x22) : QColor(0xfb, 0xfb, 0xfd));
+    pal.setColor(QPalette::WindowText, dark ? QColor(0xe6, 0xe9, 0xef) : QColor(0x22, 0x24, 0x28));
+    pal.setColor(QPalette::Text, dark ? QColor(0xe6, 0xe9, 0xef) : QColor(0x1b, 0x1b, 0x1b));
+    pal.setColor(QPalette::Highlight, dark ? QColor(0x32, 0x3A, 0x48) : activeColor);
     pal.setColor(QPalette::HighlightedText, Qt::white);
     setPalette(pal);
     setAutoFillBackground(!hasBg); // when a bg image is set, paintEvent draws it instead
@@ -1995,9 +1997,10 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
     lvl.addon = addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
     stack_.push_back(lvl);
     loadTop();
-    // A real info page (movie/book/…): ask the host to surface it. A container drill (console/platform) doesn't,
-    // so the themed cross keeps showing its column.
-    if (isInfoPageType(it.type)) emit infoPageRequested();
+    // A leaf info page (a single movie/book/issue): ask the host to surface its detail screen. Containers
+    // (a comic/TV/manga series, a console) instead drill into their children, which the themed cross shows in
+    // its column - so don't surface the classic view for those.
+    if (isInfoPageType(it.type) && !it.expandable) emit infoPageRequested();
 }
 
 bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last().detail; }

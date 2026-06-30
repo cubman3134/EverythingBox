@@ -20,19 +20,11 @@ static QSettings& store()
 
 static QVector<Theme> builtinThemes()
 {
+    // The themeable front end is the theme2 system (Settings -> Appearance). The classic widgets (the info
+    // page, library, settings) just need one neutral dark base so they never look like an "old theme".
     QVector<Theme> v;
-    { Theme t; t.name = QStringLiteral("Default"); t.accentFollowsTab = true;
-      t.neutralTab = QColor(0x7E, 0x82, 0x8C); v.push_back(t); }                         // each tab its colour
-    { Theme t; t.name = QStringLiteral("Sunset");  t.accentFollowsTab = false;
-      t.accent = QColor(0xE0, 0x7A, 0x2E); t.neutralTab = QColor(0x9A, 0x8C, 0x82); v.push_back(t); }
-    { Theme t; t.name = QStringLiteral("Ocean");   t.accentFollowsTab = false;
-      t.accent = QColor(0x2E, 0x8B, 0xC0); t.neutralTab = QColor(0x86, 0x92, 0xA0); v.push_back(t); }
-    { Theme t; t.name = QStringLiteral("Grape");   t.accentFollowsTab = false;
-      t.accent = QColor(0x8A, 0x5C, 0xC8); t.neutralTab = QColor(0x90, 0x86, 0xA0); v.push_back(t); }
-    { Theme t; t.name = QStringLiteral("Slate");   t.accentFollowsTab = false;
-      t.accent = QColor(0x5A, 0x62, 0x70); t.neutralTab = QColor(0x88, 0x8C, 0x96); v.push_back(t); }
-    { Theme t; t.name = QStringLiteral("Carousel"); t.accentFollowsTab = true; t.layout = QStringLiteral("carousel");
-      t.neutralTab = QColor(0x7E, 0x82, 0x8C); v.push_back(t); }
+    { Theme t; t.name = QStringLiteral("Default"); t.dark = true; t.accentFollowsTab = false;
+      t.accent = QColor(0x1B, 0x20, 0x2A); t.neutralTab = QColor(0x2A, 0x2F, 0x3A); v.push_back(t); }
     return v;
 }
 
@@ -104,9 +96,10 @@ static QVector<Theme> userThemes()
 
 QVector<Theme> ThemeStore::all()
 {
-    QVector<Theme> v = builtinThemes();
-    v += userThemes(); // user files can also override a built-in name (last wins in byName())
-    return v;
+    // The classic colour-theme system is retired in favour of the theme2 front end (Settings -> Appearance).
+    // Only the single neutral dark base remains, so any old/leftover theme name falls back to it (byName) and
+    // the classic widgets never show an "old theme".
+    return builtinThemes();
 }
 
 Theme ThemeStore::byName(const QString& name)

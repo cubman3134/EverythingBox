@@ -18,6 +18,7 @@ struct ThemeDetail
 struct Theme
 {
     QString name;
+    bool dark = false;                        // render the classic widgets dark (background, grid, cards)
     bool accentFollowsTab = true;             // accent = selected tab's colour; else the fixed `accent`
     QColor accent = QColor(0x53, 0x82, 0xC4); // used when accentFollowsTab is false
     QColor neutralTab = QColor(0x7E, 0x82, 0x8C);
