@@ -24,6 +24,10 @@ GridView {
         required property var modelData
         required property int index
         property bool sel: index === gv.currentIndex
+        MouseArea { // click a card to select it; click the selected card to open it
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: 10
+            onClicked: if (gv.host && gv.host.gotoItem) gv.host.gotoItem(index)
+        }
         Rectangle {
             anchors.fill: parent
             anchors.margins: Math.max(2, Number(T.val(gv.el, "spacing", 0.008)) * (gv.host ? gv.host.width : 1280))

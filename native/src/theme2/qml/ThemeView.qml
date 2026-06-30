@@ -50,6 +50,23 @@ Item {
         if (ni !== catIndex) { catIndex = ni; navigate(); categoryChanged() }
     }
 
+    // Mouse parity for the elements: clicking an item navigates to it; clicking the already-selected item
+    // activates it (the "click to move, click again to press" model). Clicking also gives the scene keyboard
+    // focus so the arrow keys work afterwards.
+    function gotoItem(i) {
+        forceActiveFocus()
+        var n = items ? items.length : 0
+        if (i < 0 || i >= n) return
+        if (i === currentIndex) activated(i)               // click the focused item -> press it
+        else { currentIndex = i; navigate() }              // click another -> move the selection there
+    }
+    function gotoCat(i) {                                   // XMB: click a category to switch to it
+        forceActiveFocus()
+        var n = categories ? categories.length : 0
+        if (i < 0 || i >= n || i === catIndex) return
+        catIndex = i; navigate(); categoryChanged()
+    }
+
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
     property int lastNearEnd: -1

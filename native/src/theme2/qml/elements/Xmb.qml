@@ -121,6 +121,10 @@ Item {
                 text: (cat.modelData && cat.modelData.title) ? cat.modelData.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(12, xmb.height * 0.03)
             }
+            MouseArea { // click a category tile to switch to it
+                anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                onClicked: if (xmb.host) xmb.host.gotoCat(cat.index)
+            }
         }
     }
 
@@ -169,6 +173,14 @@ Item {
                     color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.022)
                     elide: Text.ElideRight
                 }
+            }
+            // Click the row (icon + title region) to select it; click the selected one to open/drill. Sized to
+            // the row's vertical slot (itemGap) so adjacent rows don't overlap; disabled for faded-out rows.
+            MouseArea {
+                anchors.verticalCenter: parent.verticalCenter
+                x: 0; width: parent.width + xmb.width * 0.5; height: xmb.itemGap
+                enabled: row.opacity > 0.1; cursorShape: Qt.PointingHandCursor
+                onClicked: if (xmb.host) xmb.host.gotoItem(row.index)
             }
         }
     }

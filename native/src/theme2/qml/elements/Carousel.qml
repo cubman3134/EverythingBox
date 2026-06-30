@@ -28,6 +28,10 @@ ListView {
         required property var modelData
         required property int index
         property bool sel: index === lv.currentIndex
+        MouseArea { // click a card to select it; click the selected card to open it
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor; z: 10
+            onClicked: if (lv.host && lv.host.gotoItem) lv.host.gotoItem(index)
+        }
         Rectangle {
             anchors.centerIn: parent
             width: parent.width * (sel ? 1.0 : 0.82)
