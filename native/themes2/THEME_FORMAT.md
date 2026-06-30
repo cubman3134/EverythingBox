@@ -77,10 +77,28 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 | `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth` |
 | `carousel` | horizontal strip, selected centred + enlarged | `itemWidth`, `spacing`, `color` (selection), `card.radius` |
 | `rating` | five stars from a 0..1 value | `binding` (or `value`), `color`, `emptyColor` |
-| `video` | preview area (shows the bound poster + a play badge today) | `path`/`binding`, `radius` |
+| `video` | preview area: a slow Ken Burns drift over the bound poster + a play badge | `path`/`binding`, `radius` |
 | `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize` |
+| `particles` | animated background field | `preset`, `count`, `color`, `dotSize`, `speed`, `image` |
 
 `grid` and `carousel` render the home's catalog rows (each `{title, accent, image}`) and follow the selection. Exactly one of them is usually the main element; place a `text`/`image`/`rating` bound to `selected.*` nearby to show details for the focused item.
+
+### Background images & particles
+
+Every view already supports a **background image**: `"background": { "image": "bg.jpg", "dim": 0.4 }` (path relative to the theme folder; `dim` is a 0..1 black overlay for readability). For a moving picture, place a full-screen `image` element (`pos: [0,0]`, `size: [1,1]`) at a low `zIndex` instead.
+
+The **`particles`** element is an animated field for ambiance — usually full-screen (`pos: [0,0]`, `size: [1,1]`) behind your content (`zIndex: 0`). It is rendered with plain animated items so it works on the front end's software renderer (native `QtQuick.Particles`, which needs the GPU, would not draw here).
+
+| key | meaning |
+| --- | --- |
+| `preset` | `snow` (drifting down), `rain` (fast streaks), `embers` (rising, fading), `stars` (twinkle in place), `bokeh` (big soft drift), `dust` (slow motes) |
+| `count` | number of particles (capped at 400 — software-rendered, so keep it modest) |
+| `color` | particle colour (hex) |
+| `dotSize` | particle size as a fraction of the element height (e.g. `0.008`) |
+| `speed` | speed multiplier (default `1`) |
+| `image` | optional: draw this image (relative path) per particle instead of a dot |
+
+Use the element's own `opacity` to dim the whole field. Note `dotSize`/`speed` are dedicated names because the layout keys `size` (`[w,h]`) and `opacity` are consumed by the element's frame. Example: `{ "type": "particles", "pos": [0,0], "size": [1,1], "origin": [0,0], "zIndex": 0, "opacity": 0.5, "preset": "stars", "count": 90, "color": "#ABB6E0", "dotSize": 0.006 }`.
 
 ## Minimal example
 

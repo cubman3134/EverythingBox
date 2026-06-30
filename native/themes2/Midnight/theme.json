@@ -5,6 +5,9 @@
     "home": {
       "background": { "color": "#0A0B10" },
       "elements": [
+        { "type": "particles", "id": "stars", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 0, "opacity": 0.5,
+          "preset": "stars", "count": 90, "color": "#ABB6E0", "dotSize": 0.006 },
+
         { "type": "text",     "pos": [0.05, 0.07], "size": [0.6, 0.06],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#EAECF2", "fontSize": 0.034, "bold": true },
         { "type": "datetime", "pos": [0.95, 0.07], "size": [0.2, 0.05],  "origin": [1, 0.5], "format": "hh:mm", "color": "#8A90A0", "fontSize": 0.03, "align": "right" },
 

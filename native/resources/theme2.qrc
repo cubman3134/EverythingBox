@@ -10,5 +10,6 @@
     <file alias="elements/Carousel.qml">../src/theme2/qml/elements/Carousel.qml</file>
     <file alias="elements/Video.qml">../src/theme2/qml/elements/Video.qml</file>
     <file alias="elements/HelpSystem.qml">../src/theme2/qml/elements/HelpSystem.qml</file>
+    <file alias="elements/Particles.qml">../src/theme2/qml/elements/Particles.qml</file>
   </qresource>
 </RCC>

@@ -83,7 +83,8 @@ Item {
     // type -> exact component filename (QML files must be capitalised; filesystems may be case-sensitive).
     readonly property var elementFiles: ({
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
-        "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem"
+        "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
+        "particles": "Particles"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
