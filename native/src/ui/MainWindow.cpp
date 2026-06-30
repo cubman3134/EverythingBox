@@ -1781,8 +1781,7 @@ void MainWindow::openAppearance()
         }
         if (!list->currentItem() && list->count() > 0) list->setCurrentRow(0);
         leftCol->addWidget(list, 1);
-        auto* hint = new QLabel(tr("Themes live in %1.\nEdit a theme's theme.json to customise — it previews here live.")
-                                    .arg(ThemeEngine::themesRoot()));
+        auto* hint = new QLabel(tr("Edit a theme's theme.json to customise — it previews here live."));
         hint->setWordWrap(true);
         QFont hf = hint->font(); hf.setPointSizeF(hf.pointSizeF() * 0.85); hint->setFont(hf);
         leftCol->addWidget(hint);
@@ -1795,6 +1794,22 @@ void MainWindow::openAppearance()
         pv->setContentsMargins(1, 1, 1, 1);
         row->addWidget(previewBox, 1);
         v->addLayout(row, 1);
+
+        // How to get more themes and share your own (the community theme registry on GitHub).
+        auto* share = new QLabel(tr(
+            "<b>Get more themes &amp; share yours.</b> "
+            "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>. "
+            "Browse and download community themes, or upload your own, at "
+            "<a href=\"https://github.com/cubman3134/mymediavault-themes\">github.com/cubman3134/mymediavault-themes</a>. "
+            "To <b>add</b> a theme, drop its folder into the directory above and pick it here. "
+            "To <b>share</b> yours, add the folder under <code>themes2/</code> in that repo with an "
+            "<code>index.json</code> entry and open a pull request (see <code>THEME_FORMAT.md</code> for the format).")
+            .arg(ThemeEngine::themesRoot()));
+        share->setTextFormat(Qt::RichText);
+        share->setWordWrap(true);
+        share->setOpenExternalLinks(true); // the GitHub link opens in the browser
+        share->setStyleSheet(QStringLiteral("margin-top:12px;"));
+        v->addWidget(share);
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
