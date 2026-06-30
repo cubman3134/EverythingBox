@@ -1,0 +1,24 @@
+{
+  "name": "Grid",
+  "author": "My Media Vault",
+  "views": {
+    "home": {
+      "background": { "color": "#12141A", "dim": 0 },
+      "elements": [
+        { "type": "text", "id": "title", "pos": [0.037, 0.07], "size": [0.6, 0.07], "origin": [0, 0.5], "text": "Library", "color": "#FFFFFF", "fontSize": 0.045, "bold": true },
+
+        { "type": "grid", "id": "catalog", "pos": [0.037, 0.16], "size": [0.62, 0.80], "origin": [0, 0],
+          "columns": 4, "aspect": 1.4, "spacing": 0.008, "color": "#5B7FE0",
+          "card": { "radius": 12, "selectedBorder": "#5B7FE0", "selectedWidth": 4 } },
+
+        { "type": "video",  "id": "preview", "pos": [0.835, 0.34], "size": [0.30, 0.36], "origin": [0.5, 0.5], "binding": "selected.image", "radius": 12 },
+        { "type": "text",   "id": "selName", "pos": [0.835, 0.56], "size": [0.32, 0.06], "origin": [0.5, 0.5], "binding": "selected.title", "color": "#FFFFFF", "fontSize": 0.04, "bold": true, "align": "center" },
+        { "type": "text",   "id": "selSub",  "pos": [0.835, 0.62], "size": [0.32, 0.08], "origin": [0.5, 0.5], "binding": "selected.subtitle", "color": "#FFFFFF", "fontSize": 0.026, "align": "center", "opacity": 0.7, "wrap": true },
+        { "type": "rating", "id": "stars",   "pos": [0.835, 0.70], "size": [0.16, 0.035], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
+
+        { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
+          "entries": [ { "button": "↑↓", "label": "Move" }, { "button": "Enter", "label": "Open" } ] }
+      ]
+    }
+  }
+}

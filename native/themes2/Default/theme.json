@@ -1,10 +1,23 @@
 {
   "name": "Default",
   "author": "My Media Vault",
-  "foreground": "#FFFFFF",
-  "fontFamily": "",
-  "accent": "#E07A2E",
-  "background": { "color": "#0F1216", "image": "", "dim": 0.0 },
-  "grid": { "columns": 6, "aspect": 1.4 },
-  "card": { "radius": 12 }
+  "views": {
+    "home": {
+      "background": { "color": "#0F1216", "image": "", "dim": 0 },
+      "elements": [
+        { "type": "text",     "id": "title",  "pos": [0.037, 0.055], "size": [0.5, 0.07],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#FFFFFF", "fontSize": 0.04, "bold": true },
+        { "type": "datetime", "id": "clock",  "pos": [0.963, 0.055], "size": [0.18, 0.05], "origin": [1, 0.5], "format": "hh:mm", "color": "#FFFFFF", "fontSize": 0.032, "align": "right", "opacity": 0.65 },
+
+        { "type": "carousel", "id": "systems", "pos": [0.5, 0.31], "size": [0.94, 0.30], "origin": [0.5, 0.5], "itemWidth": 0.15, "spacing": 0.015, "color": "#E07A2E", "card": { "radius": 14 } },
+
+        { "type": "image",  "id": "hero",    "pos": [0.24, 0.72], "size": [0.22, 0.40], "origin": [0.5, 0.5], "binding": "selected.image", "fillMode": "contain", "radius": 10 },
+        { "type": "text",   "id": "selName", "pos": [0.40, 0.61], "size": [0.55, 0.07], "origin": [0, 0.5], "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.052, "bold": true },
+        { "type": "text",   "id": "selSub",  "pos": [0.40, 0.68], "size": [0.55, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#FFFFFF", "fontSize": 0.028, "opacity": 0.7 },
+        { "type": "rating", "id": "stars",   "pos": [0.40, 0.75], "size": [0.16, 0.035], "origin": [0, 0.5], "binding": "selected.rating", "color": "#E07A2E" },
+
+        { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
+          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    }
+  }
 }
