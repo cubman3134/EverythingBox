@@ -21,8 +21,11 @@ Item {
     readonly property int cols: Math.max(6, Math.min(80, Number(T.val(el, "segments", 24))))
     clip: true
 
-    property real phase
-    NumberAnimation on phase { from: 0; to: 6.2832; duration: 9000 / wave.speed; loops: Animation.Infinite; running: true }
+    // A normalised 0..1 loop. Each travelling sine multiplies (t * tau) by a WHOLE number, so every component
+    // completes a whole number of cycles per loop and the wrap from 1 back to 0 is perfectly seamless - no jump.
+    readonly property real tau: 6.283185307179586
+    property real t
+    NumberAnimation on t { from: 0; to: 1; duration: 9000 / wave.speed; loops: Animation.Infinite; running: true }
 
     Repeater {
         model: wave.bands * wave.cols
@@ -32,8 +35,8 @@ Item {
             readonly property int col: index % wave.cols
             readonly property real fx: col / (wave.cols - 1)
             readonly property real yTop: wave.height * (0.28 + band * 0.16)
-                                         + Math.sin(fx * 6.2832 * 1.4 + wave.phase + band * 0.9) * wave.amp * (1 - band * 0.18)
-                                         + Math.sin(fx * 6.2832 * 0.5 - wave.phase * 0.6 + band) * wave.amp * 0.35
+                                         + Math.sin(fx * wave.tau * 1.4 + wave.t * wave.tau + band * 0.9) * wave.amp * (1 - band * 0.18)
+                                         + Math.sin(fx * wave.tau * 0.5 - wave.t * wave.tau * 2 + band) * wave.amp * 0.35
             x: fx * wave.width
             width: wave.width / wave.cols + 1.5      // slight overlap so bars read as one filled band
             y: yTop
