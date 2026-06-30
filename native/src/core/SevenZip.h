@@ -5,15 +5,17 @@
 #pragma once
 #include <QString>
 #include <QStringList>
-#include <QByteArray>
 
 namespace SevenZip
 {
-    // Extract one file from a .7z archive into memory. Picks the first member whose name ends in one
-    // of wantedExts (case-insensitive, each like ".sfc"); if none match (or wantedExts is empty), the
-    // largest regular file. On success sets memberName (the inner file's base name, so its extension is
-    // preserved) and data, and returns true. Decompresses the chosen file wholly into memory, so it
-    // suits cartridge-sized ROMs (the usual .7z case); multi-GB disc images are better left as .chd/.iso.
-    bool extractBest(const QString& sevenZipPath, const QStringList& wantedExts,
-                     QString& memberName, QByteArray& data, QString* error = nullptr);
+    // Extract one file from a .7z archive directly to a file under destDir (named by the inner member, so
+    // its extension is preserved) and return the written path; empty on failure. Picks the member whose
+    // name ends in one of wantedExts (case-insensitive, each like ".sfc"); if none match (or wantedExts is
+    // empty), the largest regular file (a No-Intro .7z holds one ROM, so "largest" picks it). An existing
+    // file of the right size is reused. The decoder output is written straight to disk — peak memory is the
+    // uncompressed size once, not twice — but the LZMA SDK still decodes a 7z file into a single buffer, so
+    // a multi-GB image needs that much RAM to unpack (the Internet Archive's direct .chd/.iso is better for
+    // those: no extraction at all).
+    QString extractBestToFile(const QString& sevenZipPath, const QStringList& wantedExts,
+                              const QString& destDir, QString* error = nullptr);
 }

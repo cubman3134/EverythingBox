@@ -57,28 +57,9 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     const QString lower = archivePath.toLower();
     const QString dir = outDirFor(archivePath);
 
-    // ---- .7z : vendored LZMA SDK ----------------------------------------------------------------
+    // ---- .7z : vendored LZMA SDK (decodes straight to a file, reusing a prior extraction) -----------
     if (lower.endsWith(QStringLiteral(".7z")))
-    {
-        QString member;
-        QByteArray data;
-        if (!SevenZip::extractBest(archivePath, wantedExts, member, data, error))
-            return QString();
-
-        const QString out = dir + QLatin1Char('/') + member;
-        if (QFileInfo::exists(out) && QFileInfo(out).size() == data.size())
-            return out; // already extracted on a previous open
-
-        QFile f(out);
-        if (!f.open(QIODevice::WriteOnly))
-        {
-            if (error) *error = QStringLiteral("could not write the extracted ROM");
-            return QString();
-        }
-        f.write(data);
-        f.close();
-        return out;
-    }
+        return SevenZip::extractBestToFile(archivePath, wantedExts, dir, error);
 
     // ---- .zip : bundled miniz (read the whole archive via QFile so unicode paths work everywhere) ----
     QFile af(archivePath);

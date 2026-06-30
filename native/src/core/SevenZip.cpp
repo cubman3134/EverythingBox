@@ -1,5 +1,6 @@
 #include "SevenZip.h"
 
+#include <QFile>
 #include <QFileInfo>
 #include <mutex>
 #include <vector>
@@ -44,10 +45,11 @@ bool matchesAnyExt(const QString& name, const QStringList& exts)
 
 } // namespace
 
-bool SevenZip::extractBest(const QString& sevenZipPath, const QStringList& wantedExts,
-                           QString& memberName, QByteArray& data, QString* error)
+QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringList& wantedExts,
+                                    const QString& destDir, QString* error)
 {
     ensureCrcTable();
+    QString resultPath;
 
     ISzAlloc allocImp = kAlloc;
     ISzAlloc allocTempImp = kAlloc;
@@ -62,7 +64,7 @@ bool SevenZip::extractBest(const QString& sevenZipPath, const QStringList& wante
 #endif
     {
         if (error) *error = QStringLiteral("could not open archive");
-        return false;
+        return resultPath;
     }
 
     FileInStream_CreateVTable(&archiveStream);
@@ -75,13 +77,12 @@ bool SevenZip::extractBest(const QString& sevenZipPath, const QStringList& wante
     {
         File_Close(&archiveStream.file);
         if (error) *error = QStringLiteral("out of memory");
-        return false;
+        return resultPath;
     }
     lookStream.bufSize = kInputBufSize;
     lookStream.realStream = &archiveStream.vt;
     LookToRead2_INIT(&lookStream)
 
-    bool ok = false;
     CSzArEx db;
     SzArEx_Init(&db);
 
@@ -121,24 +122,53 @@ bool SevenZip::extractBest(const QString& sevenZipPath, const QStringList& wante
 
         if (bestIdx >= 0)
         {
-            UInt32 blockIndex = 0xFFFFFFFF; // "no cached block yet" — the SDK fills/uses it across calls
-            Byte* outBuffer = nullptr;
-            size_t outBufferSize = 0, offset = 0, outSizeProcessed = 0;
+            const QString destPath = destDir + QLatin1Char('/') + baseName(bestName);
 
-            if (SzArEx_Extract(&db, &lookStream.vt, static_cast<UInt32>(bestIdx), &blockIndex,
-                               &outBuffer, &outBufferSize, &offset, &outSizeProcessed,
-                               &allocImp, &allocTempImp) == SZ_OK)
+            // Reuse a previous extraction of the same member (same name + uncompressed size).
+            if (QFileInfo::exists(destPath) && QFileInfo(destPath).size() == static_cast<qint64>(bestSize))
             {
-                data = QByteArray(reinterpret_cast<const char*>(outBuffer + offset),
-                                  static_cast<qsizetype>(outSizeProcessed));
-                memberName = baseName(bestName);
-                ok = true;
+                resultPath = destPath;
             }
-            else if (error)
-                *error = QStringLiteral("failed to decompress the ROM inside the archive");
+            else
+            {
+                UInt32 blockIndex = 0xFFFFFFFF; // "no cached block yet" — the SDK fills/uses it across calls
+                Byte* outBuffer = nullptr;
+                size_t outBufferSize = 0, offset = 0, outSizeProcessed = 0;
 
-            if (outBuffer)
-                ISzAlloc_Free(&allocImp, outBuffer);
+                if (SzArEx_Extract(&db, &lookStream.vt, static_cast<UInt32>(bestIdx), &blockIndex,
+                                   &outBuffer, &outBufferSize, &offset, &outSizeProcessed,
+                                   &allocImp, &allocTempImp) == SZ_OK)
+                {
+                    // Write the decoder output straight to disk (no intermediate QByteArray), so peak memory
+                    // is the uncompressed size once, not twice. (The LZMA SDK still decodes a 7z file into a
+                    // single buffer, so a multi-GB image still needs that much RAM to unpack — for those the
+                    // Internet Archive's direct .chd/.iso, which needs no extraction, remains the better source.)
+                    QFile out(destPath);
+                    if (out.open(QIODevice::WriteOnly))
+                    {
+                        const char* data = reinterpret_cast<const char*>(outBuffer + offset);
+                        qint64 remaining = static_cast<qint64>(outSizeProcessed);
+                        qint64 wrote = 0;
+                        while (remaining > 0)
+                        {
+                            const qint64 n = out.write(data + wrote, remaining);
+                            if (n <= 0) break;
+                            wrote += n; remaining -= n;
+                        }
+                        out.close();
+                        if (remaining == 0)
+                            resultPath = destPath;
+                        else { out.remove(); if (error) *error = QStringLiteral("couldn't write the extracted ROM"); }
+                    }
+                    else if (error)
+                        *error = QStringLiteral("couldn't create the extracted ROM file");
+                }
+                else if (error)
+                    *error = QStringLiteral("failed to decompress the ROM inside the archive");
+
+                if (outBuffer)
+                    ISzAlloc_Free(&allocImp, outBuffer);
+            }
         }
         else if (error)
             *error = QStringLiteral("the archive contains no file to open");
@@ -149,5 +179,5 @@ bool SevenZip::extractBest(const QString& sevenZipPath, const QStringList& wante
     SzArEx_Free(&db, &allocImp);
     ISzAlloc_Free(&allocImp, lookStream.buf);
     File_Close(&archiveStream.file);
-    return ok;
+    return resultPath;
 }
