@@ -1,4 +1,7 @@
 #include <QApplication>
+#ifdef MMV_HAVE_QML
+#include <QQuickWindow>
+#endif
 #include "core/AppPaths.h"
 #include <QIcon>
 #include <QFile>
@@ -105,6 +108,13 @@ int main(int argc, char** argv)
 {
     // libmpv requires the C numeric locale, otherwise option/number parsing breaks. Set it before Qt.
     std::setlocale(LC_NUMERIC, "C");
+
+#ifdef MMV_HAVE_QML
+    // Render the QML themed home with Qt Quick's software backend. The app also drives libmpv through a
+    // QOpenGLWidget; sharing GL contexts between that and a hardware-accelerated QQuickWidget renders the
+    // themed home as a black screen. Software rendering avoids the clash (the themed UI is light 2D work).
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+#endif
 
     QApplication app(argc, argv);
     capLogAtStartup();                      // trim a runaway log before we start appending to it
