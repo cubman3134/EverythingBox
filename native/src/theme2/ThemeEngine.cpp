@@ -11,12 +11,34 @@
 #include <QDir>
 #include <QUrl>
 #include <QColor>
+#include <QSoundEffect>
 
-void ThemeBridge::activated() { if (onActivated && root) onActivated(root->property("currentIndex").toInt()); }
-void ThemeBridge::back()      { if (onBack) onBack(); }
-void ThemeBridge::cycle()     { if (onCycle) onCycle(); }
+// Restart-and-play a UI sound effect (no-op if the theme defined none for this action). stop() first so
+// rapid navigation retriggers cleanly instead of waiting for the previous play to finish.
+static void playEffect(QSoundEffect* e) { if (e) { e->stop(); e->play(); } }
+
+// Build a QSoundEffect for one action from the theme's "sounds" map, or null if that action has no file.
+// `keys` lets an action accept aliases (e.g. "navigate"/"move"). Paths are relative to the theme folder;
+// QSoundEffect plays uncompressed WAV. Volume (0..1) applies to every effect in the theme.
+static QSoundEffect* loadEffect(QObject* parent, const QString& themeDir, const QVariantMap& sounds,
+                                const QStringList& keys, qreal volume)
+{
+    QString file;
+    for (const QString& k : keys) { file = sounds.value(k).toString(); if (!file.isEmpty()) break; }
+    if (file.isEmpty()) return nullptr;
+    auto* e = new QSoundEffect(parent);
+    e->setSource(QUrl::fromLocalFile(QDir(themeDir).absoluteFilePath(file)));
+    e->setVolume(volume);
+    return e;
+}
+
+void ThemeBridge::activated() { playEffect(sndSelect); if (onActivated && root) onActivated(root->property("currentIndex").toInt()); }
+void ThemeBridge::back()      { playEffect(sndBack); if (onBack) onBack(); }
+void ThemeBridge::cycle()     { playEffect(sndTheme); if (onCycle) onCycle(); }
 void ThemeBridge::search()    { if (onSearch) onSearch(); }
 void ThemeBridge::nearEnd()   { if (onNearEnd) onNearEnd(); }
+void ThemeBridge::navigate()  { playEffect(sndNavigate); }
+void ThemeBridge::details()   { playEffect(sndDetails); }
 
 namespace ThemeEngine
 {
@@ -84,11 +106,29 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onCycle = std::move(onCycle);
         bridge->onSearch = std::move(onSearch);
         bridge->onNearEnd = std::move(onNearEnd);
+
+        // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
+        // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
+        // theme folder; WAV). Missing actions are simply silent.
+        const QVariantMap sounds = theme.value(QStringLiteral("sounds")).toMap();
+        if (!sounds.isEmpty())
+        {
+            const qreal vol = sounds.contains(QStringLiteral("volume"))
+                              ? qBound(0.0, sounds.value(QStringLiteral("volume")).toDouble(), 1.0) : 0.7;
+            bridge->sndNavigate = loadEffect(bridge, themeDir, sounds, { QStringLiteral("navigate"), QStringLiteral("move") }, vol);
+            bridge->sndSelect   = loadEffect(bridge, themeDir, sounds, { QStringLiteral("select"), QStringLiteral("open") }, vol);
+            bridge->sndBack     = loadEffect(bridge, themeDir, sounds, { QStringLiteral("back") }, vol);
+            bridge->sndDetails  = loadEffect(bridge, themeDir, sounds, { QStringLiteral("details") }, vol);
+            bridge->sndTheme    = loadEffect(bridge, themeDir, sounds, { QStringLiteral("theme") }, vol);
+        }
+
         QObject::connect(root, SIGNAL(activated(int)), bridge, SLOT(activated()));
         QObject::connect(root, SIGNAL(back()), bridge, SLOT(back()));
         QObject::connect(root, SIGNAL(cycleTheme()), bridge, SLOT(cycle()));
         QObject::connect(root, SIGNAL(searchRequested()), bridge, SLOT(search()));
         QObject::connect(root, SIGNAL(nearEnd()), bridge, SLOT(nearEnd()));
+        QObject::connect(root, SIGNAL(navigate()), bridge, SLOT(navigate()));
+        QObject::connect(root, SIGNAL(details()), bridge, SLOT(details()));
     }
 
     QWidget* container = QWidget::createWindowContainer(qv, parent);

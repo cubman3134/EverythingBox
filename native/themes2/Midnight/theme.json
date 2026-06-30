@@ -1,6 +1,7 @@
 {
   "name": "Midnight",
   "author": "My Media Vault",
+  "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.55 },
   "views": {
     "home": {
       "background": { "color": "#0A0B10" },

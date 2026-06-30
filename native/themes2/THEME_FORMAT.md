@@ -100,6 +100,32 @@ The **`particles`** element is an animated field for ambiance — usually full-s
 
 Use the element's own `opacity` to dim the whole field. Note `dotSize`/`speed` are dedicated names because the layout keys `size` (`[w,h]`) and `opacity` are consumed by the element's frame. Example: `{ "type": "particles", "pos": [0,0], "size": [1,1], "origin": [0,0], "zIndex": 0, "opacity": 0.5, "preset": "stars", "count": 90, "color": "#ABB6E0", "dotSize": 0.006 }`.
 
+## Sounds
+
+A theme can play a short sound when you act. Add a top-level **`sounds`** object (sibling of `views`) mapping an action to a **WAV** file relative to the theme folder:
+
+```json
+"sounds": {
+  "navigate": "sounds/move.wav",
+  "select":   "sounds/select.wav",
+  "back":     "sounds/back.wav",
+  "details":  "sounds/info.wav",
+  "theme":    "sounds/swap.wav",
+  "volume":   0.6
+}
+```
+
+| action | plays when |
+| --- | --- |
+| `navigate` (alias `move`) | the selection actually moves (arrows) |
+| `select` (alias `open`) | **Enter** — open / drill in |
+| `back` | **Esc** / Back at a root view |
+| `details` | **I** opens the detail view |
+| `theme` | **T** cycles the theme |
+| `volume` | 0..1 applied to all of this theme's sounds (default `0.7`) |
+
+Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). The shipped **Midnight** theme has a `sounds/` folder you can copy.
+
 ## Minimal example
 
 ```json

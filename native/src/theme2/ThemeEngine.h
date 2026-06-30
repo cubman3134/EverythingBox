@@ -11,6 +11,7 @@
 
 class QWidget;
 class QQuickItem;
+class QSoundEffect;
 
 // Relays the QML view's signals (navigation activate / back / cycle-theme) to plain C++ callbacks. The
 // activate signal carries no argument; we read the current selection off the root item.
@@ -25,12 +26,21 @@ public:
     std::function<void()> onCycle;
     std::function<void()> onSearch;
     std::function<void()> onNearEnd;
+
+    // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
+    QSoundEffect* sndNavigate = nullptr; // selection moved
+    QSoundEffect* sndSelect = nullptr;   // Enter / open
+    QSoundEffect* sndBack = nullptr;     // Esc / back
+    QSoundEffect* sndDetails = nullptr;  // opened the detail view
+    QSoundEffect* sndTheme = nullptr;    // cycled theme
 public slots:
     void activated();
     void back();
     void cycle();
     void search();
     void nearEnd();
+    void navigate();  // play the navigation sound
+    void details();   // play the open-details sound
 };
 
 namespace ThemeEngine

@@ -28,6 +28,8 @@ Item {
     signal cycleTheme()            // T: next theme (the host swaps the theme file)
     signal searchRequested()       // "/" or search key: the host prompts for a query and runs it
     signal nearEnd()               // selection is within a few items of the end: the host pulls the next page
+    signal navigate()              // the selection actually moved (for the host's navigation sound)
+    signal details()               // entered the detail view (for the host's "open details" sound)
 
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
@@ -47,7 +49,9 @@ Item {
     }
     function step(d) {
         var n = items ? items.length : 0
-        if (n > 0) currentIndex = Math.max(0, Math.min(n - 1, currentIndex + d))
+        if (n <= 0) return
+        var ni = Math.max(0, Math.min(n - 1, currentIndex + d))
+        if (ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
     }
     Keys.onPressed: function(e) {
         if (e.key === Qt.Key_Right)                              { step(1);          e.accepted = true }
@@ -59,7 +63,7 @@ Item {
         // Info opens the theme's detail view for the focused item; Esc backs out of it to wherever it came
         // from (home or browse). Esc in home/browse asks the host to go back (it owns the home<->browse step).
         else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView !== "detail")
-                                                                { detailReturn = currentView; currentView = "detail"; e.accepted = true }
+                                                                { detailReturn = currentView; currentView = "detail"; details(); e.accepted = true }
         else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
             if (currentView === "detail") currentView = detailReturn
             else back()
