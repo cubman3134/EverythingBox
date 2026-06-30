@@ -1613,10 +1613,29 @@ void MainWindow::showThemedXmb()
     QVariantList cats = home_->categoryItems(); // the buckets that have catalogs (each {title,key,glyph,accent})
     themedXmbCatKeys_.clear();
     for (const QVariant& v : cats) themedXmbCatKeys_ << v.toMap().value(QStringLiteral("key")).toString();
+    cats << QVariantMap{ { QStringLiteral("title"), tr("Profiles") }, { QStringLiteral("glyph"), QStringLiteral("profiles") },
+                         { QStringLiteral("accent"), QStringLiteral("#3E6FB8") } };
+    themedXmbCatKeys_ << QStringLiteral("profiles");
+    const int profilesIdx = int(cats.size()) - 1;
     cats << QVariantMap{ { QStringLiteral("title"), tr("Settings") }, { QStringLiteral("glyph"), QStringLiteral("settings") },
                          { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
     themedXmbCatKeys_ << QStringLiteral("settings");
     const int settingsIdx = int(cats.size()) - 1;
+
+    // The Profiles column: every profile (the current one ticked) to scroll + select, plus an add/edit entry.
+    auto profilesColumn = [] {
+        QVariantList out;
+        const QString cur = ProfileStore::currentId();
+        for (const Profile& p : ProfileStore::list())
+            out << QVariantMap{
+                { QStringLiteral("title"), (p.icon.isEmpty() ? QString() : p.icon + QStringLiteral("  ")) + p.name
+                                           + (p.id == cur ? QStringLiteral("   ✓") : QString()) },
+                { QStringLiteral("profileId"), p.id }, { QStringLiteral("accent"), QStringLiteral("#3E6FB8") } };
+        out << QVariantMap{ { QStringLiteral("title"), QObject::tr("＋  Add / edit profiles…") },
+                            { QStringLiteral("profileAction"), QStringLiteral("manage") },
+                            { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+        return out;
+    };
 
     const QStringList themes = ThemeEngine::availableThemes();
     QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
@@ -1629,10 +1648,20 @@ void MainWindow::showThemedXmb()
     // Show a bucket's catalog list as the column. If the bucket has a single catalog (e.g. Games -> one
     // catalog whose top level IS the console list), open it directly so the column shows its contents (the
     // consoles), skipping a pointless one-item folder.
-    auto showCatalogs = [this](int cat, int selectIdx) {
+    auto showCatalogs = [this, profilesColumn](int cat, int selectIdx) {
         const QString key = (cat >= 0 && cat < themedXmbCatKeys_.size()) ? themedXmbCatKeys_[cat] : QString();
-        themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (key == QStringLiteral("profiles")) // the Profiles column: scroll to a profile to select it
+        {
+            themedXmbInCatalog_ = false; themedXmbAutoOpened_ = false;
+            themedXmbCatalogs_ = profilesColumn();
+            int sel = selectIdx; const QString cur = ProfileStore::currentId();
+            for (int i = 0; i < themedXmbCatalogs_.size(); ++i)
+                if (themedXmbCatalogs_[i].toMap().value(QStringLiteral("profileId")).toString() == cur) { sel = i; break; }
+            if (r) { r->setProperty("items", themedXmbCatalogs_); r->setProperty("currentIndex", qMax(0, sel)); }
+            return;
+        }
+        themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
         if (themedXmbCatalogs_.size() == 1) // single catalog -> open straight into its contents
         {
             themedXmbInCatalog_ = true;
@@ -1647,10 +1676,27 @@ void MainWindow::showThemedXmb()
         if (r) { r->setProperty("items", themedXmbCatalogs_); r->setProperty("currentIndex", sel); }
     };
 
-    auto onActivated = [this, settingsIdx](int itemIdx) {
+    auto onActivated = [this, settingsIdx, profilesIdx](int itemIdx) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
         if (cat == settingsIdx) { openSettingsHub(); return; } // the full settings hub: Add-ons, Cloud Sync, Appearance, …
+        if (cat == profilesIdx) // the Profiles column: pick a profile to switch, or open the add/edit dialog
+        {
+            if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
+            const QVariantMap m = themedXmbCatalogs_[itemIdx].toMap();
+            const QString id = m.value(QStringLiteral("profileId")).toString();
+            if (!id.isEmpty())
+            {
+                if (id != ProfileStore::currentId()) { ProfileStore::setCurrent(id); home_->refresh(); }
+                showHomeScreen(); // rebuild for the chosen profile (stays on the Profiles category)
+            }
+            else if (m.value(QStringLiteral("profileAction")).toString() == QStringLiteral("manage"))
+            {
+                themedHomeIndex_ = profilesIdx; // return here after the dialog
+                onSwitchProfile();
+            }
+            return;
+        }
         if (!themedXmbInCatalog_) // the column is the catalog list -> open the chosen catalog into its items
         {
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;

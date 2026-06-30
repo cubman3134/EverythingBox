@@ -93,6 +93,11 @@ Item {
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.26); c.lineTo(w * 0.84, h * 0.34); c.lineTo(w * 0.84, h * 0.78); c.lineTo(w * 0.5, h * 0.72); c.closePath(); c.fill()
                             c.strokeStyle = (cat.modelData && cat.modelData.accent) ? cat.modelData.accent : "#444"
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.3); c.lineTo(w * 0.5, h * 0.72); c.stroke()
+                        } else if (cat.glyph === "profiles") {             // a person (user)
+                            c.beginPath(); c.arc(w * 0.5, h * 0.34, w * 0.16, 0, 6.2832); c.fill()   // head
+                            c.beginPath(); c.moveTo(w * 0.18, h * 0.86)
+                            c.bezierCurveTo(w * 0.18, h * 0.56, w * 0.82, h * 0.56, w * 0.82, h * 0.86)
+                            c.closePath(); c.fill()                                                  // shoulders
                         } else {                                           // settings: a gear
                             var gx = w * 0.5, gy = h * 0.5, R = w * 0.3, teeth = 8, tw = w * 0.13, tl = w * 0.16
                             for (var k = 0; k < teeth; k++) {
