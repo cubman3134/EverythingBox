@@ -4,6 +4,7 @@
 #include "../core/RecentStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/FavoritesStore.h"
+#include "../core/PlaylistStore.h"
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/SteamLibrary.h"
@@ -18,6 +19,7 @@
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QLineEdit>
+#include <QInputDialog>
 #include <QLabel>
 #include <QComboBox>
 #include <QTimer>
@@ -1424,6 +1426,148 @@ void HomeView::populateSteamGames()
     populate(cat, /*append*/ false);
 }
 
+// ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
+
+// A stable key for the catalogue at the root of the browse stack (its source addon + catalog id + type).
+QString HomeView::currentCatalogKey() const
+{
+    if (stack_.isEmpty()) return QStringLiteral("native||");
+    const Level& b = stack_.first();
+    const QString aid = b.addon ? b.addon->manifest.id : QStringLiteral("native");
+    return aid + QStringLiteral("|") + b.catalogId + QStringLiteral("|") + b.catalogType;
+}
+
+LoadedAddon* HomeView::addonForKey(const QString& catalogKey) const
+{
+    const QString aid = catalogKey.section(QLatin1Char('|'), 0, 0);
+    if (aid.isEmpty() || aid == QStringLiteral("native")) return nullptr;
+    for (LoadedAddon* s : mgr_->sources()) if (s->manifest.id == aid) return s;
+    return nullptr;
+}
+
+void HomeView::openPlaylistsLevel(const QString& catalogKey)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Playlists");
+    lvl.item.id = QStringLiteral("_playlists");
+    lvl.item.type = QStringLiteral("_playlists");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("playlists:") + catalogKey; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populatePlaylists(catalogKey);
+}
+
+void HomeView::populatePlaylists(const QString& catalogKey)
+{
+    MediaCatalog cat; cat.title = tr("Playlists");
+    for (const Playlist& p : PlaylistStore::forCatalog(catalogKey))
+    {
+        MediaItem it;
+        it.id = QStringLiteral("pl:") + p.id;
+        it.type = QStringLiteral("_playlist");
+        it.title = p.name;
+        it.subtitle = tr("%n item(s)", "", int(p.items.size()));
+        it.expandable = true;
+        it.mime = QStringLiteral("playlist:") + p.id;
+        cat.items.push_back(it);
+    }
+    MediaItem add; // a New-playlist entry at the bottom (activates -> name prompt)
+    add.id = QStringLiteral("_newplaylist");
+    add.type = QStringLiteral("_newplaylist");
+    add.title = tr("➕  New playlist…");
+    add.mime = QStringLiteral("newplaylist:") + catalogKey;
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
+}
+
+void HomeView::openPlaylistLevel(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return;
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = addonForKey(p.catalogKey); // the catalogue's addon, so items re-open/resolve as in the catalog
+    lvl.detail = true; lvl.title = p.name;
+    lvl.item.id = QStringLiteral("pl:") + p.id;
+    lvl.item.type = QStringLiteral("_playlist");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("playlist:") + playlistId; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populatePlaylistItems(playlistId);
+}
+
+void HomeView::populatePlaylistItems(const QString& playlistId)
+{
+    Playlist p; PlaylistStore::get(playlistId, p);
+    MediaCatalog cat; cat.title = p.name;
+    for (const PlaylistEntry& e : p.items)
+    {
+        MediaItem it;
+        it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
+        it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
+        if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
+}
+
+void HomeView::createPlaylistInteractive(const QString& catalogKey)
+{
+    bool ok = false;
+    const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
+                                               QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+    PlaylistStore::create(catalogKey, name);
+    populatePlaylists(catalogKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
+}
+
+void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
+{
+    if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
+    const QString key = currentCatalogKey();
+    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    QStringList opts;
+    for (const Playlist& p : pls) opts << p.name;
+    const QString NEWP = tr("➕ New playlist…");
+    opts << NEWP;
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(window(), tr("Add to playlist"),
+        tr("Add “%1” to:").arg(it.title), opts, 0, /*editable*/ false, &ok);
+    if (!ok || chosen.isEmpty()) return;
+    QString plid, plname = chosen;
+    if (chosen == NEWP)
+    {
+        const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
+                                                   QLineEdit::Normal, QString(), &ok).trimmed();
+        if (!ok || name.isEmpty()) return;
+        plid = PlaylistStore::create(key, name); plname = name;
+    }
+    else for (const Playlist& p : pls) if (p.name == chosen) { plid = p.id; break; }
+    if (plid.isEmpty()) return;
+    PlaylistEntry e;
+    e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
+              : (it.id.startsWith(QStringLiteral("steam:")) ? QStringLiteral("steam") : QString());
+    e.itemId = it.id; e.title = it.title; e.subtitle = it.subtitle;
+    e.type = it.type; e.thumbnailUrl = it.thumbnailUrl; e.expandable = it.expandable;
+    PlaylistStore::addItem(plid, e);
+    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), 3500);
+}
+
+void HomeView::addBrowseItemToPlaylist(int browseIndex)
+{
+    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return;
+    addItemToPlaylistInteractive(items_[browseRowMap_[browseIndex]]);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -1663,6 +1807,16 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             // Enter opens the focused item (same as a click).
             if (ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter) { onItemActivated(); return true; }
 
+            // "P" adds the focused catalog item to a playlist (the Playlists folder sits atop the catalogue).
+            if (ke->key() == Qt::Key_P && !recentView_)
+            {
+                const int row = grid_->currentRow();
+                if (row >= 0 && row < items_.size() && !items_[row].type.startsWith(QLatin1Char('_'))
+                    && items_[row].type != QStringLiteral("info"))
+                    addItemToPlaylistInteractive(items_[row]);
+                return true;
+            }
+
             // Up from anywhere in the top row returns to the media-type tabs. "Top row" = items sharing the
             // first selectable item's vertical position (works for the multi-column grid and the recent list).
             if (ke->key() == Qt::Key_Up && activeTypeButton_)
@@ -1740,6 +1894,14 @@ void HomeView::activateItem(int row)
 
     // The synthetic Steam console drills into the local library natively (not via the addon).
     if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
+
+    // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
+    if (it.type == QStringLiteral("_playlists"))
+        { openPlaylistsLevel(it.mime.mid(QStringLiteral("playlists:").size())); return; }
+    if (it.type == QStringLiteral("_playlist"))
+        { openPlaylistLevel(it.mime.mid(QStringLiteral("playlist:").size())); return; }
+    if (it.type == QStringLiteral("_newplaylist"))
+        { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
 
     LoadedAddon* addon = stack_.last().addon;
 
@@ -2070,6 +2232,11 @@ void HomeView::loadTop()
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
+    // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_playlists"))
+        { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
+    if (top.detail && top.item.type == QStringLiteral("_playlist"))
+        { populatePlaylistItems(top.item.mime.mid(QStringLiteral("playlist:").size())); return; }
 
     const bool container = top.detail && top.item.expandable;       // has children to drill into
     // A leaf detail page (a movie/episode info page) has no child list to filter -> hide the bar. A container
@@ -2681,6 +2848,19 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         grid_->clear();
         items_.clear();
         settingsStore().sync(); // fresh resume positions for the progress bars
+        // A "Playlists" folder at the very top of every (unfiltered) catalogue root: the user's saved playlists
+        // for this catalogue plus a New-playlist entry, drilled natively (no addon). Not on detail levels (a
+        // drilled container / the playlist levels themselves), search results, or Recents.
+        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
+        {
+            MediaItem pl;
+            pl.id = QStringLiteral("_playlists");
+            pl.type = QStringLiteral("_playlists");
+            pl.title = tr("Playlists");
+            pl.expandable = true;
+            pl.mime = QStringLiteral("playlists:") + currentCatalogKey(); // marker -> drilled natively
+            items_.push_back(pl);
+        }
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
         const QString kind = openKindForView();
         if (!kind.isEmpty())

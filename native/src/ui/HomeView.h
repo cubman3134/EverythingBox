@@ -67,6 +67,7 @@ public:
     void playThemedLeaf(int browseIndex);
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;
+    void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)
 
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
@@ -140,6 +141,17 @@ private:
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
     void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
     void populateSteamGames();                           // (re)build the Steam games list natively
+
+    // Playlists: every (unfiltered) catalogue root shows a "Playlists" folder; these drive its synthetic
+    // (addon-less) levels. catalogKey identifies the catalogue ("addonId|catalogId|catalogType").
+    QString currentCatalogKey() const;                   // key for the catalogue at the root of the browse stack
+    LoadedAddon* addonForKey(const QString& catalogKey) const; // the catalogue's source addon (null if native)
+    void openPlaylistsLevel(const QString& catalogKey);  // drill the Playlists folder -> the list of playlists
+    void populatePlaylists(const QString& catalogKey);   // (re)build that list (each playlist + a New entry)
+    void openPlaylistLevel(const QString& playlistId);   // drill a playlist -> its items
+    void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
+    void createPlaylistInteractive(const QString& catalogKey); // prompt for a name + create, refresh the list
+    void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
     void requestSteamMeta(const MediaItem& item, int reqId); // native detail fetch for a Steam game
     QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers

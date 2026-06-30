@@ -256,20 +256,21 @@ Item {
         opacity: (xmb.host && xmb.host.actionsOpen) ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 130 } }
         z: 50
-        width: xmb.width * 0.24; height: xmb.height * 0.19
+        width: xmb.width * 0.26; height: xmb.height * 0.27
         x: xmb.crossX + xmb.width * 0.05
         y: xmb.colTop - xmb.itemGap * 0.5
         radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
 
         Column {
-            anchors.centerIn: parent; spacing: parent.height * 0.10; width: parent.width * 0.86
+            anchors.centerIn: parent; spacing: parent.height * 0.07; width: parent.width * 0.88
             Repeater {
                 model: [ { k: 0, label: "▶  Play" },
-                         { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" } ]
+                         { k: 1, label: (xmb.host && xmb.host.actionFav) ? "★  Favorited" : "☆  Favorite" },
+                         { k: 2, label: "＋  Add to playlist" } ]
                 delegate: Rectangle {
                     required property var modelData
                     readonly property bool sel: !!(xmb.host && xmb.host.actionIndex === modelData.k)
-                    width: parent.width; height: actions.height * 0.36; radius: 8
+                    width: parent.width; height: actions.height * 0.27; radius: 8
                     color: sel ? "#3A6FB0" : "#1A222E"
                     Text {
                         anchors.centerIn: parent; text: modelData.label

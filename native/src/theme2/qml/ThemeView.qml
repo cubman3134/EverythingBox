@@ -32,7 +32,8 @@ Item {
     signal details()               // entered the detail view (for the host's "open details" sound)
     signal categoryChanged()       // XMB: moved to another category (host loads its column); read catIndex
     signal selectionMoved()        // XMB: the column selection moved (host fetches that item's metadata)
-    signal actionChosen(int which) // XMB: chose an inline action on the open leaf (0 = Play, 1 = Favorite)
+    signal actionChosen(int which) // XMB: chose an inline action (0 = Play, 1 = Favorite, 2 = Add to playlist)
+    signal addToPlaylistRequested() // XMB: "P" on the highlighted item -> host adds it to a playlist
 
     // XMB (cross) state. categories = the horizontal axis; items = the active category's column; catIndex /
     // currentIndex are the two cursors. xmbMode is on when the active view contains an `xmb` element, which
@@ -129,9 +130,10 @@ Item {
         // two options, Enter fires the chosen one, Esc dismisses. Everything else is swallowed so the cross
         // behind it stays put.
         if (actionsOpen) {
-            if (e.key === Qt.Key_Down || e.key === Qt.Key_Up) { actionIndex = (actionIndex === 0 ? 1 : 0); navigate() }
+            if (e.key === Qt.Key_Down)      { actionIndex = (actionIndex + 1) % 3; navigate() }
+            else if (e.key === Qt.Key_Up)   { actionIndex = (actionIndex + 2) % 3; navigate() }
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
-                                                              { actionChosen(actionIndex) }
+                                            { actionChosen(actionIndex) }
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { actionsOpen = false }
             e.accepted = true
             return
@@ -159,6 +161,8 @@ Item {
             e.accepted = true
         }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
+        // "P" adds the highlighted item to a playlist (the host ignores it off a real media row).
+        else if (e.key === Qt.Key_P)                            { addToPlaylistRequested(); e.accepted = true }
         // "/" (or the dedicated Search key) asks the host to prompt for a query. Not in the detail view.
         else if ((e.key === Qt.Key_Slash || e.key === Qt.Key_Search) && currentView !== "detail")
                                                                 { searchRequested(); e.accepted = true }

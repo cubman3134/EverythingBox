@@ -1628,6 +1628,9 @@ void MainWindow::refreshThemedMeta(int idx)
     const QVariantList col = r->property("items").toList();
     if (idx < 0 || idx >= col.size()) { r->setProperty("selectedMeta", QVariantMap()); return; }
     const QVariantMap it = col[idx].toMap();
+    // Synthetic rows (the Playlists folder, a playlist, the New entry) aren't media - show no metadata panel.
+    if (it.value(QStringLiteral("type")).toString().startsWith(QLatin1Char('_')))
+        { r->setProperty("selectedMeta", QVariantMap()); themedMetaWant_ = -1; return; }
     QVariantMap sk; // overwrites the previous row's data (so no stale synopsis lingers while the fetch runs)
     sk.insert(QStringLiteral("title"), it.value(QStringLiteral("title")));
     sk.insert(QStringLiteral("subtitle"), it.value(QStringLiteral("subtitle")));
@@ -1757,13 +1760,16 @@ void MainWindow::showThemedXmb()
             if (r) r->setProperty("currentIndex", 0);
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
         }
-        else // inside a catalog: containers drill in-column; a leaf opens the inline Play/Favorite chooser
+        else // inside a catalog: containers drill in-column; a leaf opens the inline action chooser
         {
             const QVariantList col = r ? r->property("items").toList() : QVariantList();
-            const bool expandable = itemIdx >= 0 && itemIdx < col.size()
-                                    && col[itemIdx].toMap().value(QStringLiteral("expandable")).toBool();
-            if (expandable) home_->browseActivate(itemIdx); // a series / console / volume -> drill into it
-            else if (r) // a movie / book / game / track / comic issue -> Play or Favorite, right here
+            const QVariantMap m = (itemIdx >= 0 && itemIdx < col.size()) ? col[itemIdx].toMap() : QVariantMap();
+            const bool expandable = m.value(QStringLiteral("expandable")).toBool();
+            const bool synthetic = m.value(QStringLiteral("type")).toString().startsWith(QLatin1Char('_'));
+            // A container (series/console/volume) or a synthetic row (Playlists folder, a playlist, New) drills
+            // / acts via the normal path; a real leaf opens the inline Play / Favorite / Add-to-playlist chooser.
+            if (expandable || synthetic) home_->browseActivate(itemIdx);
+            else if (r)
             {
                 r->setProperty("actionItem", itemIdx);
                 r->setProperty("actionFav", home_->isThemedLeafFavorite(itemIdx));
@@ -1805,22 +1811,29 @@ void MainWindow::showThemedXmb()
     // The column selection moved: refresh the live metadata panel for the new row (only while in a catalog).
     auto onSelect = [this](int idx) { if (themedXmbInCatalog_) refreshThemedMeta(idx); };
     // The inline chooser fired: 0 = Play the leaf (and close), 1 = toggle Favorite (and stay, so the heart
-    // updates in place; the metadata panel's "★ Favorited" follows too).
+    // updates in place; the metadata panel's "★ Favorited" follows too), 2 = Add to a playlist (and close).
     auto onAction = [this](int which) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
         const int idx = r->property("actionItem").toInt();
-        if (which == 0) { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
+        if (which == 0)      { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
+        else if (which == 2) { r->setProperty("actionsOpen", false); home_->addBrowseItemToPlaylist(idx); }
         else
         {
             home_->favoriteThemedLeaf(idx);
             r->setProperty("actionFav", home_->isThemedLeafFavorite(idx));
         }
     };
+    // "P" on the highlighted item: add it to a playlist (only while inside a catalogue, on a real media row).
+    auto onPlaylistAdd = [this] {
+        if (!themedXmbInCatalog_) return;
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (r) home_->addBrowseItemToPlaylist(r->property("currentIndex").toInt());
+    };
 
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
-                                        onSelect, onAction);
+                                        onSelect, onAction, onPlaylistAdd);
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("categories", cats);
