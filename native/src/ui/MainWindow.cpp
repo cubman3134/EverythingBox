@@ -79,6 +79,11 @@
 
 #include "miniz.h"
 
+#ifdef MMV_HAVE_QML
+#include "../theme2/ThemeEngine.h"
+#include <QQuickWidget>
+#endif
+
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
 static void mwLog(const QString& msg)
 {
@@ -287,6 +292,32 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     v->addWidget(stack_, 1);
     setCentralWidget(central);
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
+
+#ifdef MMV_HAVE_QML
+    // Beta preview of the new QML theme engine, fed with the real Recent list (Ctrl+Shift+T). Phase 4 will
+    // replace the Home screen with this behind a setting; for now it's an opt-in preview window.
+    {
+        auto* themeSc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")), this);
+        connect(themeSc, &QShortcut::activated, this, [this] {
+            QVariantList items;
+            for (const RecentItem& r : RecentStore::list())
+                items << QVariantMap{ { QStringLiteral("title"), r.title }, { QStringLiteral("subtitle"), r.kind },
+                                      { QStringLiteral("image"), r.thumb }, { QStringLiteral("accent"), QStringLiteral("#2A2D34") } };
+            if (items.isEmpty())
+                items << QVariantMap{ { QStringLiteral("title"), tr("Open something to fill Recent") },
+                                      { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
+            QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+            QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/Default"),
+                                                     items, system, nullptr);
+            w->setAttribute(Qt::WA_DeleteOnClose);
+            w->setWindowTitle(tr("Themed home — preview (Esc to close)"));
+            w->resize(1280, 760);
+            auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), w);
+            connect(esc, &QShortcut::activated, w, &QWidget::close);
+            w->show(); w->raise(); w->activateWindow();
+        });
+    }
+#endif
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media
     // transport overlay, the emulator Esc menu, and per-view Home buttons).
 

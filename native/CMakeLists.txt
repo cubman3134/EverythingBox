@@ -113,6 +113,14 @@ if(MYMEDIAVAULT_BUILD_APP)
     if(NOT ANDROID)
         target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
+    # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
+    if(MMV_HAVE_QML)
+        target_sources(mymediavault PRIVATE
+            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
+            resources/theme2.qrc)
+        target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
+        target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
+    endif()
     set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
     # On macOS, produce a MyMediaVault.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(mymediavault PROPERTIES MACOSX_BUNDLE TRUE)
@@ -145,10 +153,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_pageview PRIVATE src src/ebook)
     target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
 
-    # QML theme engine (Phase 1): renders a theme file through the QML view to a PNG - proves the pipeline.
+    # QML theme engine probe: renders a theme dir through ThemeEngine + the qrc-embedded QML (the app path).
     if(MMV_HAVE_QML)
-        add_executable(probe_theme2 tools/probe_theme2.cpp)
-        target_link_libraries(probe_theme2 PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick)
+        add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp resources/theme2.qrc)
+        set_target_properties(probe_theme2 PROPERTIES AUTORCC ON)
+        target_include_directories(probe_theme2 PRIVATE src src/theme2)
+        target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
     endif()
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.

@@ -1,0 +1,14 @@
+<RCC>
+  <qresource prefix="/theme2">
+    <file alias="ThemeView.qml">../src/theme2/qml/ThemeView.qml</file>
+    <file alias="Theme.js">../src/theme2/qml/Theme.js</file>
+    <file alias="elements/Text.qml">../src/theme2/qml/elements/Text.qml</file>
+    <file alias="elements/DateTime.qml">../src/theme2/qml/elements/DateTime.qml</file>
+    <file alias="elements/Image.qml">../src/theme2/qml/elements/Image.qml</file>
+    <file alias="elements/Rating.qml">../src/theme2/qml/elements/Rating.qml</file>
+    <file alias="elements/Grid.qml">../src/theme2/qml/elements/Grid.qml</file>
+    <file alias="elements/Carousel.qml">../src/theme2/qml/elements/Carousel.qml</file>
+    <file alias="elements/Video.qml">../src/theme2/qml/elements/Video.qml</file>
+    <file alias="elements/HelpSystem.qml">../src/theme2/qml/elements/HelpSystem.qml</file>
+  </qresource>
+</RCC>
