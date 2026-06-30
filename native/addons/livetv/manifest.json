@@ -1,0 +1,21 @@
+{
+  "id": "com.mymediavault.livetv",
+  "name": "Live TV",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "My Media Vault",
+  "description": "Free live TV from the public iptv-org playlists (like the USA TV / StreamFire channel lists). Browse thousands of channels by country or category, or search by name. Streams are HLS and play through the built-in player.",
+  "permissions": ["network"],
+  "minAppVersion": "0.1.0",
+  "mediaTypes": [
+    { "type": "livetv", "color": "#E23B3B", "icon": "📺", "openKind": "video", "detailLayout": "poster" }
+  ],
+  "catalogs": [
+    { "id": "livetv", "name": "Live TV", "type": "livetv" }
+  ],
+  "settings": [
+    { "key": "searchCountries", "label": "Search countries", "type": "text", "default": "us,uk,ca,au",
+      "description": "Comma-separated country codes searched when you type a channel name (e.g. us,uk,ca,au). Browsing still reaches every country." }
+  ]
+}
