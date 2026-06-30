@@ -81,7 +81,6 @@
 
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
-#include <QQuickWidget>
 #include <QQuickItem>
 #include <QDialog>
 #include <QHBoxLayout>
@@ -313,15 +312,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // Keep the themed browse view mirroring HomeView as it loads / drills / pages.
         connect(home_, &HomeView::browseItemsChanged, this, [this] {
             if (themedBrowse_ && stack_->currentWidget() == themedBrowse_)
-                if (QQuickWidget* w = qobject_cast<QQuickWidget*>(themedBrowse_))
-                    if (QQuickItem* r = w->rootObject())
-                    {
-                        r->setProperty("items", home_->browseItems());
-                        r->setProperty("currentIndex", 0);
-                        r->setProperty("currentView", QStringLiteral("browse"));
-                        QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
-                        r->setProperty("system", sys);
-                    }
+                if (QQuickItem* r = ThemeEngine::rootItem(themedBrowse_))
+                {
+                    r->setProperty("items", home_->browseItems());
+                    r->setProperty("currentIndex", 0);
+                    r->setProperty("currentView", QStringLiteral("browse"));
+                    QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
+                    r->setProperty("system", sys);
+                }
         });
     }
 #endif
@@ -1499,8 +1497,8 @@ void MainWindow::showThemedHome()
         showThemedHome();
     };
 
-    QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                             items, system, this, onActivated, onBack, onCycle);
+    QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+                                        items, system, this, onActivated, onBack, onCycle);
     QWidget* old = themedHome_;
     themedHome_ = w;
     stack_->addWidget(w);
@@ -1543,9 +1541,9 @@ void MainWindow::showThemedBrowse()
         showThemedBrowse();
     };
 
-    QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                             home_->browseItems(), system, this, onActivated, onBack, onCycle);
-    if (QQuickItem* r = w->rootObject()) r->setProperty("currentView", QStringLiteral("browse"));
+    QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+                                        home_->browseItems(), system, this, onActivated, onBack, onCycle);
+    if (QQuickItem* r = ThemeEngine::rootItem(w)) r->setProperty("currentView", QStringLiteral("browse"));
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;
     stack_->addWidget(w);
@@ -1603,8 +1601,8 @@ void MainWindow::openAppearance()
 
     auto rebuildPreview = [&, previewItems, system](const QString& folder) {
         while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
-        QQuickWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
-                                                 previewItems, system, previewBox);
+        QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                            previewItems, system, previewBox);
         p->setMinimumSize(480, 270); // 16:9; the fractional layout scales to whatever size it gets
         pv->addWidget(p);
     };

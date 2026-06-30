@@ -1,19 +1,20 @@
 // Verifies the in-app theme path end to end: ThemeEngine loads a theme from disk and renders it through the
-// qrc-embedded QML in a QQuickWidget (exactly what the app does), then grabs a frame to PNG.
-// Usage: probe_theme2 <themeDir> <out.png> [sampleImage]
+// qrc-embedded QML in a QQuickView (exactly what the app does), then grabs a frame to PNG.
+// Usage: probe_theme2 <themeDir> <out.png> [sampleImage] [startIndex]
 #include "ThemeEngine.h"
 #include <QApplication>
-#include <QQuickWidget>
 #include <QQuickItem>
+#include <QQuickWindow>
 #include <QEventLoop>
 #include <QTimer>
-#include <QPixmap>
+#include <QImage>
 #include <QFileInfo>
 #include <cstdio>
 
 int main(int argc, char** argv)
 {
     qputenv("QT_QUICK_BACKEND", "software");
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software); // match the app
     QApplication app(argc, argv);
     if (argc < 3) { std::fprintf(stderr, "usage: probe_theme2 <themeDir> <out.png> [sampleImage]\n"); return 2; }
     const QString themeDir = QString::fromLocal8Bit(argv[1]);
@@ -38,25 +39,26 @@ int main(int argc, char** argv)
     }
     QVariantMap system; system["name"] = QFileInfo(themeDir).fileName();
 
-    QQuickWidget* w = ThemeEngine::buildView(themeDir, items, system, nullptr);
+    QWidget* w = ThemeEngine::buildView(themeDir, items, system, nullptr);
+    QQuickItem* root = ThemeEngine::rootItem(w);
+    if (!root) { std::fprintf(stderr, "no root item (QML failed to load)\n"); return 1; }
+    QQuickWindow* win = root->window(); // the QQuickView embedded by buildView
+    if (!win) { std::fprintf(stderr, "no QQuickWindow for root\n"); return 1; }
+
     const int rw = qEnvironmentVariableIntValue("PROBE_W"), rh = qEnvironmentVariableIntValue("PROBE_H");
-    w->resize(rw > 0 ? rw : 1280, rh > 0 ? rh : 720); // PROBE_W/H override -> verify small-size scaling
+    win->resize(rw > 0 ? rw : 1280, rh > 0 ? rh : 720); // PROBE_W/H override -> verify small-size scaling
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
-    if (argc >= 5 && w->rootObject()) w->rootObject()->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
+    if (argc >= 5) root->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
     // PROBE_VIEW selects which theme view to render (e.g. "detail") - verifies per-view theming.
-    if (w->rootObject() && !qEnvironmentVariable("PROBE_VIEW").isEmpty())
-        w->rootObject()->setProperty("currentView", qEnvironmentVariable("PROBE_VIEW"));
-    if (w->status() == QQuickWidget::Error)
-    {
-        for (const QQmlError& e : w->errors()) std::fprintf(stderr, "QML: %s\n", e.toString().toUtf8().constData());
-        return 1;
-    }
-    w->show();
+    if (!qEnvironmentVariable("PROBE_VIEW").isEmpty())
+        root->setProperty("currentView", qEnvironmentVariable("PROBE_VIEW"));
+
+    win->show();
     { QEventLoop loop; QTimer::singleShot(500, &loop, &QEventLoop::quit); loop.exec(); }
 
-    const QPixmap pm = w->grab();
-    if (pm.isNull() || !pm.save(outPng)) { std::fprintf(stderr, "grab/save failed\n"); return 1; }
+    const QImage img = win->grabWindow();
+    if (img.isNull() || !img.save(outPng)) { std::fprintf(stderr, "grab/save failed\n"); return 1; }
     std::printf("OK: theme dir \"%s\" rendered %dx%d -> %s\n",
-                themeDir.toUtf8().constData(), pm.width(), pm.height(), outPng.toUtf8().constData());
+                themeDir.toUtf8().constData(), img.width(), img.height(), outPng.toUtf8().constData());
     return 0;
 }

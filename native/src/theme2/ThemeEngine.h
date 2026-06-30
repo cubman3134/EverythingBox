@@ -10,7 +10,6 @@
 #include <functional>
 
 class QWidget;
-class QQuickWidget;
 class QQuickItem;
 
 // Relays the QML view's signals (navigation activate / back / cycle-theme) to plain C++ callbacks. The
@@ -32,13 +31,17 @@ public slots:
 
 namespace ThemeEngine
 {
-    // Build a themed view for the given theme directory, fed with `items` (the catalog rows) and `system`.
-    // The callbacks fire on Enter (with the selected index), Esc/Back, and the theme-cycle key.
-    QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
-                            QWidget* parent = nullptr,
-                            std::function<void(int)> onActivated = {},
-                            std::function<void()> onBack = {},
-                            std::function<void()> onCycle = {});
+    // Build a themed view widget for the given theme directory, fed with `items` (the catalog rows) and
+    // `system`. The callbacks fire on Enter (with the selected index), Esc/Back, and the theme-cycle key.
+    // The returned widget embeds a software-rendered QQuickView (see rootItem() to update it live).
+    QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
+                       QWidget* parent = nullptr,
+                       std::function<void(int)> onActivated = {},
+                       std::function<void()> onBack = {},
+                       std::function<void()> onCycle = {});
+
+    // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
+    QQuickItem* rootItem(QWidget* view);
 
     QString themesRoot();              // <app>/themes2
     QStringList availableThemes();     // subdirectories of themesRoot that contain a theme.json

@@ -1,14 +1,16 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
 
-#include <QQuickWidget>
+#include <QQuickView>
 #include <QQuickItem>
+#include <QWidget>
 #include <QQmlContext>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
 #include <QDir>
 #include <QUrl>
+#include <QColor>
 
 void ThemeBridge::activated() { if (onActivated && root) onActivated(root->property("currentIndex").toInt()); }
 void ThemeBridge::back()      { if (onBack) onBack(); }
@@ -45,9 +47,9 @@ QString themeDisplayName(const QString& folder)
     return folder;
 }
 
-QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
-                        QWidget* parent, std::function<void(int)> onActivated,
-                        std::function<void()> onBack, std::function<void()> onCycle)
+QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
+                   QWidget* parent, std::function<void(int)> onActivated,
+                   std::function<void()> onBack, std::function<void()> onCycle)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -55,23 +57,24 @@ QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, cons
     if (tf.open(QIODevice::ReadOnly))
         theme = QJsonDocument::fromJson(tf.readAll()).object().toVariantMap();
 
-    auto* w = new QQuickWidget(parent);
-    w->setResizeMode(QQuickWidget::SizeRootObjectToView);
-    w->setFocusPolicy(Qt::StrongFocus); // so the embedded QML scene receives key events
-    w->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+    // A QQuickView (a real window) renders the QML reliably even alongside the app's QOpenGLWidget; a
+    // QQuickWidget rendered blank here. We embed it via createWindowContainer. (The whole themed screen is
+    // one full-page widget, so the native-window stacking quirks don't bite.)
+    auto* qv = new QQuickView();
+    qv->setResizeMode(QQuickView::SizeRootObjectToView);
+    qv->setColor(QColor(QStringLiteral("#0F1216")));
+    qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
 
-    // QQuickWidget has no setInitialProperties; set the properties on the loaded root object. Bindings
-    // re-evaluate as each lands, so `theme` is set last (everything depends on it).
-    if (QQuickItem* root = w->rootObject())
+    if (QQuickItem* root = qv->rootObject())
     {
         root->setProperty("base", QUrl::fromLocalFile(themeDir).toString());
         root->setProperty("system", system);
         root->setProperty("items", items);
         root->setProperty("currentIndex", 0);
         root->setProperty("currentView", QStringLiteral("home"));
-        root->setProperty("theme", theme);
+        root->setProperty("theme", theme); // set last - everything depends on it
 
-        auto* bridge = new ThemeBridge(w);
+        auto* bridge = new ThemeBridge(qv);
         bridge->root = root;
         bridge->onActivated = std::move(onActivated);
         bridge->onBack = std::move(onBack);
@@ -80,7 +83,19 @@ QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, cons
         QObject::connect(root, SIGNAL(back()), bridge, SLOT(back()));
         QObject::connect(root, SIGNAL(cycleTheme()), bridge, SLOT(cycle()));
     }
-    return w;
+
+    QWidget* container = QWidget::createWindowContainer(qv, parent);
+    container->setFocusPolicy(Qt::StrongFocus);
+    container->setProperty("mmvQuickView", QVariant::fromValue<QObject*>(qv)); // for rootItem()
+    return container;
+}
+
+QQuickItem* rootItem(QWidget* view)
+{
+    if (!view) return nullptr;
+    QObject* o = view->property("mmvQuickView").value<QObject*>();
+    QQuickView* qv = qobject_cast<QQuickView*>(o);
+    return qv ? qv->rootObject() : nullptr;
 }
 
 } // namespace ThemeEngine
