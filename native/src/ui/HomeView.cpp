@@ -79,6 +79,9 @@ static QSettings& settingsStore()
 static double resumeFraction(const QString& url)
 {
     if (url.isEmpty()) return -1.0;
+    // Live TV / HLS streams have no fixed length, so "how far in" is meaningless - never show a progress
+    // percentage or bar for them (the duration mpv reports for a live stream would be misleading).
+    if (url.contains(QStringLiteral(".m3u8"), Qt::CaseInsensitive)) return -1.0;
     const QByteArray h = QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
     const QString k = QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
     const double pos = settingsStore().value(k + QStringLiteral("pos"), 0.0).toDouble();
