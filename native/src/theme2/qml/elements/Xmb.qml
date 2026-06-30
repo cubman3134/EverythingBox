@@ -90,12 +90,15 @@ Item {
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.26); c.lineTo(w * 0.84, h * 0.34); c.lineTo(w * 0.84, h * 0.78); c.lineTo(w * 0.5, h * 0.72); c.closePath(); c.fill()
                             c.strokeStyle = (cat.modelData && cat.modelData.accent) ? cat.modelData.accent : "#444"
                             c.beginPath(); c.moveTo(w * 0.5, h * 0.3); c.lineTo(w * 0.5, h * 0.72); c.stroke()
-                        } else {                                           // settings: three sliders
-                            var ys = [0.3, 0.5, 0.7], kx = [0.7, 0.35, 0.6]
-                            for (var i = 0; i < 3; i++) {
-                                c.beginPath(); c.moveTo(w * 0.16, h * ys[i]); c.lineTo(w * 0.84, h * ys[i]); c.stroke()
-                                c.beginPath(); c.arc(w * kx[i], h * ys[i], w * 0.09, 0, 6.2832); c.fill()
+                        } else {                                           // settings: a gear
+                            var gx = w * 0.5, gy = h * 0.5, R = w * 0.3, teeth = 8, tw = w * 0.13, tl = w * 0.16
+                            for (var k = 0; k < teeth; k++) {
+                                c.save(); c.translate(gx, gy); c.rotate(k / teeth * 6.2832)
+                                c.fillRect(-tw / 2, -(R + tl), tw, tl + R * 0.3); c.restore()
                             }
+                            c.beginPath(); c.arc(gx, gy, R, 0, 6.2832); c.fill()
+                            c.save(); c.globalCompositeOperation = "destination-out"
+                            c.beginPath(); c.arc(gx, gy, R * 0.42, 0, 6.2832); c.fill(); c.restore()
                         }
                     }
                 }
