@@ -29,7 +29,10 @@ Item {
     readonly property real catGap: Number(T.val(el, "catSpacing", 0.135)) * width
     readonly property real itemGap: Number(T.val(el, "itemSpacing", 0.082)) * height
     readonly property real iconSize: Number(T.val(el, "iconSize", 0.11)) * height
-    // The column starts well below the category row so the bucket label never collides with the first item.
+    // Column tile size is derived from the row spacing (and stays under it even when the selected row scales
+    // up 1.12x), so column items never overlap regardless of the theme's iconSize/itemSpacing.
+    readonly property real rowSize: itemGap * 0.8
+    // The column starts well below the category row + its label so the first item never collides with them.
     readonly property real colTop: crossY + iconSize * 1.7
 
     // Smoothly slide both axes toward the selection (the PS3 "everything glides to the cross" feel).
@@ -137,7 +140,7 @@ Item {
             required property int index
             readonly property bool sel: index === xmb.itemIndex
             readonly property real dy: (index - xmb.itemScroll) * xmb.itemGap
-            width: xmb.iconSize * 0.9; height: xmb.iconSize * 0.9
+            width: xmb.rowSize; height: xmb.rowSize
             x: xmb.crossX - width / 2
             y: xmb.colTop + dy - height / 2
             opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (sel ? 1.0 : 0.6) // fade rows that rise above the column top
