@@ -32,6 +32,19 @@ QStringList availableThemes()
     return out;
 }
 
+QString themeDisplayName(const QString& folder)
+{
+    QFile f(themesRoot() + QStringLiteral("/") + folder + QStringLiteral("/theme.json"));
+    if (f.open(QIODevice::ReadOnly))
+    {
+        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        const QString name = o.value(QStringLiteral("name")).toString();
+        const QString author = o.value(QStringLiteral("author")).toString();
+        if (!name.isEmpty()) return author.isEmpty() ? name : (name + QStringLiteral(" — ") + author);
+    }
+    return folder;
+}
+
 QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                         QWidget* parent, std::function<void(int)> onActivated,
                         std::function<void()> onBack, std::function<void()> onCycle)

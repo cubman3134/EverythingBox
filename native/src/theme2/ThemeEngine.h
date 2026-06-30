@@ -42,4 +42,5 @@ namespace ThemeEngine
 
     QString themesRoot();              // <app>/themes2
     QStringList availableThemes();     // subdirectories of themesRoot that contain a theme.json
+    QString themeDisplayName(const QString& folder); // theme.json "name [— author]", else the folder name
 }

@@ -37,7 +37,8 @@ int main(int argc, char** argv)
     QVariantMap system; system["name"] = QFileInfo(themeDir).fileName();
 
     QQuickWidget* w = ThemeEngine::buildView(themeDir, items, system, nullptr);
-    w->resize(1280, 720);
+    const int rw = qEnvironmentVariableIntValue("PROBE_W"), rh = qEnvironmentVariableIntValue("PROBE_H");
+    w->resize(rw > 0 ? rw : 1280, rh > 0 ? rh : 720); // PROBE_W/H override -> verify small-size scaling
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
     if (argc >= 5 && w->rootObject()) w->rootObject()->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
     if (w->status() == QQuickWidget::Error)

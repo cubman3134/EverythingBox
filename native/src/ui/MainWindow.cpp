@@ -83,11 +83,13 @@
 #include "../theme2/ThemeEngine.h"
 #include <QQuickWidget>
 #include <QDialog>
-#include <QFormLayout>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QCheckBox>
-#include <QComboBox>
+#include <QListWidget>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QFrame>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -1495,23 +1497,71 @@ void MainWindow::openAppearance()
 {
     QDialog dlg(this);
     dlg.setWindowTitle(tr("Appearance"));
-    auto* form = new QFormLayout(&dlg);
+    dlg.resize(940, 560);
+    auto* root = new QHBoxLayout(&dlg);
+
+    // --- left: enable + theme list -------------------------------------------------------------------
+    auto* left = new QVBoxLayout();
     auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"), &dlg);
     enable->setChecked(themedHomeEnabled());
-    auto* themeCombo = new QComboBox(&dlg);
-    themeCombo->addItems(ThemeEngine::availableThemes());
-    themeCombo->setCurrentText(store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString());
-    form->addRow(enable);
-    form->addRow(tr("Theme"), themeCombo);
-    form->addRow(new QLabel(tr("Themes live in %1 — edit theme.json to customise.").arg(ThemeEngine::themesRoot()), &dlg));
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    left->addWidget(enable);
+    left->addWidget(new QLabel(tr("Theme"), &dlg));
+
+    auto* list = new QListWidget(&dlg);
+    list->setMinimumWidth(240);
+    const QStringList themes = ThemeEngine::availableThemes();
+    const QString current = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    for (const QString& folder : themes)
+    {
+        auto* it = new QListWidgetItem(ThemeEngine::themeDisplayName(folder), list);
+        it->setData(Qt::UserRole, folder); // the on-disk folder = the stored value
+        if (folder == current) list->setCurrentItem(it);
+    }
+    if (!list->currentItem() && list->count() > 0) list->setCurrentRow(0);
+    left->addWidget(list, 1);
+    auto* hint = new QLabel(tr("Themes live in %1.\nEdit theme.json to customise, then reopen this dialog.")
+                                .arg(ThemeEngine::themesRoot()), &dlg);
+    hint->setWordWrap(true);
+    QFont hf = hint->font(); hf.setPointSizeF(hf.pointSizeF() * 0.85); hint->setFont(hf);
+    left->addWidget(hint);
+    root->addLayout(left, 0);
+
+    // --- right: live preview of the selected theme over the real catalogs ----------------------------
+    auto* previewBox = new QFrame(&dlg);
+    previewBox->setFrameShape(QFrame::StyledPanel);
+    auto* pv = new QVBoxLayout(previewBox);
+    pv->setContentsMargins(1, 1, 1, 1);
+    root->addWidget(previewBox, 1);
+
+    QVariantList previewItems = home_->systemItems();
+    if (previewItems.isEmpty())
+        for (const char* n : { "Movies", "TV", "Music", "Games", "Live TV", "Books" })
+            previewItems << QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(n) },
+                                         { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+
+    auto rebuildPreview = [&, previewItems, system](const QString& folder) {
+        while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
+        QQuickWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                                 previewItems, system, previewBox);
+        p->setMinimumSize(480, 270); // 16:9; the fractional layout scales to whatever size it gets
+        pv->addWidget(p);
+    };
+    connect(list, &QListWidget::currentItemChanged, &dlg, [&](QListWidgetItem* it, QListWidgetItem*) {
+        if (it) rebuildPreview(it->data(Qt::UserRole).toString());
+    });
+    if (list->currentItem()) rebuildPreview(list->currentItem()->data(Qt::UserRole).toString());
+
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dlg);
     connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
     connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    form->addRow(bb);
+    left->addWidget(bb);
+
     if (dlg.exec() != QDialog::Accepted) return;
 
     store().setValue(QStringLiteral("themedHome/enabled"), enable->isChecked());
-    store().setValue(QStringLiteral("themedHome/theme"), themeCombo->currentText());
+    if (list->currentItem())
+        store().setValue(QStringLiteral("themedHome/theme"), list->currentItem()->data(Qt::UserRole).toString());
     store().sync();
     // Apply immediately only if we're on a home screen (don't yank the user out of media/browsing).
     if (stack_->currentWidget() == home_ || stack_->currentWidget() == themedHome_)
