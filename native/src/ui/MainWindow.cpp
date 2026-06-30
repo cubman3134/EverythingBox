@@ -1628,7 +1628,7 @@ void MainWindow::showThemedXmb()
     auto onActivated = [this, settingsIdx, showCatalogs](int itemIdx) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
-        if (cat == settingsIdx) { openAppearance(); return; }
+        if (cat == settingsIdx) { openSettingsHub(); return; } // the full settings hub: Add-ons, Cloud Sync, Appearance, …
         if (!themedXmbInCatalog_) // the column is the catalog list -> open the chosen catalog into its items
         {
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
@@ -2452,6 +2452,7 @@ void MainWindow::openSettingsHub()
             v->addWidget(b);
         };
         add(tr("General"),            [this] { openGeneralSettings(); });
+        add(tr("Appearance"),         [this] { openAppearance(); });        // the themed (XMB) home picker
         add(tr("Theme"),              [this] { openThemes(); });
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });

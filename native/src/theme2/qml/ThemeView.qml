@@ -63,7 +63,11 @@ Item {
     function gotoCat(i) {                                   // XMB: click a category to switch to it
         forceActiveFocus()
         var n = categories ? categories.length : 0
-        if (i < 0 || i >= n || i === catIndex) return
+        if (i < 0 || i >= n) return
+        if (i === catIndex) {                              // clicking the already-selected category...
+            if (!items || items.length === 0) activated(currentIndex) // ...with no column (Settings) -> open it
+            return
+        }
         catIndex = i; navigate(); categoryChanged()
     }
 
