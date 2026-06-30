@@ -1,0 +1,10 @@
+{
+  "name": "Default",
+  "author": "My Media Vault",
+  "foreground": "#FFFFFF",
+  "fontFamily": "",
+  "accent": "#E07A2E",
+  "background": { "color": "#0F1216", "image": "", "dim": 0.0 },
+  "grid": { "columns": 6, "aspect": 1.4 },
+  "card": { "radius": 12 }
+}

@@ -35,6 +35,19 @@ if(MYMEDIAVAULT_BUILD_APP)
     find_package(Qt6 REQUIRED COMPONENTS ${MMV_QT_COMPONENTS})
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
+    # QML theme engine (declarative, fully themeable front end) - desktop-first. OPTIONAL so a Qt install
+    # without qtdeclarative still builds the app (the theme engine just isn't compiled). Gate its targets on
+    # TARGET Qt6::Quick. The Android build keeps the Qt-Widgets UI until QML is added to its provisioning.
+    if(NOT ANDROID)
+        find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
+    endif()
+    if(TARGET Qt6::Quick AND TARGET Qt6::Qml)
+        set(MMV_HAVE_QML ON)
+        message(STATUS "MyMediaVault: QML theme engine enabled")
+    else()
+        message(STATUS "MyMediaVault: QML theme engine OFF (qtdeclarative not found)")
+    endif()
+
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
     add_subdirectory(third_party/lzma)     # read-only .7z decoder (LZMA SDK) for archived ROMs, all platforms
 
@@ -131,6 +144,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_pageview tools/probe_pageview.cpp src/ebook/MobiBook.cpp)
     target_include_directories(probe_pageview PRIVATE src src/ebook)
     target_link_libraries(probe_pageview PRIVATE Qt6::Gui)
+
+    # QML theme engine (Phase 1): renders a theme file through the QML view to a PNG - proves the pipeline.
+    if(MMV_HAVE_QML)
+        add_executable(probe_theme2 tools/probe_theme2.cpp)
+        target_link_libraries(probe_theme2 PRIVATE Qt6::Gui Qt6::Qml Qt6::Quick)
+    endif()
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)
