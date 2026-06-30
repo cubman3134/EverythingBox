@@ -10,15 +10,20 @@ Item {
     height: 720
 
     // --- injected from C++ / the host -----------------------------------------------------------------
-    property var view: ({})        // one view of the theme: { background:{...}, elements:[...] }
+    property var theme: ({})       // the whole theme: { name, views: { home:{...}, detail:{...}, ... } }
+    property string currentView: "home"
     property var items: []         // the catalog rows for this view
     property var system: ({})      // view-level info (name, counts, ...)
     property int currentIndex: 0   // the selected row
     property string base: ""       // theme directory as a file:// URL, for resolving relative asset paths
 
+    // The active view's definition (background + elements). Switching currentView re-renders everything.
+    readonly property var view: (theme && theme.views && theme.views[currentView]) ? theme.views[currentView] : ({})
+    function hasView(name) { return !!(theme && theme.views && theme.views[name]) }
+
     focus: true
-    signal activated(int index)    // Enter on the selected row
-    signal back()                  // Esc / Back
+    signal activated(int index)    // Enter on the selected row (host decides what to open)
+    signal back()                  // Esc / Back at the root (home) view
     signal cycleTheme()            // T: next theme (the host swaps the theme file)
 
     // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
@@ -39,8 +44,14 @@ Item {
         else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                                                 { activated(currentIndex); e.accepted = true }
-        else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace)
-                                                                { back();           e.accepted = true }
+        // Info shows the detail view for the focused item (if the theme defines one); Esc backs out of it.
+        else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView === "home")
+                                                                { currentView = "detail"; e.accepted = true }
+        else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
+            if (currentView !== "home") currentView = "home"  // leave detail -> home
+            else back()                                       // already home -> let the host handle it
+            e.accepted = true
+        }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
     }
 

@@ -16,7 +16,21 @@
         { "type": "rating", "id": "stars",   "pos": [0.40, 0.75], "size": [0.16, 0.035], "origin": [0, 0.5], "binding": "selected.rating", "color": "#E07A2E" },
 
         { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
-          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "color": "#0C0F13" },
+      "elements": [
+        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "binding": "selected.image", "fillMode": "contain", "radius": 12 },
+        { "type": "text",   "id": "dTitle",   "pos": [0.42, 0.18], "size": [0.52, 0.1],  "origin": [0, 0.5], "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.062, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text",   "id": "dSub",     "pos": [0.42, 0.30], "size": [0.52, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.03 },
+        { "type": "rating", "id": "dStars",   "pos": [0.42, 0.37], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#E07A2E" },
+        { "type": "text",   "id": "dOverview","pos": [0.42, 0.62], "size": [0.52, 0.40], "origin": [0, 0.5], "binding": "selected.overview", "color": "#D6D9E0", "fontSize": 0.026, "wrap": true, "lines": 12 },
+
+        { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
+          "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
       ]
     }
   }

@@ -31,6 +31,8 @@ int main(int argc, char** argv)
         m["accent"] = cols[i];
         m["subtitle"] = QStringLiteral("%1 items").arg((i + 3) * 17);
         m["rating"] = (i % 5) / 5.0 + 0.2;
+        m["overview"] = QStringLiteral("A short description of %1 goes here. The detail view binds to "
+                                       "selected.overview and wraps it; themers control the layout entirely.").arg(names[i]);
         if (i < 3 && !sampleImg.isEmpty()) m["image"] = sampleImg;
         items << m;
     }
@@ -41,6 +43,9 @@ int main(int argc, char** argv)
     w->resize(rw > 0 ? rw : 1280, rh > 0 ? rh : 720); // PROBE_W/H override -> verify small-size scaling
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
     if (argc >= 5 && w->rootObject()) w->rootObject()->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
+    // PROBE_VIEW selects which theme view to render (e.g. "detail") - verifies per-view theming.
+    if (w->rootObject() && !qEnvironmentVariable("PROBE_VIEW").isEmpty())
+        w->rootObject()->setProperty("currentView", qEnvironmentVariable("PROBE_VIEW"));
     if (w->status() == QQuickWidget::Error)
     {
         for (const QQmlError& e : w->errors()) std::fprintf(stderr, "QML: %s\n", e.toString().toUtf8().constData());

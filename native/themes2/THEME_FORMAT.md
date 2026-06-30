@@ -29,7 +29,10 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
 ```
 
 - `name`, `author` — shown in the theme picker.
-- `views.home` — the home screen (the only view today; more later).
+- `views` — one or more named views. `home` is the main screen. An optional `detail` view is shown for the
+  focused item when you press **I** (Info); **Esc** returns to `home`. Each view has the same shape
+  (`background` + `elements`) and binds to the same data, so the detail view typically uses a big
+  `selected.image`, `selected.title`, `selected.rating` and `selected.overview`. (More built-in views later.)
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
 
 ## Positioning (every element)

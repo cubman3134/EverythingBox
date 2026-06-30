@@ -1336,6 +1336,8 @@ QVariantList HomeView::systemItems()
         if (t.isHome) continue;
         out << QVariantMap{ { QStringLiteral("title"), t.name }, { QStringLiteral("type"), t.type },
                             { QStringLiteral("navKey"), t.navKey },
+                            { QStringLiteral("subtitle"), tr("Open to browse") },
+                            { QStringLiteral("overview"), tr("Browse the %1 catalog. Press Enter to open it.").arg(t.name) },
                             { QStringLiteral("accent"), typeColor(t.type).name() } };
     }
     return out;

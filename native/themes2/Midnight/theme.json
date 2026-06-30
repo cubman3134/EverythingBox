@@ -16,7 +16,21 @@
         { "type": "rating", "pos": [0.5, 0.78], "size": [0.18, 0.04], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#FF6A3D" },
 
         { "type": "helpsystem", "pos": [0.5, 0.95], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#EAECF2", "fontSize": 0.024,
-          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "T", "label": "Theme" } ] }
+          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "T", "label": "Theme" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "color": "#07080C" },
+      "elements": [
+        { "type": "video", "id": "preview",  "pos": [0.5, 0.32], "size": [0.5, 0.5], "origin": [0.5, 0.5], "binding": "selected.image", "radius": 14 },
+        { "type": "text",  "id": "dTitle",   "pos": [0.5, 0.62], "size": [0.9, 0.09], "origin": [0.5, 0.5], "binding": "selected.title", "color": "#FFFFFF", "fontSize": 0.058, "bold": true, "align": "center" },
+        { "type": "text",  "id": "dSub",     "pos": [0.5, 0.70], "size": [0.9, 0.05], "origin": [0.5, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.028, "align": "center" },
+        { "type": "rating","id": "dStars",   "pos": [0.5, 0.77], "size": [0.18, 0.04], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#FF6A3D" },
+        { "type": "text",  "id": "dOverview","pos": [0.5, 0.85], "size": [0.7, 0.12], "origin": [0.5, 0.5], "binding": "selected.overview", "color": "#C7CCD8", "fontSize": 0.024, "align": "center", "wrap": true, "lines": 3 },
+
+        { "type": "helpsystem", "pos": [0.5, 0.96], "size": [1, 0.045], "origin": [0.5, 0.5], "color": "#EAECF2", "fontSize": 0.022,
+          "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
       ]
     }
   }

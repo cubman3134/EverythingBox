@@ -49,15 +49,11 @@ QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, cons
                         QWidget* parent, std::function<void(int)> onActivated,
                         std::function<void()> onBack, std::function<void()> onCycle)
 {
-    // The "home" view of the theme on disk (falls back to an empty view, which renders just a background).
-    QVariantMap view;
+    // The whole theme on disk (all views). An empty map renders just a background.
+    QVariantMap theme;
     QFile tf(themeDir + QStringLiteral("/theme.json"));
     if (tf.open(QIODevice::ReadOnly))
-    {
-        const QJsonObject theme = QJsonDocument::fromJson(tf.readAll()).object();
-        view = theme.value(QStringLiteral("views")).toObject()
-                    .value(QStringLiteral("home")).toObject().toVariantMap();
-    }
+        theme = QJsonDocument::fromJson(tf.readAll()).object().toVariantMap();
 
     auto* w = new QQuickWidget(parent);
     w->setResizeMode(QQuickWidget::SizeRootObjectToView);
@@ -65,14 +61,15 @@ QQuickWidget* buildView(const QString& themeDir, const QVariantList& items, cons
     w->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
 
     // QQuickWidget has no setInitialProperties; set the properties on the loaded root object. Bindings
-    // re-evaluate as each lands, so `view` is set last (everything depends on it).
+    // re-evaluate as each lands, so `theme` is set last (everything depends on it).
     if (QQuickItem* root = w->rootObject())
     {
         root->setProperty("base", QUrl::fromLocalFile(themeDir).toString());
         root->setProperty("system", system);
         root->setProperty("items", items);
         root->setProperty("currentIndex", 0);
-        root->setProperty("view", view);
+        root->setProperty("currentView", QStringLiteral("home"));
+        root->setProperty("theme", theme);
 
         auto* bridge = new ThemeBridge(w);
         bridge->root = root;
