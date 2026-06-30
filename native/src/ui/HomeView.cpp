@@ -1348,7 +1348,7 @@ static QVariantMap categoryMeta(const QString& key)
     static const QHash<QString, M> meta = {
         { QStringLiteral("video"),   { "Video",   "#C0392B" } },
         { QStringLiteral("audio"),   { "Audio",   "#8A5CC8" } },
-        { QStringLiteral("game"),    { "Game",    "#3FA95E" } },
+        { QStringLiteral("game"),    { "Games",   "#3FA95E" } },
         { QStringLiteral("reading"), { "Reading", "#C9972E" } },
     };
     const M m = meta.value(key, { "Other", "#6A6E78" });

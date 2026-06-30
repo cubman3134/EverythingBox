@@ -1605,16 +1605,24 @@ void MainWindow::showThemedXmb()
 
     QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
 
-    // Show a bucket's catalog list as the column (the "not drilled in" state).
+    // Show a bucket's catalog list as the column. If the bucket has a single catalog (e.g. Games -> one
+    // catalog whose top level IS the console list), open it directly so the column shows its contents (the
+    // consoles), skipping a pointless one-item folder.
     auto showCatalogs = [this](int cat) {
-        themedXmbInCatalog_ = false;
         const QString key = (cat >= 0 && cat < themedXmbCatKeys_.size()) ? themedXmbCatKeys_[cat] : QString();
         themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
-        if (QQuickItem* r = ThemeEngine::rootItem(themedHome_))
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (themedXmbCatalogs_.size() == 1) // single catalog -> open straight into its contents
         {
-            r->setProperty("items", themedXmbCatalogs_);
-            r->setProperty("currentIndex", 0);
+            themedXmbInCatalog_ = true;
+            themedXmbAutoOpened_ = true;
+            if (r) { r->setProperty("items", QVariantList()); r->setProperty("currentIndex", 0); } // clear while it loads
+            home_->activateNav(themedXmbCatalogs_[0].toMap().value(QStringLiteral("navKey")).toString());
+            return;
         }
+        themedXmbInCatalog_ = false;
+        themedXmbAutoOpened_ = false;
+        if (r) { r->setProperty("items", themedXmbCatalogs_); r->setProperty("currentIndex", 0); }
     };
 
     auto onActivated = [this, settingsIdx, showCatalogs](int itemIdx) {
@@ -1637,8 +1645,9 @@ void MainWindow::showThemedXmb()
         const int cat = r ? r->property("catIndex").toInt() : 0;
         if (themedXmbInCatalog_)
         {
-            if (!home_->browseBack()) showCatalogs(cat); // at the catalog root -> back out to the catalog list
-            // else: popped a deeper level; browseItemsChanged refreshes the column
+            if (home_->browseBack()) return;        // popped a deeper level; browseItemsChanged refreshes the column
+            if (themedXmbAutoOpened_) return;       // single-catalog bucket: its contents ARE the root, nothing above
+            showCatalogs(cat);                      // multi-catalog bucket: back out to the catalog list
         }
         // at the bucket root the cross just stays put
     };
