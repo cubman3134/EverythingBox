@@ -319,15 +319,17 @@ void BookPageWidget::paintEvent(QPaintEvent*)
     doc_->documentLayout()->draw(&p, ctx);
     p.restore();
 
-    // The remaining whole lines, drawn normally below the first.
+    // The remaining whole lines, drawn normally below the first. Clip to the bottom of the LAST whole line
+    // (not to the full content height): QTextDocumentLayout draws a whole paragraph if any of it is in view,
+    // so without a tight clip the next line would bleed partway into the leftover space at the bottom.
     if (endLine > startLine)
     {
         const qreal y1 = lines_[startLine + 1].y;
-        const qreal restBottom = lines_[endLine].y + lines_[endLine].h;
+        const qreal pageBottom = lines_[endLine].y + lines_[endLine].h - y0; // height down to last whole line
         p.save();
-        p.setClipRect(QRectF(cl, topMargin_ + firstH, cw, contentH() - firstH + 2));
+        p.setClipRect(QRectF(cl, topMargin_ + firstH, cw, pageBottom - firstH));
         p.translate(cl, topMargin_ - y0);
-        ctx.clip = QRectF(0, y1, cw, restBottom - y1);
+        ctx.clip = QRectF(0, y1, cw, pageBottom - (y1 - y0));
         doc_->documentLayout()->draw(&p, ctx);
         p.restore();
     }

@@ -118,10 +118,13 @@ int main(int argc, char** argv)
     ctx.clip = QRectF(anchorX, y0, cw, firstH); b.documentLayout()->draw(&p, ctx); p.restore();
     if (endLine > startLine)
     {
-        const qreal y1 = lb[startLine + 1].y, restBottom = lb[endLine].y + lb[endLine].h;
-        p.save(); p.setClipRect(QRectF(SIDE, TOP + firstH, cw, phB - firstH + 2)); p.translate(SIDE, TOP - y0);
-        ctx.clip = QRectF(0, y1, cw, restBottom - y1); b.documentLayout()->draw(&p, ctx); p.restore();
+        const qreal y1 = lb[startLine + 1].y, pageBottom = lb[endLine].y + lb[endLine].h - y0;
+        p.save(); p.setClipRect(QRectF(SIDE, TOP + firstH, cw, pageBottom - firstH)); p.translate(SIDE, TOP - y0);
+        ctx.clip = QRectF(0, y1, cw, pageBottom - (y1 - y0)); b.documentLayout()->draw(&p, ctx); p.restore();
     }
+    // Mark the content-area bottom edge so we can see the last line is whole, with blank space below it.
+    p.setPen(QColor(255, 0, 0, 90));
+    p.drawLine(QPointF(0, TOP + phB), QPointF(WB, TOP + phB));
     p.end();
     img.save(out + QStringLiteral("/resized.png"));
     std::printf("wrote %s/resized.png (top line should start with the anchor word)\n", out.toLocal8Bit().constData());
