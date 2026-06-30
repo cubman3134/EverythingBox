@@ -17,7 +17,40 @@
         { "type": "rating", "id": "stars",   "pos": [0.835, 0.70], "size": [0.16, 0.035], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
 
         { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
-          "entries": [ { "button": "↑↓", "label": "Move" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" } ] }
+          "entries": [ { "button": "↑↓", "label": "Move" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" } ] }
+      ]
+    },
+
+    "browse": {
+      "background": { "color": "#12141A" },
+      "elements": [
+        { "type": "text", "id": "bTitle", "pos": [0.037, 0.07], "size": [0.6, 0.06], "origin": [0, 0.5], "binding": "system.name", "color": "#FFFFFF", "fontSize": 0.04, "bold": true },
+
+        { "type": "grid", "id": "bGrid", "pos": [0.037, 0.16], "size": [0.62, 0.80], "origin": [0, 0],
+          "columns": 4, "aspect": 1.4, "spacing": 0.008, "color": "#5B7FE0",
+          "card": { "radius": 12, "selectedBorder": "#5B7FE0", "selectedWidth": 4 } },
+
+        { "type": "video",  "id": "bPreview", "pos": [0.835, 0.34], "size": [0.30, 0.40], "origin": [0.5, 0.5], "binding": "selected.image", "radius": 12 },
+        { "type": "text",   "id": "bName",  "pos": [0.835, 0.60], "size": [0.32, 0.07], "origin": [0.5, 0.5], "binding": "selected.title", "color": "#FFFFFF", "fontSize": 0.036, "bold": true, "align": "center", "wrap": true, "lines": 2 },
+        { "type": "text",   "id": "bSub",   "pos": [0.835, 0.69], "size": [0.32, 0.04], "origin": [0.5, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.026, "align": "center" },
+        { "type": "rating", "id": "bStars", "pos": [0.835, 0.74], "size": [0.16, 0.035], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
+
+        { "type": "helpsystem", "id": "bHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
+          "entries": [ { "button": "↑↓←→", "label": "Navigate" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "color": "#0E1015" },
+      "elements": [
+        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "binding": "selected.image", "fillMode": "contain", "radius": 12 },
+        { "type": "text",   "id": "dTitle",   "pos": [0.42, 0.18], "size": [0.52, 0.1],  "origin": [0, 0.5], "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.062, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text",   "id": "dSub",     "pos": [0.42, 0.30], "size": [0.52, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.03 },
+        { "type": "rating", "id": "dStars",   "pos": [0.42, 0.37], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
+        { "type": "text",   "id": "dOverview","pos": [0.42, 0.62], "size": [0.52, 0.40], "origin": [0, 0.5], "binding": "selected.overview", "color": "#D6D9E0", "fontSize": 0.026, "wrap": true, "lines": 12 },
+
+        { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
+          "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
       ]
     }
   }
