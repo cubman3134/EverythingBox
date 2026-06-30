@@ -93,6 +93,20 @@ Item {
         var ni = Math.max(0, Math.min(n - 1, currentIndex + d))
         if (ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
     }
+    // The vertical move (what Down/Up and the mouse wheel do): one item in the XMB column, one grid row else.
+    function vstep(dir) { if (xmbMode) step(dir); else step(dir * gridCols) }
+
+    // Mouse wheel navigates the vertical selection anywhere in the view (down = next, up = previous). Deltas
+    // accumulate so one mouse notch = one step and a trackpad doesn't over-scroll.
+    property real wheelAccum: 0
+    WheelHandler {
+        onWheel: function(e) {
+            root.wheelAccum += e.angleDelta.y
+            while (root.wheelAccum >= 120)  { root.vstep(-1); root.wheelAccum -= 120 } // wheel up -> previous
+            while (root.wheelAccum <= -120) { root.vstep(1);  root.wheelAccum += 120 } // wheel down -> next
+            e.accepted = true
+        }
+    }
     Keys.onPressed: function(e) {
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
