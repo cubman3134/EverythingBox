@@ -1352,10 +1352,14 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
 // (Re)build the Steam games grid/column natively from the local library (no addon request).
 void HomeView::populateSteamGames()
 {
+    // A search while in the Steam console scopes to the library: keep only games whose name matches.
+    const QString q = stack_.isEmpty() ? QString() : stack_.last().query.trimmed();
+
     MediaCatalog cat;
-    cat.title = tr("Steam");
+    cat.title = q.isEmpty() ? tr("Steam") : tr("Steam · %1").arg(q);
     for (const SteamGame& g : SteamLibrary::installedGames())
     {
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
         MediaItem it;
         it.id = QStringLiteral("steam:") + g.appid;
         it.type = QStringLiteral("game");
@@ -1927,10 +1931,12 @@ void HomeView::doSearch()
     const QString q = search_->text().trimmed();
 
     // Searching while drilled into a console scopes the search to THAT console's games (not the whole
-    // catalog): keep the console level and re-run its detail with the query. Clearing the box restores the
-    // full console list. (The addon's getDetail applies the query - e.g. an IGDB name filter.)
+    // catalog): keep the console level and re-run it with the query. Clearing the box restores the full
+    // list. Covers addon consoles (getDetail applies the query - e.g. an IGDB name filter) and the native
+    // Steam library (filtered locally in populateSteamGames).
     Level& cur = stack_.last();
-    if (cur.detail && cur.item.type == QStringLiteral("platform"))
+    if (cur.detail && (cur.item.type == QStringLiteral("platform")
+                       || cur.item.mime == QStringLiteral("steam:console")))
     {
         cur.query = q;
         cur.childRow = -1;
