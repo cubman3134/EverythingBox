@@ -1,0 +1,23 @@
+{
+  "name": "Midnight",
+  "author": "My Media Vault",
+  "views": {
+    "home": {
+      "background": { "color": "#0A0B10" },
+      "elements": [
+        { "type": "text",     "pos": [0.05, 0.07], "size": [0.6, 0.06],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#EAECF2", "fontSize": 0.034, "bold": true },
+        { "type": "datetime", "pos": [0.95, 0.07], "size": [0.2, 0.05],  "origin": [1, 0.5], "format": "hh:mm", "color": "#8A90A0", "fontSize": 0.03, "align": "right" },
+
+        { "type": "carousel", "pos": [0.5, 0.30], "size": [0.96, 0.34], "origin": [0.5, 0.5],
+          "itemWidth": 0.14, "spacing": 0.018, "color": "#FF6A3D", "card": { "radius": 16 } },
+
+        { "type": "text",   "pos": [0.5, 0.62], "size": [0.9, 0.08], "origin": [0.5, 0.5], "binding": "selected.title", "color": "#FFFFFF", "fontSize": 0.06, "bold": true, "align": "center" },
+        { "type": "text",   "pos": [0.5, 0.70], "size": [0.9, 0.05], "origin": [0.5, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.028, "align": "center" },
+        { "type": "rating", "pos": [0.5, 0.78], "size": [0.18, 0.04], "origin": [0.5, 0.5], "binding": "selected.rating", "color": "#FF6A3D" },
+
+        { "type": "helpsystem", "pos": [0.5, 0.95], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#EAECF2", "fontSize": 0.024,
+          "entries": [ { "button": "←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "T", "label": "Theme" } ] }
+      ]
+    }
+  }
+}

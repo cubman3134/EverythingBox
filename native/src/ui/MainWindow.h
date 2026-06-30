@@ -168,6 +168,7 @@ private:
     void showThemedHome();
     void openAppearance();
     QWidget* themedHome_ = nullptr;
+    class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")

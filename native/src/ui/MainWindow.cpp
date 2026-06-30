@@ -90,6 +90,7 @@
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QFrame>
+#include <QFileSystemWatcher>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -1491,6 +1492,21 @@ void MainWindow::showThemedHome()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
+
+    // Hot-reload: rebuild the themed home whenever its theme.json is edited (while it's the visible screen).
+    if (!themeWatcher_)
+    {
+        themeWatcher_ = new QFileSystemWatcher(this);
+        connect(themeWatcher_, &QFileSystemWatcher::fileChanged, this, [this](const QString&) {
+            if (themedHomeEnabled() && stack_->currentWidget() == themedHome_)
+                QTimer::singleShot(150, this, [this] { // settle after the editor finishes writing
+                    if (themedHomeEnabled() && stack_->currentWidget() == themedHome_) showThemedHome();
+                });
+        });
+    }
+    themeWatcher_->removePaths(themeWatcher_->files());
+    const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName + QStringLiteral("/theme.json");
+    if (QFile::exists(themeFile)) themeWatcher_->addPath(themeFile);
 }
 
 void MainWindow::openAppearance()
