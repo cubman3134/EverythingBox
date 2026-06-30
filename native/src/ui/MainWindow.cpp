@@ -1739,79 +1739,75 @@ void MainWindow::showThemedBrowse()
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
 }
 
+// The home theme picker, as a full-screen panel page in the main window (like the other settings screens).
+// Changes save as you make them and preview live; backing out (-> the settings hub -> home) applies them.
 void MainWindow::openAppearance()
 {
-    QDialog dlg(this);
-    dlg.setWindowTitle(tr("Appearance"));
-    dlg.resize(940, 560);
-    auto* root = new QHBoxLayout(&dlg);
+    if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
 
-    // --- left: enable + theme list -------------------------------------------------------------------
-    auto* left = new QVBoxLayout();
-    auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"), &dlg);
-    enable->setChecked(themedHomeEnabled());
-    left->addWidget(enable);
-    left->addWidget(new QLabel(tr("Theme"), &dlg));
-
-    auto* list = new QListWidget(&dlg);
-    list->setMinimumWidth(240);
-    const QStringList themes = ThemeEngine::availableThemes();
-    const QString current = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-    for (const QString& folder : themes)
-    {
-        auto* it = new QListWidgetItem(ThemeEngine::themeDisplayName(folder), list);
-        it->setData(Qt::UserRole, folder); // the on-disk folder = the stored value
-        if (folder == current) list->setCurrentItem(it);
-    }
-    if (!list->currentItem() && list->count() > 0) list->setCurrentRow(0);
-    left->addWidget(list, 1);
-    auto* hint = new QLabel(tr("Themes live in %1.\nEdit theme.json to customise, then reopen this dialog.")
-                                .arg(ThemeEngine::themesRoot()), &dlg);
-    hint->setWordWrap(true);
-    QFont hf = hint->font(); hf.setPointSizeF(hf.pointSizeF() * 0.85); hint->setFont(hf);
-    left->addWidget(hint);
-    root->addLayout(left, 0);
-
-    // --- right: live preview of the selected theme over the real catalogs ----------------------------
-    auto* previewBox = new QFrame(&dlg);
-    previewBox->setFrameShape(QFrame::StyledPanel);
-    auto* pv = new QVBoxLayout(previewBox);
-    pv->setContentsMargins(1, 1, 1, 1);
-    root->addWidget(previewBox, 1);
-
-    QVariantList previewItems = home_->systemItems();
+    // A representative stand-in for the preview: the four inherent categories (so XMB themes show their cross).
+    QVariantList previewItems = home_->categoryItems();
     if (previewItems.isEmpty())
-        for (const char* n : { "Movies", "TV", "Music", "Games", "Live TV", "Books" })
+        for (const char* n : { "Video", "Games", "Audio", "Reading" })
             previewItems << QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(n) },
                                          { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
-    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+    QVariantMap previewSystem; previewSystem.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
 
-    auto rebuildPreview = [&, previewItems, system](const QString& folder) {
-        while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
-        QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
-                                            previewItems, system, previewBox);
-        p->setMinimumSize(480, 270); // 16:9; the fractional layout scales to whatever size it gets
-        pv->addWidget(p);
-    };
-    connect(list, &QListWidget::currentItemChanged, &dlg, [&](QListWidgetItem* it, QListWidgetItem*) {
-        if (it) rebuildPreview(it->data(Qt::UserRole).toString());
-    });
-    if (list->currentItem()) rebuildPreview(list->currentItem()->data(Qt::UserRole).toString());
+    showPanel(tr("Appearance"), [this, previewItems, previewSystem](QVBoxLayout* v) {
+        auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"));
+        enable->setChecked(themedHomeEnabled());
+        connect(enable, &QCheckBox::toggled, this, [this](bool on) {
+            store().setValue(QStringLiteral("themedHome/enabled"), on); store().sync();
+        });
+        v->addWidget(enable);
 
-    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, Qt::Horizontal, &dlg);
-    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    left->addWidget(bb);
+        auto* row = new QHBoxLayout();
+        auto* leftCol = new QVBoxLayout();
+        leftCol->addWidget(new QLabel(tr("Theme")));
+        auto* list = new QListWidget();
+        list->setMinimumWidth(240);
+        const QStringList themes = ThemeEngine::availableThemes();
+        const QString current = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        for (const QString& folder : themes)
+        {
+            auto* it = new QListWidgetItem(ThemeEngine::themeDisplayName(folder), list);
+            it->setData(Qt::UserRole, folder);
+            if (folder == current) list->setCurrentItem(it);
+        }
+        if (!list->currentItem() && list->count() > 0) list->setCurrentRow(0);
+        leftCol->addWidget(list, 1);
+        auto* hint = new QLabel(tr("Themes live in %1.\nEdit a theme's theme.json to customise — it previews here live.")
+                                    .arg(ThemeEngine::themesRoot()));
+        hint->setWordWrap(true);
+        QFont hf = hint->font(); hf.setPointSizeF(hf.pointSizeF() * 0.85); hint->setFont(hf);
+        leftCol->addWidget(hint);
+        row->addLayout(leftCol, 0);
 
-    if (dlg.exec() != QDialog::Accepted) return;
+        auto* previewBox = new QFrame();
+        previewBox->setFrameShape(QFrame::StyledPanel);
+        previewBox->setMinimumSize(480, 300);
+        auto* pv = new QVBoxLayout(previewBox);
+        pv->setContentsMargins(1, 1, 1, 1);
+        row->addWidget(previewBox, 1);
+        v->addLayout(row, 1);
 
-    store().setValue(QStringLiteral("themedHome/enabled"), enable->isChecked());
-    if (list->currentItem())
-        store().setValue(QStringLiteral("themedHome/theme"), list->currentItem()->data(Qt::UserRole).toString());
-    store().sync();
-    // Apply immediately only if we're on a home screen (don't yank the user out of media/browsing).
-    if (stack_->currentWidget() == home_ || stack_->currentWidget() == themedHome_)
-        showHomeScreen();
+        auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
+            while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
+            QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                                previewItems, previewSystem, previewBox);
+            p->setMinimumSize(480, 270);
+            if (QQuickItem* r = ThemeEngine::rootItem(p)) // feed categories too, so an XMB theme shows its cross
+                { r->setProperty("categories", previewItems); r->setProperty("catIndex", 0); }
+            pv->addWidget(p);
+        };
+        connect(list, &QListWidget::currentItemChanged, this, [this, rebuildPreview](QListWidgetItem* it, QListWidgetItem*) {
+            if (!it) return;
+            const QString folder = it->data(Qt::UserRole).toString();
+            store().setValue(QStringLiteral("themedHome/theme"), folder); store().sync(); // save on selection
+            rebuildPreview(folder);
+        });
+        if (list->currentItem()) rebuildPreview(list->currentItem()->data(Qt::UserRole).toString());
+    }, [this] { openSettingsHub(); });
 }
 #else
 void MainWindow::showThemedHome() {}
@@ -2452,8 +2448,7 @@ void MainWindow::openSettingsHub()
             v->addWidget(b);
         };
         add(tr("General"),            [this] { openGeneralSettings(); });
-        add(tr("Appearance"),         [this] { openAppearance(); });        // the themed (XMB) home picker
-        add(tr("Theme"),              [this] { openThemes(); });
+        add(tr("Appearance"),         [this] { openAppearance(); });        // the home theme picker
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
@@ -2464,7 +2459,11 @@ void MainWindow::openSettingsHub()
         add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
-    }, [this] { stack_->setCurrentWidget(panelReturnTo_); });
+    }, [this] {
+        // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
+        if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
+        else stack_->setCurrentWidget(panelReturnTo_);
+    });
 }
 
 void MainWindow::openGeneralSettings()
@@ -2648,32 +2647,6 @@ void MainWindow::closeEvent(QCloseEvent* e)
     QTimer::singleShot(8000, this, [this, finishClose] { if (!forceClose_) finishClose(); });
     statusBar()->showMessage(tr("Saving to Google Drive…"));
     cloud_->pushLocal([finishClose](bool, const QString&) { finishClose(); });
-}
-
-void MainWindow::openThemes()
-{
-    showPanel(tr("Theme"), [this](QVBoxLayout* v) {
-        const QString cur = ThemeStore::currentName();
-        for (const Theme& t : ThemeStore::all())
-        {
-            const bool active = (t.name.compare(cur, Qt::CaseInsensitive) == 0);
-            auto* b = panelRow(active ? (t.name + QStringLiteral("   ✓")) : t.name);
-            connect(b, &QPushButton::clicked, this, [this, name = t.name] {
-                ThemeStore::setCurrent(name);
-                home_->applyTheme();
-                openThemes(); // rebuild to move the ✓
-            });
-            v->addWidget(b);
-        }
-        auto* browse = panelRow(tr("Browse Themes…"));
-        connect(browse, &QPushButton::clicked, this, [this] {
-            auto* rb = new RegistryBrowser(RegistryBrowser::Themes, nullptr, this);
-            showDialogPanel(tr("Browse Themes"), rb,
-                            [this](int) { home_->applyTheme(); openThemes(); }, // refresh after installs
-                            [this] { openThemes(); });
-        });
-        v->addWidget(browse);
-    }, [this] { openSettingsHub(); });
 }
 
 void MainWindow::openRetroAchievements()

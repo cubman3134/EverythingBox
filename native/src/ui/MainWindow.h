@@ -73,7 +73,6 @@ private slots:
     void openCloudSync();     // Google Drive sign-in + sync panel
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
-    void openThemes();        // pick a colour theme (with a "Browse Themes…" registry button)
     void openDebug();         // diagnostic log viewer (refresh / clear / open file location)
     void openRetroAchievements(); // RetroAchievements sign-in panel
     void openEmulatorSettings();
