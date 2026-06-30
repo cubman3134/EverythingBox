@@ -115,9 +115,13 @@ if(MYMEDIAVAULT_BUILD_APP)
     endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(MMV_HAVE_QML)
+        # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
+        # present in its initial source list at finalization, so a .qrc added later via target_sources is
+        # silently skipped and "qrc:/theme2/ThemeView.qml" isn't found at runtime. This runs rcc directly.
+        qt_add_resources(MMV_THEME2_RCC resources/theme2.qrc)
         target_sources(mymediavault PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
-            resources/theme2.qrc)
+            ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
     endif()
