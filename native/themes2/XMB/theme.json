@@ -1,5 +1,5 @@
 {
-  "name": "XMB",
+  "name": "Triple",
   "author": "My Media Vault",
   "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.5 },
   "views": {

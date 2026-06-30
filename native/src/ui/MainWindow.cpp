@@ -1766,6 +1766,11 @@ void MainWindow::openAppearance()
         leftCol->addWidget(new QLabel(tr("Theme")));
         auto* list = new QListWidget();
         list->setMinimumWidth(240);
+        list->setSpacing(4); // breathing room so rows don't crowd/overlap, especially the selected one
+        list->setStyleSheet(QStringLiteral(
+            "QListWidget{outline:none;border:none;}"
+            "QListWidget::item{padding:10px 12px;border-radius:6px;}"
+            "QListWidget::item:selected{background:#2D6CDF;color:white;}"));
         const QStringList themes = ThemeEngine::availableThemes();
         const QString current = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
         for (const QString& folder : themes)
