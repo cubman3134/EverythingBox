@@ -63,10 +63,14 @@ public:
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
     void searchInBrowse(const QString& query);
+    bool atDetailLevel() const;              // the current level is an item's detail/info page
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
     void browseItemsChanged(bool appended);
+    // An item that opens a full info page (movie/series/book/comic/…) was activated. The themed host surfaces
+    // the classic detail page (it renders here on HomeView, which the themed home otherwise hides).
+    void infoPageRequested();
 public:
 
     // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast

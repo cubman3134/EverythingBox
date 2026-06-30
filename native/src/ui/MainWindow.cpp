@@ -333,6 +333,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                 r->setProperty("system", sys);
             }
         });
+
+        // Opening a movie/book/… from the themed home shows the classic info page (it renders on HomeView, which
+        // the themed home hides). Surface it; the themed column is left untouched (this switch makes its guard
+        // above false), so backing out returns to exactly where we were.
+        connect(home_, &HomeView::infoPageRequested, this, [this] {
+            QWidget* cur = stack_->currentWidget();
+            if (!themedHomeEnabled() || (cur != themedHome_ && cur != themedBrowse_)) return;
+            themedDetailFrom_ = cur;
+            themedReturnAfterDetail_ = true;
+            stack_->setCurrentWidget(home_);
+            home_->focusContent();
+        });
+        // When the user backs out of that info page (HomeView leaves the detail level), return to the themed
+        // home/browse we came from - still showing the same column at the same item.
+        connect(home_, &HomeView::browseItemsChanged, this, [this](bool) {
+            if (!themedReturnAfterDetail_ || stack_->currentWidget() != home_ || home_->atDetailLevel()) return;
+            themedReturnAfterDetail_ = false;
+            QWidget* back = themedDetailFrom_ ? themedDetailFrom_ : themedHome_;
+            if (back) { stack_->setCurrentWidget(back); back->setFocus(Qt::OtherFocusReason); }
+        });
     }
 #endif
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media

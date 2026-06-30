@@ -177,6 +177,15 @@ static QColor typeColor(const QString& type)
     return c.lighter(125); // lighter buttons
 }
 
+// Types that open a full info/detail page (a metadata header + a Play/Read button) rather than playing
+// straight away. The themed home surfaces this page (it renders on the classic HomeView).
+static bool isInfoPageType(const QString& t)
+{
+    return t == QStringLiteral("movie")  || t == QStringLiteral("series") || t == QStringLiteral("tv")
+        || t == QStringLiteral("episode")|| t == QStringLiteral("comic")  || t == QStringLiteral("manga")
+        || t == QStringLiteral("book")   || t == QStringLiteral("audiobook");
+}
+
 // A light, desaturated version of a colour (mostly white) for the catalogue background.
 static QColor lightTint(const QColor& c, qreal w = 0.14)
 {
@@ -1835,10 +1844,7 @@ void HomeView::activateItem(int row)
     // A remote leaf (a track, etc.) carries no url in the catalog - its source comes from the /stream
     // endpoint, fetched on open: resolve and open it directly. Movies/episodes (Play) and comics/manga/books
     // (Read) instead open an info page with a button that resolves on demand, like Stremio items - skip those.
-    const bool infoPageType = it.type == QStringLiteral("movie")  || it.type == QStringLiteral("series")
-                           || it.type == QStringLiteral("tv")     || it.type == QStringLiteral("episode")
-                           || it.type == QStringLiteral("comic")  || it.type == QStringLiteral("manga")
-                           || it.type == QStringLiteral("book")   || it.type == QStringLiteral("audiobook");
+    const bool infoPageType = isInfoPageType(it.type);
     if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
         && it.type != QStringLiteral("platform") && !infoPageType)
     {
@@ -1989,7 +1995,12 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
     lvl.addon = addon; lvl.detail = true; lvl.item = it; lvl.title = it.title;
     stack_.push_back(lvl);
     loadTop();
+    // A real info page (movie/book/…): ask the host to surface it. A container drill (console/platform) doesn't,
+    // so the themed cross keeps showing its column.
+    if (isInfoPageType(it.type)) emit infoPageRequested();
 }
+
+bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last().detail; }
 
 // Right-click on the Home list: offer to remove the Recent or Favorite under the cursor.
 void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
