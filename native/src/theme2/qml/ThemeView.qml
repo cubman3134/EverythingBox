@@ -10,8 +10,9 @@ Item {
     height: 720
 
     // --- injected from C++ / the host -----------------------------------------------------------------
-    property var theme: ({})       // the whole theme: { name, views: { home:{...}, detail:{...}, ... } }
+    property var theme: ({})       // the whole theme: { name, views: { home:{...}, browse:{...}, detail:{...} } }
     property string currentView: "home"
+    property string detailReturn: "home" // where Esc returns to after the detail view
     property var items: []         // the catalog rows for this view
     property var system: ({})      // view-level info (name, counts, ...)
     property int currentIndex: 0   // the selected row
@@ -44,12 +45,13 @@ Item {
         else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                                                 { activated(currentIndex); e.accepted = true }
-        // Info shows the detail view for the focused item (if the theme defines one); Esc backs out of it.
-        else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView === "home")
-                                                                { currentView = "detail"; e.accepted = true }
+        // Info opens the theme's detail view for the focused item; Esc backs out of it to wherever it came
+        // from (home or browse). Esc in home/browse asks the host to go back (it owns the home<->browse step).
+        else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView !== "detail")
+                                                                { detailReturn = currentView; currentView = "detail"; e.accepted = true }
         else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
-            if (currentView !== "home") currentView = "home"  // leave detail -> home
-            else back()                                       // already home -> let the host handle it
+            if (currentView === "detail") currentView = detailReturn
+            else back()
             e.accepted = true
         }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }

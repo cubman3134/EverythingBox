@@ -43,6 +43,15 @@ public:
     QVariantList systemItems();
     void activateNav(const QString& navKey); // open a catalog (or Home) by navKey
 
+    // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
+    QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
+    QString browseTitle() const;             // the current level's title
+    void browseActivate(int index);          // open/drill the item at this (filtered) index
+    bool browseBack();                       // go up a level; false if already at the catalog root
+signals:
+    void browseItemsChanged();               // the current level's items changed (loaded / drilled / paged)
+public:
+
     // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast
     // going through the download phase (the "info as we pull the file" feedback the user wanted there).
     void showToast(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
@@ -209,6 +218,7 @@ private:
 
     QVector<Level> stack_;       // navigation breadcrumb (top = current view)
     QVector<MediaItem> items_;   // items in the current view (parallel to grid_ rows)
+    QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
     bool recentView_ = false;    // true = showing the local "Recent" list (not an addon catalog)
     bool searchEditing_ = false; // search box: false = highlighted (arrows navigate), true = typing
     QVector<int> thumbQueue_;    // item rows awaiting a remote poster load (throttled)

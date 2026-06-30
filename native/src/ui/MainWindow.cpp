@@ -82,6 +82,7 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include <QQuickWidget>
+#include <QQuickItem>
 #include <QDialog>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -308,6 +309,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     {
         auto* sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")), this);
         connect(sc, &QShortcut::activated, this, [this] { openAppearance(); });
+
+        // Keep the themed browse view mirroring HomeView as it loads / drills / pages.
+        connect(home_, &HomeView::browseItemsChanged, this, [this] {
+            if (themedBrowse_ && stack_->currentWidget() == themedBrowse_)
+                if (QQuickWidget* w = qobject_cast<QQuickWidget*>(themedBrowse_))
+                    if (QQuickItem* r = w->rootObject())
+                    {
+                        r->setProperty("items", home_->browseItems());
+                        r->setProperty("currentIndex", 0);
+                        r->setProperty("currentView", QStringLiteral("browse"));
+                        QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
+                        r->setProperty("system", sys);
+                    }
+        });
     }
 #endif
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media
@@ -1474,7 +1489,7 @@ void MainWindow::showThemedHome()
     auto onActivated = [this, navKeys, appearanceIdx](int idx) {
         if (idx == appearanceIdx) { openAppearance(); return; }
         if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
-        { home_->activateNav(navKeys[idx]); stack_->setCurrentWidget(home_); }
+        { home_->activateNav(navKeys[idx]); showThemedBrowse(); } // themed gamelist of the catalog
     };
     auto onBack  = [this] { openAppearance(); }; // Esc at the root -> settings (a reliable way back out)
     auto onCycle = [this, themes, themeName] {
@@ -1507,6 +1522,36 @@ void MainWindow::showThemedHome()
     themeWatcher_->removePaths(themeWatcher_->files());
     const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName + QStringLiteral("/theme.json");
     if (QFile::exists(themeFile)) themeWatcher_->addPath(themeFile);
+}
+
+// Themed "gamelist": the current catalog level's items, rendered through the theme's `browse` view. The data
+// + actions are driven by HomeView (which already loads/drills/opens); we just mirror its items and route
+// activate/back back into it. browseItemsChanged() (connected in the ctor) refreshes us after a drill.
+void MainWindow::showThemedBrowse()
+{
+    const QStringList themes = ThemeEngine::availableThemes();
+    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+
+    QVariantMap system; system.insert(QStringLiteral("name"), home_->browseTitle());
+    auto onActivated = [this](int idx) { home_->browseActivate(idx); }; // opens media, or drills (-> refresh)
+    auto onBack = [this] { if (!home_->browseBack()) showThemedHome(); }; // up a level, or back to the system view
+    auto onCycle = [this, themes, themeName] {
+        if (themes.isEmpty()) return;
+        const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
+        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        showThemedBrowse();
+    };
+
+    QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+                                             home_->browseItems(), system, this, onActivated, onBack, onCycle);
+    if (QQuickItem* r = w->rootObject()) r->setProperty("currentView", QStringLiteral("browse"));
+    QWidget* old = themedBrowse_;
+    themedBrowse_ = w;
+    stack_->addWidget(w);
+    stack_->setCurrentWidget(w);
+    w->setFocus();
+    if (old) { stack_->removeWidget(old); old->deleteLater(); }
 }
 
 void MainWindow::openAppearance()

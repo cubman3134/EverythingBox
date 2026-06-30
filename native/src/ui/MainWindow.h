@@ -166,8 +166,10 @@ private:
     void showHomeScreen();
     bool themedHomeEnabled() const;
     void showThemedHome();
+    void showThemedBrowse(); // themed gamelist of the current catalog level (driven by HomeView)
     void openAppearance();
     QWidget* themedHome_ = nullptr;
+    QWidget* themedBrowse_ = nullptr;
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

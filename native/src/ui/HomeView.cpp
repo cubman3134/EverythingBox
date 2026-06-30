@@ -1343,6 +1343,42 @@ QVariantList HomeView::systemItems()
     return out;
 }
 
+// The current level's items as data for the themed browse view. Skips synthetic rows (the "open a file"
+// lead, info/header rows) and records the map back to the real items_ row for browseActivate().
+QVariantList HomeView::browseItems()
+{
+    browseRowMap_.clear();
+    QVariantList out;
+    for (int r = 0; r < items_.size(); ++r)
+    {
+        const MediaItem& it = items_[r];
+        if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr"))
+            continue;
+        browseRowMap_ << r;
+        out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
+                            { QStringLiteral("image"), it.thumbnailUrl }, { QStringLiteral("type"), it.type },
+                            { QStringLiteral("accent"), typeColor(it.type).name() },
+                            { QStringLiteral("expandable"), it.expandable } };
+    }
+    return out;
+}
+
+QString HomeView::browseTitle() const
+{
+    return stack_.isEmpty() ? QString() : stack_.last().title;
+}
+
+void HomeView::browseActivate(int index)
+{
+    if (index >= 0 && index < browseRowMap_.size()) activateItem(browseRowMap_[index]);
+}
+
+bool HomeView::browseBack()
+{
+    if (stack_.size() > 1) { stack_.pop_back(); loadTop(); return true; }
+    return false; // at the catalog root -> the host returns to the themed home
+}
+
 void HomeView::selectRecent()
 {
     recentView_ = true;
@@ -2526,6 +2562,8 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         search_->deselect();   // keep the caret at the end rather than selecting all the typed text
         searchEditing_ = true; // stay in type mode (FocusOut had flipped it off)
     }
+
+    emit browseItemsChanged(); // let a themed browse view mirror the new items
 }
 
 // Scroll to / select the row we last drilled into (stack childRow). If it hasn't been loaded yet (it was on a
