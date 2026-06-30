@@ -445,8 +445,13 @@ EbookView::EbookView(QWidget* parent) : QWidget(parent)
     menu_->setVisible(false);
     menu_->setAutoFillBackground(true);
     menu_->setFrameShape(QFrame::StyledPanel);
+    // Compact controls just for the reader's menu (overriding the app's roomier defaults), so the strip
+    // reserved at the top of the page can be shorter - leaving more of it as reading margin.
+    menu_->setStyleSheet(QStringLiteral(
+        "QPushButton{min-height:20px;padding:2px 9px;font-size:12px;} QLabel{font-size:12px;}"));
     auto* bar = new QHBoxLayout(menu_);
-    bar->setContentsMargins(8, 6, 8, 6);
+    bar->setContentsMargins(8, 3, 8, 3);
+    bar->setSpacing(5);
     auto* backBtn = new QPushButton(tr("‹ Back"), menu_);
     streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), menu_);
     streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));

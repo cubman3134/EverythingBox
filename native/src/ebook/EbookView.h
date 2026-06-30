@@ -145,5 +145,5 @@ private:
     bool streamVisible_ = false;
     int    restorePos_ = -1;       // document offset to resume at once the chapter is laid out (-1 = none)
     double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
-    static constexpr int kMenuHeight = 56; // overlay menu height; the page reserves this much up top
+    static constexpr int kMenuHeight = 38; // overlay menu height; the page reserves this much up top
 };
