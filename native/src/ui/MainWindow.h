@@ -160,6 +160,15 @@ private:
     ComicView* comic_ = nullptr;
     LibraryView* library_ = nullptr;
     HomeView* home_ = nullptr;
+
+    // Themed (QML) home, opt-in via "themedHome/enabled" (default off). showHomeScreen() routes Home to it
+    // or the classic HomeView. The themed-home methods are no-ops in builds without the QML engine.
+    void showHomeScreen();
+    bool themedHomeEnabled() const;
+    void showThemedHome();
+    void openAppearance();
+    QWidget* themedHome_ = nullptr;
+
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
     bool splitMode_ = false;                 // currently showing the split screen

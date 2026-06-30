@@ -3,6 +3,7 @@
 // Leaf items emit openItem() (routed by the main window); file association comes later.
 #pragma once
 #include <QWidget>
+#include <QVariant>
 #include <QVector>
 #include <QColor>
 #include <QMap>
@@ -37,6 +38,10 @@ public:
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
     // the player/reader "Issue with Streaming" button. No-op (with a toast) when there's nothing to retry.
     void requestNextSource();
+
+    // For the themed (QML) home: the media-type catalogs as data, and a way to open one by its navKey.
+    QVariantList systemItems();
+    void activateNav(const QString& navKey); // open a catalog (or Home) by navKey
 
     // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast
     // going through the download phase (the "info as we pull the file" feedback the user wanted there).
@@ -87,7 +92,6 @@ private:
     void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
     void showCarousel();             // show the media-type carousel landing (carousel layout)
     void showXmb();                  // show the PS3 XMB layout (categories + item column)
-    void activateNav(const QString& navKey); // open a carousel entry (media type, catalog item, or Home)
     void activateItem(int row);      // open/drill a catalog item by row (shared by grid + carousel)
     void openDetailLevel(LoadedAddon* addon, const MediaItem& it); // push + show an item's detail page
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]

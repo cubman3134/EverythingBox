@@ -82,9 +82,12 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include <QQuickWidget>
-#include <QPointer>
-#include <memory>
-#include <functional>
+#include <QDialog>
+#include <QFormLayout>
+#include <QCheckBox>
+#include <QComboBox>
+#include <QDialogButtonBox>
+#include <QLabel>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -297,52 +300,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
 #ifdef MMV_HAVE_QML
-    // Interactive preview of the new QML theme engine over the real Recent list (Ctrl+Shift+T): arrow keys /
-    // gamepad navigate, Enter opens the selected item, T cycles installed themes, Esc closes. The chosen
-    // theme persists. (Phase 5 makes this the actual Home behind a setting, with catalog navigation.)
+    // Appearance (themed-home toggle + theme picker) is reachable anywhere via Ctrl+Shift+A - this is also
+    // the reliable escape hatch to turn the themed home back off.
     {
-        auto show = std::make_shared<std::function<void()>>();
-        *show = [this, show] {
-            QVariantList items;
-            QStringList paths, kinds, keys, titles, thumbs;
-            for (const RecentItem& r : RecentStore::list())
-            {
-                items << QVariantMap{ { QStringLiteral("title"), r.title }, { QStringLiteral("subtitle"), r.kind },
-                                      { QStringLiteral("image"), r.thumb }, { QStringLiteral("accent"), QStringLiteral("#2A2D34") } };
-                paths << r.path; kinds << r.kind; keys << r.key; titles << r.title; thumbs << r.thumb;
-            }
-            if (items.isEmpty())
-                items << QVariantMap{ { QStringLiteral("title"), tr("Open something to fill Recent") },
-                                      { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
-
-            const QStringList themes = ThemeEngine::availableThemes();
-            QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-            if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
-
-            QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
-            auto wptr = std::make_shared<QPointer<QWidget>>();
-            auto onActivated = [this, paths, kinds, keys, titles, thumbs, wptr](int idx) {
-                if (idx >= 0 && idx < paths.size() && !paths[idx].isEmpty())
-                { if (*wptr) (*wptr)->close(); openRecent(paths[idx], kinds[idx], keys[idx], titles[idx], thumbs[idx]); }
-            };
-            auto onBack = [wptr] { if (*wptr) (*wptr)->close(); };
-            auto onCycle = [this, themes, themeName, show, wptr] {
-                if (themes.isEmpty()) return;
-                const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-                store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
-                if (*wptr) (*wptr)->close();
-                (*show)();
-            };
-            QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                                     items, system, nullptr, onActivated, onBack, onCycle);
-            *wptr = w;
-            w->setAttribute(Qt::WA_DeleteOnClose);
-            w->setWindowTitle(tr("Themed home — %1  (←→ navigate · Enter open · T theme · Esc close)").arg(themeName));
-            w->resize(1280, 760);
-            w->show(); w->raise(); w->activateWindow(); w->setFocus();
-        };
-        auto* themeSc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")), this);
-        connect(themeSc, &QShortcut::activated, this, [show] { (*show)(); });
+        auto* sc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+A")), this);
+        connect(sc, &QShortcut::activated, this, [this] { openAppearance(); });
     }
 #endif
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media
@@ -568,7 +530,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
-    stack_->setCurrentWidget(home_); // the catalog landing screen is shown first
+    showHomeScreen(); // the catalog landing screen (classic, or the themed home if enabled) is shown first
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
@@ -1464,8 +1426,101 @@ void MainWindow::openHome()
     clearAudioQueue();
     if (isFullScreen()) leaveFullScreen(); // exiting media (e.g. a movie) must drop back to a normal window
     home_->refresh();
+    showHomeScreen(); // classic HomeView, or the themed home if the user enabled it
+}
+
+// Route the Home screen to the themed (QML) home or the classic HomeView per the user's setting. When the
+// setting is off (default) this is exactly the old behaviour: show home_.
+void MainWindow::showHomeScreen()
+{
+#ifdef MMV_HAVE_QML
+    if (themedHomeEnabled()) { showThemedHome(); return; }
+#endif
     stack_->setCurrentWidget(home_);
 }
+
+bool MainWindow::themedHomeEnabled() const
+{
+#ifdef MMV_HAVE_QML
+    return store().value(QStringLiteral("themedHome/enabled"), false).toBool();
+#else
+    return false;
+#endif
+}
+
+#ifdef MMV_HAVE_QML
+// Build + show the themed "system view": the media-type catalogs as a themed carousel/grid, plus an
+// Appearance tile. Activating a catalog enters the classic browser for it; Appearance / Esc opens settings;
+// T cycles themes. Rebuilt each time so it reflects the current catalogs + theme.
+void MainWindow::showThemedHome()
+{
+    QVariantList items = home_->systemItems();
+    QStringList navKeys;
+    for (const QVariant& v : items) navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
+    items << QVariantMap{ { QStringLiteral("title"), tr("Appearance") },
+                          { QStringLiteral("subtitle"), tr("Themes & layout") },
+                          { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+    navKeys << QString();
+    const int appearanceIdx = int(items.size()) - 1;
+
+    const QStringList themes = ThemeEngine::availableThemes();
+    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+    auto onActivated = [this, navKeys, appearanceIdx](int idx) {
+        if (idx == appearanceIdx) { openAppearance(); return; }
+        if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
+        { home_->activateNav(navKeys[idx]); stack_->setCurrentWidget(home_); }
+    };
+    auto onBack  = [this] { openAppearance(); }; // Esc at the root -> settings (a reliable way back out)
+    auto onCycle = [this, themes, themeName] {
+        if (themes.isEmpty()) return;
+        const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
+        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        showThemedHome();
+    };
+
+    QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+                                             items, system, this, onActivated, onBack, onCycle);
+    QWidget* old = themedHome_;
+    themedHome_ = w;
+    stack_->addWidget(w);
+    stack_->setCurrentWidget(w);
+    w->setFocus();
+    if (old) { stack_->removeWidget(old); old->deleteLater(); }
+}
+
+void MainWindow::openAppearance()
+{
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Appearance"));
+    auto* form = new QFormLayout(&dlg);
+    auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"), &dlg);
+    enable->setChecked(themedHomeEnabled());
+    auto* themeCombo = new QComboBox(&dlg);
+    themeCombo->addItems(ThemeEngine::availableThemes());
+    themeCombo->setCurrentText(store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString());
+    form->addRow(enable);
+    form->addRow(tr("Theme"), themeCombo);
+    form->addRow(new QLabel(tr("Themes live in %1 — edit theme.json to customise.").arg(ThemeEngine::themesRoot()), &dlg));
+    auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    form->addRow(bb);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    store().setValue(QStringLiteral("themedHome/enabled"), enable->isChecked());
+    store().setValue(QStringLiteral("themedHome/theme"), themeCombo->currentText());
+    store().sync();
+    // Apply immediately only if we're on a home screen (don't yank the user out of media/browsing).
+    if (stack_->currentWidget() == home_ || stack_->currentWidget() == themedHome_)
+        showHomeScreen();
+}
+#else
+void MainWindow::showThemedHome() {}
+void MainWindow::openAppearance() {}
+#endif
 
 void MainWindow::enterSplitScreen()
 {

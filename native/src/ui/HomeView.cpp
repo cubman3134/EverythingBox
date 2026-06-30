@@ -1325,6 +1325,22 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
     loadTop();
 }
 
+// The media-type catalogs (one tab each) as data for the themed "system view". Each row's navKey opens that
+// catalog via activateNav(). Colours match the tabs (typeColor).
+QVariantList HomeView::systemItems()
+{
+    if (navTargets_.isEmpty()) refresh(); // make sure the catalog list has been built
+    QVariantList out;
+    for (const NavTarget& t : navTargets_)
+    {
+        if (t.isHome) continue;
+        out << QVariantMap{ { QStringLiteral("title"), t.name }, { QStringLiteral("type"), t.type },
+                            { QStringLiteral("navKey"), t.navKey },
+                            { QStringLiteral("accent"), typeColor(t.type).name() } };
+    }
+    return out;
+}
+
 void HomeView::selectRecent()
 {
     recentView_ = true;
