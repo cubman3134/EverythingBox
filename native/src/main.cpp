@@ -1,7 +1,4 @@
 #include <QApplication>
-#ifdef MMV_HAVE_QML
-#include <QQuickWindow>
-#endif
 #include "core/AppPaths.h"
 #include <QIcon>
 #include <QFile>
@@ -110,10 +107,10 @@ int main(int argc, char** argv)
     std::setlocale(LC_NUMERIC, "C");
 
 #ifdef MMV_HAVE_QML
-    // Render the QML themed home with Qt Quick's software backend. The app also drives libmpv through a
-    // QOpenGLWidget; sharing GL contexts between that and a hardware-accelerated QQuickWidget renders the
-    // themed home as a black screen. Software rendering avoids the clash (the themed UI is light 2D work).
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    // The themed home is a QQuickWidget while the app also drives libmpv through a QOpenGLWidget. Qt requires
+    // a shared GL context for the two to coexist - without it the QQuickWidget renders blank (black/white).
+    // Must be set before the QApplication is constructed.
+    QApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 #endif
 
     QApplication app(argc, argv);
