@@ -43,6 +43,14 @@ public:
     QVariantList systemItems();
     void activateNav(const QString& navKey); // open a catalog (or Home) by navKey
 
+    // The four inherent top-level categories (video / audio / game / reading) that catalogs classify into.
+    // categoryItems() returns the buckets that have at least one catalog (each {title,key,accent,glyph});
+    // categoryCatalogs(key) returns the catalogs in that bucket (each {title,navKey,type,accent,subtitle}).
+    // mediaCategory() maps a catalog/media type to a bucket key. Used by the themed XMB's two-step nav.
+    static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
+    QVariantList categoryItems();
+    QVariantList categoryCatalogs(const QString& categoryKey);
+
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
     QString browseTitle() const;             // the current level's title

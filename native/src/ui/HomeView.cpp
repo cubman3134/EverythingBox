@@ -1327,6 +1327,66 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
 
 // The media-type catalogs (one tab each) as data for the themed "system view". Each row's navKey opens that
 // catalog via activateNav(). Colours match the tabs (typeColor).
+// Classify a catalog/media type into one of the four inherent top-level categories. Unknown types fall back
+// to Video (the most common media kind), so a new addon type still lands somewhere sensible.
+QString HomeView::mediaCategory(const QString& type)
+{
+    const QString t = type.toLower();
+    if (t == "album" || t == "track" || t == "music" || t == "song"
+        || t == "audiobook" || t == "podcast" || t == "podcast_episode") return QStringLiteral("audio");
+    if (t == "game" || t == "platform" || t == "rom" || t == "console")  return QStringLiteral("game");
+    if (t == "book" || t == "ebook" || t == "novel" || t == "comic" || t == "comic_issue"
+        || t == "manga" || t == "manga_chapter")                         return QStringLiteral("reading");
+    // movie, series, tv, livetv, livesport(s), channel, film, video, ... and anything unrecognised:
+    return QStringLiteral("video");
+}
+
+// Static metadata for a bucket key: display name, accent colour, and the glyph the XMB draws.
+static QVariantMap categoryMeta(const QString& key)
+{
+    struct M { const char* name; const char* color; };
+    static const QHash<QString, M> meta = {
+        { QStringLiteral("video"),   { "Video",   "#C0392B" } },
+        { QStringLiteral("audio"),   { "Audio",   "#8A5CC8" } },
+        { QStringLiteral("game"),    { "Game",    "#3FA95E" } },
+        { QStringLiteral("reading"), { "Reading", "#C9972E" } },
+    };
+    const M m = meta.value(key, { "Other", "#6A6E78" });
+    return QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(m.name) },
+                        { QStringLiteral("key"), key },
+                        { QStringLiteral("glyph"), key },
+                        { QStringLiteral("accent"), QString::fromLatin1(m.color) } };
+}
+
+// The buckets that actually have a catalog, in a fixed friendly order (skips Home).
+QVariantList HomeView::categoryItems()
+{
+    if (navTargets_.isEmpty()) refresh();
+    QSet<QString> present;
+    for (const NavTarget& t : navTargets_)
+        if (!t.isHome) present.insert(mediaCategory(t.type));
+    QVariantList out;
+    for (const QString& key : { QStringLiteral("video"), QStringLiteral("game"),
+                                QStringLiteral("audio"), QStringLiteral("reading") })
+        if (present.contains(key)) out << categoryMeta(key);
+    return out;
+}
+
+// The catalogs inside one bucket, as a column the themed XMB can show and drill into via activateNav(navKey).
+QVariantList HomeView::categoryCatalogs(const QString& categoryKey)
+{
+    if (navTargets_.isEmpty()) refresh();
+    QVariantList out;
+    for (const NavTarget& t : navTargets_)
+    {
+        if (t.isHome || mediaCategory(t.type) != categoryKey) continue;
+        out << QVariantMap{ { QStringLiteral("title"), t.name }, { QStringLiteral("navKey"), t.navKey },
+                            { QStringLiteral("type"), t.type }, { QStringLiteral("catalog"), true },
+                            { QStringLiteral("accent"), typeColor(t.type).name() } };
+    }
+    return out;
+}
+
 QVariantList HomeView::systemItems()
 {
     if (navTargets_.isEmpty()) refresh(); // make sure the catalog list has been built

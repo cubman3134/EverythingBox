@@ -1,11 +1,12 @@
 // XMB element - a PlayStation-style XrossMediaBar. The horizontal axis is the categories (host.categories,
-// each = a media type), the vertical axis is the selected category's live items (host.items). Both axes slide
-// so the active element stays pinned at the "cross". This element is purely presentational: ThemeView owns
-// the keys (xmb mode) and the host (C++) loads each category's column on categoryChanged. Data it reads off
-// the host (the ThemeView root): categories, catIndex, items, currentIndex.
+// each = an inherent bucket: Video/Game/Audio/Reading/Settings), the vertical axis is the column the host
+// feeds (that bucket's catalogs, or - once you open a catalog - its live items). Both axes slide so the active
+// element stays pinned at the "cross". Purely presentational: ThemeView owns the keys (xmb mode) and the host
+// (C++) swaps the column. Reads off the host (the ThemeView root): categories, catIndex, items, currentIndex.
 //
-// Theme keys: color, subColor, crossX/crossY (fraction - where the cross sits), catSpacing, itemSpacing,
-// iconSize (all fractions), descColor (the selected item's description text).
+// Category tiles show, in order of preference: a theme `icon` image, else a drawn glyph for the bucket
+// (modelData.glyph: "video"|"audio"|"game"|"reading"|"settings"), else the title's first letter.
+// Theme keys: color, subColor, descColor, crossX/crossY, catSpacing, itemSpacing, iconSize (fractions).
 import QtQuick
 import "../Theme.js" as T
 
@@ -24,10 +25,12 @@ Item {
     readonly property color subColor: T.val(el, "subColor", "#C2C7D4")
     readonly property color descColor: T.val(el, "descColor", "#9AA0AE")
     readonly property real crossX: Number(T.val(el, "crossX", 0.20)) * width
-    readonly property real crossY: Number(T.val(el, "crossY", 0.34)) * height
+    readonly property real crossY: Number(T.val(el, "crossY", 0.30)) * height
     readonly property real catGap: Number(T.val(el, "catSpacing", 0.135)) * width
-    readonly property real itemGap: Number(T.val(el, "itemSpacing", 0.085)) * height
+    readonly property real itemGap: Number(T.val(el, "itemSpacing", 0.082)) * height
     readonly property real iconSize: Number(T.val(el, "iconSize", 0.11)) * height
+    // The column starts well below the category row so the bucket label never collides with the first item.
+    readonly property real colTop: crossY + iconSize * 1.7
 
     // Smoothly slide both axes toward the selection (the PS3 "everything glides to the cross" feel).
     property real catScroll: catIndex
@@ -46,6 +49,8 @@ Item {
             required property int index
             readonly property bool sel: index === xmb.catIndex
             readonly property real dx: (index - xmb.catScroll) * xmb.catGap
+            readonly property string glyph: (modelData && modelData.glyph) ? modelData.glyph : ""
+            readonly property string icon: (modelData && modelData.icon) ? modelData.icon : ""
             width: xmb.iconSize; height: xmb.iconSize
             x: xmb.crossX + dx - width / 2
             y: xmb.crossY - height / 2
@@ -56,29 +61,67 @@ Item {
             Rectangle {
                 anchors.fill: parent; radius: width * 0.18
                 color: (cat.modelData && cat.modelData.accent) ? cat.modelData.accent : "#2A2E36"
-                visible: !(cat.modelData && cat.modelData.icon)
-                Text { // first letter as a stand-in glyph when the theme ships no icon
+                visible: cat.icon === ""
+
+                // Drawn glyph (static Canvas - software-renderer safe, painted once). White on the accent tile.
+                Canvas {
                     anchors.centerIn: parent
+                    width: parent.width * 0.58; height: parent.height * 0.58
+                    visible: cat.glyph !== ""
+                    onPaint: {
+                        var c = getContext("2d"); c.reset(); c.clearRect(0, 0, width, height)
+                        var w = width, h = height
+                        c.fillStyle = "#FFFFFF"; c.strokeStyle = "#FFFFFF"
+                        c.lineWidth = Math.max(2, w * 0.08); c.lineCap = "round"; c.lineJoin = "round"
+                        if (cat.glyph === "video") {                       // play triangle
+                            c.beginPath(); c.moveTo(w * 0.28, h * 0.2); c.lineTo(w * 0.8, h * 0.5); c.lineTo(w * 0.28, h * 0.8); c.closePath(); c.fill()
+                        } else if (cat.glyph === "audio") {                // musical note
+                            c.beginPath(); c.ellipse(w * 0.24, h * 0.62, w * 0.26, h * 0.22); c.fill()
+                            c.beginPath(); c.rect(w * 0.46, h * 0.16, w * 0.08, h * 0.52); c.fill()
+                            c.beginPath(); c.moveTo(w * 0.5, h * 0.16); c.quadraticCurveTo(w * 0.86, h * 0.22, w * 0.74, h * 0.42); c.lineTo(w * 0.54, h * 0.34); c.closePath(); c.fill()
+                        } else if (cat.glyph === "game") {                 // gamepad: d-pad cross + two buttons
+                            var cxp = w * 0.34, cyp = h * 0.5, arm = w * 0.17, th = w * 0.11
+                            c.fillRect(cxp - arm, cyp - th / 2, arm * 2, th)   // d-pad horizontal
+                            c.fillRect(cxp - th / 2, cyp - arm, th, arm * 2)   // d-pad vertical
+                            c.beginPath(); c.arc(w * 0.68, h * 0.4, w * 0.075, 0, 6.2832); c.fill()  // buttons
+                            c.beginPath(); c.arc(w * 0.8, h * 0.6, w * 0.075, 0, 6.2832); c.fill()
+                        } else if (cat.glyph === "reading") {              // open book
+                            c.beginPath(); c.moveTo(w * 0.5, h * 0.26); c.lineTo(w * 0.16, h * 0.34); c.lineTo(w * 0.16, h * 0.78); c.lineTo(w * 0.5, h * 0.72); c.closePath(); c.fill()
+                            c.beginPath(); c.moveTo(w * 0.5, h * 0.26); c.lineTo(w * 0.84, h * 0.34); c.lineTo(w * 0.84, h * 0.78); c.lineTo(w * 0.5, h * 0.72); c.closePath(); c.fill()
+                            c.strokeStyle = (cat.modelData && cat.modelData.accent) ? cat.modelData.accent : "#444"
+                            c.beginPath(); c.moveTo(w * 0.5, h * 0.3); c.lineTo(w * 0.5, h * 0.72); c.stroke()
+                        } else {                                           // settings: three sliders
+                            var ys = [0.3, 0.5, 0.7], kx = [0.7, 0.35, 0.6]
+                            for (var i = 0; i < 3; i++) {
+                                c.beginPath(); c.moveTo(w * 0.16, h * ys[i]); c.lineTo(w * 0.84, h * ys[i]); c.stroke()
+                                c.beginPath(); c.arc(w * kx[i], h * ys[i], w * 0.09, 0, 6.2832); c.fill()
+                            }
+                        }
+                    }
+                }
+                Text { // ultimate fallback when there's no icon and no glyph
+                    anchors.centerIn: parent
+                    visible: cat.glyph === ""
                     text: (cat.modelData && cat.modelData.title) ? cat.modelData.title.charAt(0) : ""
                     color: "#FFFFFF"; font.bold: true; font.pixelSize: parent.height * 0.5
                 }
             }
             Image {
-                anchors.fill: parent; visible: !!(cat.modelData && cat.modelData.icon)
-                source: (cat.modelData && cat.modelData.icon && xmb.host) ? xmb.host.resolve(cat.modelData.icon) : ""
+                anchors.fill: parent; visible: cat.icon !== ""
+                source: (cat.icon !== "" && xmb.host) ? xmb.host.resolve(cat.icon) : ""
                 fillMode: Image.PreserveAspectFit; smooth: true
             }
-            Text {
+            Text { // the selected bucket's name, just under its tile
                 visible: cat.sel
                 anchors.horizontalCenter: parent.horizontalCenter
-                anchors.top: parent.bottom; anchors.topMargin: xmb.height * 0.018
+                anchors.top: parent.bottom; anchors.topMargin: xmb.height * 0.02
                 text: (cat.modelData && cat.modelData.title) ? cat.modelData.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(12, xmb.height * 0.03)
             }
         }
     }
 
-    // ---- vertical item axis (the selected category's column, descending from the cross) ------------------
+    // ---- vertical column (the bucket's catalogs, or a catalog's items), descending from below the cross ----
     Repeater {
         model: xmb.items
         delegate: Item {
@@ -89,9 +132,8 @@ Item {
             readonly property real dy: (index - xmb.itemScroll) * xmb.itemGap
             width: xmb.iconSize * 0.9; height: xmb.iconSize * 0.9
             x: xmb.crossX - width / 2
-            y: xmb.crossY + xmb.iconSize * 1.05 + dy - height / 2 // start clear below the category icon + label
-            // Fade out as a row rises above the cross (XMB shows the selection + what's below it).
-            opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (sel ? 1.0 : 0.6)
+            y: xmb.colTop + dy - height / 2
+            opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (sel ? 1.0 : 0.6) // fade rows that rise above the column top
             scale: sel ? 1.12 : 0.94
             Behavior on scale { NumberAnimation { duration: 140 } }
 
@@ -105,27 +147,26 @@ Item {
                 source: (row.modelData && row.modelData.image && xmb.host) ? xmb.host.resolve(row.modelData.image) : ""
                 fillMode: Image.PreserveAspectCrop; smooth: true
             }
-            Text {
+            // Title (and, for the selected row, a subtitle line beneath it) to the right of the icon.
+            Column {
                 anchors.left: parent.right; anchors.leftMargin: xmb.width * 0.015
                 anchors.verticalCenter: parent.verticalCenter
-                width: xmb.width * 0.5
-                text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
-                color: row.sel ? xmb.textColor : xmb.subColor
-                font.bold: row.sel; font.pixelSize: Math.max(11, xmb.height * (row.sel ? 0.03 : 0.024))
-                elide: Text.ElideRight
+                width: xmb.width * 0.5; spacing: xmb.height * 0.004
+                Text {
+                    width: parent.width
+                    text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
+                    color: row.sel ? xmb.textColor : xmb.subColor
+                    font.bold: row.sel; font.pixelSize: Math.max(11, xmb.height * (row.sel ? 0.03 : 0.024))
+                    elide: Text.ElideRight
+                }
+                Text {
+                    width: parent.width
+                    visible: row.sel && !!(row.modelData && row.modelData.subtitle)
+                    text: (row.modelData && row.modelData.subtitle) ? row.modelData.subtitle : ""
+                    color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.022)
+                    elide: Text.ElideRight
+                }
             }
         }
-    }
-
-    // ---- selected item's subtitle/description (to the right of the cross) ---------------------------------
-    Text {
-        readonly property var selItem: (xmb.items && xmb.items.length > xmb.itemIndex && xmb.itemIndex >= 0) ? xmb.items[xmb.itemIndex] : null
-        x: xmb.crossX + xmb.width * 0.32
-        y: xmb.crossY - xmb.height * 0.04
-        width: xmb.width * 0.42
-        visible: !!selItem
-        text: selItem && selItem.subtitle ? selItem.subtitle : ""
-        color: xmb.descColor; font.pixelSize: Math.max(11, xmb.height * 0.024)
-        wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
     }
 }

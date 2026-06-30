@@ -317,7 +317,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         connect(home_, &HomeView::browseItemsChanged, this, [this](bool appended) {
             QWidget* tgt = nullptr;
             if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
-            else if (themedHome_ && themedHomeIsXmb_ && stack_->currentWidget() == themedHome_) tgt = themedHome_;
+            // The XMB column mirrors HomeView only while drilled into a catalog (not on the catalog-list level).
+            else if (themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_ && stack_->currentWidget() == themedHome_) tgt = themedHome_;
             if (!tgt) return;
             QQuickItem* r = ThemeEngine::rootItem(tgt);
             if (!r) return;
@@ -689,6 +690,19 @@ void MainWindow::showEvent(QShowEvent* event)
         if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
     });
+}
+
+// When the window is re-activated (alt-tab back, restore from minimised), the embedded themed view - a native
+// window via createWindowContainer - doesn't automatically regain keyboard focus, leaving arrow keys dead
+// until the user clicks. Re-focus it so navigation keeps working.
+void MainWindow::changeEvent(QEvent* event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() == QEvent::ActivationChange && isActiveWindow())
+        QTimer::singleShot(0, this, [this] {
+            QWidget* w = stack_ ? stack_->currentWidget() : nullptr;
+            if (w && (w == themedHome_ || w == themedBrowse_)) w->setFocus(Qt::ActiveWindowFocusReason);
+        });
 }
 
 // Inline "Who's using My Media Vault?" picker, shown once the window is up (replaces the pre-window popup).
@@ -1566,19 +1580,21 @@ void MainWindow::showThemedHome()
     if (QFile::exists(themeFile)) themeWatcher_->addPath(themeFile);
 }
 
-// Themed PS3-style XMB home. The horizontal axis is the media-type categories (+ a synthetic Settings), the
-// vertical axis is the highlighted category's live items - mirrored from HomeView, so moving across categories
-// reloads the column and Enter opens/drills exactly like the classic browser. Stays on one screen (no drill to
-// a separate browse view): the cross itself shows the column.
+// Themed PS3-style XMB home, two-step: the horizontal axis is the four inherent categories (Video / Game /
+// Audio / Reading, + a synthetic Settings); the vertical column shows that category's catalogs, and Enter on a
+// catalog drills the column into its live items (Esc returns to the catalog list). Moving across categories
+// resets the column to that bucket's catalog list. Everything stays on the one cross screen.
 void MainWindow::showThemedXmb()
 {
     themedHomeIsXmb_ = true;
+    themedXmbInCatalog_ = false;
 
-    QVariantList cats = home_->systemItems();
-    themedXmbNavKeys_.clear();
-    for (const QVariant& v : cats) themedXmbNavKeys_ << v.toMap().value(QStringLiteral("navKey")).toString();
-    cats << QVariantMap{ { QStringLiteral("title"), tr("Settings") }, { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
-    themedXmbNavKeys_ << QString();                 // the synthetic Settings category (no catalog)
+    QVariantList cats = home_->categoryItems(); // the buckets that have catalogs (each {title,key,glyph,accent})
+    themedXmbCatKeys_.clear();
+    for (const QVariant& v : cats) themedXmbCatKeys_ << v.toMap().value(QStringLiteral("key")).toString();
+    cats << QVariantMap{ { QStringLiteral("title"), tr("Settings") }, { QStringLiteral("glyph"), QStringLiteral("settings") },
+                         { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+    themedXmbCatKeys_ << QStringLiteral("settings");
     const int settingsIdx = int(cats.size()) - 1;
 
     const QStringList themes = ThemeEngine::availableThemes();
@@ -1589,13 +1605,43 @@ void MainWindow::showThemedXmb()
 
     QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
 
-    auto onActivated = [this, settingsIdx](int itemIdx) {
+    // Show a bucket's catalog list as the column (the "not drilled in" state).
+    auto showCatalogs = [this](int cat) {
+        themedXmbInCatalog_ = false;
+        const QString key = (cat >= 0 && cat < themedXmbCatKeys_.size()) ? themedXmbCatKeys_[cat] : QString();
+        themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
+        if (QQuickItem* r = ThemeEngine::rootItem(themedHome_))
+        {
+            r->setProperty("items", themedXmbCatalogs_);
+            r->setProperty("currentIndex", 0);
+        }
+    };
+
+    auto onActivated = [this, settingsIdx, showCatalogs](int itemIdx) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
         if (cat == settingsIdx) { openAppearance(); return; }
-        home_->browseActivate(itemIdx); // open / drill -> browseItemsChanged refreshes the column
+        if (!themedXmbInCatalog_) // the column is the catalog list -> open the chosen catalog into its items
+        {
+            if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
+            const QString navKey = themedXmbCatalogs_[itemIdx].toMap().value(QStringLiteral("navKey")).toString();
+            if (navKey.isEmpty()) return;
+            themedXmbInCatalog_ = true;
+            if (r) r->setProperty("currentIndex", 0);
+            home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
+        }
+        else home_->browseActivate(itemIdx); // already in a catalog -> open / drill deeper
     };
-    auto onBack  = [this] { home_->browseBack(); }; // up a level if drilled; at the category root the cross stays
+    auto onBack = [this, showCatalogs] {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        const int cat = r ? r->property("catIndex").toInt() : 0;
+        if (themedXmbInCatalog_)
+        {
+            if (!home_->browseBack()) showCatalogs(cat); // at the catalog root -> back out to the catalog list
+            // else: popped a deeper level; browseItemsChanged refreshes the column
+        }
+        // at the bucket root the cross just stays put
+    };
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -1603,21 +1649,16 @@ void MainWindow::showThemedXmb()
         showThemedHome();
     };
     auto onSearch = [this] {
+        if (!themedXmbInCatalog_) return; // search applies once you're inside a catalog
         const QString q = promptThemedSearch(home_->browseTitle());
         if (!q.isNull()) home_->searchInBrowse(q);
     };
-    auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
-    auto loadCat = [this, settingsIdx](int cat) {
-        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
-        if (cat >= 0 && cat < themedXmbNavKeys_.size() && !themedXmbNavKeys_[cat].isEmpty())
-            home_->activateNav(themedXmbNavKeys_[cat]); // its items land via browseItemsChanged
-        else if (r) r->setProperty("items", QVariantList()); // Settings: empty column
-    };
-    auto onCategory = [this, loadCat] {
+    auto onNearEnd = [this] { if (themedXmbInCatalog_ && home_->browseHasMore()) home_->browseLoadMore(); };
+    auto onCategory = [this, showCatalogs] {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
         themedHomeIndex_ = r->property("catIndex").toInt();
-        loadCat(themedHomeIndex_);
+        showCatalogs(themedHomeIndex_); // switching bucket resets the column to its catalog list
     };
 
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
@@ -1634,7 +1675,7 @@ void MainWindow::showThemedXmb()
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
 
-    loadCat(startCat); // populate the starting column now (themedHome_ is current, so the result lands here)
+    showCatalogs(startCat); // populate the starting bucket's catalog list
 
     if (!themeWatcher_)
     {

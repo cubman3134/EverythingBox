@@ -90,6 +90,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;          // Esc leaves full screen
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
+    void changeEvent(QEvent* event) override;               // re-focus the themed view when the window reactivates
     void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
 
 private:
@@ -176,7 +177,9 @@ private:
     QWidget* themedBrowse_ = nullptr;
     int themedHomeIndex_ = 0; // remember the highlighted system, so returning from a catalog lands back on it
     bool themedHomeIsXmb_ = false; // the themed home is an XMB cross (its column mirrors HomeView live)
-    QStringList themedXmbNavKeys_; // XMB: category index -> HomeView navKey (empty = the synthetic Settings)
+    QStringList themedXmbCatKeys_;  // XMB: category index -> bucket key ("video"/.../"settings")
+    QVariantList themedXmbCatalogs_; // XMB: the current bucket's catalog list (the column when not drilled in)
+    bool themedXmbInCatalog_ = false; // XMB: column shows a catalog's live items (true) vs the catalog list (false)
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
