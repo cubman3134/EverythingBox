@@ -333,16 +333,46 @@ void CloudSync::downloadFile(const QString& fileId, std::function<void(bool, con
 
 static const char* kBundleName = "mymediavault-sync.zip";
 
-static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& prefix)
+// First-party addon folders (manifest id "com.mymediavault.*"). These ship with the app build and are
+// updated by install/deploy, so they're kept OUT of cloud sync - otherwise the cloud snapshot would clobber
+// a freshly-deployed update on the next startup. Third-party addons (other ids) still sync. Addon *config*
+// lives in settings.json, which is synced regardless, so API keys still travel across devices.
+static QSet<QString> firstPartyAddonDirs()
+{
+    QSet<QString> out;
+    const QString root = AppPaths::dataDir() + QStringLiteral("/addons");
+    const QFileInfoList subs = QDir(root).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo& d : subs)
+    {
+        QFile mf(d.absoluteFilePath() + QStringLiteral("/manifest.json"));
+        if (!mf.open(QIODevice::ReadOnly)) continue;
+        const QJsonObject m = QJsonDocument::fromJson(mf.readAll()).object();
+        if (m.value(QStringLiteral("id")).toString().startsWith(QStringLiteral("com.mymediavault.")))
+            out.insert(d.fileName());
+    }
+    return out;
+}
+
+// Top-level subfolder of a relative path, e.g. "aiocatalog/main.js" -> "aiocatalog".
+static QString topSegment(const QString& rel)
+{
+    const int s = rel.indexOf(QLatin1Char('/'));
+    return s < 0 ? rel : rel.left(s);
+}
+
+static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& prefix,
+                      const QSet<QString>& excludeTop = {})
 {
     QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext())
     {
         const QString path = it.next();
+        const QString rel = QDir(dir).relativeFilePath(path);
+        if (!excludeTop.isEmpty() && excludeTop.contains(topSegment(rel))) continue; // skip first-party addons
         QFile f(path);
         if (!f.open(QIODevice::ReadOnly)) continue;
         const QByteArray data = f.readAll();
-        const QString arch = prefix + QStringLiteral("/") + QDir(dir).relativeFilePath(path);
+        const QString arch = prefix + QStringLiteral("/") + rel;
         mz_zip_writer_add_mem(&z, arch.toUtf8().constData(), data.constData(), data.size(), MZ_DEFAULT_COMPRESSION);
     }
 }
@@ -365,7 +395,7 @@ static QByteArray buildBundle()
     mz_zip_writer_add_mem(&z, "settings.json", sJson.constData(), sJson.size(), MZ_DEFAULT_COMPRESSION);
 
     const QString app = AppPaths::dataDir();
-    zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"));
+    zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"), firstPartyAddonDirs());
     zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
     zipAddDir(z, app + QStringLiteral("/saves"),  QStringLiteral("saves"));   // emulator battery saves (.srm)
     zipAddDir(z, app + QStringLiteral("/states"), QStringLiteral("states"));  // emulator save states (.state)
@@ -383,6 +413,7 @@ static bool applyBundle(const QByteArray& data)
     mz_zip_archive z; std::memset(&z, 0, sizeof(z));
     if (!mz_zip_reader_init_mem(&z, data.constData(), data.size(), 0)) return false;
     const QString app = AppPaths::dataDir();
+    const QSet<QString> firstParty = firstPartyAddonDirs(); // never let the cloud overwrite these
     const int n = int(mz_zip_reader_get_num_files(&z));
     for (int i = 0; i < n; ++i)
     {
@@ -406,6 +437,9 @@ static bool applyBundle(const QByteArray& data)
         else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/"))
                  || name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/")))
         {
+            // A first-party addon ships with the build; don't let an (older) cloud bundle overwrite it.
+            if (name.startsWith(QStringLiteral("addons/")) && firstParty.contains(topSegment(name.mid(7))))
+                continue;
             // Restrict to the app dir (defend against path traversal in archive names).
             const QString dest = QDir::cleanPath(app + QStringLiteral("/") + name);
             if (!dest.startsWith(QDir::cleanPath(app) + QStringLiteral("/"))) continue;
@@ -430,6 +464,7 @@ static QByteArray stateHash()
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
 
     const QString app = AppPaths::dataDir();
+    const QSet<QString> firstParty = firstPartyAddonDirs(); // not synced -> not part of the fingerprint
     for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes"),
                                 QStringLiteral("saves"), QStringLiteral("states") })
     {
@@ -440,9 +475,11 @@ static QByteArray stateHash()
         files.sort();
         for (const QString& f : files)
         {
+            const QString rel = QDir(dir).relativeFilePath(f);
+            if (sub == QStringLiteral("addons") && firstParty.contains(topSegment(rel))) continue;
             QFile file(f);
             if (!file.open(QIODevice::ReadOnly)) continue;
-            h.addData((sub + QStringLiteral("/") + QDir(dir).relativeFilePath(f)).toUtf8());
+            h.addData((sub + QStringLiteral("/") + rel).toUtf8());
             h.addData(QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256));
         }
     }
