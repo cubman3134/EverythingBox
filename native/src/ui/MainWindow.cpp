@@ -82,6 +82,9 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include <QQuickWidget>
+#include <QPointer>
+#include <memory>
+#include <functional>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -294,28 +297,52 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
 #ifdef MMV_HAVE_QML
-    // Beta preview of the new QML theme engine, fed with the real Recent list (Ctrl+Shift+T). Phase 4 will
-    // replace the Home screen with this behind a setting; for now it's an opt-in preview window.
+    // Interactive preview of the new QML theme engine over the real Recent list (Ctrl+Shift+T): arrow keys /
+    // gamepad navigate, Enter opens the selected item, T cycles installed themes, Esc closes. The chosen
+    // theme persists. (Phase 5 makes this the actual Home behind a setting, with catalog navigation.)
     {
-        auto* themeSc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")), this);
-        connect(themeSc, &QShortcut::activated, this, [this] {
+        auto show = std::make_shared<std::function<void()>>();
+        *show = [this, show] {
             QVariantList items;
+            QStringList paths, kinds, keys, titles, thumbs;
             for (const RecentItem& r : RecentStore::list())
+            {
                 items << QVariantMap{ { QStringLiteral("title"), r.title }, { QStringLiteral("subtitle"), r.kind },
                                       { QStringLiteral("image"), r.thumb }, { QStringLiteral("accent"), QStringLiteral("#2A2D34") } };
+                paths << r.path; kinds << r.kind; keys << r.key; titles << r.title; thumbs << r.thumb;
+            }
             if (items.isEmpty())
                 items << QVariantMap{ { QStringLiteral("title"), tr("Open something to fill Recent") },
                                       { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
+
+            const QStringList themes = ThemeEngine::availableThemes();
+            QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+            if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+
             QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
-            QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/Default"),
-                                                     items, system, nullptr);
+            auto wptr = std::make_shared<QPointer<QWidget>>();
+            auto onActivated = [this, paths, kinds, keys, titles, thumbs, wptr](int idx) {
+                if (idx >= 0 && idx < paths.size() && !paths[idx].isEmpty())
+                { if (*wptr) (*wptr)->close(); openRecent(paths[idx], kinds[idx], keys[idx], titles[idx], thumbs[idx]); }
+            };
+            auto onBack = [wptr] { if (*wptr) (*wptr)->close(); };
+            auto onCycle = [this, themes, themeName, show, wptr] {
+                if (themes.isEmpty()) return;
+                const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
+                store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+                if (*wptr) (*wptr)->close();
+                (*show)();
+            };
+            QQuickWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+                                                     items, system, nullptr, onActivated, onBack, onCycle);
+            *wptr = w;
             w->setAttribute(Qt::WA_DeleteOnClose);
-            w->setWindowTitle(tr("Themed home — preview (Esc to close)"));
+            w->setWindowTitle(tr("Themed home — %1  (←→ navigate · Enter open · T theme · Esc close)").arg(themeName));
             w->resize(1280, 760);
-            auto* esc = new QShortcut(QKeySequence(Qt::Key_Escape), w);
-            connect(esc, &QShortcut::activated, w, &QWidget::close);
-            w->show(); w->raise(); w->activateWindow();
-        });
+            w->show(); w->raise(); w->activateWindow(); w->setFocus();
+        };
+        auto* themeSc = new QShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+T")), this);
+        connect(themeSc, &QShortcut::activated, this, [show] { (*show)(); });
     }
 #endif
     // No persistent bottom bar: navigation lives in each view (Home's top bar, the Settings hub, the media

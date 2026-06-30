@@ -16,6 +16,34 @@ Item {
     property int currentIndex: 0   // the selected row
     property string base: ""       // theme directory as a file:// URL, for resolving relative asset paths
 
+    focus: true
+    signal activated(int index)    // Enter on the selected row
+    signal back()                  // Esc / Back
+    signal cycleTheme()            // T: next theme (the host swaps the theme file)
+
+    // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
+    property int gridCols: {
+        if (view && view.elements)
+            for (var i = 0; i < view.elements.length; i++)
+                if (view.elements[i].type === "grid") return Math.max(1, Number(view.elements[i].columns || 4))
+        return 1
+    }
+    function step(d) {
+        var n = items ? items.length : 0
+        if (n > 0) currentIndex = Math.max(0, Math.min(n - 1, currentIndex + d))
+    }
+    Keys.onPressed: function(e) {
+        if (e.key === Qt.Key_Right)                              { step(1);          e.accepted = true }
+        else if (e.key === Qt.Key_Left)                         { step(-1);         e.accepted = true }
+        else if (e.key === Qt.Key_Down)                         { step(gridCols);   e.accepted = true }
+        else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
+        else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
+                                                                { activated(currentIndex); e.accepted = true }
+        else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace)
+                                                                { back();           e.accepted = true }
+        else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
+    }
+
     // The data context bindings resolve against. Recomputed when the selection changes.
     readonly property var dataCtx: ({
         "system": system,

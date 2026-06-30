@@ -38,6 +38,8 @@ int main(int argc, char** argv)
 
     QQuickWidget* w = ThemeEngine::buildView(themeDir, items, system, nullptr);
     w->resize(1280, 720);
+    // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
+    if (argc >= 5 && w->rootObject()) w->rootObject()->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
     if (w->status() == QQuickWidget::Error)
     {
         for (const QQmlError& e : w->errors()) std::fprintf(stderr, "QML: %s\n", e.toString().toUtf8().constData());
