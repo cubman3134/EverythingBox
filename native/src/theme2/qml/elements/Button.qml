@@ -20,6 +20,25 @@ Item {
     readonly property color fg: T.val(el, "textColor", "#38455A")
     readonly property color bc: T.val(el, "borderColor", "#AEBBCB")
     readonly property bool round: T.val(el, "shape", "pill") === "round"
+    // Optional housing: a large disc the button sits on, offset toward a corner so it runs off the screen edge
+    // (the Wii's Wii/Mail button pods). housingSide picks which way it leans ("left"/"right").
+    readonly property bool housing: T.val(el, "housing", false)
+    readonly property string hside: T.val(el, "housingSide", "left")
+    readonly property real hscale: Number(T.val(el, "housingScale", 2.4))
+
+    Rectangle {
+        visible: btn.housing
+        z: -1
+        width: btn.width * btn.hscale; height: btn.height * btn.hscale
+        radius: Math.min(width, height) / 2
+        x: btn.width / 2 - width / 2 + (btn.hside === "right" ? 1 : -1) * (width - btn.width) * 0.42
+        y: btn.height / 2 - height / 2 + (height - btn.height) * 0.42
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#E3EAF2" }
+            GradientStop { position: 1.0; color: "#BAC7D8" }
+        }
+        border.width: 2; border.color: "#AEBBCB"
+    }
 
     // Soft drop shadow beneath a round button (a radial fade; static Canvas, software-renderer safe).
     Canvas {
