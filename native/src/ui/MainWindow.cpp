@@ -2102,6 +2102,122 @@ void MainWindow::onSwitchProfile()
     }, [this] { openHome(); });
 }
 
+// A game whose platform is desktop Windows isn't an emulator ROM — we run it on the PC itself. The addon
+// tags these with the platform name it was opened from (e.g. "PC (Windows)").
+static bool isPcPlatform(const QString& hint)
+{
+    const QString h = hint.trimmed().toLower();
+    return h == QStringLiteral("pc (windows)") || h == QStringLiteral("pc (microsoft windows)")
+        || h == QStringLiteral("pc windows") || h == QStringLiteral("windows") || h == QStringLiteral("pc");
+}
+
+// Pull the real download filename (which carries the extension we need to run/open it) out of a
+// Content-Disposition header; a debrid link's URL is just an opaque id, so this is where the name comes from.
+static QString filenameFromContentDisposition(const QString& cd)
+{
+    // Prefer the RFC 5987 "filename*=UTF-8''…" form, then a plain filename="…" / filename=… .
+    for (const QString& pat : { QStringLiteral("filename\\*=(?:UTF-8'')?([^;]+)"),
+                                QStringLiteral("filename=\"?([^\";]+)") })
+    {
+        const QRegularExpression re(pat, QRegularExpression::CaseInsensitiveOption);
+        const auto m = re.match(cd);
+        if (m.hasMatch())
+        {
+            QString name = m.captured(1).trimmed();
+            if (name.endsWith(QLatin1Char('"'))) name.chop(1);
+            return QUrl::fromPercentEncoding(name.toUtf8()).trimmed(); // undo any RFC 5987 %-encoding
+        }
+    }
+    return QString();
+}
+
+namespace { QString safeFileName(const QString& title); } // defined in the anonymous namespace further below
+
+// Download a PC (Windows) game and hand it to the OS to run/install. The file (a repack installer, a portable
+// .exe, or an archive) is streamed to <data>/games/pc so multi-GB downloads don't sit in memory; its real
+// name — and the extension we need to launch it — comes from Content-Disposition since the debrid URL is an
+// opaque id. On completion we open it with the OS default (installer/exe runs; archive opens); if we couldn't
+// determine the type, we just reveal it in its folder.
+void MainWindow::openPcGame(const MediaItem& item)
+{
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/games/pc");
+    QDir().mkpath(dir);
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+
+    const QString partPath = dir + QStringLiteral("/") + safeFileName(item.title) + QStringLiteral(".download");
+    auto part = std::make_shared<QFile>(partPath);
+    if (!part->open(QIODevice::WriteOnly))
+    {
+        statusBar()->showMessage(tr("Couldn't start downloading “%1”.").arg(item.title), 6000);
+        return;
+    }
+
+    mwLog(QStringLiteral("pcgame: download \"%1\" from %2").arg(item.title, logSafeUrl(item.url)));
+    QNetworkRequest rq{ QUrl(item.url) };
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = docNam_->get(rq);
+
+    auto fileName = std::make_shared<QString>(); // real download name, from Content-Disposition
+    statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+
+    connect(reply, &QNetworkReply::metaDataChanged, this, [reply, fileName] {
+        if (fileName->isEmpty())
+            if (const QByteArray cd = reply->rawHeader("Content-Disposition"); !cd.isEmpty())
+                *fileName = filenameFromContentDisposition(QString::fromUtf8(cd));
+    });
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
+
+    auto humanMB = [](qint64 b) { return QString::number(b / 1048576.0, 'f', 1); };
+    connect(reply, &QNetworkReply::downloadProgress, this,
+            [this, title = item.title, humanMB, lastPct = -1](qint64 rec, qint64 total) mutable {
+        if (total <= 0) return;
+        const int pct = static_cast<int>(rec * 100 / total);
+        if (pct == lastPct) return;
+        lastPct = pct;
+        statusBar()->showMessage(tr("Downloading “%1”… %2%  (%3 / %4 MB)")
+                                     .arg(title).arg(pct).arg(humanMB(rec), humanMB(total)));
+    });
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, part, partPath, fileName, dir, item] {
+        reply->deleteLater();
+        part->write(reply->readAll());
+        part->close();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            mwLog(QStringLiteral("pcgame: download failed \"%1\": %2").arg(item.title, reply->errorString()));
+            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(item.title, reply->errorString()), 8000);
+            part->remove();
+            return;
+        }
+
+        const QString name = fileName->isEmpty() ? safeFileName(item.title) : safeFileName(*fileName);
+        const QString dest = dir + QStringLiteral("/") + name;
+        QFile::remove(dest);
+        if (!QFile::rename(partPath, dest))
+        {
+            statusBar()->showMessage(tr("Couldn't save “%1”.").arg(item.title), 6000);
+            QFile::remove(partPath);
+            return;
+        }
+        mwLog(QStringLiteral("pcgame: saved \"%1\" -> %2").arg(item.title, QFileInfo(dest).fileName()));
+        RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
+
+        const QString ext = QFileInfo(dest).suffix().toLower();
+        if (!ext.isEmpty())
+        {
+            statusBar()->showMessage(tr("Opening “%1”…").arg(item.title), 5000);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dest)); // installer/.exe runs; archive opens
+        }
+        else
+        {
+            statusBar()->showMessage(tr("Downloaded “%1” — opening its folder.").arg(item.title), 6000);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+        }
+    });
+}
+
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
     // Whether the player/reader should offer "Issue with Streaming" for this item (an Allarr-resolved file
@@ -2128,6 +2244,15 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     const QString type = item.type.toLower();
     const QString lower = url.toLower();
     QString err;
+
+    // PC (Windows) games aren't emulator ROMs — we're on a PC, so download the file and hand it to the OS to
+    // run/install (an installer or portable .exe runs; an archive opens). Must come before the ROM handling
+    // below, which would otherwise try to find an emulator core for it and fail ("no system").
+    if (type == QStringLiteral("game") && isPcPlatform(item.systemHint))
+    {
+        openPcGame(item);
+        return;
+    }
 
     // Playlists (IPTV channel lists / HLS streams) must be handled before the ROM check below: ".m3u" is
     // also the PlayStation multi-disc extension, so it would otherwise be fetched as a game. openM3u()

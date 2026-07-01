@@ -103,6 +103,9 @@ private:
     void openGamePath(const QString& path, const QString& title = QString(),
                       const QString& thumb = QString(), const QString& key = QString(),
                       const QString& systemHint = QString()); // console/platform name to pick the system over the file ext
+    // A PC (Windows) game isn't an emulator ROM: download it to <data>/games/pc and hand it to the OS to
+    // run/install (installer/portable .exe runs; an archive opens). See openLibraryItem's PC-platform branch.
+    void openPcGame(const MediaItem& item);
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
     // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
