@@ -16,5 +16,6 @@
     <file alias="elements/Button.qml">../src/theme2/qml/elements/Button.qml</file>
     <file alias="elements/Panel.qml">../src/theme2/qml/elements/Panel.qml</file>
     <file alias="elements/Channels.qml">../src/theme2/qml/elements/Channels.qml</file>
+    <file alias="elements/Clock.qml">../src/theme2/qml/elements/Clock.qml</file>
   </qresource>
 </RCC>

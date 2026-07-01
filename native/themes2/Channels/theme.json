@@ -16,7 +16,7 @@
                     "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.05,
                     "labelColor": "#FFFFFF", "labelBg": "#F7FAFD" } },
 
-        { "type": "datetime", "id": "clock", "pos": [0.5, 0.800], "size": [0.5, 0.10], "origin": [0.5, 0.5], "zIndex": 2, "format": "h:mm AP", "color": "#3A4657", "fontSize": 0.066, "bold": true, "align": "center" },
+        { "type": "clock", "id": "clock", "pos": [0.5, 0.800], "size": [0.42, 0.095], "origin": [0.5, 0.5], "zIndex": 2, "onColor": "#3A4657", "offColor": "#0000000F", "ampmColor": "#5A6B84", "ampmSize": 0.34, "thickness": 0.17 },
         { "type": "datetime", "id": "date",  "pos": [0.5, 0.890], "size": [0.5, 0.05], "origin": [0.5, 0.5], "zIndex": 2, "format": "ddd M/d",  "color": "#5A6B84", "fontSize": 0.030, "align": "center" },
 
         { "type": "button", "id": "settings", "pos": [0.062, 0.900], "size": [0.078, 0.135], "origin": [0.5, 0.5], "zIndex": 3,

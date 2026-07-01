@@ -1,7 +1,9 @@
 // Button element: a clickable rounded/pill button that fires a named host action (the host decides what it
-// does). Used for the Wii-menu corner buttons (Settings, Profile). Theme keys: action (the name passed to the
-// host, e.g. "settings" / "profile"), glyph ("settings"|"profile" drawn icon), label (optional text),
-// color (fill), textColor, borderColor, shape ("pill" [default] | "round").
+// does). Used for the Wii-menu corner buttons (Settings, Profile). A `round` button gets a Wii-style bevel:
+// a metallic outer ring (bright top -> dark bottom) around a glossy inner face; a `pill` button is a plain
+// flat capsule. Theme keys: action (the name passed to the host, e.g. "settings" / "profile"), glyph
+// ("settings"|"profile" drawn icon), label (optional text), color (pill fill), textColor, borderColor,
+// shape ("pill" [default] | "round").
 import QtQuick
 import "../Theme.js" as T
 
@@ -17,16 +19,47 @@ Item {
     readonly property color bg: T.val(el, "color", "#F4F7FB")
     readonly property color fg: T.val(el, "textColor", "#38455A")
     readonly property color bc: T.val(el, "borderColor", "#AEBBCB")
+    readonly property bool round: T.val(el, "shape", "pill") === "round"
 
     Rectangle {
         id: cap
         anchors.fill: parent
-        radius: T.val(btn.el, "shape", "pill") === "round" ? Math.min(width, height) / 2 : height / 2
-        color: btn.bg
-        border.width: 2; border.color: btn.bc
+        radius: btn.round ? Math.min(width, height) / 2 : height / 2
         scale: ma.pressed ? 0.93 : (ma.containsMouse ? 1.05 : 1.0)
         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+        color: btn.round ? "#9FB0C4" : btn.bg           // round: base under the bevel ring; pill: flat fill
+        border.width: btn.round ? 0 : 2
+        border.color: btn.bc
 
+        // ---- round Wii-style bevel: a metallic ring + a glossy inner face ----
+        Rectangle {                                     // outer ring (bright top -> dark bottom)
+            visible: btn.round; anchors.fill: parent; radius: width / 2
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#FFFFFF" }
+                GradientStop { position: 1.0; color: "#8698AE" }
+            }
+        }
+        Rectangle {                                     // inner face
+            id: face
+            visible: btn.round; anchors.centerIn: parent
+            width: parent.width - parent.height * 0.16; height: width; radius: width / 2
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#FFFFFF" }
+                GradientStop { position: 0.55; color: "#EAEFF6" }
+                GradientStop { position: 1.0; color: "#C9D5E4" }
+            }
+            Rectangle {                                 // top gloss highlight
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: parent.top; anchors.topMargin: parent.height * 0.08
+                width: parent.width * 0.74; height: parent.height * 0.40; radius: height / 2
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#D8FFFFFF" }
+                    GradientStop { position: 1.0; color: "#00FFFFFF" }
+                }
+            }
+        }
+
+        // ---- glyph (+ label for pill) ----
         Row {
             anchors.centerIn: parent; spacing: cap.height * 0.16
             Canvas { // the drawn glyph (software-renderer safe: painted once)
