@@ -58,8 +58,9 @@ Item {
                             readonly property int slot: pg.pageBase + index
                             readonly property var item: (slot < ch.count) ? ch.items[slot] : null
                             readonly property bool empty: item === null
-                            // No grid selection ring while focus has dropped to the bottom buttons.
-                            readonly property bool sel: !empty && slot === ch.cur && !(ch.host && ch.host.focusZone === 1)
+                            // No grid selection ring while focus has dropped to the bottom buttons (ctx is a
+                            // reactive binding, so this updates the instant focus leaves the grid).
+                            readonly property bool sel: !empty && slot === ch.cur && !(ch.ctx && ch.ctx.focusZone === 1)
                             x: (index % ch.cols) * ch.cellW
                             y: Math.floor(index / ch.cols) * ch.cellH
                             width: ch.cellW; height: ch.cellH

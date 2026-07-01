@@ -225,7 +225,8 @@ Item {
         "items": items,
         "index": currentIndex,
         "count": items ? items.length : 0,
-        "selected": (items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({})
+        "selected": (items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({}),
+        "focusZone": focusZone // 1 = focus has left the grid for the bottom buttons (grid drops its selection)
     })
 
     // type -> exact component filename (QML files must be capitalised; filesystems may be case-sensitive).
