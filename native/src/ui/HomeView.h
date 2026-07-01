@@ -88,10 +88,15 @@ public:
 
     // Toast over the view (Play/Read progress + errors). Public so MainWindow can keep the same toast
     // going through the download phase (the "info as we pull the file" feedback the user wanted there).
+    // These no longer draw locally - they emit toastRequested/toastHideRequested so MainWindow can render
+    // the message as a window-level overlay that stays visible over ANY theme (a themed home is a native
+    // QQuickView our own child widgets can't paint over).
     void showToast(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
     void hideToast();                                   // dismiss it now (e.g. the content view takes over)
 
 signals:
+    void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
+    void toastHideRequested();                        // ask MainWindow to dismiss it
     void openItem(const MediaItem& item);
     void downloadItem(const MediaItem& item); // a resolved file to download for keeps (-> Recents)
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls); // manga chapter
@@ -182,7 +187,6 @@ private:
     void populate(const MediaCatalog& cat, bool append);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
-    void repositionToast();                             // re-centre the toast near the bottom of the view
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
     void showMeta(const MediaDetail& detail);
     void hideMeta();
@@ -224,8 +228,6 @@ private:
     QPushButton* settingsBtn_ = nullptr; // the "Settings" button
     QColor themeColor_;                  // the active tab's colour (drives bars/buttons/headers)
     QLabel* status_ = nullptr;
-    QLabel* toast_ = nullptr;          // floating notification (Play/Read progress + errors)
-    QTimer* toastTimer_ = nullptr;     // auto-hides the toast
     QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
 

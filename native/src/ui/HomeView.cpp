@@ -720,19 +720,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     status_ = new QLabel(this);
     status_->hide();
 
-    // A floating toast for Play/Read progress + errors (the old bottom status strip was removed, so plain
-    // status_->setText messages were invisible). Centred near the bottom; auto-hides after a few seconds.
-    toast_ = new QLabel(this);
-    toast_->setVisible(false);
-    toast_->setWordWrap(true);
-    toast_->setAlignment(Qt::AlignCenter);
-    toast_->setTextInteractionFlags(Qt::NoTextInteraction);
-    toast_->setStyleSheet(QStringLiteral(
-        "QLabel{background:rgba(18,20,26,0.95);color:#f4f6f8;border:1px solid rgba(255,255,255,0.18);"
-        "border-radius:10px;padding:12px 22px;font-size:12pt;font-weight:600;}"));
-    toastTimer_ = new QTimer(this);
-    toastTimer_->setSingleShot(true);
-    connect(toastTimer_, &QTimer::timeout, this, [this] { if (toast_) toast_->hide(); });
+    // Play/Read progress + errors are shown as a window-level overlay (see MainWindow::notify), not a child
+    // of this view: a themed home is a native QQuickView our own widgets can't paint over. showToast/hideToast
+    // just relay to MainWindow via toastRequested/toastHideRequested so the notice floats over any theme.
 
     connect(mgr_, &AddonManager::catalogReady, this, &HomeView::onCatalogReady);
     connect(mgr_, &AddonManager::metaReady, this, &HomeView::onMetaReady);
@@ -1983,8 +1973,8 @@ void HomeView::activateItem(int row)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
         mgr_->resolveStream(addon, item, [this, addon, item, fileProvider](const QString& url, const QString& mime) {
-            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
-            else { if (toast_) toast_->hide(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
+            if (!url.isEmpty()) { hideToast(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
+            else { hideToast(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
         });
         return;
     }
@@ -2363,7 +2353,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (pages.isEmpty())
                 showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
                              "aren't hosted here — try another chapter or title.").arg(title), 7000);
-            else { if (toast_) toast_->hide(); emit openImagePages(title, key, pages); }
+            else { hideToast(); emit openImagePages(title, key, pages); }
         });
         return;
     }
@@ -2399,7 +2389,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         const QString title = it.title;
         mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
             else if (!err.isEmpty())
                 showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
             else
@@ -2420,7 +2410,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         if (playBtn_) playBtn_->setEnabled(false);
         mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
             else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
         });
         return;
@@ -2433,7 +2423,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         if (playBtn_) playBtn_->setEnabled(false);
         mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                               "(check that Allarr is configured and returning results).").arg(it.title), 7000);
         });
@@ -2712,7 +2702,7 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
             resolvePlay(themedPlayAddon_, themedPlayItem_, QString(), themedPlayConsole_, imdb, stremioType);
         else
         {
-            if (toast_) toast_->hide();
+            hideToast();
             showToast(tr("No stream source for “%1”. No stream addon (e.g. Allarr) returned a playable link.")
                           .arg(themedPlayItem_.title), 7000);
         }
@@ -2798,35 +2788,17 @@ void HomeView::hideMeta()
 
 void HomeView::showToast(const QString& text, int ms)
 {
-    if (!toast_) return;
-    toast_->setText(text);
-    toast_->setMaximumWidth(qMax(240, int(width() * 0.7)));
-    toast_->adjustSize();
-    repositionToast();
-    toast_->show();
-    toast_->raise();
-    if (toastTimer_) { if (ms > 0) toastTimer_->start(ms); else toastTimer_->stop(); } // ms<=0 => sticky
+    emit toastRequested(text, ms); // rendered by MainWindow as a window-level overlay (over any theme)
 }
 
 void HomeView::hideToast()
 {
-    if (toast_) toast_->hide();
-    if (toastTimer_) toastTimer_->stop();
-}
-
-void HomeView::repositionToast()
-{
-    if (!toast_ || toast_->isHidden()) return;
-    toast_->adjustSize();
-    const int x = (width() - toast_->width()) / 2;
-    const int y = height() - toast_->height() - 48; // floats just above the bottom edge
-    toast_->move(qMax(8, x), qMax(8, y));
+    emit toastHideRequested();
 }
 
 void HomeView::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
-    repositionToast();
 }
 
 // Theme the detail card. Colours are set EXPLICITLY (not via palette) because a stylesheet on the panel

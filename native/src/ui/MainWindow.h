@@ -65,6 +65,13 @@ private slots:
     // startNextDownload runs them one at a time. Fed by HomeView's downloadItem signal (single item or a crawl).
     void enqueueDownload(const MediaItem& item);
     void startNextDownload();
+    // Window-level notification overlay for download/resolve progress + errors. A top-level Tool window (not a
+    // child widget) so it floats over ANY current view, including a themed home (a native QQuickView our own
+    // child widgets can't paint over). Driven by HomeView's toastRequested/toastHideRequested and by the
+    // library download queue, so the "info while pulling a file" feedback shows regardless of the active theme.
+    void notify(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
+    void hideNotice();
+    void positionNotice();                           // re-anchor to our bottom-centre (global coords)
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
     // then hand it to the comic reader (which gives natural page order + resume for free).
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
@@ -87,6 +94,7 @@ private slots:
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // reveal media controls on mouse move
     void resizeEvent(QResizeEvent* event) override;
+    void moveEvent(QMoveEvent* event) override;             // keep the notification overlay anchored while dragging
     void keyPressEvent(QKeyEvent* event) override;          // Esc leaves full screen
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
     void changeEvent(QEvent* event) override;               // re-focus the themed view when the window reactivates
@@ -216,6 +224,8 @@ private:
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
     QLabel* playerNotice_ = nullptr;        // transient centred message over the player (works in full screen)
     QTimer* playerNoticeTimer_ = nullptr;
+    QLabel* notice_ = nullptr;              // window-level download/resolve notice overlay (over any theme)
+    QTimer* noticeTimer_ = nullptr;         // auto-hides the notice
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;

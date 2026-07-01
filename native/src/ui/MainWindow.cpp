@@ -58,6 +58,7 @@
 #include <QDialogButtonBox>
 #include <QEvent>
 #include <QResizeEvent>
+#include <QMoveEvent>
 #include <QShortcut>
 #include <QKeyEvent>
 #include <QFileDialog>
@@ -504,6 +505,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     playerNoticeTimer_->setSingleShot(true);
     connect(playerNoticeTimer_, &QTimer::timeout, this, [this] { if (playerNotice_) playerNotice_->hide(); });
 
+    // Window-level notification overlay (download/resolve progress + errors). A top-level Tool window tied to
+    // us — a normal child widget would be hidden behind a themed home (a native QQuickView container). Tool +
+    // no-activate keeps it floating just above our window without stealing focus or the taskbar. Translucent
+    // background so the rounded corners read cleanly; click-through so it never eats a press on the view below.
+    notice_ = new QLabel(this, Qt::FramelessWindowHint | Qt::Tool | Qt::WindowDoesNotAcceptFocus);
+    notice_->setObjectName(QStringLiteral("mwNotice"));
+    notice_->setAttribute(Qt::WA_ShowWithoutActivating);
+    notice_->setAttribute(Qt::WA_TranslucentBackground);
+    notice_->setAttribute(Qt::WA_TransparentForMouseEvents);
+    notice_->setFocusPolicy(Qt::NoFocus);
+    notice_->setWordWrap(true);
+    notice_->setAlignment(Qt::AlignCenter);
+    notice_->setStyleSheet(QStringLiteral(
+        "#mwNotice { background:rgba(18,20,26,0.95); color:#f4f6f8; border:1px solid rgba(255,255,255,0.18);"
+        " border-radius:10px; padding:12px 22px; font-size:12pt; font-weight:600; }"));
+    notice_->hide();
+    noticeTimer_ = new QTimer(this);
+    noticeTimer_->setSingleShot(true);
+    connect(noticeTimer_, &QTimer::timeout, this, [this] { if (notice_) notice_->hide(); });
+
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
     connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
@@ -526,6 +547,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     player_->installEventFilter(this);
     mediaControls_->installEventFilter(this);
 
+    // HomeView's progress/error toasts now render as our window-level overlay so they stay visible over any
+    // theme (a themed home is a native QQuickView the view's own toast couldn't cover).
+    connect(home_, &HomeView::toastRequested, this, &MainWindow::notify);
+    connect(home_, &HomeView::toastHideRequested, this, &MainWindow::hideNotice);
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
     connect(home_, &HomeView::switchProfileRequested, this, &MainWindow::onSwitchProfile);
@@ -612,6 +637,13 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     QMainWindow::resizeEvent(event);
     if (mediaControls_ && mediaControls_->isVisible())
         positionMediaControls();
+    positionNotice();
+}
+
+void MainWindow::moveEvent(QMoveEvent* event)
+{
+    QMainWindow::moveEvent(event);
+    positionNotice(); // the notice is a separate top-level window; keep it stuck to us as we drag
 }
 
 void MainWindow::leaveFullScreen()
@@ -810,6 +842,36 @@ void MainWindow::showPlayerNotice(const QString& msg, int ms)
     playerNotice_->show();
     playerNotice_->raise();
     playerNoticeTimer_->start(ms);
+}
+
+void MainWindow::positionNotice()
+{
+    if (!notice_ || !notice_->isVisible()) return;
+    notice_->setMaximumWidth(qMax(280, int(width() * 0.7)));
+    notice_->adjustSize();
+    // It's a top-level window, so place it in global coordinates over our bottom-centre.
+    const QPoint tl = mapToGlobal(QPoint(0, 0));
+    const int x = tl.x() + (width() - notice_->width()) / 2;
+    const int y = tl.y() + height() - notice_->height() - 56; // floats just above the bottom edge
+    notice_->move(qMax(tl.x() + 8, x), qMax(tl.y() + 8, y));
+}
+
+void MainWindow::notify(const QString& text, int ms)
+{
+    if (!notice_) return;
+    notice_->setText(text);
+    notice_->setMaximumWidth(qMax(280, int(width() * 0.7)));
+    notice_->adjustSize();
+    notice_->show();
+    notice_->raise();
+    positionNotice();
+    if (noticeTimer_) { if (ms > 0) noticeTimer_->start(ms); else noticeTimer_->stop(); } // ms<=0 => sticky
+}
+
+void MainWindow::hideNotice()
+{
+    if (notice_) notice_->hide();
+    if (noticeTimer_) noticeTimer_->stop();
 }
 
 void MainWindow::showNextSourceFeedback(const QString& msg)
@@ -2449,7 +2511,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     const QString localPath = dir + QStringLiteral("/") + hash + ext;
 
     auto openLocal = [this, item, localPath] {
-        home_->hideToast(); // resolve+download feedback done; the content view takes over
+        hideNotice(); // resolve+download feedback done; the content view takes over
         MediaItem local = item;
         local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
         openLibraryItem(local);
@@ -2467,7 +2529,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
     // Continue the feedback in the same toast that showed "Finding/Looking…", so the file-pull progress
     // appears where the user is already looking (not just the status bar). Sticky until it opens/fails.
-    home_->showToast(tr("Downloading “%1”…").arg(item.title), 0);
+    notify(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2%3").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName(), ext));
 
     QNetworkRequest rq{QUrl(item.url)};
@@ -2498,7 +2560,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             msg = tr("Downloading “%1”… %2 MB").arg(title, humanMB(received));
         }
         statusBar()->showMessage(msg);
-        home_->showToast(msg, 0); // mirror the live percentage into the toast (sticky)
+        notify(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, localPath, openLocal, title = item.title] {
@@ -2508,7 +2570,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
             const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
             statusBar()->showMessage(e, 6000);
-            home_->showToast(e, 6000);
+            notify(e, 6000);
             return;
         }
         const QByteArray body = reply->readAll();
@@ -2518,7 +2580,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             f.close(); f.remove();
             mwLog(QStringLiteral("download: save failed for \"%1\" (%2 bytes)").arg(title).arg(body.size()));
             statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
-            home_->showToast(tr("Couldn't save “%1” to cache.").arg(title), 6000);
+            notify(tr("Couldn't save “%1” to cache.").arg(title), 6000);
             return;
         }
         f.close();
@@ -2527,7 +2589,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         {
             mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
             statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
-            home_->showToast(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+            notify(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
             return;
         }
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(body.size()));
@@ -2600,6 +2662,7 @@ void MainWindow::startNextDownload()
     {
         downloadBusy_ = false;
         statusBar()->showMessage(tr("Downloads complete."), 5000);
+        notify(tr("Downloads complete."), 4000);
         mwLog(QStringLiteral("download(library): queue drained"));
         return;
     }
@@ -2622,8 +2685,10 @@ void MainWindow::startNextDownload()
     }
 
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
-    statusBar()->showMessage(tr("Downloading “%1”…%2").arg(item.title,
-                             remaining > 0 ? tr("  (%1 more queued)").arg(remaining) : QString()));
+    const QString startMsg = tr("Downloading “%1”…%2").arg(item.title,
+                             remaining > 0 ? tr("  (%1 more queued)").arg(remaining) : QString());
+    statusBar()->showMessage(startMsg);
+    notify(startMsg, 0); // window-level so it shows over any theme; sticky until progress/finish updates it
     mwLog(QStringLiteral("download(library): GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(dest).fileName()));
 
     QNetworkRequest rq{ QUrl(item.url) };
@@ -2638,9 +2703,11 @@ void MainWindow::startNextDownload()
         const int pct = static_cast<int>(rec * 100 / total);
         if (pct == lastPct) return;
         lastPct = pct;
-        statusBar()->showMessage(tr("Downloading “%1”… %2%  (%3 / %4 MB)%5")
+        const QString msg = tr("Downloading “%1”… %2%  (%3 / %4 MB)%5")
             .arg(title).arg(pct).arg(humanMB(rec), humanMB(total),
-                 remaining > 0 ? tr("  (%1 more)").arg(remaining) : QString()));
+                 remaining > 0 ? tr("  (%1 more)").arg(remaining) : QString());
+        statusBar()->showMessage(msg);
+        notify(msg, 0);
     });
 
     connect(reply, &QNetworkReply::finished, this,
@@ -2649,7 +2716,9 @@ void MainWindow::startNextDownload()
         if (reply->error() != QNetworkReply::NoError)
         {
             mwLog(QStringLiteral("download(library): FAILED \"%1\": %2").arg(title, reply->errorString()));
-            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(title, reply->errorString()), 6000);
+            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
+            statusBar()->showMessage(e, 6000);
+            notify(e, 6000);
             startNextDownload(); // keep the queue moving
             return;
         }
