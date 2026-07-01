@@ -33,12 +33,11 @@ Item {
         // screen edge. The cylindrical vertical gradient (highlight band across the middle) reads as a tube.
         property real hcH: btn.height * 1.28
         height: hcH; width: btn.width * btn.hscale; radius: hcH / 2
-        y: btn.height / 2 - hcH / 2 + btn.height * 0.16
+        y: btn.height / 2 - hcH / 2 + btn.height * 0.05
         x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: "#C6D2E1" }
-            GradientStop { position: 0.42; color: "#EFF3F8" }
-            GradientStop { position: 1.0; color: "#B2C0D2" }
+        gradient: Gradient {                             // matte, not shiny
+            GradientStop { position: 0.0; color: "#E6ECF3" }
+            GradientStop { position: 1.0; color: "#C4D1E0" }
         }
         border.width: 2; border.color: "#A9B7C8"
     }

@@ -20,9 +20,9 @@
         { "type": "datetime", "id": "date",  "pos": [0.435, 0.888], "size": [0.34, 0.06], "origin": [0, 0.5], "zIndex": 2, "format": "ddd M/d",  "color": "#5A6B84", "fontSize": 0.042, "bold": true, "align": "left" },
 
         { "type": "button", "id": "settings", "pos": [0.062, 0.900], "size": [0.078, 0.135], "origin": [0.5, 0.5], "zIndex": 3,
-          "action": "settings", "glyph": "settings", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "left", "housingScale": 6 },
+          "action": "settings", "glyph": "settings", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "left", "housingScale": 1.9 },
         { "type": "button", "id": "profile", "pos": [0.938, 0.900], "size": [0.078, 0.135], "origin": [0.5, 0.5], "zIndex": 3,
-          "action": "profile", "glyph": "profile", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "right", "housingScale": 6 }
+          "action": "profile", "glyph": "profile", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "right", "housingScale": 1.9 }
       ]
     },
 
