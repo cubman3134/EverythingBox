@@ -36,6 +36,7 @@ Item {
     signal selectionMoved()        // XMB: the column selection moved (host fetches that item's metadata)
     signal actionChosen(int which) // XMB: chose an inline action (0 = Play, 1 = Favorite, 2 = Add to playlist)
     signal addToPlaylistRequested() // XMB: "P" on the highlighted item -> host adds it to a playlist
+    signal actionRequested(string name) // a `button` element was clicked -> host runs the named action
 
     // XMB (cross) state. categories = the horizontal axis; items = the active category's column; catIndex /
     // currentIndex are the two cursors. xmbMode is on when the active view contains an `xmb` element, which
@@ -77,6 +78,7 @@ Item {
         if (i === currentIndex) activated(i)               // click the focused item -> press it
         else { currentIndex = i; navigate() }              // click another -> move the selection there
     }
+    function buttonAction(name) { forceActiveFocus(); actionRequested(name) } // a `button` element was pressed
     function gotoCat(i) {                                   // XMB: click a category to switch to it
         forceActiveFocus()
         if (actionsOpen) return
@@ -183,7 +185,7 @@ Item {
     readonly property var elementFiles: ({
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
-        "particles": "Particles", "xmb": "Xmb", "wave": "Wave"
+        "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 

@@ -30,6 +30,7 @@ public:
     std::function<void(int)> onSelect; // XMB: the column cursor moved to `index` (host fetches its metadata)
     std::function<void(int)> onAction; // XMB: chose an inline action (0=Play, 1=Favorite, 2=Add to playlist)
     std::function<void()> onPlaylistAdd; // XMB: "P" on the highlighted item (host adds it to a playlist)
+    std::function<void(QString)> onButton; // a `button` element fired its named action (e.g. settings/profile)
 
     // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
     QSoundEffect* sndNavigate = nullptr; // selection moved
@@ -49,6 +50,7 @@ public slots:
     void selection(); // XMB: column cursor moved (host fetches the selected item's metadata)
     void action(int which); // XMB: chose an inline Play/Favorite/Add-to-playlist action
     void playlistAdd();     // XMB: "P" - add the highlighted item to a playlist
+    void button(const QString& name); // a `button` element fired its named action
 };
 
 namespace ThemeEngine
@@ -66,7 +68,8 @@ namespace ThemeEngine
                        std::function<void()> onCategory = {},
                        std::function<void(int)> onSelect = {},
                        std::function<void(int)> onAction = {},
-                       std::function<void()> onPlaylistAdd = {});
+                       std::function<void()> onPlaylistAdd = {},
+                       std::function<void(QString)> onButton = {});
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);

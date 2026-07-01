@@ -13,5 +13,6 @@
     <file alias="elements/Particles.qml">../src/theme2/qml/elements/Particles.qml</file>
     <file alias="elements/Xmb.qml">../src/theme2/qml/elements/Xmb.qml</file>
     <file alias="elements/Wave.qml">../src/theme2/qml/elements/Wave.qml</file>
+    <file alias="elements/Button.qml">../src/theme2/qml/elements/Button.qml</file>
   </qresource>
 </RCC>

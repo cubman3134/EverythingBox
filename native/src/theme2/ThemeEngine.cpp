@@ -44,6 +44,7 @@ void ThemeBridge::category()  { if (onCategory) onCategory(); }
 void ThemeBridge::selection() { if (onSelect && root) onSelect(root->property("currentIndex").toInt()); }
 void ThemeBridge::action(int which) { if (onAction) onAction(which); }
 void ThemeBridge::playlistAdd() { if (onPlaylistAdd) onPlaylistAdd(); }
+void ThemeBridge::button(const QString& name) { if (onButton) onButton(name); }
 
 namespace ThemeEngine
 {
@@ -81,7 +82,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
                    std::function<void()> onBack, std::function<void()> onCycle,
                    std::function<void()> onSearch, std::function<void()> onNearEnd,
                    std::function<void()> onCategory, std::function<void(int)> onSelect,
-                   std::function<void(int)> onAction, std::function<void()> onPlaylistAdd)
+                   std::function<void(int)> onAction, std::function<void()> onPlaylistAdd,
+                   std::function<void(QString)> onButton)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -117,6 +119,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onSelect = std::move(onSelect);
         bridge->onAction = std::move(onAction);
         bridge->onPlaylistAdd = std::move(onPlaylistAdd);
+        bridge->onButton = std::move(onButton);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -144,6 +147,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(selectionMoved()), bridge, SLOT(selection()));
         QObject::connect(root, SIGNAL(actionChosen(int)), bridge, SLOT(action(int)));
         QObject::connect(root, SIGNAL(addToPlaylistRequested()), bridge, SLOT(playlistAdd()));
+        QObject::connect(root, SIGNAL(actionRequested(QString)), bridge, SLOT(button(QString)));
     }
 
     QWidget* container = QWidget::createWindowContainer(qv, parent);

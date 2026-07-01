@@ -1586,8 +1586,17 @@ void MainWindow::showThemedHome()
         showThemedBrowse();
     };
 
+    // A theme may place `button` elements (e.g. the Channels theme's Wii-style corner buttons): route their
+    // named actions to the real screens. Unknown actions are ignored.
+    auto onButton = [this](const QString& a) {
+        if (a == QStringLiteral("settings"))     openSettingsHub();
+        else if (a == QStringLiteral("profile")) onSwitchProfile();
+        else if (a == QStringLiteral("appearance")) openAppearance();
+    };
+
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
-                                        items, system, this, onActivated, onBack, onCycle, onSearch);
+                                        items, system, this, onActivated, onBack, onCycle, onSearch,
+                                        {}, {}, {}, {}, {}, onButton);
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
     if (QQuickItem* r = ThemeEngine::rootItem(w))
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
