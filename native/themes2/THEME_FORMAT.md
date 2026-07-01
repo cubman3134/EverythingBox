@@ -72,7 +72,7 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 | `type` | Purpose | Key properties |
 | --- | --- | --- |
 | `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines` |
-| `datetime` | live clock/date | `format` (Qt format, e.g. `"hh:mm"`, `"ddd d MMM"`), `color`, `fontSize`, `align` |
+| `datetime` | live clock/date | `format` (Qt format, e.g. `"hh:mm"`, `"ddd d MMM"`), `color`, `fontSize`, `align`, `fontFile` (a bundled font in the theme folder, e.g. `"fonts/Foo.ttf"`) or `fontFamily` (a system font) |
 | `image` | poster / picture | `path` or `binding`, `fillMode` (`contain`\|`cover`\|`stretch`), `radius`, `color` (placeholder) |
 | `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth`, `card.fill`, `card.border`+`card.borderWidth` (always-on outline), `card.selectedScale` (the selected card grows + lifts), `card.label` (`overlay`\|`center` name centred on the card, no bar\|`top` title bar on the card\|`below` name-plate\|`none`), `card.labelSize`, `card.labelColor`, `card.labelBg` |
 | `button` | a clickable button that runs a named host action (`round` gets a Wii-style bevel + soft shadow; `housing` puts it on a disc that runs off the screen corner) | `action` (`settings`\|`profile`\|`appearance`), `glyph` (`settings`\|`profile`), `label`, `color`, `textColor`, `borderColor`, `shape` (`pill`\|`round`), `housing`, `housingSide` (`left`\|`right`), `housingScale` |
