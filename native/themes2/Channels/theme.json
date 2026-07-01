@@ -10,7 +10,7 @@
           "gradient": ["#EAEFF5", "#CBD7E6"], "curve": 0.55, "topColor": "#9FC0E0", "topWidth": 3 },
 
         { "type": "channels", "id": "channels", "pos": [0.015, 0.035], "size": [0.97, 0.70], "origin": [0, 0], "zIndex": 1,
-          "columns": 4, "rows": 3, "spacing": 0.007,
+          "columns": 4, "rows": 3, "pages": 4, "spacing": 0.007,
           "card": { "radius": 16, "fill": "#FFFFFF", "border": "#B7C3D4", "borderWidth": 2,
                     "emptyFill": "#D9E0EA", "emptyBorder": "#C4CCD6",
                     "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.05,

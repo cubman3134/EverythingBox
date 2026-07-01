@@ -19,8 +19,16 @@ Item {
     readonly property var items: (ctx && ctx.items) ? ctx.items : []
     readonly property int count: items.length
     readonly property int cur: (ctx && ctx.index !== undefined) ? ctx.index : 0
-    readonly property int pageCount: Math.max(1, Math.ceil(count / perPage))
-    readonly property int page: Math.min(pageCount - 1, Math.floor(cur / perPage))
+    // At least `pages` pages exist (the Wii shows pages of mostly-empty channel slots you can arrow into);
+    // more appear if the catalogs overflow that.
+    readonly property int minPages: Math.max(1, Number(T.val(el, "pages", 1)))
+    readonly property int pageCount: Math.max(minPages, Math.ceil(count / perPage))
+    // The page on screen. It follows the selection, but the arrows can also browse ahead into the empty pages;
+    // moving the selection snaps back to the page it's on.
+    property int viewPage: 0
+    onCurChanged: viewPage = Math.min(pageCount - 1, Math.floor(cur / perPage))
+    onPageCountChanged: if (viewPage > pageCount - 1) viewPage = pageCount - 1
+    Component.onCompleted: viewPage = Math.min(pageCount - 1, Math.floor(cur / perPage))
 
     readonly property real arrowW: height * 0.17         // side gutter reserved for a page arrow
     readonly property real gap: Number(T.val(el, "spacing", 0.01)) * (host ? host.width : 1280)
@@ -33,7 +41,7 @@ Item {
         id: vp
         x: ch.arrowW; width: ch.vpW; height: ch.height; clip: true
         Row {
-            x: -ch.page * ch.vpW
+            x: -ch.viewPage * ch.vpW
             Behavior on x { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
             Repeater {
                 model: ch.pageCount
@@ -119,14 +127,10 @@ Item {
             }
         }
         MouseArea { anchors.fill: parent; enabled: parent.on; cursorShape: Qt.PointingHandCursor
-            onClicked: {
-                if (!ch.host || !ch.host.gotoItem) return
-                var target = parent.forward ? Math.min(ch.count - 1, (ch.page + 1) * ch.perPage)
-                                             : Math.max(0, (ch.page - 1) * ch.perPage)
-                ch.host.gotoItem(target)
-            }
+            onClicked: ch.viewPage = parent.forward ? Math.min(ch.pageCount - 1, ch.viewPage + 1)
+                                                     : Math.max(0, ch.viewPage - 1)
         }
     }
-    PageArrow { anchors.left: parent.left;  anchors.verticalCenter: parent.verticalCenter; forward: false; on: ch.page > 0 }
-    PageArrow { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; forward: true;  on: ch.page < ch.pageCount - 1 }
+    PageArrow { anchors.left: parent.left;  anchors.verticalCenter: parent.verticalCenter; forward: false; on: ch.viewPage > 0 }
+    PageArrow { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; forward: true;  on: ch.viewPage < ch.pageCount - 1 }
 }
