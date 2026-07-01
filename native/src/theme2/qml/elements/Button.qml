@@ -32,9 +32,10 @@ Item {
     Canvas {
         visible: btn.housing
         z: -1
-        property real hcH: btn.height * 1.28
+        property real hcH: btn.height * 1.20
         height: hcH; width: btn.width * btn.hscale
-        y: btn.height / 2 - hcH / 2 + btn.height * 0.05
+        // Top pinned to where the taller (1.28) tube sat; only the bottom comes up.
+        y: btn.height / 2 - btn.height * 1.28 / 2 + btn.height * 0.05
         x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
         onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
         onPaint: {
