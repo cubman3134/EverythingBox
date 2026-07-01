@@ -9,11 +9,12 @@
         { "type": "panel", "id": "bar", "pos": [0, 0.82], "size": [1, 0.18], "origin": [0, 0], "zIndex": 0,
           "gradient": ["#EAEFF5", "#CBD7E6"], "curve": 0.55, "topColor": "#9FC0E0", "topWidth": 3 },
 
-        { "type": "grid", "id": "channels", "pos": [0.03, 0.035], "size": [0.94, 0.70], "origin": [0, 0], "zIndex": 1,
-          "columns": 4, "aspect": 0.62, "spacing": 0.014, "color": "#2FA1E6",
+        { "type": "channels", "id": "channels", "pos": [0.015, 0.035], "size": [0.97, 0.70], "origin": [0, 0], "zIndex": 1,
+          "columns": 4, "rows": 3, "spacing": 0.007,
           "card": { "radius": 16, "fill": "#FFFFFF", "border": "#B7C3D4", "borderWidth": 2,
+                    "emptyFill": "#D9E0EA", "emptyBorder": "#C4CCD6",
                     "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.05,
-                    "label": "center", "labelColor": "#FFFFFF" } },
+                    "labelColor": "#FFFFFF", "labelBg": "#F7FAFD" } },
 
         { "type": "datetime", "id": "clock", "pos": [0.5, 0.795], "size": [0.5, 0.10], "origin": [0.5, 0.5], "zIndex": 2, "format": "h:mm AP", "color": "#3A4657", "fontSize": 0.070, "bold": true, "align": "center" },
         { "type": "datetime", "id": "date",  "pos": [0.5, 0.875], "size": [0.5, 0.05], "origin": [0.5, 0.5], "zIndex": 2, "format": "ddd M/d",  "color": "#5A6B84", "fontSize": 0.030, "align": "center" },

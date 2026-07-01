@@ -105,7 +105,8 @@ Item {
     property int gridCols: {
         if (view && view.elements)
             for (var i = 0; i < view.elements.length; i++)
-                if (view.elements[i].type === "grid") return Math.max(1, Number(view.elements[i].columns || 4))
+                if (view.elements[i].type === "grid" || view.elements[i].type === "channels")
+                    return Math.max(1, Number(view.elements[i].columns || 4))
         return 1
     }
     function step(d) {
@@ -185,7 +186,8 @@ Item {
     readonly property var elementFiles: ({
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
-        "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel"
+        "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
+        "channels": "Channels"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 

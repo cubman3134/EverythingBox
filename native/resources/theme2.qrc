@@ -15,5 +15,6 @@
     <file alias="elements/Wave.qml">../src/theme2/qml/elements/Wave.qml</file>
     <file alias="elements/Button.qml">../src/theme2/qml/elements/Button.qml</file>
     <file alias="elements/Panel.qml">../src/theme2/qml/elements/Panel.qml</file>
+    <file alias="elements/Channels.qml">../src/theme2/qml/elements/Channels.qml</file>
   </qresource>
 </RCC>
