@@ -177,4 +177,12 @@ bool homeIsXmb(const QString& themeDir)
     return false;
 }
 
+bool homeHidesAppearanceTile(const QString& themeDir)
+{
+    QFile f(themeDir + QStringLiteral("/theme.json"));
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    return QJsonDocument::fromJson(f.readAll()).object()
+           .value(QStringLiteral("hideAppearanceTile")).toBool();
+}
+
 } // namespace ThemeEngine

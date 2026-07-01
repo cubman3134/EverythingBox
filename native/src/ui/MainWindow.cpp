@@ -1547,18 +1547,25 @@ void MainWindow::showThemedHome()
     }
     themedHomeIsXmb_ = false;
 
-    QVariantList items = home_->systemItems();
-    QStringList navKeys;
-    for (const QVariant& v : items) navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
-    items << QVariantMap{ { QStringLiteral("title"), tr("Appearance") },
-                          { QStringLiteral("subtitle"), tr("Themes & layout") },
-                          { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
-    navKeys << QString();
-    const int appearanceIdx = int(items.size()) - 1;
-
     const QStringList themes = ThemeEngine::availableThemes();
     QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
     if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
+
+    QVariantList items = home_->systemItems();
+    QStringList navKeys;
+    for (const QVariant& v : items) navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
+    // The Appearance tile is a catalog-grid stand-in for the theme picker. A theme with its own settings /
+    // appearance button (e.g. Channels) sets "hideAppearanceTile": true so it isn't shown twice.
+    int appearanceIdx = -1;
+    if (!ThemeEngine::homeHidesAppearanceTile(themeDir))
+    {
+        items << QVariantMap{ { QStringLiteral("title"), tr("Appearance") },
+                              { QStringLiteral("subtitle"), tr("Themes & layout") },
+                              { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+        navKeys << QString();
+        appearanceIdx = int(items.size()) - 1;
+    }
 
     QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
     auto onActivated = [this, navKeys, appearanceIdx](int idx) {
@@ -1594,7 +1601,7 @@ void MainWindow::showThemedHome()
         else if (a == QStringLiteral("appearance")) openAppearance();
     };
 
-    QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
+    QWidget* w = ThemeEngine::buildView(themeDir,
                                         items, system, this, onActivated, onBack, onCycle, onSearch,
                                         {}, {}, {}, {}, {}, onButton);
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).

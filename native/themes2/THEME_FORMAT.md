@@ -76,6 +76,7 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 | `image` | poster / picture | `path` or `binding`, `fillMode` (`contain`\|`cover`\|`stretch`), `radius`, `color` (placeholder) |
 | `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth`, `card.fill`, `card.border`+`card.borderWidth` (always-on outline), `card.selectedScale` (the selected card grows + lifts), `card.label` (`overlay`\|`top` title bar on the card\|`below` name-plate\|`none`), `card.labelSize`, `card.labelColor`, `card.labelBg` |
 | `button` | a clickable button that runs a named host action | `action` (`settings`\|`profile`\|`appearance`), `glyph` (`settings`\|`profile`), `label`, `color`, `textColor`, `borderColor`, `shape` (`pill`\|`round`) |
+| `panel` | a filled bar with an optional curved (dipped) top edge — the Wii-menu bottom shelf | `color` or `gradient` `["#top","#bottom"]`, `curve` (0..1 middle dip), `topColor`+`topWidth` (accent line) |
 | `carousel` | horizontal strip, selected centred + enlarged | `itemWidth`, `spacing`, `color` (selection), `card.radius` |
 | `rating` | five stars from a 0..1 value | `binding` (or `value`), `color`, `emptyColor` |
 | `video` | preview area: a slow Ken Burns drift over the bound poster + a play badge | `path`/`binding`, `radius` |
@@ -151,5 +152,7 @@ Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) —
   }}
 }
 ```
+
+A top-level **`"hideAppearanceTile": true`** stops the app adding its Appearance catalog tile to the home grid — use it when your theme provides its own settings/appearance `button` (so it isn't offered twice).
 
 Copy one of the shipped themes (`Default`, `Grid`, `Lumen`, `Midnight`, `Channels`) as a starting point and edit away — the home updates as you save.

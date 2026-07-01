@@ -77,6 +77,10 @@ namespace ThemeEngine
     // True if the theme's `home` view contains an `xmb` element (so the host drives it as an XMB cross).
     bool homeIsXmb(const QString& themeDir);
 
+    // True if the theme sets top-level "hideAppearanceTile": true (it provides its own settings/theme button,
+    // so the host shouldn't also add an Appearance catalog tile to the grid).
+    bool homeHidesAppearanceTile(const QString& themeDir);
+
     QString themesRoot();              // <app>/themes2
     QStringList availableThemes();     // subdirectories of themesRoot that contain a theme.json
     QString themeDisplayName(const QString& folder); // theme.json "name [— author]", else the folder name
