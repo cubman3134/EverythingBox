@@ -4,8 +4,8 @@
 // Card knobs (all optional; defaults preserve the original look): fill (tile colour behind the poster),
 // border + borderWidth (an always-on outline on every card), selectedBorder + selectedWidth, selectedScale
 // (the selected card grows and lifts above its neighbours - a Wii-menu "pop"), label ("overlay" scrim over
-// the poster [default], "top" a title bar across the top of the card [Wii-channel style], "below" a plate
-// under the poster, or "none"), labelColor, labelBg.
+// the poster [default], "center" the title centred over the whole card with no bar, "top" a title bar across
+// the top of the card [Wii-channel style], "below" a plate under the poster, or "none"), labelColor, labelBg.
 import QtQuick
 import "../Theme.js" as T
 
@@ -100,6 +100,18 @@ GridView {
                     font.pixelSize: Math.max(10, 0.024 * (gv.host ? gv.host.height : 720))
                     font.bold: true
                     elide: Text.ElideRight
+                }
+                // Centred label: the title over the whole card, no bar (label === "center"). An outline keeps
+                // it readable over any tile colour.
+                Text {
+                    visible: gv.labelMode === "center"
+                    anchors.centerIn: parent; width: parent.width * 0.88
+                    text: (modelData && modelData.title) ? modelData.title : ""
+                    color: T.val(gv.card, "labelColor", "#FFFFFF")
+                    style: Text.Outline; styleColor: Qt.rgba(0, 0, 0, 0.35)
+                    font.pixelSize: Math.max(12, 0.032 * (gv.host ? gv.host.height : 720)); font.bold: true
+                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
                 }
             }
 
