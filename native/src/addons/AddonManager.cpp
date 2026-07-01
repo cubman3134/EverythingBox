@@ -1094,8 +1094,26 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
         if (reply->error() != QNetworkReply::NoError)
         {
             // Couldn't reach the provider (down / refused / timed out) - report it as such, NOT "no match".
-            streamLog(QStringLiteral("doc-bridge: search error: %1").arg(reply->errorString()));
-            cb(QString(), QString(), reply->errorString());
+            // Cloudflare fronts many self-hosted providers; it wraps tunnel/origin problems in a 5xx with a
+            // body like "error code: 1033" (the tunnel isn't connected). Turn those into a plain-English cause
+            // so the toast tells the user what to do, instead of the raw "server replied:".
+            const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QByteArray body = reply->readAll();
+            QString cf; { const int p = body.indexOf("error code:"); if (p >= 0) cf = QString::fromLatin1(body.mid(p + 11, 8)).trimmed(); }
+            QString why;
+            if (http == 530 || cf == QStringLiteral("1033"))
+                why = tr("its Cloudflare tunnel is offline (error 1033). Start the server and its tunnel, then retry");
+            else if (http >= 520 && http <= 527)
+                why = tr("its host is unreachable (Cloudflare error %1)").arg(cf.isEmpty() ? QString::number(http) : cf);
+            else if (http >= 500)
+                why = tr("it returned a server error (HTTP %1)").arg(http);
+            else if (http >= 400)
+                why = tr("it rejected the request (HTTP %1)").arg(http);
+            else
+                why = reply->errorString(); // connection refused / timed out / DNS - Qt's message is already clear
+            streamLog(QStringLiteral("doc-bridge: search error: %1 (http %2%3)").arg(reply->errorString())
+                          .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
+            cb(QString(), QString(), why);
             return;
         }
         MediaItem hit;

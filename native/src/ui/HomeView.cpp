@@ -2401,7 +2401,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { if (toast_) toast_->hide(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
             else if (!err.isEmpty())
-                showToast(tr("Couldn't reach the file provider (Allarr) — is it running? (%1)").arg(err), 8000);
+                showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
             else
                 showToast(tr("The file provider (Allarr) has no copy of “%1”.").arg(title), 7000);
         });
