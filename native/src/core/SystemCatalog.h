@@ -43,6 +43,8 @@ namespace SystemCatalog
                          { "mednafen_pce", "mednafen_pce_fast" } },
             { "ws",      "WonderSwan",                        { "ws", "wsc" },
                          { "mednafen_wswan" } },
+            { "virtualboy", "Virtual Boy",                    { "vb" },
+                         { "mednafen_vb" } },
             { "a2600",   "Atari 2600",                        { "a26" },
                          { "stella" } },
             // ---- 8/16-bit consoles & home computers (in-process libretro cores, auto-downloaded) ----------
@@ -192,6 +194,7 @@ namespace SystemCatalog
         else if (has("pc engine cd") || has("turbografx cd") || has("turbo grafx cd") || has("tg-cd")) id = QStringLiteral("pcecd");
         else if (has("supergrafx") || has("super grafx") || has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
         else if (has("wonderswan"))                                       id = QStringLiteral("ws");
+        else if (has("virtual boy") || has("virtualboy"))                 id = QStringLiteral("virtualboy");
         else if (has("atari st"))                                         id = QStringLiteral("atarist"); // before atari 2600
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
         else if (has("atari 800") || has("atari 8-bit") || has("atari800")) id = QStringLiteral("atari800");
