@@ -2,6 +2,7 @@
   "name": "Channels",
   "author": "cubman3134",
   "hideAppearanceTile": true,
+  "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.55 },
   "views": {
     "home": {
       "background": { "gradient": ["#EFF3F8", "#C4D2E4"] },

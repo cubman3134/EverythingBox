@@ -44,7 +44,7 @@ void ThemeBridge::category()  { if (onCategory) onCategory(); }
 void ThemeBridge::selection() { if (onSelect && root) onSelect(root->property("currentIndex").toInt()); }
 void ThemeBridge::action(int which) { if (onAction) onAction(which); }
 void ThemeBridge::playlistAdd() { if (onPlaylistAdd) onPlaylistAdd(); }
-void ThemeBridge::button(const QString& name) { if (onButton) onButton(name); }
+void ThemeBridge::button(const QString& name) { playEffect(sndSelect); if (onButton) onButton(name); }
 
 namespace ThemeEngine
 {
