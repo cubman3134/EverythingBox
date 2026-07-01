@@ -29,15 +29,18 @@ Item {
     Rectangle {
         visible: btn.housing
         z: -1
-        width: btn.width * btn.hscale; height: btn.height * btn.hscale
-        radius: Math.min(width, height) / 2
-        x: btn.width / 2 - width / 2 + (btn.hside === "right" ? 1 : -1) * (width - btn.width) * 0.42
-        y: btn.height / 2 - height / 2 + (height - btn.height) * 0.42
+        // A metallic capsule (tube): its circular end sits just under the button and the tube runs off the near
+        // screen edge. The cylindrical vertical gradient (highlight band across the middle) reads as a tube.
+        property real hcH: btn.height * 1.28
+        height: hcH; width: btn.width * btn.hscale; radius: hcH / 2
+        y: btn.height / 2 - hcH / 2 + btn.height * 0.16
+        x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#E3EAF2" }
-            GradientStop { position: 1.0; color: "#BAC7D8" }
+            GradientStop { position: 0.0; color: "#C6D2E1" }
+            GradientStop { position: 0.42; color: "#EFF3F8" }
+            GradientStop { position: 1.0; color: "#B2C0D2" }
         }
-        border.width: 2; border.color: "#AEBBCB"
+        border.width: 2; border.color: "#A9B7C8"
     }
 
     // Soft drop shadow beneath a round button (a radial fade; static Canvas, software-renderer safe).

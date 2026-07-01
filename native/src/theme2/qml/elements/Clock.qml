@@ -79,7 +79,7 @@ Item {
             var ampmTxt = pm ? "PM" : "AM", ampmW = c.measureText(ampmTxt).width, ampmGap = dw * 0.42
             var totalW = hs.length * dw + (hs.length - 1) * gap + gap + colonW + gap
                        + ms.length * dw + (ms.length - 1) * gap + ampmGap + ampmW + slant * dh
-            var x = (W - totalW) / 2
+            var x = (T.val(clk.el, "align", "center") === "left") ? 0 : (W - totalW) / 2
 
             for (var i = 0; i < hs.length; i++) { digit(x, hs.charCodeAt(i) - 48); x += dw + gap }
             colon(x); x += colonW + gap

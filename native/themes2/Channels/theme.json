@@ -16,13 +16,13 @@
                     "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.05,
                     "labelColor": "#FFFFFF", "labelBg": "#F7FAFD" } },
 
-        { "type": "clock", "id": "clock", "pos": [0.5, 0.800], "size": [0.42, 0.095], "origin": [0.5, 0.5], "zIndex": 2, "onColor": "#3A4657", "offColor": "#0000000D", "ampmColor": "#5A6B84", "ampmSize": 0.34, "thickness": 0.16, "slant": 0 },
-        { "type": "datetime", "id": "date",  "pos": [0.5, 0.890], "size": [0.5, 0.05], "origin": [0.5, 0.5], "zIndex": 2, "format": "ddd M/d",  "color": "#5A6B84", "fontSize": 0.030, "align": "center" },
+        { "type": "clock", "id": "clock", "pos": [0.43, 0.795], "size": [0.34, 0.10], "origin": [0, 0.5], "zIndex": 2, "align": "left", "onColor": "#3A4657", "offColor": "#0000000D", "ampmColor": "#5A6B84", "ampmSize": 0.34, "thickness": 0.16, "slant": 0 },
+        { "type": "datetime", "id": "date",  "pos": [0.435, 0.888], "size": [0.34, 0.06], "origin": [0, 0.5], "zIndex": 2, "format": "ddd M/d",  "color": "#5A6B84", "fontSize": 0.042, "bold": true, "align": "left" },
 
         { "type": "button", "id": "settings", "pos": [0.062, 0.900], "size": [0.078, 0.135], "origin": [0.5, 0.5], "zIndex": 3,
-          "action": "settings", "glyph": "settings", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "left" },
+          "action": "settings", "glyph": "settings", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "left", "housingScale": 6 },
         { "type": "button", "id": "profile", "pos": [0.938, 0.900], "size": [0.078, 0.135], "origin": [0.5, 0.5], "zIndex": 3,
-          "action": "profile", "glyph": "profile", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "right" }
+          "action": "profile", "glyph": "profile", "color": "#F7FAFD", "textColor": "#4A5A72", "borderColor": "#AEBBCB", "shape": "round", "housing": true, "housingSide": "right", "housingScale": 6 }
       ]
     },
 
