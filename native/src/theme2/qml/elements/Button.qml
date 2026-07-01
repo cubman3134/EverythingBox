@@ -21,6 +21,23 @@ Item {
     readonly property color bc: T.val(el, "borderColor", "#AEBBCB")
     readonly property bool round: T.val(el, "shape", "pill") === "round"
 
+    // Soft drop shadow beneath a round button (a radial fade; static Canvas, software-renderer safe).
+    Canvas {
+        visible: btn.round
+        anchors.horizontalCenter: cap.horizontalCenter
+        anchors.verticalCenter: cap.verticalCenter
+        anchors.verticalCenterOffset: cap.height * 0.11
+        width: cap.width * 1.16; height: cap.height * 1.16
+        onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
+        onPaint: {
+            var c = getContext("2d"); c.reset(); c.clearRect(0, 0, width, height)
+            var cx = width / 2, cy = height / 2, R = Math.min(width, height) / 2
+            var g = c.createRadialGradient(cx, cy, R * 0.4, cx, cy, R)
+            g.addColorStop(0, "#34000000"); g.addColorStop(1, "#00000000")
+            c.fillStyle = g; c.beginPath(); c.arc(cx, cy, R, 0, 6.2832); c.fill()
+        }
+    }
+
     Rectangle {
         id: cap
         anchors.fill: parent
@@ -42,7 +59,7 @@ Item {
         Rectangle {                                     // inner face
             id: face
             visible: btn.round; anchors.centerIn: parent
-            width: parent.width - parent.height * 0.16; height: width; radius: width / 2
+            width: parent.width - parent.height * 0.08; height: width; radius: width / 2
             gradient: Gradient {
                 GradientStop { position: 0.0; color: "#FFFFFF" }
                 GradientStop { position: 0.55; color: "#EAEFF6" }
