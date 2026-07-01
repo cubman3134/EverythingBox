@@ -26,20 +26,36 @@ Item {
     readonly property string hside: T.val(el, "housingSide", "left")
     readonly property real hscale: Number(T.val(el, "housingScale", 2.4))
 
-    Rectangle {
+    // Housing: a rounded end (under the button) running into a straight tube off the near screen edge. Drawn as
+    // a path with a FLAT outer end, so the tube stays full width right up to the edge - the rounded end is off
+    // the screen, so you never see it taper. Matte fill.
+    Canvas {
         visible: btn.housing
         z: -1
-        // A metallic capsule (tube): its circular end sits just under the button and the tube runs off the near
-        // screen edge. The cylindrical vertical gradient (highlight band across the middle) reads as a tube.
         property real hcH: btn.height * 1.28
-        height: hcH; width: btn.width * btn.hscale; radius: hcH / 2
+        height: hcH; width: btn.width * btn.hscale
         y: btn.height / 2 - hcH / 2 + btn.height * 0.05
         x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
-        gradient: Gradient {                             // matte, not shiny
-            GradientStop { position: 0.0; color: "#E6ECF3" }
-            GradientStop { position: 1.0; color: "#C4D1E0" }
+        onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
+        onPaint: {
+            var c = getContext("2d"); c.reset(); c.clearRect(0, 0, width, height)
+            var W = width, H = height, r = H / 2
+            c.beginPath()
+            if (btn.hside === "right") {        // rounded left end (at button), flat right end (runs off-screen)
+                c.moveTo(W, 0); c.lineTo(r, 0)
+                c.arc(r, r, r, -Math.PI / 2, Math.PI / 2, true)
+                c.lineTo(W, H)
+            } else {                            // rounded right end (at button), flat left end (runs off-screen)
+                c.moveTo(0, 0); c.lineTo(W - r, 0)
+                c.arc(W - r, r, r, -Math.PI / 2, Math.PI / 2, false)
+                c.lineTo(0, H)
+            }
+            c.closePath()
+            var g = c.createLinearGradient(0, 0, 0, H)
+            g.addColorStop(0, "#E6ECF3"); g.addColorStop(1, "#C4D1E0")
+            c.fillStyle = g; c.fill()
+            c.strokeStyle = "#A9B7C8"; c.lineWidth = 2; c.stroke()
         }
-        border.width: 2; border.color: "#A9B7C8"
     }
 
     // Soft drop shadow beneath a round button (a radial fade; static Canvas, software-renderer safe).
