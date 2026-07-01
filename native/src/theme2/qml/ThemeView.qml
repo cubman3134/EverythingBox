@@ -21,6 +21,8 @@ Item {
     // The active view's definition (background + elements). Switching currentView re-renders everything.
     readonly property var view: (theme && theme.views && theme.views[currentView]) ? theme.views[currentView] : ({})
     function hasView(name) { return !!(theme && theme.views && theme.views[name]) }
+    // Optional vertical background gradient: background.gradient = ["#top", "#bottom"] (else a flat colour).
+    readonly property var bgGradient: (view && view.background && view.background.gradient) ? view.background.gradient : null
 
     focus: true
     signal activated(int index)    // Enter on the selected row (host decides what to open)
@@ -204,6 +206,14 @@ Item {
 
         // --- background -------------------------------------------------------------------------------
         Rectangle { anchors.fill: parent; color: T.val(root.view ? root.view.background : null, "color", "#0F1216") }
+        Rectangle { // optional vertical gradient (top -> bottom) over the flat colour
+            anchors.fill: parent
+            visible: !!root.bgGradient
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: (root.bgGradient && root.bgGradient.length > 0) ? root.bgGradient[0] : "transparent" }
+                GradientStop { position: 1.0; color: (root.bgGradient && root.bgGradient.length > 1) ? root.bgGradient[1] : "transparent" }
+            }
+        }
         Image {
             anchors.fill: parent
             source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))

@@ -1,0 +1,53 @@
+{
+  "name": "Channels",
+  "author": "cubman3134",
+  "views": {
+    "home": {
+      "background": { "gradient": ["#EEF3FA", "#C6D3E7"] },
+      "elements": [
+        { "type": "text",     "id": "title", "pos": [0.05, 0.085], "size": [0.6, 0.07], "origin": [0, 0.5], "binding": "system.name", "color": "#38455A", "fontSize": 0.05, "bold": true },
+        { "type": "datetime", "id": "clock", "pos": [0.95, 0.085], "size": [0.35, 0.06], "origin": [1, 0.5], "format": "ddd d MMM   hh:mm", "color": "#5A6B84", "fontSize": 0.03, "align": "right" },
+
+        { "type": "grid", "id": "channels", "pos": [0.05, 0.175], "size": [0.90, 0.73], "origin": [0, 0],
+          "columns": 4, "aspect": 0.95, "spacing": 0.013, "color": "#2FA1E6",
+          "card": { "radius": 18, "fill": "#FFFFFF", "border": "#B7C3D4", "borderWidth": 2,
+                    "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.06,
+                    "label": "below", "labelColor": "#38455A", "labelBg": "#F4F7FB" } },
+
+        { "type": "helpsystem", "id": "help", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#5A6B84", "fontSize": 0.024,
+          "entries": [ { "button": "↑↓←→", "label": "Move" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" } ] }
+      ]
+    },
+
+    "browse": {
+      "background": { "gradient": ["#EEF3FA", "#C6D3E7"] },
+      "elements": [
+        { "type": "text", "id": "bTitle", "pos": [0.05, 0.085], "size": [0.7, 0.06], "origin": [0, 0.5], "binding": "system.name", "color": "#38455A", "fontSize": 0.044, "bold": true },
+        { "type": "datetime", "id": "bClock", "pos": [0.95, 0.085], "size": [0.35, 0.06], "origin": [1, 0.5], "format": "hh:mm", "color": "#5A6B84", "fontSize": 0.03, "align": "right" },
+
+        { "type": "grid", "id": "bGrid", "pos": [0.05, 0.175], "size": [0.90, 0.73], "origin": [0, 0],
+          "columns": 5, "aspect": 1.28, "spacing": 0.012, "color": "#2FA1E6",
+          "card": { "radius": 16, "fill": "#FFFFFF", "border": "#B7C3D4", "borderWidth": 2,
+                    "selectedBorder": "#2FA1E6", "selectedWidth": 5, "selectedScale": 1.07,
+                    "label": "below", "labelColor": "#38455A", "labelBg": "#F4F7FB" } },
+
+        { "type": "helpsystem", "id": "bHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#5A6B84", "fontSize": 0.024,
+          "entries": [ { "button": "↑↓←→", "label": "Navigate" }, { "button": "/", "label": "Search" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "gradient": ["#F1F5FB", "#C6D3E7"] },
+      "elements": [
+        { "type": "image",  "id": "poster",   "pos": [0.07, 0.5],  "size": [0.30, 0.72], "origin": [0, 0.5], "binding": "selected.image", "fillMode": "contain", "radius": 16 },
+        { "type": "text",   "id": "dTitle",   "pos": [0.44, 0.20], "size": [0.50, 0.1],  "origin": [0, 0.5], "binding": "selected.title",    "color": "#28323F", "fontSize": 0.06, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text",   "id": "dSub",     "pos": [0.44, 0.32], "size": [0.50, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#5A6B84", "fontSize": 0.03 },
+        { "type": "rating", "id": "dStars",   "pos": [0.44, 0.39], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#2FA1E6" },
+        { "type": "text",   "id": "dOverview","pos": [0.44, 0.64], "size": [0.50, 0.42], "origin": [0, 0.5], "binding": "selected.overview", "color": "#3A4657", "fontSize": 0.026, "wrap": true, "lines": 12 },
+
+        { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#5A6B84", "fontSize": 0.024,
+          "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    }
+  }
+}

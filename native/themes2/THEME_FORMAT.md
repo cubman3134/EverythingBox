@@ -74,7 +74,7 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 | `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines` |
 | `datetime` | live clock/date | `format` (Qt format, e.g. `"hh:mm"`, `"ddd d MMM"`), `color`, `fontSize`, `align` |
 | `image` | poster / picture | `path` or `binding`, `fillMode` (`contain`\|`cover`\|`stretch`), `radius`, `color` (placeholder) |
-| `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth` |
+| `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth`, `card.fill`, `card.border`+`card.borderWidth` (always-on outline), `card.selectedScale` (the selected card grows + lifts), `card.label` (`overlay`\|`below`\|`none`), `card.labelColor`, `card.labelBg` |
 | `carousel` | horizontal strip, selected centred + enlarged | `itemWidth`, `spacing`, `color` (selection), `card.radius` |
 | `rating` | five stars from a 0..1 value | `binding` (or `value`), `color`, `emptyColor` |
 | `video` | preview area: a slow Ken Burns drift over the bound poster + a play badge | `path`/`binding`, `radius` |
@@ -87,7 +87,7 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 
 ### Background images & particles
 
-Every view already supports a **background image**: `"background": { "image": "bg.jpg", "dim": 0.4 }` (path relative to the theme folder; `dim` is a 0..1 black overlay for readability). For a moving picture, place a full-screen `image` element (`pos: [0,0]`, `size: [1,1]`) at a low `zIndex` instead.
+Every view already supports a **background image**: `"background": { "image": "bg.jpg", "dim": 0.4 }` (path relative to the theme folder; `dim` is a 0..1 black overlay for readability). For a moving picture, place a full-screen `image` element (`pos: [0,0]`, `size: [1,1]`) at a low `zIndex` instead. A view can also use a vertical **gradient** instead of a flat colour: `"background": { "gradient": ["#EEF3FA", "#C6D3E7"] }` (top → bottom).
 
 The **`particles`** element is an animated field for ambiance — usually full-screen (`pos: [0,0]`, `size: [1,1]`) behind your content (`zIndex: 0`). It is rendered with plain animated items so it works on the front end's software renderer (native `QtQuick.Particles`, which needs the GPU, would not draw here).
 
@@ -151,4 +151,4 @@ Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) —
 }
 ```
 
-Copy one of the shipped themes (`Default`, `Grid`, `Lumen`, `Midnight`) as a starting point and edit away — the home updates as you save.
+Copy one of the shipped themes (`Default`, `Grid`, `Lumen`, `Midnight`, `Channels`) as a starting point and edit away — the home updates as you save.
