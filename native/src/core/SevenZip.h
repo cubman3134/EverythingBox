@@ -18,4 +18,8 @@ namespace SevenZip
     // those: no extraction at all).
     QString extractBestToFile(const QString& sevenZipPath, const QStringList& wantedExts,
                               const QString& destDir, QString* error = nullptr);
+
+    // Extract every file in the .7z under destDir, preserving the archive's internal paths (for a whole
+    // release, e.g. a PC-game repack: setup.exe + its .bin parts). Returns false on the first failure.
+    bool extractAllToDir(const QString& sevenZipPath, const QString& destDir, QString* error = nullptr);
 }

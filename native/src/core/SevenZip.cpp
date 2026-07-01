@@ -2,6 +2,7 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <mutex>
 #include <vector>
 
@@ -180,4 +181,98 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
     ISzAlloc_Free(&allocImp, lookStream.buf);
     File_Close(&archiveStream.file);
     return resultPath;
+}
+
+bool SevenZip::extractAllToDir(const QString& sevenZipPath, const QString& destDir, QString* error)
+{
+    ensureCrcTable();
+
+    ISzAlloc allocImp = kAlloc;
+    ISzAlloc allocTempImp = kAlloc;
+
+    CFileInStream archiveStream;
+#ifdef _WIN32
+    if (InFile_OpenW(&archiveStream.file, reinterpret_cast<const WCHAR*>(sevenZipPath.utf16())) != 0)
+#else
+    if (InFile_Open(&archiveStream.file, sevenZipPath.toUtf8().constData()) != 0)
+#endif
+    {
+        if (error) *error = QStringLiteral("could not open archive");
+        return false;
+    }
+
+    FileInStream_CreateVTable(&archiveStream);
+    archiveStream.wres = 0;
+
+    CLookToRead2 lookStream;
+    LookToRead2_CreateVTable(&lookStream, False);
+    lookStream.buf = static_cast<Byte*>(ISzAlloc_Alloc(&allocImp, kInputBufSize));
+    if (!lookStream.buf)
+    {
+        File_Close(&archiveStream.file);
+        if (error) *error = QStringLiteral("out of memory");
+        return false;
+    }
+    lookStream.bufSize = kInputBufSize;
+    lookStream.realStream = &archiveStream.vt;
+    LookToRead2_INIT(&lookStream)
+
+    bool ok = false;
+    CSzArEx db;
+    SzArEx_Init(&db);
+
+    if (SzArEx_Open(&db, &lookStream.vt, &allocImp, &allocTempImp) == SZ_OK)
+    {
+        ok = true;
+        // The SDK keeps the decoded solid-block in outBuffer across calls, so extracting every member in one
+        // pass reuses it. Each file's bytes are written straight to disk under destDir, preserving its path.
+        UInt32 blockIndex = 0xFFFFFFFF;
+        Byte* outBuffer = nullptr;
+        size_t outBufferSize = 0;
+        std::vector<UInt16> nameBuf;
+
+        for (UInt32 i = 0; ok && i < db.NumFiles; ++i)
+        {
+            if (SzArEx_IsDir(&db, i))
+                continue;
+
+            const size_t len = SzArEx_GetFileNameUtf16(&db, i, nullptr);
+            nameBuf.resize(len);
+            SzArEx_GetFileNameUtf16(&db, i, nameBuf.data());
+            QString name = QString::fromUtf16(reinterpret_cast<const char16_t*>(nameBuf.data()), int(len > 0 ? len - 1 : 0));
+            name.replace(QLatin1Char('\\'), QLatin1Char('/'));
+
+            const QString outPath = destDir + QLatin1Char('/') + name;
+            QDir().mkpath(QFileInfo(outPath).absolutePath());
+
+            size_t offset = 0, outSizeProcessed = 0;
+            if (SzArEx_Extract(&db, &lookStream.vt, i, &blockIndex, &outBuffer, &outBufferSize,
+                               &offset, &outSizeProcessed, &allocImp, &allocTempImp) != SZ_OK)
+            {
+                ok = false; if (error) *error = QStringLiteral("failed to decompress a file in the archive");
+                break;
+            }
+            QFile out(outPath);
+            if (!out.open(QIODevice::WriteOnly))
+            {
+                ok = false; if (error) *error = QStringLiteral("couldn't write an extracted file");
+                break;
+            }
+            const char* data = reinterpret_cast<const char*>(outBuffer + offset);
+            qint64 remaining = static_cast<qint64>(outSizeProcessed), wrote = 0;
+            while (remaining > 0) { const qint64 n = out.write(data + wrote, remaining); if (n <= 0) break; wrote += n; remaining -= n; }
+            out.close();
+            if (remaining != 0) { out.remove(); ok = false; if (error) *error = QStringLiteral("couldn't write an extracted file"); break; }
+        }
+
+        if (outBuffer)
+            ISzAlloc_Free(&allocImp, outBuffer);
+    }
+    else if (error)
+        *error = QStringLiteral("not a valid .7z archive");
+
+    SzArEx_Free(&db, &allocImp);
+    ISzAlloc_Free(&allocImp, lookStream.buf);
+    File_Close(&archiveStream.file);
+    return ok;
 }

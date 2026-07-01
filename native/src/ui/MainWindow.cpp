@@ -16,6 +16,7 @@
 #include "../core/Settings.h"
 #include "../core/CoreManager.h"
 #include "../core/ArchiveRom.h"
+#include <QDirIterator>
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
@@ -2131,6 +2132,28 @@ static QString filenameFromContentDisposition(const QString& cd)
     return QString();
 }
 
+// Find the installer to launch inside an extracted repack: prefer setup.exe, else the largest .exe that
+// isn't obvious cruft (an uninstaller or a bundled redistributable). Empty if there's no runnable .exe.
+static QString findInstaller(const QString& dir)
+{
+    QString best;
+    qint64 bestSize = -1;
+    QDirIterator it(dir, QStringList{ QStringLiteral("*.exe") }, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString p = it.next();
+        const QString base = QFileInfo(p).fileName().toLower();
+        if (base == QStringLiteral("setup.exe")) return p; // the repack installer
+        if (base.contains(QStringLiteral("unins")) || base.contains(QStringLiteral("redist"))
+            || base.contains(QStringLiteral("vcredist")) || base.contains(QStringLiteral("directx"))
+            || base.contains(QStringLiteral("dxsetup")) || base.contains(QStringLiteral("dotnet")))
+            continue;
+        const qint64 sz = QFileInfo(p).size();
+        if (sz > bestSize) { bestSize = sz; best = p; }
+    }
+    return best;
+}
+
 namespace { QString safeFileName(const QString& title); } // defined in the anonymous namespace further below
 
 // Download a PC (Windows) game and hand it to the OS to run/install. The file (a repack installer, a portable
@@ -2202,19 +2225,45 @@ void MainWindow::openPcGame(const MediaItem& item)
             return;
         }
         mwLog(QStringLiteral("pcgame: saved \"%1\" -> %2").arg(item.title, QFileInfo(dest).fileName()));
-        RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
 
-        const QString ext = QFileInfo(dest).suffix().toLower();
-        if (!ext.isEmpty())
+        // An archive (the whole-torrent .zip, or a .7z) is a repack: extract it and launch its installer.
+        if (ArchiveRom::isArchive(dest))
         {
-            statusBar()->showMessage(tr("Opening “%1”…").arg(item.title), 5000);
-            QDesktopServices::openUrl(QUrl::fromLocalFile(dest)); // installer/.exe runs; archive opens
+            const QString gameDir = dir + QStringLiteral("/") + QFileInfo(dest).completeBaseName();
+            statusBar()->showMessage(tr("Extracting “%1”…").arg(item.title));
+            QString aerr;
+            mwLog(QStringLiteral("pcgame: extracting %1").arg(QFileInfo(dest).fileName()));
+            if (!ArchiveRom::extractAll(dest, gameDir, &aerr))
+            {
+                mwLog(QStringLiteral("pcgame: extract failed: %1").arg(aerr));
+                statusBar()->showMessage(tr("Couldn't extract “%1”: %2").arg(item.title, aerr), 8000);
+                RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
+                QDesktopServices::openUrl(QUrl::fromLocalFile(dir)); // reveal the archive so the user can act
+                return;
+            }
+            QFile::remove(dest); // unpacked now; drop the archive
+
+            const QString installer = findInstaller(gameDir);
+            RecentStore::add({ installer.isEmpty() ? gameDir : installer, item.title, QStringLiteral("game"),
+                               item.thumbnailUrl, item.id });
+            if (!installer.isEmpty())
+            {
+                mwLog(QStringLiteral("pcgame: launching installer %1").arg(QFileInfo(installer).fileName()));
+                statusBar()->showMessage(tr("Launching the installer for “%1”…").arg(item.title), 6000);
+                QDesktopServices::openUrl(QUrl::fromLocalFile(installer));
+            }
+            else
+            {
+                statusBar()->showMessage(tr("Extracted “%1” — opening its folder.").arg(item.title), 6000);
+                QDesktopServices::openUrl(QUrl::fromLocalFile(gameDir));
+            }
+            return;
         }
-        else
-        {
-            statusBar()->showMessage(tr("Downloaded “%1” — opening its folder.").arg(item.title), 6000);
-            QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
-        }
+
+        // A direct installer / portable .exe runs; anything else opens with the OS default.
+        RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
+        statusBar()->showMessage(tr("Opening “%1”…").arg(item.title), 5000);
+        QDesktopServices::openUrl(QUrl::fromLocalFile(dest));
     });
 }
 

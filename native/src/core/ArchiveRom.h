@@ -18,4 +18,8 @@ namespace ArchiveRom
     // Re-extraction is skipped if the temp file already exists from a previous open. Empty on failure;
     // *error (if given) holds a message.
     QString extractToTemp(const QString& archivePath, const QStringList& wantedExts = {}, QString* error = nullptr);
+
+    // Extract every file in a .zip/.7z archive under destDir, preserving internal paths — for a whole
+    // release like a PC-game repack (setup.exe + its parts). Returns false on the first failure.
+    bool extractAll(const QString& archivePath, const QString& destDir, QString* error = nullptr);
 }

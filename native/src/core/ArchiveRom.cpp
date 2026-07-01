@@ -140,3 +140,51 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     mz_zip_reader_end(&zip);
     return result;
 }
+
+bool ArchiveRom::extractAll(const QString& archivePath, const QString& destDir, QString* error)
+{
+    QDir().mkpath(destDir);
+    const QString lower = archivePath.toLower();
+
+    if (lower.endsWith(QStringLiteral(".7z")))
+        return SevenZip::extractAllToDir(archivePath, destDir, error);
+    if (!lower.endsWith(QStringLiteral(".zip")))
+    {
+        if (error) *error = QStringLiteral("unsupported archive type");
+        return false;
+    }
+
+    // .zip via miniz, streamed from disk and to disk (a repack can be many GB, so don't buffer it). File
+    // names inside a repack are ASCII; miniz opens paths with fopen, so a non-ASCII path can fail on Windows.
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_file(&zip, archivePath.toUtf8().constData(), 0))
+    {
+        if (error) *error = QStringLiteral("not a valid zip archive");
+        return false;
+    }
+
+    bool ok = true;
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count; ++i)
+    {
+        if (mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        mz_zip_archive_file_stat st;
+        if (!mz_zip_reader_file_stat(&zip, i, &st))
+            continue;
+        QString name = QString::fromUtf8(st.m_filename);
+        name.replace(QLatin1Char('\\'), QLatin1Char('/'));
+        const QString outPath = destDir + QLatin1Char('/') + name;
+        QDir().mkpath(QFileInfo(outPath).absolutePath());
+        if (!mz_zip_reader_extract_to_file(&zip, i, outPath.toUtf8().constData(), 0))
+        {
+            ok = false;
+            if (error) *error = QStringLiteral("couldn't extract a file from the zip");
+            break;
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+    return ok;
+}
