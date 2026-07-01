@@ -26,9 +26,11 @@ Item {
     readonly property int renderedPages: pageCount + 1
     readonly property int page: Math.min(pageCount - 1, Math.floor(cur / perPage))
 
-    readonly property real arrowW: height * 0.17         // side gutter reserved for a page arrow
+    readonly property real arrowW: height * 0.16         // page-arrow diameter (the arrows float over the grid)
     readonly property real gap: Number(T.val(el, "spacing", 0.01)) * (host ? host.width : 1280)
-    readonly property real vpW: width - 2 * arrowW
+    // The grid spans the full width so the next column peeks right to the edge; the arrows float on top of it
+    // (no reserved gutter, so nothing masks the peek).
+    readonly property real vpW: width
     readonly property real peek: Number(T.val(el, "peek", 0.35))  // width of the peeking column, in cells
     readonly property real cellW: vpW / (cols + peek)    // a page is `cols` wide; the peek shows the next column
     readonly property real pageW: cols * cellW
@@ -37,7 +39,7 @@ Item {
     // ---- the pages (a Row of full-width pages, translated to the current page) ----
     Item {
         id: vp
-        x: ch.arrowW; width: ch.vpW; height: ch.height; clip: true
+        x: 0; width: ch.vpW; height: ch.height; clip: true
         Row {
             x: -ch.page * ch.pageW
             Behavior on x { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
