@@ -32,6 +32,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QPlainTextEdit>
+#include <QTextEdit>
+#include <QAbstractSpinBox>
 #include <QScrollBar>
 #include "SettingsDialog.h"
 
@@ -637,40 +639,49 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // fires for the player / readers).
     if (e->key() == Qt::Key_Escape && isFullScreen()) { leaveFullScreen(); return; }
 
-    // Arrow-key / remote navigation for the inline settings pages. Up/Down (and Left/Right) move focus
-    // within a bounded ring of the Back button + the visible content rows, so the selection can NEVER be
-    // lost to an off-screen widget (the generic focusNextChild/PreviousChild can wander out of the panel).
-    if (stack_->currentWidget() == panelPage_ && !panelDialog_) // an embedded dialog drives its own keys
+    // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …). Up/Down
+    // (and Left/Right) move focus within a bounded ring of the header Back button + the visible content rows, so
+    // the selection can NEVER be lost to an off-screen widget; Backspace goes back; Enter/Select activates the
+    // focused row. This runs for embedded dialogs too so their header Back is reachable and Backspace works -
+    // it's skipped only while a text field / spin box / editable combo is focused, so typing keeps its keys.
+    if (stack_->currentWidget() == panelPage_)
     {
-        const int key = e->key();
-        const bool prev = (key == Qt::Key_Up   || key == Qt::Key_Left);
-        const bool next = (key == Qt::Key_Down || key == Qt::Key_Right);
-        if (prev || next)
+        QWidget* fw = focusWidget();
+        const bool editing = qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
+                           || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw)
+                           || (qobject_cast<QComboBox*>(fw) && qobject_cast<QComboBox*>(fw)->isEditable());
+        if (!editing)
         {
-            QVector<QWidget*> ring;
-            if (panelBack_) ring.push_back(panelBack_);          // index 0: header Back
-            if (QWidget* w = panelScroll_->widget())
-                for (QWidget* c : w->findChildren<QWidget*>())
-                    if (c->isVisibleTo(w) && (c->focusPolicy() & Qt::TabFocus))
-                        ring.push_back(c);
-            if (!ring.isEmpty())
+            const int key = e->key();
+            const bool prev = (key == Qt::Key_Up   || key == Qt::Key_Left);
+            const bool next = (key == Qt::Key_Down || key == Qt::Key_Right);
+            if (prev || next)
             {
-                int idx = ring.indexOf(focusWidget());
-                if (idx < 0) idx = next ? 0 : ring.size() - 1; // focus was elsewhere -> grab an end
-                else         idx = qBound(0, idx + (next ? 1 : -1), ring.size() - 1); // clamp (never wrap off)
-                ring[idx]->setFocus(Qt::TabFocusReason);
+                QVector<QWidget*> ring;
+                if (panelBack_) ring.push_back(panelBack_);          // index 0: header Back
+                if (QWidget* w = panelScroll_->widget())
+                    for (QWidget* c : w->findChildren<QWidget*>())
+                        if (c->isVisibleTo(w) && (c->focusPolicy() & Qt::TabFocus))
+                            ring.push_back(c);
+                if (!ring.isEmpty())
+                {
+                    int idx = ring.indexOf(fw);
+                    if (idx < 0) idx = next ? 0 : ring.size() - 1; // focus was elsewhere -> grab an end
+                    else         idx = qBound(0, idx + (next ? 1 : -1), ring.size() - 1); // clamp (never wrap off)
+                    ring[idx]->setFocus(Qt::TabFocusReason);
+                }
+                return;
             }
-            return;
-        }
-        switch (key)
-        {
-        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
-            if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
-            break;
-        case Qt::Key_Backspace:
-            if (panelOnBack_) { panelOnBack_(); return; }
-            break;
-        default: break;
+            switch (key)
+            {
+            case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+                if (auto* b = qobject_cast<QAbstractButton*>(fw)) { b->click(); return; }
+                break;
+            case Qt::Key_Backspace:
+                if (panelOnBack_) { panelOnBack_(); return; }
+                break;
+            default: break;
+            }
         }
     }
 
