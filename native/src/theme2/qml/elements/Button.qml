@@ -20,6 +20,8 @@ Item {
     readonly property color fg: T.val(el, "textColor", "#38455A")
     readonly property color bc: T.val(el, "borderColor", "#AEBBCB")
     readonly property bool round: T.val(el, "shape", "pill") === "round"
+    // Keyboard/controller focus: the host tells us the focused button's action; ours matching = we're focused.
+    readonly property bool focused: !!(host && host.focusedButtonAction && host.focusedButtonAction === action)
     // Optional housing: a large disc the button sits on, offset toward a corner so it runs off the screen edge
     // (the Wii's Wii/Mail button pods). housingSide picks which way it leans ("left"/"right").
     readonly property bool housing: T.val(el, "housing", false)
@@ -80,8 +82,15 @@ Item {
         id: cap
         anchors.fill: parent
         radius: btn.round ? Math.min(width, height) / 2 : height / 2
-        scale: ma.pressed ? 0.93 : (ma.containsMouse ? 1.05 : 1.0)
+        scale: btn.focused ? 1.09 : (ma.pressed ? 0.93 : (ma.containsMouse ? 1.05 : 1.0))
         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
+
+        Rectangle { // keyboard/controller focus ring
+            visible: btn.focused
+            anchors.fill: parent; anchors.margins: -parent.height * 0.09
+            radius: btn.round ? Math.min(width, height) / 2 : height / 2
+            color: "transparent"; border.width: Math.max(2, parent.height * 0.055); border.color: "#2FA1E6"
+        }
         color: btn.round ? "#9FB0C4" : btn.bg           // round: base under the bevel ring; pill: flat fill
         border.width: btn.round ? 0 : 2
         border.color: btn.bc

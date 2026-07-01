@@ -54,6 +54,29 @@ Item {
     property bool actionFav: false
     property int actionItem: -1
 
+    // Bottom-bar buttons (e.g. the Channels theme's Settings/Profile corner buttons) join keyboard/controller
+    // navigation: pressing Down at the bottom of the grid moves focus into this "button zone". buttonList is
+    // the view's `button` actions left-to-right; buttonIndex is the cursor; focusedButtonAction is what a
+    // `button` element checks to draw its focus ring (empty string = the grid still has focus).
+    property int focusZone: 0   // 0 = main content (grid/carousel), 1 = the bottom buttons
+    property int buttonIndex: 0
+    readonly property var buttonList: {
+        var out = []
+        if (view && view.elements) {
+            var arr = []
+            for (var i = 0; i < view.elements.length; i++) {
+                var el = view.elements[i]
+                if (el.type === "button" && el.action)
+                    arr.push({ x: (el.pos && el.pos.length) ? Number(el.pos[0]) : 0, action: el.action })
+            }
+            arr.sort(function(a, b) { return a.x - b.x })
+            for (var j = 0; j < arr.length; j++) out.push(arr[j].action)
+        }
+        return out
+    }
+    readonly property string focusedButtonAction:
+        (focusZone === 1 && buttonIndex >= 0 && buttonIndex < buttonList.length) ? buttonList[buttonIndex] : ""
+
     readonly property bool xmbMode: {
         if (view && view.elements)
             for (var i = 0; i < view.elements.length; i++)
@@ -94,7 +117,7 @@ Item {
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
     property int lastNearEnd: -1
-    onItemsChanged: { lastNearEnd = -1; actionsOpen = false } // a new/grown set: re-arm nearEnd, drop any chooser
+    onItemsChanged: { lastNearEnd = -1; actionsOpen = false; focusZone = 0 } // new set: re-arm, drop chooser + button focus
     onCurrentIndexChanged: {
         var n = items ? items.length : 0
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
@@ -124,6 +147,7 @@ Item {
     WheelHandler {
         onWheel: function(e) {
             if (root.actionsOpen) { e.accepted = true; return } // freeze the column while the chooser is up
+            root.focusZone = 0 // scrolling returns focus to the grid
             root.wheelAccum += e.angleDelta.y
             while (root.wheelAccum >= 120)  { root.vstep(-1); root.wheelAccum -= 120 } // wheel up -> previous
             while (root.wheelAccum <= -120) { root.vstep(1);  root.wheelAccum += 120 } // wheel down -> next
@@ -143,6 +167,18 @@ Item {
             e.accepted = true
             return
         }
+        // The bottom button bar has focus (entered with Down at the bottom of the grid): Left/Right move between
+        // buttons, Up returns to the grid, Enter fires the focused button, Esc also returns to the grid.
+        if (focusZone === 1) {
+            if (e.key === Qt.Key_Left)       { if (buttonIndex > 0) { buttonIndex -= 1; navigate() } }
+            else if (e.key === Qt.Key_Right) { if (buttonIndex < buttonList.length - 1) { buttonIndex += 1; navigate() } }
+            else if (e.key === Qt.Key_Up)    { focusZone = 0; navigate() }
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
+                                             { if (focusedButtonAction !== "") actionRequested(focusedButtonAction) }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { focusZone = 0 }
+            e.accepted = true
+            return
+        }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
             stepCat(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
@@ -152,7 +188,17 @@ Item {
         }
         else if (e.key === Qt.Key_Right)                        { step(1);          e.accepted = true }
         else if (e.key === Qt.Key_Left)                         { step(-1);         e.accepted = true }
-        else if (e.key === Qt.Key_Down)                         { step(gridCols);   e.accepted = true }
+        else if (e.key === Qt.Key_Down) {
+            // Move to the row below if there is one; at the bottom row, drop focus to the bottom buttons.
+            var n = items ? items.length : 0
+            if (currentIndex + gridCols < n) step(gridCols)
+            else if (buttonList.length > 0) {
+                focusZone = 1
+                buttonIndex = ((currentIndex % gridCols) >= gridCols / 2) ? buttonList.length - 1 : 0
+                navigate()
+            }
+            e.accepted = true
+        }
         else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                                                 { activated(currentIndex); e.accepted = true }
@@ -257,5 +303,5 @@ Item {
     }
 
     // Re-run the fade when the active view changes (e.g. opening/closing the detail view).
-    onCurrentViewChanged: fade.restart()
+    onCurrentViewChanged: { focusZone = 0; fade.restart() }
 }

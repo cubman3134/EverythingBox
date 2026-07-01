@@ -58,7 +58,8 @@ Item {
                             readonly property int slot: pg.pageBase + index
                             readonly property var item: (slot < ch.count) ? ch.items[slot] : null
                             readonly property bool empty: item === null
-                            readonly property bool sel: !empty && slot === ch.cur
+                            // No grid selection ring while focus has dropped to the bottom buttons.
+                            readonly property bool sel: !empty && slot === ch.cur && !(ch.host && ch.host.focusZone === 1)
                             x: (index % ch.cols) * ch.cellW
                             y: Math.floor(index / ch.cols) * ch.cellH
                             width: ch.cellW; height: ch.cellH
