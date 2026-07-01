@@ -73,6 +73,7 @@ public:
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
     void searchInBrowse(const QString& query);
     bool atDetailLevel() const;              // the current level is an item's detail/info page
+    bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
@@ -152,6 +153,12 @@ private:
     void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
     void createPlaylistInteractive(const QString& catalogKey); // prompt for a name + create, refresh the list
     void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
+
+    // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
+    // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.
+    QString catalogRecentKind() const;                   // "video"|"audio"|"document"|"game" for this catalogue
+    void openRecentsLevel(const QString& kind);          // drill the Recent folder -> the matching recents
+    void populateRecents(const QString& kind);           // (re)build that list as re-openable rows
     void requestSteamMeta(const MediaItem& item, int reqId); // native detail fetch for a Steam game
     QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers

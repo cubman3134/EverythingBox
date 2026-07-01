@@ -1533,6 +1533,7 @@ void HomeView::createPlaylistInteractive(const QString& catalogKey)
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
+    if (atRecentsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), 3500); return; }
     const QString key = currentCatalogKey();
     QVector<Playlist> pls = PlaylistStore::forCatalog(key);
     QStringList opts;
@@ -1566,6 +1567,59 @@ void HomeView::addBrowseItemToPlaylist(int browseIndex)
 {
     if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return;
     addItemToPlaylistInteractive(items_[browseRowMap_[browseIndex]]);
+}
+
+// ---- Recents: a per-catalogue "Recent" folder (its recently-opened items, resumed on open) ----------------
+
+bool HomeView::atRecentsLevel() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.type == QStringLiteral("_recents");
+}
+
+// The RecentItem kind that belongs to the catalogue at the root (its bucket mapped to a recent kind).
+QString HomeView::catalogRecentKind() const
+{
+    const QString cat = stack_.isEmpty() ? QString() : mediaCategory(stack_.first().catalogType);
+    if (cat == QStringLiteral("audio"))   return QStringLiteral("audio");
+    if (cat == QStringLiteral("game"))    return QStringLiteral("game");
+    if (cat == QStringLiteral("reading")) return QStringLiteral("document");
+    return QStringLiteral("video");
+}
+
+void HomeView::openRecentsLevel(const QString& kind)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Recent");
+    lvl.item.id = QStringLiteral("_recents");
+    lvl.item.type = QStringLiteral("_recents");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("recents:") + kind; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateRecents(kind);
+}
+
+void HomeView::populateRecents(const QString& kind)
+{
+    MediaCatalog cat; cat.title = tr("Recent");
+    for (const RecentItem& r : RecentStore::list())
+    {
+        if (!kind.isEmpty() && r.kind != kind) continue;
+        MediaItem it;
+        it.url = r.path;                                       // re-open target
+        it.id = r.key;                                         // stable resume key (streamed items)
+        it.mime = r.kind;                                      // routing kind
+        it.type = iconTypeForKind(r.kind);                    // drives the placeholder icon + resume bar
+        it.thumbnailUrl = r.thumb;
+        it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
 }
 
 void HomeView::renderRecents()
@@ -1879,6 +1933,14 @@ void HomeView::activateItem(int row)
         return;
     }
 
+    // A catalogue's synthetic Recent folder: activating a row re-opens it where you left off (resume), just
+    // like the Home recents list. Intercept before the generic url path below (recents carry a url too).
+    if (atRecentsLevel() && it.type != QStringLiteral("_recents"))
+    {
+        emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+        return;
+    }
+
     if (it.type == QStringLiteral("_open"))
     {
         emit requestOpenFile(it.url); // url carries the kind: video/audio/document/game
@@ -1894,6 +1956,10 @@ void HomeView::activateItem(int row)
 
     // The synthetic Steam console drills into the local library natively (not via the addon).
     if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
+
+    // The synthetic Recent folder drills into this catalogue's recently-opened items.
+    if (it.type == QStringLiteral("_recents"))
+        { openRecentsLevel(it.mime.mid(QStringLiteral("recents:").size())); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -2232,6 +2298,9 @@ void HomeView::loadTop()
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
+    // Returning to a synthetic Recent level (Back from a re-opened item): rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_recents"))
+        { populateRecents(top.item.mime.mid(QStringLiteral("recents:").size())); return; }
     // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_playlists"))
         { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
@@ -2848,6 +2917,25 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         grid_->clear();
         items_.clear();
         settingsStore().sync(); // fresh resume positions for the progress bars
+        // A "Recent" folder at the very top of a catalogue (above Playlists), holding this catalogue's recently
+        // opened items - but only if there are any of its kind ("if applicable"). Opening a row re-opens it at
+        // its saved position. Same guard as Playlists (catalogue root, unfiltered, not Recents/detail).
+        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
+        {
+            const QString rkind = catalogRecentKind();
+            bool hasRecents = false;
+            for (const RecentItem& r : RecentStore::list()) if (r.kind == rkind) { hasRecents = true; break; }
+            if (hasRecents)
+            {
+                MediaItem rc;
+                rc.id = QStringLiteral("_recents");
+                rc.type = QStringLiteral("_recents");
+                rc.title = tr("Recent");
+                rc.expandable = true;
+                rc.mime = QStringLiteral("recents:") + rkind; // marker -> drilled natively
+                items_.push_back(rc);
+            }
+        }
         // A "Playlists" folder at the very top of every (unfiltered) catalogue root: the user's saved playlists
         // for this catalogue plus a New-playlist entry, drilled natively (no addon). Not on detail levels (a
         // drilled container / the playlist levels themselves), search results, or Recents.
