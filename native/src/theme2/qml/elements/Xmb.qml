@@ -242,6 +242,27 @@ Item {
                 color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)
                 wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
             }
+            // RetroAchievements: earned badges shown bright at the front, locked ones dimmed (Steam-style).
+            Text {
+                width: parent.width
+                visible: !!(meta.m.achievements && meta.m.achievements.length)
+                text: "🏆 Achievements — " + (meta.m.achEarned || 0) + " / " + (meta.m.achTotal || 0)
+                color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.022)
+            }
+            Flow {
+                width: parent.width; spacing: xmb.height * 0.006
+                visible: !!(meta.m.achievements && meta.m.achievements.length)
+                Repeater {
+                    model: meta.m.achievements ? meta.m.achievements.slice(0, 21) : []
+                    delegate: Image {
+                        required property var modelData
+                        width: xmb.height * 0.05; height: width
+                        source: modelData.badge ? "https://media.retroachievements.org/Badge/" + modelData.badge + ".png" : ""
+                        opacity: modelData.earned ? 1.0 : 0.28
+                        smooth: true; asynchronous: true; fillMode: Image.PreserveAspectFit
+                    }
+                }
+            }
         }
         // "Favorited" pinned to the bottom of the panel.
         Text {

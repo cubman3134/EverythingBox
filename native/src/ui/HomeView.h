@@ -11,6 +11,7 @@
 #include "../addons/AddonModels.h"
 
 class AddonManager;
+class RaBrowse;
 struct LoadedAddon;
 class CarouselView;
 class QComboBox;
@@ -235,6 +236,7 @@ private:
     QLabel* status_ = nullptr;
     QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
+    RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
     QFrame* meta_ = nullptr;

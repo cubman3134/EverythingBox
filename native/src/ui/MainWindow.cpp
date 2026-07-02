@@ -3703,6 +3703,27 @@ void MainWindow::openRetroAchievements()
         if (ach_ && ach_->isLoggedIn())
         {
             status->setText(tr("Signed in as %1.").arg(ach_->username()));
+
+            // Optional web API key: lets the Triple/XMB info panel show a game's achievements (with the ones
+            // you've earned highlighted) while browsing. It's separate from your login token.
+            auto* keyIntro = new QLabel(tr("Optional: paste your RetroAchievements <b>web API key</b> (RA site → "
+                "Settings → Keys) to show each game's achievements — the ones you've earned highlighted — in the "
+                "Triple theme's info panel."));
+            keyIntro->setWordWrap(true); keyIntro->setStyleSheet(QStringLiteral("font-size:13px;"));
+            v->addWidget(keyIntro);
+            QSettings raStore(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            auto* keyEdit = new QLineEdit(); keyEdit->setMinimumHeight(34);
+            keyEdit->setEchoMode(QLineEdit::Password); keyEdit->setPlaceholderText(tr("Web API key"));
+            keyEdit->setText(raStore.value(QStringLiteral("ra/apikey")).toString());
+            v->addWidget(keyEdit);
+            auto* saveKey = panelRow(tr("Save API Key"));
+            connect(saveKey, &QPushButton::clicked, this, [this, keyEdit] {
+                QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+                s.setValue(QStringLiteral("ra/apikey"), keyEdit->text().trimmed()); s.sync();
+                statusBar()->showMessage(tr("Saved RetroAchievements web API key."), 4000);
+            });
+            v->addWidget(saveKey);
+
             auto* out = panelRow(tr("Sign Out"));
             connect(out, &QPushButton::clicked, this, [this] { if (ach_) ach_->logout(); openRetroAchievements(); });
             v->addWidget(out);

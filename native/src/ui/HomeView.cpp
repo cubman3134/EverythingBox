@@ -3,6 +3,8 @@
 #include "../addons/AddonManager.h"
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/RaBrowse.h"
+#include "../core/Achievements.h"
 #include "../core/ProfileStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
@@ -2531,6 +2533,43 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
     emit themedMetaReady(idx, base);
+
+    // RetroAchievements: for a retro game, pull its achievement set + which ones this user has earned, and
+    // merge them into the live panel (earned first, so they highlight "at the front"). Best-effort and async;
+    // a stale result is dropped by the host's currentIndex check. Skipped unless a web API key is configured.
+    if (it.type == QStringLiteral("game") && RaBrowse::configured())
+    {
+        QString console;
+        for (int i = stack_.size() - 1; i >= 0; --i)
+            if (stack_[i].item.type == QStringLiteral("platform")) { console = stack_[i].item.title.trimmed(); break; }
+        const GameSystem* sys = console.isEmpty() ? nullptr : SystemCatalog::forConsoleName(console);
+        const unsigned cid = (sys && !sys->extensions.isEmpty())
+                             ? Achievements::consoleIdForExtension(sys->extensions.first()) : 0u;
+        if (cid)
+        {
+            if (!raBrowse_) raBrowse_ = new RaBrowse(this);
+            const int reqIdx = idx;
+            raBrowse_->fetch(it.title, cid, [this, reqIdx](const QList<RaBrowse::Ach>& list) {
+                if (list.isEmpty()) return;
+                QVariantList arr;
+                int earned = 0;
+                for (const RaBrowse::Ach& a : list)
+                {
+                    if (a.earned) ++earned;
+                    arr << QVariantMap{ { QStringLiteral("title"), a.title },
+                                        { QStringLiteral("badge"), a.badge },
+                                        { QStringLiteral("earned"), a.earned } };
+                }
+                QVariantMap m;
+                m.insert(QStringLiteral("index"), reqIdx);
+                m.insert(QStringLiteral("achievements"), arr);
+                m.insert(QStringLiteral("achEarned"), earned);
+                m.insert(QStringLiteral("achTotal"), int(arr.size()));
+                emit themedMetaReady(reqIdx, m);
+            });
+        }
+    }
+
     if (!stack_.last().addon) { themedMetaReq_ = -1; return; }
     themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches
 }
