@@ -2287,6 +2287,16 @@ static QString findGameExe(const QString& dir, const QString& title, bool titleM
     return QString();                         // an un-run installer repack: no game exe yet
 }
 
+// Fuzzy match a title against a folder / DisplayName (lowercase, alnum-only, containment either way). Guards
+// against tiny strings matching everything.
+static QString pcNorm(const QString& s) { QString o; for (const QChar c : s) if (c.isLetterOrNumber()) o += c.toLower(); return o; }
+static bool pcTitleMatch(const QString& a, const QString& b)
+{
+    const QString x = pcNorm(a), y = pcNorm(b);
+    if (x.size() < 4 || y.size() < 4) return false;
+    return x.contains(y) || y.contains(x);
+}
+
 #ifdef Q_OS_WIN
 // The Windows "Uninstall" registry roots where installers register their DisplayName + InstallLocation.
 static QStringList uninstallRoots()
@@ -2469,6 +2479,50 @@ void MainWindow::openPcGame(const MediaItem& item)
     });
 }
 
+// Find where a PC game landed after its installer ran - wherever the user pointed it.
+QString MainWindow::locateInstalledGameExe(const QString& title, const QString& gameDir,
+                                           const QStringList& extraLocations)
+{
+    QStringList locations = extraLocations; // e.g. InstallLocations captured by the install-time registry diff
+#ifdef Q_OS_WIN
+    // 1) Any uninstall entry whose name or install folder matches the game -> its InstallLocation. Catches
+    //    installers (GOG/Inno) that register after our process-watch already fired.
+    for (const QString& root : uninstallRoots())
+    {
+        QSettings s(root, QSettings::NativeFormat);
+        for (const QString& g : s.childGroups())
+        {
+            const QString key = root + QLatin1Char('\\') + g;
+            QSettings e(key, QSettings::NativeFormat);
+            const QString loc = installLocationOf(key);
+            if (loc.isEmpty()) continue;
+            if (pcTitleMatch(e.value(QStringLiteral("DisplayName")).toString(), title)
+                || pcTitleMatch(QFileInfo(loc).fileName(), title))
+                locations << loc;
+        }
+    }
+    // 2) A subfolder named like the game under a common install root (GOG's default is C:\GOG Games\<Title>).
+    QStringList roots{ QStringLiteral("C:/GOG Games"), QStringLiteral("C:/Games"), QStringLiteral("C:/GOG") };
+    for (const char* ev : { "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432" })
+        if (const QString p = qEnvironmentVariable(ev); !p.isEmpty()) roots << p;
+    for (const QString& root : roots)
+    {
+        QDir d(root);
+        if (!d.exists()) continue;
+        for (const QString& sub : d.entryList(QDir::Dirs | QDir::NoDotAndDotDot))
+            if (pcTitleMatch(sub, title)) locations << d.absoluteFilePath(sub);
+    }
+#endif
+    // 3) Our own extracted folder + the shared games/pc root (portable repacks / pre-store installs).
+    if (!gameDir.isEmpty()) locations << gameDir;
+    locations << AppPaths::dataDir() + QStringLiteral("/games/pc");
+
+    // Title-named exe first (skips bundled redistributables), then any game exe, across all candidates.
+    for (const QString& loc : locations) { const QString e = findGameExe(loc, title, /*titleMatchOnly*/ true); if (!e.isEmpty()) return e; }
+    for (const QString& loc : locations) { const QString e = findGameExe(loc, title, false); if (!e.isEmpty()) return e; }
+    return QString();
+}
+
 // Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
 // exact executable (not the installer).
 void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb)
@@ -2535,16 +2589,10 @@ void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, 
                                        const QString& gameDir, const QStringList& installLocations)
 {
     notify(tr("Setup finished — locating “%1”…").arg(title), 0);
-    QStringList roots = installLocations;
-    if (!gameDir.isEmpty()) roots << gameDir;
-    // Title-named exe first (skips redistributables the installer may also register), then any game exe.
-    QString exe;
-    for (const QString& r : roots) { exe = findGameExe(r, title, /*titleMatchOnly*/ true); if (!exe.isEmpty()) break; }
-    if (exe.isEmpty())
-        for (const QString& r : roots) { exe = findGameExe(r, title, false); if (!exe.isEmpty()) break; }
-
+    const QString exe = locateInstalledGameExe(title, gameDir, installLocations);
     if (!exe.isEmpty())
     {
+        PcGameStore::setDir(id, QFileInfo(exe).absolutePath());
         PcGameStore::setExe(id, exe);
         mwLog(QStringLiteral("pcgame: post-install exe for \"%1\" -> %2").arg(title, exe));
         launchPcExe(exe, id, title, thumb);
@@ -2562,40 +2610,33 @@ bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& titl
     const PcGameStore::Entry e = PcGameStore::get(id);
     // 1) We already know the game exe - just run it.
     if (!e.exe.isEmpty() && QFileInfo::exists(e.exe)) { launchPcExe(e.exe, id, title, thumb); return true; }
-    // Never downloaded (or its folder is gone). Before re-downloading, rescue installs that predate this
-    // store: an exe named after the game anywhere under games/pc (title-match only - "largest exe" across
-    // OTHER games' folders would be wrong).
-    if (e.dir.isEmpty() || !QFileInfo::exists(e.dir))
+
+    // 2) Find it wherever it installed - the installer's registered location, C:\GOG Games\<Title>, Program
+    //    Files, our extracted folder, etc. Handles installs outside our folder and pre-store installs.
+    const QString found = locateInstalledGameExe(title, e.dir);
+    if (!found.isEmpty())
     {
-        const QString rescued = findGameExe(AppPaths::dataDir() + QStringLiteral("/games/pc"), title,
-                                            /*titleMatchOnly*/ true);
-        if (rescued.isEmpty()) return false; // caller downloads it fresh
-        PcGameStore::setDir(id, QFileInfo(rescued).absolutePath());
-        PcGameStore::setExe(id, rescued);
-        mwLog(QStringLiteral("pcgame: rescued pre-store install of \"%1\" -> %2").arg(title, rescued));
-        launchPcExe(rescued, id, title, thumb);
+        PcGameStore::setDir(id, QFileInfo(found).absolutePath());
+        PcGameStore::setExe(id, found);
+        mwLog(QStringLiteral("pcgame: located \"%1\" -> %2").arg(title, found));
+        launchPcExe(found, id, title, thumb);
         return true;
     }
 
-    // 2) Downloaded before: look for the now-installed game exe under its folder and remember it.
-    const QString exe = findGameExe(e.dir, title);
-    if (!exe.isEmpty())
+    // 3) Not installed anywhere yet. If we downloaded it but haven't run setup, do that now (the next open
+    //    finds the installed exe). Otherwise, if we have a folder, ask the user to point us at the exe once;
+    //    if we have nothing local at all, let the caller download it fresh.
+    if (!e.dir.isEmpty() && QFileInfo::exists(e.dir))
     {
-        PcGameStore::setExe(id, exe);
-        mwLog(QStringLiteral("pcgame: resolved exe for \"%1\" -> %2").arg(title, QFileInfo(exe).fileName()));
-        launchPcExe(exe, id, title, thumb);
+        if (!e.installerRan)
+        {
+            const QString inst = findInstaller(e.dir);
+            if (!inst.isEmpty()) { runPcInstaller(inst, id, title, thumb, e.dir); return true; }
+        }
+        promptLocatePcExe(id, title, thumb, e.dir);
         return true;
     }
-    // 3) Extracted but no game exe yet. If we haven't run its installer, do that now; the next open will find
-    //    the installed exe. If setup already ran, it installed somewhere we can't see (e.g. Program Files) -
-    //    ask the user to point us at the game's .exe once, then remember it forever.
-    if (!e.installerRan)
-    {
-        const QString inst = findInstaller(e.dir);
-        if (!inst.isEmpty()) { runPcInstaller(inst, id, title, thumb, e.dir); return true; }
-    }
-    promptLocatePcExe(id, title, thumb, e.dir);
-    return true;
+    return false; // never downloaded and not found anywhere -> caller downloads it
 }
 
 // Ask the user which .exe launches this game (for installers that put the game outside our folder). Remembers

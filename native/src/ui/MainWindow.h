@@ -125,6 +125,11 @@ private:
     // target); the installer's registered InstallLocation is also checked so custom paths are found.
     void runPcInstaller(const QString& installer, const QString& id, const QString& title,
                         const QString& thumb, const QString& gameDir);
+    // Find where a PC game actually installed: the installer's registered InstallLocation, an uninstall entry
+    // whose name matches the title, a common install root (e.g. C:\GOG Games\<Title>), our extracted folder,
+    // or any passed-in locations. Returns the game exe (title-named preferred), or empty if not found yet.
+    QString locateInstalledGameExe(const QString& title, const QString& gameDir,
+                                   const QStringList& extraLocations = {});
     void onPcInstallerFinished(const QString& id, const QString& title, const QString& thumb,
                                const QString& gameDir, const QStringList& installLocations);
     void relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
