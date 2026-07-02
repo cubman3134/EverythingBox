@@ -58,6 +58,7 @@ void RetroView::buildMenu()
     auto* load   = new QPushButton(tr("Load State"), menu_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), menu_);
     for (QPushButton* b : { resume, save, load, exit }) v->addWidget(b);
+    menuButtons_ = { resume, save, load, exit }; // arrow-key / Enter navigation order
 
     menuStatus_ = new QLabel(QString(), menu_);
     menuStatus_->setAlignment(Qt::AlignCenter);
@@ -262,6 +263,7 @@ void RetroView::showMenu()
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     menu_->show();
     menu_->raise();
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason); // arrow keys work at once
 }
 
 void RetroView::hideMenu()
@@ -407,6 +409,26 @@ void RetroView::keyPressEvent(QKeyEvent* e)
 
     // Esc toggles the in-game pause menu (Resume / Save / Load / Exit).
     if (e->key() == Qt::Key_Escape) { toggleMenu(); return; }
+
+    // While the pause menu is up, arrow keys move between its buttons and Enter activates one; every other
+    // key is swallowed so it never reaches the (paused) game.
+    if (menu_ && menu_->isVisible())
+    {
+        const int key = e->key();
+        if ((key == Qt::Key_Up || key == Qt::Key_Down) && !menuButtons_.isEmpty())
+        {
+            int idx = menuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+            if (idx < 0) idx = 0;
+            else         idx = (idx + (key == Qt::Key_Down ? 1 : menuButtons_.size() - 1)) % menuButtons_.size();
+            menuButtons_[idx]->setFocus(Qt::TabFocusReason); // wraps around the short list
+        }
+        else if (key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Select)
+        {
+            if (auto* b = qobject_cast<QPushButton*>(focusWidget())) b->click();
+            else if (!menuButtons_.isEmpty()) menuButtons_.first()->click();
+        }
+        return;
+    }
 
     // Save-state hotkeys (RetroArch-style: F2 save, F4 load) - reserved, not remappable.
     if (e->key() == Qt::Key_F2) { QString err; if (!saveState(&err)) emit statusMessage(err); return; }
