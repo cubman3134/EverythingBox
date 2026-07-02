@@ -206,12 +206,16 @@ Item {
         opacity: shown ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
         x: xmb.width * 0.58; width: xmb.width * 0.38
-        y: xmb.colTop - xmb.itemGap * 0.4; height: xmb.height * 0.74
+        // Start up near the category row and stop above the help bar, so long metadata (a big poster + a full
+        // synopsis) can't run off the bottom of the screen. clip guarantees nothing draws past the panel.
+        y: xmb.crossY - xmb.iconSize * 0.4
+        height: xmb.height * 0.90 - y
+        clip: true
 
         Column {
-            anchors.fill: parent; spacing: xmb.height * 0.016
+            anchors.fill: parent; spacing: xmb.height * 0.014
             Image {
-                width: parent.width * 0.40; height: width * 1.4
+                width: parent.width * 0.36; height: Math.min(width * 1.4, meta.height * 0.38)
                 source: (meta.m && meta.m.image && xmb.host) ? xmb.host.resolve(meta.m.image) : ""
                 fillMode: Image.PreserveAspectCrop; smooth: true; visible: source != ""
             }
@@ -238,7 +242,7 @@ Item {
             Text { // synopsis
                 width: parent.width; visible: !!meta.m.overview; text: meta.m.overview ? meta.m.overview : ""
                 color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.0225)
-                wrapMode: Text.WordWrap; maximumLineCount: 7; elide: Text.ElideRight; lineHeight: 1.15
+                wrapMode: Text.WordWrap; maximumLineCount: 6; elide: Text.ElideRight; lineHeight: 1.15
             }
             Text {
                 visible: !!meta.m.favorite; text: "★  Favorited"
@@ -257,7 +261,7 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 130 } }
         z: 50
         width: xmb.width * 0.26; height: xmb.height * 0.27
-        x: xmb.crossX + xmb.width * 0.05
+        x: xmb.crossX + xmb.width * 0.11 // a clear gap from the item column instead of hugging it
         y: xmb.colTop - xmb.itemGap * 0.5
         radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
 
