@@ -734,12 +734,15 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
                 QVector<QWidget*> ring;
                 if (panelBack_) ring.push_back(panelBack_);
                 if (QWidget* w = panelScroll_->widget()) collectPanelRows(w->layout(), ring);
-                if (!ring.isEmpty())
-                {
-                    int idx = ring.indexOf(fw);
-                    if (idx < 0) ring.first()->setFocus(Qt::TabFocusReason);           // off-list -> land on Back
-                    else         ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
-                }
+                const int idx = ring.indexOf(fw);
+                if (idx >= 0)
+                    ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
+                else
+                    // Focus isn't on a known row (shouldn't normally happen). Do NOT hijack it to Back - leave
+                    // the current row selected so the last row can't "escape" upward on Down.
+                    mwLog(QStringLiteral("panelnav: focus %1 not in ring of %2 - staying put")
+                              .arg(fw ? QString::fromLatin1(fw->metaObject()->className()) : QStringLiteral("null"))
+                              .arg(ring.size()));
                 return;
             }
             switch (key)
