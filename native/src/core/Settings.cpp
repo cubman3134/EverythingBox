@@ -32,6 +32,14 @@ void Settings::setSubtitleLanguage(const QString& code)
     store().sync();
 }
 
+bool Settings::bgmEnabled() { return store().value(QStringLiteral("bgm/enabled"), true).toBool(); }
+void Settings::setBgmEnabled(bool on) { store().setValue(QStringLiteral("bgm/enabled"), on); store().sync(); }
+int  Settings::bgmVolume() { return store().value(QStringLiteral("bgm/volume"), 35).toInt(); }
+void Settings::setBgmVolume(int pct)
+{
+    store().setValue(QStringLiteral("bgm/volume"), qBound(0, pct, 100)); store().sync();
+}
+
 QString Settings::coreFor(const QString& systemId)
 {
     return store().value(QStringLiteral("cores/") + systemId).toString();

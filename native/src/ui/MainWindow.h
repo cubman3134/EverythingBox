@@ -14,6 +14,7 @@ class EbookView;
 class PdfView;
 class ComicView;
 class LibraryView;
+class BackgroundMusic;
 class HomeView;
 class AddonManager;
 class CloudSync;
@@ -203,6 +204,8 @@ private:
     PdfView* pdf_ = nullptr;
     ComicView* comic_ = nullptr;
     LibraryView* library_ = nullptr;
+    BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
+    void updateBackgroundMusic();       // play/pause the BGM to match the current view
     HomeView* home_ = nullptr;
 
     // Themed (QML) home, opt-in via "themedHome/enabled" (default off). showHomeScreen() routes Home to it

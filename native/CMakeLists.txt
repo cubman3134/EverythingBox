@@ -86,6 +86,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
+        src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/CoreManager.cpp  src/core/CoreManager.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h

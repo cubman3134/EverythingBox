@@ -14,6 +14,7 @@
 #include "../addons/AddonManager.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
+#include "../core/BackgroundMusic.h"
 #include "../core/CoreManager.h"
 #include "../core/ArchiveRom.h"
 #include <QDirIterator>
@@ -325,6 +326,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(stack_, 1);
     setCentralWidget(central);
+
+    // Menu background music (RetroBat-style): plays while browsing, pauses on games/video. Follow the view.
+    bgm_ = new BackgroundMusic(this);
+    connect(stack_, &QStackedWidget::currentChanged, this, [this] { updateBackgroundMusic(); });
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
 #ifdef MMV_HAVE_QML
@@ -3514,6 +3519,16 @@ static QPushButton* panelRow(const QString& label)
     return b;
 }
 
+// Play the menu background music on browse/settings screens; pause it on content (player, emulator, readers,
+// split) so it never plays over a game or video.
+void MainWindow::updateBackgroundMusic()
+{
+    if (!bgm_) return;
+    QWidget* w = stack_->currentWidget();
+    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
+    bgm_->setActive(menu);
+}
+
 void MainWindow::openSettingsHub()
 {
     // Entering the settings area from a real page: remember it so the top-level Back returns there.
@@ -3587,6 +3602,41 @@ void MainWindow::openGeneralSettings()
         note->setWordWrap(true);
         note->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(note);
+
+        // --- Background music: play tracks dropped in <data>/music while browsing the menus. ---
+        v->addSpacing(10);
+        if (bgm_) bgm_->reload(); // rescan so files added since last time are picked up
+        auto* bHeading = new QLabel(tr("Background Music"));
+        bHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(bHeading);
+        auto* bNote = new QLabel(tr("Drop audio files into the music folder to play them quietly while you browse "
+                                    "(they pause during games and video)."));
+        bNote->setWordWrap(true); bNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(bNote);
+
+        auto* bOn = new QCheckBox(tr("Play background music"));
+        bOn->setStyleSheet(QStringLiteral("font-size:15px;"));
+        bOn->setChecked(Settings::bgmEnabled());
+        v->addWidget(bOn);
+        connect(bOn, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setBgmEnabled(c); if (bgm_) bgm_->setEnabled(c); updateBackgroundMusic(); });
+
+        auto* volRow = new QHBoxLayout();
+        volRow->addWidget(new QLabel(tr("Volume")));
+        auto* bVol = new QSlider(Qt::Horizontal); bVol->setRange(0, 100); bVol->setValue(Settings::bgmVolume());
+        bVol->setEnabled(bOn->isChecked());
+        connect(bOn, &QCheckBox::toggled, bVol, &QSlider::setEnabled);
+        connect(bVol, &QSlider::valueChanged, this,
+                [this](int val) { Settings::setBgmVolume(val); if (bgm_) bgm_->setVolume(val); });
+        volRow->addWidget(bVol, 1);
+        v->addLayout(volRow);
+
+        auto* openMusic = panelRow(tr("Open Music Folder"));
+        connect(openMusic, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(BackgroundMusic::musicDir()));
+            if (bgm_) { bgm_->reload(); updateBackgroundMusic(); } // pick up any files already there
+        });
+        v->addWidget(openMusic);
 
         // --- Streaming (Debrid): a TorBox API key turns Stremio torrent results into playable streams. ---
         v->addSpacing(10);

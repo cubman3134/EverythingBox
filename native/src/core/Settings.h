@@ -11,6 +11,13 @@ namespace Settings
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
 
+    // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
+    // default at a modest volume.
+    bool bgmEnabled();
+    void setBgmEnabled(bool on);
+    int  bgmVolume();                  // 0..100
+    void setBgmVolume(int pct);
+
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 
