@@ -2551,6 +2551,13 @@ void HomeView::playThemedLeaf(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
     const MediaItem it = items_[browseRowMap_[idx]]; // copy (async callbacks outlive items_)
+    // Synthetic Recent/Downloaded folders hold already-local files (no addon to resolve through) - re-open
+    // them like the classic list does, instead of trying to resolve them as catalog items via resolvePlay.
+    if (atRecentsLevel() || atDownloadsLevel())
+    {
+        if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+        return;
+    }
     LoadedAddon* addon = stack_.last().addon;
     const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
     QString console;

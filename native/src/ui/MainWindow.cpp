@@ -1871,7 +1871,8 @@ void MainWindow::showThemedXmb()
             if (r) r->setProperty("currentIndex", 0);
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
         }
-        else if (home_->atRecentsLevel()) home_->browseActivate(itemIdx); // a recent row -> re-open at its spot
+        else if (home_->atRecentsLevel() || home_->atDownloadsLevel())
+            home_->browseActivate(itemIdx); // a Recent/Downloaded row -> re-open the local file at its spot
         else // inside a catalog: containers drill in-column; a leaf opens the inline action chooser
         {
             const QVariantList col = r ? r->property("items").toList() : QVariantList();
