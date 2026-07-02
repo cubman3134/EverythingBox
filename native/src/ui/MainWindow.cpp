@@ -866,6 +866,8 @@ void MainWindow::notify(const QString& text, int ms)
     notice_->show();
     notice_->raise();
     positionNotice();
+    notice_->repaint(); // paint synchronously now, so a message set right before a blocking step (e.g. archive
+                        // extraction) is actually visible instead of queued behind the freeze
     if (noticeTimer_) { if (ms > 0) noticeTimer_->start(ms); else noticeTimer_->stop(); } // ms<=0 => sticky
 }
 
@@ -2298,6 +2300,8 @@ void MainWindow::openPcGame(const MediaItem& item)
 
     auto fileName = std::make_shared<QString>(); // real download name, from Content-Disposition
     statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+    notify(tr("Downloading “%1”…").arg(item.title), 0); // sticky window-level notice, kept up through the whole
+                                                        // download → extract → launch so there's never a blank gap
 
     connect(reply, &QNetworkReply::metaDataChanged, this, [reply, fileName] {
         if (fileName->isEmpty())
@@ -2313,8 +2317,10 @@ void MainWindow::openPcGame(const MediaItem& item)
         const int pct = static_cast<int>(rec * 100 / total);
         if (pct == lastPct) return;
         lastPct = pct;
-        statusBar()->showMessage(tr("Downloading “%1”… %2%  (%3 / %4 MB)")
-                                     .arg(title).arg(pct).arg(humanMB(rec), humanMB(total)));
+        const QString msg = tr("Downloading “%1”… %2%  (%3 / %4 MB)")
+                                .arg(title).arg(pct).arg(humanMB(rec), humanMB(total));
+        statusBar()->showMessage(msg);
+        notify(msg, 0);
     });
 
     connect(reply, &QNetworkReply::finished, this,
@@ -2325,7 +2331,9 @@ void MainWindow::openPcGame(const MediaItem& item)
         if (reply->error() != QNetworkReply::NoError)
         {
             mwLog(QStringLiteral("pcgame: download failed \"%1\": %2").arg(item.title, reply->errorString()));
-            statusBar()->showMessage(tr("Couldn't download “%1”: %2").arg(item.title, reply->errorString()), 8000);
+            const QString e = tr("Couldn't download “%1”: %2").arg(item.title, reply->errorString());
+            statusBar()->showMessage(e, 8000);
+            notify(e, 8000);
             part->remove();
             return;
         }
@@ -2336,6 +2344,7 @@ void MainWindow::openPcGame(const MediaItem& item)
         if (!QFile::rename(partPath, dest))
         {
             statusBar()->showMessage(tr("Couldn't save “%1”.").arg(item.title), 6000);
+            notify(tr("Couldn't save “%1”.").arg(item.title), 6000);
             QFile::remove(partPath);
             return;
         }
@@ -2346,12 +2355,15 @@ void MainWindow::openPcGame(const MediaItem& item)
         {
             const QString gameDir = dir + QStringLiteral("/") + QFileInfo(dest).completeBaseName();
             statusBar()->showMessage(tr("Extracting “%1”…").arg(item.title));
+            notify(tr("Extracting “%1”… this can take a while for a large game.").arg(item.title), 0);
             QString aerr;
             mwLog(QStringLiteral("pcgame: extracting %1").arg(QFileInfo(dest).fileName()));
             if (!ArchiveRom::extractAll(dest, gameDir, &aerr))
             {
                 mwLog(QStringLiteral("pcgame: extract failed: %1").arg(aerr));
-                statusBar()->showMessage(tr("Couldn't extract “%1”: %2").arg(item.title, aerr), 8000);
+                const QString e = tr("Couldn't extract “%1”: %2").arg(item.title, aerr);
+                statusBar()->showMessage(e, 8000);
+                notify(e, 8000);
                 RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
                 QDesktopServices::openUrl(QUrl::fromLocalFile(dir)); // reveal the archive so the user can act
                 return;
