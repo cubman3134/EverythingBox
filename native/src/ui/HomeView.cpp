@@ -5,6 +5,8 @@
 #include "../core/DownloadsStore.h"
 #include "../core/RaBrowse.h"
 #include "../core/Achievements.h"
+#include "../core/SteamAchievements.h"
+#include "../core/PcGameStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
@@ -2534,10 +2536,10 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
     emit themedMetaReady(idx, base);
 
-    // RetroAchievements: for a retro game, pull its achievement set + which ones this user has earned, and
-    // merge them into the live panel (earned first, so they highlight "at the front"). Best-effort and async;
-    // a stale result is dropped by the host's currentIndex check. Skipped unless a web API key is configured.
-    if (it.type == QStringLiteral("game") && RaBrowse::configured())
+    // Achievements for a game -> the live panel (earned first, so they highlight "at the front"). Retro
+    // consoles use RetroAchievements; a PC game uses Steam (its schema + the local emulator's unlock file).
+    // Async + best-effort; a stale result is dropped by the host's currentIndex check.
+    if (it.type == QStringLiteral("game"))
     {
         QString console;
         for (int i = stack_.size() - 1; i >= 0; --i)
@@ -2545,28 +2547,55 @@ void HomeView::requestThemedMeta(int idx)
         const GameSystem* sys = console.isEmpty() ? nullptr : SystemCatalog::forConsoleName(console);
         const unsigned cid = (sys && !sys->extensions.isEmpty())
                              ? Achievements::consoleIdForExtension(sys->extensions.first()) : 0u;
-        if (cid)
+        const int reqIdx = idx;
+        // Publish a list of { title, icon(full URL), earned } into the panel.
+        auto publish = [this, reqIdx](const QVariantList& arr, int earned) {
+            if (arr.isEmpty()) return;
+            QVariantMap m;
+            m.insert(QStringLiteral("index"), reqIdx);
+            m.insert(QStringLiteral("achievements"), arr);
+            m.insert(QStringLiteral("achEarned"), earned);
+            m.insert(QStringLiteral("achTotal"), int(arr.size()));
+            emit themedMetaReady(reqIdx, m);
+        };
+
+        if (cid && RaBrowse::configured())
         {
             if (!raBrowse_) raBrowse_ = new RaBrowse(this);
-            const int reqIdx = idx;
-            raBrowse_->fetch(it.title, cid, [this, reqIdx](const QList<RaBrowse::Ach>& list) {
-                if (list.isEmpty()) return;
-                QVariantList arr;
-                int earned = 0;
+            raBrowse_->fetch(it.title, cid, [publish](const QList<RaBrowse::Ach>& list) {
+                QVariantList arr; int earned = 0;
                 for (const RaBrowse::Ach& a : list)
                 {
                     if (a.earned) ++earned;
                     arr << QVariantMap{ { QStringLiteral("title"), a.title },
-                                        { QStringLiteral("badge"), a.badge },
+                                        { QStringLiteral("icon"), QStringLiteral("https://media.retroachievements.org/Badge/") + a.badge + QStringLiteral(".png") },
                                         { QStringLiteral("earned"), a.earned } };
                 }
-                QVariantMap m;
-                m.insert(QStringLiteral("index"), reqIdx);
-                m.insert(QStringLiteral("achievements"), arr);
-                m.insert(QStringLiteral("achEarned"), earned);
-                m.insert(QStringLiteral("achTotal"), int(arr.size()));
-                emit themedMetaReady(reqIdx, m);
+                publish(arr, earned);
             });
+        }
+        else if (cid == 0 && SteamAchievements::configured())
+        {
+            const QString cl = console.toLower();
+            const bool pc = cl == QStringLiteral("pc") || cl == QStringLiteral("windows")
+                         || cl.startsWith(QStringLiteral("pc (")) || cl.startsWith(QStringLiteral("pc windows"));
+            const PcGameStore::Entry e = PcGameStore::get(it.id);
+            const QString gameDir = !e.exe.isEmpty() ? QFileInfo(e.exe).absolutePath() : e.dir;
+            if (pc && !gameDir.isEmpty())
+            {
+                if (!steamAch_) steamAch_ = new SteamAchievements(this);
+                steamAch_->fetch(it.title, gameDir, [publish](const QList<SteamAchievements::Ach>& list) {
+                    QVariantList arr; int earned = 0;
+                    for (const SteamAchievements::Ach& a : list)
+                    {
+                        if (a.earned) ++earned;
+                        arr << QVariantMap{ { QStringLiteral("title"), a.title },
+                                            { QStringLiteral("icon"), a.icon },
+                                            { QStringLiteral("earned"), a.earned } };
+                    }
+                    publish(arr, earned);
+                });
+            }
         }
     }
 

@@ -12,6 +12,7 @@
 
 class AddonManager;
 class RaBrowse;
+class SteamAchievements;
 struct LoadedAddon;
 class CarouselView;
 class QComboBox;
@@ -237,6 +238,7 @@ private:
     QTimer* searchTimer_ = nullptr;    // debounces live-search as the user types
     QNetworkAccessManager* nam_ = nullptr;
     RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
+    SteamAchievements* steamAch_ = nullptr; // Steam achievements for installed PC games (Hydra-style, lazy)
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
     QFrame* meta_ = nullptr;

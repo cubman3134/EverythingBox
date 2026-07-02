@@ -257,7 +257,7 @@ Item {
                     delegate: Image {
                         required property var modelData
                         width: xmb.height * 0.05; height: width
-                        source: modelData.badge ? "https://media.retroachievements.org/Badge/" + modelData.badge + ".png" : ""
+                        source: modelData.icon ? modelData.icon : "" // full badge/icon URL (RetroAchievements or Steam)
                         opacity: modelData.earned ? 1.0 : 0.28
                         smooth: true; asynchronous: true; fillMode: Image.PreserveAspectFit
                     }

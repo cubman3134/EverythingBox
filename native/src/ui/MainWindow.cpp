@@ -3649,6 +3649,27 @@ void MainWindow::openGeneralSettings()
         });
         v->addWidget(openMusic);
 
+        // --- PC game achievements (Steam): a Steam web API key shows an installed PC game's Steam achievements. ---
+        v->addSpacing(10);
+        auto* sHeading = new QLabel(tr("PC Game Achievements (Steam)"));
+        sHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(sHeading);
+        auto* sNote = new QLabel(tr("Paste a Steam Web API key (steamcommunity.com/dev/apikey) to show an installed "
+            "PC game's Steam achievements in the Triple theme, with the ones you've unlocked highlighted. Unlocks "
+            "come from the game's Steam-emulator save."));
+        sNote->setWordWrap(true); sNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(sNote);
+        auto* sKey = new QLineEdit(store().value(QStringLiteral("steam/apikey")).toString());
+        sKey->setMinimumHeight(34); sKey->setEchoMode(QLineEdit::Password);
+        sKey->setPlaceholderText(tr("Steam Web API key"));
+        v->addWidget(sKey);
+        auto* sSave = panelRow(tr("Save Steam Key"));
+        connect(sSave, &QPushButton::clicked, this, [this, sKey] {
+            store().setValue(QStringLiteral("steam/apikey"), sKey->text().trimmed()); store().sync();
+            statusBar()->showMessage(tr("Saved Steam Web API key."), 4000);
+        });
+        v->addWidget(sSave);
+
         // --- Streaming (Debrid): a TorBox API key turns Stremio torrent results into playable streams. ---
         v->addSpacing(10);
         auto* dHeading = new QLabel(tr("Streaming (Debrid)"));
