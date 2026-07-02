@@ -2593,7 +2593,7 @@ void MainWindow::runPcInstaller(const QString& installer, const QString& id, con
 
         auto* watch = new QWinEventNotifier(h, this);
         auto guard = std::make_shared<bool>(false);
-        auto complete = [this, dlg, watch, h, id, title, thumb, gameDir, before, guard]() {
+        auto complete = [this, dlg, watch, h, id, title, thumb, gameDir, installer, before, guard]() {
             if (*guard) return; // process-exit and the button can both fire; run the tail exactly once
             *guard = true;
             watch->setEnabled(false); watch->deleteLater();
@@ -2605,7 +2605,7 @@ void MainWindow::runPcInstaller(const QString& installer, const QString& id, con
                 if (!before.contains(k)) { const QString l = installLocationOf(k); if (!l.isEmpty()) locs << l; }
             mwLog(QStringLiteral("pcgame: installer for \"%1\" done; %2 new install location(s)").arg(title).arg(locs.size()));
             dlg->accept(); dlg->deleteLater();
-            onPcInstallerFinished(id, title, thumb, gameDir, locs);
+            onPcInstallerFinished(id, title, thumb, gameDir, installer, locs);
         };
         connect(watch, &QWinEventNotifier::activated, this, [complete]() { complete(); });
         connect(done, &QPushButton::clicked, this, [complete]() { complete(); });
@@ -2620,9 +2620,43 @@ void MainWindow::runPcInstaller(const QString& installer, const QString& id, con
     QDesktopServices::openUrl(QUrl::fromLocalFile(installer));
 }
 
+// Delete a PC game's install media (the downloaded installer .exe and/or the extracted repack folder) once
+// the game is installed elsewhere. Strictly bounded: only touches paths inside <data>/games/pc, never the
+// games/pc root itself, and never the folder the game actually installed into (a portable game).
+void MainWindow::cleanupPcInstallMedia(const QString& installer, const QString& gameDir, const QString& installedExe)
+{
+    const QString pcRoot = QDir(AppPaths::dataDir() + QStringLiteral("/games/pc")).absolutePath();
+    const QString exePath = QFileInfo(installedExe).absoluteFilePath();
+    auto insidePcRoot = [&](const QString& p) {
+        const QString a = QFileInfo(p).absoluteFilePath();
+        return a == pcRoot || a.startsWith(pcRoot + QLatin1Char('/'), Qt::CaseInsensitive);
+    };
+    auto exeUnder = [&](const QString& folder) {
+        const QString f = QDir(folder).absolutePath();
+        return exePath == f || exePath.startsWith(f + QLatin1Char('/'), Qt::CaseInsensitive);
+    };
+
+    // The standalone installer file (e.g. games/pc/setup_<game>_….exe) - not needed once installed.
+    if (!installer.isEmpty() && insidePcRoot(installer)
+        && QFileInfo(installer).absoluteFilePath() != exePath && QFileInfo::exists(installer))
+    {
+        mwLog(QStringLiteral("pcgame: removing installer %1").arg(QFileInfo(installer).fileName()));
+        QFile::remove(installer);
+    }
+    // The extracted repack folder - only if it's a real subfolder of games/pc (not the root) and the game
+    // didn't install into it (portable). removeRecursively frees the whole unpacked repack.
+    const QString gd = QDir(gameDir).absolutePath();
+    if (!gameDir.isEmpty() && gd != pcRoot && insidePcRoot(gd) && QDir(gd).exists() && !exeUnder(gd))
+    {
+        mwLog(QStringLiteral("pcgame: removing extracted repack %1").arg(QFileInfo(gd).fileName()));
+        QDir(gd).removeRecursively();
+    }
+}
+
 // The installer closed: find the game it installed (its registered location, or our folder) and launch it.
 void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, const QString& thumb,
-                                       const QString& gameDir, const QStringList& installLocations)
+                                       const QString& gameDir, const QString& installer,
+                                       const QStringList& installLocations)
 {
     notify(tr("Setup finished — locating “%1”…").arg(title), 0);
     const QString exe = locateInstalledGameExe(title, gameDir, installLocations);
@@ -2631,6 +2665,7 @@ void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, 
         PcGameStore::setDir(id, QFileInfo(exe).absolutePath());
         PcGameStore::setExe(id, exe);
         mwLog(QStringLiteral("pcgame: post-install exe for \"%1\" -> %2").arg(title, exe));
+        cleanupPcInstallMedia(installer, gameDir, exe); // reclaim space: the installer/repack is spent now
         launchPcExe(exe, id, title, thumb);
         return;
     }

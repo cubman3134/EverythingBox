@@ -131,7 +131,11 @@ private:
     QString locateInstalledGameExe(const QString& title, const QString& gameDir,
                                    const QStringList& extraLocations = {});
     void onPcInstallerFinished(const QString& id, const QString& title, const QString& thumb,
-                               const QString& gameDir, const QStringList& installLocations);
+                               const QString& gameDir, const QString& installer,
+                               const QStringList& installLocations);
+    // Delete a PC game's spent install media (installer .exe / extracted repack) after it's installed - only
+    // within <data>/games/pc, never the game's own install folder.
+    void cleanupPcInstallMedia(const QString& installer, const QString& gameDir, const QString& installedExe);
     void relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
     void promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir);
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
