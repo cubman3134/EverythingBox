@@ -54,6 +54,7 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QPushButton>
+#include <QProgressBar>
 #include <QAbstractButton>
 #include <QSlider>
 #include <QLabel>
@@ -2557,23 +2558,43 @@ void MainWindow::runPcInstaller(const QString& installer, const QString& id, con
     sei.nShow = SW_SHOWNORMAL;
     if (ShellExecuteExW(&sei) && sei.hProcess)
     {
-        notify(tr("Installing “%1”… complete the setup window; I'll launch the game when it closes.").arg(title), 0);
         HANDLE h = sei.hProcess;
+        // A modal "installing" dialog blocks interaction with the app until setup closes (the separate setup
+        // window is a different app, so it stays usable). App-modal, not exec()-blocking, so the event loop
+        // keeps running and the process watcher can fire.
+        auto* dlg = new QDialog(this);
+        dlg->setWindowTitle(tr("Installing “%1”").arg(title));
+        dlg->setModal(true);
+        dlg->setWindowModality(Qt::ApplicationModal);
+        dlg->setWindowFlags((dlg->windowFlags() & ~Qt::WindowCloseButtonHint) | Qt::CustomizeWindowHint | Qt::WindowTitleHint);
+        auto* lay = new QVBoxLayout(dlg);
+        auto* msg = new QLabel(tr("Installing “%1”…\n\nComplete the setup window that just opened. The app will "
+                                  "continue automatically when setup closes.").arg(title), dlg);
+        msg->setWordWrap(true);
+        auto* bar = new QProgressBar(dlg); bar->setRange(0, 0); // indeterminate "busy" bar
+        auto* done = new QPushButton(tr("I've finished setup"), dlg); // safety valve if the watcher can't tell
+        lay->addWidget(msg); lay->addWidget(bar); lay->addWidget(done, 0, Qt::AlignRight);
+        dlg->setMinimumWidth(440);
+
         auto* watch = new QWinEventNotifier(h, this);
-        connect(watch, &QWinEventNotifier::activated, this,
-                [this, watch, h, id, title, thumb, gameDir, before]() {
-            watch->setEnabled(false);
-            watch->deleteLater();
+        auto guard = std::make_shared<bool>(false);
+        auto complete = [this, dlg, watch, h, id, title, thumb, gameDir, before, guard]() {
+            if (*guard) return; // process-exit and the button can both fire; run the tail exactly once
+            *guard = true;
+            watch->setEnabled(false); watch->deleteLater();
             CloseHandle(h);
-            // Uninstall entries that appeared during setup point at where the game landed (Program Files, a
-            // custom path, or our folder).
+            // Uninstall entries that appeared during setup point at where the game landed.
             QStringList locs;
             const QSet<QString> after = uninstallKeysSnapshot();
             for (const QString& k : after)
                 if (!before.contains(k)) { const QString l = installLocationOf(k); if (!l.isEmpty()) locs << l; }
-            mwLog(QStringLiteral("pcgame: installer for \"%1\" closed; %2 new install location(s)").arg(title).arg(locs.size()));
+            mwLog(QStringLiteral("pcgame: installer for \"%1\" done; %2 new install location(s)").arg(title).arg(locs.size()));
+            dlg->accept(); dlg->deleteLater();
             onPcInstallerFinished(id, title, thumb, gameDir, locs);
-        });
+        };
+        connect(watch, &QWinEventNotifier::activated, this, [complete]() { complete(); });
+        connect(done, &QPushButton::clicked, this, [complete]() { complete(); });
+        dlg->show(); // non-blocking; app-modal locks the main window while the watcher stays live
         return;
     }
     mwLog(QStringLiteral("pcgame: ShellExecuteEx couldn't monitor the installer — opening without monitoring"));
