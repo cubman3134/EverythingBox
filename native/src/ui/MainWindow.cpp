@@ -2614,13 +2614,69 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
     DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
-    // config relative to the CWD and silently fail to start if it's ours. Fall back to the shell (which can
-    // elevate) only if the direct launch can't start.
+    // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
+
+#ifdef Q_OS_WIN
+    // Launch via the shell (elevates if the game asks) with a process handle, and watch it briefly: a game
+    // that closes within a few seconds didn't really open (missing redistributables, or the wrong exe).
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = nullptr;
+    const std::wstring wFile = exe.toStdWString();
+    const std::wstring wDir  = workDir.toStdWString();
+    sei.lpFile = wFile.c_str();
+    sei.lpDirectory = wDir.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&sei) && sei.hProcess)
+    {
+        HANDLE h = sei.hProcess;
+        auto done = std::make_shared<bool>(false);
+        auto* watch = new QWinEventNotifier(h, this);
+        auto* timer = new QTimer(this); timer->setSingleShot(true);
+        auto cleanup = [watch, timer, h] { watch->setEnabled(false); watch->deleteLater(); timer->stop(); timer->deleteLater(); CloseHandle(h); };
+        connect(watch, &QWinEventNotifier::activated, this, [this, done, cleanup, id, title, thumb, exe] {
+            if (*done) return; *done = true; cleanup();
+            mwLog(QStringLiteral("pcgame: \"%1\" closed right after launching").arg(title));
+            onPcGameFailedToOpen(id, title, thumb, exe); // exited before the grace period -> it didn't open
+        });
+        connect(timer, &QTimer::timeout, this, [done, cleanup] { if (*done) return; *done = true; cleanup(); }); // stayed open - fine
+        timer->start(9000);
+        return;
+    }
+    mwLog(QStringLiteral("pcgame: ShellExecuteEx couldn't launch \"%1\" — falling back").arg(QFileInfo(exe).fileName()));
+#endif
     if (!QProcess::startDetached(exe, QStringList(), workDir))
     {
         mwLog(QStringLiteral("pcgame: startDetached failed for \"%1\" — falling back to shell open").arg(QFileInfo(exe).fileName()));
         QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+    }
+}
+
+// The launched game closed almost immediately: tell the user (it usually means missing redistributables or the
+// wrong exe) and offer to open its folder or point us at a different exe.
+void MainWindow::onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe)
+{
+    const QString folder = QFileInfo(exe).absolutePath();
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("“%1” didn't stay open").arg(title));
+    box.setText(tr("“%1” closed right after it launched.").arg(title));
+    box.setInformativeText(tr("This usually means it's missing components — install the redistributables in its "
+                              "folder (often a _Redist / _CommonRedist folder) — or the launched file was the "
+                              "wrong one."));
+    QPushButton* openBtn = box.addButton(tr("Open game folder"), QMessageBox::AcceptRole);
+    QPushButton* pickBtn = box.addButton(tr("Choose a different .exe"), QMessageBox::ActionRole);
+    box.addButton(QMessageBox::Close);
+    box.exec();
+    if (box.clickedButton() == openBtn)
+        QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
+    else if (box.clickedButton() == pickBtn)
+    {
+        const QString picked = QFileDialog::getOpenFileName(this,
+            tr("Pick the .exe that launches “%1”").arg(title), folder, tr("Programs (*.exe)"));
+        if (!picked.isEmpty()) { PcGameStore::setExe(id, picked); launchPcExe(picked, id, title, thumb); }
     }
 }
 

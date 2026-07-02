@@ -120,6 +120,9 @@ private:
     // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
     bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
     void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
+    // The launched game closed within a few seconds (it didn't really open - often missing redistributables,
+    // or the wrong exe). Tell the user and offer to open its folder or pick a different exe.
+    void onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe);
     // Run a PC game's setup, monitor the installer process, and when it finishes locate the installed game
     // (wherever the user pointed it) and launch it. gameDir is our extracted repack folder (a common install
     // target); the installer's registered InstallLocation is also checked so custom paths are found.
