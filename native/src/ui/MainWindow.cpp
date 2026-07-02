@@ -20,6 +20,7 @@
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
+#include "../core/PcGameStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
@@ -2138,6 +2139,9 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title, const QString& thumb)
 {
     currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
+    // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path
+    // this Recent entry recorded (e.g. its one-time installer) is stale or gone.
+    if (kind == QStringLiteral("pcgame")) { relaunchPcGame(resumeKey, title, thumb, path); return; }
     // A streamed link has no local file to check; route it straight to libmpv.
     const bool isUrl = path.contains(QStringLiteral("://"));
     if (!isUrl && !QFileInfo::exists(path))
@@ -2216,6 +2220,43 @@ static QString findInstaller(const QString& dir)
     return best;
 }
 
+// Find the actual *game* executable inside an installed/extracted PC game (as opposed to its installer).
+// Skips setup.exe and the usual cruft (uninstallers, bundled redistributables, crash handlers); prefers an
+// .exe whose name matches the game title, else the largest remaining one. Returns empty when there's no game
+// exe to run yet - which distinguishes a portable/installed game (has one) from a repack that's been unpacked
+// but whose setup.exe hasn't been run (only setup.exe present -> empty -> the caller runs the installer).
+// titleMatchOnly restricts it to the title-named exe - used when scanning the shared games/pc root, where
+// "largest exe anywhere" could belong to a different game.
+static QString findGameExe(const QString& dir, const QString& title, bool titleMatchOnly = false)
+{
+    auto normAlnum = [](const QString& s) { QString o; for (const QChar c : s) if (c.isLetterOrNumber()) o += c.toLower(); return o; };
+    const QString want = normAlnum(title);
+    QString titleHit;  qint64 titleHitSize = -1;
+    QString largest;   qint64 largestSize = -1;
+    bool hasSetup = false;
+    QDirIterator it(dir, QStringList{ QStringLiteral("*.exe") }, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString p = it.next();
+        const QString base = QFileInfo(p).fileName().toLower();
+        if (base == QStringLiteral("setup.exe")) { hasSetup = true; continue; }
+        if (base.contains(QStringLiteral("unins")) || base.contains(QStringLiteral("redist"))
+            || base.contains(QStringLiteral("vcredist")) || base.contains(QStringLiteral("directx"))
+            || base.contains(QStringLiteral("dxsetup")) || base.contains(QStringLiteral("dotnet"))
+            || base.contains(QStringLiteral("crashreport")) || base.contains(QStringLiteral("crashpad")))
+            continue;
+        const qint64 sz = QFileInfo(p).size();
+        const QString stem = normAlnum(QFileInfo(p).completeBaseName());
+        if (!want.isEmpty() && !stem.isEmpty() && (stem == want || stem.contains(want) || want.contains(stem)))
+        { if (sz > titleHitSize) { titleHitSize = sz; titleHit = p; } }
+        if (sz > largestSize) { largestSize = sz; largest = p; }
+    }
+    if (!titleHit.isEmpty()) return titleHit; // the game exe is named after the game - strongest signal
+    if (titleMatchOnly)      return QString();
+    if (!hasSetup)           return largest;  // no installer in the tree => it's portable/installed already
+    return QString();                         // an un-run installer repack: no game exe yet
+}
+
 namespace { QString safeFileName(const QString& title); } // defined in the anonymous namespace further below
 
 // Download a PC (Windows) game and hand it to the OS to run/install. The file (a repack installer, a portable
@@ -2225,6 +2266,10 @@ namespace { QString safeFileName(const QString& title); } // defined in the anon
 // determine the type, we just reveal it in its folder.
 void MainWindow::openPcGame(const MediaItem& item)
 {
+    // Already have it on disk? Launch the installed game directly (or re-run a pending installer / ask where
+    // it went) instead of downloading again.
+    if (tryLaunchInstalledPcGame(item.id, item.title, item.thumbnailUrl)) return;
+
     const QString dir = AppPaths::dataDir() + QStringLiteral("/games/pc");
     QDir().mkpath(dir);
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
@@ -2304,29 +2349,133 @@ void MainWindow::openPcGame(const MediaItem& item)
                 return;
             }
             QFile::remove(dest); // unpacked now; drop the archive
+            PcGameStore::setDir(item.id, gameDir); // remember where it lives so we never re-download it
 
+            // Portable repack: the game exe is already here - launch it and remember it, so every future open
+            // runs it directly. Installer repack: run its setup this once; the next open finds the installed
+            // exe (findGameExe) and launches that instead.
+            const QString exe = findGameExe(gameDir, item.title);
+            if (!exe.isEmpty())
+            {
+                PcGameStore::setExe(item.id, exe);
+                launchPcExe(exe, item.id, item.title, item.thumbnailUrl);
+                return;
+            }
             const QString installer = findInstaller(gameDir);
-            RecentStore::add({ installer.isEmpty() ? gameDir : installer, item.title, QStringLiteral("game"),
-                               item.thumbnailUrl, item.id });
             if (!installer.isEmpty())
             {
+                PcGameStore::setInstallerRan(item.id, true);
+                RecentStore::add({ installer, item.title, QStringLiteral("pcgame"), item.thumbnailUrl, item.id });
                 mwLog(QStringLiteral("pcgame: launching installer %1").arg(QFileInfo(installer).fileName()));
-                statusBar()->showMessage(tr("Launching the installer for “%1”…").arg(item.title), 6000);
+                notify(tr("Installing “%1”… run its setup, then open it again to play.").arg(item.title), 9000);
                 QDesktopServices::openUrl(QUrl::fromLocalFile(installer));
             }
             else
             {
-                statusBar()->showMessage(tr("Extracted “%1” — opening its folder.").arg(item.title), 6000);
+                RecentStore::add({ gameDir, item.title, QStringLiteral("pcgame"), item.thumbnailUrl, item.id });
+                notify(tr("Extracted “%1” — opening its folder.").arg(item.title), 6000);
                 QDesktopServices::openUrl(QUrl::fromLocalFile(gameDir));
             }
             return;
         }
 
-        // A direct installer / portable .exe runs; anything else opens with the OS default.
-        RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
-        statusBar()->showMessage(tr("Opening “%1”…").arg(item.title), 5000);
+        // A direct download. A portable/standalone game .exe is the game itself - remember it so re-opening
+        // runs it straight away. A bare setup.exe is an installer (run it once); anything else (a lone file)
+        // opens with the OS default.
+        const QString base = QFileInfo(dest).fileName().toLower();
+        if (QFileInfo(dest).suffix().toLower() == QStringLiteral("exe") && base != QStringLiteral("setup.exe"))
+        {
+            PcGameStore::setExe(item.id, dest);
+            launchPcExe(dest, item.id, item.title, item.thumbnailUrl);
+            return;
+        }
+        if (base == QStringLiteral("setup.exe")) PcGameStore::setInstallerRan(item.id, true);
+        RecentStore::add({ dest, item.title, QStringLiteral("pcgame"), item.thumbnailUrl, item.id });
+        notify(tr("Opening “%1”…").arg(item.title), 5000);
         QDesktopServices::openUrl(QUrl::fromLocalFile(dest));
     });
+}
+
+// Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
+// exact executable (not the installer).
+void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb)
+{
+    mwLog(QStringLiteral("pcgame: launch \"%1\"").arg(QFileInfo(exe).fileName()));
+    notify(tr("Launching “%1”…").arg(title), 5000);
+    RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
+    QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+}
+
+// Try to open an already-downloaded PC game without fetching it again. Returns true when it handled the open.
+bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb)
+{
+    const PcGameStore::Entry e = PcGameStore::get(id);
+    // 1) We already know the game exe - just run it.
+    if (!e.exe.isEmpty() && QFileInfo::exists(e.exe)) { launchPcExe(e.exe, id, title, thumb); return true; }
+    // Never downloaded (or its folder is gone). Before re-downloading, rescue installs that predate this
+    // store: an exe named after the game anywhere under games/pc (title-match only - "largest exe" across
+    // OTHER games' folders would be wrong).
+    if (e.dir.isEmpty() || !QFileInfo::exists(e.dir))
+    {
+        const QString rescued = findGameExe(AppPaths::dataDir() + QStringLiteral("/games/pc"), title,
+                                            /*titleMatchOnly*/ true);
+        if (rescued.isEmpty()) return false; // caller downloads it fresh
+        PcGameStore::setDir(id, QFileInfo(rescued).absolutePath());
+        PcGameStore::setExe(id, rescued);
+        mwLog(QStringLiteral("pcgame: rescued pre-store install of \"%1\" -> %2").arg(title, rescued));
+        launchPcExe(rescued, id, title, thumb);
+        return true;
+    }
+
+    // 2) Downloaded before: look for the now-installed game exe under its folder and remember it.
+    const QString exe = findGameExe(e.dir, title);
+    if (!exe.isEmpty())
+    {
+        PcGameStore::setExe(id, exe);
+        mwLog(QStringLiteral("pcgame: resolved exe for \"%1\" -> %2").arg(title, QFileInfo(exe).fileName()));
+        launchPcExe(exe, id, title, thumb);
+        return true;
+    }
+    // 3) Extracted but no game exe yet. If we haven't run its installer, do that now; the next open will find
+    //    the installed exe. If setup already ran, it installed somewhere we can't see (e.g. Program Files) -
+    //    ask the user to point us at the game's .exe once, then remember it forever.
+    if (!e.installerRan)
+    {
+        const QString inst = findInstaller(e.dir);
+        if (!inst.isEmpty())
+        {
+            PcGameStore::setInstallerRan(id, true);
+            mwLog(QStringLiteral("pcgame: running installer %1").arg(QFileInfo(inst).fileName()));
+            notify(tr("Installing “%1”… run its setup, then open it again to play.").arg(title), 9000);
+            RecentStore::add({ inst, title, QStringLiteral("pcgame"), thumb, id });
+            QDesktopServices::openUrl(QUrl::fromLocalFile(inst));
+            return true;
+        }
+    }
+    promptLocatePcExe(id, title, thumb, e.dir);
+    return true;
+}
+
+// Ask the user which .exe launches this game (for installers that put the game outside our folder). Remembers
+// the choice so it only ever has to be answered once.
+void MainWindow::promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir)
+{
+    const QString start = QFileInfo::exists(startDir) ? startDir
+                          : (AppPaths::dataDir() + QStringLiteral("/games/pc"));
+    const QString exe = QFileDialog::getOpenFileName(this,
+        tr("Where did “%1” install? Pick its game .exe").arg(title), start, tr("Programs (*.exe)"));
+    if (exe.isEmpty()) { notify(tr("No game executable chosen for “%1”.").arg(title), 5000); return; }
+    PcGameStore::setExe(id, exe);
+    launchPcExe(exe, id, title, thumb);
+}
+
+// Re-open a PC game from a Recent entry (kind "pcgame"): use the store's resolved exe / install folder, and
+// only fall back to the exact path Recent recorded if the store was lost.
+void MainWindow::relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath)
+{
+    if (tryLaunchInstalledPcGame(id, title, thumb)) return;
+    if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath)) { launchPcExe(recordedPath, id, title, thumb); return; }
+    notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), 7000);
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)

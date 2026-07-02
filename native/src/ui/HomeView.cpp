@@ -437,13 +437,15 @@ static QString iconTypeForKind(const QString& kind)
     if (kind == QStringLiteral("video"))    return QStringLiteral("movie");
     if (kind == QStringLiteral("audio"))    return QStringLiteral("album");
     if (kind == QStringLiteral("document")) return QStringLiteral("book");
-    if (kind == QStringLiteral("game"))     return QStringLiteral("game");
+    if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")) return QStringLiteral("game");
     return QString();
 }
 
 // Group key for a Recent entry: by media type, and per-console for games ("game:<console>").
 static QString recentGroupKey(const RecentItem& r)
 {
+    if (r.kind == QStringLiteral("pcgame"))
+        return QStringLiteral("game:") + QObject::tr("PC (Windows)");
     if (r.kind == QStringLiteral("game"))
     {
         const QString ext = QFileInfo(r.path).suffix().toLower();
@@ -1595,7 +1597,10 @@ void HomeView::populateRecents(const QString& kind)
     MediaCatalog cat; cat.title = tr("Recent");
     for (const RecentItem& r : RecentStore::list())
     {
-        if (!kind.isEmpty() && r.kind != kind) continue;
+        // PC games belong to the game catalogue's Recent view alongside emulated ones.
+        const bool match = r.kind == kind
+                           || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame"));
+        if (!kind.isEmpty() && !match) continue;
         MediaItem it;
         it.url = r.path;                                       // re-open target
         it.id = r.key;                                         // stable resume key (streamed items)

@@ -114,6 +114,14 @@ private:
     // A PC (Windows) game isn't an emulator ROM: download it to <data>/games/pc and hand it to the OS to
     // run/install (installer/portable .exe runs; an archive opens). See openLibraryItem's PC-platform branch.
     void openPcGame(const MediaItem& item);
+    // Re-open a PC game without re-downloading: launch the remembered game exe (PcGameStore), or the game
+    // exe now sitting in its install folder, re-run a not-yet-run installer, or ask the user to locate the
+    // exe. tryLaunchInstalledPcGame returns true when it handled the open; false => no local copy yet, so
+    // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
+    bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
+    void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
+    void relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
+    void promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir);
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
     // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
