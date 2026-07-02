@@ -96,6 +96,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void moveEvent(QMoveEvent* event) override;             // keep the notification overlay anchored while dragging
     void keyPressEvent(QKeyEvent* event) override;          // Esc leaves full screen
+    bool focusNextPrevChild(bool next) override;            // clamp Tab / D-pad focus nav in settings panels
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
     void changeEvent(QEvent* event) override;               // re-focus the themed view when the window reactivates
     void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
@@ -194,6 +195,7 @@ private:
                          const std::function<void()>& onBack);
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
     QWidget* firstPanelRow() const;     // the first focusable row in the current panel content (or null)
+    QVector<QWidget*> panelNavRing() const; // Back + the panel's focusable rows, top-to-bottom (arrow/Tab nav)
 
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;

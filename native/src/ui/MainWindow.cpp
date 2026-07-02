@@ -703,6 +703,33 @@ static void collectPanelRows(QLayout* lay, QVector<QWidget*>& out)
     }
 }
 
+// The settings/dialog panel's navigation order: header Back first, then the focusable rows top-to-bottom.
+QVector<QWidget*> MainWindow::panelNavRing() const
+{
+    QVector<QWidget*> ring;
+    if (panelBack_) ring.push_back(panelBack_);
+    if (panelScroll_ && panelScroll_->widget()) collectPanelRows(panelScroll_->widget()->layout(), ring);
+    return ring;
+}
+
+// Tab / directional focus (a remote's D-pad often maps "down" to focus-next, handled by Qt BEFORE
+// keyPressEvent) would wrap from the last row back to the header Back. In a plain settings panel, clamp it to
+// the same strict top-to-bottom list instead: never wrap, so the last row stays put on "next".
+bool MainWindow::focusNextPrevChild(bool next)
+{
+    if (stack_->currentWidget() == panelPage_ && !panelDialog_)
+    {
+        const QVector<QWidget*> ring = panelNavRing();
+        const int idx = ring.indexOf(focusWidget());
+        if (idx >= 0)
+        {
+            ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
+            return true; // handled - suppress Qt's wrap-around
+        }
+    }
+    return QMainWindow::focusNextPrevChild(next);
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* e)
 {
     // Esc leaves full screen (the emulator view consumes its own Esc for the pause menu, so this only
@@ -731,18 +758,10 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             {
                 // A strict top-to-bottom list: Back at the top, then the rows in order. Down stops at the last
                 // row, Up stops at Back - never wraps around.
-                QVector<QWidget*> ring;
-                if (panelBack_) ring.push_back(panelBack_);
-                if (QWidget* w = panelScroll_->widget()) collectPanelRows(w->layout(), ring);
+                const QVector<QWidget*> ring = panelNavRing();
                 const int idx = ring.indexOf(fw);
-                if (idx >= 0)
+                if (idx >= 0) // clamp; if focus isn't on a known row, leave it put (never jump to Back)
                     ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
-                else
-                    // Focus isn't on a known row (shouldn't normally happen). Do NOT hijack it to Back - leave
-                    // the current row selected so the last row can't "escape" upward on Down.
-                    mwLog(QStringLiteral("panelnav: focus %1 not in ring of %2 - staying put")
-                              .arg(fw ? QString::fromLatin1(fw->metaObject()->className()) : QStringLiteral("null"))
-                              .arg(ring.size()));
                 return;
             }
             switch (key)
