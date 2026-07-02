@@ -2306,6 +2306,38 @@ static QString findGameExe(const QString& dir, const QString& title, bool titleM
     return QString();                         // an un-run installer repack: no game exe yet
 }
 
+// Extract a PC-game archive robustly. The bundled miniz/LZMA path handles typical .zip/.7z, but large repacks
+// (ZIP64, RAR, or unusual methods - e.g. FitGirl) defeat it, so fall back to the system's bsdtar (Windows
+// ships it as tar.exe) / 7z, which read virtually any archive. Synchronous: a repack extraction blocks, like
+// the built-in path already does.
+static bool extractPcArchive(const QString& archive, const QString& destDir, QString* err)
+{
+    if (ArchiveRom::extractAll(archive, destDir, err)) return true;
+    QDir().mkpath(destDir);
+    struct Cmd { QString prog; QStringList args; };
+    QList<Cmd> cmds;
+#ifdef Q_OS_WIN
+    cmds << Cmd{ QStringLiteral("C:/Windows/System32/tar.exe"), { QStringLiteral("-xf"), archive, QStringLiteral("-C"), destDir } };
+    cmds << Cmd{ QStringLiteral("tar"),  { QStringLiteral("-xf"), archive, QStringLiteral("-C"), destDir } };
+    cmds << Cmd{ QStringLiteral("7z"),   { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + destDir, archive } };
+    cmds << Cmd{ QStringLiteral("7za"),  { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + destDir, archive } };
+#else
+    cmds << Cmd{ QStringLiteral("bsdtar"), { QStringLiteral("-xf"), archive, QStringLiteral("-C"), destDir } };
+    cmds << Cmd{ QStringLiteral("7z"), { QStringLiteral("x"), QStringLiteral("-y"), QStringLiteral("-o") + destDir, archive } };
+#endif
+    for (const Cmd& c : cmds)
+    {
+        QProcess p;
+        p.start(c.prog, c.args);
+        if (!p.waitForStarted(5000)) continue; // tool not installed
+        p.waitForFinished(-1);                 // let a multi-GB repack finish
+        if (p.exitStatus() == QProcess::NormalExit && p.exitCode() == 0)
+        { mwLog(QStringLiteral("pcgame: extracted via %1").arg(QFileInfo(c.prog).fileName())); return true; }
+    }
+    if (err) *err = QObject::tr("no available extractor could read it");
+    return false;
+}
+
 // Fuzzy match a title against a folder / DisplayName (lowercase, alnum-only, containment either way). Guards
 // against tiny strings matching everything.
 static QString pcNorm(const QString& s) { QString o; for (const QChar c : s) if (c.isLetterOrNumber()) o += c.toLower(); return o; }
@@ -2462,7 +2494,7 @@ void MainWindow::openPcGame(const MediaItem& item)
             notify(tr("Extracting “%1”… this can take a while for a large game.").arg(item.title), 0);
             QString aerr;
             mwLog(QStringLiteral("pcgame: extracting %1").arg(QFileInfo(dest).fileName()));
-            if (!ArchiveRom::extractAll(dest, gameDir, &aerr))
+            if (!extractPcArchive(dest, gameDir, &aerr))
             {
                 mwLog(QStringLiteral("pcgame: extract failed: %1").arg(aerr));
                 const QString e = tr("Couldn't extract “%1”: %2").arg(item.title, aerr);
@@ -2475,17 +2507,21 @@ void MainWindow::openPcGame(const MediaItem& item)
             QFile::remove(dest); // unpacked now; drop the archive
             PcGameStore::setDir(item.id, gameDir); // remember where it lives so we never re-download it
 
-            // Portable repack: the game exe is already here - launch it and remember it, so every future open
-            // runs it directly. Installer repack: run its setup this once; the next open finds the installed
-            // exe (findGameExe) and launches that instead.
-            const QString exe = findGameExe(gameDir, item.title);
-            if (!exe.isEmpty())
+            // A portable game runs directly: its exe is named after the game, or ships its runtime DLLs right
+            // beside it. Anything else in the extracted repack - a setup.exe, or an installer .exe sitting in a
+            // folder - is run as the installer, after which we locate the game it installs.
+            const QString game = findGameExe(gameDir, item.title);
+            const bool portable = !game.isEmpty()
+                && (pcTitleMatch(QFileInfo(game).completeBaseName(), item.title)
+                    || !QDir(QFileInfo(game).absolutePath()).entryList(QStringList{ QStringLiteral("*.dll") }, QDir::Files).isEmpty());
+            if (portable)
             {
-                PcGameStore::setExe(item.id, exe);
-                launchPcExe(exe, item.id, item.title, item.thumbnailUrl);
+                PcGameStore::setExe(item.id, game);
+                launchPcExe(game, item.id, item.title, item.thumbnailUrl);
                 return;
             }
-            const QString installer = findInstaller(gameDir);
+            QString installer = findInstaller(gameDir);
+            if (installer.isEmpty()) installer = game; // the only runnable exe we found - treat it as the installer
             if (!installer.isEmpty())
             {
                 runPcInstaller(installer, item.id, item.title, item.thumbnailUrl, gameDir);
