@@ -138,6 +138,10 @@ private:
     void cleanupPcInstallMedia(const QString& installer, const QString& gameDir, const QString& installedExe);
     void relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
     void promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir);
+    // Forget a PC game entirely: clear its store entry, drop it from Recent + Downloads, and delete its
+    // leftover install media under games/pc. Used when the user cancels the "locate the exe" prompt, so
+    // re-opening it starts a fresh download/install.
+    void forgetPcGame(const QString& id, const QString& title);
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
     // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
     void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,

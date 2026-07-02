@@ -2797,15 +2797,43 @@ bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& titl
     return false; // never downloaded and not found anywhere -> caller downloads it
 }
 
+// Forget a PC game entirely and reclaim its space, so re-opening starts a fresh download/install.
+void MainWindow::forgetPcGame(const QString& id, const QString& title)
+{
+    const QString pcRoot = QDir(AppPaths::dataDir() + QStringLiteral("/games/pc")).absolutePath();
+    const PcGameStore::Entry e = PcGameStore::get(id);
+    auto underPcRoot = [&](const QString& p) {
+        return QFileInfo(p).absoluteFilePath().startsWith(pcRoot + QLatin1Char('/'), Qt::CaseInsensitive);
+    };
+    // Delete the leftover installer file(s) this game recorded (only inside games/pc).
+    for (const RecentItem& r : RecentStore::list())
+        if (r.key == id && underPcRoot(r.path) && QFileInfo(r.path).isFile())
+            QFile::remove(r.path);
+    // Delete the extracted repack folder (a subfolder of games/pc, never the root itself).
+    const QString gd = QDir(e.dir).absolutePath();
+    if (!e.dir.isEmpty() && gd != pcRoot && underPcRoot(e.dir) && QDir(gd).exists())
+        QDir(gd).removeRecursively();
+    // Forget it everywhere.
+    PcGameStore::clear(id);
+    RecentStore::remove(id);
+    DownloadsStore::remove(id);
+    mwLog(QStringLiteral("pcgame: forgot \"%1\" (no exe chosen) — cleared store/recent/downloads + media").arg(title));
+}
+
 // Ask the user which .exe launches this game (for installers that put the game outside our folder). Remembers
-// the choice so it only ever has to be answered once.
+// the choice; if they cancel, the game is forgotten (removed from Recent/Downloads) so re-opening reinstalls.
 void MainWindow::promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir)
 {
     const QString start = QFileInfo::exists(startDir) ? startDir
                           : (AppPaths::dataDir() + QStringLiteral("/games/pc"));
     const QString exe = QFileDialog::getOpenFileName(this,
         tr("Where did “%1” install? Pick its game .exe").arg(title), start, tr("Programs (*.exe)"));
-    if (exe.isEmpty()) { notify(tr("No game executable chosen for “%1”.").arg(title), 5000); return; }
+    if (exe.isEmpty())
+    {
+        forgetPcGame(id, title);
+        notify(tr("Cancelled — “%1” was removed. Open it again to download and install it.").arg(title), 7000);
+        return;
+    }
     PcGameStore::setExe(id, exe);
     launchPcExe(exe, id, title, thumb);
 }
