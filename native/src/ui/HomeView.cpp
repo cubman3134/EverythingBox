@@ -2,6 +2,7 @@
 #include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
 #include "../core/RecentStore.h"
+#include "../core/DownloadsStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
@@ -1527,7 +1528,7 @@ void HomeView::createPlaylistInteractive(const QString& catalogKey)
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
-    if (atRecentsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), 3500); return; }
+    if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), 3500); return; }
     const QString key = currentCatalogKey();
     QVector<Playlist> pls = PlaylistStore::forCatalog(key);
     QStringList opts;
@@ -1610,6 +1611,53 @@ void HomeView::populateRecents(const QString& kind)
         it.type = iconTypeForKind(r.kind);                    // drives the placeholder icon + resume bar
         it.thumbnailUrl = r.thumb;
         it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
+}
+
+bool HomeView::atDownloadsLevel() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.type == QStringLiteral("_downloads");
+}
+
+void HomeView::openDownloadsLevel(const QString& marker)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Downloaded");
+    lvl.item.id = QStringLiteral("_downloads");
+    lvl.item.type = QStringLiteral("_downloads");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("downloads:") + marker; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateDownloads(marker);
+}
+
+void HomeView::populateDownloads(const QString& marker)
+{
+    // marker = "<kind>|<system>": kind filters the catalogue; system (a SystemCatalog id, or "pc") scopes a
+    // games console. An empty system matches any (non-game catalogues).
+    const QString kind = marker.section(QLatin1Char('|'), 0, 0);
+    const QString system = marker.section(QLatin1Char('|'), 1, 1);
+    MediaCatalog cat; cat.title = tr("Downloaded");
+    for (const DownloadedItem& d : DownloadsStore::list())
+    {
+        if (!kind.isEmpty() && d.kind != kind) continue;
+        if (!system.isEmpty() && d.system != system) continue;
+        if (!QFileInfo::exists(d.path)) continue; // hide entries whose file was deleted outside the app
+        MediaItem it;
+        it.url = d.path;
+        it.id = d.key;
+        it.mime = d.kind;                       // routing kind (openRecent dispatches on it)
+        it.type = iconTypeForKind(d.kind);
+        it.thumbnailUrl = d.thumb;
+        it.title = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
         cat.items.push_back(it);
     }
     cat.hasMore = false;
@@ -1937,6 +1985,12 @@ void HomeView::activateItem(int row)
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
+    // A catalogue's synthetic Downloaded folder: rows are local files, re-opened the same way as recents.
+    if (atDownloadsLevel() && it.type != QStringLiteral("_downloads"))
+    {
+        emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+        return;
+    }
 
     if (it.type == QStringLiteral("_open"))
     {
@@ -1957,6 +2011,10 @@ void HomeView::activateItem(int row)
     // The synthetic Recent folder drills into this catalogue's recently-opened items.
     if (it.type == QStringLiteral("_recents"))
         { openRecentsLevel(it.mime.mid(QStringLiteral("recents:").size())); return; }
+
+    // The synthetic Downloaded folder drills into this catalogue's (or console's) fully-downloaded items.
+    if (it.type == QStringLiteral("_downloads"))
+        { openDownloadsLevel(it.mime.mid(QStringLiteral("downloads:").size())); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -2298,6 +2356,9 @@ void HomeView::loadTop()
     // Returning to a synthetic Recent level (Back from a re-opened item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_recents"))
         { populateRecents(top.item.mime.mid(QStringLiteral("recents:").size())); return; }
+    // Returning to a synthetic Downloaded level: rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_downloads"))
+        { populateDownloads(top.item.mime.mid(QStringLiteral("downloads:").size())); return; }
     // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_playlists"))
         { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
@@ -2915,6 +2976,27 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 items_.push_back(rc);
             }
         }
+        // A "Downloaded" folder holding this catalogue's fully-downloaded items - but NOT for games, which get
+        // one inside each console folder instead (see the platform block below). Only if there are any.
+        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
+        {
+            const QString rkind = catalogRecentKind();
+            if (rkind != QStringLiteral("game"))
+            {
+                bool has = false;
+                for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { has = true; break; }
+                if (has)
+                {
+                    MediaItem dl;
+                    dl.id = QStringLiteral("_downloads");
+                    dl.type = QStringLiteral("_downloads");
+                    dl.title = tr("Downloaded");
+                    dl.expandable = true;
+                    dl.mime = QStringLiteral("downloads:") + rkind + QLatin1Char('|'); // no console filter
+                    items_.push_back(dl);
+                }
+            }
+        }
         // A "Playlists" folder at the very top of every (unfiltered) catalogue root: the user's saved playlists
         // for this catalogue plus a New-playlist entry, drilled natively (no addon). Not on detail levels (a
         // drilled container / the playlist levels themselves), search results, or Recents.
@@ -2927,6 +3009,35 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             pl.expandable = true;
             pl.mime = QStringLiteral("playlists:") + currentCatalogKey(); // marker -> drilled natively
             items_.push_back(pl);
+        }
+        // A "Downloaded" folder inside each games console folder: the fully-downloaded games for THIS console.
+        if (!stack_.isEmpty() && stack_.last().detail && stack_.last().query.isEmpty() && !recentView_
+            && stack_.last().item.type == QStringLiteral("platform"))
+        {
+            const QString name = stack_.last().item.title.trimmed();
+            const QString low = name.toLower();
+            const bool pc = low == QStringLiteral("pc (windows)") || low == QStringLiteral("pc windows")
+                            || low == QStringLiteral("windows") || low == QStringLiteral("pc");
+            QString kind, system;
+            if (pc) { kind = QStringLiteral("pcgame"); system = QStringLiteral("pc"); }
+            else if (const GameSystem* s = SystemCatalog::forConsoleName(name))
+                { kind = QStringLiteral("game"); system = s->id; }
+            if (!kind.isEmpty())
+            {
+                bool has = false;
+                for (const DownloadedItem& d : DownloadsStore::list())
+                    if (d.kind == kind && d.system == system) { has = true; break; }
+                if (has)
+                {
+                    MediaItem dl;
+                    dl.id = QStringLiteral("_downloads");
+                    dl.type = QStringLiteral("_downloads");
+                    dl.title = tr("Downloaded");
+                    dl.expandable = true;
+                    dl.mime = QStringLiteral("downloads:") + kind + QLatin1Char('|') + system;
+                    items_.push_back(dl);
+                }
+            }
         }
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
         const QString kind = openKindForView();

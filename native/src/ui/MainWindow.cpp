@@ -21,6 +21,7 @@
 #include "../core/EmulatorManager.h"
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
+#include "../core/DownloadsStore.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
@@ -2173,10 +2174,14 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     else if (kind == QStringLiteral("game"))
     {
         // Re-open with the console the game was launched with, so a shared extension (.iso/.cue/.chd/.bin)
-        // isn't mis-resolved by extension alone. Look it up from the Recent entry (by stable key, else path).
+        // isn't mis-resolved by extension alone. Prefer the Downloaded record (authoritative for downloads),
+        // else the Recent entry; match by stable key, else path.
         QString sysId;
-        for (const RecentItem& r : RecentStore::list())
-            if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
+        for (const DownloadedItem& d : DownloadsStore::list())
+            if ((!resumeKey.isEmpty() && d.key == resumeKey) || d.path == path) { sysId = d.system; break; }
+        if (sysId.isEmpty())
+            for (const RecentItem& r : RecentStore::list())
+                if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
         openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
     }
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
@@ -2471,6 +2476,7 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     mwLog(QStringLiteral("pcgame: launch \"%1\"").arg(QFileInfo(exe).fileName()));
     notify(tr("Launching “%1”…").arg(title), 5000);
     RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
+    DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
     QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
 }
 
@@ -2931,6 +2937,14 @@ QString downloadKind(const QString& type, const QString& ext)
     if (type == QStringLiteral("game") || SystemCatalog::forExtension(ext.mid(1)) != nullptr) return QStringLiteral("game");
     return QStringLiteral("video");
 }
+// The canonical SystemCatalog id for a downloaded game, from its console hint (preferred) or file extension,
+// so the Downloaded folder can group it under the right console. Empty if it isn't a game / can't be mapped.
+QString downloadSystemId(const QString& systemHint, const QString& ext)
+{
+    const GameSystem* s = systemHint.isEmpty() ? nullptr : SystemCatalog::forConsoleName(systemHint);
+    if (!s) s = SystemCatalog::forExtension(ext.startsWith(QLatin1Char('.')) ? ext.mid(1) : ext);
+    return s ? s->id : QString();
+}
 } // namespace
 
 void MainWindow::enqueueDownload(const MediaItem& item)
@@ -2959,12 +2973,14 @@ void MainWindow::startNextDownload()
     QDir().mkpath(dir);
     const QString ext = downloadExt(item);
     const QString kind = downloadKind(item.type, ext);
+    const QString sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
     const QString dest = dir + QStringLiteral("/") + safeFileName(item.title) + ext;
 
-    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) // skip existing, but make sure it's in Recent
+    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) // skip existing, but make sure it's recorded
     {
         mwLog(QStringLiteral("download(library): \"%1\" already downloaded — skipping").arg(item.title));
-        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, item.systemHint });
+        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, sysId });
+        DownloadsStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, sysId });
         startNextDownload();
         return;
     }
@@ -2996,7 +3012,7 @@ void MainWindow::startNextDownload()
     });
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, dest, kind, title = item.title, thumb = item.thumbnailUrl, id = item.id, sysHint = item.systemHint] {
+            [this, reply, dest, kind, sysId, title = item.title, thumb = item.thumbnailUrl, id = item.id] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
@@ -3021,7 +3037,8 @@ void MainWindow::startNextDownload()
         if (QFile::rename(dest + QStringLiteral(".part"), dest))
         {
             mwLog(QStringLiteral("download(library): saved \"%1\" (%2 bytes)").arg(title).arg(body.size()));
-            RecentStore::add({ dest, title, kind, thumb, id, sysHint }); // appears in Recent, re-openable offline
+            RecentStore::add({ dest, title, kind, thumb, id, sysId });    // appears in Recent, re-openable offline
+            DownloadsStore::add({ dest, title, kind, thumb, id, sysId }); // and in the catalogue's Downloaded folder
         }
         startNextDownload();
     });

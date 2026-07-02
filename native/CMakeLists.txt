@@ -98,6 +98,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
+        src/core/DownloadsStore.cpp src/core/DownloadsStore.h
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
