@@ -49,3 +49,10 @@ void PcGameStore::setInstallerRan(const QString& id, bool ran)
     store().setValue(keyFor(id) + QStringLiteral("/installerRan"), ran);
     store().sync();
 }
+
+void PcGameStore::clear(const QString& id)
+{
+    if (id.isEmpty()) return;
+    store().remove(keyFor(id)); // drops the whole <hash>/ group (dir, exe, installerRan)
+    store().sync();
+}

@@ -2316,6 +2316,24 @@ static bool pcTitleMatch(const QString& a, const QString& b)
     return x.contains(y) || y.contains(x);
 }
 
+// Does this exe plausibly belong to `title`? An exe outside our managed games/pc folder came from a matched
+// external install (GOG/Program Files) and is trusted. One INSIDE games/pc must have the game's name in the
+// exe or one of its parent folders - otherwise it's a stale cross-match (an old bug once stored another
+// game's exe here), and we must not launch it for this title.
+static bool pcExeBelongsTo(const QString& exe, const QString& title, const QString& pcRoot)
+{
+    const QString a = QFileInfo(exe).absoluteFilePath();
+    if (!a.startsWith(pcRoot + QLatin1Char('/'), Qt::CaseInsensitive)) return true; // external install - trust it
+    if (pcTitleMatch(QFileInfo(exe).completeBaseName(), title)) return true;
+    QString dir = QFileInfo(exe).absolutePath();
+    for (int i = 0; i < 5 && dir.length() > pcRoot.length(); ++i) // walk the extracted-repack nesting up to root
+    {
+        if (pcTitleMatch(QFileInfo(dir).fileName(), title)) return true;
+        dir = QFileInfo(dir).absolutePath();
+    }
+    return false;
+}
+
 #ifdef Q_OS_WIN
 // The Windows "Uninstall" registry roots where installers register their DisplayName + InstallLocation.
 static QStringList uninstallRoots()
@@ -2698,7 +2716,18 @@ void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, 
 // Try to open an already-downloaded PC game without fetching it again. Returns true when it handled the open.
 bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb)
 {
-    const PcGameStore::Entry e = PcGameStore::get(id);
+    PcGameStore::Entry e = PcGameStore::get(id);
+    const QString pcRoot = QDir(AppPaths::dataDir() + QStringLiteral("/games/pc")).absolutePath();
+    // A stored exe/dir that points at ANOTHER game (a stale cross-match from an old locate bug - e.g. Warhammer
+    // once mapped to Rift Wizard's exe): forget it so we re-resolve/download instead of launching the wrong game.
+    if (!e.exe.isEmpty() && QFileInfo::exists(e.exe) && !looksLikeInstaller(e.exe) && !pcExeBelongsTo(e.exe, title, pcRoot))
+    {
+        mwLog(QStringLiteral("pcgame: stored exe %1 doesn't match \"%2\" — clearing stale mapping")
+                  .arg(QFileInfo(e.exe).fileName(), title));
+        PcGameStore::clear(id);
+        e = PcGameStore::Entry{}; // continue as if never downloaded
+    }
+
     // 1) We already know the game exe - just run it. (Ignore a stored path that's actually an installer, from
     //    before installer-named .exes were detected: fall through to re-locate the real game below.)
     if (!e.exe.isEmpty() && QFileInfo::exists(e.exe) && !looksLikeInstaller(e.exe))

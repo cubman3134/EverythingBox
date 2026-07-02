@@ -17,4 +17,5 @@ namespace PcGameStore
     void setDir(const QString& id, const QString& dir);
     void setExe(const QString& id, const QString& exe);
     void setInstallerRan(const QString& id, bool ran);
+    void clear(const QString& id); // forget everything for this game (dir/exe/installerRan)
 }
