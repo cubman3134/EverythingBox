@@ -12,6 +12,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QMap>
+#include <QHash>
 #include <functional>
 #include <memory>
 #include <vector>
@@ -152,6 +153,9 @@ private:
                                   const QString& type, const QString& imdbStreamId,
                                   std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
+    // Key for the catalog-result cache: source + catalog + query + page + filters (QMap iterates sorted).
+    QString catalogCacheKey(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                            const QMap<QString, QString>& filters) const;
     int dispatch(const AddonRequest& req);     // run getCatalog/getDetail off-thread, deliver via catalogReady
     int dispatchMeta(const AddonRequest& req); // run getMeta off-thread, deliver via metaReady
     // Remote dispatch: async HTTP on the GUI thread (I/O-bound, so no worker thread), same result signals.
@@ -165,4 +169,12 @@ private:
     QVector<LoadedAddon*> sources_;
     QNetworkAccessManager* nam_ = nullptr;      // remote-source HTTP (created lazily on the GUI thread)
     int reqCounter_ = 0;
+
+    // Catalog browse/landing results (e.g. the console list) cached so re-opening a tab is instant instead of
+    // re-fetching (a blocking HTTP GET or a JS getCatalog run). Populated from catalogReady for requestCatalog
+    // calls; served on a hit within the TTL; cleared when addons reload. Search/detail results aren't cached.
+    struct CatalogCacheEntry { qint64 atMs = 0; MediaCatalog cat; };
+    QHash<QString, CatalogCacheEntry> catalogCache_;
+    QHash<int, QString> pendingCatalogKey_;     // in-flight reqId -> cache key, to store the result on arrival
+    static constexpr qint64 kCatalogCacheTtlMs = 30 * 60 * 1000; // 30 minutes
 };

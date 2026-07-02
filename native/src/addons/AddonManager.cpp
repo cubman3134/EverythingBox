@@ -434,6 +434,18 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
 {
     qRegisterMetaType<MediaCatalog>("MediaCatalog");
     qRegisterMetaType<MediaDetail>("MediaDetail");
+
+    // Cache each requestCatalog result once it arrives, so a re-open serves it instantly (see requestCatalog).
+    // Only reqIds registered in pendingCatalogKey_ (from requestCatalog) are cached; a cache-hit re-emit isn't.
+    connect(this, &AddonManager::catalogReady, this, [this](int reqId, const MediaCatalog& cat) {
+        const auto it = pendingCatalogKey_.constFind(reqId);
+        if (it == pendingCatalogKey_.constEnd()) return;
+        const QString key = it.value();
+        pendingCatalogKey_.erase(it);
+        if (!cat.items.isEmpty()) // don't cache an empty/failed fetch
+            catalogCache_.insert(key, { QDateTime::currentMSecsSinceEpoch(), cat });
+    });
+
     nam_ = new QNetworkAccessManager(this);
     root_ = AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
@@ -471,6 +483,8 @@ void AddonManager::reload()
 {
     loaded_.clear();
     sources_.clear();
+    catalogCache_.clear();      // the addon set is changing; don't serve a stale catalog for it
+    pendingCatalogKey_.clear();
 
     const QFileInfoList dirs = QDir(root_).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     for (const QFileInfo& d : dirs)
@@ -684,12 +698,40 @@ int AddonManager::requestMeta(LoadedAddon* src, const MediaItem& item)
     return dispatchMeta(buildRequest(src, QStringLiteral("getMeta"), itemArg(item)));
 }
 
+QString AddonManager::catalogCacheKey(LoadedAddon* src, const QString& catalogId, const QString& query,
+                                      int page, const QMap<QString, QString>& filters) const
+{
+    QString k = src->manifest.id + QLatin1Char('|') + catalogId + QLatin1Char('|') + query
+              + QLatin1Char('|') + QString::number(page);
+    for (auto it = filters.constBegin(); it != filters.constEnd(); ++it) // QMap iterates in sorted key order
+        if (!it.value().isEmpty())
+            k += QLatin1Char('|') + it.key() + QLatin1Char('=') + it.value();
+    return k;
+}
+
 int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                                  const QMap<QString, QString>& filters)
 {
     if (!src) return -1;
-    if (src->transport == LoadedAddon::RemoteHttp) return dispatchRemoteCatalog(src, catalogId, query, page, filters);
-    return dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page, filters)));
+
+    // Serve a recent browse/landing result from cache (e.g. the console list, which rarely changes) instead
+    // of re-fetching. Delivered on the next event-loop turn so the caller records its reqId first.
+    const QString key = catalogCacheKey(src, catalogId, query, page, filters);
+    const auto cached = catalogCache_.constFind(key);
+    if (cached != catalogCache_.constEnd()
+        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < kCatalogCacheTtlMs)
+    {
+        const int reqId = ++reqCounter_;
+        const MediaCatalog cat = cached->cat;
+        QMetaObject::invokeMethod(this, [this, reqId, cat] { emit catalogReady(reqId, cat); }, Qt::QueuedConnection);
+        return reqId;
+    }
+
+    const int reqId = (src->transport == LoadedAddon::RemoteHttp)
+        ? dispatchRemoteCatalog(src, catalogId, query, page, filters)
+        : dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page, filters)));
+    pendingCatalogKey_[reqId] = key; // store the result under this key when it arrives (see the constructor)
+    return reqId;
 }
 
 int AddonManager::requestDetail(LoadedAddon* src, const MediaItem& item, int page,
