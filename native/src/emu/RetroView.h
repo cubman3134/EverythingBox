@@ -119,4 +119,12 @@ private:
     QIODevice* audioIo_ = nullptr; // push-mode sink input (owned by audioSink_)
     QByteArray pendingAudio_;      // interleaved S16 stereo not yet written
     int audioBytesPerSec_ = 0;
+    // Resample the core's (often odd, e.g. SNES 32040 Hz) output to the device's native rate; feeding an
+    // unsupported rate to QAudioSink on Windows produces static. Linear interp with carried state.
+    int audioSrcRate_ = 0;         // the core's reported sample rate
+    int audioOutRate_ = 0;         // the QAudioSink's rate (device native)
+    double rsStep_ = 1.0;          // input frames per output frame (src/out)
+    double rsPos_ = 0.0;           // carried fractional read position
+    int16_t rsPrev_[2] = { 0, 0 }; // last input frame from the previous push (for cross-buffer interpolation)
+    void resampleAppend(const int16_t* in, size_t frames); // src-rate -> out-rate, appends to pendingAudio_
 };

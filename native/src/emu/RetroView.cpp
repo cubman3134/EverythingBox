@@ -502,19 +502,55 @@ void RetroView::startAudio(int sampleRate)
     stopAudio();
     if (sampleRate <= 0) return;
 
-    QAudioFormat fmt;
-    fmt.setSampleRate(sampleRate);
-    fmt.setChannelCount(2);
-    fmt.setSampleFormat(QAudioFormat::Int16);
-
     const QAudioDevice dev = QMediaDevices::defaultAudioOutput();
     if (dev.isNull()) return; // no output device -> run silent
+
+    // Output at a rate the device actually supports (its native rate), and resample the core to it. Handing
+    // QAudioSink an unsupported rate - SNES's 32040 Hz especially - gives static/garbled audio on Windows.
+    auto supports = [&dev](int rate) {
+        QAudioFormat f; f.setSampleRate(rate); f.setChannelCount(2); f.setSampleFormat(QAudioFormat::Int16);
+        return dev.isFormatSupported(f);
+    };
+    int outRate = dev.preferredFormat().sampleRate();
+    if (outRate <= 0 || !supports(outRate)) outRate = supports(48000) ? 48000 : (supports(44100) ? 44100 : sampleRate);
+
+    QAudioFormat fmt;
+    fmt.setSampleRate(outRate);
+    fmt.setChannelCount(2);
+    fmt.setSampleFormat(QAudioFormat::Int16);
 
     audioSink_ = new QAudioSink(dev, fmt, this);
     audioSink_->setBufferSize(fmt.bytesForDuration(100000)); // ~100 ms
     audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
-    audioBytesPerSec_ = sampleRate * 2 * 2;                  // stereo S16
+    audioSrcRate_ = sampleRate;
+    audioOutRate_ = outRate;
+    audioBytesPerSec_ = outRate * 2 * 2;                     // stereo S16 at the OUTPUT rate
+    rsStep_ = double(sampleRate) / double(outRate);
+    rsPos_ = 0.0; rsPrev_[0] = rsPrev_[1] = 0;
     audioIo_ = audioSink_->start();                          // push mode: write samples to this
+}
+
+// Linear-resample interleaved S16 stereo from audioSrcRate_ to audioOutRate_, carrying the fractional read
+// position and the previous frame across calls so there's no click at buffer boundaries.
+void RetroView::resampleAppend(const int16_t* in, size_t frames)
+{
+    const size_t N = frames;
+    double pos = rsPos_; // stream index: 0 = rsPrev_, k>=1 = in[k-1]
+    while (pos < double(N))
+    {
+        const int i = int(pos);
+        const double f = pos - i;
+        const int16_t aL = (i == 0) ? rsPrev_[0] : in[(i - 1) * 2];
+        const int16_t aR = (i == 0) ? rsPrev_[1] : in[(i - 1) * 2 + 1];
+        const int16_t bL = in[i * 2];
+        const int16_t bR = in[i * 2 + 1];
+        const int16_t o[2] = { int16_t(aL + (bL - aL) * f), int16_t(aR + (bR - aR) * f) };
+        pendingAudio_.append(reinterpret_cast<const char*>(o), 4);
+        pos += rsStep_;
+    }
+    rsPrev_[0] = in[(N - 1) * 2]; rsPrev_[1] = in[(N - 1) * 2 + 1];
+    rsPos_ = pos - double(N);                 // shift baseline: old index N (last frame) becomes new index 0
+    if (rsPos_ < 0.0) rsPos_ = 0.0;
 }
 
 void RetroView::stopAudio()
@@ -527,13 +563,18 @@ void RetroView::stopAudio()
     }
     audioIo_ = nullptr;
     pendingAudio_.clear();
+    audioSrcRate_ = audioOutRate_ = 0;
+    rsPos_ = 0.0; rsPrev_[0] = rsPrev_[1] = 0;
 }
 
 // Called from the core during runFrame() (GUI thread): interleaved S16 stereo, 'frames' stereo samples.
 void RetroView::pushAudio(const int16_t* data, size_t frames)
 {
     if (!audioIo_ || frames == 0) return;
-    pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
+    if (audioSrcRate_ == audioOutRate_)
+        pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
+    else
+        resampleAppend(data, frames); // core rate (e.g. 32040) -> device native rate (e.g. 48000)
 
     const qint64 freeBytes = audioSink_->bytesFree();
     if (freeBytes > 0 && !pendingAudio_.isEmpty())
