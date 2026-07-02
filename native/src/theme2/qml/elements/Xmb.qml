@@ -208,7 +208,7 @@ Item {
         x: xmb.width * 0.58; width: xmb.width * 0.38
         // Start up near the category row and stop above the help bar, so long metadata (a big poster + a full
         // synopsis) can't run off the bottom of the screen. clip guarantees nothing draws past the panel.
-        y: xmb.crossY - xmb.iconSize * 0.4
+        y: xmb.crossY - xmb.iconSize * 1.1
         height: xmb.height * 0.90 - y
         clip: true
 
