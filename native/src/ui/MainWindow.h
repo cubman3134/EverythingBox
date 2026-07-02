@@ -120,6 +120,13 @@ private:
     // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
     bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
     void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
+    // Run a PC game's setup, monitor the installer process, and when it finishes locate the installed game
+    // (wherever the user pointed it) and launch it. gameDir is our extracted repack folder (a common install
+    // target); the installer's registered InstallLocation is also checked so custom paths are found.
+    void runPcInstaller(const QString& installer, const QString& id, const QString& title,
+                        const QString& thumb, const QString& gameDir);
+    void onPcInstallerFinished(const QString& id, const QString& title, const QString& thumb,
+                               const QString& gameDir, const QStringList& installLocations);
     void relaunchPcGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
     void promptLocatePcExe(const QString& id, const QString& title, const QString& thumb, const QString& startDir);
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a

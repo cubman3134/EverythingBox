@@ -28,6 +28,7 @@
 #include "RegistryBrowser.h"
 #include <QInputDialog>
 #include <QSettings>
+#include <QSet>
 #include <QLineEdit>
 #include <QUrl>
 #include <QDesktopServices>
@@ -98,6 +99,20 @@
 #include <QFileSystemWatcher>
 #include <QInputDialog>
 #include <QLineEdit>
+#endif
+
+// Win32 (PC-game installers): launch the setup via the shell so it can elevate (UAC), get a process handle,
+// and monitor it to completion. Included last so <windows.h>'s macros don't clobber the Qt headers above.
+#ifdef Q_OS_WIN
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+  #include <shellapi.h>
+  #include <QWinEventNotifier>
 #endif
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
@@ -2267,6 +2282,43 @@ static QString findGameExe(const QString& dir, const QString& title, bool titleM
     return QString();                         // an un-run installer repack: no game exe yet
 }
 
+#ifdef Q_OS_WIN
+// The Windows "Uninstall" registry roots where installers register their DisplayName + InstallLocation.
+static QStringList uninstallRoots()
+{
+    return {
+        QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+        QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+        QStringLiteral("HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+    };
+}
+// Snapshot every uninstall entry's full key path, so a before/after diff around an install reveals the
+// entry the setup just created - and thus where it installed the game.
+static QSet<QString> uninstallKeysSnapshot()
+{
+    QSet<QString> out;
+    for (const QString& root : uninstallRoots())
+    {
+        QSettings s(root, QSettings::NativeFormat);
+        for (const QString& g : s.childGroups()) out.insert(root + QLatin1Char('\\') + g);
+    }
+    return out;
+}
+// Where a specific uninstall entry says the app installed (InstallLocation, or the folder of DisplayIcon).
+static QString installLocationOf(const QString& fullKey)
+{
+    QSettings s(fullKey, QSettings::NativeFormat);
+    QString loc = s.value(QStringLiteral("InstallLocation")).toString().trimmed();
+    if (loc.isEmpty())
+    {
+        const QString icon = s.value(QStringLiteral("DisplayIcon")).toString().trimmed();
+        if (icon.contains(QStringLiteral(".exe"), Qt::CaseInsensitive))
+            loc = QFileInfo(icon.split(QLatin1Char(',')).first()).absolutePath();
+    }
+    return loc;
+}
+#endif
+
 namespace { QString safeFileName(const QString& title); } // defined in the anonymous namespace further below
 
 // Download a PC (Windows) game and hand it to the OS to run/install. The file (a repack installer, a portable
@@ -2384,11 +2436,7 @@ void MainWindow::openPcGame(const MediaItem& item)
             const QString installer = findInstaller(gameDir);
             if (!installer.isEmpty())
             {
-                PcGameStore::setInstallerRan(item.id, true);
-                RecentStore::add({ installer, item.title, QStringLiteral("pcgame"), item.thumbnailUrl, item.id });
-                mwLog(QStringLiteral("pcgame: launching installer %1").arg(QFileInfo(installer).fileName()));
-                notify(tr("Installing “%1”… run its setup, then open it again to play.").arg(item.title), 9000);
-                QDesktopServices::openUrl(QUrl::fromLocalFile(installer));
+                runPcInstaller(installer, item.id, item.title, item.thumbnailUrl, gameDir);
             }
             else
             {
@@ -2424,6 +2472,82 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     notify(tr("Launching “%1”…").arg(title), 5000);
     RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
     QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+}
+
+// Run a PC game's setup, watch the installer process, and when it closes find + launch the installed game.
+void MainWindow::runPcInstaller(const QString& installer, const QString& id, const QString& title,
+                                const QString& thumb, const QString& gameDir)
+{
+    PcGameStore::setInstallerRan(id, true);
+    RecentStore::add({ installer, title, QStringLiteral("pcgame"), thumb, id });
+    mwLog(QStringLiteral("pcgame: running installer %1").arg(QFileInfo(installer).fileName()));
+
+#ifdef Q_OS_WIN
+    const QSet<QString> before = uninstallKeysSnapshot();
+    // ShellExecuteEx runs setup through the shell so a manifest asking for elevation gets its UAC prompt
+    // (QProcess can't elevate), and SEE_MASK_NOCLOSEPROCESS hands us a handle we can watch to completion.
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
+    sei.lpVerb = nullptr;                       // default verb; the exe's manifest decides whether to elevate
+    const std::wstring wFile = installer.toStdWString();
+    const std::wstring wDir  = QFileInfo(installer).absolutePath().toStdWString();
+    sei.lpFile = wFile.c_str();
+    sei.lpDirectory = wDir.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (ShellExecuteExW(&sei) && sei.hProcess)
+    {
+        notify(tr("Installing “%1”… complete the setup window; I'll launch the game when it closes.").arg(title), 0);
+        HANDLE h = sei.hProcess;
+        auto* watch = new QWinEventNotifier(h, this);
+        connect(watch, &QWinEventNotifier::activated, this,
+                [this, watch, h, id, title, thumb, gameDir, before]() {
+            watch->setEnabled(false);
+            watch->deleteLater();
+            CloseHandle(h);
+            // Uninstall entries that appeared during setup point at where the game landed (Program Files, a
+            // custom path, or our folder).
+            QStringList locs;
+            const QSet<QString> after = uninstallKeysSnapshot();
+            for (const QString& k : after)
+                if (!before.contains(k)) { const QString l = installLocationOf(k); if (!l.isEmpty()) locs << l; }
+            mwLog(QStringLiteral("pcgame: installer for \"%1\" closed; %2 new install location(s)").arg(title).arg(locs.size()));
+            onPcInstallerFinished(id, title, thumb, gameDir, locs);
+        });
+        return;
+    }
+    mwLog(QStringLiteral("pcgame: ShellExecuteEx couldn't monitor the installer — opening without monitoring"));
+#endif
+    // Fallback (no handle / non-Windows): open it; we can't detect completion, so the next open resolves the
+    // installed exe.
+    notify(tr("Installing “%1”… run its setup, then open it again to play.").arg(title), 9000);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(installer));
+}
+
+// The installer closed: find the game it installed (its registered location, or our folder) and launch it.
+void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, const QString& thumb,
+                                       const QString& gameDir, const QStringList& installLocations)
+{
+    notify(tr("Setup finished — locating “%1”…").arg(title), 0);
+    QStringList roots = installLocations;
+    if (!gameDir.isEmpty()) roots << gameDir;
+    // Title-named exe first (skips redistributables the installer may also register), then any game exe.
+    QString exe;
+    for (const QString& r : roots) { exe = findGameExe(r, title, /*titleMatchOnly*/ true); if (!exe.isEmpty()) break; }
+    if (exe.isEmpty())
+        for (const QString& r : roots) { exe = findGameExe(r, title, false); if (!exe.isEmpty()) break; }
+
+    if (!exe.isEmpty())
+    {
+        PcGameStore::setExe(id, exe);
+        mwLog(QStringLiteral("pcgame: post-install exe for \"%1\" -> %2").arg(title, exe));
+        launchPcExe(exe, id, title, thumb);
+        return;
+    }
+    mwLog(QStringLiteral("pcgame: post-install couldn't locate \"%1\" — asking the user").arg(title));
+    const QString start = !installLocations.isEmpty() ? installLocations.first()
+                          : (gameDir.isEmpty() ? AppPaths::dataDir() + QStringLiteral("/games/pc") : gameDir);
+    promptLocatePcExe(id, title, thumb, start);
 }
 
 // Try to open an already-downloaded PC game without fetching it again. Returns true when it handled the open.
@@ -2462,15 +2586,7 @@ bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& titl
     if (!e.installerRan)
     {
         const QString inst = findInstaller(e.dir);
-        if (!inst.isEmpty())
-        {
-            PcGameStore::setInstallerRan(id, true);
-            mwLog(QStringLiteral("pcgame: running installer %1").arg(QFileInfo(inst).fileName()));
-            notify(tr("Installing “%1”… run its setup, then open it again to play.").arg(title), 9000);
-            RecentStore::add({ inst, title, QStringLiteral("pcgame"), thumb, id });
-            QDesktopServices::openUrl(QUrl::fromLocalFile(inst));
-            return true;
-        }
+        if (!inst.isEmpty()) { runPcInstaller(inst, id, title, thumb, e.dir); return true; }
     }
     promptLocatePcExe(id, title, thumb, e.dir);
     return true;
