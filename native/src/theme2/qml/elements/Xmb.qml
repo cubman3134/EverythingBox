@@ -212,8 +212,11 @@ Item {
         height: xmb.height * 0.90 - y
         clip: true
 
+        // Top block: poster, title, subtitle, facts (fixed, anchored to the top of the panel).
         Column {
-            anchors.fill: parent; spacing: xmb.height * 0.014
+            id: metaTop
+            anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+            spacing: xmb.height * 0.014
             Image {
                 width: parent.width * 0.36; height: Math.min(width * 1.4, meta.height * 0.38)
                 source: (meta.m && meta.m.image && xmb.host) ? xmb.host.resolve(meta.m.image) : ""
@@ -239,14 +242,43 @@ Item {
                 color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)
                 wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
             }
-            Text { // synopsis
-                width: parent.width; visible: !!meta.m.overview; text: meta.m.overview ? meta.m.overview : ""
-                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.0225)
-                wrapMode: Text.WordWrap; maximumLineCount: 6; elide: Text.ElideRight; lineHeight: 1.15
-            }
+        }
+        // "Favorited" pinned to the bottom of the panel.
+        Text {
+            id: favLine
+            anchors.left: parent.left; anchors.bottom: parent.bottom
+            visible: !!meta.m.favorite; text: "★  Favorited"
+            color: "#FFD66B"; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.021)
+        }
+        // Synopsis fills the space between the top block and the bottom. If the description is taller than that
+        // space, it auto-scrolls in place - pause at the top, ease down to the end, pause, ease back up, repeat -
+        // so the whole thing is readable without going off-screen.
+        Item {
+            id: synBox
+            anchors.top: metaTop.bottom; anchors.topMargin: xmb.height * 0.016
+            anchors.left: parent.left; anchors.right: parent.right
+            anchors.bottom: favLine.visible ? favLine.top : parent.bottom
+            anchors.bottomMargin: favLine.visible ? xmb.height * 0.008 : 0
+            clip: true
+            property real over: Math.max(0, synText.paintedHeight - height)
+            function restartScroll() { scroller.stop(); synText.y = 0; if (over > 2 && meta.shown) scroller.start() }
+            onOverChanged: restartScroll()
+            Component.onCompleted: restartScroll()
             Text {
-                visible: !!meta.m.favorite; text: "★  Favorited"
-                color: "#FFD66B"; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.021)
+                id: synText
+                width: parent.width; y: 0
+                visible: !!meta.m.overview; text: meta.m.overview ? meta.m.overview : ""
+                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.0225)
+                wrapMode: Text.WordWrap; lineHeight: 1.15
+                onPaintedHeightChanged: synBox.restartScroll() // new selection -> re-measure + restart at the top
+            }
+            SequentialAnimation {
+                id: scroller; loops: Animation.Infinite; running: false
+                PauseAnimation { duration: 1800 }
+                NumberAnimation { target: synText; property: "y"; to: -synBox.over
+                                  duration: Math.max(1500, synBox.over * 40); easing.type: Easing.InOutQuad }
+                PauseAnimation { duration: 1600 }
+                NumberAnimation { target: synText; property: "y"; to: 0; duration: 800; easing.type: Easing.InOutQuad }
             }
         }
     }
