@@ -2481,10 +2481,19 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
-            else if (fileProvider)
-                showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
-                             "minutes; if it never appears, there may be no copy.").arg(it.title), 10000);
-            else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
+            else {
+                // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
+                // on debrid — it names the title). Otherwise, for a file provider the source may still be
+                // caching; for anything else it's simply no usable link.
+                const QString notice = mgr_->takeStreamNotice();
+                if (!notice.isEmpty())
+                    showToast(notice, 12000);
+                else if (fileProvider)
+                    showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
+                                 "minutes; if it never appears, there may be no copy.").arg(it.title), 10000);
+                else
+                    showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
+            }
         });
         return;
     }

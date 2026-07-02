@@ -1184,10 +1184,18 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
                                   // timeout ends as an empty result so the caller can report an outcome
     { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [reply, base, cb] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, base, cb] {
         reply->deleteLater();
-        QString url, mime;
-        if (reply->error() == QNetworkReply::NoError) url = parseStreamJson(reply->readAll(), base, &mime);
+        QString url, mime, notice;
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            const QByteArray body = reply->readAll();
+            url = parseStreamJson(body, base, &mime);
+            // A "notice" accompanies an empty result when the addon has no link yet but a message for the
+            // user (e.g. Allarr just sent the release to debrid to cache). Stash it for the callback.
+            notice = QJsonDocument::fromJson(body).object().value(QStringLiteral("notice")).toString();
+        }
+        lastStreamNotice_ = notice;
         cb(url, mime);
     });
 }

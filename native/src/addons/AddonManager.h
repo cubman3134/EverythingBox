@@ -94,6 +94,10 @@ public:
     void resolveStream(LoadedAddon* src, const MediaItem& item,
                        std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
     QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
+    // The most recent /stream "notice" (e.g. a "caching started" message from Allarr), consumed once —
+    // empty when there was none. resolveStream sets it just before its callback, so a callback handed an
+    // empty url can surface WHY there's no link yet instead of a bare "no source".
+    QString takeStreamNotice() { const QString n = lastStreamNotice_; lastStreamNotice_.clear(); return n; }
     // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
     void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                                std::function<void(const QString& url)> cb);
@@ -169,6 +173,7 @@ private:
     QVector<LoadedAddon*> sources_;
     QNetworkAccessManager* nam_ = nullptr;      // remote-source HTTP (created lazily on the GUI thread)
     int reqCounter_ = 0;
+    QString lastStreamNotice_;                  // /stream "notice" from the last resolveStream (see takeStreamNotice)
 
     // Catalog browse/landing results (e.g. the console list) cached so re-opening a tab is instant instead of
     // re-fetching (a blocking HTTP GET or a JS getCatalog run). Populated from catalogReady for requestCatalog
