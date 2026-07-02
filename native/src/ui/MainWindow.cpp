@@ -2531,14 +2531,24 @@ QString MainWindow::locateInstalledGameExe(const QString& title, const QString& 
             if (pcTitleMatch(sub, title)) locations << d.absoluteFilePath(sub);
     }
 #endif
-    // 3) Our own extracted folder + the shared games/pc root (portable repacks / pre-store installs).
+    // 3) Our own extracted folder (this game's own dir).
     if (!gameDir.isEmpty()) locations << gameDir;
-    locations << AppPaths::dataDir() + QStringLiteral("/games/pc");
 
-    // Title-named exe first (skips bundled redistributables), then any game exe, across all candidates.
-    for (const QString& loc : locations) { const QString e = findGameExe(loc, title, /*titleMatchOnly*/ true); if (!e.isEmpty()) return e; }
-    for (const QString& loc : locations) { const QString e = findGameExe(loc, title, false); if (!e.isEmpty()) return e; }
-    return QString();
+    // These candidates are all THIS game's own folders (a matched install location / its extracted dir), so a
+    // "largest game exe" fallback is safe. But never the shared games/pc root - it holds OTHER games, and the
+    // largest exe there would be some unrelated game (that's how "Warhammer" once launched Rift Wizard).
+    const QString pcRoot = QDir(AppPaths::dataDir() + QStringLiteral("/games/pc")).absolutePath();
+    QStringList specific;
+    for (const QString& loc : locations)
+        if (QDir(loc).absolutePath() != pcRoot) specific << loc;
+
+    // Title-named exe first (skips bundled redistributables), then the largest game exe - within this game's
+    // own folders only.
+    for (const QString& loc : specific) { const QString e = findGameExe(loc, title, /*titleMatchOnly*/ true); if (!e.isEmpty()) return e; }
+    for (const QString& loc : specific) { const QString e = findGameExe(loc, title, false); if (!e.isEmpty()) return e; }
+    // Shared games/pc root: only ever a title-named match (portable repacks / pre-store installs), never the
+    // arbitrary largest exe.
+    return findGameExe(pcRoot, title, /*titleMatchOnly*/ true);
 }
 
 // Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
