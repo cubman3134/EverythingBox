@@ -1157,7 +1157,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     {
         mwLog(QStringLiteral("game: launching in split pane"));
         splitTarget_->openGame(corePath, rom, core);
-        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key });
+        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
         finishSplitOpen();
         return;
     }
@@ -1172,7 +1172,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     {
         mwLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         stack_->setCurrentWidget(retro_);
-        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key });
+        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
     }
     else
     {
@@ -1203,7 +1203,7 @@ void MainWindow::ensureEmu()
         emuStopBtn_->setVisible(true);
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
             RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
-                               pendingEmuThumb_, pendingEmuKey_ });
+                               pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_ });
         // Step aside so the emulator is unobstructed and in front; we restore when it exits. (Our window is
         // often full screen and would otherwise sit on top of the freshly-launched emulator.)
         emuReturnState_ = windowState();
@@ -1268,11 +1268,11 @@ void MainWindow::launchExternalGame(const GameSystem* sys, const QString& rom, c
         statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
         finishSplitOpen();
     }
-    runEmulator(*em, rom, title, thumb, key);
+    runEmulator(*em, rom, title, thumb, key, sys->id);
 }
 
 void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, const QString& title,
-                             const QString& thumb, const QString& key)
+                             const QString& thumb, const QString& key, const QString& system)
 {
     ensureEmu();
     if (emu_->busy())
@@ -1286,7 +1286,7 @@ void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, con
     book_->persist(); pdf_->persist(); comic_->persist();
     clearAudioQueue();
 
-    pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key;
+    pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
     ensureEmuPage();
     emuLabel_->setText(EmulatorManager::isInstalled(em)
                            ? tr("Starting %1…").arg(em.displayName)
@@ -2153,7 +2153,15 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
     else if (kind == QStringLiteral("audio"))    openAudioPath(path);
-    else if (kind == QStringLiteral("game"))     openGamePath(path, title, thumb, resumeKey); // keep its name/cover
+    else if (kind == QStringLiteral("game"))
+    {
+        // Re-open with the console the game was launched with, so a shared extension (.iso/.cue/.chd/.bin)
+        // isn't mis-resolved by extension alone. Look it up from the Recent entry (by stable key, else path).
+        QString sysId;
+        for (const RecentItem& r : RecentStore::list())
+            if ((!resumeKey.isEmpty() && r.key == resumeKey) || r.path == path) { sysId = r.system; break; }
+        openGamePath(path, title, thumb, resumeKey, sysId); // keep its name/cover + console
+    }
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
 }
 
@@ -2828,7 +2836,7 @@ void MainWindow::startNextDownload()
     if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) // skip existing, but make sure it's in Recent
     {
         mwLog(QStringLiteral("download(library): \"%1\" already downloaded — skipping").arg(item.title));
-        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id });
+        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, item.systemHint });
         startNextDownload();
         return;
     }
@@ -2860,7 +2868,7 @@ void MainWindow::startNextDownload()
     });
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, dest, kind, title = item.title, thumb = item.thumbnailUrl, id = item.id] {
+            [this, reply, dest, kind, title = item.title, thumb = item.thumbnailUrl, id = item.id, sysHint = item.systemHint] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
@@ -2885,7 +2893,7 @@ void MainWindow::startNextDownload()
         if (QFile::rename(dest + QStringLiteral(".part"), dest))
         {
             mwLog(QStringLiteral("download(library): saved \"%1\" (%2 bytes)").arg(title).arg(body.size()));
-            RecentStore::add({ dest, title, kind, thumb, id }); // appears in Recent, re-openable offline
+            RecentStore::add({ dest, title, kind, thumb, id, sysHint }); // appears in Recent, re-openable offline
         }
         startNextDownload();
     });

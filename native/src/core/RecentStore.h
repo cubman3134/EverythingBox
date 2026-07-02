@@ -9,10 +9,13 @@ struct RecentItem
 {
     QString path;   // absolute file path / URL to re-open
     QString title;  // display label
-    QString kind;   // "video" | "audio" | "document" | "game"
+    QString kind;   // "video" | "audio" | "document" | "game" | "pcgame"
     QString thumb;  // optional poster image (path or http url); empty -> a type placeholder is drawn
     QString key;    // stable identity for resume + de-dup (e.g. an addon item id); empty -> use path. A
                     // streamed item's URL changes each session, so resume/de-dup key on this instead.
+    QString system; // games only: the resolved SystemCatalog id (e.g. "psx", "gc") the game launched with,
+                    // so re-opening picks the right console instead of guessing from a shared extension
+                    // (.iso/.cue/.chd/.bin). Empty for non-games / legacy entries.
 };
 
 namespace RecentStore

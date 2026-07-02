@@ -40,6 +40,7 @@ QVector<RecentItem> RecentStore::list()
         it.kind  = o.value(QStringLiteral("kind")).toString();
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
+        it.system = o.value(QStringLiteral("system")).toString();
         if (!it.path.isEmpty()) out.push_back(it);
     }
     return out;
@@ -68,6 +69,7 @@ void RecentStore::add(const RecentItem& item)
         o.insert(QStringLiteral("kind"), it.kind);
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
+        if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
         arr.append(o);
     }
     store().setValue(recentsKey(),
@@ -94,6 +96,7 @@ void RecentStore::remove(const QString& pathOrKey)
         o.insert(QStringLiteral("kind"), it.kind);
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
+        if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
         arr.append(o);
     }
     store().setValue(recentsKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));

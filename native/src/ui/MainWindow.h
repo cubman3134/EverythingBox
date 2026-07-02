@@ -129,7 +129,7 @@ private:
     // Run a standalone emulator: stop our playback, show the wait page, minimise, and launch (auto-installing
     // if needed). rom empty => open the emulator's own UI (e.g. TeknoParrot, or another emulator for setup).
     void runEmulator(const ExternalEmulator& em, const QString& rom = QString(), const QString& title = QString(),
-                     const QString& thumb = QString(), const QString& key = QString());
+                     const QString& thumb = QString(), const QString& key = QString(), const QString& system = QString());
     void ensureEmu();        // lazily create EmulatorManager + wire its signals
     void ensureEmuPage();    // lazily build the "playing in <emulator>" wait page
     void openEmulatorManager(); // Settings > Emulators: folder + per-emulator install status
@@ -222,7 +222,7 @@ private:
     QWidget* emuPage_ = nullptr;
     QLabel* emuLabel_ = nullptr;
     QPushButton* emuStopBtn_ = nullptr;
-    QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_; // Recent entry, added on launch
+    QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     Qt::WindowStates emuReturnState_ = Qt::WindowNoState; // our window state to restore after the emulator exits
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)

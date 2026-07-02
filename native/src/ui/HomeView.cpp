@@ -448,8 +448,10 @@ static QString recentGroupKey(const RecentItem& r)
         return QStringLiteral("game:") + QObject::tr("PC (Windows)");
     if (r.kind == QStringLiteral("game"))
     {
-        const QString ext = QFileInfo(r.path).suffix().toLower();
-        const GameSystem* sys = SystemCatalog::forExtension(ext);
+        // Prefer the console the game was launched with (stored on the entry); fall back to the extension
+        // for legacy entries that predate that.
+        const GameSystem* sys = r.system.isEmpty() ? nullptr : SystemCatalog::byId(r.system);
+        if (!sys) sys = SystemCatalog::forExtension(QFileInfo(r.path).suffix().toLower());
         return QStringLiteral("game:") + (sys ? sys->name : QObject::tr("Game"));
     }
     return r.kind; // video / audio / document
