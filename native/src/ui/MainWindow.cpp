@@ -2229,6 +2229,28 @@ static QString filenameFromContentDisposition(const QString& cd)
     return QString();
 }
 
+// An .exe that isn't the game or its main installer: an uninstaller, a bundled redistributable (VC++, DirectX,
+// .NET/NDP, OpenAL), or a crash handler. Skipped when hunting for the installer or the game exe. base is the
+// lowercased file name.
+static bool isCruftExe(const QString& base)
+{
+    static const char* pats[] = { "unins", "redist", "vcredist", "vc_redist", "directx", "dxsetup",
+        "dxwebsetup", "dotnet", "dotnetfx", "netfx", "ndp", "oalinst", "crashreport", "crashpad",
+        "notification_helper", "uninstall" };
+    for (const char* p : pats) if (base.contains(QLatin1String(p))) return true;
+    return false;
+}
+
+// A downloaded/extracted .exe that's actually an installer (GOG "setup_<game>_….exe", Inno "setup.exe",
+// *installer*, …) rather than the game itself - run it as setup, then locate the installed game.
+static bool looksLikeInstaller(const QString& fileName)
+{
+    const QString b = QFileInfo(fileName).fileName().toLower();
+    return b.startsWith(QStringLiteral("setup")) || b.startsWith(QStringLiteral("install"))
+        || b.startsWith(QStringLiteral("gog_")) || b.contains(QStringLiteral("installer"))
+        || b.contains(QStringLiteral("_setup"));
+}
+
 // Find the installer to launch inside an extracted repack: prefer setup.exe, else the largest .exe that
 // isn't obvious cruft (an uninstaller or a bundled redistributable). Empty if there's no runnable .exe.
 static QString findInstaller(const QString& dir)
@@ -2241,10 +2263,7 @@ static QString findInstaller(const QString& dir)
         const QString p = it.next();
         const QString base = QFileInfo(p).fileName().toLower();
         if (base == QStringLiteral("setup.exe")) return p; // the repack installer
-        if (base.contains(QStringLiteral("unins")) || base.contains(QStringLiteral("redist"))
-            || base.contains(QStringLiteral("vcredist")) || base.contains(QStringLiteral("directx"))
-            || base.contains(QStringLiteral("dxsetup")) || base.contains(QStringLiteral("dotnet")))
-            continue;
+        if (isCruftExe(base)) continue;
         const qint64 sz = QFileInfo(p).size();
         if (sz > bestSize) { bestSize = sz; best = p; }
     }
@@ -2271,11 +2290,8 @@ static QString findGameExe(const QString& dir, const QString& title, bool titleM
         const QString p = it.next();
         const QString base = QFileInfo(p).fileName().toLower();
         if (base == QStringLiteral("setup.exe")) { hasSetup = true; continue; }
-        if (base.contains(QStringLiteral("unins")) || base.contains(QStringLiteral("redist"))
-            || base.contains(QStringLiteral("vcredist")) || base.contains(QStringLiteral("directx"))
-            || base.contains(QStringLiteral("dxsetup")) || base.contains(QStringLiteral("dotnet"))
-            || base.contains(QStringLiteral("crashreport")) || base.contains(QStringLiteral("crashpad")))
-            continue;
+        if (looksLikeInstaller(base)) { hasSetup = true; continue; } // e.g. setup_<game>_….exe (GOG) is setup
+        if (isCruftExe(base)) continue;
         const qint64 sz = QFileInfo(p).size();
         const QString stem = normAlnum(QFileInfo(p).completeBaseName());
         if (!want.isEmpty() && !stem.isEmpty() && (stem == want || stem.contains(want) || want.contains(stem)))
@@ -2463,17 +2479,16 @@ void MainWindow::openPcGame(const MediaItem& item)
             return;
         }
 
-        // A direct download. A portable/standalone game .exe is the game itself - remember it so re-opening
-        // runs it straight away. A bare setup.exe is an installer (run it once); anything else (a lone file)
-        // opens with the OS default.
-        const QString base = QFileInfo(dest).fileName().toLower();
-        if (QFileInfo(dest).suffix().toLower() == QStringLiteral("exe") && base != QStringLiteral("setup.exe"))
+        // A direct download. An installer .exe (GOG "setup_<game>_….exe", Inno "setup.exe", …) is run as
+        // setup, then we locate the installed game. A portable/standalone game .exe IS the game - remember it
+        // so re-opening runs it straight away. Anything else opens with the OS default.
+        if (QFileInfo(dest).suffix().toLower() == QStringLiteral("exe"))
         {
+            if (looksLikeInstaller(dest)) { runPcInstaller(dest, item.id, item.title, item.thumbnailUrl, dir); return; }
             PcGameStore::setExe(item.id, dest);
             launchPcExe(dest, item.id, item.title, item.thumbnailUrl);
             return;
         }
-        if (base == QStringLiteral("setup.exe")) PcGameStore::setInstallerRan(item.id, true);
         RecentStore::add({ dest, item.title, QStringLiteral("pcgame"), item.thumbnailUrl, item.id });
         notify(tr("Opening “%1”…").arg(item.title), 5000);
         QDesktopServices::openUrl(QUrl::fromLocalFile(dest));
@@ -2629,8 +2644,10 @@ void MainWindow::onPcInstallerFinished(const QString& id, const QString& title, 
 bool MainWindow::tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb)
 {
     const PcGameStore::Entry e = PcGameStore::get(id);
-    // 1) We already know the game exe - just run it.
-    if (!e.exe.isEmpty() && QFileInfo::exists(e.exe)) { launchPcExe(e.exe, id, title, thumb); return true; }
+    // 1) We already know the game exe - just run it. (Ignore a stored path that's actually an installer, from
+    //    before installer-named .exes were detected: fall through to re-locate the real game below.)
+    if (!e.exe.isEmpty() && QFileInfo::exists(e.exe) && !looksLikeInstaller(e.exe))
+    { launchPcExe(e.exe, id, title, thumb); return true; }
 
     // 2) Find it wherever it installed - the installer's registered location, C:\GOG Games\<Title>, Program
     //    Files, our extracted folder, etc. Handles installs outside our folder and pre-store installs.
