@@ -55,6 +55,7 @@
 #include <QApplication>
 #include <QPushButton>
 #include <QProgressBar>
+#include <QProcess>
 #include <QAbstractButton>
 #include <QSlider>
 #include <QLabel>
@@ -2547,7 +2548,15 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     notify(tr("Launching “%1”…").arg(title), 5000);
     RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
     DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
-    QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+    // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
+    // config relative to the CWD and silently fail to start if it's ours. Fall back to the shell (which can
+    // elevate) only if the direct launch can't start.
+    const QString workDir = QFileInfo(exe).absolutePath();
+    if (!QProcess::startDetached(exe, QStringList(), workDir))
+    {
+        mwLog(QStringLiteral("pcgame: startDetached failed for \"%1\" — falling back to shell open").arg(QFileInfo(exe).fileName()));
+        QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+    }
 }
 
 // Run a PC game's setup, watch the installer process, and when it closes find + launch the installed game.
