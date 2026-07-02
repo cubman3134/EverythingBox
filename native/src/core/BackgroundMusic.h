@@ -21,6 +21,10 @@ public:
     void setEnabled(bool on);       // master on/off (the Settings toggle)
     void setVolume(int pct);        // 0..100
     bool hasTracks() const { return !tracks_.isEmpty(); }
+    QString currentTitle() const { return title_; } // the playing track's name (empty if none)
+
+signals:
+    void nowPlayingChanged(const QString& title); // the track changed (or cleared)
 
 private:
     void applyState();              // play or pause based on enabled_ && active_ && hasTracks()
@@ -29,6 +33,7 @@ private:
     QMediaPlayer* player_ = nullptr;
     QAudioOutput* out_ = nullptr;
     QStringList tracks_;
+    QString title_;                 // display name of the current track (for the "now playing" readout)
     int idx_ = -1;
     bool active_ = false;
     bool enabled_ = true;

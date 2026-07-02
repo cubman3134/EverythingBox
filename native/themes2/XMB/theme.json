@@ -12,6 +12,9 @@
         { "type": "datetime", "id": "clock", "pos": [0.97, 0.08], "size": [0.32, 0.05], "origin": [1, 0.5],
           "format": "ddd d MMM    hh:mm", "color": "#E8EEF8", "fontSize": 0.028, "align": "right", "opacity": 0.85 },
 
+        { "type": "nowplaying", "id": "np", "pos": [0.97, 0.135], "size": [0.34, 0.042], "origin": [1, 0.5], "zIndex": 2,
+          "color": "#AFC0DE", "fontSize": 0.023, "align": "right", "prefix": "♪  " },
+
         { "type": "xmb", "id": "cross", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 2,
           "color": "#FFFFFF", "subColor": "#C6CEDC", "descColor": "#9AA8C4",
           "crossX": 0.22, "crossY": 0.32, "catSpacing": 0.135, "itemSpacing": 0.10, "iconSize": 0.12 },

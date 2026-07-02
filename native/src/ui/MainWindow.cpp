@@ -330,6 +330,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Menu background music (RetroBat-style): plays while browsing, pauses on games/video. Follow the view.
     bgm_ = new BackgroundMusic(this);
     connect(stack_, &QStackedWidget::currentChanged, this, [this] { updateBackgroundMusic(); });
+    connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
 #ifdef MMV_HAVE_QML
@@ -1749,6 +1750,7 @@ void MainWindow::showThemedHome()
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
     QWidget* old = themedHome_;
     themedHome_ = w;
+    updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     w->setFocus();
@@ -1999,6 +2001,7 @@ void MainWindow::showThemedXmb()
     }
     QWidget* old = themedHome_;
     themedHome_ = w;
+    updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
     w->setFocus();
@@ -3527,6 +3530,14 @@ void MainWindow::updateBackgroundMusic()
     QWidget* w = stack_->currentWidget();
     const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
     bgm_->setActive(menu);
+}
+
+// Push the current track name into the themed home so the Triple theme's "now playing" readout shows it.
+void MainWindow::updateThemedNowPlaying()
+{
+    if (!themedHome_ || !bgm_) return;
+    if (QQuickItem* r = ThemeEngine::rootItem(themedHome_))
+        r->setProperty("nowPlaying", bgm_->currentTitle());
 }
 
 void MainWindow::openSettingsHub()

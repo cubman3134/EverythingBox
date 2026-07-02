@@ -6,6 +6,7 @@
 #include <QAudioOutput>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QUrl>
 #include <QRandomGenerator>
 
@@ -50,6 +51,7 @@ void BackgroundMusic::reload()
     for (int i = tracks_.size() - 1; i > 0; --i) // Fisher-Yates shuffle
         tracks_.swapItemsAt(i, QRandomGenerator::global()->bounded(i + 1));
     idx_ = tracks_.isEmpty() ? -1 : 0;
+    if (tracks_.isEmpty() && !title_.isEmpty()) { title_.clear(); emit nowPlayingChanged(title_); }
     applyState(); // start playing if we're on a menu and just found tracks (won't interrupt a current one)
 }
 
@@ -59,6 +61,8 @@ void BackgroundMusic::playIndex(int i)
     idx_ = ((i % tracks_.size()) + tracks_.size()) % tracks_.size(); // wrap
     player_->setSource(QUrl::fromLocalFile(tracks_[idx_]));
     player_->play();
+    title_ = QFileInfo(tracks_[idx_]).completeBaseName();
+    emit nowPlayingChanged(title_);
 }
 
 void BackgroundMusic::applyState()
@@ -76,5 +80,10 @@ void BackgroundMusic::applyState()
 }
 
 void BackgroundMusic::setActive(bool on)  { if (active_ == on) return; active_ = on; applyState(); }
-void BackgroundMusic::setEnabled(bool on) { enabled_ = on; applyState(); }
+void BackgroundMusic::setEnabled(bool on)
+{
+    enabled_ = on;
+    if (!on && !title_.isEmpty()) { title_.clear(); emit nowPlayingChanged(title_); } // hide the readout when off
+    applyState();
+}
 void BackgroundMusic::setVolume(int pct)  { out_->setVolume(qBound(0, pct, 100) / 100.0); }

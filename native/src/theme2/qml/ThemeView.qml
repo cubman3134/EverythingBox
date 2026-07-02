@@ -54,6 +54,8 @@ Item {
     property bool actionFav: false
     property int actionItem: -1
 
+    property string nowPlaying: "" // current background-music track name (host-set; the "nowplaying" element reads it)
+
     // Bottom-bar buttons (e.g. the Channels theme's Settings/Profile corner buttons) join keyboard/controller
     // navigation: pressing Down at the bottom of the grid moves focus into this "button zone". buttonList is
     // the view's `button` actions left-to-right; buttonIndex is the cursor; focusedButtonAction is what a
@@ -234,7 +236,7 @@ Item {
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
-        "channels": "Channels", "clock": "Clock"
+        "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
