@@ -2461,7 +2461,9 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             else if (!err.isEmpty())
                 showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
             else
-                showToast(tr("The file provider (Allarr) has no copy of “%1”.").arg(title), 7000);
+                showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
+                             "less-common titles take a while). Try again in a few minutes; if it never "
+                             "appears, there may be no copy.").arg(title), 10000);
         });
         return;
     }
@@ -2479,6 +2481,9 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
+            else if (fileProvider)
+                showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
+                             "minutes; if it never appears, there may be no copy.").arg(it.title), 10000);
             else showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
         });
         return;
