@@ -685,6 +685,24 @@ void MainWindow::toggleFullScreen()
     if (stack_->currentWidget() == playerPage_) revealMediaControls();
 }
 
+// Focusable widgets of a layout in visual (top-to-bottom) order, recursing into nested layouts / container
+// widgets. Used to build the panel's arrow-nav order so it matches what the user sees (findChildren doesn't
+// guarantee order, which let the focused row fall out of the ring and jump focus to Back).
+static void collectPanelRows(QLayout* lay, QVector<QWidget*>& out)
+{
+    if (!lay) return;
+    for (int i = 0; i < lay->count(); ++i)
+    {
+        QLayoutItem* it = lay->itemAt(i);
+        if (QWidget* wdg = it->widget())
+        {
+            if (wdg->isVisible() && (wdg->focusPolicy() & Qt::TabFocus)) out.push_back(wdg);
+            else if (wdg->layout()) collectPanelRows(wdg->layout(), out);
+        }
+        else if (QLayout* sub = it->layout()) collectPanelRows(sub, out);
+    }
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* e)
 {
     // Esc leaves full screen (the emulator view consumes its own Esc for the pause menu, so this only
@@ -705,22 +723,22 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         if (!editing)
         {
             const int key = e->key();
-            const bool prev = (key == Qt::Key_Up   || key == Qt::Key_Left);
-            const bool next = (key == Qt::Key_Down || key == Qt::Key_Right);
+            // Only Up/Down move between rows (a vertical list). Left/Right do nothing here - so, e.g., they
+            // never nudge focus off the header Back button, and a focused slider keeps them for its own use.
+            const bool prev = (key == Qt::Key_Up);
+            const bool next = (key == Qt::Key_Down);
             if (prev || next)
             {
+                // A strict top-to-bottom list: Back at the top, then the rows in order. Down stops at the last
+                // row, Up stops at Back - never wraps around.
                 QVector<QWidget*> ring;
-                if (panelBack_) ring.push_back(panelBack_);          // index 0: header Back
-                if (QWidget* w = panelScroll_->widget())
-                    for (QWidget* c : w->findChildren<QWidget*>())
-                        if (c->isVisibleTo(w) && (c->focusPolicy() & Qt::TabFocus))
-                            ring.push_back(c);
+                if (panelBack_) ring.push_back(panelBack_);
+                if (QWidget* w = panelScroll_->widget()) collectPanelRows(w->layout(), ring);
                 if (!ring.isEmpty())
                 {
                     int idx = ring.indexOf(fw);
-                    if (idx < 0) idx = next ? 0 : ring.size() - 1; // focus was elsewhere -> grab an end
-                    else         idx = qBound(0, idx + (next ? 1 : -1), ring.size() - 1); // clamp (never wrap off)
-                    ring[idx]->setFocus(Qt::TabFocusReason);
+                    if (idx < 0) ring.first()->setFocus(Qt::TabFocusReason);           // off-list -> land on Back
+                    else         ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
                 }
                 return;
             }
@@ -3443,10 +3461,9 @@ QWidget* MainWindow::firstPanelRow() const
 {
     QWidget* w = panelScroll_->widget();
     if (!w) return nullptr;
-    for (QWidget* child : w->findChildren<QWidget*>())
-        if (child->isVisibleTo(w) && (child->focusPolicy() & Qt::TabFocus))
-            return child;
-    return nullptr;
+    QVector<QWidget*> rows;
+    collectPanelRows(w->layout(), rows);      // visual order, so the first row is the topmost one
+    return rows.isEmpty() ? nullptr : rows.first();
 }
 
 void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
@@ -3492,9 +3509,9 @@ void MainWindow::openSettingsHub()
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
 #if !defined(Q_OS_ANDROID)
-        add(tr("Emulators"),          [this] { openEmulatorManager(); });   // standalone emulators (Dolphin…) - desktop only
+        add(tr("Stand Alone Emulators Settings"), [this] { openEmulatorManager(); }); // standalone emulators (Dolphin…) - desktop only
 #endif
-        add(tr("Emulator Settings…"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
+        add(tr("Libretro Emulator Settings"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
     }, [this] {
