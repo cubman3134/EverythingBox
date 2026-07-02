@@ -200,9 +200,51 @@ void RetroView::publishFrame() // worker -> GUI handoff
     QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
 }
 
+// Held state of the menu-relevant pad buttons, OR-ed across every connected controller.
+int RetroView::menuPadMask() const
+{
+    auto any = [this](unsigned id) {
+        for (unsigned p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad_.button(p, id)) return true;
+        return false;
+    };
+    int m = 0;
+    if (any(RETRO_DEVICE_ID_JOYPAD_UP))   m |= 1;
+    if (any(RETRO_DEVICE_ID_JOYPAD_DOWN)) m |= 2;
+    if (any(RETRO_DEVICE_ID_JOYPAD_A) || any(RETRO_DEVICE_ID_JOYPAD_B)) m |= 4; // either face button confirms
+    return m;
+}
+
+// Controller navigation for the open pause menu: d-pad Up/Down move (wrapping), A/B activate. Rising-edge
+// only so a held direction doesn't race through the short list.
+void RetroView::handleMenuPad()
+{
+    const int cur = menuPadMask();
+    const int pressed = cur & ~menuPadPrev_;
+    menuPadPrev_ = cur;
+    if (menuButtons_.isEmpty()) return;
+    int idx = menuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+    if (idx < 0) idx = 0;
+    if      (pressed & 1) menuButtons_[(idx + menuButtons_.size() - 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
+    else if (pressed & 2) menuButtons_[(idx + 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
+    if (pressed & 4)
+    {
+        if (auto* b = qobject_cast<QPushButton*>(focusWidget())) b->click();
+        else menuButtons_.first()->click();
+    }
+}
+
 void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publish a snapshot for the worker
 {
     pad_.poll();
+    // Start+Select toggles the pause menu, so a controller-only player can open it (and close it).
+    const bool combo = [this] {
+        auto any = [this](unsigned id) { for (unsigned p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad_.button(p, id)) return true; return false; };
+        return any(RETRO_DEVICE_ID_JOYPAD_START) && any(RETRO_DEVICE_ID_JOYPAD_SELECT);
+    }();
+    if (combo && !menuComboPrev_) toggleMenu();
+    menuComboPrev_ = combo;
+    if (menu_ && menu_->isVisible()) { handleMenuPad(); return; } // menu up: the pad drives it, not the game
+
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
     int btn[4] = { 0, 0, 0, 0 }; int16_t ax[4][2][2] = {};
@@ -264,6 +306,7 @@ void RetroView::showMenu()
     menu_->show();
     menu_->raise();
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason); // arrow keys work at once
+    menuPadPrev_ = menuPadMask(); // seed edge state so buttons held while opening aren't read as a press
 }
 
 void RetroView::hideMenu()

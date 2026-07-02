@@ -112,6 +112,10 @@ private:
     QFrame* menu_ = nullptr;        // Esc pause menu overlay
     QLabel* menuStatus_ = nullptr;  // save/load feedback inside the menu
     QVector<QPushButton*> menuButtons_; // Resume/Save/Load/Exit, in order, for arrow-key + Enter navigation
+    int menuPadPrev_ = 0;               // previous frame's menu d-pad/confirm mask (edge detection)
+    bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
+    int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad
+    void handleMenuPad();               // drive the pause menu from the controller while it's open
 
     int turboMask_[4] = { 0, 0, 0, 0 }; // per port: bit set = that RetroPad button auto-fires
     int turboHalfPeriod_ = 3; // frames the autofire stays on (and off) each cycle
