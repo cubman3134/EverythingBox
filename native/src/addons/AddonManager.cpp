@@ -1180,6 +1180,8 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
     QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id, attempt));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(90000); // debrid-resolving a torrent can be slow, but must not hang forever - a
+                                  // timeout ends as an empty result so the caller can report an outcome
     { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [reply, base, cb] {

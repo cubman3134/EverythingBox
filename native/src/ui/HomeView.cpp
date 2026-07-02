@@ -2036,7 +2036,7 @@ void HomeView::activateItem(int row)
         const MediaItem item = it; // copy for the async callback
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
-        showToast(tr("Finding a source for “%1”…").arg(it.title), 30000);
+        showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
         mgr_->resolveStream(addon, item, [this, addon, item, fileProvider](const QString& url, const QString& mime) {
             if (!url.isEmpty()) { hideToast(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
             else { hideToast(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
@@ -2086,7 +2086,7 @@ void HomeView::startDownload()
     dlQueued_ = 0;
     dlBusy_ = true;
     showToast(top.item.expandable ? tr("Preparing downloads for “%1”…").arg(top.item.title)
-                                  : tr("Preparing download for “%1”…").arg(top.item.title), 30000);
+                                  : tr("Preparing download for “%1”…").arg(top.item.title), 0);
     dlNext();
 }
 
@@ -2452,7 +2452,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         }
         if (query.isEmpty()) query = it.title;
         const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
-        showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 30000);
+        showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
         mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
@@ -2474,7 +2474,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
           : (it.type == QStringLiteral("movie") || it.type == QStringLiteral("series"))
                                                ? tr("Finding a stream for “%1”…").arg(it.title)
                                                : tr("Looking for “%1”…").arg(it.title);
-        showToast(lookingMsg, 30000);
+        showToast(lookingMsg, 0);
         if (playBtn_) playBtn_->setEnabled(false);
         mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
@@ -2487,7 +2487,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     {
         lastPlay_ = { nullptr, it, true, imdbType, imdbId, 0 };
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
-        showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
+        showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
@@ -2571,7 +2571,7 @@ void HomeView::playThemedLeaf(int idx)
             || it.type == QStringLiteral("series") || it.type == QStringLiteral("tv"));
     if (needsImdb)
     {
-        showToast(tr("Finding a stream for “%1”…").arg(it.title), 30000);
+        showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         themedPlayAddon_ = addon; themedPlayItem_ = it; themedPlayConsole_ = console;
         themedPlayReq_ = mgr_->requestMeta(addon, it);
         return;
