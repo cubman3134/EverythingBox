@@ -58,6 +58,8 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QWindow>
+#include <QQuickWindow>
+#include <QPointer>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QProcess>
@@ -1833,10 +1835,55 @@ void MainWindow::openHome()
 void MainWindow::showHomeScreen()
 {
 #ifdef MMV_HAVE_QML
-    if (themedHomeEnabled()) { showThemedHome(); return; }
+    if (themedHomeEnabled())
+    {
+        // Re-show the EXISTING themed view instead of rebuilding its native QQuickView when the theme hasn't
+        // changed: recreating the view on every return (e.g. leaving Settings) is what leaves it painting
+        // black. Theme changes are saved but only applied here, so rebuild when the setting differs.
+        const QString curTheme = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        if (themedHome_ && stack_->indexOf(themedHome_) >= 0 && themedHomeBuiltTheme_ == curTheme)
+        {
+            stack_->setCurrentWidget(themedHome_);
+            themedHome_->setFocus();
+            nudgeThemedHome(); // make sure the re-shown surface actually paints
+        }
+        else
+        {
+            showThemedHome();  // first time, or the theme changed -> (re)build
+        }
+        return;
+    }
 #endif
     stack_->setCurrentWidget(home_);
 }
+
+#ifdef MMV_HAVE_QML
+// After switching to the themed home, make sure its QQuickView actually paints. A native-child QQuickView
+// (createWindowContainer) that's (re)shown while the top-level window is ALREADY visible can miss its platform
+// expose event, so isExposed() stays false and Qt's render loop never paints it — a black screen. Toggling the
+// window's visibility forces a fresh expose. Gated to skip the very first show (the top-level's own show()
+// exposes it then), so we never disturb normal startup.
+void MainWindow::nudgeThemedHome()
+{
+    if (!themedHome_) return;
+    auto* win = qobject_cast<QQuickWindow*>(themedHome_->property("mmvQuickView").value<QObject*>());
+    if (!win) return;
+    const bool first = !themedHomeShownOnce_;
+    themedHomeShownOnce_ = true;
+    QPointer<QQuickWindow> wp(win);
+    auto force = [wp, first] {
+        if (!wp) return;
+        if (!first && !wp->isExposed()) { wp->setVisible(false); wp->setVisible(true); } // force a fresh expose
+        wp->requestUpdate();
+    };
+    force();
+    QTimer::singleShot(40,  this, force);
+    QTimer::singleShot(160, this, force);
+    QTimer::singleShot(320, this, force);
+}
+#else
+void MainWindow::nudgeThemedHome() {}
+#endif
 
 bool MainWindow::themedHomeEnabled() const
 {
@@ -1868,6 +1915,7 @@ void MainWindow::showThemedHome()
         const QStringList themes = ThemeEngine::availableThemes();
         QString tn = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
         if (!themes.contains(tn)) tn = themes.value(0, QStringLiteral("Default"));
+        themedHomeBuiltTheme_ = tn; // remember what we built, so showHomeScreen can reuse vs. rebuild
         if (ThemeEngine::homeIsXmb(ThemeEngine::themesRoot() + QStringLiteral("/") + tn)) { showThemedXmb(); return; }
     }
     themedHomeIsXmb_ = false;
@@ -1939,6 +1987,7 @@ void MainWindow::showThemedHome()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
+    nudgeThemedHome(); // force the freshly-built QQuickView to paint (anti-black on rebuild)
 
     // Hot-reload: rebuild the themed home whenever its theme.json is edited (while it's the visible screen).
     if (!themeWatcher_)
@@ -2191,6 +2240,7 @@ void MainWindow::showThemedXmb()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
+    nudgeThemedHome(); // force the freshly-built QQuickView to paint (anti-black on rebuild)
 
     showCatalogs(startCat, themedXmbCatalogIndex_); // populate the starting bucket's catalog list (restore on rebuild)
 

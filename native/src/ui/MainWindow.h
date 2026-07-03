@@ -249,6 +249,9 @@ private:
     // QString if the user cancels (empty-but-non-null clears the search).
     QString promptThemedSearch(const QString& scope);
     QWidget* themedHome_ = nullptr;
+    QString  themedHomeBuiltTheme_;   // the theme the current themedHome_ was built with (reuse vs. rebuild)
+    bool     themedHomeShownOnce_ = false; // first show is exposed by the top-level show(); later ones may need a kick
+    void nudgeThemedHome();           // force the themed QQuickView to expose + repaint after we switch to it (anti-black)
     QWidget* themedBrowse_ = nullptr;
     int themedHomeIndex_ = 0; // remember the highlighted system, so returning from a catalog lands back on it
     bool themedHomeIsXmb_ = false; // the themed home is an XMB cross (its column mirrors HomeView live)
