@@ -799,12 +799,26 @@ void MainWindow::hideEscMenu()
     if (!escMenu_) return;
     escMenu_->hide();
     activateWindow();
-    // Restore focus to exactly where it was before the menu (so the previous selection stays active); fall
-    // back to the current page if that widget is gone or off the current page.
-    QWidget* prev = escMenuPrevFocus_.data();
-    QWidget* cur = stack_->currentWidget();
-    QWidget* target = (prev && isAncestorOf(prev) && (prev == cur || (cur && cur->isAncestorOf(prev)))) ? prev : cur;
-    if (target) { target->setFocus(Qt::OtherFocusReason); target->activateWindow(); }
+    raise();
+    // Restore focus AFTER the window-activation settles: hiding the escMenu (a top-level window) hands the OS
+    // foreground back asynchronously, so doing this inline doesn't stick — the cross stays highlighted but
+    // dead. Deferred, our window is active again, so the focus + QML active-focus restore holds.
+    QTimer::singleShot(0, this, [this] {
+        QWidget* prev = escMenuPrevFocus_.data();
+        QWidget* cur = stack_->currentWidget();
+        QWidget* target = (prev && isAncestorOf(prev) && (prev == cur || (cur && cur->isAncestorOf(prev)))) ? prev : cur;
+        if (target) target->setFocus(Qt::OtherFocusReason);
+#ifdef MMV_HAVE_QML
+        // A QQuickWidget forwards focus to its QML scene, but after focus was stolen the scene's active-focus
+        // item isn't restored by setFocus alone. Force focus onto the QML root so its Keys handler (and the
+        // selection) resume exactly where they were.
+        if (cur == themedHome_ || cur == themedBrowse_)
+        {
+            cur->setFocus(Qt::OtherFocusReason);
+            if (auto* r = ThemeEngine::rootItem(cur)) r->forceActiveFocus();
+        }
+#endif
+    });
 }
 
 // ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------
@@ -1036,16 +1050,22 @@ void MainWindow::showEvent(QShowEvent* event)
     });
 }
 
-// When the window is re-activated (alt-tab back, restore from minimised), the embedded themed view - a native
-// window via createWindowContainer - doesn't automatically regain keyboard focus, leaving arrow keys dead
-// until the user clicks. Re-focus it so navigation keeps working.
+// When the window is re-activated (alt-tab back, restore from minimised, the Esc menu closing), the themed
+// QQuickWidget doesn't automatically restore its QML scene's active focus, leaving arrow keys dead until a
+// click. Re-focus it AND force focus onto the QML root so navigation keeps working.
 void MainWindow::changeEvent(QEvent* event)
 {
     QMainWindow::changeEvent(event);
     if (event->type() == QEvent::ActivationChange && isActiveWindow())
         QTimer::singleShot(0, this, [this] {
             QWidget* w = stack_ ? stack_->currentWidget() : nullptr;
-            if (w && (w == themedHome_ || w == themedBrowse_)) w->setFocus(Qt::ActiveWindowFocusReason);
+            if (w && (w == themedHome_ || w == themedBrowse_))
+            {
+                w->setFocus(Qt::ActiveWindowFocusReason);
+#ifdef MMV_HAVE_QML
+                if (auto* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
+#endif
+            }
         });
 }
 
