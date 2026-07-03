@@ -14,6 +14,7 @@ struct BiosFile
 {
     QString fileName; // exact name the core/emulator looks for (saved under the system/bios folder)
     QString url;      // direct https download
+    QString md5;      // expected MD5 of a good dump (lowercase hex); empty => presence-only, no hash check
 };
 
 namespace BiosCatalog
@@ -46,27 +47,28 @@ namespace BiosCatalog
         // PlayStation (Beetle PSX / SwanStation): the three region BIOSes, looked up by name in the
         // system folder. Beetle wants the matching region; shipping all three covers any disc.
         static const QList<BiosFile> psx = {
-            { QStringLiteral("scph5500.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5500.bin")) }, // JP
-            { QStringLiteral("scph5501.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5501.bin")) }, // US
-            { QStringLiteral("scph5502.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5502.bin")) }, // EU
+            { QStringLiteral("scph5500.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5500.bin")), QStringLiteral("8dd7d5296a650fac7319bce665a6a53c") }, // JP
+            { QStringLiteral("scph5501.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5501.bin")), QStringLiteral("490f666e1afb15b7362b406ed1cea246") }, // US
+            { QStringLiteral("scph5502.bin"), retrobios(QStringLiteral("Sony/PlayStation/scph5502.bin")), QStringLiteral("32736f17079d0b2b7024407c39bd3050") }, // EU
         };
 
         // Sega Saturn (Beetle Saturn / Kronos): JP + US/EU BIOS, both named as the cores expect.
         static const QList<BiosFile> saturn = {
-            { QStringLiteral("sega_101.bin"),  retrobios(QStringLiteral("Sega/Saturn/sega_101.bin")) },  // JP
-            { QStringLiteral("mpr-17933.bin"), retrobios(QStringLiteral("Sega/Saturn/mpr-17933.bin")) }, // US/EU
+            { QStringLiteral("sega_101.bin"),  retrobios(QStringLiteral("Sega/Saturn/sega_101.bin")),  QStringLiteral("85ec9ca47d8f6807718151cbcca8b964") },  // JP
+            { QStringLiteral("mpr-17933.bin"), retrobios(QStringLiteral("Sega/Saturn/mpr-17933.bin")), QStringLiteral("3240872c70984b6cbfda1586cab68dba") }, // US/EU
         };
 
         // Panasonic 3DO (Opera): the FZ-1 BIOS is the common default.
         static const QList<BiosFile> threedo = {
-            { QStringLiteral("panafz1.bin"), retrobios(QStringLiteral("3DO%20Company/3DO/panafz1.bin")) },
+            { QStringLiteral("panafz1.bin"), retrobios(QStringLiteral("3DO%20Company/3DO/panafz1.bin")), QStringLiteral("f47264dd47fe30f73ab3c010015c155b") },
         };
 
         // PlayStation 2 (PCSX2, standalone): a single full BIOS dump is enough; PCSX2 auto-detects any
-        // valid image in its bios folder. This is a late USA dump that covers most discs.
+        // valid image in its bios folder. This is a late USA dump that covers most discs. (No canonical MD5
+        // recorded for this particular dump, so it's checked for presence only.)
         static const QList<BiosFile> ps2 = {
             { QStringLiteral("ps2-0230a-20080220.bin"),
-              retrobios(QStringLiteral("Sony/PlayStation%202/ps2-0230a-20080220.bin")) },
+              retrobios(QStringLiteral("Sony/PlayStation%202/ps2-0230a-20080220.bin")), QString() },
         };
 
         if (systemId == QStringLiteral("psx"))    return psx;

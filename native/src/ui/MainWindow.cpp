@@ -3947,11 +3947,12 @@ QString biosDestDir(const QString& systemId)
     return CoreManager::systemDir();
 }
 
-// Present if the exact file is in the libretro system folder, or anywhere under its emulator's tree (PCSX2
-// stores it in a "bios" sub-folder whose exact location depends on the build).
-bool biosFilePresent(const QString& systemId, const QString& fileName)
+// Path of the BIOS file if it's present — in the libretro system folder, or anywhere under its emulator's
+// tree (PCSX2 stores it in a "bios" sub-folder whose exact location depends on the build). Empty if missing.
+QString biosFilePath(const QString& systemId, const QString& fileName)
 {
-    if (QFile::exists(CoreManager::systemDir() + QStringLiteral("/") + fileName)) return true;
+    const QString inSys = CoreManager::systemDir() + QStringLiteral("/") + fileName;
+    if (QFile::exists(inSys)) return inSys;
     const GameSystem* s = SystemCatalog::byId(systemId);
     if (s && !s->externalEmulator.isEmpty())
     {
@@ -3959,23 +3960,33 @@ bool biosFilePresent(const QString& systemId, const QString& fileName)
         if (QDir(emuRoot).exists())
         {
             QDirIterator it(emuRoot, QStringList{ fileName }, QDir::Files, QDirIterator::Subdirectories);
-            if (it.hasNext()) return true;
+            if (it.hasNext()) return it.next();
         }
     }
-    return false;
+    return QString();
+}
+
+// MD5 of a file, lowercase hex (streamed, so a multi-MB BIOS isn't slurped into memory). Empty on read error.
+QString fileMd5(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return QString();
+    QCryptographicHash h(QCryptographicHash::Md5);
+    if (!h.addData(&f)) return QString();
+    return QString::fromLatin1(h.result().toHex());
 }
 } // namespace
 
 void MainWindow::openBiosCheck()
 {
     showPanel(tr("BIOS Check"), [this](QVBoxLayout* v) {
-        auto* intro = new QLabel(tr("Required BIOS / firmware for each system. Missing files are fetched "
-            "automatically the first time you launch a game for that system — or download them all now. BIOS "
-            "dumps are copyrighted, so they aren't shipped with the app."));
+        auto* intro = new QLabel(tr("Required BIOS / firmware for each system, verified by MD5. Missing files "
+            "are fetched automatically the first time you launch a game for that system — or download them all "
+            "now. BIOS dumps are copyrighted, so they aren't shipped with the app."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:13px;"));
         v->addWidget(intro);
 
-        int total = 0, present = 0;
+        int total = 0, good = 0, bad = 0, missing = 0;
         QString html;
         for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
         {
@@ -3984,16 +3995,26 @@ void MainWindow::openBiosCheck()
             html += QStringLiteral("<p style='margin:10px 0 2px 0;'><b>%1</b></p>").arg(bs.name.toHtmlEscaped());
             for (const BiosFile& bf : files)
             {
-                const bool ok = biosFilePresent(bs.systemId, bf.fileName);
-                ++total; if (ok) ++present;
+                ++total;
+                const QString path = biosFilePath(bs.systemId, bf.fileName);
+                QString colour, mark, note;
+                if (path.isEmpty())
+                { colour = QStringLiteral("#e03131"); mark = QStringLiteral("&#10007;"); note = tr(" — missing"); ++missing; }
+                else if (!bf.md5.isEmpty() && fileMd5(path).compare(bf.md5, Qt::CaseInsensitive) != 0)
+                { colour = QStringLiteral("#f08c00"); mark = QStringLiteral("&#9888;"); note = tr(" — wrong MD5 (corrupt or a different dump)"); ++bad; }
+                else if (bf.md5.isEmpty())
+                { colour = QStringLiteral("#37b24d"); mark = QStringLiteral("&#10003;"); note = tr(" — present (MD5 not verified)"); ++good; }
+                else
+                { colour = QStringLiteral("#37b24d"); mark = QStringLiteral("&#10003;"); ++good; }
+
                 html += QStringLiteral("<div style='margin-left:14px;color:%1;'>%2&nbsp;&nbsp;%3</div>")
-                            .arg(ok ? QStringLiteral("#37b24d") : QStringLiteral("#e03131"),
-                                 ok ? QStringLiteral("&#10003;") : QStringLiteral("&#10007;"),
-                                 bf.fileName.toHtmlEscaped() + (ok ? QString() : tr(" — missing")));
+                            .arg(colour, mark, bf.fileName.toHtmlEscaped() + note);
             }
         }
 
-        auto* summary = new QLabel(tr("%1 of %2 BIOS files present.").arg(present).arg(total));
+        auto* summary = new QLabel(bad > 0
+            ? tr("%1 of %2 BIOS files OK — %n failed the MD5 check.", "", bad).arg(good).arg(total)
+            : tr("%1 of %2 BIOS files present.").arg(good).arg(total));
         summary->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;margin-top:6px;"));
         v->addWidget(summary);
 
@@ -4002,13 +4023,23 @@ void MainWindow::openBiosCheck()
         report->setText(html);
         v->addWidget(report);
 
-        const bool allPresent = (present == total);
-        auto* dl = panelRow(allPresent ? tr("Re-check") : tr("Download Missing BIOS"));
+        // Offer a download when anything is missing OR a present file failed its hash (re-fetch overwrites it).
+        const bool needsDownload = (missing > 0 || bad > 0);
+        auto* dl = panelRow(needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"));
         connect(dl, &QPushButton::clicked, this, [this] {
             statusBar()->showMessage(tr("Checking BIOS…"));
             for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+            {
+                // Drop any present-but-wrong-hash file so ensureBios (which skips existing files) re-fetches it.
+                for (const BiosFile& bf : BiosCatalog::forSystem(bs.systemId))
+                {
+                    if (bf.md5.isEmpty()) continue;
+                    const QString p = biosFilePath(bs.systemId, bf.fileName);
+                    if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
+                }
                 CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
                                         [this](const QString& s) { statusBar()->showMessage(s); });
+            }
             statusBar()->showMessage(tr("BIOS check complete."), 4000);
             openBiosCheck(); // rebuild the panel so the ticks refresh
         });
