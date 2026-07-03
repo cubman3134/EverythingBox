@@ -17,6 +17,15 @@ Gamepad::Gamepad()
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) == 0)
     {
         initialized_ = true;
+        // Load the bundled SDL_GameControllerDB (community mappings) so uncommon / third-party pads map to the
+        // standard layout, à la EmulationStation / RetroBat. Best-effort: SDL keeps its built-in defaults if
+        // the file is missing, and any entry here augments/overrides them for a device.
+        if (char* base = SDL_GetBasePath())
+        {
+            const std::string db = std::string(base) + "gamecontrollerdb.txt";
+            SDL_free(base);
+            SDL_GameControllerAddMappingsFromFile(db.c_str()); // -1 if absent — harmless
+        }
         openControllers();
     }
 }
