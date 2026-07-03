@@ -55,6 +55,7 @@ Item {
     property int actionItem: -1
 
     property string nowPlaying: "" // current background-music track name (host-set; the "nowplaying" element reads it)
+    property bool catLoading: false // host-set: the selected category's column is fetching (XMB shows a spinner)
 
     // Bottom-bar buttons (e.g. the Channels theme's Settings/Profile corner buttons) join keyboard/controller
     // navigation: pressing Down at the bottom of the grid moves focus into this "button zone". buttonList is

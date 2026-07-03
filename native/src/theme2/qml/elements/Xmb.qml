@@ -123,11 +123,33 @@ Item {
                 fillMode: Image.PreserveAspectFit; smooth: true
             }
             Text { // the selected bucket's name, just under its tile
+                id: catLabel
                 visible: cat.sel
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.top: parent.bottom; anchors.topMargin: xmb.height * 0.02
                 text: (cat.modelData && cat.modelData.title) ? cat.modelData.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(12, xmb.height * 0.03)
+            }
+            // Loading spinner under the selected category while its column is being fetched: the cross scrolls
+            // to the category right away and this shows the content is on the way (instead of an empty column).
+            Item {
+                id: catSpinner
+                visible: cat.sel && !!(xmb.host && xmb.host.catLoading)
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.top: catLabel.bottom; anchors.topMargin: xmb.height * 0.018
+                width: xmb.height * 0.045; height: width
+                Canvas {
+                    anchors.fill: parent
+                    onPaint: {
+                        var c = getContext("2d"); c.reset(); c.clearRect(0, 0, width, height)
+                        c.lineWidth = Math.max(2, width * 0.13); c.lineCap = "round"
+                        c.strokeStyle = xmb.textColor
+                        c.beginPath(); c.arc(width / 2, height / 2, width * 0.38, -Math.PI / 2, Math.PI * 0.85); c.stroke()
+                    }
+                }
+                RotationAnimation on rotation {
+                    from: 0; to: 360; duration: 850; loops: Animation.Infinite; running: catSpinner.visible
+                }
             }
             MouseArea { // click a category tile to switch to it
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor

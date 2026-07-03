@@ -388,6 +388,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             if (!r) return;
             const int cur = r->property("currentIndex").toInt();
             r->setProperty("items", home_->browseItems()); // rebuilds the row map used by browseRestoreIndex()
+            r->setProperty("catLoading", false); // items arrived -> stop the category spinner
             // Append -> keep the selection; a fresh set -> re-select the row we drilled into (Back), else top.
             r->setProperty("currentIndex", appended ? cur : home_->browseRestoreIndex());
             if (tgt == themedBrowse_) // the XMB home keeps its "home" view + categories; only browse swaps view/title
@@ -2135,7 +2136,8 @@ void MainWindow::showThemedXmb()
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         // Leaving the items level (to a catalog list / profiles / settings): no leaf is selected, so drop the
         // metadata panel and any open action chooser. (When a catalog loads, browseItemsChanged repopulates it.)
-        if (r) { r->setProperty("selectedMeta", QVariantMap()); r->setProperty("actionsOpen", false); }
+        if (r) { r->setProperty("selectedMeta", QVariantMap()); r->setProperty("actionsOpen", false);
+                 r->setProperty("catLoading", false); } // default: no spinner (the async branches below turn it on)
         if (key == QStringLiteral("profiles")) // the Profiles column: scroll to a profile to select it
         {
             themedXmbInCatalog_ = false; themedXmbAutoOpened_ = false;
@@ -2151,7 +2153,7 @@ void MainWindow::showThemedXmb()
         {
             themedXmbInCatalog_ = true;
             themedXmbAutoOpened_ = true;
-            if (r) { r->setProperty("items", QVariantList()); r->setProperty("currentIndex", 0); } // clear while it loads
+            if (r) { r->setProperty("items", QVariantList()); r->setProperty("currentIndex", 0); r->setProperty("catLoading", true); } // clear + spinner while it loads
             home_->activateNav(themedXmbCatalogs_[0].toMap().value(QStringLiteral("navKey")).toString());
             return;
         }
@@ -2189,7 +2191,7 @@ void MainWindow::showThemedXmb()
             if (navKey.isEmpty()) return;
             themedXmbCatalogIndex_ = itemIdx;       // remember the catalog, so Back re-selects it in the list
             themedXmbInCatalog_ = true;
-            if (r) r->setProperty("currentIndex", 0);
+            if (r) { r->setProperty("currentIndex", 0); r->setProperty("catLoading", true); } // spinner while it loads
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
         }
         else if (home_->atRecentsLevel() || home_->atDownloadsLevel())
