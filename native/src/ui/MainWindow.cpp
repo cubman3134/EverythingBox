@@ -25,6 +25,7 @@
 #include "../core/DownloadsStore.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
+#include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
@@ -3704,6 +3705,7 @@ void MainWindow::openSettingsHub()
         add(tr("Stand Alone Emulators Settings"), [this] { openEmulatorManager(); }); // standalone emulators (Dolphin…) - desktop only
 #endif
         add(tr("Libretro Emulator Settings"), [this] { openEmulatorSettings(); }); // still a popup (phase 2)
+        add(tr("BIOS Check"),         [this] { openBiosCheck(); });        // per-system BIOS presence (RetroBat-style)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
     }, [this] {
@@ -3928,6 +3930,95 @@ void MainWindow::openCloudSync()
         });
         connect(cloud_.get(), &CloudSync::signInFailed, status, [status](const QString& e) { status->setText(tr("Sign-in failed: %1").arg(e)); });
         connect(cloud_.get(), &CloudSync::signedOut, status, [refresh] { refresh(); });
+    }, [this] { openSettingsHub(); });
+}
+
+// ---- BIOS check (RetroBat-style): per-system BIOS presence + download-missing ---------------------------
+
+namespace
+{
+// Where system <id>'s BIOS should live: a standalone emulator keeps it under its own tree; in-process cores
+// read from the shared libretro "system" folder.
+QString biosDestDir(const QString& systemId)
+{
+    const GameSystem* s = SystemCatalog::byId(systemId);
+    if (s && !s->externalEmulator.isEmpty())
+        return EmulatorManager::emulatorsRoot() + QStringLiteral("/") + s->externalEmulator + QStringLiteral("/bios");
+    return CoreManager::systemDir();
+}
+
+// Present if the exact file is in the libretro system folder, or anywhere under its emulator's tree (PCSX2
+// stores it in a "bios" sub-folder whose exact location depends on the build).
+bool biosFilePresent(const QString& systemId, const QString& fileName)
+{
+    if (QFile::exists(CoreManager::systemDir() + QStringLiteral("/") + fileName)) return true;
+    const GameSystem* s = SystemCatalog::byId(systemId);
+    if (s && !s->externalEmulator.isEmpty())
+    {
+        const QString emuRoot = EmulatorManager::emulatorsRoot() + QStringLiteral("/") + s->externalEmulator;
+        if (QDir(emuRoot).exists())
+        {
+            QDirIterator it(emuRoot, QStringList{ fileName }, QDir::Files, QDirIterator::Subdirectories);
+            if (it.hasNext()) return true;
+        }
+    }
+    return false;
+}
+} // namespace
+
+void MainWindow::openBiosCheck()
+{
+    showPanel(tr("BIOS Check"), [this](QVBoxLayout* v) {
+        auto* intro = new QLabel(tr("Required BIOS / firmware for each system. Missing files are fetched "
+            "automatically the first time you launch a game for that system — or download them all now. BIOS "
+            "dumps are copyrighted, so they aren't shipped with the app."));
+        intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:13px;"));
+        v->addWidget(intro);
+
+        int total = 0, present = 0;
+        QString html;
+        for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+        {
+            const QList<BiosFile>& files = BiosCatalog::forSystem(bs.systemId);
+            if (files.isEmpty()) continue;
+            html += QStringLiteral("<p style='margin:10px 0 2px 0;'><b>%1</b></p>").arg(bs.name.toHtmlEscaped());
+            for (const BiosFile& bf : files)
+            {
+                const bool ok = biosFilePresent(bs.systemId, bf.fileName);
+                ++total; if (ok) ++present;
+                html += QStringLiteral("<div style='margin-left:14px;color:%1;'>%2&nbsp;&nbsp;%3</div>")
+                            .arg(ok ? QStringLiteral("#37b24d") : QStringLiteral("#e03131"),
+                                 ok ? QStringLiteral("&#10003;") : QStringLiteral("&#10007;"),
+                                 bf.fileName.toHtmlEscaped() + (ok ? QString() : tr(" — missing")));
+            }
+        }
+
+        auto* summary = new QLabel(tr("%1 of %2 BIOS files present.").arg(present).arg(total));
+        summary->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;margin-top:6px;"));
+        v->addWidget(summary);
+
+        auto* report = new QLabel(this);
+        report->setTextFormat(Qt::RichText); report->setWordWrap(true);
+        report->setText(html);
+        v->addWidget(report);
+
+        const bool allPresent = (present == total);
+        auto* dl = panelRow(allPresent ? tr("Re-check") : tr("Download Missing BIOS"));
+        connect(dl, &QPushButton::clicked, this, [this] {
+            statusBar()->showMessage(tr("Checking BIOS…"));
+            for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+                CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
+                                        [this](const QString& s) { statusBar()->showMessage(s); });
+            statusBar()->showMessage(tr("BIOS check complete."), 4000);
+            openBiosCheck(); // rebuild the panel so the ticks refresh
+        });
+        v->addWidget(dl);
+
+        auto* open = panelRow(tr("Open BIOS Folder"));
+        connect(open, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(CoreManager::systemDir()));
+        });
+        v->addWidget(open);
     }, [this] { openSettingsHub(); });
 }
 

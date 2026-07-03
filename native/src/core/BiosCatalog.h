@@ -25,6 +25,20 @@ namespace BiosCatalog
         return QStringLiteral("https://raw.githubusercontent.com/Abdess/retrobios/main/bios/") + relPath;
     }
 
+    // Systems that need a BIOS (the keys forSystem() knows about), with display names — drives the BIOS
+    // checker in Settings. Kept in sync with forSystem() below.
+    struct BiosSystem { QString systemId; QString name; };
+    inline const QList<BiosSystem>& systemsWithBios()
+    {
+        static const QList<BiosSystem> list = {
+            { QStringLiteral("psx"),    QStringLiteral("PlayStation") },
+            { QStringLiteral("saturn"), QStringLiteral("Sega Saturn") },
+            { QStringLiteral("3do"),    QStringLiteral("3DO") },
+            { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
+        };
+        return list;
+    }
+
     inline const QList<BiosFile>& forSystem(const QString& systemId)
     {
         static const QList<BiosFile> none;

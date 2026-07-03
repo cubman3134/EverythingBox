@@ -83,6 +83,7 @@ private slots:
     void cloudSyncNow();      // pull (if newer) then push the current state
     void openDebug();         // diagnostic log viewer (refresh / clear / open file location)
     void openRetroAchievements(); // RetroAchievements sign-in panel
+    void openBiosCheck();         // per-system BIOS presence check + download-missing (RetroBat-style)
     void openEmulatorSettings();
     void openInputMapping();
     void nextTrack();
