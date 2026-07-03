@@ -691,7 +691,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if (escMenu_ && event->type() == QEvent::KeyPress && (obj == escMenu_ || escMenuButtons_.contains(obj)))
     {
         const int key = static_cast<QKeyEvent*>(event)->key();
-        const int idx = escMenuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+        // The escMenu is its own top-level window, so QApplication::focusWidget() (the app-wide focus) is the
+        // focused button — QMainWindow::focusWidget() would report OUR window's focus and mis-index.
+        const int idx = escMenuButtons_.indexOf(qobject_cast<QPushButton*>(QApplication::focusWidget()));
         switch (key)
         {
         case Qt::Key_Down: case Qt::Key_Right:
@@ -701,7 +703,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
             if (!escMenuButtons_.isEmpty()) escMenuButtons_[qMax(qMax(idx, 0) - 1, 0)]->setFocus(Qt::TabFocusReason);
             return true;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
-            if (auto* b = qobject_cast<QPushButton*>(focusWidget())) { b->click(); return true; }
+            if (auto* b = qobject_cast<QPushButton*>(QApplication::focusWidget())) { b->click(); return true; }
             return true;
         case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back:
             hideEscMenu(); return true;
@@ -744,7 +746,11 @@ void MainWindow::buildEscMenu()
     escMenu_->setObjectName(QStringLiteral("escMenu"));
     escMenu_->setStyleSheet(QStringLiteral(
         "#escMenu { background: rgba(20,20,24,0.97); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; }"
-        "#escMenu QPushButton { padding: 11px 30px; font-size: 16px; }"
+        "#escMenu QPushButton { padding: 11px 30px; font-size: 16px; border-radius: 8px; background: rgba(255,255,255,0.06);"
+        " border: 1px solid transparent; color: #e8e8e8; }"
+        // Clear highlight on the selected button so arrow navigation is visible.
+        "#escMenu QPushButton:focus { background: #2D6CDF; color: white; border: 1px solid #5B8CFF; }"
+        "#escMenu QPushButton:hover { background: rgba(255,255,255,0.12); }"
         "#escMenu QLabel { color: #e8e8e8; }"));
     auto* v = new QVBoxLayout(escMenu_);
     v->setContentsMargins(26, 22, 26, 22);
