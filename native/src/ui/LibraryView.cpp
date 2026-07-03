@@ -251,6 +251,7 @@ void LibraryView::showLocalSystems()
 {
     localMode_ = true; localLevel_ = 0; localSystemId_.clear();
     RomLibrary::ensureStructure();
+    RomLibrary::syncToDownloads(); // also surface these ROMs in the home's Downloaded list
     localGroups_ = RomLibrary::scan();
 
     MediaCatalog cat;

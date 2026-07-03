@@ -1,6 +1,7 @@
 #include "RomLibrary.h"
 #include "Settings.h"
 #include "SystemCatalog.h"
+#include "DownloadsStore.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -168,4 +169,30 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
     std::sort(groups.begin(), groups.end(),
               [](const SystemGroup& a, const SystemGroup& b) { return a.systemName.localeAwareCompare(b.systemName) < 0; });
     return groups;
+}
+
+int RomLibrary::syncToDownloads()
+{
+    // What's already tracked (by stable key, else path) — so re-runs don't churn or reorder the list.
+    QSet<QString> have;
+    for (const DownloadedItem& d : DownloadsStore::list())
+        have.insert(d.key.isEmpty() ? d.path : d.key);
+
+    int added = 0;
+    for (const SystemGroup& g : scan())
+        for (const Rom& r : g.roms)
+        {
+            const QString key = QStringLiteral("romlib:") + r.path;
+            if (have.contains(key) || have.contains(r.path)) continue; // already in Downloaded
+            DownloadedItem d;
+            d.path = r.path;
+            d.title = r.title;
+            d.kind = QStringLiteral("game");
+            d.key = key;
+            d.system = r.systemId; // groups it under the right console in the Downloaded folder
+            DownloadsStore::add(d);
+            have.insert(key);
+            ++added;
+        }
+    return added;
 }

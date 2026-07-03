@@ -41,4 +41,9 @@ namespace RomLibrary
 
     // Scan the library: one group per system folder that actually contains ROMs, each with its games.
     QVector<SystemGroup> scan();
+
+    // Pull any ROMs sitting in the library folders (e.g. added manually) into the Downloaded list, so they
+    // show up in the home's Downloaded folder alongside downloaded games — playable without visiting Library.
+    // Only adds ROMs not already recorded (so it doesn't reshuffle the list). Returns how many were added.
+    int syncToDownloads();
 }

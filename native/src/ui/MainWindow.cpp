@@ -335,6 +335,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
+    // Pull any manually-added ROMs sitting in the library folders into the Downloaded list, so they show up
+    // in the home like downloaded games. Deferred so it never delays the window appearing.
+    QTimer::singleShot(0, this, [] { RomLibrary::syncToDownloads(); });
+
 #ifdef MMV_HAVE_QML
     // Appearance (themed-home toggle + theme picker) is reachable anywhere via Ctrl+Shift+A - this is also
     // the reliable escape hatch to turn the themed home back off.
@@ -3749,8 +3753,10 @@ void MainWindow::openGeneralSettings()
             if (dir.isEmpty()) return;
             Settings::setRomsFolder(dir);
             rPath->setText(dir);
-            RomLibrary::ensureStructure(); // create the per-system sub-folders in the new location
-            statusBar()->showMessage(tr("ROMs folder set to %1").arg(dir), 5000);
+            RomLibrary::ensureStructure();        // create the per-system sub-folders in the new location
+            const int added = RomLibrary::syncToDownloads(); // pull any ROMs already there into Downloaded
+            statusBar()->showMessage(added > 0 ? tr("ROMs folder set to %1 — added %n game(s) to Downloaded.", "", added).arg(dir)
+                                               : tr("ROMs folder set to %1").arg(dir), 6000);
         });
         auto* rOpen = panelRow(tr("Open ROMs Folder"));
         connect(rOpen, &QPushButton::clicked, this, [this] {
