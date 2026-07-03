@@ -657,6 +657,29 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
         revealMediaControls();
+
+    // The Esc pause menu owns its keys while open (it's a separate top-level window): Up/Down move between
+    // Resume/Exit, Enter fires, Esc/Backspace resumes.
+    if (escMenu_ && event->type() == QEvent::KeyPress && (obj == escMenu_ || escMenuButtons_.contains(obj)))
+    {
+        const int key = static_cast<QKeyEvent*>(event)->key();
+        const int idx = escMenuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+        switch (key)
+        {
+        case Qt::Key_Down: case Qt::Key_Right:
+            if (!escMenuButtons_.isEmpty()) escMenuButtons_[qMin(qMax(idx, 0) + 1, escMenuButtons_.size() - 1)]->setFocus(Qt::TabFocusReason);
+            return true;
+        case Qt::Key_Up: case Qt::Key_Left:
+            if (!escMenuButtons_.isEmpty()) escMenuButtons_[qMax(qMax(idx, 0) - 1, 0)]->setFocus(Qt::TabFocusReason);
+            return true;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
+            if (auto* b = qobject_cast<QPushButton*>(focusWidget())) { b->click(); return true; }
+            return true;
+        case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back:
+            hideEscMenu(); return true;
+        default: break;
+        }
+    }
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -678,6 +701,69 @@ void MainWindow::leaveFullScreen()
 {
     showNormal();
     player_->unsetCursor();    // restore the cursor
+}
+
+// ---- App pause menu (Esc) -------------------------------------------------------------------------------
+
+bool MainWindow::escMenuVisible() const { return escMenu_ && escMenu_->isVisible(); }
+
+void MainWindow::buildEscMenu()
+{
+    if (escMenu_) return;
+    // A top-level frameless window so it paints above the native QML/mpv surfaces (a child widget would be
+    // occluded by them). Styled like the in-game pause menu for consistency.
+    escMenu_ = new QFrame(this, Qt::FramelessWindowHint | Qt::Tool);
+    escMenu_->setObjectName(QStringLiteral("escMenu"));
+    escMenu_->setStyleSheet(QStringLiteral(
+        "#escMenu { background: rgba(20,20,24,0.97); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; }"
+        "#escMenu QPushButton { padding: 11px 30px; font-size: 16px; }"
+        "#escMenu QLabel { color: #e8e8e8; }"));
+    auto* v = new QVBoxLayout(escMenu_);
+    v->setContentsMargins(26, 22, 26, 22);
+    v->setSpacing(10);
+
+    auto* title = new QLabel(tr("My Media Vault"), escMenu_);
+    title->setAlignment(Qt::AlignCenter);
+    title->setStyleSheet(QStringLiteral("font-size:19px; font-weight:600;"));
+    v->addWidget(title);
+
+    auto* resume = new QPushButton(tr("Resume"), escMenu_);
+    auto* quit   = new QPushButton(tr("Exit My Media Vault"), escMenu_);
+    v->addWidget(resume);
+    v->addWidget(quit);
+    escMenuButtons_ = { resume, quit };
+
+    connect(resume, &QPushButton::clicked, this, [this] { hideEscMenu(); });
+    connect(quit,   &QPushButton::clicked, this, [this] { hideEscMenu(); close(); }); // close() runs the Drive-push exit
+
+    // Arrow / Enter / Esc navigation for the menu (it's its own top-level window, so route its keys here).
+    escMenu_->installEventFilter(this);
+    for (QPushButton* b : escMenuButtons_) b->installEventFilter(this);
+    escMenu_->hide();
+}
+
+void MainWindow::showEscMenu()
+{
+    if (escMenuVisible()) return;
+    buildEscMenu();
+    escMenu_->adjustSize();
+    // Centre it over the window in global coordinates (it's a top-level window).
+    const QPoint tl = mapToGlobal(QPoint(0, 0));
+    escMenu_->move(tl.x() + (width() - escMenu_->width()) / 2,
+                   tl.y() + (height() - escMenu_->height()) / 2);
+    escMenu_->show();
+    escMenu_->raise();
+    escMenu_->activateWindow();
+    if (!escMenuButtons_.isEmpty()) escMenuButtons_.first()->setFocus(Qt::TabFocusReason); // Resume, arrows work at once
+}
+
+void MainWindow::hideEscMenu()
+{
+    if (!escMenu_) return;
+    escMenu_->hide();
+    activateWindow();
+    // Return keyboard focus to whatever view was showing so its navigation resumes immediately.
+    if (QWidget* cur = stack_->currentWidget()) { cur->setFocus(Qt::OtherFocusReason); cur->activateWindow(); }
 }
 
 void MainWindow::toggleFullScreen()
@@ -741,9 +827,17 @@ bool MainWindow::focusNextPrevChild(bool next)
 
 void MainWindow::keyPressEvent(QKeyEvent* e)
 {
-    // Esc leaves full screen (the emulator view consumes its own Esc for the pause menu, so this only
-    // fires for the player / readers).
-    if (e->key() == Qt::Key_Escape && isFullScreen()) { leaveFullScreen(); return; }
+    // Esc brings up the app pause menu (Resume / Exit) in the browsing UI — the themed home routes its own
+    // root Esc here via onBack (see showThemedXmb). In the player / readers, Esc keeps its old job of leaving
+    // full screen. (The emulator view consumes its own Esc for the in-game menu, so it never reaches here.)
+    if (e->key() == Qt::Key_Escape)
+    {
+        if (escMenuVisible()) { hideEscMenu(); return; }
+        QWidget* cur = stack_->currentWidget();
+        if (cur == home_ || cur == panelPage_) { showEscMenu(); return; }
+        if (cur == themedHome_ || cur == themedBrowse_) return; // themed view drives Esc itself (onBack)
+        if (isFullScreen()) { leaveFullScreen(); return; }      // player / readers
+    }
 
     // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …). Up/Down
     // (and Left/Right) move focus within a bounded ring of the header Back button + the visible content rows, so
@@ -1954,10 +2048,11 @@ void MainWindow::showThemedXmb()
         if (themedXmbInCatalog_)
         {
             if (home_->browseBack()) return;          // popped a deeper level; browseItemsChanged refreshes the column
-            if (themedXmbAutoOpened_) return;         // single-catalog bucket: its contents ARE the root, nothing above
-            showCatalogs(cat, themedXmbCatalogIndex_); // multi-catalog bucket: back out, re-select the catalog we opened
+            if (!themedXmbAutoOpened_)                // multi-catalog bucket: back out, re-select the catalog we opened
+            { showCatalogs(cat, themedXmbCatalogIndex_); return; }
+            // single-catalog bucket: its contents ARE the root -> fall through to the app menu
         }
-        // at the bucket root the cross just stays put
+        showEscMenu(); // at the top of the themed home: bring up the app pause menu (Resume / Exit)
     };
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;

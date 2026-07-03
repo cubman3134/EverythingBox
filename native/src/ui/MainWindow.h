@@ -188,6 +188,16 @@ private:
     void finishResume();                   // a file played to the end -> drop its saved position
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
+
+    // App pause menu (Esc): a small "Resume / Exit My Media Vault" overlay, à la the in-game pause menu. It's
+    // a top-level window so it sits above the themed QML surface too, and gives a clean way to quit in full
+    // screen. Shown at the themed home's root and from the classic home; navigated with arrows / Enter / Esc.
+    void buildEscMenu();
+    void showEscMenu();
+    void hideEscMenu();
+    bool escMenuVisible() const;
+    QFrame* escMenu_ = nullptr;
+    QVector<QPushButton*> escMenuButtons_; // { Resume, Exit }, in arrow-navigation order
     void revealMediaControls();
     void positionMediaControls();
     void showPlayerNotice(const QString& msg, int ms = 6000); // centred transient message over the player
