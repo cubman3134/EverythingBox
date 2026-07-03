@@ -11,6 +11,10 @@ namespace Settings
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
 
+    // Open the app maximized to full screen on launch (default off — a normal resizable window).
+    bool startFullscreen();
+    void setStartFullscreen(bool on);
+
     // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
     // default at a modest volume.
     bool bgmEnabled();

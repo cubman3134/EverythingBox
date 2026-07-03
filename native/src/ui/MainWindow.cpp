@@ -3616,6 +3616,20 @@ void MainWindow::openSettingsHub()
 void MainWindow::openGeneralSettings()
 {
     showPanel(tr("General"), [this](QVBoxLayout* v) {
+        // --- Display: open the app full screen on launch. ---
+        auto* dispHeading = new QLabel(tr("Display"));
+        dispHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(dispHeading);
+        auto* fs = new QCheckBox(tr("Open in full screen on startup"));
+        fs->setStyleSheet(QStringLiteral("font-size:15px;"));
+        fs->setChecked(Settings::startFullscreen());
+        v->addWidget(fs);
+        connect(fs, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setStartFullscreen(c);
+            if (c) showFullScreen(); else if (isFullScreen()) leaveFullScreen(); // reflect the choice right away
+        });
+        v->addSpacing(10);
+
         auto* heading = new QLabel(tr("Subtitles"));
         heading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
         v->addWidget(heading);

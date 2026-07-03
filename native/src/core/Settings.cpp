@@ -32,6 +32,12 @@ void Settings::setSubtitleLanguage(const QString& code)
     store().sync();
 }
 
+bool Settings::startFullscreen() { return store().value(QStringLiteral("general/startFullscreen"), false).toBool(); }
+void Settings::setStartFullscreen(bool on)
+{
+    store().setValue(QStringLiteral("general/startFullscreen"), on); store().sync();
+}
+
 bool Settings::bgmEnabled() { return store().value(QStringLiteral("bgm/enabled"), true).toBool(); }
 void Settings::setBgmEnabled(bool on) { store().setValue(QStringLiteral("bgm/enabled"), on); store().sync(); }
 int  Settings::bgmVolume() { return store().value(QStringLiteral("bgm/volume"), 35).toInt(); }

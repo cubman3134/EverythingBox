@@ -20,6 +20,7 @@
 #include "ui/ProfileDialog.h"
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
+#include "core/Settings.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
 static constexpr const char* kAppVersion = "0.2.0";
@@ -156,8 +157,9 @@ int main(int argc, char** argv)
 
     MainWindow window(chooseProfile);
     window.setWindowTitle(QStringLiteral("My Media Vault"));
-    window.resize(1280, 760);
-    window.show();
+    window.resize(1280, 760);                              // the size we restore to when leaving full screen
+    if (Settings::startFullscreen()) window.showFullScreen();
+    else                             window.show();
     window.raise();
     window.activateWindow(); // foreground + keyboard focus so arrow keys work without a click first
     return app.exec();
