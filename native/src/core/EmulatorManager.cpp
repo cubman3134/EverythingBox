@@ -559,6 +559,54 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
     reply->deleteLater();
 }
 
+// A Wii U retail disc image (.wux/.wud) is encrypted with a unique per-disc title key. Scene/No-Intro archives
+// ship that key as a 16-byte <game>.key beside the image, which ArchiveRom extracts next to the ROM (same base
+// name, .key extension). Cemu decrypts a disc by brute-forcing every key in keys.txt against the disc header,
+// so the disc key has to live in keys.txt. (Cemu also supports a <image>.key sidecar, but that fallback was
+// added after the 2.6 build we ship — it's ignored there — so keys.txt is the portable route.) Append the disc
+// key's hex to every keys.txt Cemu reads, de-duplicated so repeated launches don't pile up. Best-effort.
+void EmulatorManager::prepareCemuDiscKey(const QString& binDir)
+{
+    if (em_.id != QStringLiteral("cemu")) return;
+    const QString ext = QFileInfo(rom_).suffix().toLower();
+    if (ext != QStringLiteral("wux") && ext != QStringLiteral("wud")) return;
+
+    // The companion key sits next to the image with the extension swapped to .key ("Game.wux" -> "Game.key").
+    const QString keyPath = QFileInfo(rom_).absolutePath() + QLatin1Char('/')
+                            + QFileInfo(rom_).completeBaseName() + QStringLiteral(".key");
+    QFile kf(keyPath);
+    if (!kf.open(QIODevice::ReadOnly)) return; // no companion key shipped with this ROM — nothing to add
+    const QByteArray raw = kf.readAll();
+    kf.close();
+    if (raw.size() != 16) return;          // a disc title key is exactly 16 bytes; anything else isn't one
+    const QByteArray hex = raw.toHex();    // lowercase 32-char hex, the keys.txt line format
+
+    QStringList targets;
+    targets << binDir + QStringLiteral("/keys.txt");
+#ifdef Q_OS_WIN
+    const QString appdata = qEnvironmentVariable("APPDATA");
+    if (!appdata.isEmpty()) targets << appdata + QStringLiteral("/Cemu/keys.txt");
+#else
+    targets << QDir::homePath() + QStringLiteral("/.config/Cemu/keys.txt");
+#endif
+
+    for (const QString& t : targets)
+    {
+        QByteArray content;
+        QFile f(t);
+        if (f.open(QIODevice::ReadOnly)) { content = f.readAll(); f.close(); }
+        if (content.toLower().contains(hex)) continue; // already listed — don't duplicate
+        QDir().mkpath(QFileInfo(t).absolutePath());
+        if (f.open(QIODevice::WriteOnly | QIODevice::Append))
+        {
+            if (!content.isEmpty() && !content.endsWith('\n')) f.write("\n");
+            f.write(hex);
+            f.write("\n");
+            f.close();
+        }
+    }
+}
+
 void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
@@ -598,6 +646,7 @@ void EmulatorManager::launch(const QString& binary)
     {
         prepareBios(QFileInfo(binary).absolutePath());
         prepareCemuKeys(QFileInfo(binary).absolutePath());
+        prepareCemuDiscKey(QFileInfo(binary).absolutePath());
     }
 
     game_ = new QProcess(this);

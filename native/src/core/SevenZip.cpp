@@ -95,6 +95,7 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
         UInt64 bestSize = 0;
         bool bestExt = false;
         QString bestName;
+        int keyIdx = -1;      // a companion disc key (Wii U .wux/.wud dumps ship a tiny <game>.key)
         std::vector<UInt16> nameBuf;
 
         for (UInt32 i = 0; i < db.NumFiles; ++i)
@@ -109,6 +110,10 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
                 reinterpret_cast<const char16_t*>(nameBuf.data()), int(len > 0 ? len - 1 : 0));
             const UInt64 size = SzArEx_GetFileSize(&db, i);
             const bool extMatch = !wantedExts.isEmpty() && matchesAnyExt(name, wantedExts);
+
+            // A tiny .key alongside the image is the disc key the emulator needs to decrypt it (see below).
+            if (name.endsWith(QStringLiteral(".key"), Qt::CaseInsensitive) && size <= 4096)
+                keyIdx = int(i);
 
             // An extension match always beats a non-match; within the same match class, larger wins.
             const bool better = (extMatch && !bestExt) || (extMatch == bestExt && size > bestSize);
@@ -169,6 +174,33 @@ QString SevenZip::extractBestToFile(const QString& sevenZipPath, const QStringLi
 
                 if (outBuffer)
                     ISzAlloc_Free(&allocImp, outBuffer);
+            }
+
+            // Companion disc key: Wii U dumps ship a 16-byte <game>.key next to the .wux/.wud. The emulator
+            // (Cemu) decrypts the disc with it, looking beside the image with the extension swapped to .key.
+            // We only extract the main image above, so pull the key too and name it to match the image.
+            if (!resultPath.isEmpty() && keyIdx >= 0)
+            {
+                const QString keyDest = destDir + QLatin1Char('/')
+                                        + QFileInfo(destPath).completeBaseName() + QStringLiteral(".key");
+                if (!QFileInfo::exists(keyDest))
+                {
+                    UInt32 kBlock = 0xFFFFFFFF;
+                    Byte* kBuf = nullptr;
+                    size_t kBufSize = 0, kOff = 0, kSz = 0;
+                    if (SzArEx_Extract(&db, &lookStream.vt, static_cast<UInt32>(keyIdx), &kBlock, &kBuf,
+                                       &kBufSize, &kOff, &kSz, &allocImp, &allocTempImp) == SZ_OK)
+                    {
+                        QFile kf(keyDest);
+                        if (kf.open(QIODevice::WriteOnly))
+                        {
+                            kf.write(reinterpret_cast<const char*>(kBuf + kOff), static_cast<qint64>(kSz));
+                            kf.close();
+                        }
+                    }
+                    if (kBuf)
+                        ISzAlloc_Free(&allocImp, kBuf);
+                }
             }
         }
         else if (error)

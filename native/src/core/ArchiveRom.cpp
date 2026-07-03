@@ -83,6 +83,7 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     mz_uint64 bestSize = 0;
     bool bestExt = false;
     QString bestName;
+    int keyIdx = -1; // a companion disc key (Wii U .wux/.wud dumps ship a tiny <game>.key beside the image)
     const mz_uint count = mz_zip_reader_get_num_files(&zip);
     for (mz_uint i = 0; i < count; ++i)
     {
@@ -92,6 +93,8 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
         if (mz_zip_reader_is_file_a_directory(&zip, i))
             continue;
         const QString name = QString::fromUtf8(st.m_filename);
+        if (name.endsWith(QStringLiteral(".key"), Qt::CaseInsensitive) && st.m_uncomp_size <= 4096)
+            keyIdx = int(i);
         if (wantedExts.isEmpty() && endsWithAny(name, kJunkExts))
             continue;
         const bool extMatch = !wantedExts.isEmpty() && endsWithAny(name, wantedExts);
@@ -136,6 +139,15 @@ QString ArchiveRom::extractToTemp(const QString& archivePath, const QStringList&
     }
     else if (error)
         *error = QStringLiteral("the zip contains no ROM file");
+
+    // Companion disc key: Wii U dumps ship a 16-byte <game>.key next to the .wux/.wud. Cemu decrypts the
+    // disc with it, looking beside the image with the extension swapped to .key. Extract it to match.
+    if (!result.isEmpty() && keyIdx >= 0)
+    {
+        const QString keyDest = dir + QLatin1Char('/') + QFileInfo(result).completeBaseName() + QStringLiteral(".key");
+        if (!QFileInfo::exists(keyDest))
+            mz_zip_reader_extract_to_file(&zip, static_cast<mz_uint>(keyIdx), keyDest.toUtf8().constData(), 0);
+    }
 
     mz_zip_reader_end(&zip);
     return result;

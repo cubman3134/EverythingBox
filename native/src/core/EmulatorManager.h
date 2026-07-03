@@ -54,6 +54,7 @@ private:
     void finishInstall();       // common tail: locate the binary, then launch or report "installed"
     void prepareBios(const QString& binDir); // fetch + wire up a BIOS for emulators that need one (PCSX2)
     void prepareCemuKeys(const QString& binDir); // fetch Cemu's keys.txt into its folder if absent (Wii U)
+    void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
     void launch(const QString& binary);
     QString platformArtifact() const;
     QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl
