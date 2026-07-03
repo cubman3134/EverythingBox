@@ -3419,10 +3419,25 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     notify(tr("Downloading “%1”…").arg(item.title), 0);
     mwLog(QStringLiteral("download: GET %1 -> %2%3").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName(), ext));
 
+    // Stream the body straight to a .part file as it arrives instead of buffering the whole thing in memory
+    // with readAll(): ROMs (Wii U / GameCube / PS2 disc images) can be several GB and would exhaust RAM.
+    const QString partPath = localPath + QStringLiteral(".part");
+    auto part = std::make_shared<QFile>(partPath);
+    if (!part->open(QIODevice::WriteOnly))
+    {
+        mwLog(QStringLiteral("download: can't open cache file for \"%1\": %2").arg(item.title, part->errorString()));
+        const QString e = tr("Couldn't save “%1” to cache.").arg(item.title);
+        statusBar()->showMessage(e, 6000); notify(e, 6000);
+        return;
+    }
+
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = docNam_->get(rq);
+
+    // Write each chunk to disk as it arrives — memory stays ~one buffer, not the whole file.
+    connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
 
     // Live download feedback: a percentage when the server sends a Content-Length, else
     // the running byte count. Throttled to whole-percent / changed-text updates so we
@@ -3450,42 +3465,47 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         notify(msg, 0); // mirror the live percentage into the toast (sticky)
     });
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, localPath, openLocal, title = item.title] {
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, part, partPath, localPath, openLocal, title = item.title] {
         reply->deleteLater();
+        part->write(reply->readAll());               // any tail not yet drained by readyRead
+        part->flush();                               // surface a buffered write error (e.g. disk full)
+        const bool writeOk = part->error() == QFileDevice::NoError;
+        part->close();
+
         if (reply->error() != QNetworkReply::NoError)
         {
+            QFile::remove(partPath);
             mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
             const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
             statusBar()->showMessage(e, 6000);
             notify(e, 6000);
             return;
         }
-        const QByteArray body = reply->readAll();
-        if (body.isEmpty()) // the source returned nothing (e.g. no copy / a dead link) - opening it would just fail
+        if (!writeOk)
         {
-            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
-            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
-            return;
-        }
-        QFile f(localPath + QStringLiteral(".part"));
-        if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
-        {
-            f.close(); f.remove();
-            mwLog(QStringLiteral("download: save failed for \"%1\" (%2 bytes)").arg(title).arg(body.size()));
+            QFile::remove(partPath);
+            mwLog(QStringLiteral("download: save failed for \"%1\"").arg(title));
             statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
             notify(tr("Couldn't save “%1” to cache.").arg(title), 6000);
             return;
         }
-        f.close();
+        if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link) - opening it would just fail
+        {
+            QFile::remove(partPath);
+            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
+            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
+            return;
+        }
         QFile::remove(localPath);
-        if (!QFile::rename(localPath + QStringLiteral(".part"), localPath))
+        if (!QFile::rename(partPath, localPath))
         {
             mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
             statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
             notify(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
             return;
         }
-        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(body.size()));
+        mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
         statusBar()->clearMessage();
         openLocal();
     });
