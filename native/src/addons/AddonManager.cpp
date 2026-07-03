@@ -199,6 +199,51 @@ static QString manifestCacheKey(const QString& base)
     return QStringLiteral("addon.remote.manifest.") + QString::fromUtf8(h);
 }
 
+// Per-addon ETag of the last package we pulled from its updateUrl, so an unchanged package answers 304.
+static QString updateEtagKey(const QString& id)
+{
+    return QStringLiteral("addon.update.etag.") + id;
+}
+
+// Compare dotted version strings numerically (1.10 > 1.9). Missing trailing parts count as 0; a non-numeric
+// part is treated as 0. Returns <0 if a<b, 0 if equal, >0 if a>b.
+static int versionCompare(const QString& a, const QString& b)
+{
+    const QStringList pa = a.split(QLatin1Char('.'));
+    const QStringList pb = b.split(QLatin1Char('.'));
+    const int n = qMax(pa.size(), pb.size());
+    for (int i = 0; i < n; ++i)
+    {
+        const int va = i < pa.size() ? pa[i].section(QLatin1Char('-'), 0, 0).toInt() : 0;
+        const int vb = i < pb.size() ? pb[i].section(QLatin1Char('-'), 0, 0).toInt() : 0;
+        if (va != vb) return va < vb ? -1 : 1;
+    }
+    return 0;
+}
+
+// Read the "version" out of a .addon package held in memory (its top-level manifest.json). Returns false if
+// the bytes aren't a readable zip with a valid manifest, so a junk/HTML response can't be mistaken for one.
+static bool packageVersion(const QByteArray& pkg, QString* versionOut)
+{
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_reader_init_mem(&zip, pkg.constData(), size_t(pkg.size()), 0)) return false;
+    bool ok = false;
+    const int idx = mz_zip_reader_locate_file(&zip, "manifest.json", nullptr, 0);
+    if (idx >= 0)
+    {
+        size_t sz = 0;
+        if (void* data = mz_zip_reader_extract_to_heap(&zip, mz_uint(idx), &sz, 0))
+        {
+            const AddonManifest m = AddonManifest::fromJson(QByteArray(static_cast<char*>(data), int(sz)), &ok);
+            if (ok && versionOut) *versionOut = m.version;
+            mz_free(data);
+        }
+    }
+    mz_zip_reader_end(&zip);
+    return ok;
+}
+
 // A /stream response is either {"url":"...","mime":"..."} or {"streams":[{"url","mime"}...]}; take the
 // first playable url and resolve it against the addon base. Returns url (and mime via out-param).
 static QString parseStreamJson(const QByteArray& body, const QString& base, QString* mime = nullptr)
@@ -452,6 +497,7 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     reload();
     seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
     refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest
+    checkAddonUpdates();         // self-update local addons that publish a newer package (manifest updateUrl)
 }
 
 void AddonManager::refreshRemoteManifests()
@@ -475,6 +521,59 @@ void AddonManager::refreshRemoteManifests()
             store().sync();
             reload();              // rebuild sources from the refreshed cache
             emit sourcesChanged(); // the UI rebuilds its tabs, picking up new catalogs (e.g. retro games)
+        });
+    }
+}
+
+void AddonManager::checkAddonUpdates()
+{
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    // Snapshot the targets first: installPackage()/reload() in the callbacks rebuilds loaded_, which would
+    // invalidate any iterator held here. (id, updateUrl, installed version) is all we need per addon.
+    struct Target { QString id; QString url; QString version; };
+    QVector<Target> targets;
+    for (const auto& up : loaded_)
+        if (up->transport == LoadedAddon::JsLocal && !up->manifest.updateUrl.isEmpty())
+            targets.push_back({ up->manifest.id, up->manifest.updateUrl, up->manifest.version });
+
+    for (const Target& t : targets)
+    {
+        QNetworkRequest rq{ QUrl(t.url) };
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        rq.setTransferTimeout(20000);
+        const QByteArray etag = store().value(updateEtagKey(t.id)).toByteArray();
+        if (!etag.isEmpty()) rq.setRawHeader("If-None-Match", etag); // unchanged package -> cheap 304
+
+        QNetworkReply* reply = nam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, t] {
+            reply->deleteLater();
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            if (reply->error() != QNetworkReply::NoError || status == 304) return; // offline / unchanged
+            const QByteArray pkg = reply->readAll();
+            const QByteArray newEtag = reply->rawHeader("ETag");
+            if (pkg.isEmpty()) return;
+
+            QString remoteVer;
+            if (!packageVersion(pkg, &remoteVer)) return;                 // not a real .addon package (junk/HTML)
+            // Remember the ETag either way, so we don't re-pull an unchanged package that just isn't newer.
+            if (!newEtag.isEmpty()) { store().setValue(updateEtagKey(t.id), newEtag); store().sync(); }
+            if (versionCompare(remoteVer, t.version) <= 0) return;        // same or older -> keep what we have
+
+            const QString tmp = QDir::tempPath() + QStringLiteral("/mmv-update-") + t.id + QStringLiteral(".addon");
+            QFile f(tmp);
+            if (!f.open(QIODevice::WriteOnly)) return;
+            f.write(pkg);
+            f.close();
+            QString err;
+            if (installPackage(tmp, &err)) // replaces the addon folder in place + reload()s the source list
+            {
+                streamLog(QStringLiteral("addon update: %1 %2 -> %3").arg(t.id, t.version, remoteVer));
+                emit sourcesChanged(); // the UI rebuilds its tabs against the refreshed addon
+            }
+            else
+                streamLog(QStringLiteral("addon update: %1 package rejected: %2").arg(t.id, err));
+            QFile::remove(tmp);
         });
     }
 }

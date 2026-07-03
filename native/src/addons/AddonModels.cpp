@@ -19,6 +19,7 @@ AddonManifest AddonManifest::fromJson(const QByteArray& json, bool* ok)
     m.description = o.value(QStringLiteral("description")).toString();
     m.accent      = o.value(QStringLiteral("accent")).toString();
     m.minAppVersion = o.value(QStringLiteral("minAppVersion")).toString();
+    m.updateUrl   = o.value(QStringLiteral("updateUrl")).toString();
     for (const QJsonValue& v : o.value(QStringLiteral("permissions")).toArray())
         m.permissions << v.toString();
 

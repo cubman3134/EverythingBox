@@ -64,6 +64,9 @@ public:
     // Re-fetch each remote source's manifest in the background; if one changed (e.g. the addon added a new
     // catalog), update its cache, rebuild, and emit sourcesChanged so new catalogs appear without re-adding.
     void refreshRemoteManifests();
+    // Self-update installed JsLocal addons that declare a manifest "updateUrl": fetch the public package, and
+    // if its version is newer than the installed one, reinstall it in place. Runs in the background on startup.
+    void checkAddonUpdates();
     const QVector<LoadedAddon*>& sources() const { return sources_; } // media-source addons
     const std::vector<std::unique_ptr<LoadedAddon>>& all() const { return loaded_; }
     QVector<AddonCatalog> catalogs(LoadedAddon* src) const;

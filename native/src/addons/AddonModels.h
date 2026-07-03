@@ -58,6 +58,8 @@ struct AddonManifest
     QString accent;          // optional per-addon accent colour (hex), used by this addon's catalog types
     QStringList permissions; // declared capabilities, e.g. ["network"]
     QString minAppVersion;
+    QString updateUrl;       // optional public URL (e.g. a GitHub raw link) to this addon's latest .addon
+                             // package; when set, a JsLocal addon self-updates on startup if it's newer
     QVector<AddonSetting> settings;       // user-configurable credentials/options
     QVector<AddonCatalog> catalogs;       // media-typed catalogs (empty = a single implicit catalog)
     QVector<AddonMediaType> mediaTypes;   // custom media types with their own colour/icon
