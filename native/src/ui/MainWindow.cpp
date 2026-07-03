@@ -779,6 +779,9 @@ void MainWindow::buildEscMenu()
 void MainWindow::showEscMenu()
 {
     if (escMenuVisible()) return;
+    // Remember exactly what had focus (the themed view, or a specific classic-home item) so Resume returns
+    // there with its selection intact, rather than to the bare container.
+    escMenuPrevFocus_ = QApplication::focusWidget();
     buildEscMenu();
     escMenu_->adjustSize();
     // Centre it over the window in global coordinates (it's a top-level window).
@@ -796,8 +799,12 @@ void MainWindow::hideEscMenu()
     if (!escMenu_) return;
     escMenu_->hide();
     activateWindow();
-    // Return keyboard focus to whatever view was showing so its navigation resumes immediately.
-    if (QWidget* cur = stack_->currentWidget()) { cur->setFocus(Qt::OtherFocusReason); cur->activateWindow(); }
+    // Restore focus to exactly where it was before the menu (so the previous selection stays active); fall
+    // back to the current page if that widget is gone or off the current page.
+    QWidget* prev = escMenuPrevFocus_.data();
+    QWidget* cur = stack_->currentWidget();
+    QWidget* target = (prev && isAncestorOf(prev) && (prev == cur || (cur && cur->isAncestorOf(prev)))) ? prev : cur;
+    if (target) { target->setFocus(Qt::OtherFocusReason); target->activateWindow(); }
 }
 
 // ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------

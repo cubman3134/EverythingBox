@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QColor>
+#include <QPointer>
 #include <memory>
 #include <functional>
 #include "../addons/AddonModels.h"
@@ -199,6 +200,7 @@ private:
     bool escMenuVisible() const;
     QFrame* escMenu_ = nullptr;
     QVector<QPushButton*> escMenuButtons_; // { Resume, Exit }, in arrow-navigation order
+    QPointer<QWidget> escMenuPrevFocus_;   // widget focused before the menu opened, restored on Resume
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
