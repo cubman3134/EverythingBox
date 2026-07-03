@@ -14,6 +14,12 @@ Gamepad::Gamepad()
     SDL_SetMainReady();
     // Keep delivering controller events even when the app window isn't focused.
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    // Qt owns the Windows message loop. Without this, SDL_PumpEvents (called every poll) does its own
+    // PeekMessage(NULL) and dispatches ALL of the thread's window messages — including Qt's — which fights
+    // Qt's event delivery and can leave a just-created QQuickView (the themed home, rebuilt when leaving
+    // Settings) painting black. Disabling SDL's message loop lets Qt dispatch; SDL still gets its device
+    // notifications through Qt's dispatch, so hot-plug keeps working.
+    SDL_SetHint(SDL_HINT_WINDOWS_ENABLE_MESSAGELOOP, "0");
     if (SDL_Init(SDL_INIT_GAMECONTROLLER) == 0)
     {
         initialized_ = true;
