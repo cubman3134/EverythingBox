@@ -248,32 +248,35 @@ Item {
         return base + "/" + p
     }
 
-    // The whole view fades in on first appear and re-fades whenever the active view switches (home<->browse
-    // <->detail), so transitions read smoothly. Software-backend friendly (just an opacity animation).
+    // --- background -----------------------------------------------------------------------------------
+    // OUTSIDE the fading `content` below and always fully opaque, so switching views never drops to the
+    // window's near-black clear colour (which read as a black screen in full screen). Only the foreground
+    // elements fade; the backdrop stays solid the whole time.
+    Rectangle { anchors.fill: parent; color: T.val(root.view ? root.view.background : null, "color", "#0F1216") }
+    Rectangle { // optional vertical gradient (top -> bottom) over the flat colour
+        anchors.fill: parent
+        visible: !!root.bgGradient
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: (root.bgGradient && root.bgGradient.length > 0) ? root.bgGradient[0] : "transparent" }
+            GradientStop { position: 1.0; color: (root.bgGradient && root.bgGradient.length > 1) ? root.bgGradient[1] : "transparent" }
+        }
+    }
+    Image {
+        anchors.fill: parent
+        source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))
+        visible: source != "" && status === Image.Ready
+        fillMode: Image.PreserveAspectCrop
+    }
+    Rectangle { anchors.fill: parent; color: "black"; opacity: Number(T.val(root.view ? root.view.background : null, "dim", 0)) }
+
+    // The foreground elements fade in on first appear and re-fade whenever the active view switches
+    // (home<->browse<->detail), so transitions read smoothly. Software-backend friendly (an opacity animation).
     Item {
         id: content
         anchors.fill: parent
         opacity: 0
         Component.onCompleted: fade.restart()
         NumberAnimation { id: fade; target: content; property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
-
-        // --- background -------------------------------------------------------------------------------
-        Rectangle { anchors.fill: parent; color: T.val(root.view ? root.view.background : null, "color", "#0F1216") }
-        Rectangle { // optional vertical gradient (top -> bottom) over the flat colour
-            anchors.fill: parent
-            visible: !!root.bgGradient
-            gradient: Gradient {
-                GradientStop { position: 0.0; color: (root.bgGradient && root.bgGradient.length > 0) ? root.bgGradient[0] : "transparent" }
-                GradientStop { position: 1.0; color: (root.bgGradient && root.bgGradient.length > 1) ? root.bgGradient[1] : "transparent" }
-            }
-        }
-        Image {
-            anchors.fill: parent
-            source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))
-            visible: source != "" && status === Image.Ready
-            fillMode: Image.PreserveAspectCrop
-        }
-        Rectangle { anchors.fill: parent; color: "black"; opacity: Number(T.val(root.view ? root.view.background : null, "dim", 0)) }
 
         // --- elements ---------------------------------------------------------------------------------
         Repeater {
