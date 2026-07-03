@@ -6,6 +6,7 @@
 #include <QVector>
 #include <functional>
 #include "../addons/AddonModels.h"
+#include "../core/RomLibrary.h"
 
 class AddonManager;
 struct LoadedAddon;
@@ -42,6 +43,15 @@ private slots:
 
 private:
     void showCatalog(const MediaCatalog& cat);
+    // Local ROM library (RetroBat / ES-DE layout): the first "source" is a synthetic "Local ROMs" entry that
+    // drills systems -> games instead of running an addon catalog. showLocalSystems lists the systems that
+    // have ROMs; showLocalGames lists one system's games; activating a game launches it via openItem().
+    void showLocalSystems();
+    void showLocalGames(const QString& systemId);
+    bool localMode_ = false;                        // the Local ROMs source is selected
+    int  localLevel_ = 0;                           // 0 = systems list, 1 = games list
+    QString localSystemId_;                         // the system whose games are showing (level 1)
+    QVector<RomLibrary::SystemGroup> localGroups_;  // last scan result, cached for the drill-down
     // Host a sub-page inline (no popup): push it onto the internal stack; the helpers return to the main
     // list when done. showDialogPage embeds an existing QDialog; pushPage/popPage handle ad-hoc forms.
     void showDialogPage(QDialog* dlg, const std::function<void(int result)>& onFinished);

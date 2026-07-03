@@ -38,6 +38,16 @@ void Settings::setStartFullscreen(bool on)
     store().setValue(QStringLiteral("general/startFullscreen"), on); store().sync();
 }
 
+QString Settings::romsFolder()
+{
+    const QString p = store().value(QStringLiteral("roms/folder")).toString();
+    return p.isEmpty() ? (AppPaths::dataDir() + QStringLiteral("/roms")) : p;
+}
+void Settings::setRomsFolder(const QString& path)
+{
+    store().setValue(QStringLiteral("roms/folder"), path); store().sync();
+}
+
 bool Settings::bgmEnabled() { return store().value(QStringLiteral("bgm/enabled"), true).toBool(); }
 void Settings::setBgmEnabled(bool on) { store().setValue(QStringLiteral("bgm/enabled"), on); store().sync(); }
 int  Settings::bgmVolume() { return store().value(QStringLiteral("bgm/volume"), 35).toInt(); }

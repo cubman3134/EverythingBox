@@ -2,6 +2,7 @@
 #include "AddonSettingsDialog.h"
 #include "RegistryBrowser.h"
 #include "../addons/AddonManager.h"
+#include "../core/RomLibrary.h"
 
 #include <QListWidget>
 #include <QLineEdit>
@@ -115,6 +116,12 @@ void LibraryView::refreshSources()
     sourceRefs_.clear();
     itemList_->clear();
     currentItems_.clear();
+    localMode_ = false;
+
+    // First entry: the local ROM library (RetroBat / ES-DE layout). Not an addon, so its ref is null and it
+    // has no enable/disable checkbox; selecting it drills systems -> games (see onSourceChanged).
+    { auto* local = new QListWidgetItem(tr("🎮  Local ROMs"), sourceList_); local->setToolTip(RomLibrary::root());
+      sourceRefs_.push_back(nullptr); }
 
     // All media sources are listed; the checkbox enables/disables each one (persisted).
     for (LoadedAddon* s : mgr_->sources())
@@ -128,10 +135,12 @@ void LibraryView::refreshSources()
     }
     populating_ = false;
 
-    if (sourceList_->count() > 0)
-        sourceList_->setCurrentRow(0);
+    // Default to the first add-on (row 0 is the synthetic "Local ROMs" entry); selecting Local ROMs is what
+    // creates/scans the ROM tree, so we don't do that work unless the user asks for it.
+    if (sourceList_->count() > 1)
+        sourceList_->setCurrentRow(1);
     else
-        status_->setText(tr("No media-source addons installed. Use “Install Addon…” to add one."));
+        sourceList_->setCurrentRow(0); // only Local ROMs is present
 }
 
 void LibraryView::onSourceChanged()
@@ -140,6 +149,8 @@ void LibraryView::onSourceChanged()
     if (row < 0 || row >= sourceRefs_.size()) return;
 
     LoadedAddon* s = sourceRefs_[row];
+    if (!s) { pendingReqId_ = -1; showLocalSystems(); return; } // the synthetic "Local ROMs" source
+    localMode_ = false;
     if (!mgr_->isEnabled(s->manifest.id))
     {
         itemList_->clear();
@@ -157,7 +168,7 @@ void LibraryView::onSourceCheckChanged(QListWidgetItem* item)
 {
     if (populating_ || !item) return;
     const int row = sourceList_->row(item);
-    if (row < 0 || row >= sourceRefs_.size()) return;
+    if (row < 0 || row >= sourceRefs_.size() || !sourceRefs_[row]) return; // skip the local-ROMs pseudo-source
     mgr_->setEnabled(sourceRefs_[row]->manifest.id, item->checkState() == Qt::Checked);
     if (row == sourceList_->currentRow())
         onSourceChanged(); // reflect the new state in the item pane immediately
@@ -168,6 +179,30 @@ void LibraryView::doSearch()
     const int row = sourceList_->currentRow();
     if (row < 0 || row >= sourceRefs_.size()) return;
     const QString q = search_->text().trimmed();
+
+    // Local ROMs: filter the whole library by title (empty query -> back to the systems list).
+    if (!sourceRefs_[row])
+    {
+        if (q.isEmpty()) { showLocalSystems(); return; }
+        if (localGroups_.isEmpty()) localGroups_ = RomLibrary::scan();
+        MediaCatalog cat;
+        cat.title = tr("Search “%1”").arg(q);
+        for (const RomLibrary::SystemGroup& g : localGroups_)
+            for (const RomLibrary::Rom& r : g.roms)
+                if (r.title.contains(q, Qt::CaseInsensitive))
+                {
+                    MediaItem it;
+                    it.type = QStringLiteral("game");
+                    it.url = r.path; it.title = r.title; it.subtitle = r.systemName;
+                    it.systemHint = r.systemId; it.id = QStringLiteral("romlib:") + r.path;
+                    cat.items.push_back(it);
+                }
+        localMode_ = true; localLevel_ = 1; // results are games -> Enter launches
+        showCatalog(cat);
+        status_->setText(tr("%n match(es).", "", cat.items.size()));
+        return;
+    }
+
     status_->setText(tr("Loading…"));
     pendingReqId_ = q.isEmpty() ? mgr_->requestCatalog(sourceRefs_[row], QString(), QString(), 1)
                                 : mgr_->requestSearch(sourceRefs_[row], q);
@@ -198,8 +233,72 @@ void LibraryView::showCatalog(const MediaCatalog& cat)
 void LibraryView::onItemActivated()
 {
     const int row = itemList_->currentRow();
-    if (row >= 0 && row < currentItems_.size())
-        emit openItem(currentItems_[row]);
+    if (row < 0 || row >= currentItems_.size()) return;
+    const MediaItem it = currentItems_[row];
+    if (localMode_)
+    {
+        if (it.type == QStringLiteral("__back__")) { showLocalSystems(); return; } // "‹ All systems"
+        if (localLevel_ == 0) { showLocalGames(it.id); return; }                    // a system row -> its games
+        emit openItem(it);                                                          // a game -> launch
+        return;
+    }
+    emit openItem(it);
+}
+
+// Scan the ROM library and list the systems that have games (RetroBat / ES-DE <root>/<system>/ layout). The
+// tree is created first so it's ready to drop ROMs into even on a fresh install.
+void LibraryView::showLocalSystems()
+{
+    localMode_ = true; localLevel_ = 0; localSystemId_.clear();
+    RomLibrary::ensureStructure();
+    localGroups_ = RomLibrary::scan();
+
+    MediaCatalog cat;
+    cat.title = tr("Local ROMs");
+    for (const RomLibrary::SystemGroup& g : localGroups_)
+    {
+        MediaItem it;
+        it.type = QStringLiteral("platform");
+        it.id = g.systemId;                 // onItemActivated drills into this system
+        it.title = g.systemName;
+        it.subtitle = tr("%n game(s)", "", g.roms.size());
+        it.expandable = true;
+        cat.items.push_back(it);
+    }
+    showCatalog(cat);
+    if (localGroups_.isEmpty())
+        status_->setText(tr("No ROMs found under %1 — drop games into its system sub-folders "
+                            "(RetroBat / ES-DE layout), then Reload.").arg(RomLibrary::root()));
+    else
+        status_->setText(tr("Local ROMs — %n system(s). Open one to see its games.", "", localGroups_.size()));
+}
+
+void LibraryView::showLocalGames(const QString& systemId)
+{
+    localMode_ = true; localLevel_ = 1; localSystemId_ = systemId;
+    const RomLibrary::SystemGroup* grp = nullptr;
+    for (const RomLibrary::SystemGroup& g : localGroups_) if (g.systemId == systemId) { grp = &g; break; }
+
+    MediaCatalog cat;
+    MediaItem back; back.type = QStringLiteral("__back__"); back.title = tr("‹ All systems");
+    cat.items.push_back(back);
+    if (grp)
+    {
+        cat.title = grp->systemName;
+        for (const RomLibrary::Rom& r : grp->roms)
+        {
+            MediaItem it;
+            it.type = QStringLiteral("game");
+            it.url = r.path;
+            it.title = r.title;
+            it.systemHint = r.systemId;                        // routes to the right core/emulator on launch
+            it.id = QStringLiteral("romlib:") + r.path;         // stable key for Recent / play stats
+            cat.items.push_back(it);
+        }
+    }
+    showCatalog(cat);
+    status_->setText(grp ? tr("%1 — %n game(s). Enter to play.", "", grp->roms.size()).arg(grp->systemName)
+                         : tr("No games."));
 }
 
 void LibraryView::installAddon()
@@ -243,7 +342,7 @@ void LibraryView::addByUrl()
 void LibraryView::removeSelected()
 {
     const int row = sourceList_->currentRow();
-    if (row < 0 || row >= sourceRefs_.size()) { status_->setText(tr("Select a source to remove.")); return; }
+    if (row < 0 || row >= sourceRefs_.size() || !sourceRefs_[row]) { status_->setText(tr("Select an add-on to remove.")); return; }
     LoadedAddon* s = sourceRefs_[row];
     const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
     const bool remote = (s->transport == LoadedAddon::RemoteHttp);
@@ -274,9 +373,9 @@ void LibraryView::removeSelected()
 void LibraryView::configureAddon()
 {
     const int row = sourceList_->currentRow();
-    if (row < 0 || row >= sourceRefs_.size())
+    if (row < 0 || row >= sourceRefs_.size() || !sourceRefs_[row])
     {
-        status_->setText(tr("Select a source to configure."));
+        status_->setText(tr("Select an add-on to configure."));
         return;
     }
     auto* dlg = new AddonSettingsDialog(sourceRefs_[row]->manifest, this);

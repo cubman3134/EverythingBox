@@ -24,6 +24,7 @@
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/PlayStats.h"
+#include "../core/RomLibrary.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
@@ -3723,6 +3724,40 @@ void MainWindow::openGeneralSettings()
             Settings::setStartFullscreen(c);
             if (c) showFullScreen(); else if (isFullScreen()) leaveFullScreen(); // reflect the choice right away
         });
+        v->addSpacing(10);
+
+        // --- Game ROMs: a local ROM library laid out RetroBat / ES-DE style (<root>/<system>/roms). ---
+        auto* rHeading = new QLabel(tr("Game ROMs"));
+        rHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(rHeading);
+        auto* rNote = new QLabel(tr("ROMs live in per-system folders under one root (RetroBat / EmulationStation "
+            "Desktop Edition layout). Point this anywhere on your system; games then appear under “Local ROMs” "
+            "in the Library."));
+        rNote->setWordWrap(true); rNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(rNote);
+        auto* rRow = new QHBoxLayout();
+        auto* rPath = new QLineEdit(Settings::romsFolder());
+        rPath->setMinimumHeight(34);
+        rPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        rRow->addWidget(rPath, 1);
+        auto* rBrowse = new QPushButton(tr("Change…"));
+        rRow->addWidget(rBrowse);
+        v->addLayout(rRow);
+        connect(rBrowse, &QPushButton::clicked, this, [this, rPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the ROMs folder"),
+                                                                  Settings::romsFolder());
+            if (dir.isEmpty()) return;
+            Settings::setRomsFolder(dir);
+            rPath->setText(dir);
+            RomLibrary::ensureStructure(); // create the per-system sub-folders in the new location
+            statusBar()->showMessage(tr("ROMs folder set to %1").arg(dir), 5000);
+        });
+        auto* rOpen = panelRow(tr("Open ROMs Folder"));
+        connect(rOpen, &QPushButton::clicked, this, [this] {
+            RomLibrary::ensureStructure(); // make sure the tree exists before we open it
+            QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
+        });
+        v->addWidget(rOpen);
         v->addSpacing(10);
 
         auto* heading = new QLabel(tr("Subtitles"));

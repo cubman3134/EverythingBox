@@ -15,6 +15,11 @@ namespace Settings
     bool startFullscreen();
     void setStartFullscreen(bool on);
 
+    // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
+    // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.
+    QString romsFolder();          // resolved path (never empty)
+    void setRomsFolder(const QString& path);
+
     // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
     // default at a modest volume.
     bool bgmEnabled();
