@@ -242,6 +242,7 @@ Item {
             Text { // facts (rating / genres / developer / …) the addon supplied, a few at most
                 width: parent.width; visible: text !== ""; textFormat: Text.RichText
                 text: {
+                    if (meta.m.type === "game") return "" // games: year + play line covers it; drop the facts/platforms row
                     var f = meta.m.facts; if (!f || !f.length) return ""
                     var out = []
                     for (var i = 0; i < f.length && i < 4; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
@@ -257,11 +258,12 @@ Item {
                 text: "🏆 Achievements — " + (meta.m.achEarned || 0) + " / " + (meta.m.achTotal || 0)
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(10, xmb.height * 0.022)
             }
-            Flow {
+            Flow { // a single row of badges (earned first, bright); overflow past one line is clipped away
                 width: parent.width; spacing: xmb.height * 0.006
+                height: xmb.height * 0.05; clip: true
                 visible: !!(meta.m.achievements && meta.m.achievements.length)
                 Repeater {
-                    model: meta.m.achievements ? meta.m.achievements.slice(0, 21) : []
+                    model: meta.m.achievements ? meta.m.achievements.slice(0, 16) : []
                     delegate: Image {
                         required property var modelData
                         width: xmb.height * 0.05; height: width
