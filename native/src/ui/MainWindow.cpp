@@ -337,7 +337,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // Menu background music (RetroBat-style): plays while browsing, pauses on games/video. Follow the view.
     bgm_ = new BackgroundMusic(this);
-    connect(stack_, &QStackedWidget::currentChanged, this, [this] { updateBackgroundMusic(); });
+    connect(stack_, &QStackedWidget::currentChanged, this, [this] {
+        updateBackgroundMusic();
+        // Remember the full-screen state as we ENTER content (a game / video / reader), so exiting back to the
+        // home restores it instead of always dropping to a window (see openHome). Content doesn't change the
+        // full-screen state itself, so isFullScreen() here is the browsing state we want to come back to.
+        QWidget* w = stack_->currentWidget();
+        const bool content = (w == retro_ || w == playerPage_ || w == book_ || w == pdf_ || w == comic_ || w == emuPage_);
+        if (content && !inContent_) fsBeforeContent_ = isFullScreen();
+        inContent_ = content;
+    });
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
@@ -551,14 +560,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     playerNoticeTimer_->setSingleShot(true);
     connect(playerNoticeTimer_, &QTimer::timeout, this, [this] { if (playerNotice_) playerNotice_->hide(); });
 
-    // Window-level notification overlay (download/resolve progress + errors). A top-level Tool window tied to
-    // us — a normal child widget would be hidden behind a themed home (a native QQuickView container). Tool +
-    // no-activate keeps it floating just above our window without stealing focus or the taskbar. Translucent
-    // background so the rounded corners read cleanly; click-through so it never eats a press on the view below.
-    notice_ = new QLabel(this, Qt::FramelessWindowHint | Qt::Tool | Qt::WindowDoesNotAcceptFocus);
+    // Notification overlay (download/resolve progress + errors). A CHILD widget of the central area, raised
+    // over the current page — NOT a separate top-level window. A top-level window is trapped behind a
+    // foreground fullscreen main window (Windows' boosted fullscreen z-band), so it only appeared when you
+    // alt-tabbed away. As a child it's part of the window and composites over everything: the QQuickWidget
+    // themed home and the libmpv QOpenGLWidget both composite with sibling widgets. Click-through, no focus.
+    notice_ = new QLabel(centralWidget());
     notice_->setObjectName(QStringLiteral("mwNotice"));
-    notice_->setAttribute(Qt::WA_ShowWithoutActivating);
-    notice_->setAttribute(Qt::WA_TranslucentBackground);
     notice_->setAttribute(Qt::WA_TransparentForMouseEvents);
     notice_->setFocusPolicy(Qt::NoFocus);
     notice_->setWordWrap(true);
@@ -1092,13 +1100,14 @@ void MainWindow::showPlayerNotice(const QString& msg, int ms)
 void MainWindow::positionNotice()
 {
     if (!notice_ || !notice_->isVisible()) return;
-    notice_->setMaximumWidth(qMax(280, int(width() * 0.7)));
+    QWidget* area = notice_->parentWidget() ? notice_->parentWidget() : this;
+    notice_->setMaximumWidth(qMax(280, int(area->width() * 0.7)));
     notice_->adjustSize();
-    // It's a top-level window, so place it in global coordinates over our bottom-centre.
-    const QPoint tl = mapToGlobal(QPoint(0, 0));
-    const int x = tl.x() + (width() - notice_->width()) / 2;
-    const int y = tl.y() + height() - notice_->height() - 56; // floats just above the bottom edge
-    notice_->move(qMax(tl.x() + 8, x), qMax(tl.y() + 8, y));
+    // Child overlay: local coordinates over the bottom-centre of the central area.
+    const int x = (area->width() - notice_->width()) / 2;
+    const int y = area->height() - notice_->height() - 56; // floats just above the bottom edge
+    notice_->move(qMax(8, x), qMax(8, y));
+    notice_->raise(); // keep it above the current page
 }
 
 void MainWindow::notify(const QString& text, int ms)
@@ -1826,7 +1835,10 @@ void MainWindow::openHome()
     pdf_->persist();
     comic_->persist();
     clearAudioQueue();
-    if (isFullScreen()) leaveFullScreen(); // exiting media (e.g. a movie) must drop back to a normal window
+    // Restore the full-screen state we had before opening content: a full-screen browser stays full screen
+    // after exiting the emulator/movie; one that went full screen only for a movie drops back to a window.
+    if (fsBeforeContent_ && !isFullScreen()) showFullScreen();
+    else if (!fsBeforeContent_ && isFullScreen()) leaveFullScreen();
     home_->refresh();
     showHomeScreen(); // classic HomeView, or the themed home if the user enabled it
 }
