@@ -275,10 +275,6 @@ private:
         int attempt = 0;              // last ?n= used (0 = best)
     } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
-    // Play-history facts ({label,value} pairs) for a game id we've launched before, newest fact first; empty
-    // if never played. Shown at the top of the info panel's facts, in both the classic and themed layouts.
-    QVariantList playFactsFor(const QString& id) const;
-
     // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
     int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
     int themedMetaIndex_ = -1;        // the browse index that fetch was for

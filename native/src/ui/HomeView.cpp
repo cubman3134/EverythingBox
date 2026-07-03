@@ -2521,20 +2521,6 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
 
-QVariantList HomeView::playFactsFor(const QString& id) const
-{
-    QVariantList out;
-    if (id.isEmpty()) return out;
-    const PlayStats::Stat s = PlayStats::get(PlayStats::identity(id, QString()));
-    if (s.lastPlayed <= 0) return out; // never launched -> no play facts
-    out << QVariantMap{ { QStringLiteral("label"), tr("Last played") },
-                        { QStringLiteral("value"), PlayStats::formatLastPlayed(s.lastPlayed) } };
-    if (s.totalSeconds > 0)
-        out << QVariantMap{ { QStringLiteral("label"), tr("Time played") },
-                            { QStringLiteral("value"), PlayStats::formatDuration(s.totalSeconds) } };
-    return out;
-}
-
 void HomeView::requestThemedMeta(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
@@ -2549,9 +2535,15 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("type"), it.type);
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
-    // Show play history right away (survives even for games with no addon /meta to enrich them below).
-    const QVariantList pf = playFactsFor(it.id);
-    if (!pf.isEmpty()) base.insert(QStringLiteral("facts"), pf);
+    // Play history rides on the subtitle line (beside the year), not the facts line — see Xmb.qml. Emitted
+    // as its own fields so it shows straight away, even for a game with no addon /meta to enrich it below.
+    const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(it.id, QString()));
+    if (ps.lastPlayed > 0)
+    {
+        base.insert(QStringLiteral("lastPlayed"), PlayStats::formatLastPlayed(ps.lastPlayed));
+        if (ps.totalSeconds > 0)
+            base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
+    }
     emit themedMetaReady(idx, base);
 
     // Achievements for a game -> the live panel (earned first, so they highlight "at the front"). Retro
@@ -2857,13 +2849,16 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         QVariantMap m;
         m.insert(QStringLiteral("index"), themedMetaIndex_);
         m.insert(QStringLiteral("overview"), detail.overview);
-        // Lead with play history (a played game), then the addon's facts — the /meta facts replace the
-        // skeleton's, so re-prepend them here or they'd be lost on this merge.
+        // For games, drop "Released": the year already shows on the subtitle line, so it'd be redundant.
+        // (Play history is carried on separate fields that survive this facts merge — see requestThemedMeta.)
+        const bool isGame = themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size()
+                            && items_[browseRowMap_[themedMetaIndex_]].type == QStringLiteral("game");
         QVariantList facts;
-        if (themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size())
-            facts = playFactsFor(items_[browseRowMap_[themedMetaIndex_]].id);
         for (const MediaFact& f : detail.facts)
+        {
+            if (isGame && f.label == tr("Released")) continue;
             facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+        }
         m.insert(QStringLiteral("facts"), facts);
         if (!detail.imageUrl.isEmpty()) m.insert(QStringLiteral("image"), detail.imageUrl);
         if (!detail.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), detail.subtitle);

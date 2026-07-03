@@ -227,16 +227,24 @@ Item {
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(15, xmb.height * 0.036)
                 wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
             }
-            Text {
-                width: parent.width; visible: !!meta.m.subtitle; text: meta.m.subtitle ? meta.m.subtitle : ""
-                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.024); elide: Text.ElideRight
+            Text { // year/subtitle, with play history (last played · time played) folded onto the same line
+                width: parent.width; visible: text !== ""; textFormat: Text.RichText
+                text: {
+                    var parts = []
+                    if (meta.m.subtitle)   parts.push(meta.m.subtitle)
+                    if (meta.m.lastPlayed) parts.push("<b>Last played:</b> " + meta.m.lastPlayed)
+                    if (meta.m.timePlayed) parts.push("<b>Time played:</b> " + meta.m.timePlayed)
+                    return parts.join("&nbsp;&nbsp;·&nbsp;&nbsp;")
+                }
+                color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.024)
+                wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
             }
-            Text { // facts (rating / genres / released / …) the addon supplied, a few at most
+            Text { // facts (rating / genres / developer / …) the addon supplied, a few at most
                 width: parent.width; visible: text !== ""; textFormat: Text.RichText
                 text: {
                     var f = meta.m.facts; if (!f || !f.length) return ""
                     var out = []
-                    for (var i = 0; i < f.length && i < 6; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
+                    for (var i = 0; i < f.length && i < 4; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
                     return out.join("&nbsp;&nbsp;&nbsp;")
                 }
                 color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)
