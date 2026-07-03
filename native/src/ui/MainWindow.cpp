@@ -1324,7 +1324,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         if (extracted.isEmpty())
         {
             mwLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(rom).fileName(), aerr));
-            statusBar()->showMessage(tr("Couldn't open the archived game: %1").arg(aerr), 6000);
+            notify(tr("Couldn't open the archived game: %1").arg(aerr), 7000);
             return;
         }
         mwLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
@@ -1425,7 +1425,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     else
     {
         mwLog(QStringLiteral("game: openGame failed: %1").arg(err));
-        statusBar()->showMessage(tr("Can't run game: %1").arg(err), 6000);
+        notify(tr("Can't run game: %1").arg(err), 7000);
     }
 }
 
@@ -3436,6 +3436,12 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             return;
         }
         const QByteArray body = reply->readAll();
+        if (body.isEmpty()) // the source returned nothing (e.g. no copy / a dead link) - opening it would just fail
+        {
+            mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
+            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
+            return;
+        }
         QFile f(localPath + QStringLiteral(".part"));
         if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
         {
