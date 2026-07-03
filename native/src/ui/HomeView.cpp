@@ -2146,7 +2146,7 @@ void HomeView::dlResolveLeaf(const DlNode& node)
             query = (it.title + QLatin1Char(' ') + author).trimmed();
         }
         if (query.isEmpty()) query = it.title;
-        mgr_->resolveDocumentByQuery(query, catType, [this, it](const QString& url, const QString& mime, const QString&) {
+        mgr_->resolveDocumentByQuery(query, catType, [this, it](const QString& url, const QString& mime, const QString&, bool) {
             if (!url.isEmpty()) dlEmit(it, url, mime);
             dlNext();
         });
@@ -2460,11 +2460,13 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
-        mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err) {
+        mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err, bool noMatches) {
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
             else if (!err.isEmpty())
                 showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
+            else if (noMatches)
+                showToast(tr("No copies of “%1” were found.").arg(title), 8000);
             else
                 showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
                              "less-common titles take a while). Try again in a few minutes; if it never "

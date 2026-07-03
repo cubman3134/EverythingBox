@@ -177,11 +177,18 @@ Item {
             Rectangle {
                 anchors.fill: parent; radius: 8
                 color: (row.modelData && row.modelData.accent) ? row.modelData.accent : "#23272F"
-                visible: !(row.modelData && row.modelData.image)
+                // Show the accent tile until the icon is ready (and for off-screen rows whose icon isn't loaded).
+                visible: !(row.modelData && row.modelData.image) || rowIcon.status !== Image.Ready
             }
             Image {
+                id: rowIcon
                 anchors.fill: parent; visible: !!(row.modelData && row.modelData.image)
-                source: (row.modelData && row.modelData.image && xmb.host) ? xmb.host.resolve(row.modelData.image) : ""
+                asynchronous: true; cache: true
+                sourceSize.width: width; sourceSize.height: height
+                // Only rasterize icons for rows near the cross: a full console list is ~56 SVGs, and decoding
+                // them all at once on the software renderer is the hitch you feel landing on a big category.
+                source: (row.modelData && row.modelData.image && xmb.host && Math.abs(row.index - xmb.itemScroll) < 9)
+                        ? xmb.host.resolve(row.modelData.image) : ""
                 fillMode: Image.PreserveAspectCrop; smooth: true
             }
             // Title (and, for the selected row, a subtitle line beneath it) to the right of the icon.

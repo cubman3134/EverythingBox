@@ -1206,9 +1206,9 @@ void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbS
 }
 
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,
-                                          std::function<void(const QString&, const QString&, const QString&)> cb)
+                                          std::function<void(const QString&, const QString&, const QString&, bool)> cb)
 {
-    if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString()); return; }
+    if (query.trimmed().isEmpty()) { cb(QString(), QString(), QString(), false); return; }
     // Pick the first enabled file provider (a non-Stremio remote media-source, e.g. Allarr) that exposes a
     // catalog of this type, and use ITS catalog id to search.
     LoadedAddon* prov = nullptr; QString catId;
@@ -1220,7 +1220,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
             if (c.type == catalogType) { prov = s; catId = c.id; break; }
         if (prov) break;
     }
-    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString(), QString()); return; }
+    if (!prov) { streamLog(QStringLiteral("doc-bridge: no file provider for type %1").arg(catalogType)); cb(QString(), QString(), QString(), false); return; }
 
     const QString base = prov->baseUrl;
     streamLog(QStringLiteral("doc-bridge: searching %1 catalog '%2' for \"%3\"").arg(prov->manifest.id, catId, query));
@@ -1254,7 +1254,7 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
                 why = reply->errorString(); // connection refused / timed out / DNS - Qt's message is already clear
             streamLog(QStringLiteral("doc-bridge: search error: %1 (http %2%3)").arg(reply->errorString())
                           .arg(http).arg(cf.isEmpty() ? QString() : QStringLiteral(", cf ") + cf));
-            cb(QString(), QString(), why);
+            cb(QString(), QString(), why, false);
             return;
         }
         MediaItem hit;
@@ -1264,9 +1264,9 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
         for (const MediaItem& it : cat.items) if (!it.expandable) { hit = it; break; }
         if (hit.id.isEmpty() && hit.url.isEmpty() && !cat.items.isEmpty()) hit = cat.items.first();
         streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
-        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString()); return; } // reached, but no match
-        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString()); return; } // already a direct file
-        resolveStream(prov, hit, [cb](const QString& url, const QString& mime) { cb(url, mime, QString()); });
+        if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString(), true); return; } // reached, zero results
+        if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
+        resolveStream(prov, hit, [cb](const QString& url, const QString& mime) { cb(url, mime, QString(), false); });
     });
 }
 
