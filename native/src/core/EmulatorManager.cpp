@@ -13,6 +13,7 @@
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QEventLoop>
+#include <cctype>
 #include <QProcess>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -494,14 +495,45 @@ void EmulatorManager::prepareBios(const QString& binDir)
     }
 }
 
-// Cemu can't decrypt Wii U titles without keys.txt (the console's title/common keys) in its folder. Fetch it
-// once, on demand, into the Cemu install — the same on-launch, best-effort model as prepareBios. Kept out of
-// the app bundle/repo (these are copyrighted keys); pulled from a maintained gist when Cemu is set up.
+// True if keys.txt at `path` actually contains keys (a 32-hex-char line) rather than being absent or just the
+// blank comment-only placeholder Cemu writes when it starts without keys.
+static bool cemuKeysPresent(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    const QList<QByteArray> lines = f.readAll().split('\n');
+    for (QByteArray line : lines)
+    {
+        line = line.trimmed();
+        if (line.size() < 32) continue;
+        bool hex = true;
+        for (int i = 0; i < 32; ++i) if (!std::isxdigit(static_cast<unsigned char>(line[i]))) { hex = false; break; }
+        if (hex) return true;
+    }
+    return false;
+}
+
+// Cemu can't decrypt Wii U titles without keys.txt (the console's title/common keys). Fetch it on demand into
+// the folder(s) Cemu reads — next to the exe (portable) AND its per-user data dir (%APPDATA%\Cemu on Windows,
+// where a non-portable Cemu 2.x looks) — the same best-effort model as prepareBios. Kept out of the app repo
+// (copyrighted keys); pulled from a maintained gist when Cemu is set up. Skips paths that already have real
+// keys, and overwrites Cemu's blank placeholder.
 void EmulatorManager::prepareCemuKeys(const QString& binDir)
 {
     if (em_.id != QStringLiteral("cemu")) return;
-    const QString dest = binDir + QStringLiteral("/keys.txt");
-    if (QFile::exists(dest)) return; // already provided (by us on a previous run, or by the user)
+
+    QStringList targets;
+    targets << binDir + QStringLiteral("/keys.txt");
+#ifdef Q_OS_WIN
+    const QString appdata = qEnvironmentVariable("APPDATA");
+    if (!appdata.isEmpty()) targets << appdata + QStringLiteral("/Cemu/keys.txt");
+#else
+    targets << QDir::homePath() + QStringLiteral("/.config/Cemu/keys.txt");
+#endif
+
+    QStringList todo;
+    for (const QString& t : targets) if (!cemuKeysPresent(t)) todo << t;
+    if (todo.isEmpty()) return; // real keys already in place wherever Cemu looks
 
     emit status(tr("Fetching Cemu keys…"), -1);
     QNetworkRequest rq((QUrl(QStringLiteral(
@@ -516,9 +548,14 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
     if (reply->error() == QNetworkReply::NoError)
     {
         const QByteArray body = reply->readAll();
-        if (!body.isEmpty()) { QFile f(dest); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); } }
+        if (!body.isEmpty())
+            for (const QString& t : todo)
+            {
+                QDir().mkpath(QFileInfo(t).absolutePath());
+                QFile f(t); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
+            }
     }
-    // On failure, leave it absent: Cemu will prompt for keys itself, exactly as before.
+    // On failure, leave it: Cemu will prompt for keys itself, exactly as before.
     reply->deleteLater();
 }
 
