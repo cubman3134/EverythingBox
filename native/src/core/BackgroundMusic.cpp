@@ -2,13 +2,13 @@
 #include "AppPaths.h"
 #include "Settings.h"
 
-#include <QMediaPlayer>
-#include <QAudioOutput>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
-#include <QUrl>
 #include <QRandomGenerator>
+#include <QMetaObject>
+
+#include <mpv/client.h>
 
 QString BackgroundMusic::musicDir()
 {
@@ -29,16 +29,35 @@ QString BackgroundMusic::musicDir()
 
 BackgroundMusic::BackgroundMusic(QObject* parent) : QObject(parent)
 {
-    out_ = new QAudioOutput(this);
-    player_ = new QMediaPlayer(this);
-    player_->setAudioOutput(out_);
+    mpv_ = mpv_create();
+    if (mpv_)
+    {
+        // Audio only: vid=no ignores any embedded cover-art "video" stream (the thing that makes some MP3s
+        // play silently through other backends); vo=null + audio-display=no keep it strictly audio; idle=yes
+        // keeps the instance alive between tracks so we can load the next one.
+        mpv_set_option_string(mpv_, "vid", "no");
+        mpv_set_option_string(mpv_, "vo", "null");
+        mpv_set_option_string(mpv_, "audio-display", "no");
+        mpv_set_option_string(mpv_, "idle", "yes");
+        mpv_set_option_string(mpv_, "force-window", "no");
+        mpv_set_option_string(mpv_, "terminal", "no");
+        mpv_set_option_string(mpv_, "config", "no");
+        // mpv parses numbers with the C locale; main() already calls setlocale(LC_NUMERIC, "C").
+        if (mpv_initialize(mpv_) < 0) { mpv_terminate_destroy(mpv_); mpv_ = nullptr; }
+    }
+    if (mpv_)
+    {
+        double v = qBound(0, Settings::bgmVolume(), 100);
+        mpv_set_property(mpv_, "volume", MPV_FORMAT_DOUBLE, &v);
+        mpv_set_wakeup_callback(mpv_, &BackgroundMusic::onWakeup, this);
+    }
     enabled_ = Settings::bgmEnabled();
-    out_->setVolume(qBound(0, Settings::bgmVolume(), 100) / 100.0);
-    // Advance to the next track when one finishes (loop the shuffled list forever).
-    connect(player_, &QMediaPlayer::mediaStatusChanged, this, [this](QMediaPlayer::MediaStatus s) {
-        if (s == QMediaPlayer::EndOfMedia) playIndex(idx_ + 1);
-    });
     reload();
+}
+
+BackgroundMusic::~BackgroundMusic()
+{
+    if (mpv_) { mpv_terminate_destroy(mpv_); mpv_ = nullptr; }
 }
 
 void BackgroundMusic::reload()
@@ -57,25 +76,35 @@ void BackgroundMusic::reload()
 
 void BackgroundMusic::playIndex(int i)
 {
-    if (tracks_.isEmpty()) return;
+    if (tracks_.isEmpty() || !mpv_) return;
     idx_ = ((i % tracks_.size()) + tracks_.size()) % tracks_.size(); // wrap
-    player_->setSource(QUrl::fromLocalFile(tracks_[idx_]));
-    player_->play();
+    const QByteArray path = QFile::encodeName(tracks_[idx_]); // mpv wants a filesystem-encoded path
+    const char* cmd[] = { "loadfile", path.constData(), nullptr };
+    mpv_command(mpv_, cmd);
+    loaded_ = true;
+    setPaused(!(enabled_ && active_)); // load paused if we're not on a menu screen
     title_ = QFileInfo(tracks_[idx_]).completeBaseName();
     emit nowPlayingChanged(title_);
+}
+
+void BackgroundMusic::setPaused(bool paused)
+{
+    if (!mpv_) return;
+    int flag = paused ? 1 : 0;
+    mpv_set_property(mpv_, "pause", MPV_FORMAT_FLAG, &flag);
 }
 
 void BackgroundMusic::applyState()
 {
     if (enabled_ && active_ && !tracks_.isEmpty())
     {
-        if (player_->playbackState() == QMediaPlayer::PlayingState) return;
-        if (player_->source().isEmpty()) playIndex(idx_ < 0 ? 0 : idx_); // first start
-        else player_->play();                                            // resume where it paused
+        if (idx_ < 0) idx_ = 0;
+        if (!loaded_) playIndex(idx_); // first start
+        else setPaused(false);         // resume where it paused
     }
-    else
+    else if (loaded_)
     {
-        player_->pause();
+        setPaused(true);
     }
 }
 
@@ -86,4 +115,34 @@ void BackgroundMusic::setEnabled(bool on)
     if (!on && !title_.isEmpty()) { title_.clear(); emit nowPlayingChanged(title_); } // hide the readout when off
     applyState();
 }
-void BackgroundMusic::setVolume(int pct)  { out_->setVolume(qBound(0, pct, 100) / 100.0); }
+void BackgroundMusic::setVolume(int pct)
+{
+    if (!mpv_) return;
+    double v = qBound(0, pct, 100);
+    mpv_set_property(mpv_, "volume", MPV_FORMAT_DOUBLE, &v);
+}
+
+// Queued from mpv's (other-thread) wakeup callback so the event drain runs on the GUI thread.
+void BackgroundMusic::onWakeup(void* ctx)
+{
+    QMetaObject::invokeMethod(static_cast<BackgroundMusic*>(ctx), "onMpvEvents", Qt::QueuedConnection);
+}
+
+void BackgroundMusic::onMpvEvents()
+{
+    if (!mpv_) return;
+    while (true)
+    {
+        mpv_event* e = mpv_wait_event(mpv_, 0);
+        if (e->event_id == MPV_EVENT_NONE) break;
+        if (e->event_id == MPV_EVENT_END_FILE)
+        {
+            auto* ef = static_cast<mpv_event_end_file*>(e->data);
+            // A track finished (EOF) or couldn't be decoded (ERROR) -> move to the next one; loop forever.
+            // A STOP/REDIRECT reason means WE replaced the file (playIndex), so don't double-advance.
+            if (ef && (ef->reason == MPV_END_FILE_REASON_EOF || ef->reason == MPV_END_FILE_REASON_ERROR)
+                && !tracks_.isEmpty())
+                playIndex(idx_ + 1);
+        }
+    }
+}
