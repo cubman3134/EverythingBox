@@ -1,7 +1,7 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
 
-#include <QQuickView>
+#include <QQuickWidget>
 #include <QQuickItem>
 #include <QWidget>
 #include <QQmlContext>
@@ -91,12 +91,14 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     if (tf.open(QIODevice::ReadOnly))
         theme = QJsonDocument::fromJson(tf.readAll()).object().toVariantMap();
 
-    // A QQuickView (a real window) renders the QML reliably even alongside the app's QOpenGLWidget; a
-    // QQuickWidget rendered blank here. We embed it via createWindowContainer. (The whole themed screen is
-    // one full-page widget, so the native-window stacking quirks don't bite.)
-    auto* qv = new QQuickView();
-    qv->setResizeMode(QQuickView::SizeRootObjectToView);
-    qv->setColor(QColor(QStringLiteral("#0F1216")));
+    // A QQuickWidget: with the app's SOFTWARE Qt Quick backend (set in main()) it renders into the widget
+    // backing store like any other widget — no native child window. The earlier QQuickView+createWindowContainer
+    // approach embedded a real native window, which Windows would intermittently stop compositing over a
+    // fullscreen app (black screen) and whose activation churn made the shell flash the taskbar. (The historic
+    // "QQuickWidget rendered blank" note was the GL path, before the software backend was forced.)
+    auto* qv = new QQuickWidget(parent);
+    qv->setResizeMode(QQuickWidget::SizeRootObjectToView);
+    qv->setClearColor(QColor(QStringLiteral("#0F1216")));
     qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
 
     if (QQuickItem* root = qv->rootObject())
@@ -150,18 +152,16 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(actionRequested(QString)), bridge, SLOT(button(QString)));
     }
 
-    QWidget* container = QWidget::createWindowContainer(qv, parent);
-    container->setFocusPolicy(Qt::StrongFocus);
-    container->setProperty("mmvQuickView", QVariant::fromValue<QObject*>(qv)); // for rootItem()
-    return container;
+    qv->setFocusPolicy(Qt::StrongFocus);
+    qv->setProperty("mmvQuickView", QVariant::fromValue<QObject*>(qv)); // marks a themed page + for rootItem()
+    return qv;
 }
 
 QQuickItem* rootItem(QWidget* view)
 {
     if (!view) return nullptr;
-    QObject* o = view->property("mmvQuickView").value<QObject*>();
-    QQuickView* qv = qobject_cast<QQuickView*>(o);
-    return qv ? qv->rootObject() : nullptr;
+    auto* qw = qobject_cast<QQuickWidget*>(view->property("mmvQuickView").value<QObject*>());
+    return qw ? qw->rootObject() : nullptr;
 }
 
 bool homeIsXmb(const QString& themeDir)

@@ -251,11 +251,7 @@ private:
     QWidget* themedHome_ = nullptr;
     QString  themedHomeBuiltTheme_;   // the theme the current themedHome_ was built with (reuse vs. rebuild)
     bool     themedHomeShownOnce_ = false; // first show is exposed by the top-level show(); later ones may need a kick
-    void nudgeThemedHome();           // force the themed QQuickView to expose + repaint after we switch to it (anti-black)
-    void recompositeFullScreen();     // flicker-free alt-tab mimic: re-composite child windows in fullscreen (anti-black)
-    QTimer* recompTimer_ = nullptr;   // debounce: one recomposite AFTER a stack swap settles (a swap emits
-                                      // currentChanged several times; overlapping blinks fight over foreground)
-    bool recompInFlight_ = false;     // a blink cycle is running; ignore re-triggers until it completes
+    void nudgeThemedHome();           // schedule a repaint of the (plain QQuickWidget) themed home after a rebuild
     QWidget* themedBrowse_ = nullptr;
     int themedHomeIndex_ = 0; // remember the highlighted system, so returning from a catalog lands back on it
     bool themedHomeIsXmb_ = false; // the themed home is an XMB cross (its column mirrors HomeView live)

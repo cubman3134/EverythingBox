@@ -57,7 +57,7 @@ namespace ThemeEngine
 {
     // Build a themed view widget for the given theme directory, fed with `items` (the catalog rows) and
     // `system`. The callbacks fire on Enter (with the selected index), Esc/Back, and the theme-cycle key.
-    // The returned widget embeds a software-rendered QQuickView (see rootItem() to update it live).
+    // The returned widget is a software-rendered QQuickWidget (see rootItem() to update it live).
     QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                        QWidget* parent = nullptr,
                        std::function<void(int)> onActivated = {},

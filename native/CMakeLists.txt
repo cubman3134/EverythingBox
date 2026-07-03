@@ -41,7 +41,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     if(NOT ANDROID)
         find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
     endif()
-    if(TARGET Qt6::Quick AND TARGET Qt6::Qml)
+    if(TARGET Qt6::Quick AND TARGET Qt6::Qml AND TARGET Qt6::QuickWidgets)
         set(MMV_HAVE_QML ON)
         message(STATUS "MyMediaVault: QML theme engine enabled")
     else()
@@ -130,7 +130,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         target_sources(mymediavault PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             ${MMV_THEME2_RCC})
-        target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick)
+        target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
     endif()
     set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe

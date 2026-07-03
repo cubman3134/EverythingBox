@@ -337,22 +337,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // Menu background music (RetroBat-style): plays while browsing, pauses on games/video. Follow the view.
     bgm_ = new BackgroundMusic(this);
-    // Debounced: a single stack swap emits currentChanged several times (add / switch / remove-old), and
-    // overlapping blinks fight over the foreground — visible flicker AND a still-black result. One timer,
-    // restarted on each emission, fires exactly one recomposite once the swap has settled.
-    recompTimer_ = new QTimer(this);
-    recompTimer_->setSingleShot(true);
-    recompTimer_->setInterval(180);
-    connect(recompTimer_, &QTimer::timeout, this, &MainWindow::recompositeFullScreen);
-    connect(stack_, &QStackedWidget::currentChanged, this, [this] {
-        updateBackgroundMusic();
-        // Any themed page is a native-child QQuickView; when it's (re)shown while we're fullscreen, Windows can
-        // fail to composite it (black) until foreground changes. Recomposite — imperceptibly — after any switch
-        // to one, so it's fixed no matter how the user got there (Settings, drilling a category, going back…).
-        QWidget* w = stack_->currentWidget();
-        if (w && w->property("mmvQuickView").isValid() && isFullScreen())
-            recompTimer_->start();
-    });
+    connect(stack_, &QStackedWidget::currentChanged, this, [this] { updateBackgroundMusic(); });
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
@@ -819,11 +804,9 @@ void MainWindow::sendNavKey(int key)
     // The app pause menu is a top-level window and owns input while it's open.
     if (escMenuVisible()) { deliver(QApplication::focusWidget(), key); return; }
     QWidget* cur = stack_->currentWidget();
-    // The themed home/browse is a QQuickView embedded in a window container: deliver to the QML window so its
-    // Keys handler (arrow nav) sees it, exactly like a real key press.
-    if (cur == themedHome_ || cur == themedBrowse_)
-        if (auto* win = qobject_cast<QWindow*>(cur->property("mmvQuickView").value<QObject*>()))
-        { deliver(win, key); return; }
+    // The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
+    // into the QML scene's Keys handler (arrow nav) like a real key press.
+    if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
     QWidget* w = QApplication::focusWidget();
     if (!w || !isAncestorOf(w)) w = cur; // keep injection within our own window
     deliver(w, key);
@@ -1853,75 +1836,20 @@ void MainWindow::openHome()
 void MainWindow::showHomeScreen()
 {
 #ifdef MMV_HAVE_QML
-    if (themedHomeEnabled())
-    {
-        // Always rebuild a FRESH themed view on return. A re-shown (reused) software QQuickView keeps a clean
-        // scene and repaints nothing — an empty black surface — whereas a freshly built one does a full first
-        // render (that's why it's fine at startup). showThemedXmb calls nudgeThemedHome() to force the new
-        // window to expose, since the top-level is already visible and won't expose it on its own.
-        showThemedHome(); // the stack's currentChanged hook recomposites us (see the ctor) so it isn't black
-        return;
-    }
+    // Rebuild a fresh themed view on return so it reflects the current theme/catalogs. The themed pages are
+    // QQuickWidgets (plain widgets, no native child window), so this is safe: no compositing tricks needed.
+    if (themedHomeEnabled()) { showThemedHome(); return; }
 #endif
     stack_->setCurrentWidget(home_);
 }
 
 #ifdef MMV_HAVE_QML
-// Force Windows to re-composite our foreground fullscreen window's child surfaces — the same thing alt-tab
-// does — by flashing foreground to an invisible 1px helper window and taking it straight back. No change to
-// our own window's size or state, so (unlike bouncing fullscreen) there's no visible flicker. This fixes the
-// child QQuickView (themed home) that fullscreen optimizations leave black when it's shown after we're
-// already fullscreen.
-void MainWindow::recompositeFullScreen()
-{
-    if (!isFullScreen()) return;
-    // Busy with a dance already? Don't swallow the request — a swap that lands mid-dance still needs its own
-    // recomposite (rapid navigation hits this), so run again once the current one finishes.
-    if (recompInFlight_) { recompTimer_->start(); return; }
-    recompInFlight_ = true;
-    // The reliable fix is re-establishing fullscreen (a showNormal/showFullScreen bounce always worked; focus
-    // tricks don't — Windows polices foreground changes and silently refuses them). Get the same effect
-    // invisibly: shrink the window by ONE pixel for one frame and restore it. Leaving the exactly-screen-sized
-    // state makes Windows rebuild the window's composition including the just-shown native child (same reason
-    // startup works: the child exists before fullscreen is established); restoring the size keeps that tree.
-    const QSize full = size();
-    resize(full.width(), full.height() - 1);
-    QTimer::singleShot(30, this, [this, full] {
-        // The shrink makes Windows drop the window's fullscreen status (it's no longer exactly screen-sized),
-        // which also costs us the fullscreen z-band and can push us behind other windows with dead focus.
-        // Restore unconditionally, re-assert the state, and take the foreground + input focus back.
-        resize(full);
-        if (!isFullScreen()) showFullScreen();
-        activateWindow();
-        raise();
-        QTimer::singleShot(60, this, [this] {
-            recompInFlight_ = false;
-            // Restore focus ONLY when a themed page is current (and the pause menu isn't up) — a dance must
-            // never yank focus from a settings row or the Esc menu the user moved to meanwhile.
-            QWidget* w = stack_->currentWidget();
-            if (!w || escMenuVisible()) return;
-            if (auto* qw = qobject_cast<QQuickWindow*>(w->property("mmvQuickView").value<QObject*>()))
-            {
-                w->setFocus(Qt::ActiveWindowFocusReason);
-                // The container kept Qt focus through the dance, so no focus-in fires to hand the EMBEDDED
-                // window keyboard focus — arrow keys would stay dead. Activate it directly (what a click does),
-                // then ask for a fresh frame so it blits its real content.
-                qw->requestActivate();
-                qw->requestUpdate();
-            }
-        });
-    });
-}
-
-// After (re)building the themed home, ask its QQuickView for a fresh frame so it blits real content. In full
-// screen the heavy lifting is done by recompositeFullScreen() (see the stack currentChanged hook); this just
-// covers the windowed case where a re-shown software view may keep a stale surface.
+// After (re)building the themed home, schedule a repaint. The themed page is a plain QQuickWidget, so this is
+// just a widget update — kept as a hook point (and for the windowed first-show).
 void MainWindow::nudgeThemedHome()
 {
     themedHomeShownOnce_ = true;
-    if (!themedHome_) return;
-    if (auto* win = qobject_cast<QQuickWindow*>(themedHome_->property("mmvQuickView").value<QObject*>()))
-        win->requestUpdate();
+    if (themedHome_) themedHome_->update();
 }
 #else
 void MainWindow::nudgeThemedHome() {}
@@ -2029,7 +1957,7 @@ void MainWindow::showThemedHome()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
-    nudgeThemedHome(); // force the freshly-built QQuickView to paint (anti-black on rebuild)
+    nudgeThemedHome(); // repaint the rebuilt themed home
 
     // Hot-reload: rebuild the themed home whenever its theme.json is edited (while it's the visible screen).
     if (!themeWatcher_)
@@ -2283,7 +2211,7 @@ void MainWindow::showThemedXmb()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
-    nudgeThemedHome(); // force the freshly-built QQuickView to paint (anti-black on rebuild)
+    nudgeThemedHome(); // repaint the rebuilt themed home
 
     showCatalogs(startCat, themedXmbCatalogIndex_); // populate the starting bucket's catalog list (restore on rebuild)
 
