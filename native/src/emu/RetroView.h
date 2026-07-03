@@ -51,6 +51,7 @@ public:
 signals:
     void statusMessage(const QString& text); // surfaced by the main window (save/load feedback)
     void exitRequested();                    // the Esc menu's "Exit" - main window stops + returns Home
+    void gameStopped();                      // a running game was torn down (main window records playtime)
 
 protected:
     void paintEvent(QPaintEvent*) override;

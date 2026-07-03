@@ -7,6 +7,7 @@
 #include "../core/Achievements.h"
 #include "../core/SteamAchievements.h"
 #include "../core/PcGameStore.h"
+#include "../core/PlayStats.h"
 #include "../core/ProfileStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
@@ -2520,6 +2521,20 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
 
+QVariantList HomeView::playFactsFor(const QString& id) const
+{
+    QVariantList out;
+    if (id.isEmpty()) return out;
+    const PlayStats::Stat s = PlayStats::get(PlayStats::identity(id, QString()));
+    if (s.lastPlayed <= 0) return out; // never launched -> no play facts
+    out << QVariantMap{ { QStringLiteral("label"), tr("Last played") },
+                        { QStringLiteral("value"), PlayStats::formatLastPlayed(s.lastPlayed) } };
+    if (s.totalSeconds > 0)
+        out << QVariantMap{ { QStringLiteral("label"), tr("Time played") },
+                            { QStringLiteral("value"), PlayStats::formatDuration(s.totalSeconds) } };
+    return out;
+}
+
 void HomeView::requestThemedMeta(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
@@ -2534,6 +2549,9 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("type"), it.type);
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
+    // Show play history right away (survives even for games with no addon /meta to enrich them below).
+    const QVariantList pf = playFactsFor(it.id);
+    if (!pf.isEmpty()) base.insert(QStringLiteral("facts"), pf);
     emit themedMetaReady(idx, base);
 
     // Achievements for a game -> the live panel (earned first, so they highlight "at the front"). Retro
@@ -2839,7 +2857,11 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         QVariantMap m;
         m.insert(QStringLiteral("index"), themedMetaIndex_);
         m.insert(QStringLiteral("overview"), detail.overview);
+        // Lead with play history (a played game), then the addon's facts — the /meta facts replace the
+        // skeleton's, so re-prepend them here or they'd be lost on this merge.
         QVariantList facts;
+        if (themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size())
+            facts = playFactsFor(items_[browseRowMap_[themedMetaIndex_]].id);
         for (const MediaFact& f : detail.facts)
             facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
         m.insert(QStringLiteral("facts"), facts);
@@ -2888,6 +2910,14 @@ void HomeView::showMeta(const MediaDetail& d)
     metaTitle_->setText(titleHtml);
 
     QStringList rows;
+    // Lead with play history (last played / time played) for a game we've launched before, above its facts.
+    const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(metaItem_.id, QString()));
+    if (ps.lastPlayed > 0)
+    {
+        rows << QStringLiteral("<b>%1:</b> %2").arg(tr("Last played"), PlayStats::formatLastPlayed(ps.lastPlayed));
+        if (ps.totalSeconds > 0)
+            rows << QStringLiteral("<b>%1:</b> %2").arg(tr("Time played"), PlayStats::formatDuration(ps.totalSeconds));
+    }
     for (const MediaFact& f : d.facts)
         rows << QStringLiteral("<b>%1:</b> %2").arg(f.label.toHtmlEscaped(), f.value.toHtmlEscaped());
     metaFacts_->setText(rows.join(QStringLiteral("<br>")));

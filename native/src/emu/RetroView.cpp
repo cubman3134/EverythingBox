@@ -262,6 +262,7 @@ void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publis
 
 void RetroView::stop()
 {
+    const bool wasRunning = running_; // so we only announce (and time) a session that actually started
     if (core_.gameLoaded()) saveSram(); // persist battery RAM before tearing the core down
     if (ach_) ach_->unloadGame();
     running_ = false;
@@ -272,6 +273,7 @@ void RetroView::stop()
     pad_.stopRumble();
     core_.unload();
     update();
+    if (wasRunning) emit gameStopped();
 }
 
 void RetroView::setPaused(bool paused)

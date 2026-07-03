@@ -23,6 +23,7 @@
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/PlayStats.h"
 #include "../core/ProfileStore.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
@@ -627,6 +628,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
+    // Bank the elapsed session whenever the full-screen game is torn down (Exit, or switching to other content).
+    connect(retro_, &RetroView::gameStopped, this, [this] { endPlaySession(); });
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
     connect(stop, &QPushButton::clicked, this, [this] {
         player_->stop(); mediaControls_->hide(); clearAudioQueue(); openHome(); });
@@ -1224,6 +1227,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         mwLog(QStringLiteral("game: launching in split pane"));
         splitTarget_->openGame(corePath, rom, core);
         RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
+        PlayStats::markPlayed(PlayStats::identity(key, rom)); // split panes aren't session-timed; stamp last-played
         finishSplitOpen();
         return;
     }
@@ -1239,6 +1243,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         mwLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         stack_->setCurrentWidget(retro_);
         RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
+        beginPlaySession(PlayStats::identity(key, rom));
     }
     else
     {
@@ -1268,8 +1273,11 @@ void MainWindow::ensureEmu()
         emuLabel_->setText(tr("Playing in %1.\n\nClose the %1 window to return to My Media Vault.").arg(name));
         emuStopBtn_->setVisible(true);
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
+        {
             RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
                                pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_ });
+            beginPlaySession(PlayStats::identity(pendingEmuKey_, pendingEmuRom_));
+        }
         // Step aside so the emulator is unobstructed and in front; we restore when it exits. (Our window is
         // often full screen and would otherwise sit on top of the freshly-launched emulator.)
         emuReturnState_ = windowState();
@@ -1277,6 +1285,8 @@ void MainWindow::ensureEmu()
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         mwLog(QStringLiteral("emu: process exited (code %1)").arg(code));
+        endPlaySession(); // bank the external emulator's play time
+
         if (isMinimized()) // come back to where we were before handing off to the emulator
         {
             if (emuReturnState_ & Qt::WindowFullScreen)    showFullScreen();
@@ -2655,12 +2665,34 @@ QString MainWindow::locateInstalledGameExe(const QString& title, const QString& 
 
 // Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
 // exact executable (not the installer).
+// Start timing a game session: close any session still open, stamp last-played, and note the start time.
+void MainWindow::beginPlaySession(const QString& identity)
+{
+    endPlaySession();
+    if (identity.isEmpty()) return;
+    PlayStats::markPlayed(identity);
+    activePlayId_ = identity;
+    activePlayStart_ = QDateTime::currentSecsSinceEpoch();
+}
+
+// End the active session (if any) and bank its elapsed time into the game's total.
+void MainWindow::endPlaySession()
+{
+    if (activePlayId_.isEmpty()) return;
+    const qint64 secs = QDateTime::currentSecsSinceEpoch() - activePlayStart_;
+    PlayStats::addSession(activePlayId_, secs);
+    activePlayId_.clear();
+    activePlayStart_ = 0;
+}
+
 void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb)
 {
     mwLog(QStringLiteral("pcgame: launch \"%1\"").arg(QFileInfo(exe).fileName()));
     notify(tr("Launching “%1”…").arg(title), 5000);
     RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
     DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
+    const QString playId = PlayStats::identity(id, exe);
+    PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
     // config relative to the CWD and silently fail to start if it's ours.
     const QString workDir = QFileInfo(exe).absolutePath();
@@ -2680,16 +2712,28 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     if (ShellExecuteExW(&sei) && sei.hProcess)
     {
         HANDLE h = sei.hProcess;
-        auto done = std::make_shared<bool>(false);
+        auto done    = std::make_shared<bool>(false); // the notifier has fired and been handled
+        auto graceOk = std::make_shared<bool>(false); // survived the 9s "did it actually open" grace window
+        const qint64 startSecs = QDateTime::currentSecsSinceEpoch();
         auto* watch = new QWinEventNotifier(h, this);
         auto* timer = new QTimer(this); timer->setSingleShot(true);
         auto cleanup = [watch, timer, h] { watch->setEnabled(false); watch->deleteLater(); timer->stop(); timer->deleteLater(); CloseHandle(h); };
-        connect(watch, &QWinEventNotifier::activated, this, [this, done, cleanup, id, title, thumb, exe] {
+        connect(watch, &QWinEventNotifier::activated, this,
+                [this, done, graceOk, cleanup, id, title, thumb, exe, playId, startSecs] {
             if (*done) return; *done = true; cleanup();
-            mwLog(QStringLiteral("pcgame: \"%1\" closed right after launching").arg(title));
-            onPcGameFailedToOpen(id, title, thumb, exe); // exited before the grace period -> it didn't open
+            if (!*graceOk) // exited before the grace period -> it didn't really open
+            {
+                mwLog(QStringLiteral("pcgame: \"%1\" closed right after launching").arg(title));
+                onPcGameFailedToOpen(id, title, thumb, exe);
+                return;
+            }
+            const qint64 secs = QDateTime::currentSecsSinceEpoch() - startSecs; // a real play session ended
+            PlayStats::addSession(playId, secs);
+            mwLog(QStringLiteral("pcgame: \"%1\" exited after %2s of play").arg(title).arg(secs));
         });
-        connect(timer, &QTimer::timeout, this, [done, cleanup] { if (*done) return; *done = true; cleanup(); }); // stayed open - fine
+        // Keep watching after the grace window (don't clean up) so we can time the whole session, not just
+        // confirm it opened. A game whose launcher forks and exits early undercounts; that's inherent here.
+        connect(timer, &QTimer::timeout, this, [done, graceOk] { if (*done) return; *graceOk = true; });
         timer->start(9000);
         return;
     }

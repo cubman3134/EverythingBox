@@ -122,6 +122,13 @@ private:
     // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
     bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
     void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
+    // Play-time tracking for the full-screen emulator / external-emulator flow: stamp last-played + start the
+    // clock when a game begins, and bank the elapsed session when it ends. (PC games are timed separately in
+    // launchPcExe, off their own process handle.) beginPlaySession auto-closes any session still open.
+    void beginPlaySession(const QString& identity);
+    void endPlaySession();
+    QString activePlayId_;          // identity of the game currently being timed ("" = none)
+    qint64  activePlayStart_ = 0;   // epoch seconds the active session began
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,
     // or the wrong exe). Tell the user and offer to open its folder or pick a different exe.
     void onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe);

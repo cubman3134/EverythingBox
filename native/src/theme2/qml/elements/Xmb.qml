@@ -236,7 +236,7 @@ Item {
                 text: {
                     var f = meta.m.facts; if (!f || !f.length) return ""
                     var out = []
-                    for (var i = 0; i < f.length && i < 4; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
+                    for (var i = 0; i < f.length && i < 6; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
                     return out.join("&nbsp;&nbsp;&nbsp;")
                 }
                 color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)
