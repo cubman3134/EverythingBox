@@ -199,6 +199,16 @@ private:
     bool escMenuVisible() const;
     QFrame* escMenu_ = nullptr;
     QVector<QPushButton*> escMenuButtons_; // { Resume, Exit }, in arrow-navigation order
+
+    // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
+    // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
+    // and hold-to-repeat. RetroView owns the pad in-game, so this stays out of its way.
+    void pollMenuPad();
+    void sendNavKey(int key);   // deliver a synthetic key to the active view (themed QML window, panel, etc.)
+    QTimer* padNavTimer_ = nullptr;
+    qint64  padTick_ = 0;       // accumulated ms (fixed poll interval), for the repeat clock
+    bool    padPrev_[8] = { false };  // per-nav-input: was it held last tick (edge detection)
+    qint64  padNext_[8] = { 0 };      // per-nav-input: tick at which a held direction may repeat again
     void revealMediaControls();
     void positionMediaControls();
     void showPlayerNotice(const QString& msg, int ms = 6000); // centred transient message over the player

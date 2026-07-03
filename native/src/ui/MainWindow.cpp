@@ -57,6 +57,7 @@
 #include <QHBoxLayout>
 #include <QScrollArea>
 #include <QApplication>
+#include <QWindow>
 #include <QPushButton>
 #include <QProgressBar>
 #include <QProcess>
@@ -339,6 +340,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull any manually-added ROMs sitting in the library folders into the Downloaded list, so they show up
     // in the home like downloaded games. Deferred so it never delays the window appearing.
     QTimer::singleShot(0, this, [] { RomLibrary::syncToDownloads(); });
+
+    // Controller navigation of the menus: poll the gamepad ~60Hz and inject nav keys (see pollMenuPad). This
+    // also opens a controller connected while browsing (Gamepad::poll handles hot-plug), so it works even if
+    // the user never enters a game.
+    padNavTimer_ = new QTimer(this);
+    padNavTimer_->setInterval(16);
+    connect(padNavTimer_, &QTimer::timeout, this, &MainWindow::pollMenuPad);
+    padNavTimer_->start();
 
 #ifdef MMV_HAVE_QML
     // Appearance (themed-home toggle + theme picker) is reachable anywhere via Ctrl+Shift+A - this is also
@@ -770,6 +779,71 @@ void MainWindow::hideEscMenu()
     activateWindow();
     // Return keyboard focus to whatever view was showing so its navigation resumes immediately.
     if (QWidget* cur = stack_->currentWidget()) { cur->setFocus(Qt::OtherFocusReason); cur->activateWindow(); }
+}
+
+// ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------
+
+// libretro RETRO_DEVICE_ID_JOYPAD_* ids used for menu navigation (B/south = confirm, A/east = back — the
+// Gamepad's default mapping; the left stick also drives the d-pad ids past a deadzone).
+namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PAD_LEFT = 6, PAD_RIGHT = 7, PAD_A = 8; }
+
+void MainWindow::sendNavKey(int key)
+{
+    auto deliver = [](QObject* target, int k) {
+        if (!target) return;
+        QKeyEvent press(QEvent::KeyPress, k, Qt::NoModifier);
+        QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
+        QCoreApplication::sendEvent(target, &press);
+        QCoreApplication::sendEvent(target, &release);
+    };
+    // The app pause menu is a top-level window and owns input while it's open.
+    if (escMenuVisible()) { deliver(QApplication::focusWidget(), key); return; }
+    QWidget* cur = stack_->currentWidget();
+    // The themed home/browse is a QQuickView embedded in a window container: deliver to the QML window so its
+    // Keys handler (arrow nav) sees it, exactly like a real key press.
+    if (cur == themedHome_ || cur == themedBrowse_)
+        if (auto* win = qobject_cast<QWindow*>(cur->property("mmvQuickView").value<QObject*>()))
+        { deliver(win, key); return; }
+    QWidget* w = QApplication::focusWidget();
+    if (!w || !isAncestorOf(w)) w = cur; // keep injection within our own window
+    deliver(w, key);
+}
+
+void MainWindow::pollMenuPad()
+{
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    if (!pad || !pad->available()) return;
+    // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay.
+    if (retro_->running() || stack_->currentWidget() == retro_) return;
+    // Only act when our window (or its pause menu) is focused, so we never steal input from another app.
+    if (!isActiveWindow() && !(escMenu_ && escMenu_->isActiveWindow())) return;
+    // Don't fight text entry (a focused search box / key field): let the keyboard handle those.
+    QWidget* fw = QApplication::focusWidget();
+    if (qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
+        || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw)) return;
+
+    pad->poll();
+    padTick_ += 16;
+
+    struct Nav { int id; int key; bool repeat; };
+    static const Nav navs[] = {
+        { PAD_UP,    Qt::Key_Up,        true  }, { PAD_DOWN,  Qt::Key_Down,      true  },
+        { PAD_LEFT,  Qt::Key_Left,      true  }, { PAD_RIGHT, Qt::Key_Right,     true  },
+        { PAD_B,     Qt::Key_Return,    false }, { PAD_A,     Qt::Key_Backspace, false },
+        { PAD_START, Qt::Key_Escape,    false },
+    };
+    const int n = int(sizeof(navs) / sizeof(navs[0]));
+    for (int i = 0; i < n; ++i)
+    {
+        bool held = false;
+        for (int p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad->button(unsigned(p), unsigned(navs[i].id))) { held = true; break; }
+        if (held)
+        {
+            if (!padPrev_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 420; }        // press edge
+            else if (navs[i].repeat && padTick_ >= padNext_[i]) { sendNavKey(navs[i].key); padNext_[i] = padTick_ + 110; } // hold-repeat
+        }
+        padPrev_[i] = held;
+    }
 }
 
 void MainWindow::toggleFullScreen()
