@@ -12,6 +12,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QEventLoop>
 #include <QProcess>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -493,6 +494,34 @@ void EmulatorManager::prepareBios(const QString& binDir)
     }
 }
 
+// Cemu can't decrypt Wii U titles without keys.txt (the console's title/common keys) in its folder. Fetch it
+// once, on demand, into the Cemu install — the same on-launch, best-effort model as prepareBios. Kept out of
+// the app bundle/repo (these are copyrighted keys); pulled from a maintained gist when Cemu is set up.
+void EmulatorManager::prepareCemuKeys(const QString& binDir)
+{
+    if (em_.id != QStringLiteral("cemu")) return;
+    const QString dest = binDir + QStringLiteral("/keys.txt");
+    if (QFile::exists(dest)) return; // already provided (by us on a previous run, or by the user)
+
+    emit status(tr("Fetching Cemu keys…"), -1);
+    QNetworkRequest rq((QUrl(QStringLiteral(
+        "https://gist.githubusercontent.com/xXPhenomXx/093b352723ec51644453a9528a8dc87e/raw"))));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    rq.setTransferTimeout(20000);
+    QNetworkReply* reply = nam_->get(rq);
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    loop.exec();
+    if (reply->error() == QNetworkReply::NoError)
+    {
+        const QByteArray body = reply->readAll();
+        if (!body.isEmpty()) { QFile f(dest); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); } }
+    }
+    // On failure, leave it absent: Cemu will prompt for keys itself, exactly as before.
+    reply->deleteLater();
+}
+
 void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
@@ -526,10 +555,13 @@ void EmulatorManager::launch(const QString& binary)
     }
 #endif
 
-    // Emulators that can't boot without a copyrighted BIOS (PCSX2): make sure one is in place next to the
-    // binary before launching. Best-effort and only on local (non-Flatpak) installs we control on disk.
+    // Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're
+    // in place next to the binary before launching. Best-effort and only on local installs we control on disk.
     if (!isFlatpak)
+    {
         prepareBios(QFileInfo(binary).absolutePath());
+        prepareCemuKeys(QFileInfo(binary).absolutePath());
+    }
 
     game_ = new QProcess(this);
     if (!isFlatpak) game_->setWorkingDirectory(QFileInfo(binary).absolutePath());
