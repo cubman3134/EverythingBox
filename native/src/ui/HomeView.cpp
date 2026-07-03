@@ -2487,7 +2487,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         if (playBtn_) playBtn_->setEnabled(false);
         mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); emit openItem(m); }
             else {
                 // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be

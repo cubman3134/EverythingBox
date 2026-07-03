@@ -153,7 +153,14 @@ static QUrl remoteStreamUrl(const QString& base, const QString& type, const QStr
 {
     QString u = base + QStringLiteral("/stream/") + segEnc(type.isEmpty() ? QStringLiteral("item") : type)
               + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json");
-    if (attempt > 0) u += QStringLiteral("?n=") + QString::number(attempt); // ask the provider for the n-th best source
+    QStringList q;
+    if (attempt > 0) q << (QStringLiteral("n=") + QString::number(attempt)); // ask the provider for the n-th best source
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    // Desktop can shell out to curl, so tell the addon it may hand back a Cloudflare-gated source (lolroms)
+    // as a DIRECT url for us to fetch ourselves — bypassing its proxy and any Cloudflare-tunnel size limit.
+    q << QStringLiteral("dl=curl");
+#endif
+    if (!q.isEmpty()) u += QStringLiteral("?") + q.join(QLatin1Char('&'));
     return QUrl(u);
 }
 
@@ -1286,15 +1293,20 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
     connect(reply, &QNetworkReply::finished, this, [this, reply, base, cb] {
         reply->deleteLater();
         QString url, mime, notice;
+        bool curl = false;
         if (reply->error() == QNetworkReply::NoError)
         {
             const QByteArray body = reply->readAll();
             url = parseStreamJson(body, base, &mime);
+            const QJsonObject o = QJsonDocument::fromJson(body).object();
             // A "notice" accompanies an empty result when the addon has no link yet but a message for the
             // user (e.g. Allarr just sent the release to debrid to cache). Stash it for the callback.
-            notice = QJsonDocument::fromJson(body).object().value(QStringLiteral("notice")).toString();
+            notice = o.value(QStringLiteral("notice")).toString();
+            // "curl":true means url is a direct Cloudflare-gated source we should fetch with a browser-UA curl.
+            curl = o.value(QStringLiteral("curl")).toBool();
         }
         lastStreamNotice_ = notice;
+        lastStreamCurl_ = curl;
         cb(url, mime);
     });
 }

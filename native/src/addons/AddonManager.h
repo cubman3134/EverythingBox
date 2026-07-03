@@ -101,6 +101,9 @@ public:
     // empty when there was none. resolveStream sets it just before its callback, so a callback handed an
     // empty url can surface WHY there's no link yet instead of a bare "no source".
     QString takeStreamNotice() { const QString n = lastStreamNotice_; lastStreamNotice_.clear(); return n; }
+    // Whether the last resolveStream returned a Cloudflare-gated direct url the client should fetch itself
+    // via a browser-UA curl (set only on desktop, which asks with ?dl=curl). Consumed once by the callback.
+    bool takeStreamCurl() { const bool c = lastStreamCurl_; lastStreamCurl_ = false; return c; }
     // Resolve a torrent (infoHash) to a streamable http URL via the TorBox debrid API (cached torrents only).
     void resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                                std::function<void(const QString& url)> cb);
@@ -178,6 +181,7 @@ private:
     QNetworkAccessManager* nam_ = nullptr;      // remote-source HTTP (created lazily on the GUI thread)
     int reqCounter_ = 0;
     QString lastStreamNotice_;                  // /stream "notice" from the last resolveStream (see takeStreamNotice)
+    bool lastStreamCurl_ = false;               // /stream "curl" flag from the last resolveStream (see takeStreamCurl)
 
     // Catalog browse/landing results (e.g. the console list) cached so re-opening a tab is instant instead of
     // re-fetching (a blocking HTTP GET or a JS getCatalog run). Populated from catalogReady for requestCatalog

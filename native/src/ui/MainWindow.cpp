@@ -3432,6 +3432,80 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         return;
     }
 
+#if !defined(Q_OS_ANDROID) && !defined(Q_OS_IOS)
+    if (item.cfCurl)
+    {
+        // A Cloudflare-gated direct source (lolroms): the normal HTTP client's TLS fingerprint gets a 403, so
+        // fetch it with a browser-UA curl (ships on Win10+/macOS/Linux) straight to the .part file. No addon
+        // proxy, so no Cloudflare-tunnel size/time limit, and no in-memory buffering (curl writes to disk).
+        const QString partPath = localPath + QStringLiteral(".part");
+#ifdef Q_OS_WIN
+        QString curlExe = QDir(QString::fromLocal8Bit(qgetenv("SystemRoot"))).filePath(QStringLiteral("System32/curl.exe"));
+        if (!QFileInfo::exists(curlExe)) curlExe = QStringLiteral("curl");
+#else
+        const QString curlExe = QStringLiteral("curl");
+#endif
+        const QUrl u(item.url);
+        const QString referer = u.scheme() + QStringLiteral("://") + u.host() + QStringLiteral("/");
+        static const QString kUa = QStringLiteral(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36");
+
+        statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
+        notify(tr("Downloading “%1”…").arg(item.title), 0);
+        mwLog(QStringLiteral("download(curl): %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(partPath).fileName()));
+
+        QProcess* p = new QProcess(this);
+        // curl doesn't stream progress to us, so poll the growing .part file for a byte count.
+        QTimer* progress = new QTimer(p);
+        connect(progress, &QTimer::timeout, this, [this, partPath, title = item.title] {
+            const QString msg = tr("Downloading “%1”… %2 MB").arg(title).arg(QFileInfo(partPath).size() / 1048576);
+            statusBar()->showMessage(msg); notify(msg, 0);
+        });
+        progress->start(1000);
+
+        connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                [this, p, progress, partPath, localPath, openLocal, title = item.title](int code, QProcess::ExitStatus) {
+            progress->stop();
+            p->deleteLater();
+            if (code != 0)
+            {
+                QFile::remove(partPath);
+                mwLog(QStringLiteral("download(curl): FAILED \"%1\" (curl exit %2)").arg(title).arg(code));
+                const QString e = tr("Couldn't download “%1” (the source may be down).").arg(title);
+                statusBar()->showMessage(e, 6000); notify(e, 6000);
+                return;
+            }
+            if (QFileInfo(partPath).size() == 0)
+            {
+                QFile::remove(partPath);
+                mwLog(QStringLiteral("download(curl): empty (0 bytes) for \"%1\"").arg(title));
+                notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
+                return;
+            }
+            QFile::remove(localPath);
+            if (!QFile::rename(partPath, localPath))
+            {
+                mwLog(QStringLiteral("download(curl): finalise (rename) failed for \"%1\"").arg(title));
+                statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+                return;
+            }
+            mwLog(QStringLiteral("download(curl): complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
+            statusBar()->clearMessage();
+            openLocal();
+        });
+        connect(p, &QProcess::errorOccurred, this, [this, p, progress, title = item.title](QProcess::ProcessError e) {
+            if (e != QProcess::FailedToStart) return; // other errors also fire `finished`, handled there
+            progress->stop(); p->deleteLater();
+            mwLog(QStringLiteral("download(curl): curl failed to start for \"%1\"").arg(title));
+            const QString msg = tr("Couldn't download “%1”: curl isn't available.").arg(title);
+            statusBar()->showMessage(msg, 6000); notify(msg, 6000);
+        });
+        p->start(curlExe, { QStringLiteral("-sL"), QStringLiteral("-A"), kUa, QStringLiteral("-e"), referer,
+                            QStringLiteral("--fail"), QStringLiteral("-o"), partPath, item.url });
+        return;
+    }
+#endif
+
     if (!docNam_) docNam_ = new QNetworkAccessManager(this);
     statusBar()->showMessage(tr("Downloading “%1”…").arg(item.title));
     // Continue the feedback in the same toast that showed "Finding/Looking…", so the file-pull progress

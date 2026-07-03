@@ -84,6 +84,9 @@ struct MediaItem
     // For games: the console/platform this was opened from (e.g. "PSP", "GameCube"). Lets the launcher pick
     // the right emulator even when the file extension is shared (PSP .iso vs GameCube .iso). Not serialized.
     QString systemHint;
+    // url is a Cloudflare-gated direct source (lolroms) to fetch with a browser-UA curl rather than the normal
+    // HTTP client (whose TLS fingerprint gets a 403). Set by resolveStream on desktop only. Not serialized.
+    bool cfCurl = false;
 };
 
 struct MediaCatalog
