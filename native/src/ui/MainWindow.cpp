@@ -59,7 +59,6 @@
 #include <QScrollArea>
 #include <QApplication>
 #include <QWindow>
-#include <QQuickWindow>
 #include <QPointer>
 #include <QImage>
 #include <QScreen>

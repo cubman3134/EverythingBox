@@ -173,7 +173,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp ${MMV_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2)
-        target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::Multimedia)
+        target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia)
     endif()
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
