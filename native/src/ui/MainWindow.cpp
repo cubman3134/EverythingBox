@@ -1027,14 +1027,19 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Esc/Back closes it (rather than exiting the video).
     if (subOverlay_ && subOverlay_->isVisible())
     {
+        auto* fw = qobject_cast<QPushButton*>(focusWidget());
+        const bool inRight = subRightCol_.contains(fw);
+        QVector<QPushButton*>& col = inRight ? subRightCol_ : subLeftCol_;
+        int idx = col.indexOf(fw);
         switch (e->key())
         {
         case Qt::Key_Escape: case Qt::Key_Backspace: hideSubtitleMenu(); return;
-        case Qt::Key_Up:   case Qt::Key_Left:  stepSubtitleFocus(-1); return;
-        case Qt::Key_Down: case Qt::Key_Right: stepSubtitleFocus(+1); return;
+        case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return;
+        case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return;
+        case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;
+        case Qt::Key_Right: if (!subRightCol_.isEmpty()) subRightCol_[qBound(0, idx < 0 ? 0 : idx, subRightCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;
         case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
-            if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
-            return;
+            if (fw) fw->click(); return;
         default: return; // swallow other keys while the panel is up
         }
     }
@@ -3311,7 +3316,8 @@ void MainWindow::hideSubtitleMenu()
     subOverlay_->hide();
     subOverlay_->deleteLater();
     subOverlay_ = nullptr;
-    subPanelButtons_.clear();
+    subLeftCol_.clear();
+    subRightCol_.clear();
     revealMediaControls();
 }
 
@@ -3344,8 +3350,9 @@ void MainWindow::showSubtitleMenu()
     card->setStyleSheet(QStringLiteral(
         "#subCard { background:#16161c; border:1px solid rgba(255,255,255,0.14); border-radius:16px; }"
         "#subCard QLabel { color:#e8e8e8; }"));
-    card->setFixedWidth(460);
-    card->setMaximumHeight(qMax(320, player_->height() - 48));
+    const int cardW = qBound(360, player_->width() - 60, 760);
+    card->setFixedWidth(cardW);
+    card->setMaximumHeight(qMax(300, player_->height() - 48));
     midRow->addWidget(card);
     midRow->addStretch(1);
     centre->addLayout(midRow);
@@ -3353,27 +3360,45 @@ void MainWindow::showSubtitleMenu()
 
     auto* cv = new QVBoxLayout(card);
     cv->setContentsMargins(24, 20, 24, 20);
-    cv->setSpacing(12);
+    cv->setSpacing(14);
 
     // Header: title + close.
     auto* headRow = new QHBoxLayout();
     auto* title = new QLabel(tr("Subtitles"), card);
     title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
     headRow->addWidget(title, 1);
-    auto* closeBtn = new QPushButton(tr("✕"), card);
-    closeBtn->setFixedSize(30, 30);
+    auto* closeBtn = new QPushButton(QString(QChar(0x00D7)), card); // × (U+00D7) renders in every font
+    closeBtn->setFixedSize(32, 32);
     closeBtn->setStyleSheet(QStringLiteral(
-        "QPushButton { background:rgba(255,255,255,0.08); color:#e8e8e8; border:none; border-radius:8px; font-size:15px; }"
+        "QPushButton { background:rgba(255,255,255,0.08); color:#e8e8e8; border:none; border-radius:8px;"
+        " font-size:22px; font-weight:bold; padding-bottom:3px; }"
         "QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
+    closeBtn->setCursor(Qt::PointingHandCursor);
     connect(closeBtn, &QPushButton::clicked, this, [this] { hideSubtitleMenu(); });
     headRow->addWidget(closeBtn);
     cv->addLayout(headRow);
+
+    // Two columns side by side: the track list (left) and the sync/size/source controls (right), so you can
+    // reach the settings directly instead of walking the whole track list.
+    auto* body = new QHBoxLayout();
+    body->setSpacing(22);
+    auto* leftCol = new QVBoxLayout();
+    leftCol->setSpacing(8);
+    auto* rightCol = new QVBoxLayout();
+    rightCol->setSpacing(10);
+
+    auto sectionLabel = [card](const QString& t) {
+        auto* l = new QLabel(t, card);
+        l->setStyleSheet(QStringLiteral("font-size:13px;font-weight:bold;color:#9aa0aa;"));
+        return l;
+    };
 
     // Flat full-width row button used for tracks + source actions; `on` gives it the accent selected look.
     auto rowButton = [card](const QString& text, bool on) {
         auto* b = new QPushButton(text, card);
         b->setMinimumHeight(38);
         b->setCursor(Qt::PointingHandCursor);
+        b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         b->setStyleSheet(QString(QStringLiteral(
             "QPushButton { text-align:left; padding:6px 14px; border-radius:8px; color:#e8e8e8; font-size:15px;"
             " background:%1; border:1px solid %2; }"
@@ -3383,14 +3408,14 @@ void MainWindow::showSubtitleMenu()
         return b;
     };
 
-    // --- Track picker: Off + each track, in a scroll area so a long list stays contained. ---
-    cv->addWidget(new QLabel(tr("Track"), card));
+    // --- LEFT: track picker (Off + each track), scrollable so a long list stays contained. ---
+    leftCol->addWidget(sectionLabel(tr("TRACK")));
     auto* trackScroll = new QScrollArea(card);
     trackScroll->setWidgetResizable(true);
     trackScroll->setFrameShape(QFrame::NoFrame);
     trackScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    trackScroll->setMaximumHeight(220);
     trackScroll->setStyleSheet(QStringLiteral("background:transparent;"));
+    trackScroll->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
     auto* trackHost = new QWidget(trackScroll);
     auto* tv = new QVBoxLayout(trackHost);
     tv->setContentsMargins(0, 0, 6, 0);
@@ -3403,18 +3428,20 @@ void MainWindow::showSubtitleMenu()
     auto* offBtn = rowButton(tr("Off"), !anySelected);
     connect(offBtn, &QPushButton::clicked, this, [this] { player_->setSubtitleTrack(-1); hideSubtitleMenu(); });
     tv->addWidget(offBtn);
-    subPanelButtons_ = { closeBtn, offBtn };
+    subLeftCol_ = { offBtn };
+    QPushButton* initial = offBtn;
     for (const MpvWidget::SubtitleTrack& t : tracks)
     {
         const QString lang = t.lang.isEmpty() ? QString() : t.lang.toUpper();
         QString label = lang;
         if (!t.title.isEmpty()) label = label.isEmpty() ? t.title : lang + QStringLiteral("  ·  ") + t.title;
         if (label.isEmpty()) label = tr("Track %1").arg(t.id);
-        auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("    ")) + label, t.selected);
+        auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("     ")) + label, t.selected);
         const int id = t.id;
         connect(b, &QPushButton::clicked, this, [this, id] { player_->setSubtitleTrack(id); hideSubtitleMenu(); });
         tv->addWidget(b);
-        subPanelButtons_ << b;
+        subLeftCol_ << b;
+        if (t.selected) initial = b;
     }
     if (tracks.isEmpty())
     {
@@ -3425,34 +3452,39 @@ void MainWindow::showSubtitleMenu()
     }
     tv->addStretch(1);
     trackScroll->setWidget(trackHost);
-    cv->addWidget(trackScroll);
+    leftCol->addWidget(trackScroll, 1);
 
-    // --- Sync + size adjusters: −/+ that update live and keep the panel open. ---
-    auto addAdjustRow = [this, card, cv](const QString& name, std::function<QString()> value,
-                                         std::function<void()> minus, std::function<void()> plus) {
+    // --- RIGHT: sync + size adjusters (−/+ update live), then the source actions. ---
+    // Close is the first right-column focus target (it sits top-right), so Up from the settings reaches it.
+    subRightCol_ = { closeBtn };
+    rightCol->addWidget(sectionLabel(tr("TIMING & SIZE")));
+    auto addAdjustRow = [this, card, rightCol](const QString& name, std::function<QString()> value,
+                                               std::function<void()> minus, std::function<void()> plus) {
         auto* w = new QWidget(card);
         auto* h = new QHBoxLayout(w);
-        h->setContentsMargins(2, 0, 2, 0);
+        h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(10);
         auto* lbl = new QLabel(name + QStringLiteral(":  ") + value(), w);
         lbl->setStyleSheet(QStringLiteral("font-size:15px;"));
         h->addWidget(lbl, 1);
         auto mkBtn = [w](const QString& t) {
             auto* b = new QPushButton(t, w);
-            b->setFixedSize(38, 32);
+            b->setFixedSize(40, 34);
+            b->setCursor(Qt::PointingHandCursor);
             b->setStyleSheet(QStringLiteral(
                 "QPushButton { background:rgba(255,255,255,0.10); color:#e8e8e8; border:none; border-radius:8px;"
-                " font-size:18px;font-weight:bold; } QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
+                " font-size:19px;font-weight:bold; padding:0; }"
+                "QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
             return b;
         };
-        auto* minusBtn = mkBtn(QStringLiteral("−"));
+        auto* minusBtn = mkBtn(QString(QChar(0x2212))); // − minus sign
         auto* plusBtn = mkBtn(QStringLiteral("+"));
         h->addWidget(minusBtn);
         h->addWidget(plusBtn);
         connect(minusBtn, &QPushButton::clicked, w, [=] { minus(); lbl->setText(name + QStringLiteral(":  ") + value()); });
         connect(plusBtn,  &QPushButton::clicked, w, [=] { plus();  lbl->setText(name + QStringLiteral(":  ") + value()); });
-        cv->addWidget(w);
-        subPanelButtons_ << minusBtn << plusBtn;
+        rightCol->addWidget(w);
+        subRightCol_ << minusBtn << plusBtn;
     };
     addAdjustRow(tr("Sync"),
                  [this] { return tr("%1 s").arg(player_->subtitleDelay(), 0, 'f', 1); },
@@ -3463,7 +3495,8 @@ void MainWindow::showSubtitleMenu()
                  [this] { player_->setSubtitleScale(qMax(0.2, player_->subtitleScale() - 0.1)); },
                  [this] { player_->setSubtitleScale(qMin(4.0, player_->subtitleScale() + 0.1)); });
 
-    // --- Sources: load a local file, or fetch a matching one from OpenSubtitles. ---
+    rightCol->addSpacing(6);
+    rightCol->addWidget(sectionLabel(tr("SOURCE")));
     auto* loadBtn = rowButton(tr("📂  Load from file…"), false);
     connect(loadBtn, &QPushButton::clicked, this, [this] {
         const QString f = QFileDialog::getOpenFileName(
@@ -3472,8 +3505,8 @@ void MainWindow::showSubtitleMenu()
         if (!f.isEmpty()) player_->addSubtitle(f);
         hideSubtitleMenu();
     });
-    cv->addWidget(loadBtn);
-    subPanelButtons_ << loadBtn;
+    rightCol->addWidget(loadBtn);
+    subRightCol_ << loadBtn;
     if (SubtitleFetcher::configured() && !(subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()))
     {
         auto* dlBtn = rowButton(tr("🔍  Download from OpenSubtitles"), false);
@@ -3486,27 +3519,18 @@ void MainWindow::showSubtitleMenu()
                 else notify(tr("No matching subtitle found on OpenSubtitles."), 5000);
             });
         });
-        cv->addWidget(dlBtn);
-        subPanelButtons_ << dlBtn;
+        rightCol->addWidget(dlBtn);
+        subRightCol_ << dlBtn;
     }
+    rightCol->addStretch(1);
+
+    body->addLayout(leftCol, 3);
+    body->addLayout(rightCol, 2);
+    cv->addLayout(body, 1);
 
     subOverlay_->show();
     subOverlay_->raise();
-    // Land focus on the current track (or Off) so arrows/remote work without a click.
-    QPushButton* initial = subPanelButtons_.value(1, closeBtn);
-    for (QPushButton* b : subPanelButtons_)
-        if (b->text().startsWith(QStringLiteral("✓"))) { initial = b; break; }
-    initial->setFocus(Qt::TabFocusReason);
-}
-
-// Move focus across the subtitle panel's controls, wrapping at the ends (arrow/remote navigation).
-void MainWindow::stepSubtitleFocus(int dir)
-{
-    if (subPanelButtons_.isEmpty()) return;
-    int idx = subPanelButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
-    if (idx < 0) idx = 0;
-    else idx = (idx + dir + subPanelButtons_.size()) % subPanelButtons_.size();
-    subPanelButtons_[idx]->setFocus(Qt::TabFocusReason);
+    initial->setFocus(Qt::TabFocusReason); // land on the current track (or Off)
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)

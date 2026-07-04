@@ -294,9 +294,11 @@ private:
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
     void showSubtitleMenu();
     void hideSubtitleMenu();
-    void stepSubtitleFocus(int dir);              // move focus across the panel's controls (dir +1/-1)
     QWidget* subOverlay_ = nullptr;
-    QVector<QPushButton*> subPanelButtons_;
+    // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
+    // within a column, Left/Right jump between them - so you reach the settings without walking the track list.
+    QVector<QPushButton*> subLeftCol_;
+    QVector<QPushButton*> subRightCol_;
 
     // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
     EmulatorManager* emu_ = nullptr;
