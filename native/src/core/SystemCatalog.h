@@ -39,6 +39,10 @@ namespace SystemCatalog
             // only so removing the externalEmulator line restores the in-process path.
             { "psx",     "PlayStation",                       { "cue", "chd", "pbp", "m3u", "ccd", "exe" },
                          { "swanstation", "mednafen_psx_hw", "pcsx_rearmed" }, "duckstation" },
+            // Sega Saturn: disc images; needs a Saturn BIOS (auto-fetched, see BiosCatalog "saturn"). Beetle
+            // Saturn is the accuracy/compatibility default; Kronos is the OpenGL (hardware-rendered) alternative.
+            { "saturn",  "Sega Saturn",                       { "cue", "chd", "ccd", "m3u", "iso" },
+                         { "mednafen_saturn", "kronos" } },
             { "pce",     "PC Engine / TurboGrafx-16",         { "pce", "sgx" },
                          { "mednafen_pce", "mednafen_pce_fast" } },
             { "ws",      "WonderSwan",                        { "ws", "wsc" },
@@ -185,6 +189,7 @@ namespace SystemCatalog
         else if (has("game boy") || has("gbc"))                           id = QStringLiteral("gb");
         else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
         else if (has("dreamcast"))                                        id = QStringLiteral("dreamcast");
+        else if (has("saturn"))                                           id = QStringLiteral("saturn");
         else if (has("sega cd 32x") || has("mega cd 32x") || has("mega-cd 32x")) id = QStringLiteral("segacd32x");
         else if (has("sega cd") || has("mega cd") || has("mega-cd") || has("segacd")) id = QStringLiteral("segacd");
         else if (has("sega 32x") || n == QLatin1String("32x"))            id = QStringLiteral("32x");
