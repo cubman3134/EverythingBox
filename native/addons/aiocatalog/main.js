@@ -299,8 +299,19 @@ function igdbToItems(arr) {
         var cover = (g.cover && g.cover.image_id)
             ? "https://images.igdb.com/igdb/image/upload/t_cover_big/" + g.cover.image_id + ".jpg" : "";
         var y = g.first_release_date ? String(new Date(g.first_release_date * 1000).getFullYear()) : "";
+        // Alternate/original titles (Japanese original, regional rebrands): let the client retry a ROM lookup
+        // when the localized name misses. Skip acronyms/very short strings and the primary name itself; cap the
+        // list so a lookup doesn't fan out endlessly.
+        var alt = [];
+        if (g.alternative_names) {
+            for (var k = 0; k < g.alternative_names.length && alt.length < 6; k++) {
+                var an = g.alternative_names[k];
+                if (an && an.name && an.name.length >= 4 && an.name !== g.name && alt.indexOf(an.name) < 0)
+                    alt.push(an.name);
+            }
+        }
         items.push({ id: "igdb:" + g.id, title: g.name, subtitle: y, type: "game",
-                     thumbnailUrl: cover, expandable: false, url: "" });
+                     thumbnailUrl: cover, expandable: false, url: "", altNames: alt });
     }
     return items;
 }
@@ -340,7 +351,7 @@ function gamesCatalog(query, page, f) {
     if (query) {
         page = page1(page);
         if (!igdbCreds()) return info("Games", "Set your IGDB (Twitch) client id + secret in Configure… to search games.");
-        var body = 'search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date; ';
+        var body = 'search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date,alternative_names.name; ';
         if (f.genre) body += 'where genres = (' + parseInt(f.genre, 10) + '); ';
         body += 'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';';
         var r = igdbQuery(body);
@@ -357,7 +368,7 @@ function igdbPlatformGames(platformId, page, f) {
     if (f.genre) where += " & genres = (" + parseInt(f.genre, 10) + ")";
     // Search within this console: a case-insensitive name match, keeping the platform filter.
     if (f.query) { var q = String(f.query).replace(/["\\]/g, "").replace(/^\s+|\s+$/g, ""); if (q) where += ' & name ~ *"' + q + '"*'; }
-    var r = igdbQuery('fields name,cover.image_id,first_release_date,rating; ' + where + '; sort ' + igdbSort(f) + '; ' +
+    var r = igdbQuery('fields name,cover.image_id,first_release_date,rating,alternative_names.name; ' + where + '; sort ' + igdbSort(f) + '; ' +
                       'limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
     if (!r) return info("Games", "Could not load games for this console.");
     if (!r.length && page === 1) return resultF("Games", [{ id: "_info", title: "No games match these filters.", type: "info" }], false, gameFilters());

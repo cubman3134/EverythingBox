@@ -75,6 +75,8 @@ static MediaItem itemFromJson(const QJsonObject& o)
     it.url          = o.value(QStringLiteral("url")).toString();
     it.mime         = o.value(QStringLiteral("mime")).toString();
     it.expandable   = o.value(QStringLiteral("expandable")).toBool();
+    const QJsonArray alt = o.value(QStringLiteral("altNames")).toArray();
+    for (const QJsonValue& v : alt) { const QString s = v.toString().trimmed(); if (!s.isEmpty()) it.altNames << s; }
     return it;
 }
 

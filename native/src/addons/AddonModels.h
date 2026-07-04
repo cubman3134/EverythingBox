@@ -93,6 +93,10 @@ struct MediaItem
     // The IMDB stream id this playable was resolved from - "tt123" (movie) or "ttShow:season:episode" (episode).
     // Carried to the player so it can auto-fetch a matching subtitle from OpenSubtitles. Not serialized.
     QString imdbStreamId;
+    // Alternate / original titles for this item (e.g. IGDB alternative_names: the Japanese original, regional
+    // rebrands like "Rockman"/"Mega Man" or "Probotector"/"Contra"). Used to retry a ROM/file-provider lookup
+    // when the localized catalog title doesn't match the copy's original name. Not serialized.
+    QStringList altNames;
 };
 
 struct MediaCatalog

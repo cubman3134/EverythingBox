@@ -263,7 +263,16 @@ function igdbToItems(arr) {
     const cover = (g.cover && g.cover.image_id)
       ? "https://images.igdb.com/igdb/image/upload/t_cover_big/" + g.cover.image_id + ".jpg" : "";
     const y = g.first_release_date ? String(new Date(g.first_release_date * 1000).getFullYear()) : "";
-    items.push({ id: "igdb:" + g.id, title: g.name, subtitle: y, type: "game", thumbnailUrl: cover, expandable: false, url: "" });
+    // Alternate/original titles (Japanese original, regional rebrands) for retrying a ROM lookup when the
+    // localized name misses; skip acronyms/very short strings and the primary name, cap the list.
+    const alt = [];
+    if (g.alternative_names) {
+      for (const an of g.alternative_names) {
+        if (alt.length >= 6) break;
+        if (an && an.name && an.name.length >= 4 && an.name !== g.name && alt.indexOf(an.name) < 0) alt.push(an.name);
+      }
+    }
+    items.push({ id: "igdb:" + g.id, title: g.name, subtitle: y, type: "game", thumbnailUrl: cover, expandable: false, url: "", altNames: alt });
   }
   return items;
 }
@@ -279,7 +288,7 @@ async function gamesCatalog(query, page) {
   if (query) {
     page = page1(page);
     if (!igdbCreds()) return info("Games", "Set your IGDB client id + secret in Configure… to search games.");
-    const r = await igdbQuery('search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
+    const r = await igdbQuery('search "' + query.replace(/"/g, "") + '"; fields name,cover.image_id,first_release_date,alternative_names.name; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
     if (!r) return info("Games", "Could not authenticate with IGDB.");
     return result("Games: " + query, igdbToItems(r), r.length === PAGE);
   }
@@ -288,7 +297,7 @@ async function gamesCatalog(query, page) {
 async function igdbPlatformGames(platformId, page) {
   page = page1(page);
   if (!igdbCreds()) return info("Games", "Set your IGDB client id + secret in Configure… to load games.");
-  const r = await igdbQuery('fields name,cover.image_id,first_release_date,rating; where platforms = (' + platformId + ') & cover != null; sort rating desc; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
+  const r = await igdbQuery('fields name,cover.image_id,first_release_date,rating,alternative_names.name; where platforms = (' + platformId + ') & cover != null; sort rating desc; limit ' + PAGE + '; offset ' + ((page - 1) * PAGE) + ';');
   if (!r) return info("Games", "Could not load games for this console.");
   if (!r.length && page === 1) return info("Games", "No games found for this console.");
   return result("Games", igdbToItems(r), r.length === PAGE);

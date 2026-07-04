@@ -64,6 +64,8 @@
 #include <QSettings>
 #include <QCryptographicHash>
 #include <QCoreApplication>
+#include <memory>
+#include <functional>
 
 static const QSize kPoster(140, 200);
 
@@ -2510,22 +2512,47 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             query = (it.title + QLatin1Char(' ') + author).trimmed();
         }
         if (query.isEmpty()) query = it.title;
+        // A game's localized catalog title may not match the copy's original regional name. Queue the
+        // original/alternate names (with the console suffix) as fallbacks, tried only if the provider was
+        // reached but had no match under the previous name.
+        QStringList queries{ query };
+        if (it.type == QStringLiteral("game"))
+            for (const QString& alt : it.altNames)
+            {
+                const QString q = (alt + QLatin1Char(' ') + console).trimmed();
+                if (!q.isEmpty() && !queries.contains(q, Qt::CaseInsensitive)) queries << q;
+            }
         const bool read = (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book"));
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
-        mgr_->resolveDocumentByQuery(query, catType, [this, it, title, console](const QString& url, const QString& mime, const QString& err, bool noMatches) {
-            if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m); }
-            else if (!err.isEmpty())
-                showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
-            else if (noMatches)
-                showToast(tr("No copies of “%1” were found.").arg(title), 8000);
-            else
-                showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
-                             "less-common titles take a while). Try again in a few minutes; if it never "
-                             "appears, there may be no copy.").arg(title), 10000);
-        });
+        // Walk the query list: on a hit, open it; on "no match" advance to the next name; a real error or a
+        // still-caching result stops and reports. `self` keeps the recursion alive across the async calls.
+        auto attempt = std::make_shared<std::function<void(int)>>();
+        std::weak_ptr<std::function<void(int)>> weak = attempt;
+        *attempt = [this, queries, catType, it, title, console, weak](int i) {
+            mgr_->resolveDocumentByQuery(queries[i], catType,
+                [this, queries, it, title, console, weak, i, self = weak.lock()]
+                (const QString& url, const QString& mime, const QString& err, bool noMatches) {
+                if (!url.isEmpty())
+                {
+                    if (playBtn_) playBtn_->setEnabled(true);
+                    hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m);
+                    return;
+                }
+                if (noMatches && i + 1 < queries.size()) { if (auto f = weak.lock()) (*f)(i + 1); return; }
+                if (playBtn_) playBtn_->setEnabled(true);
+                if (!err.isEmpty())
+                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
+                else if (noMatches)
+                    showToast(tr("No copies of “%1” were found.").arg(title), 8000);
+                else
+                    showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
+                                 "less-common titles take a while). Try again in a few minutes; if it never "
+                                 "appears, there may be no copy.").arg(title), 10000);
+            });
+        };
+        (*attempt)(0);
         return;
     }
     if (addon && addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
