@@ -3932,8 +3932,10 @@ void MainWindow::updateBackgroundMusic()
 void MainWindow::updateThemedNowPlaying()
 {
     if (!themedHome_ || !bgm_) return;
+#ifdef MMV_HAVE_QML // themedHome_ is only ever non-null in QML builds; guard the QtQuick types for the rest
     if (QQuickItem* r = ThemeEngine::rootItem(themedHome_))
         r->setProperty("nowPlaying", bgm_->currentTitle());
+#endif
 }
 
 void MainWindow::openSettingsHub()
