@@ -77,6 +77,9 @@
 #include <QShortcut>
 #include <QKeyEvent>
 #include <QFileDialog>
+#include <QMenu>
+#include <QActionGroup>
+#include <QWidgetAction>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -475,7 +478,6 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
-    auto* subLoad = new QPushButton(tr("＋Sub"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
     prevChap->setToolTip(tr("Previous chapter"));
     rewind->setToolTip(tr("Rewind 10s"));
@@ -483,8 +485,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     fastFwd->setToolTip(tr("Forward 10s"));
     nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
-    subsBtn->setToolTip(tr("Subtitles: cycle tracks / off"));
-    subLoad->setToolTip(tr("Load a subtitle file…"));
+    subsBtn->setToolTip(tr("Subtitles — pick a track, sync, size, load or download"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
@@ -510,11 +511,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
     mc->addWidget(subsBtn);
-    mc->addWidget(subLoad);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, subLoad, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -673,14 +673,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         nextChap->setVisible(has);
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
-    connect(subsBtn, &QPushButton::clicked, this, [this] { player_->cycleSubtitle(); revealMediaControls(); });
-    connect(subLoad, &QPushButton::clicked, this, [this] {
-        const QString f = QFileDialog::getOpenFileName(
-            this, tr("Load subtitle"), QString(),
-            tr("Subtitles (*.srt *.ass *.ssa *.sub *.vtt *.idx);;All files (*)"));
-        if (!f.isEmpty()) player_->addSubtitle(f);
-        revealMediaControls();
-    });
+    connect(subsBtn, &QPushButton::clicked, this, [this, subsBtn] { showSubtitleMenu(subsBtn); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
@@ -3281,13 +3274,119 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
 void MainWindow::armSubtitleFetch(const MediaItem& item)
 {
     subCtx_ = {};
-    if (!Settings::subtitlesOnByDefault() || !SubtitleFetcher::configured()) return;
     const QString t = item.type.toLower();
     const bool eligible = t.isEmpty() || t == QStringLiteral("movie") || t == QStringLiteral("series")
                           || t == QStringLiteral("episode") || t == QStringLiteral("video");
     if (!eligible) return;
-    if (item.imdbStreamId.isEmpty() && item.title.isEmpty()) return;
-    subCtx_ = { item.imdbStreamId, item.title, true };
+    // Keep the match hints for the current video so the subtitle menu's manual "download" works too; only arm
+    // the automatic-on-load fetch when the feature is enabled, configured, and we have something to match on.
+    subCtx_.imdbStreamId = item.imdbStreamId;
+    subCtx_.title = item.title;
+    subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
+                     && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
+}
+
+// The single subtitle button's menu (Stremio-style): pick a track (or off), sync/size adjustments that keep
+// the menu open, load a file, or download a matching subtitle from OpenSubtitles. Anchored above the button.
+void MainWindow::showSubtitleMenu(QWidget* anchor)
+{
+    revealMediaControls();
+    QMenu menu(this);
+    menu.setStyleSheet(QStringLiteral(
+        "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+        "QMenu::item { padding:6px 26px 6px 24px; border-radius:6px; }"
+        "QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+        "QMenu::item:disabled { color:#888; }"
+        "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+
+    // --- Track selection: Off + each embedded/loaded subtitle track, the current one checked. ---
+    const auto tracks = player_->subtitleTracks();
+    auto* group = new QActionGroup(&menu);
+    group->setExclusive(true);
+    QAction* offAct = menu.addAction(tr("Off"));
+    offAct->setCheckable(true);
+    group->addAction(offAct);
+    bool anySelected = false;
+    for (const MpvWidget::SubtitleTrack& tr_ : tracks)
+    {
+        const QString lang = tr_.lang.isEmpty() ? QString() : tr_.lang.toUpper();
+        QString label = lang;
+        if (!tr_.title.isEmpty()) label = label.isEmpty() ? tr_.title : lang + QStringLiteral(" · ") + tr_.title;
+        if (label.isEmpty()) label = tr("Track %1").arg(tr_.id);
+        QAction* a = menu.addAction(label);
+        a->setCheckable(true);
+        a->setChecked(tr_.selected);
+        group->addAction(a);
+        if (tr_.selected) anySelected = true;
+        const int id = tr_.id;
+        connect(a, &QAction::triggered, this, [this, id] { player_->setSubtitleTrack(id); });
+    }
+    offAct->setChecked(!anySelected);
+    connect(offAct, &QAction::triggered, this, [this] { player_->setSubtitleTrack(-1); });
+
+    // --- Sync + size rows: −/+ buttons that adjust live without closing the menu. ---
+    auto addAdjustRow = [this, &menu](const QString& name, std::function<QString()> value,
+                                      std::function<void()> minus, std::function<void()> plus) {
+        auto* w = new QWidget(&menu);
+        auto* h = new QHBoxLayout(w);
+        h->setContentsMargins(24, 4, 12, 4);
+        h->setSpacing(8);
+        auto* lbl = new QLabel(name + QStringLiteral(":  ") + value(), w);
+        lbl->setStyleSheet(QStringLiteral("color:#e8e8e8;"));
+        h->addWidget(lbl, 1);
+        auto mkBtn = [w](const QString& t) {
+            auto* b = new QPushButton(t, w);
+            b->setFixedSize(28, 24);
+            b->setStyleSheet(QStringLiteral(
+                "QPushButton { background:rgba(255,255,255,0.10); color:#e8e8e8; border:none; border-radius:5px;"
+                " font-weight:bold; } QPushButton:hover { background:rgba(90,140,255,0.7); }"));
+            return b;
+        };
+        auto* minusBtn = mkBtn(QStringLiteral("−"));
+        auto* plusBtn = mkBtn(QStringLiteral("+"));
+        h->addWidget(minusBtn);
+        h->addWidget(plusBtn);
+        connect(minusBtn, &QPushButton::clicked, w, [=] { minus(); lbl->setText(name + QStringLiteral(":  ") + value()); });
+        connect(plusBtn,  &QPushButton::clicked, w, [=] { plus();  lbl->setText(name + QStringLiteral(":  ") + value()); });
+        auto* wa = new QWidgetAction(&menu);
+        wa->setDefaultWidget(w);
+        menu.addAction(wa);
+    };
+    menu.addSeparator();
+    addAdjustRow(tr("Sync"),
+                 [this] { return tr("%1 s").arg(player_->subtitleDelay(), 0, 'f', 1); },
+                 [this] { player_->setSubtitleDelay(player_->subtitleDelay() - 0.1); },
+                 [this] { player_->setSubtitleDelay(player_->subtitleDelay() + 0.1); });
+    addAdjustRow(tr("Size"),
+                 [this] { return QStringLiteral("%1%").arg(qRound(player_->subtitleScale() * 100)); },
+                 [this] { player_->setSubtitleScale(qMax(0.2, player_->subtitleScale() - 0.1)); },
+                 [this] { player_->setSubtitleScale(qMin(4.0, player_->subtitleScale() + 0.1)); });
+
+    // --- Sources: load a local file, or fetch a matching one from OpenSubtitles. ---
+    menu.addSeparator();
+    QAction* loadAct = menu.addAction(tr("Load from file…"));
+    connect(loadAct, &QAction::triggered, this, [this] {
+        const QString f = QFileDialog::getOpenFileName(
+            this, tr("Load subtitle"), QString(),
+            tr("Subtitles (*.srt *.ass *.ssa *.sub *.vtt *.idx);;All files (*)"));
+        if (!f.isEmpty()) player_->addSubtitle(f);
+    });
+    if (SubtitleFetcher::configured() && !(subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()))
+    {
+        QAction* dlAct = menu.addAction(tr("Download from OpenSubtitles"));
+        connect(dlAct, &QAction::triggered, this, [this] {
+            notify(tr("Searching OpenSubtitles for a subtitle…"), 0);
+            subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
+                               [this](const QString& srt) {
+                if (!srt.isEmpty()) { player_->addSubtitle(srt); notify(tr("Subtitle added."), 3000); }
+                else notify(tr("No matching subtitle found on OpenSubtitles."), 5000);
+            });
+        });
+    }
+
+    const QSize sh = menu.sizeHint();
+    menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
+    revealMediaControls();
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)

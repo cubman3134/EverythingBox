@@ -4,6 +4,7 @@
 #pragma once
 #include <QOpenGLWidget>
 #include <QString>
+#include <QVector>
 #include <mpv/client.h>
 #include <mpv/render_gl.h>
 
@@ -25,6 +26,15 @@ public:
     void setPosition(double seconds);
     void cycleSubtitle();                     // step through subtitle tracks (… -> off -> 1 -> 2 -> …)
     void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
+
+    // One subtitle track in the current file, for building a picker menu.
+    struct SubtitleTrack { int id = 0; QString title; QString lang; bool selected = false; };
+    QVector<SubtitleTrack> subtitleTracks() const; // sub tracks in the current file (empty if none)
+    void setSubtitleTrack(int id);            // select track id; id < 0 turns subtitles off
+    double subtitleDelay() const;             // current subtitle timing offset, seconds
+    void setSubtitleDelay(double seconds);
+    double subtitleScale() const;             // current subtitle size multiplier (1.0 = default)
+    void setSubtitleScale(double factor);
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
     void prevChapter();                       // jump to the previous chapter
     void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level

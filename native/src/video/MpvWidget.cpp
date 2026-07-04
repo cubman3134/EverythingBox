@@ -390,3 +390,69 @@ void MpvWidget::addSubtitle(const QString& path)
     const char* cmd[] = { "sub-add", p.constData(), "select", nullptr }; // load and switch to it
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
 }
+
+QVector<MpvWidget::SubtitleTrack> MpvWidget::subtitleTracks() const
+{
+    QVector<SubtitleTrack> out;
+    if (!mpv) return out;
+    int64_t count = 0;
+    mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count);
+    for (int64_t i = 0; i < count; ++i)
+    {
+        char key[80];
+        auto field = [&](const char* name) {
+            std::snprintf(key, sizeof key, "track-list/%lld/%s", static_cast<long long>(i), name);
+            return key;
+        };
+        char* ty = mpv_get_property_string(mpv, field("type"));
+        const bool isSub = ty && std::strcmp(ty, "sub") == 0;
+        if (ty) mpv_free(ty);
+        if (!isSub) continue;
+
+        SubtitleTrack t;
+        int64_t id = 0;
+        mpv_get_property(mpv, field("id"), MPV_FORMAT_INT64, &id);
+        t.id = static_cast<int>(id);
+        char* lg = mpv_get_property_string(mpv, field("lang"));
+        if (lg) { t.lang = QString::fromUtf8(lg); mpv_free(lg); }
+        char* ti = mpv_get_property_string(mpv, field("title"));
+        if (ti) { t.title = QString::fromUtf8(ti); mpv_free(ti); }
+        int sel = 0;
+        mpv_get_property(mpv, field("selected"), MPV_FORMAT_FLAG, &sel);
+        t.selected = sel != 0;
+        out.push_back(t);
+    }
+    return out;
+}
+
+void MpvWidget::setSubtitleTrack(int id)
+{
+    if (!mpv) return;
+    if (id < 0) { mpv_set_property_string(mpv, "sid", "no"); return; }
+    const QByteArray v = QByteArray::number(id);
+    mpv_set_property_string(mpv, "sid", v.constData());
+}
+
+double MpvWidget::subtitleDelay() const
+{
+    double d = 0.0;
+    if (mpv) mpv_get_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &d);
+    return d;
+}
+
+void MpvWidget::setSubtitleDelay(double seconds)
+{
+    if (mpv) mpv_set_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &seconds);
+}
+
+double MpvWidget::subtitleScale() const
+{
+    double f = 1.0;
+    if (mpv) mpv_get_property(mpv, "sub-scale", MPV_FORMAT_DOUBLE, &f);
+    return f;
+}
+
+void MpvWidget::setSubtitleScale(double factor)
+{
+    if (mpv) mpv_set_property(mpv, "sub-scale", MPV_FORMAT_DOUBLE, &factor);
+}

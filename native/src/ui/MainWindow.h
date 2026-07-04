@@ -289,6 +289,7 @@ private:
     class SubtitleFetcher* subFetcher_ = nullptr;
     struct SubContext { QString imdbStreamId; QString title; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
+    void showSubtitleMenu(QWidget* anchor);       // the player bar's single subtitle button -> Stremio-style menu
 
     // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
     EmulatorManager* emu_ = nullptr;
