@@ -617,8 +617,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         mediaControls_->hide();
         videoBack_->hide();
         streamIssueBtn_->hide();
-        if (isFullScreen() && stack_->currentWidget() == playerPage_)
-            player_->setCursor(Qt::BlankCursor);
+        if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
+            player_->setCursor(Qt::BlankCursor); // but never hide the cursor while the subtitle panel is open
     });
 
     // Reveal the controls on mouse movement over the player / controls.
@@ -3326,6 +3326,9 @@ void MainWindow::showSubtitleMenu()
     subOverlay_ = new QWidget(player_);
     subOverlay_->setObjectName(QStringLiteral("subScrim"));
     subOverlay_->setStyleSheet(QStringLiteral("#subScrim { background: rgba(8,8,12,0.60); }"));
+    // Give the overlay its own arrow cursor so it never inherits the player's blanked cursor (which the
+    // inactivity timer sets in full screen) over the scrim/card background.
+    subOverlay_->setCursor(Qt::ArrowCursor);
     subOverlay_->setGeometry(player_->rect());
     subOverlay_->installEventFilter(this); // a click on the scrim (outside the card) dismisses
 
