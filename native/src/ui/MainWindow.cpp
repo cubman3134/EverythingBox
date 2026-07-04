@@ -2217,9 +2217,17 @@ void MainWindow::showThemedXmb()
         showThemedHome();
     };
     auto onSearch = [this] {
-        if (!themedXmbInCatalog_) return; // search applies once you're inside a catalog
-        const QString q = promptThemedSearch(home_->browseTitle());
-        if (!q.isNull()) home_->searchInBrowse(q);
+        // Inside a catalog: scope the search to it. At the XMB root: search every add-on at once (cross-addon).
+        if (themedXmbInCatalog_)
+        {
+            const QString q = promptThemedSearch(home_->browseTitle());
+            if (!q.isNull()) home_->searchInBrowse(q);
+        }
+        else
+        {
+            const QString q = promptThemedSearch(tr("everything"));
+            if (!q.isNull() && !q.trimmed().isEmpty()) { home_->searchEverything(q); showThemedBrowse(); }
+        }
     };
     auto onNearEnd = [this] { if (themedXmbInCatalog_ && home_->browseHasMore()) home_->browseLoadMore(); };
     auto onCategory = [this, showCatalogs] {

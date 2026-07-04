@@ -1375,6 +1375,56 @@ void HomeView::searchInBrowse(const QString& query)
     doSearch();                            // scoped to the current console, else re-runs the base catalog
 }
 
+// Cross-addon search: replace the browse stack with a synthetic "_search" level and fan the query out to every
+// enabled source's catalogs; results stream into one merged grid as each responds. Back returns here (loadTop
+// re-runs it). Each result is tagged with its origin so activateItem re-opens it through the right addon.
+void HomeView::searchEverything(const QString& query)
+{
+    const QString q = query.trimmed();
+    if (q.isEmpty()) return;
+    recentView_ = false;
+    applyGridMode(/*recentList*/ false);
+    styleTypeButtons(QStringLiteral("home"));
+    hideMeta();
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true;
+    lvl.item.type = QStringLiteral("_search");
+    lvl.item.mime = QStringLiteral("search:") + q;
+    lvl.item.title = tr("Search: %1").arg(q);
+    lvl.title = lvl.item.title;
+    lvl.query = q;
+    stack_.clear();
+    stack_.push_back(lvl);
+    startSearchEverything(q);
+}
+
+void HomeView::startSearchEverything(const QString& query)
+{
+    ++generation_;                        // fresh grid -> ignore stale async thumbnails
+    searchAllReqs_.clear();
+    searchAllReqSrc_.clear();
+    searchAllSeen_.clear();
+    searchAllCat_ = MediaCatalog();
+    searchAllCat_.title = tr("Search: %1").arg(query);
+    searchAllQuery_ = query;
+    pendingReqId_ = -1;                    // not driven by the single-request path
+    hasMore_ = false;
+    for (LoadedAddon* s : mgr_->sources())
+    {
+        if (!s->isMediaSource() || !mgr_->isEnabled(s->manifest.id)) continue;
+        for (const AddonCatalog& c : mgr_->catalogs(s))
+        {
+            const int req = mgr_->requestCatalog(s, c.id, query, 1, {});
+            searchAllReqs_.insert(req);
+            searchAllReqSrc_.insert(req, s->manifest.id);
+        }
+    }
+    loading_ = !searchAllReqs_.isEmpty();
+    populate(searchAllCat_, /*append*/ false); // clears the grid, shows the (empty) searching state
+    if (searchAllReqs_.isEmpty()) showToast(tr("No add-ons to search."), 4000);
+    updateStatus();
+}
+
 void HomeView::selectRecent()
 {
     recentView_ = true;
@@ -2030,6 +2080,7 @@ void HomeView::activateItem(int row)
         { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
 
     LoadedAddon* addon = stack_.last().addon;
+    if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // cross-addon search result
 
     // A remote leaf (a track, etc.) carries no url in the catalog - its source comes from the /stream
     // endpoint, fetched on open: resolve and open it directly. Movies/episodes (Play) and comics/manga/books
@@ -2358,6 +2409,9 @@ void HomeView::loadTop()
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
+    // Returning to a cross-addon search (Back out of a result): re-run the fan-out.
+    if (top.detail && top.item.type == QStringLiteral("_search"))
+        { startSearchEverything(top.item.mime.mid(QStringLiteral("search:").size())); return; }
     // Returning to a synthetic Recent level (Back from a re-opened item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_recents"))
         { populateRecents(top.item.mime.mid(QStringLiteral("recents:").size())); return; }
@@ -3049,6 +3103,32 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
         dlNext();
         return;
     }
+    if (searchAllReqs_.contains(requestId)) // one source's response to a cross-addon search
+    {
+        searchAllReqs_.remove(requestId);
+        const QString srcId = searchAllReqSrc_.take(requestId);
+        MediaCatalog add; // just this source's fresh, de-duped items, appended so the grid doesn't reset
+        for (MediaItem it : cat.items)
+        {
+            if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr") || it.title.isEmpty()) continue;
+            const QString dk = (it.title + QLatin1Char('|') + it.type).toLower();
+            if (searchAllSeen_.contains(dk)) continue;
+            searchAllSeen_.insert(dk);
+            it.sourceAddonId = srcId;                 // remember which addon to re-open it through
+            add.items.push_back(it);
+            searchAllCat_.items.push_back(it);
+        }
+        if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_search") && !add.items.isEmpty())
+            populate(add, /*append*/ !items_.isEmpty());
+        if (searchAllReqs_.isEmpty())
+        {
+            loading_ = false;
+            if (searchAllCat_.items.isEmpty()) showToast(tr("No results for “%1”.").arg(searchAllQuery_), 6000);
+        }
+        updateStatus();
+        return;
+    }
+
     if (requestId != pendingReqId_) return; // a superseded request (navigated away / newer page)
     loading_ = false;
     currentPage_ = pendingPage_;

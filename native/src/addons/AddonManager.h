@@ -68,6 +68,8 @@ public:
     // if its version is newer than the installed one, reinstall it in place. Runs in the background on startup.
     void checkAddonUpdates();
     const QVector<LoadedAddon*>& sources() const { return sources_; } // media-source addons
+    LoadedAddon* sourceById(const QString& manifestId) const          // resolve a source by its manifest id
+    { for (LoadedAddon* s : sources_) if (s->manifest.id == manifestId) return s; return nullptr; }
     const std::vector<std::unique_ptr<LoadedAddon>>& all() const { return loaded_; }
     QVector<AddonCatalog> catalogs(LoadedAddon* src) const;
 

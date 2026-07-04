@@ -8,6 +8,8 @@
 #include <QColor>
 #include <QMap>
 #include <QList>
+#include <QSet>
+#include <QHash>
 #include "../addons/AddonModels.h"
 
 class AddonManager;
@@ -74,6 +76,9 @@ public:
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.
     void searchInBrowse(const QString& query);
+    // Cross-addon search: query every enabled source's catalogs for `query` at once and merge the results into
+    // one grid (deduped by title+type; each result remembers its source so it re-opens through the right addon).
+    void searchEverything(const QString& query);
     bool atDetailLevel() const;              // the current level is an item's detail/info page
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
@@ -302,6 +307,14 @@ private:
     bool hasMore_ = false;       // the addon says another page exists
     bool loading_ = false;       // a page fetch is in progress (guards re-entrant scroll triggers)
     int pendingReqId_ = -1;      // in-flight async request; results with a different id are stale
+
+    // ---- cross-addon search (searchEverything): many catalog requests fanned out, results merged into one grid
+    void startSearchEverything(const QString& query); // (re)fire the fan-out for the current search level
+    QSet<int> searchAllReqs_;          // still-in-flight requestCatalog ids for this search
+    QHash<int, QString> searchAllReqSrc_; // reqId -> source manifest id (to tag each result's origin)
+    QSet<QString> searchAllSeen_;      // dedup keys "title|type" already added
+    MediaCatalog searchAllCat_;        // accumulated results (also used to re-populate on Back)
+    QString searchAllQuery_;
     int pendingPage_ = 1;        // page number of the in-flight request
     bool pendingAppend_ = false; // whether the in-flight request appends or replaces
 };

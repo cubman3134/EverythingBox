@@ -87,6 +87,9 @@ struct MediaItem
     // url is a Cloudflare-gated direct source (lolroms) to fetch with a browser-UA curl rather than the normal
     // HTTP client (whose TLS fingerprint gets a 403). Set by resolveStream on desktop only. Not serialized.
     bool cfCurl = false;
+    // The source addon this item came from, set when it's surfaced outside its own catalog (a cross-addon search
+    // merges results from many addons into one grid) so it can be re-opened through the right addon. Not serialized.
+    QString sourceAddonId;
 };
 
 struct MediaCatalog
