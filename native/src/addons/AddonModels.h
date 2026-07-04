@@ -90,6 +90,9 @@ struct MediaItem
     // The source addon this item came from, set when it's surfaced outside its own catalog (a cross-addon search
     // merges results from many addons into one grid) so it can be re-opened through the right addon. Not serialized.
     QString sourceAddonId;
+    // The IMDB stream id this playable was resolved from - "tt123" (movie) or "ttShow:season:episode" (episode).
+    // Carried to the player so it can auto-fetch a matching subtitle from OpenSubtitles. Not serialized.
+    QString imdbStreamId;
 };
 
 struct MediaCatalog

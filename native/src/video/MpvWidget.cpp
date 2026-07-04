@@ -11,6 +11,7 @@
 #include <QDateTime>
 #include <stdexcept>
 #include <cstring>
+#include <cstdio>
 
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga tracing.
 static void videoLog(const QString& msg)
@@ -213,6 +214,38 @@ void MpvWidget::handleEvent(mpv_event* event)
         if (npTimer_) npTimer_->start(400);
         emit chapterCountChanged(0); // hide chapter nav until the new file reports its own count
         break;
+    case MPV_EVENT_FILE_LOADED:
+    {
+        // The track list is now populated: report whether an embedded subtitle in the preferred language is
+        // present, so the app can decide to auto-download one. Also report whether this is a video track (an
+        // audio-only file never wants subtitles). mpv lang codes may be 2- or 3-letter; match on the first two.
+        const QString want = Settings::subtitleLanguage().trimmed().toLower();
+        int64_t count = 0;
+        mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count);
+        bool anySub = false, wantSub = false, video = false;
+        for (int64_t i = 0; i < count; ++i)
+        {
+            char key[64];
+            std::snprintf(key, sizeof key, "track-list/%lld/type", static_cast<long long>(i));
+            char* ty = mpv_get_property_string(mpv, key);
+            const QString type = ty ? QString::fromUtf8(ty) : QString();
+            if (ty) mpv_free(ty);
+            if (type == QStringLiteral("video")) { video = true; continue; }
+            if (type != QStringLiteral("sub")) continue;
+            anySub = true;
+            std::snprintf(key, sizeof key, "track-list/%lld/lang", static_cast<long long>(i));
+            char* lg = mpv_get_property_string(mpv, key);
+            if (lg)
+            {
+                const QString l = QString::fromUtf8(lg).toLower();
+                if (!want.isEmpty() && (l.left(2) == want.left(2))) wantSub = true;
+                mpv_free(lg);
+            }
+        }
+        const bool usable = want.isEmpty() ? anySub : wantSub;
+        emit fileLoaded(usable, video || hasVideo_);
+        break;
+    }
     case MPV_EVENT_END_FILE:
     {
         if (nowPlaying_) nowPlaying_->hide();

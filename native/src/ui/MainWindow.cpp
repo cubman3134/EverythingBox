@@ -21,6 +21,7 @@
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
 #include "../core/AppUpdater.h"
+#include "../core/SubtitleFetcher.h"
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -251,6 +252,22 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
     comic_ = new ComicView(this);
+
+    // Auto-subtitle download: when an eligible video finishes loading with no subtitle in the preferred
+    // language, fetch one from OpenSubtitles and hand it to the player. Dormant unless the user configured
+    // OpenSubtitles credentials and enabled "show subtitles by default".
+    subFetcher_ = new SubtitleFetcher(this);
+    connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
+    connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
+        if (!subCtx_.active) return;
+        subCtx_.active = false; // one-shot per open
+        if (hasSub || !isVideo) return;
+        if (subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()) return;
+        subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
+                           [this](const QString& srt) {
+            if (!srt.isEmpty()) player_->addSubtitle(srt);
+        });
+    });
 
     // RetroAchievements: one client, attached to the full-screen emulator. Logs in silently if a token was
     // saved, and announces unlocks. Split-screen panes don't participate (one active game at a time).
@@ -1196,6 +1213,7 @@ void MainWindow::openVideoPath(const QString& path)
 {
     if (isM3uRef(path)) { openM3u(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
+    subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     retro_->stop();
     book_->persist();
@@ -1711,6 +1729,7 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
 {
+    subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -1802,6 +1821,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
                                  const QString& thumbnailUrl)
 {
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
+    subCtx_ = {};           // audio has no subtitles to fetch
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
     clearAudioQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
@@ -3255,6 +3275,21 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
     notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), 7000);
 }
 
+// Decide whether the video about to play should get an auto-downloaded subtitle, and stash the match hints
+// for the MpvWidget::fileLoaded handler. Only movies/episodes qualify, and only when the feature is enabled
+// and configured. Always resets subCtx_ first, so a prior video's context can't leak into an ineligible open.
+void MainWindow::armSubtitleFetch(const MediaItem& item)
+{
+    subCtx_ = {};
+    if (!Settings::subtitlesOnByDefault() || !SubtitleFetcher::configured()) return;
+    const QString t = item.type.toLower();
+    const bool eligible = t.isEmpty() || t == QStringLiteral("movie") || t == QStringLiteral("series")
+                          || t == QStringLiteral("episode") || t == QStringLiteral("video");
+    if (!eligible) return;
+    if (item.imdbStreamId.isEmpty() && item.title.isEmpty()) return;
+    subCtx_ = { item.imdbStreamId, item.title, true };
+}
+
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
     // Whether the player/reader should offer "Issue with Streaming" for this item (an Allarr-resolved file
@@ -3418,6 +3453,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
         const QString rkey = item.id.isEmpty() ? url : item.id;
         beginResume(rkey);
+        armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();
@@ -4116,6 +4152,40 @@ void MainWindow::openGeneralSettings()
         note->setWordWrap(true);
         note->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(note);
+
+        // --- Auto-download subtitles (OpenSubtitles.com). When a movie/episode has no subtitle in the chosen
+        // language, fetch one automatically. Needs a free API key + the user's account (login is required to
+        // download). All three blank => the feature stays off. ---
+        v->addSpacing(10);
+        auto* osHeading = new QLabel(tr("Auto-download from OpenSubtitles"));
+        osHeading->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;"));
+        v->addWidget(osHeading);
+        auto* osNote = new QLabel(tr("When “show subtitles by default” is on and a video has none in your "
+                                     "language, fetch one automatically. Get a free API key at "
+                                     "opensubtitles.com (Consumers → New consumer) and sign in with your "
+                                     "OpenSubtitles account — a login is required to download."));
+        osNote->setWordWrap(true);
+        osNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(osNote);
+
+        auto addCredRow = [this, v](const QString& label, const QString& value, bool secret,
+                                    std::function<void(const QString&)> save) {
+            auto* row = new QHBoxLayout();
+            auto* l = new QLabel(label); l->setMinimumWidth(90);
+            row->addWidget(l);
+            auto* edit = new QLineEdit(value);
+            edit->setMinimumHeight(30);
+            if (secret) edit->setEchoMode(QLineEdit::Password);
+            connect(edit, &QLineEdit::textChanged, this, [save](const QString& t) { save(t); }); // save as typed
+            row->addWidget(edit, 1);
+            v->addLayout(row);
+        };
+        addCredRow(tr("API key:"), Settings::openSubApiKey(), false,
+                   [](const QString& t) { Settings::setOpenSubApiKey(t); });
+        addCredRow(tr("Username:"), Settings::openSubUsername(), false,
+                   [](const QString& t) { Settings::setOpenSubUsername(t); });
+        addCredRow(tr("Password:"), Settings::openSubPassword(), true,
+                   [](const QString& t) { Settings::setOpenSubPassword(t); });
 
         // --- Background music: play tracks dropped in <data>/music while browsing the menus. ---
         v->addSpacing(10);

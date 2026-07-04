@@ -11,6 +11,16 @@ namespace Settings
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
 
+    // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
+    // language. The REST API needs an app API key (register once, free) for search, plus the user's account
+    // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.
+    QString openSubApiKey();
+    void setOpenSubApiKey(const QString& key);
+    QString openSubUsername();
+    void setOpenSubUsername(const QString& user);
+    QString openSubPassword();
+    void setOpenSubPassword(const QString& pass);
+
     // Open the app maximized to full screen on launch (default off — a normal resizable window).
     bool startFullscreen();
     void setStartFullscreen(bool on);

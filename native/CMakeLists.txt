@@ -91,6 +91,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/CoreManager.cpp  src/core/CoreManager.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         src/core/AppUpdater.cpp   src/core/AppUpdater.h
+        src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
         src/core/SevenZip.cpp     src/core/SevenZip.h

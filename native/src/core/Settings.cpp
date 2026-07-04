@@ -32,6 +32,22 @@ void Settings::setSubtitleLanguage(const QString& code)
     store().sync();
 }
 
+QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
+void Settings::setOpenSubApiKey(const QString& key)
+{
+    store().setValue(QStringLiteral("subs/osApiKey"), key.trimmed()); store().sync();
+}
+QString Settings::openSubUsername() { return store().value(QStringLiteral("subs/osUser")).toString(); }
+void Settings::setOpenSubUsername(const QString& user)
+{
+    store().setValue(QStringLiteral("subs/osUser"), user.trimmed()); store().sync();
+}
+QString Settings::openSubPassword() { return store().value(QStringLiteral("subs/osPass")).toString(); }
+void Settings::setOpenSubPassword(const QString& pass)
+{
+    store().setValue(QStringLiteral("subs/osPass"), pass); store().sync();
+}
+
 bool Settings::startFullscreen() { return store().value(QStringLiteral("general/startFullscreen"), false).toBool(); }
 void Settings::setStartFullscreen(bool on)
 {

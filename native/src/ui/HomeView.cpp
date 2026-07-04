@@ -2539,9 +2539,9 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                                                : tr("Looking for “%1”…").arg(it.title);
         showToast(lookingMsg, 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStream(addon, it, [this, it, fileProvider, console](const QString& url, const QString& mime) {
+        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; emit openItem(m); }
             else {
                 // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be
@@ -2564,9 +2564,9 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
         showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider](const QString& url, const QString& mime) {
+        mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider, imdbId](const QString& url, const QString& mime) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                               "(check that Allarr is configured and returning results).").arg(it.title), 7000);
         });

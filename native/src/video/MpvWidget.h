@@ -35,6 +35,10 @@ signals:
     void positionChanged(double seconds);
     void endReached();
     void chapterCountChanged(int count);      // how many chapters the current file has (0 = none)
+    // Fired once the file's tracks are known. hasUsableSubtitle is true when it already carries a subtitle
+    // track in the preferred language (or any, if no preference) — so a listener can auto-fetch one only when
+    // it's false. isVideo distinguishes a real video (worth subtitling) from an audio-only file.
+    void fileLoaded(bool hasUsableSubtitle, bool isVideo);
 
 protected:
     void initializeGL() override;

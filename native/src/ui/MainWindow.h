@@ -283,6 +283,13 @@ private:
 
     class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place
 
+    // Auto-subtitle download (OpenSubtitles): when a movie/episode video loads with no subtitle in the
+    // preferred language, fetch one and load it into the player. subCtx_ holds the current video's match
+    // hints, set only for eligible opens and consumed once by the MpvWidget::fileLoaded handler.
+    class SubtitleFetcher* subFetcher_ = nullptr;
+    struct SubContext { QString imdbStreamId; QString title; bool active = false; } subCtx_;
+    void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
+
     // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
     EmulatorManager* emu_ = nullptr;
     QWidget* emuPage_ = nullptr;
