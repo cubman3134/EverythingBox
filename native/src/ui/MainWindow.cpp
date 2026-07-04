@@ -77,9 +77,6 @@
 #include <QShortcut>
 #include <QKeyEvent>
 #include <QFileDialog>
-#include <QMenu>
-#include <QActionGroup>
-#include <QWidgetAction>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -673,7 +670,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         nextChap->setVisible(has);
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
-    connect(subsBtn, &QPushButton::clicked, this, [this, subsBtn] { showSubtitleMenu(subsBtn); });
+    connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
@@ -707,6 +704,10 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                                                || obj == streamIssueBtn_))
         revealMediaControls();
 
+    // A click on the subtitle overlay's scrim (i.e. outside the card, whose child widgets consume their own
+    // clicks) dismisses the panel.
+    if (obj == subOverlay_ && event->type() == QEvent::MouseButtonPress) { hideSubtitleMenu(); return true; }
+
     // The Esc pause menu owns its keys while open (it's a separate top-level window): Up/Down move between
     // Resume/Exit, Enter fires, Esc/Backspace resumes.
     if (escMenu_ && event->type() == QEvent::KeyPress && (obj == escMenu_ || escMenuButtons_.contains(obj)))
@@ -737,7 +738,7 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
-    if (mediaControls_ && mediaControls_->isVisible())
+    if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_)
         positionMediaControls();
     positionNotice();
 }
@@ -1022,6 +1023,22 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
     // Up reaches the top-left Back, Down returns to the transport row, Enter/Select activates, Space
     // toggles pause, Backspace exits. (A focused seek slider keeps Left/Right for scrubbing.)
+    // The subtitle overlay, when open, captures navigation: arrows move across its controls, Enter activates,
+    // Esc/Back closes it (rather than exiting the video).
+    if (subOverlay_ && subOverlay_->isVisible())
+    {
+        switch (e->key())
+        {
+        case Qt::Key_Escape: case Qt::Key_Backspace: hideSubtitleMenu(); return;
+        case Qt::Key_Up:   case Qt::Key_Left:  stepSubtitleFocus(-1); return;
+        case Qt::Key_Down: case Qt::Key_Right: stepSubtitleFocus(+1); return;
+        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
+            if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
+            return;
+        default: return; // swallow other keys while the panel is up
+        }
+    }
+
     if (stack_->currentWidget() == playerPage_)
     {
         switch (e->key())
@@ -1137,6 +1154,7 @@ void MainWindow::positionMediaControls()
         playerNotice_->adjustSize();
         playerNotice_->move((player_->width() - playerNotice_->width()) / 2, margin + videoBack_->height() + 14);
     }
+    if (subOverlay_) subOverlay_->setGeometry(player_->rect()); // keep the subtitle scrim covering the player
 }
 
 void MainWindow::showPlayerNotice(const QString& msg, int ms)
@@ -1886,6 +1904,7 @@ void MainWindow::openLibrary()
 void MainWindow::openHome()
 {
     // Leaving whatever was open: stop playback/emulation, save reader positions.
+    hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
     player_->stop();
     retro_->stop();
     book_->persist();
@@ -3286,60 +3305,141 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }
 
-// The single subtitle button's menu (Stremio-style): pick a track (or off), sync/size adjustments that keep
-// the menu open, load a file, or download a matching subtitle from OpenSubtitles. Anchored above the button.
-void MainWindow::showSubtitleMenu(QWidget* anchor)
+void MainWindow::hideSubtitleMenu()
 {
+    if (!subOverlay_) return;
+    subOverlay_->hide();
+    subOverlay_->deleteLater();
+    subOverlay_ = nullptr;
+    subPanelButtons_.clear();
     revealMediaControls();
-    QMenu menu(this);
-    menu.setStyleSheet(QStringLiteral(
-        "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
-        "QMenu::item { padding:6px 26px 6px 24px; border-radius:6px; }"
-        "QMenu::item:selected { background:rgba(90,140,255,0.55); }"
-        "QMenu::item:disabled { color:#888; }"
-        "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+}
 
-    // --- Track selection: Off + each embedded/loaded subtitle track, the current one checked. ---
+// The subtitle button opens a full-player overlay panel (Stremio-style) rather than a dropdown: a dimmed
+// scrim over the whole video with a centred card holding the track picker, sync/size adjusters, and the
+// load/download sources. Clicking the scrim, the ✕, or pressing Esc/Back closes it; it's arrow-navigable.
+void MainWindow::showSubtitleMenu()
+{
+    if (subOverlay_) { hideSubtitleMenu(); return; } // second press on the button toggles it closed
+    revealMediaControls();
+
+    subOverlay_ = new QWidget(player_);
+    subOverlay_->setObjectName(QStringLiteral("subScrim"));
+    subOverlay_->setStyleSheet(QStringLiteral("#subScrim { background: rgba(8,8,12,0.60); }"));
+    subOverlay_->setGeometry(player_->rect());
+    subOverlay_->installEventFilter(this); // a click on the scrim (outside the card) dismisses
+
+    // Centre the card within the scrim.
+    auto* centre = new QVBoxLayout(subOverlay_);
+    centre->setContentsMargins(0, 0, 0, 0);
+    centre->addStretch(1);
+    auto* midRow = new QHBoxLayout();
+    midRow->addStretch(1);
+
+    auto* card = new QFrame(subOverlay_);
+    card->setObjectName(QStringLiteral("subCard"));
+    card->setStyleSheet(QStringLiteral(
+        "#subCard { background:#16161c; border:1px solid rgba(255,255,255,0.14); border-radius:16px; }"
+        "#subCard QLabel { color:#e8e8e8; }"));
+    card->setFixedWidth(460);
+    card->setMaximumHeight(qMax(320, player_->height() - 48));
+    midRow->addWidget(card);
+    midRow->addStretch(1);
+    centre->addLayout(midRow);
+    centre->addStretch(1);
+
+    auto* cv = new QVBoxLayout(card);
+    cv->setContentsMargins(24, 20, 24, 20);
+    cv->setSpacing(12);
+
+    // Header: title + close.
+    auto* headRow = new QHBoxLayout();
+    auto* title = new QLabel(tr("Subtitles"), card);
+    title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
+    headRow->addWidget(title, 1);
+    auto* closeBtn = new QPushButton(tr("✕"), card);
+    closeBtn->setFixedSize(30, 30);
+    closeBtn->setStyleSheet(QStringLiteral(
+        "QPushButton { background:rgba(255,255,255,0.08); color:#e8e8e8; border:none; border-radius:8px; font-size:15px; }"
+        "QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
+    connect(closeBtn, &QPushButton::clicked, this, [this] { hideSubtitleMenu(); });
+    headRow->addWidget(closeBtn);
+    cv->addLayout(headRow);
+
+    // Flat full-width row button used for tracks + source actions; `on` gives it the accent selected look.
+    auto rowButton = [card](const QString& text, bool on) {
+        auto* b = new QPushButton(text, card);
+        b->setMinimumHeight(38);
+        b->setCursor(Qt::PointingHandCursor);
+        b->setStyleSheet(QString(QStringLiteral(
+            "QPushButton { text-align:left; padding:6px 14px; border-radius:8px; color:#e8e8e8; font-size:15px;"
+            " background:%1; border:1px solid %2; }"
+            "QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.55); border:1px solid rgba(255,255,255,0.5); }"))
+            .arg(on ? QStringLiteral("rgba(90,140,255,0.30)") : QStringLiteral("rgba(255,255,255,0.05)"),
+                 on ? QStringLiteral("rgba(90,140,255,0.9)")  : QStringLiteral("transparent")));
+        return b;
+    };
+
+    // --- Track picker: Off + each track, in a scroll area so a long list stays contained. ---
+    cv->addWidget(new QLabel(tr("Track"), card));
+    auto* trackScroll = new QScrollArea(card);
+    trackScroll->setWidgetResizable(true);
+    trackScroll->setFrameShape(QFrame::NoFrame);
+    trackScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    trackScroll->setMaximumHeight(220);
+    trackScroll->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* trackHost = new QWidget(trackScroll);
+    auto* tv = new QVBoxLayout(trackHost);
+    tv->setContentsMargins(0, 0, 6, 0);
+    tv->setSpacing(6);
+
     const auto tracks = player_->subtitleTracks();
-    auto* group = new QActionGroup(&menu);
-    group->setExclusive(true);
-    QAction* offAct = menu.addAction(tr("Off"));
-    offAct->setCheckable(true);
-    group->addAction(offAct);
     bool anySelected = false;
-    for (const MpvWidget::SubtitleTrack& tr_ : tracks)
-    {
-        const QString lang = tr_.lang.isEmpty() ? QString() : tr_.lang.toUpper();
-        QString label = lang;
-        if (!tr_.title.isEmpty()) label = label.isEmpty() ? tr_.title : lang + QStringLiteral(" · ") + tr_.title;
-        if (label.isEmpty()) label = tr("Track %1").arg(tr_.id);
-        QAction* a = menu.addAction(label);
-        a->setCheckable(true);
-        a->setChecked(tr_.selected);
-        group->addAction(a);
-        if (tr_.selected) anySelected = true;
-        const int id = tr_.id;
-        connect(a, &QAction::triggered, this, [this, id] { player_->setSubtitleTrack(id); });
-    }
-    offAct->setChecked(!anySelected);
-    connect(offAct, &QAction::triggered, this, [this] { player_->setSubtitleTrack(-1); });
+    for (const MpvWidget::SubtitleTrack& t : tracks) if (t.selected) anySelected = true;
 
-    // --- Sync + size rows: −/+ buttons that adjust live without closing the menu. ---
-    auto addAdjustRow = [this, &menu](const QString& name, std::function<QString()> value,
-                                      std::function<void()> minus, std::function<void()> plus) {
-        auto* w = new QWidget(&menu);
+    auto* offBtn = rowButton(tr("Off"), !anySelected);
+    connect(offBtn, &QPushButton::clicked, this, [this] { player_->setSubtitleTrack(-1); hideSubtitleMenu(); });
+    tv->addWidget(offBtn);
+    subPanelButtons_ = { closeBtn, offBtn };
+    for (const MpvWidget::SubtitleTrack& t : tracks)
+    {
+        const QString lang = t.lang.isEmpty() ? QString() : t.lang.toUpper();
+        QString label = lang;
+        if (!t.title.isEmpty()) label = label.isEmpty() ? t.title : lang + QStringLiteral("  ·  ") + t.title;
+        if (label.isEmpty()) label = tr("Track %1").arg(t.id);
+        auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("    ")) + label, t.selected);
+        const int id = t.id;
+        connect(b, &QPushButton::clicked, this, [this, id] { player_->setSubtitleTrack(id); hideSubtitleMenu(); });
+        tv->addWidget(b);
+        subPanelButtons_ << b;
+    }
+    if (tracks.isEmpty())
+    {
+        auto* none = new QLabel(tr("This video has no embedded subtitle tracks."), card);
+        none->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
+        none->setWordWrap(true);
+        tv->addWidget(none);
+    }
+    tv->addStretch(1);
+    trackScroll->setWidget(trackHost);
+    cv->addWidget(trackScroll);
+
+    // --- Sync + size adjusters: −/+ that update live and keep the panel open. ---
+    auto addAdjustRow = [this, card, cv](const QString& name, std::function<QString()> value,
+                                         std::function<void()> minus, std::function<void()> plus) {
+        auto* w = new QWidget(card);
         auto* h = new QHBoxLayout(w);
-        h->setContentsMargins(24, 4, 12, 4);
-        h->setSpacing(8);
+        h->setContentsMargins(2, 0, 2, 0);
+        h->setSpacing(10);
         auto* lbl = new QLabel(name + QStringLiteral(":  ") + value(), w);
-        lbl->setStyleSheet(QStringLiteral("color:#e8e8e8;"));
+        lbl->setStyleSheet(QStringLiteral("font-size:15px;"));
         h->addWidget(lbl, 1);
         auto mkBtn = [w](const QString& t) {
             auto* b = new QPushButton(t, w);
-            b->setFixedSize(28, 24);
+            b->setFixedSize(38, 32);
             b->setStyleSheet(QStringLiteral(
-                "QPushButton { background:rgba(255,255,255,0.10); color:#e8e8e8; border:none; border-radius:5px;"
-                " font-weight:bold; } QPushButton:hover { background:rgba(90,140,255,0.7); }"));
+                "QPushButton { background:rgba(255,255,255,0.10); color:#e8e8e8; border:none; border-radius:8px;"
+                " font-size:18px;font-weight:bold; } QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
             return b;
         };
         auto* minusBtn = mkBtn(QStringLiteral("−"));
@@ -3348,11 +3448,9 @@ void MainWindow::showSubtitleMenu(QWidget* anchor)
         h->addWidget(plusBtn);
         connect(minusBtn, &QPushButton::clicked, w, [=] { minus(); lbl->setText(name + QStringLiteral(":  ") + value()); });
         connect(plusBtn,  &QPushButton::clicked, w, [=] { plus();  lbl->setText(name + QStringLiteral(":  ") + value()); });
-        auto* wa = new QWidgetAction(&menu);
-        wa->setDefaultWidget(w);
-        menu.addAction(wa);
+        cv->addWidget(w);
+        subPanelButtons_ << minusBtn << plusBtn;
     };
-    menu.addSeparator();
     addAdjustRow(tr("Sync"),
                  [this] { return tr("%1 s").arg(player_->subtitleDelay(), 0, 'f', 1); },
                  [this] { player_->setSubtitleDelay(player_->subtitleDelay() - 0.1); },
@@ -3363,18 +3461,21 @@ void MainWindow::showSubtitleMenu(QWidget* anchor)
                  [this] { player_->setSubtitleScale(qMin(4.0, player_->subtitleScale() + 0.1)); });
 
     // --- Sources: load a local file, or fetch a matching one from OpenSubtitles. ---
-    menu.addSeparator();
-    QAction* loadAct = menu.addAction(tr("Load from file…"));
-    connect(loadAct, &QAction::triggered, this, [this] {
+    auto* loadBtn = rowButton(tr("📂  Load from file…"), false);
+    connect(loadBtn, &QPushButton::clicked, this, [this] {
         const QString f = QFileDialog::getOpenFileName(
             this, tr("Load subtitle"), QString(),
             tr("Subtitles (*.srt *.ass *.ssa *.sub *.vtt *.idx);;All files (*)"));
         if (!f.isEmpty()) player_->addSubtitle(f);
+        hideSubtitleMenu();
     });
+    cv->addWidget(loadBtn);
+    subPanelButtons_ << loadBtn;
     if (SubtitleFetcher::configured() && !(subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()))
     {
-        QAction* dlAct = menu.addAction(tr("Download from OpenSubtitles"));
-        connect(dlAct, &QAction::triggered, this, [this] {
+        auto* dlBtn = rowButton(tr("🔍  Download from OpenSubtitles"), false);
+        connect(dlBtn, &QPushButton::clicked, this, [this] {
+            hideSubtitleMenu();
             notify(tr("Searching OpenSubtitles for a subtitle…"), 0);
             subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
                                [this](const QString& srt) {
@@ -3382,11 +3483,27 @@ void MainWindow::showSubtitleMenu(QWidget* anchor)
                 else notify(tr("No matching subtitle found on OpenSubtitles."), 5000);
             });
         });
+        cv->addWidget(dlBtn);
+        subPanelButtons_ << dlBtn;
     }
 
-    const QSize sh = menu.sizeHint();
-    menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
-    revealMediaControls();
+    subOverlay_->show();
+    subOverlay_->raise();
+    // Land focus on the current track (or Off) so arrows/remote work without a click.
+    QPushButton* initial = subPanelButtons_.value(1, closeBtn);
+    for (QPushButton* b : subPanelButtons_)
+        if (b->text().startsWith(QStringLiteral("✓"))) { initial = b; break; }
+    initial->setFocus(Qt::TabFocusReason);
+}
+
+// Move focus across the subtitle panel's controls, wrapping at the ends (arrow/remote navigation).
+void MainWindow::stepSubtitleFocus(int dir)
+{
+    if (subPanelButtons_.isEmpty()) return;
+    int idx = subPanelButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
+    if (idx < 0) idx = 0;
+    else idx = (idx + dir + subPanelButtons_.size()) % subPanelButtons_.size();
+    subPanelButtons_[idx]->setFocus(Qt::TabFocusReason);
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)
