@@ -523,6 +523,133 @@ static void seedFileIfAbsent(const QString& path, const QByteArray& content)
     if (f.open(QIODevice::WriteOnly)) { f.write(content); f.close(); }
 }
 
+// Append `section` to the ini at `path` if `marker` isn't already in the file. Used to add a controller block
+// to an ini another step already wrote (PCSX2.ini, DuckStation settings.ini, Dolphin.ini) without clobbering it.
+static void appendIniSectionIfAbsent(const QString& path, const QByteArray& marker, const QByteArray& section)
+{
+    QByteArray existing;
+    { QFile r(path); if (r.open(QIODevice::ReadOnly)) { existing = r.readAll(); r.close(); } }
+    if (existing.contains(marker)) return; // already has this block (user's own or a prior seed)
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append))
+    {
+        if (!existing.isEmpty() && !existing.endsWith('\n')) f.write("\n");
+        f.write(section);
+        f.close();
+    }
+}
+
+// Auto-map the player's controller inside each standalone emulator so a game boots with working input — the
+// thing RetroBat/ES-DE do that makes a pad "just work". Without this, most standalone emulators launch with no
+// binding and the user has to open each emulator's input menu and hand-map every button. We seed a config for a
+// standard XInput/SDL pad as Player 1 (only when absent, so a user's own mapping is never overwritten). The
+// bodies mirror RetroBat's input-config generators; on Windows they key on device index 0 / XInput, so no
+// per-controller GUID is needed. Emulators that already auto-map a standard pad (DuckStation, PPSSPP) are seeded
+// too for a guaranteed result; Ryujinx (needs the live SDL GUID) and Flycast (keys on the controller name, and
+// ships a working default) are left to their own detection.
+void EmulatorManager::prepareControllerConfig(const QString& binDir)
+{
+    const QString& id = em_.id;
+
+    // ---- Cemu: controllerProfiles/controllerN.xml (N = player-1 = 0). Auto-loaded on start, no settings.xml
+    // reference needed. XInput api with <uuid>0</uuid> binds device 0 generically (no GUID). ----------------
+#ifdef Q_OS_WIN
+    if (id == QStringLiteral("cemu"))
+    {
+        static const QByteArray kCemuPad =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<emulated_controller>\n\t<type>Wii U GamePad</type>\n"
+            "\t<controller>\n\t\t<api>XInput</api>\n\t\t<uuid>0</uuid>\n\t\t<display_name>Controller 0</display_name>\n"
+            "\t\t<rumble>0</rumble>\n\t\t<axis><deadzone>0.25</deadzone><range>1</range></axis>\n"
+            "\t\t<rotation><deadzone>0.25</deadzone><range>1</range></rotation>\n"
+            "\t\t<trigger><deadzone>0.25</deadzone><range>1</range></trigger>\n\t\t<mappings>\n"
+            "\t\t\t<entry><mapping>1</mapping><button>13</button></entry>\n"   // A  <- XInput A
+            "\t\t\t<entry><mapping>2</mapping><button>12</button></entry>\n"   // B  <- XInput B
+            "\t\t\t<entry><mapping>3</mapping><button>15</button></entry>\n"   // X
+            "\t\t\t<entry><mapping>4</mapping><button>14</button></entry>\n"   // Y
+            "\t\t\t<entry><mapping>5</mapping><button>8</button></entry>\n"    // L
+            "\t\t\t<entry><mapping>6</mapping><button>9</button></entry>\n"    // R
+            "\t\t\t<entry><mapping>7</mapping><button>42</button></entry>\n"   // ZL (left trigger)
+            "\t\t\t<entry><mapping>8</mapping><button>43</button></entry>\n"   // ZR (right trigger)
+            "\t\t\t<entry><mapping>9</mapping><button>4</button></entry>\n"    // + (start)
+            "\t\t\t<entry><mapping>10</mapping><button>5</button></entry>\n"   // - (back)
+            "\t\t\t<entry><mapping>11</mapping><button>0</button></entry>\n"   // dpad up
+            "\t\t\t<entry><mapping>12</mapping><button>1</button></entry>\n"   // dpad down
+            "\t\t\t<entry><mapping>13</mapping><button>2</button></entry>\n"   // dpad left
+            "\t\t\t<entry><mapping>14</mapping><button>3</button></entry>\n"   // dpad right
+            "\t\t\t<entry><mapping>15</mapping><button>6</button></entry>\n"   // L3
+            "\t\t\t<entry><mapping>16</mapping><button>7</button></entry>\n"   // R3
+            "\t\t\t<entry><mapping>17</mapping><button>39</button></entry>\n"  // left stick up
+            "\t\t\t<entry><mapping>18</mapping><button>45</button></entry>\n"  // left stick down
+            "\t\t\t<entry><mapping>19</mapping><button>44</button></entry>\n"  // left stick left
+            "\t\t\t<entry><mapping>20</mapping><button>38</button></entry>\n"  // left stick right
+            "\t\t\t<entry><mapping>21</mapping><button>41</button></entry>\n"  // right stick up
+            "\t\t\t<entry><mapping>22</mapping><button>47</button></entry>\n"  // right stick down
+            "\t\t\t<entry><mapping>23</mapping><button>46</button></entry>\n"  // right stick left
+            "\t\t\t<entry><mapping>24</mapping><button>40</button></entry>\n"  // right stick right
+            "\t\t</mappings>\n\t</controller>\n</emulated_controller>\n";
+        seedFileIfAbsent(binDir + QStringLiteral("/controllerProfiles/controller0.xml"), kCemuPad);
+        const QString appdata = qEnvironmentVariable("APPDATA");
+        if (!appdata.isEmpty())
+            seedFileIfAbsent(appdata + QStringLiteral("/Cemu/controllerProfiles/controller0.xml"), kCemuPad);
+        return;
+    }
+
+    // ---- Dolphin: GCPadNew.ini [GCPad1] + Dolphin.ini [Core] SIDevice0=6 (standard controller in port 1). ----
+    if (id == QStringLiteral("dolphin"))
+    {
+        seedFileIfAbsent(binDir + QStringLiteral("/User/Config/GCPadNew.ini"),
+            "[GCPad1]\nDevice = XInput/0/Gamepad\n"
+            "Buttons/A = `Button B`\nButtons/B = `Button A`\nButtons/X = `Button Y`\nButtons/Y = `Button X`\n"
+            "Buttons/Z = `Shoulder R`\nButtons/Start = `Start`\n"
+            "Main Stick/Up = `Left Y+`\nMain Stick/Down = `Left Y-`\nMain Stick/Left = `Left X-`\n"
+            "Main Stick/Right = `Left X+`\nC-Stick/Up = `Right Y+`\nC-Stick/Down = `Right Y-`\n"
+            "C-Stick/Left = `Right X-`\nC-Stick/Right = `Right X+`\n"
+            "Triggers/L = `Trigger L`\nTriggers/R = `Trigger R`\nTriggers/L-Analog = `Trigger L`\n"
+            "Triggers/R-Analog = `Trigger R`\nD-Pad/Up = `Pad N`\nD-Pad/Down = `Pad S`\nD-Pad/Left = `Pad W`\n"
+            "D-Pad/Right = `Pad E`\nMain Stick/Dead Zone = 15.0\nC-Stick/Dead Zone = 15.0\n"
+            "Rumble/Motor = `Motor L`|`Motor R`\n");
+        appendIniSectionIfAbsent(binDir + QStringLiteral("/User/Config/Dolphin.ini"),
+            "SIDevice0", "\n[Core]\nSIDevice0 = 6\n");
+        return;
+    }
+#endif // Q_OS_WIN
+
+    // ---- PCSX2: [Pad1] appended to the inis/PCSX2.ini prepareBios wrote. SDL-0 works cross-platform; PCSX2 has
+    // NO default binding, so this is the one that's outright broken without a seed. ----
+    if (id == QStringLiteral("pcsx2"))
+    {
+        appendIniSectionIfAbsent(binDir + QStringLiteral("/inis/PCSX2.ini"), "[Pad1]",
+            "\n[InputSources]\nSDL = true\nSDLControllerEnhancedMode = false\nSDLRawInput = true\n"
+            "XInput = false\nDInput = false\n\n[Pad1]\nType = DualShock2\n"
+            "Up = SDL-0/DPadUp\nRight = SDL-0/DPadRight\nDown = SDL-0/DPadDown\nLeft = SDL-0/DPadLeft\n"
+            "Triangle = SDL-0/FaceNorth\nCircle = SDL-0/FaceEast\nCross = SDL-0/FaceSouth\nSquare = SDL-0/FaceWest\n"
+            "Select = SDL-0/Back\nStart = SDL-0/Start\nL1 = SDL-0/LeftShoulder\nR1 = SDL-0/RightShoulder\n"
+            "L2 = SDL-0/+LeftTrigger\nR2 = SDL-0/+RightTrigger\nL3 = SDL-0/LeftStick\nR3 = SDL-0/RightStick\n"
+            "Analog = SDL-0/Guide\nLUp = SDL-0/-LeftY\nLRight = SDL-0/+LeftX\nLDown = SDL-0/+LeftY\n"
+            "LLeft = SDL-0/-LeftX\nRUp = SDL-0/-RightY\nRRight = SDL-0/+RightX\nRDown = SDL-0/+RightY\n"
+            "RLeft = SDL-0/-RightX\nLargeMotor = SDL-0/LargeMotor\nSmallMotor = SDL-0/SmallMotor\n");
+        return;
+    }
+
+    // ---- DuckStation: [Pad1] appended to settings.ini. It self-maps a standard pad, but seeding guarantees it. ----
+    if (id == QStringLiteral("duckstation"))
+    {
+        appendIniSectionIfAbsent(binDir + QStringLiteral("/settings.ini"), "[Pad1]",
+            "\n[ControllerPorts]\nMultitapMode = Disabled\nControllerSettingsMigrated = true\n\n"
+            "[InputSources]\nSDL = true\nSDLControllerEnhancedMode = false\nXInput = false\nDInput = false\n\n"
+            "[Pad1]\nType = AnalogController\n"
+            "Up = SDL-0/DPadUp\nDown = SDL-0/DPadDown\nLeft = SDL-0/DPadLeft\nRight = SDL-0/DPadRight\n"
+            "Triangle = SDL-0/Y\nCircle = SDL-0/B\nCross = SDL-0/A\nSquare = SDL-0/X\n"
+            "Select = SDL-0/Back\nStart = SDL-0/Start\nL1 = SDL-0/LeftShoulder\nR1 = SDL-0/RightShoulder\n"
+            "L2 = SDL-0/+LeftTrigger\nR2 = SDL-0/+RightTrigger\nL3 = SDL-0/LeftStick\nR3 = SDL-0/RightStick\n"
+            "Analog = SDL-0/Guide\nLLeft = SDL-0/-LeftX\nLRight = SDL-0/+LeftX\nLDown = SDL-0/+LeftY\n"
+            "LUp = SDL-0/-LeftY\nRLeft = SDL-0/-RightX\nRRight = SDL-0/+RightX\nRDown = SDL-0/+RightY\n"
+            "RUp = SDL-0/-RightY\n");
+        return;
+    }
+}
+
 // Several standalone emulators block a fresh install with a first-run wizard / consent dialog / welcome screen
 // before you can boot a game. Frontends (RetroBat / ES-DE / Batocera) skip these by pre-seeding a minimal config
 // with the "setup already done" flag set — the same trick prepareBios uses for PCSX2 and prepareCemuConfig for
@@ -761,6 +888,7 @@ void EmulatorManager::launch(const QString& binary)
         prepareBios(QFileInfo(binary).absolutePath());
         prepareFirstRunConfig(QFileInfo(binary).absolutePath());
         prepareCemuConfig(QFileInfo(binary).absolutePath());
+        prepareControllerConfig(QFileInfo(binary).absolutePath()); // after the above wrote the base inis to append to
         prepareCemuKeys(QFileInfo(binary).absolutePath());
         prepareCemuDiscKey(QFileInfo(binary).absolutePath());
     }
