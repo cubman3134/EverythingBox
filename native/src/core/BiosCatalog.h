@@ -36,6 +36,7 @@ namespace BiosCatalog
             { QStringLiteral("saturn"), QStringLiteral("Sega Saturn") },
             { QStringLiteral("3do"),    QStringLiteral("3DO") },
             { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
+            { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
         };
         return list;
     }
@@ -71,10 +72,20 @@ namespace BiosCatalog
               retrobios(QStringLiteral("Sony/PlayStation%202/ps2-0230a-20080220.bin")), QString() },
         };
 
+        // Famicom Disk System (fceumm/Nestopia, under system "nes"): a .fds disk won't boot without the FDS
+        // BIOS, which the core looks for as "disksys.rom" in the system folder. Plain .nes cartridges don't
+        // need it — but it's an 8 KB one-time fetch, and the core only touches it when loading an FDS disk.
+        static const QList<BiosFile> nes = {
+            { QStringLiteral("disksys.rom"),
+              retrobios(QStringLiteral("Nintendo/Famicom%20Disk%20System/disksys.rom")),
+              QStringLiteral("ca30b50f880eb660a320674ed365ef7a") },
+        };
+
         if (systemId == QStringLiteral("psx"))    return psx;
         if (systemId == QStringLiteral("saturn")) return saturn;
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
+        if (systemId == QStringLiteral("nes"))    return nes;
         return none;
     }
 
