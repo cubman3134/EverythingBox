@@ -281,6 +281,8 @@ private:
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
 
+    class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place
+
     // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
     EmulatorManager* emu_ = nullptr;
     QWidget* emuPage_ = nullptr;

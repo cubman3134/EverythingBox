@@ -37,6 +37,11 @@ void Settings::setStartFullscreen(bool on)
 {
     store().setValue(QStringLiteral("general/startFullscreen"), on); store().sync();
 }
+bool Settings::checkUpdatesOnStartup() { return store().value(QStringLiteral("general/checkUpdatesOnStartup"), true).toBool(); }
+void Settings::setCheckUpdatesOnStartup(bool on)
+{
+    store().setValue(QStringLiteral("general/checkUpdatesOnStartup"), on); store().sync();
+}
 
 QString Settings::romsFolder()
 {

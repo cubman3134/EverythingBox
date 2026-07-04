@@ -15,6 +15,10 @@ namespace Settings
     bool startFullscreen();
     void setStartFullscreen(bool on);
 
+    // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
+    bool checkUpdatesOnStartup();
+    void setCheckUpdatesOnStartup(bool on);
+
     // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
     // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.
     QString romsFolder();          // resolved path (never empty)

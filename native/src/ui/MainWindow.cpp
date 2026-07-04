@@ -20,6 +20,7 @@
 #include <QDirIterator>
 #include "../core/EmulatorRegistry.h"
 #include "../core/EmulatorManager.h"
+#include "../core/AppUpdater.h"
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -361,6 +362,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     padNavTimer_->setInterval(16);
     connect(padNavTimer_, &QTimer::timeout, this, &MainWindow::pollMenuPad);
     padNavTimer_->start();
+
+    // App self-update: quietly check GitHub Releases a few seconds after launch (opt-out in General settings).
+    // A found update just surfaces a toast; the actual install is user-triggered from Settings ▸ General.
+    updater_ = new AppUpdater(this);
+    connect(updater_, &AppUpdater::updateAvailable, this, [this](const QString& ver, const QString&) {
+        notify(tr("My Media Vault %1 is available — Settings ▸ General ▸ Updates to install.").arg(ver), 12000);
+    });
+    connect(updater_, &AppUpdater::progress, this, [this](const QString& t, int) { notify(t, 0); });
+    connect(updater_, &AppUpdater::applyFailed, this, [this](const QString& why) { notify(why, 8000); });
+    if (Settings::checkUpdatesOnStartup())
+        QTimer::singleShot(4000, updater_, [this] { updater_->checkForUpdate(); });
 
 #ifdef MMV_HAVE_QML
     // Appearance (themed-home toggle + theme picker) is reachable anywhere via Ctrl+Shift+A - this is also
@@ -3969,6 +3981,52 @@ void MainWindow::openGeneralSettings()
         connect(fs, &QCheckBox::toggled, this, [this](bool c) {
             Settings::setStartFullscreen(c);
             if (c) showFullScreen(); else if (isFullScreen()) leaveFullScreen(); // reflect the choice right away
+        });
+        v->addSpacing(10);
+
+        // --- Updates: check GitHub Releases and install a newer build in place. ---
+        auto* uHeading = new QLabel(tr("Updates"));
+        uHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(uHeading);
+        auto* uVer = new QLabel(tr("You're on version %1.").arg(AppUpdater::currentVersion()));
+        uVer->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(uVer);
+        auto* uAuto = new QCheckBox(tr("Check for updates on startup"));
+        uAuto->setStyleSheet(QStringLiteral("font-size:15px;"));
+        uAuto->setChecked(Settings::checkUpdatesOnStartup());
+        v->addWidget(uAuto);
+        connect(uAuto, &QCheckBox::toggled, this, [](bool c) { Settings::setCheckUpdatesOnStartup(c); });
+        auto* uRow = new QHBoxLayout();
+        auto* uCheck = new QPushButton(tr("Check now"));
+        auto* uInstall = new QPushButton(tr("Install update"));
+        uInstall->setVisible(updater_ && updater_->updatePending());
+        if (updater_ && updater_->updatePending())
+            uInstall->setText(tr("Install %1 and restart").arg(updater_->latestVersion()));
+        uRow->addWidget(uCheck); uRow->addWidget(uInstall); uRow->addStretch(1);
+        v->addLayout(uRow);
+        auto* uStatus = new QLabel();
+        uStatus->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(uStatus);
+        // Wire the panel's controls to the shared updater. uStatus is the connection context, so the handlers
+        // auto-disconnect when the panel closes; SingleShotConnection drops each after it fires once.
+        connect(uCheck, &QPushButton::clicked, this, [this, uStatus, uInstall] {
+            uStatus->setText(tr("Checking…"));
+            connect(updater_, &AppUpdater::updateAvailable, uStatus, [uStatus, uInstall](const QString& ver, const QString&) {
+                uStatus->setText(tr("Version %1 is available.").arg(ver));
+                uInstall->setText(tr("Install %1 and restart").arg(ver));
+                uInstall->setVisible(true);
+            }, Qt::SingleShotConnection);
+            connect(updater_, &AppUpdater::upToDate, uStatus, [uStatus] {
+                uStatus->setText(tr("You're already on the latest version."));
+            }, Qt::SingleShotConnection);
+            connect(updater_, &AppUpdater::checkFailed, uStatus, [uStatus](const QString& why) {
+                uStatus->setText(tr("Couldn't check for updates: %1").arg(why));
+            }, Qt::SingleShotConnection);
+            updater_->checkForUpdate();
+        });
+        connect(uInstall, &QPushButton::clicked, this, [this, uStatus] {
+            uStatus->setText(tr("Downloading and installing… the app will restart."));
+            updater_->downloadAndApply();
         });
         v->addSpacing(10);
 
