@@ -1408,7 +1408,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     if (!sys)
     {
         mwLog(QStringLiteral("game: no system for .%1 — aborting").arg(ext));
-        statusBar()->showMessage(tr("No system is configured for .%1 files.").arg(ext), 6000);
+        notify(tr("No system is configured for .%1 files.").arg(ext), 6000);
         return;
     }
 
@@ -1440,7 +1440,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     if (corePath.isEmpty())
     {
         mwLog(QStringLiteral("game: core '%1' unavailable: %2").arg(core, dlErr.isEmpty() ? QStringLiteral("download failed") : dlErr));
-        statusBar()->showMessage(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr, 6000);
+        notify(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr, 6000);
         return;
     }
     mwLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
@@ -1845,19 +1845,19 @@ void MainWindow::openDocumentPath(const QString& f)
 
     if (ext == QStringLiteral("pdf"))
     {
-        if (!pdf_->openPdf(f, &err)) { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); return; }
+        if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(pdf_);
     }
     else if (ext == QStringLiteral("cbz"))
     {
-        if (!comic_->openComic(f, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
+        if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
-        if (!book_->openBook(f, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
+        if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(book_);
     }
@@ -2734,7 +2734,7 @@ void MainWindow::openPcGame(const MediaItem& item)
     auto part = std::make_shared<QFile>(partPath);
     if (!part->open(QIODevice::WriteOnly))
     {
-        statusBar()->showMessage(tr("Couldn't start downloading “%1”.").arg(item.title), 6000);
+        notify(tr("Couldn't start downloading “%1”.").arg(item.title), 6000);
         return;
     }
 
@@ -3353,7 +3353,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
-        if (!book_->openBook(url, &err)) { statusBar()->showMessage(tr("Can't open book: %1").arg(err), 6000); return; }
+        if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(book_);
@@ -3377,11 +3377,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             stack_->setCurrentWidget(pdf_);
             recordDocument();
         }
-        else { statusBar()->showMessage(tr("Can't open PDF: %1").arg(err), 6000); }
+        else { notify(tr("Can't open PDF: %1").arg(err), 6000); }
     }
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {
-        if (!comic_->openComic(url, &err)) { statusBar()->showMessage(tr("Can't open comic: %1").arg(err), 6000); return; }
+        if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
         recordDocument();
@@ -3497,7 +3497,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             if (!QFile::rename(partPath, localPath))
             {
                 mwLog(QStringLiteral("download(curl): finalise (rename) failed for \"%1\"").arg(title));
-                statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+                notify(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
                 return;
             }
             mwLog(QStringLiteral("download(curl): complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
@@ -3786,7 +3786,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     auto openCbz = [this, cbzPath, title] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); statusBar()->showMessage(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
+        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
         stack_->setCurrentWidget(comic_);
         mwLog(QStringLiteral("openImagePages: reader shown"));
@@ -3819,7 +3819,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             QFile::remove(partPath);
             mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
             if (!mz_zip_writer_init_file(&zip, partPath.toUtf8().constData(), 0))
-            { statusBar()->showMessage(tr("Couldn't assemble “%1”.").arg(title), 6000); return; }
+            { notify(tr("Couldn't assemble “%1”.").arg(title), 6000); return; }
 
             int added = 0;
             for (int p = 0; p < pages->size(); ++p)
@@ -3839,10 +3839,10 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
 
             mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
             if (added == 0)
-            { QFile::remove(partPath); statusBar()->showMessage(tr("Couldn't download any pages for “%1”.").arg(title), 6000); return; }
+            { QFile::remove(partPath); notify(tr("Couldn't download any pages for “%1”.").arg(title), 6000); return; }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
-            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); statusBar()->showMessage(tr("Couldn't save “%1”.").arg(title), 6000); return; }
+            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); notify(tr("Couldn't save “%1”.").arg(title), 6000); return; }
             statusBar()->clearMessage();
             mwLog(QStringLiteral("openImagePages: opening reader"));
             openCbz();

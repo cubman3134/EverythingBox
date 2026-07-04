@@ -932,6 +932,18 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
                 it.thumbnailUrl = resolveRemoteUrl(it.thumbnailUrl, base);
             }
         }
+        else
+        {
+            // Same as a failed catalog: surface the reason instead of an empty grid the user can't explain (a
+            // fullscreen/controller user never sees the status bar, so it has to be an on-screen row).
+            const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            MediaItem info; info.type = QStringLiteral("info");
+            info.title = http >= 400
+                ? tr("Couldn't load this (HTTP %1). The add-on or its source may be unavailable — try again shortly.").arg(http)
+                : tr("Couldn't reach the add-on: %1").arg(reply->errorString());
+            cat.items.push_back(info);
+            streamLog(QStringLiteral("detail fetch failed (%1): %2").arg(http).arg(reply->errorString()));
+        }
         emit catalogReady(reqId, cat);
     });
     return reqId;
