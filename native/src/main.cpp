@@ -23,7 +23,7 @@
 #include "core/Settings.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.2.0";
+static constexpr const char* kAppVersion = "0.3.0";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
