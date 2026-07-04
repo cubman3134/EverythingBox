@@ -55,6 +55,17 @@ public:
     const retro_system_info& systemInfo() const { return sysInfo_; }
     const retro_system_av_info& avInfo() const { return avInfo_; }
 
+    // ---- hardware (OpenGL) rendering ----
+    // A core that renders with OpenGL calls SET_HW_RENDER; we accept GL/GLES context types and hand it a
+    // frontend framebuffer + proc-address resolver, both provided by the Qt/GL layer (RetroView) through the
+    // two std::function hooks below. Its frames then arrive as "the FBO is ready" rather than CPU pixels:
+    // usesHwRender() is true and takeHwFramePending() reports each ready HW frame for the frontend to read back.
+    bool usesHwRender() const { return hwRenderRequested_; }
+    const retro_hw_render_callback& hwRenderCallback() const { return hwRender_; }
+    bool takeHwFramePending() { bool p = hwFramePending_; hwFramePending_ = false; return p; }
+    std::function<uintptr_t()> hwGetFramebuffer;        // -> the frontend FBO id the core should render into
+    std::function<void*(const char*)> hwGetProcAddress; // -> a GL entry point (Qt QOpenGLContext::getProcAddress)
+
     // Emulated memory access (for RetroAchievements). memoryData/Size wrap retro_get_memory_*; memoryMap()
     // returns the core's address-space descriptors (or nullptr if it didn't publish any).
     void* memoryData(unsigned id) const { return retro_get_memory_data_ ? retro_get_memory_data_(id) : nullptr; }
@@ -119,11 +130,16 @@ private:
     static void inputPollCb();
     static int16_t inputStateCb(unsigned port, unsigned device, unsigned index, unsigned id);
     static bool rumbleSetStateCb(unsigned port, retro_rumble_effect effect, uint16_t strength);
+    static uintptr_t hwGetCurrentFramebufferCb();                 // -> frontend FBO (routes to hwGetFramebuffer)
+    static retro_proc_address_t hwGetProcAddressCb(const char* sym); // -> GL proc (routes to hwGetProcAddress)
 
     void* handle_ = nullptr;
     bool gameLoaded_ = false;
     bool crashed_ = false;
     retro_pixel_format pixelFormat_ = RETRO_PIXEL_FORMAT_0RGB1555;
+    retro_hw_render_callback hwRender_{}; // the core's HW-render request (context_reset/destroy fns, flags)
+    bool hwRenderRequested_ = false;      // true once a GL/GLES SET_HW_RENDER was accepted
+    bool hwFramePending_ = false;         // videoRefreshCb saw RETRO_HW_FRAME_BUFFER_VALID: the FBO has a frame
     retro_system_info sysInfo_{};
     retro_system_av_info avInfo_{};
     std::vector<uint8_t> frame_;   // BGRA8888

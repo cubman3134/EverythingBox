@@ -18,6 +18,9 @@ class QIODevice;
 class QFrame;
 class QLabel;
 class QPushButton;
+class QOpenGLContext;
+class QOffscreenSurface;
+class QOpenGLFramebufferObject;
 
 class RetroView : public QWidget
 {
@@ -83,6 +86,17 @@ private:
     void startAudio(int sampleRate);
     void stopAudio();
     void pushAudio(const int16_t* data, size_t frames);
+
+    // ---- hardware (OpenGL) rendering: a GL core renders into an offscreen FBO, which we read back into hwImg_
+    // and paint through the normal software path (keeps the compositor happy — no native GL child surface). ----
+    void setupHwRender();     // create the offscreen GL context + FBO, wire the core's hooks, call context_reset
+    void teardownHwRender();  // context_destroy + tear down the GL objects
+    void readbackHwFrame();   // glReadPixels the FBO's used region into hwImg_ (flipped to top-down)
+    bool hwMode_ = false;
+    QOpenGLContext* glCtx_ = nullptr;
+    QOffscreenSurface* glSurface_ = nullptr;
+    QOpenGLFramebufferObject* glFbo_ = nullptr;
+    QImage hwImg_;            // last HW frame read back from the FBO, ready to paint
 
     LibretroCore core_;
     Gamepad pad_;             // physical controller (SDL2); merged with the keyboard

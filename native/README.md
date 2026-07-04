@@ -88,9 +88,11 @@ To regenerate the libmpv MSVC import lib (if you replace the DLL): dump its `mpv
 ## Roadmap
 1. **libretro frontend** — ✅ load/init/run/video/audio/input, ✅ core options, ✅ save states. Verify a ROM
    end to end (`probe_core mgba_libretro.dll game.gba` — also exercises the save-state round-trip).
-   Note: **software-rendered cores only** so far (`RetroView` blits frames). Hardware-rendered cores
-   (Dolphin, GL/Vulkan N64) need a shared GL context via `RETRO_ENVIRONMENT_SET_HW_RENDER` — not done yet.
-   Mesen / Mesen-S are excluded from the catalog (their Windows builds fault on a worker thread here).
+   Note: **OpenGL** hardware-rendered cores now run too — `RETRO_ENVIRONMENT_SET_HW_RENDER` is accepted for
+   GL/GLES cores (N64 GLideN64, Beetle PSX HW, Flycast, ...); `RetroView` gives the core an offscreen
+   `QOpenGLContext` + FBO and reads it back into the software paint path (no native GL child surface, so it
+   stays clear of the fullscreen-compositing bugs). Vulkan/D3D HW cores are still declined (fall back to
+   software). Mesen / Mesen-S are excluded from the catalog (their Windows builds fault on a worker thread here).
 2. **libmpv video** — ✅ embedded (render API) in a Qt OpenGL surface; "video" items route to it.
 3. **Qt UI** — the media-hub shell (library, browser, now-playing), reusing the hub's behavior. [partial: shell + settings]
 4. **Port the C# logic** — ✅ epub (`EpubBook`/`EbookView`, Qt rich-text), ✅ PDF (`PdfView`, QtPdf/PDFium),

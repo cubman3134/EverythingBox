@@ -20,6 +20,11 @@
 #include <QPushButton>
 #include <QVBoxLayout>
 #include <QThread>
+#include <QOpenGLContext>
+#include <QOffscreenSurface>
+#include <QOpenGLFramebufferObject>
+#include <QOpenGLFunctions>
+#include <QSurfaceFormat>
 #include <cstring>
 
 RetroView::RetroView(QWidget* parent) : QWidget(parent)
@@ -113,6 +118,11 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         return false;
     }
     romPath_ = romPath;
+    // A GL/GLES core (N64 with GLideN64, Beetle PSX HW, Flycast, ...) asks for hardware rendering during
+    // loadGame. Stand up the offscreen GL context + FBO now, before the first frame. HW rendering runs on the
+    // GUI thread (one GL context), so a split-pane HW core drops out of threaded mode.
+    if (core_.usesHwRender())
+        setupHwRender();
     loadSram(); // restore battery-backed in-game saves before the game starts
     double fps = core_.avInfo().timing.fps;
     if (fps <= 0.0) fps = 60.0;
@@ -271,6 +281,7 @@ void RetroView::stop()
     hideMenu();
     pressedKeys_.clear();
     pad_.stopRumble();
+    teardownHwRender(); // context_destroy + drop the GL objects while the core is still loaded
     core_.unload();
     update();
     if (wasRunning) emit gameStopped();
@@ -332,7 +343,17 @@ void RetroView::tick()
     // Advance the autofire phase: on for turboHalfPeriod_ frames, then off for the same.
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
-    core_.runFrame();   // audio is pushed via core_.onAudio
+    if (hwMode_ && glCtx_)  // GL core: run inside our context so it renders into the FBO, then read it back
+    {
+        glCtx_->makeCurrent(glSurface_);
+        glFbo_->bind();                 // the core queries get_current_framebuffer, but bind it as a default too
+        core_.runFrame();
+        if (core_.takeHwFramePending()) readbackHwFrame();
+        glFbo_->release();
+        glCtx_->doneCurrent();
+    }
+    else
+        core_.runFrame();   // audio is pushed via core_.onAudio
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
         stop();
@@ -342,6 +363,92 @@ void RetroView::tick()
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
     if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
     update();
+}
+
+// Stand up an offscreen OpenGL context + FBO for a hardware-rendered core. The core draws into the FBO; we
+// read it back each frame and paint it through the normal (software) path, so no native GL surface is ever
+// composited into the window — that's what caused the fullscreen black-screen bugs, so we deliberately avoid it.
+void RetroView::setupHwRender()
+{
+    const retro_hw_render_callback& cb = core_.hwRenderCallback();
+    threaded_ = false; // a single GL context, driven from the GUI thread
+
+    QSurfaceFormat fmt;
+    const bool gles = cb.context_type == RETRO_HW_CONTEXT_OPENGLES2
+                   || cb.context_type == RETRO_HW_CONTEXT_OPENGLES3
+                   || cb.context_type == RETRO_HW_CONTEXT_OPENGLES_VERSION;
+    if (gles)
+        fmt.setRenderableType(QSurfaceFormat::OpenGLES);
+    else
+    {
+        fmt.setRenderableType(QSurfaceFormat::OpenGL);
+        if (cb.context_type == RETRO_HW_CONTEXT_OPENGL_CORE)
+        {
+            fmt.setProfile(QSurfaceFormat::CoreProfile);
+            fmt.setVersion(cb.version_major ? int(cb.version_major) : 3, int(cb.version_minor));
+        }
+        else
+            fmt.setProfile(QSurfaceFormat::CompatibilityProfile);
+    }
+    if (cb.depth)   fmt.setDepthBufferSize(24);
+    if (cb.stencil) fmt.setStencilBufferSize(8);
+
+    glSurface_ = new QOffscreenSurface();
+    glSurface_->setFormat(fmt);
+    glSurface_->create();
+    glCtx_ = new QOpenGLContext();
+    glCtx_->setFormat(fmt);
+    if (!glCtx_->create() || !glCtx_->makeCurrent(glSurface_))
+    {
+        teardownHwRender();
+        emit statusMessage(tr("This core needs OpenGL, which couldn't be initialised here."));
+        return;
+    }
+
+    // The core reads these each frame (installed via SET_HW_RENDER): our FBO to draw into, and GL entry points.
+    core_.hwGetFramebuffer  = [this]() -> uintptr_t { return glFbo_ ? uintptr_t(glFbo_->handle()) : 0; };
+    core_.hwGetProcAddress  = [this](const char* s) -> void* { return glCtx_ ? (void*)glCtx_->getProcAddress(s) : nullptr; };
+
+    QOpenGLFramebufferObjectFormat ff;
+    ff.setAttachment(cb.stencil ? QOpenGLFramebufferObject::CombinedDepthStencil
+                   : cb.depth   ? QOpenGLFramebufferObject::Depth
+                                : QOpenGLFramebufferObject::NoAttachment);
+    const retro_game_geometry& g = core_.avInfo().geometry;
+    glFbo_ = new QOpenGLFramebufferObject(int(qMax(g.max_width, 1u)), int(qMax(g.max_height, 1u)), ff);
+    hwMode_ = true;
+    if (cb.context_reset) cb.context_reset(); // the core creates its GL resources here
+    glCtx_->doneCurrent();
+}
+
+// Read the used region of the FBO into hwImg_ (flipped to a top-down QImage). Called with the context current
+// and the FBO bound, right after runFrame().
+void RetroView::readbackHwFrame()
+{
+    const unsigned w = core_.frameWidth(), h = core_.frameHeight();
+    if (!w || !h || !glCtx_ || !glFbo_) return;
+    glFbo_->bind(); // the core may have left a different framebuffer bound; read from ours
+    QImage img(int(w), int(h), QImage::Format_RGBA8888);
+    glCtx_->functions()->glReadPixels(0, 0, int(w), int(h), GL_RGBA, GL_UNSIGNED_BYTE, img.bits());
+    // libretro GL cores render bottom-left origin; flip vertically so row 0 is the top for painting.
+    hwImg_ = core_.hwRenderCallback().bottom_left_origin ? img.mirrored(false, true) : img;
+}
+
+void RetroView::teardownHwRender()
+{
+    if (glCtx_ && glSurface_ && glCtx_->makeCurrent(glSurface_))
+    {
+        const retro_hw_render_callback& cb = core_.hwRenderCallback();
+        if (hwMode_ && cb.context_destroy) cb.context_destroy(); // let the core free its GL resources first
+        delete glFbo_; glFbo_ = nullptr;
+        glCtx_->doneCurrent();
+    }
+    delete glFbo_;     glFbo_ = nullptr; // (in case makeCurrent failed above)
+    delete glCtx_;     glCtx_ = nullptr;
+    delete glSurface_; glSurface_ = nullptr;
+    core_.hwGetFramebuffer = nullptr;
+    core_.hwGetProcAddress = nullptr;
+    hwImg_ = QImage();
+    hwMode_ = false;
 }
 
 QString RetroView::statePath() const
@@ -432,6 +539,16 @@ void RetroView::paintEvent(QPaintEvent*)
         const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(dst, frameImg_);
+        return;
+    }
+
+    if (hwMode_) // hardware core: paint the frame we read back from the GL FBO
+    {
+        if (hwImg_.isNull()) return;
+        const QSize t = hwImg_.size().scaled(size(), Qt::KeepAspectRatio);
+        const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+        p.drawImage(dst, hwImg_);
         return;
     }
 

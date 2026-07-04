@@ -320,7 +320,24 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
         if (auto* v2i = (const retro_core_options_v2_intl*)data)
             if (v2i->us) self->registerOptionDefsV2(v2i->us->definitions);
         return true;
-    // RETRO_ENVIRONMENT_SET_HW_RENDER falls through -> false (software only until a GL context exists)
+    case RETRO_ENVIRONMENT_SET_HW_RENDER:
+    {
+        // A core wants to render with a GPU API. We can host OpenGL / OpenGL ES via an offscreen context +
+        // FBO (set up by the Qt layer); Vulkan/D3D aren't supported, so reject those and the core falls back to
+        // software (or declines to load) exactly as before. Store the callback and give the core our framebuffer
+        // + proc-address resolvers; RetroView creates the context and calls context_reset before the first frame.
+        auto* cb = (retro_hw_render_callback*)data;
+        if (!cb) return false;
+        if (cb->context_type != RETRO_HW_CONTEXT_OPENGL && cb->context_type != RETRO_HW_CONTEXT_OPENGL_CORE
+            && cb->context_type != RETRO_HW_CONTEXT_OPENGLES2 && cb->context_type != RETRO_HW_CONTEXT_OPENGLES3
+            && cb->context_type != RETRO_HW_CONTEXT_OPENGLES_VERSION)
+            return false;
+        self->hwRender_ = *cb;
+        self->hwRenderRequested_ = true;
+        cb->get_current_framebuffer = hwGetCurrentFramebufferCb;
+        cb->get_proc_address = hwGetProcAddressCb;
+        return true;
+    }
     default:
         return false;
     }
@@ -330,6 +347,11 @@ void LibretroCore::videoRefreshCb(const void* data, unsigned width, unsigned hei
 {
     auto* self = current_;
     self->frameW_ = width; self->frameH_ = height;
+    if (data == RETRO_HW_FRAME_BUFFER_VALID) // the core rendered this frame into our GL FBO; nothing to convert
+    {
+        self->hwFramePending_ = true; // the frontend reads the FBO back after runFrame() returns
+        return;
+    }
     if (!data) return; // duped frame: keep the previous picture
     if (self->frame_.size() < (size_t)width * height * 4)
         self->frame_.assign((size_t)width * height * 4, 0);
@@ -399,4 +421,16 @@ bool LibretroCore::rumbleSetStateCb(unsigned port, retro_rumble_effect effect, u
     if (!current_ || !current_->onRumble) return false;
     current_->onRumble(port, static_cast<unsigned>(effect), strength);
     return true;
+}
+
+// The core calls these (installed via SET_HW_RENDER) each frame to find the framebuffer to draw into and to
+// resolve GL entry points. Both route to the Qt/GL layer's hooks; 0/null before RetroView has set them up.
+uintptr_t LibretroCore::hwGetCurrentFramebufferCb()
+{
+    return (current_ && current_->hwGetFramebuffer) ? current_->hwGetFramebuffer() : 0;
+}
+retro_proc_address_t LibretroCore::hwGetProcAddressCb(const char* sym)
+{
+    if (!current_ || !current_->hwGetProcAddress) return nullptr;
+    return reinterpret_cast<retro_proc_address_t>(current_->hwGetProcAddress(sym));
 }
