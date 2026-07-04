@@ -513,6 +513,40 @@ static bool cemuKeysPresent(const QString& path)
     return false;
 }
 
+// Cemu shows a "Getting Started" wizard (game-path/graphics-pack prompts) on its very first launch. It decides
+// "first launch" solely by whether settings.xml exists (CemuApp.cpp: isFirstStart = !exists(settings.xml)), so
+// pre-seeding a minimal settings.xml makes Cemu skip the wizard and boot straight into the game — the RetroBat/
+// ES-DE "no per-emulator setup" model (mirrors what prepareBios does for PCSX2's setup wizard). Existence alone
+// is what matters; Cemu fills every other value with its default on load and rewrites the full file on exit.
+// Never clobbers an existing config.
+void EmulatorManager::prepareCemuConfig(const QString& binDir)
+{
+    if (em_.id != QStringLiteral("cemu")) return;
+
+    QStringList dirs;
+    dirs << binDir; // in case a future Cemu build runs portable (settings next to the exe)
+#ifdef Q_OS_WIN
+    const QString appdata = qEnvironmentVariable("APPDATA");
+    if (!appdata.isEmpty()) dirs << appdata + QStringLiteral("/Cemu"); // where non-portable Cemu 2.x reads it
+#else
+    dirs << QDir::homePath() + QStringLiteral("/.config/Cemu");
+#endif
+
+    for (const QString& d : dirs)
+    {
+        const QString cfg = d + QStringLiteral("/settings.xml");
+        if (QFile::exists(cfg)) continue; // respect the user's own config — only seed when absent
+        QDir().mkpath(d);
+        QFile f(cfg);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Text))
+        {
+            // fullscreen matches our -f launch; everything else defaults.
+            f.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<content>\n\t<fullscreen>true</fullscreen>\n</content>\n");
+            f.close();
+        }
+    }
+}
+
 // Cemu can't decrypt Wii U titles without keys.txt (the console's title/common keys). Fetch it on demand into
 // the folder(s) Cemu reads — next to the exe (portable) AND its per-user data dir (%APPDATA%\Cemu on Windows,
 // where a non-portable Cemu 2.x looks) — the same best-effort model as prepareBios. Kept out of the app repo
@@ -645,6 +679,7 @@ void EmulatorManager::launch(const QString& binary)
     if (!isFlatpak)
     {
         prepareBios(QFileInfo(binary).absolutePath());
+        prepareCemuConfig(QFileInfo(binary).absolutePath());
         prepareCemuKeys(QFileInfo(binary).absolutePath());
         prepareCemuDiscKey(QFileInfo(binary).absolutePath());
     }

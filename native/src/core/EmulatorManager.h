@@ -53,6 +53,7 @@ private:
     void installFlatpak();      // Linux .flatpak (flatpak install --user)
     void finishInstall();       // common tail: locate the binary, then launch or report "installed"
     void prepareBios(const QString& binDir); // fetch + wire up a BIOS for emulators that need one (PCSX2)
+    void prepareCemuConfig(const QString& binDir); // pre-seed settings.xml so Cemu skips its first-run wizard
     void prepareCemuKeys(const QString& binDir); // fetch Cemu's keys.txt into its folder if absent (Wii U)
     void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
     void launch(const QString& binary);
