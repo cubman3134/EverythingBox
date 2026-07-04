@@ -848,6 +848,91 @@ void EmulatorManager::prepareCemuDiscKey(const QString& binDir)
     }
 }
 
+// ---- Save-data backup / centralization for standalone emulators -------------------------------------------
+// Each standalone emulator writes its saves to its own scattered folder (Cemu's mlc, PCSX2/DuckStation memory
+// cards, Dolphin's User/GC & Wii NAND, ...). We snapshot those into one app-owned tree, <app>/saves/emulators/
+// <id>/, on every game exit — which centralizes them AND gets them cloud-synced for free (CloudSync already zips
+// <app>/saves recursively). On launch we seed an emulator that has no saves yet from that central copy, so a
+// fresh install / a new device picks up your progress. We never overwrite an emulator's existing saves (no
+// clobber), so this is safe; it's a backup + fresh-device restore, not a two-way merge.
+
+namespace {
+bool dirHasFiles(const QString& dir)
+{
+    if (!QFileInfo::exists(dir)) return false;
+    QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+    return it.hasNext();
+}
+void copyTree(const QString& src, const QString& dst)
+{
+    QDir().mkpath(dst);
+    QDirIterator it(src, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext())
+    {
+        const QString from = it.next();
+        const QString to = dst + QLatin1Char('/') + QDir(src).relativeFilePath(from);
+        QDir().mkpath(QFileInfo(to).absolutePath());
+        QFile::remove(to);      // overwrite an older copy
+        QFile::copy(from, to);
+    }
+}
+} // namespace
+
+QList<QPair<QString, QString>> EmulatorManager::emulatorSaveDirs(const QString& id, const QString& binDir)
+{
+    QList<QPair<QString, QString>> out;
+    auto add = [&](const QString& dir, const QString& label) { out.append({ dir, label }); };
+#ifdef Q_OS_WIN
+    const QString appdata = qEnvironmentVariable("APPDATA");
+#endif
+    if (id == QStringLiteral("cemu"))
+    {
+#ifdef Q_OS_WIN
+        if (!appdata.isEmpty()) add(appdata + QStringLiteral("/Cemu/mlc01/usr/save"), QStringLiteral("cemu"));
+#endif
+        add(binDir + QStringLiteral("/mlc01/usr/save"), QStringLiteral("cemu")); // portable fallback
+    }
+    else if (id == QStringLiteral("dolphin"))
+    {
+        add(binDir + QStringLiteral("/User/GC"),         QStringLiteral("dolphin/GC"));   // GameCube memory cards
+        add(binDir + QStringLiteral("/User/Wii/title"),  QStringLiteral("dolphin/Wii"));  // Wii NAND saves
+    }
+    else if (id == QStringLiteral("pcsx2"))       add(binDir + QStringLiteral("/memcards"), QStringLiteral("pcsx2"));
+    else if (id == QStringLiteral("duckstation")) add(binDir + QStringLiteral("/memcards"), QStringLiteral("duckstation"));
+    else if (id == QStringLiteral("rpcs3"))       add(binDir + QStringLiteral("/dev_hdd0/home"), QStringLiteral("rpcs3"));
+    else if (id == QStringLiteral("ppsspp"))      add(binDir + QStringLiteral("/memstick/PSP/SAVEDATA"), QStringLiteral("ppsspp"));
+    else if (id == QStringLiteral("vita3k"))      add(binDir + QStringLiteral("/ux0/user/00/savedata"), QStringLiteral("vita3k"));
+    else if (id == QStringLiteral("flycast"))     add(binDir + QStringLiteral("/data"), QStringLiteral("flycast"));
+    else if (id == QStringLiteral("xenia"))       add(binDir + QStringLiteral("/content"), QStringLiteral("xenia"));
+    else if (id == QStringLiteral("ryujinx"))
+    {
+#ifdef Q_OS_WIN
+        if (!appdata.isEmpty()) add(appdata + QStringLiteral("/Ryujinx/bis/user/save"), QStringLiteral("ryujinx"));
+#endif
+        add(binDir + QStringLiteral("/portable/bis/user/save"), QStringLiteral("ryujinx"));
+    }
+    return out;
+}
+
+void EmulatorManager::backupSaves(const QString& binDir)
+{
+    const QString central = AppPaths::dataDir() + QStringLiteral("/saves/emulators/") + em_.id;
+    for (const auto& sd : emulatorSaveDirs(em_.id, binDir))
+        if (dirHasFiles(sd.first))
+            copyTree(sd.first, central + QLatin1Char('/') + sd.second);
+}
+
+void EmulatorManager::restoreSaves(const QString& binDir)
+{
+    const QString central = AppPaths::dataDir() + QStringLiteral("/saves/emulators/") + em_.id;
+    for (const auto& sd : emulatorSaveDirs(em_.id, binDir))
+    {
+        const QString backup = central + QLatin1Char('/') + sd.second;
+        if (dirHasFiles(backup) && !dirHasFiles(sd.first)) // only seed an emulator that has no saves of its own
+            copyTree(backup, sd.first);
+    }
+}
+
 void EmulatorManager::launch(const QString& binary)
 {
     QString tmpl = em_.argsTemplate;
@@ -891,15 +976,18 @@ void EmulatorManager::launch(const QString& binary)
         prepareControllerConfig(QFileInfo(binary).absolutePath()); // after the above wrote the base inis to append to
         prepareCemuKeys(QFileInfo(binary).absolutePath());
         prepareCemuDiscKey(QFileInfo(binary).absolutePath());
+        restoreSaves(QFileInfo(binary).absolutePath()); // seed saves from the central backup if this install has none
     }
 
+    const QString binDir = QFileInfo(binary).absolutePath();
     game_ = new QProcess(this);
-    if (!isFlatpak) game_->setWorkingDirectory(QFileInfo(binary).absolutePath());
+    if (!isFlatpak) game_->setWorkingDirectory(binDir);
     connect(game_, &QProcess::started, this, [this] { emit launched(em_.displayName); });
     connect(game_, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this](int code, QProcess::ExitStatus) {
+            [this, binDir, isFlatpak](int code, QProcess::ExitStatus) {
         busy_ = false;
         if (game_) { game_->deleteLater(); game_ = nullptr; }
+        if (!isFlatpak) backupSaves(binDir); // snapshot the saves the emulator just wrote into the central tree
         emit finished(code);
     });
     connect(game_, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
