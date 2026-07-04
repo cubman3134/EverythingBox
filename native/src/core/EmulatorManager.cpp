@@ -513,6 +513,86 @@ static bool cemuKeysPresent(const QString& path)
     return false;
 }
 
+// Write `content` to `path` only if nothing is there yet, creating parent dirs. Never clobbers a real config
+// the user (or a prior run) already wrote — first-run seeding must be a no-op on an already-configured install.
+static void seedFileIfAbsent(const QString& path, const QByteArray& content)
+{
+    if (QFileInfo::exists(path)) return;
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly)) { f.write(content); f.close(); }
+}
+
+// Several standalone emulators block a fresh install with a first-run wizard / consent dialog / welcome screen
+// before you can boot a game. Frontends (RetroBat / ES-DE / Batocera) skip these by pre-seeding a minimal config
+// with the "setup already done" flag set — the same trick prepareBios uses for PCSX2 and prepareCemuConfig for
+// Cemu. Do it for the rest here: seed each emulator's config (only when absent, so existing setups are untouched)
+// so a brand-new install boots straight into the game. Config keys are minimal — every emulator fills the rest
+// with its own defaults. Emulators with no blocking first-run prompt (PPSSPP, melonDS, Flycast, Azahar, BigPEmu,
+// Ryujinx) get nothing; firmware/BIOS that some still need to actually run games is a genuine one-time user
+// requirement, not a skippable prompt, and is out of scope here.
+void EmulatorManager::prepareFirstRunConfig(const QString& binDir)
+{
+    const QString& id = em_.id;
+
+    if (id == QStringLiteral("duckstation"))
+    {
+        // Multi-step Setup Wizard (language/BIOS/controllers/game-dirs). portable.txt keeps config next to the
+        // exe; SetupWizardIncomplete=false is the exact key that suppresses the wizard.
+        seedFileIfAbsent(binDir + QStringLiteral("/portable.txt"), QByteArray());
+        seedFileIfAbsent(binDir + QStringLiteral("/settings.ini"),
+            "[Main]\nSetupWizardIncomplete = false\nStartFullscreen = true\nConfirmPowerOff = false\n"
+            "PauseOnFocusLoss = false\n");
+    }
+    else if (id == QStringLiteral("dolphin"))
+    {
+        // "Allow Usage Statistics Reporting?" consent popup. PermissionAsked=True suppresses it; Enabled=False
+        // opts out of actually sending anything. portable.txt puts config under ./User/Config next to the exe.
+        seedFileIfAbsent(binDir + QStringLiteral("/portable.txt"), QByteArray());
+        seedFileIfAbsent(binDir + QStringLiteral("/User/Config/Dolphin.ini"),
+            "[Analytics]\nEnabled = False\nPermissionAsked = True\n\n[Interface]\nConfirmStop = False\n\n"
+            "[Display]\nFullscreen = True\n");
+    }
+    else if (id == QStringLiteral("rpcs3"))
+    {
+        // "Welcome to RPCS3" modal (Exit closes the app). RPCS3 is portable on Windows (config next to the exe).
+        // (PS3 firmware is still required to actually boot games — a separate one-time user step.)
+        seedFileIfAbsent(binDir + QStringLiteral("/GuiConfigs/CurrentSettings.ini"),
+            "[main_window]\ninfoBoxEnabledWelcome=false\nconfirmationBoxExitGame=false\n\n"
+            "[Meta]\ncheckUpdateStart=false\n");
+    }
+    else if (id == QStringLiteral("vita3k"))
+    {
+        // Blocking "install firmware" welcome modal + a separate missing-firmware launch warning. config.yml
+        // next to the exe is portable. (Firmware is optional for Vita3K — many titles run without it.)
+        seedFileIfAbsent(binDir + QStringLiteral("/config.yml"),
+            "show-welcome: false\nwarn-missing-firmware: false\ninitial-setup: true\n");
+    }
+    else if (id == QStringLiteral("xemu"))
+    {
+        // "First Boot — configure machine settings" welcome panel. An xemu.toml next to the exe makes xemu
+        // portable and read it. (Xbox BIOS/MCPX/HDD are still required to boot — a separate one-time user step.)
+        seedFileIfAbsent(binDir + QStringLiteral("/xemu.toml"), "[general]\nshow_welcome = false\n");
+    }
+#ifdef Q_OS_WIN
+    else if (id == QStringLiteral("xenia"))
+    {
+        // Xenia's one-time disclaimer is a native Win32 MessageBox gated on a REGISTRY flag (HKCU\Software\Xenia
+        // XEFLAGS, a REG_QWORD; bit 0 = "disclaimer acknowledged"), NOT its .toml — so writing config can't skip
+        // it. Pre-set the flag with reg.exe (QSettings can't reliably emit REG_QWORD). Only if not already set.
+        QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\SOFTWARE\\Xenia"), QSettings::NativeFormat);
+        if (!reg.contains(QStringLiteral("XEFLAGS")))
+        {
+            QProcess::execute(QStringLiteral("reg"), {
+                QStringLiteral("add"), QStringLiteral("HKCU\\SOFTWARE\\Xenia"),
+                QStringLiteral("/v"), QStringLiteral("XEFLAGS"),
+                QStringLiteral("/t"), QStringLiteral("REG_QWORD"),
+                QStringLiteral("/d"), QStringLiteral("1"), QStringLiteral("/f") });
+        }
+    }
+#endif
+}
+
 // Cemu shows a "Getting Started" wizard (game-path/graphics-pack prompts) on its very first launch. It decides
 // "first launch" solely by whether settings.xml exists (CemuApp.cpp: isFirstStart = !exists(settings.xml)), so
 // pre-seeding a minimal settings.xml makes Cemu skip the wizard and boot straight into the game — the RetroBat/
@@ -679,6 +759,7 @@ void EmulatorManager::launch(const QString& binary)
     if (!isFlatpak)
     {
         prepareBios(QFileInfo(binary).absolutePath());
+        prepareFirstRunConfig(QFileInfo(binary).absolutePath());
         prepareCemuConfig(QFileInfo(binary).absolutePath());
         prepareCemuKeys(QFileInfo(binary).absolutePath());
         prepareCemuDiscKey(QFileInfo(binary).absolutePath());
