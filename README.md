@@ -15,7 +15,7 @@ Grab the latest build for your platform:
 | **Linux** (x86_64) | [**MyMediaVault-linux-x86_64.AppImage**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
 | **Android / Android TV** (arm64) | [**MyMediaVault-android-arm64.apk**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-android-arm64.apk) | Sideload it; runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. See [Android / Android TV](#android--android-tv). |
 
-Current version: **0.2.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
+Current version: **0.3.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
 
 This repository is the native app. The previous Unity implementation has been
 removed; its portable logic (EPUB/PDF parsing, the addon model) was reimplemented
