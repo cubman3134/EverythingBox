@@ -253,6 +253,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 {
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
+    if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
     comic_ = new ComicView(this);

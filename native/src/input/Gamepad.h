@@ -38,6 +38,10 @@ public:
     // also present, so a lone unrecognized third-party pad is never suppressed. Empty when there's nothing to skip.
     std::string phantomControllerIgnoreList() const;
 
+    // Diagnostic: one line describing every joystick SDL currently enumerates (index, name, vid/pid, whether SDL
+    // treats it as a game controller, and its controller type). Logged at startup to debug device-mapping issues.
+    std::string describeControllers() const;
+
     // Digital RetroPad button for a player port. id is a RETRO_DEVICE_ID_JOYPAD_* value. The d-pad also
     // responds to the left analog stick past a deadzone, so stick-only pads still drive d-pad games.
     bool button(unsigned port, unsigned retroId) const;

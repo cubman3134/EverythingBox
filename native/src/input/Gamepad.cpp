@@ -108,22 +108,49 @@ void Gamepad::closeAll()
 std::string Gamepad::phantomControllerIgnoreList() const
 {
     if (!initialized_) return {};
-    std::string unknowns;
-    bool haveRecognized = false;
-    for (int p = 0; p < kMaxPlayers; ++p)
+    // Scan EVERY joystick, not just the ones we opened: a keyboard exposing a gamepad HID interface (Keychron HE)
+    // is a joystick SDL2 won't map as a game controller (isGC=0), so we never open it — but an emulator's newer
+    // SDL still treats it as a controller and it can steal the SDL-0 slot from the real pad. A "real" controller
+    // is one SDL2 maps AND recognizes the type of (DualSense => PS5). When at least one real controller is present,
+    // return the VID/PID of everything else so the emulator ignores it; otherwise suppress nothing (a lone
+    // unrecognized pad must keep working).
+    std::string suspects;
+    bool haveRealController = false;
+    const int n = SDL_NumJoysticks();
+    for (int i = 0; i < n; ++i)
     {
-        if (!slots_[p]) continue;
-        auto* gc = static_cast<SDL_GameController*>(slots_[p]);
-        if (SDL_GameControllerGetType(gc) != SDL_CONTROLLER_TYPE_UNKNOWN) { haveRecognized = true; continue; }
-        const Uint16 vid = SDL_GameControllerGetVendor(gc);
-        const Uint16 pid = SDL_GameControllerGetProduct(gc);
+        if (SDL_IsGameController(i) && SDL_GameControllerTypeForIndex(i) != SDL_CONTROLLER_TYPE_UNKNOWN)
+        { haveRealController = true; continue; }
+        const Uint16 vid = SDL_JoystickGetDeviceVendor(i);
+        const Uint16 pid = SDL_JoystickGetDeviceProduct(i);
         if (!vid && !pid) continue; // no identity to match on — leave it alone
         char buf[24];
         SDL_snprintf(buf, sizeof(buf), "0x%04x/0x%04x", vid, pid);
-        if (!unknowns.empty()) unknowns += ",";
-        unknowns += buf;
+        if (!suspects.empty()) suspects += ",";
+        suspects += buf;
     }
-    return haveRecognized ? unknowns : std::string(); // don't suppress a lone unrecognized pad
+    return haveRealController ? suspects : std::string();
+}
+
+std::string Gamepad::describeControllers() const
+{
+    if (!initialized_) return "gamepad: SDL not initialized";
+    std::string out = "gamepad: SDL2 enumerates:";
+    const int n = SDL_NumJoysticks();
+    if (n == 0) return out + " (no joysticks)";
+    for (int i = 0; i < n; ++i)
+    {
+        const bool isGC = SDL_IsGameController(i);
+        const char* nm = isGC ? SDL_GameControllerNameForIndex(i) : SDL_JoystickNameForIndex(i);
+        const Uint16 vid = SDL_JoystickGetDeviceVendor(i);
+        const Uint16 pid = SDL_JoystickGetDeviceProduct(i);
+        const int type = isGC ? static_cast<int>(SDL_GameControllerTypeForIndex(i)) : -1;
+        char line[256];
+        SDL_snprintf(line, sizeof(line), " [%d name='%s' vid=0x%04x pid=0x%04x isGC=%d type=%d]",
+                     i, nm ? nm : "?", vid, pid, isGC ? 1 : 0, type);
+        out += line;
+    }
+    return out;
 }
 
 void Gamepad::poll()
@@ -261,6 +288,7 @@ std::string Gamepad::name(unsigned) const { return {}; }
 void Gamepad::openControllers() {}
 void Gamepad::closeAll() {}
 std::string Gamepad::phantomControllerIgnoreList() const { return {}; }
+std::string Gamepad::describeControllers() const { return "gamepad: built without SDL"; }
 void Gamepad::poll() {}
 bool Gamepad::button(unsigned, unsigned) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }
