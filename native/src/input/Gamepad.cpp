@@ -105,6 +105,9 @@ void Gamepad::closeAll()
         }
 }
 
+void Gamepad::suspend() { stopRumble(); closeAll(); } // hand the pad to a standalone emulator, uncontested
+void Gamepad::resume()  { if (initialized_) openControllers(); }
+
 void Gamepad::poll()
 {
     if (!initialized_) return;
@@ -239,6 +242,8 @@ int Gamepad::firstConnectedPort() const { return -1; }
 std::string Gamepad::name(unsigned) const { return {}; }
 void Gamepad::openControllers() {}
 void Gamepad::closeAll() {}
+void Gamepad::suspend() {}
+void Gamepad::resume() {}
 void Gamepad::poll() {}
 bool Gamepad::button(unsigned, unsigned) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }

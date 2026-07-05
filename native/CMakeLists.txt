@@ -124,6 +124,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
+    # XInput: a stateless, multi-reader controller read used to detect the exit hotkey (Start+Select) while a
+    # standalone emulator owns the pad — it doesn't hold the device the way our SDL handle does.
+    if(WIN32)
+        target_link_libraries(mymediavault PRIVATE xinput)
+    endif()
     if(NOT ANDROID)
         target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()

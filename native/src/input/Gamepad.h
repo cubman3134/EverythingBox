@@ -31,6 +31,12 @@ public:
 
     void poll();   // call once per frame, before reading state (also handles connect/disconnect)
 
+    // Release / re-acquire the physical controllers. Called around a standalone emulator launch so the emulator
+    // gets uncontested access to the pad (an open SDL handle can starve another app's input on Windows); resume()
+    // reopens whatever is attached when the emulator exits.
+    void suspend();
+    void resume();
+
     // Digital RetroPad button for a player port. id is a RETRO_DEVICE_ID_JOYPAD_* value. The d-pad also
     // responds to the left analog stick past a deadzone, so stick-only pads still drive d-pad games.
     bool button(unsigned port, unsigned retroId) const;
