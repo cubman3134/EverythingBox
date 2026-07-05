@@ -128,10 +128,19 @@ void RetroView::showMainMenu()
     menuTitle_->setText(tr("Paused"));
     mainPage_->show();
     subScroll_ = nullptr;               // main page doesn't scroll
-    if (diskBtn_) diskBtn_->setVisible(running_ && core_.hasDiskControl()); // only for disk-based systems
-    if (optBtn_)  optBtn_->setVisible(running_ && !core_.options().empty()); // only when the core exposes options
+    // Disk / Core Options only apply to some systems/cores. Filter the nav list by the logical condition, NOT
+    // isHidden() — showMenu() calls this before menu_->show(), so the buttons' show is still deferred and
+    // isHidden() would (wrongly) report every button hidden, leaving the nav list empty.
+    const bool showDisk = running_ && core_.hasDiskControl();
+    const bool showOpt  = running_ && !core_.options().empty();
+    if (diskBtn_) diskBtn_->setVisible(showDisk);
+    if (optBtn_)  optBtn_->setVisible(showOpt);
     menuButtons_.clear();               // navigation over the visible main-page buttons
-    for (QPushButton* b : mainButtons_) if (b && !b->isHidden()) menuButtons_ << b;
+    for (QPushButton* b : mainButtons_)
+    {
+        if (!b || (b == diskBtn_ && !showDisk) || (b == optBtn_ && !showOpt)) continue;
+        menuButtons_ << b;
+    }
     menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
