@@ -30,6 +30,7 @@ class QOffscreenSurface;
 class QOpenGLFramebufferObject;
 class QNetworkAccessManager;
 class NetplaySession;
+class PortMapper;
 
 class RetroView : public QWidget
 {
@@ -115,6 +116,7 @@ private:
     void netTick();                     // the frame loop while netplay is active
     quint16 captureLocalButtons();      // this peer's RetroPad button mask (port-0 controls)
     NetplaySession* net_ = nullptr;
+    PortMapper* portMapper_ = nullptr;  // UPnP-IGD auto port-forward for online hosting (best-effort)
     bool netActive_ = false;
     unsigned netLocalPort_ = 0, netRemotePort_ = 1;
     quint32 netFrame_ = 0, netGenFrame_ = 0;

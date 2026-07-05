@@ -29,6 +29,12 @@ public:
     // pairs them and then just pipes bytes, so the lockstep protocol runs over it unchanged.
     void hostViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
     void joinViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
+    // "Both" online mode: host listens for a DIRECT (UPnP-forwarded) connection AND on the relay at once — first
+    // peer to arrive wins, the other path is dropped. The joiner tries the host's direct endpoint first (if any),
+    // then falls back to the relay. Lowest latency when UPnP works; always connects thanks to the relay.
+    void hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code);
+    void joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
+                    const QString& directIp, quint16 directPort);
     void stop();
 
     bool active() const { return active_; }
@@ -64,6 +70,7 @@ private:
 
     QTcpServer* server_ = nullptr;
     QTcpSocket* sock_ = nullptr;
+    QTcpSocket* relaySock_ = nullptr;              // host's relay socket while it races the direct server (first wins)
     QByteArray rx_;
     QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
     bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;

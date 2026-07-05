@@ -5,6 +5,7 @@
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include "../core/SystemCatalog.h"
+#include "../core/PortMapper.h"
 #include <QTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -411,8 +412,7 @@ void RetroView::showNetplay()
         static const QString cs = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZ23456789"); // no ambiguous 0/O/1/I
         QString code;
         for (int i = 0; i < 5; ++i) code += cs.at(int(QRandomGenerator::global()->bounded(cs.size())));
-        startNetplayOnline(true, code);
-        if (menuStatus_) menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1").arg(code)); });
+        startNetplayOnline(true, code); });  // status (incl. the shareable code) is set once UPnP resolves
     sv->addWidget(hostOnlineBtn); menuButtons_ << hostOnlineBtn;
 
     auto* joinOnlineBtn = flat(new QPushButton(tr("Join online…  (enter a friend's code)"), slotsPage_));
@@ -1068,6 +1068,9 @@ void RetroView::startNetplay(bool asHost, const QString& hostAddr)
     else        net_->join(hostAddr, 55420);
 }
 
+// Online netplay, "Both" strategy: the host tries UPnP to open a port for a low-latency DIRECT connection AND
+// registers on the relay at the same time (whichever the joiner reaches first wins). The shareable code carries
+// the public endpoint when UPnP worked (ROOM~ip:port) so the joiner can try direct, else it's just the room code.
 void RetroView::startNetplayOnline(bool asHost, const QString& code)
 {
     if (!running_ || threaded_) return;
@@ -1078,11 +1081,44 @@ void RetroView::startNetplayOnline(bool asHost, const QString& code)
         return;
     }
     const int colon = relay.lastIndexOf(QLatin1Char(':'));
-    const QString host = colon > 0 ? relay.left(colon) : relay;
-    const quint16 port = colon > 0 ? quint16(relay.mid(colon + 1).toUInt()) : quint16(55666);
+    const QString rhost = colon > 0 ? relay.left(colon) : relay;
+    const quint16 rp = colon > 0 ? quint16(relay.mid(colon + 1).toUInt()) : quint16(0);
+    const quint16 relayPort = rp ? rp : quint16(55666);
+    constexpr quint16 kDirectPort = 55420;
     ensureNetSession();
-    if (asHost) net_->hostViaRelay(host, port ? port : 55666, code);
-    else        net_->joinViaRelay(host, port ? port : 55666, code);
+
+    if (asHost)
+    {
+        if (!portMapper_) portMapper_ = new PortMapper(this);
+        portMapper_->disconnect(this);   // clear any connections from a prior host attempt
+        connect(portMapper_, &PortMapper::mapped, this,
+                [this, code, rhost, relayPort](const QString& pubIp, quint16 ext) {
+            net_->hostOnline(kDirectPort, rhost, relayPort, code);
+            const QString full = code + QStringLiteral("~") + pubIp + QStringLiteral(":") + QString::number(ext);
+            if (menuStatus_) menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1").arg(full));
+        }, Qt::SingleShotConnection);
+        connect(portMapper_, &PortMapper::failed, this, [this, code, rhost, relayPort](const QString&) {
+            net_->hostOnline(kDirectPort, rhost, relayPort, code);  // relay-only; direct server still up for a manual forward
+            if (menuStatus_)
+                menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1  (relay)").arg(code));
+        }, Qt::SingleShotConnection);
+        if (menuStatus_) menuStatus_->setText(tr("Opening a port on your router…"));
+        portMapper_->map(kDirectPort, kDirectPort);
+    }
+    else
+    {
+        // Parse ROOM or ROOM~ip:port. If an endpoint is present, joinOnline tries it first, then the relay.
+        QString room = code, dip; quint16 dport = 0;
+        const int tilde = code.indexOf(QLatin1Char('~'));
+        if (tilde > 0)
+        {
+            room = code.left(tilde);
+            const QString ep = code.mid(tilde + 1);
+            const int c2 = ep.lastIndexOf(QLatin1Char(':'));
+            if (c2 > 0) { dip = ep.left(c2); dport = quint16(ep.mid(c2 + 1).toUInt()); }
+        }
+        net_->joinOnline(rhost, relayPort, room, dip, dport);
+    }
 }
 
 void RetroView::tick()

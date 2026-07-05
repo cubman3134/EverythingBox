@@ -106,6 +106,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/AppUpdater.cpp   src/core/AppUpdater.h
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/CastManager.cpp  src/core/CastManager.h
+        src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
@@ -172,6 +173,14 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_netplay tools/probe_netplay.cpp src/emu/NetplaySession.cpp)
     target_include_directories(probe_netplay PRIVATE src src/emu)
     target_link_libraries(probe_netplay PRIVATE Qt6::Core Qt6::Network)
+    # Exercise UPnP-IGD port mapping against the real router.
+    add_executable(probe_portmap tools/probe_portmap.cpp src/core/PortMapper.cpp)
+    target_include_directories(probe_portmap PRIVATE src src/core)
+    target_link_libraries(probe_portmap PRIVATE Qt6::Core Qt6::Network)
+    # Exercise the "Both" online orchestration: direct-wins and direct-fail->relay-fallback.
+    add_executable(probe_netplay_both tools/probe_netplay_both.cpp src/emu/NetplaySession.cpp)
+    target_include_directories(probe_netplay_both PRIVATE src src/emu)
+    target_link_libraries(probe_netplay_both PRIVATE Qt6::Core Qt6::Network)
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)

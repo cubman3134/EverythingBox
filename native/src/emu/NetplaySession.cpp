@@ -5,6 +5,9 @@
 #include <QHostAddress>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QTimer>
+#include <QPointer>
+#include <QSharedPointer>
 
 // Wire framing: [u32 length][u8 type][payload], length covers type+payload.
 //   type 1 INPUT: [u32 frame][u16 buttons]
@@ -92,6 +95,103 @@ void NetplaySession::joinViaRelay(const QString& relayHost, quint16 relayPort, c
 {
     host_ = false;
     connectToRelay(relayHost, relayPort, "JOIN " + code.toUtf8() + "\n");
+}
+
+// "Both" host: listen for a DIRECT (UPnP-forwarded) connection on localPort AND register on the relay at once.
+// Whichever peer arrives first wins; the loser path is torn down. If UPnP mapping succeeded the caller already
+// forwarded localPort so a low-latency direct connection is possible; if not, the relay still pairs us. The relay
+// runs on its OWN socket during the race so a stray direct attempt can't disturb the verified fallback.
+void NetplaySession::hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code)
+{
+    stop();
+    active_ = true; host_ = true; ready_ = false; awaitingPair_ = true;
+    relayBuf_.clear();
+
+    // Path A — direct server.
+    server_ = new QTcpServer(this);
+    connect(server_, &QTcpServer::newConnection, this, [this] {
+        QTcpSocket* s = server_ ? server_->nextPendingConnection() : nullptr;
+        if (!awaitingPair_ || !s) { if (s) s->deleteLater(); return; }  // relay already won
+        awaitingPair_ = false;
+        server_->close();
+        if (relaySock_) { relaySock_->disconnect(this); relaySock_->abort(); relaySock_->deleteLater(); relaySock_ = nullptr; }
+        attachSocket(s);
+        emit status(tr("Player 2 connected directly."));
+        beginAsHost();
+    });
+    server_->listen(QHostAddress::AnyIPv4, localPort);  // if this fails, the relay path still carries us
+
+    // Path B — relay, on its own socket until it wins.
+    relaySock_ = new QTcpSocket(this);
+    relaySock_->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+    connect(relaySock_, &QTcpSocket::connected, this, [this, code] {
+        if (relaySock_) relaySock_->write("HOST " + code.toUtf8() + "\n"); });
+    connect(relaySock_, &QTcpSocket::readyRead, this, [this] {
+        if (!awaitingPair_ || !relaySock_) return;
+        relayBuf_ += relaySock_->readAll();
+        const int nl = relayBuf_.indexOf('\n');
+        if (nl < 0) return;
+        const QByteArray lineB = relayBuf_.left(nl).trimmed();
+        const QByteArray leftover = relayBuf_.mid(nl + 1);
+        relayBuf_.clear();
+        if (lineB != "PAIRED") {
+            emit ended(lineB == "BUSY" ? tr("That code is already in use — pick another.")
+                                       : tr("The relay gave an unexpected response."));
+            stop();
+            return;
+        }
+        // Relay won: adopt it as the session socket, drop the direct server.
+        awaitingPair_ = false;
+        if (server_) { server_->close(); server_->deleteLater(); server_ = nullptr; }
+        QTcpSocket* s = relaySock_; relaySock_ = nullptr;
+        s->disconnect(this);          // clear the temp handshake handlers
+        attachSocket(s);              // re-installs wireSocketErrors + onReadyRead
+        rx_ = leftover;
+        emit status(tr("Player 2 joined via the relay."));
+        beginAsHost();
+    });
+    connect(relaySock_, &QAbstractSocket::errorOccurred, this, [this] {
+        // Relay unreachable. Only fatal if the direct server also isn't listening — otherwise keep waiting on direct.
+        if (awaitingPair_ && (!server_ || !server_->isListening())) {
+            emit ended(tr("Couldn't reach the relay and no direct route is available."));
+            stop();
+        }
+    });
+    emit status(tr("Opening the room — waiting for player 2…"));
+    relaySock_->connectToHost(relayHost, relayPort);
+}
+
+// "Both" join: if the host advertised a direct endpoint (UPnP worked), try it first for lowest latency; on ANY
+// failure (refused, unreachable, or timeout) fall back to the verified relay path. No endpoint -> relay directly.
+void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
+                                const QString& directIp, quint16 directPort)
+{
+    if (directIp.isEmpty() || directPort == 0) { joinViaRelay(relayHost, relayPort, code); return; }
+
+    stop();
+    active_ = true; host_ = false; ready_ = false;
+    QTcpSocket* d = new QTcpSocket(this);
+    d->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+
+    auto resolved = QSharedPointer<bool>::create(false);   // committed to direct, or fell back — happens once
+    QPointer<QTcpSocket> dp = d;
+    auto toRelay = [this, relayHost, relayPort, code, resolved, dp]() {
+        if (*resolved) return;
+        *resolved = true;
+        if (dp) { dp->disconnect(this); dp->abort(); dp->deleteLater(); }
+        emit status(tr("Direct connection failed — using the relay…"));
+        joinViaRelay(relayHost, relayPort, code);
+    };
+    connect(d, &QTcpSocket::connected, this, [this, resolved, dp] {
+        if (*resolved || !dp) return;
+        *resolved = true;
+        attachSocket(dp);   // adopt the direct socket; wait for the host's HELLO + STATE
+        emit status(tr("Connected directly — syncing game state…"));
+    });
+    connect(d, &QAbstractSocket::errorOccurred, this, [toRelay] { toRelay(); });
+    emit status(tr("Trying a direct connection to the host…"));
+    d->connectToHost(directIp, directPort);
+    QTimer::singleShot(4000, this, [toRelay] { toRelay(); });   // direct didn't connect in time
 }
 
 // The relay speaks one line (PAIRED / NOHOST / BUSY), then pipes raw bytes. Consume just that line, hand any
@@ -217,5 +317,6 @@ void NetplaySession::stop()
     remoteInputs_.clear();
     rx_.clear(); relayBuf_.clear();
     if (sock_) { sock_->disconnect(this); sock_->abort(); sock_->deleteLater(); sock_ = nullptr; }
+    if (relaySock_) { relaySock_->disconnect(this); relaySock_->abort(); relaySock_->deleteLater(); relaySock_ = nullptr; }
     if (server_) { server_->deleteLater(); server_ = nullptr; }
 }
