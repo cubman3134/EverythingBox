@@ -11,6 +11,10 @@ namespace Settings
     QString subtitleLanguage();
     void setSubtitleLanguage(const QString& code);
 
+    // Auto-play the next TV episode when one finishes (default on).
+    bool autoplayNextEpisode();
+    void setAutoplayNextEpisode(bool on);
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.

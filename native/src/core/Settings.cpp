@@ -32,6 +32,12 @@ void Settings::setSubtitleLanguage(const QString& code)
     store().sync();
 }
 
+bool Settings::autoplayNextEpisode() { return store().value(QStringLiteral("playback/autoplayNext"), true).toBool(); }
+void Settings::setAutoplayNextEpisode(bool on)
+{
+    store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
+}
+
 QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
 void Settings::setOpenSubApiKey(const QString& key)
 {

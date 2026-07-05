@@ -1357,7 +1357,51 @@ void MainWindow::onTrackEnded()
 {
     finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
-    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) playTrack(trackIndex_ + 1);
+    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playTrack(trackIndex_ + 1); return; }
+    // A TV episode that played to the end -> roll to the next episode, if enabled.
+    if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
+}
+
+// Resolve and play the episode after the one that just finished. The current episode's id is "ttShow:s:e";
+// try same-season ep+1 first, then next-season ep1 (best-effort: the stream resolver is the source of truth
+// for whether an episode exists / is available). No-op for anything that isn't a TV episode.
+void MainWindow::tryPlayNextEpisode()
+{
+    if (stack_->currentWidget() != playerPage_) return;      // only while a video is on screen
+    const QStringList parts = subCtx_.imdbStreamId.split(QLatin1Char(':'));
+    if (parts.size() < 3) return;                            // not "ttShow:season:episode"
+    const QString show = parts.value(0);
+    const int s = parts.value(1).toInt(), e = parts.value(2).toInt();
+    if (show.isEmpty() || s <= 0 || e <= 0) return;
+
+    const QString nextEp = QStringLiteral("%1:%2:%3").arg(show).arg(s).arg(e + 1);
+    const QString nextSeason = QStringLiteral("%1:%2:%3").arg(show).arg(s + 1).arg(1);
+    showPlayerNotice(tr("Up next — finding the next episode…"), 20000);
+    addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
+        [this, nextEp, nextSeason](const QString& url, const QString& mime) {
+        if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
+        // End of season? Try the first episode of the next one before giving up.
+        addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
+            [this, nextSeason](const QString& url2, const QString& mime2) {
+            if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
+            else { if (playerNotice_) playerNotice_->hide(); notify(tr("No next episode found — that looks like the finale."), 6000); }
+        });
+    });
+}
+
+void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime)
+{
+    if (playerNotice_) playerNotice_->hide();
+    const QStringList p = imdbStreamId.split(QLatin1Char(':'));
+    MediaItem it;
+    it.url = url;
+    it.mime = mime;
+    it.type = QStringLiteral("episode");
+    it.imdbStreamId = imdbStreamId;
+    it.title = tr("Season %1 · Episode %2").arg(p.value(1), p.value(2));
+    it.id = imdbStreamId; // stable resume/Recent key for this episode
+    notify(tr("Up next: %1").arg(it.title), 4000);
+    openLibraryItem(it); // plays it, and re-arms subCtx_ so the following episode auto-advances too
 }
 
 void MainWindow::beginResume(const QString& path)
@@ -4483,6 +4527,16 @@ void MainWindow::openGeneralSettings()
             QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
         });
         v->addWidget(rOpen);
+        v->addSpacing(10);
+
+        auto* pbHeading = new QLabel(tr("Playback"));
+        pbHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(pbHeading);
+        auto* autoNext = new QCheckBox(tr("Auto-play the next episode"));
+        autoNext->setStyleSheet(QStringLiteral("font-size:15px;"));
+        autoNext->setChecked(Settings::autoplayNextEpisode());
+        connect(autoNext, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoplayNextEpisode(c); });
+        v->addWidget(autoNext);
         v->addSpacing(10);
 
         auto* heading = new QLabel(tr("Subtitles"));

@@ -289,6 +289,9 @@ private:
     class SubtitleFetcher* subFetcher_ = nullptr;
     struct SubContext { QString imdbStreamId; QString title; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
+    // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
+    void tryPlayNextEpisode();
+    void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
 
     // Casting the current stream to a Chromecast / DLNA device on the LAN. castUrl_ etc. hold the currently
     // playing stream so the picker can hand it to the chosen device.
