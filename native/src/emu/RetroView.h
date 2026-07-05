@@ -7,6 +7,9 @@
 #include <QMutex>
 #include <QVector>
 #include <set>
+#include <deque>
+#include <vector>
+#include <cstdint>
 #include "LibretroCore.h"   // mymediavault_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
@@ -82,6 +85,8 @@ private:
     static QImage buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter f);
 
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
+    bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
+    void captureRewind();      // snapshot the current state into the rewind ring buffer (bounded by bytes)
     void startEmu();           // begin the frame loop after a game loads (GUI timer or worker thread)
     void stopEmu();            // stop the loop / tear down the worker thread
     void publishFrame();       // copy the core's frame for the GUI to paint (threaded mode)
@@ -166,6 +171,16 @@ private:
     int turboHalfPeriod_ = 3; // frames the autofire stays on (and off) each cycle
     int turboCounter_ = 0;
     bool turboOn_ = true;     // current autofire phase (recomputed each frame)
+
+    // Fast-forward (hold Tab / pad Select+R2): run several core frames per tick. Rewind (hold R / pad
+    // Select+L2): replay states from a bounded ring buffer captured each frame. Both are full-screen only
+    // (disabled in threaded/split-pane mode, like save states).
+    bool ffKey_ = false, rewindKey_ = false;   // keyboard hold state
+    bool fastForward_ = false, rewinding_ = false; // resolved each frame from keyboard + pad
+    std::deque<std::vector<uint8_t>> rewindBuf_;   // recent states, oldest at front
+    size_t rewindBytes_ = 0;                       // total bytes held in rewindBuf_
+    static constexpr size_t kRewindMaxBytes = 96u * 1024 * 1024; // ~96 MB cap (fewer seconds for big-state cores)
+    static constexpr int kFfSpeed = 4;             // fast-forward multiplier
 
     QAudioSink* audioSink_ = nullptr;
     QIODevice* audioIo_ = nullptr; // push-mode sink input (owned by audioSink_)

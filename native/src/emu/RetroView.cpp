@@ -455,6 +455,9 @@ void RetroView::stop()
     paused_ = false;
     hideMenu();
     pressedKeys_.clear();
+    ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
+    rewindBuf_.clear();
+    rewindBytes_ = 0;
     pad_.stopRumble();
     teardownHwRender(); // context_destroy + drop the GL objects while the core is still loaded
     core_.unload();
@@ -487,6 +490,7 @@ void RetroView::toggleMenu()
 void RetroView::showMenu()
 {
     if (!running_) return;
+    ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false; // don't stay stuck if the menu opens mid-hold
     setPaused(true);
     menuStatus_->clear();
     showMainMenu();               // always open on the main page (centres + focuses the first button)
@@ -509,14 +513,10 @@ void RetroView::resizeEvent(QResizeEvent*)
         menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
 }
 
-void RetroView::tick()
+// Advance the core one frame (hardware or software path) and do the per-frame bookkeeping. Returns false if
+// the core crashed and was stopped, so the caller bails out of the frame.
+bool RetroView::runOneCoreFrame()
 {
-    if (!running_) return;
-    pad_.poll();        // refresh controller state + handle hot-plug before the core reads input
-    updateControllerPorts(); // pick up controllers plugged in/out mid-game
-    // Advance the autofire phase: on for turboHalfPeriod_ frames, then off for the same.
-    if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
-    turboOn_ = turboCounter_ < turboHalfPeriod_;
     if (hwMode_ && glCtx_)  // GL core: run inside our context so it renders into the FBO, then read it back
     {
         glCtx_->makeCurrent(glSurface_);
@@ -527,15 +527,70 @@ void RetroView::tick()
         glCtx_->doneCurrent();
     }
     else
-        core_.runFrame();   // audio is pushed via core_.onAudio
+        core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding)
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
         stop();
         emit statusMessage(tr("The emulator core crashed and was stopped."));
-        return;
+        return false;
     }
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
     if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
+    return true;
+}
+
+// Snapshot the current core state into the rewind buffer, dropping the oldest states past the byte cap.
+void RetroView::captureRewind()
+{
+    std::vector<uint8_t> s;
+    if (!core_.saveState(s) || s.empty()) return; // core can't serialize -> rewind simply stays unavailable
+    rewindBytes_ += s.size();
+    rewindBuf_.push_back(std::move(s));
+    while (rewindBytes_ > kRewindMaxBytes && rewindBuf_.size() > 1)
+    {
+        rewindBytes_ -= rewindBuf_.front().size();
+        rewindBuf_.pop_front();
+    }
+}
+
+void RetroView::tick()
+{
+    if (!running_) return;
+    pad_.poll();        // refresh controller state + handle hot-plug before the core reads input
+    updateControllerPorts(); // pick up controllers plugged in/out mid-game
+    // Advance the autofire phase: on for turboHalfPeriod_ frames, then off for the same.
+    if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
+    turboOn_ = turboCounter_ < turboHalfPeriod_;
+
+    // Resolve fast-forward / rewind from the keyboard (Tab / R) or a controller combo (Select+R2 / Select+L2).
+    auto anyPad = [this](unsigned id) {
+        for (unsigned p = 0; p < Gamepad::kMaxPlayers; ++p) if (pad_.button(p, id)) return true;
+        return false; };
+    const bool sel = anyPad(RETRO_DEVICE_ID_JOYPAD_SELECT);
+    fastForward_ = ffKey_     || (sel && anyPad(RETRO_DEVICE_ID_JOYPAD_R2));
+    rewinding_   = rewindKey_ || (sel && anyPad(RETRO_DEVICE_ID_JOYPAD_L2));
+
+    // Rewind: step back through the captured states (audio stays muted via the rewinding_ flag). One buffered
+    // state is consumed per tick; when the buffer runs dry we hold on the oldest frame.
+    if (rewinding_ && !threaded_)
+    {
+        if (!rewindBuf_.empty()) { rewindBytes_ -= rewindBuf_.back().size(); rewindBuf_.pop_back(); }
+        if (rewindBuf_.empty()) { update(); return; }
+        const std::vector<uint8_t>& s = rewindBuf_.back();
+        core_.loadState(s.data(), s.size());
+        if (!runOneCoreFrame()) return; // renders the restored state
+        update();
+        return;
+    }
+
+    // Normal / fast-forward: run one or several core frames. Capture a rewind snapshot before each real frame
+    // (skipped while fast-forwarding, to keep its cost down).
+    const int frames = fastForward_ ? kFfSpeed : 1;
+    for (int i = 0; i < frames; ++i)
+    {
+        if (!threaded_ && !fastForward_) captureRewind();
+        if (!runOneCoreFrame()) return;
+    }
     update();
 }
 
@@ -806,6 +861,9 @@ void RetroView::keyPressEvent(QKeyEvent* e)
     // Save-state hotkeys (RetroArch-style: F2 save, F4 load) - reserved, not remappable.
     if (e->key() == Qt::Key_F2) { QString err; if (!saveState(&err)) emit statusMessage(err); return; }
     if (e->key() == Qt::Key_F4) { QString err; if (!loadState(&err)) emit statusMessage(err); return; }
+    // Fast-forward (hold Tab) and rewind (hold R) - reserved hotkeys, kept out of the gameplay keymap.
+    if (e->key() == Qt::Key_Tab) { ffKey_ = true; return; }
+    if (e->key() == Qt::Key_R)   { rewindKey_ = true; return; }
 
     pressedKeys_.insert(e->key()); // resolved to a (port, button) per the keymap in inputState()
 }
@@ -813,6 +871,8 @@ void RetroView::keyPressEvent(QKeyEvent* e)
 void RetroView::keyReleaseEvent(QKeyEvent* e)
 {
     if (e->isAutoRepeat()) return;
+    if (e->key() == Qt::Key_Tab) { ffKey_ = false; return; }
+    if (e->key() == Qt::Key_R)   { rewindKey_ = false; return; }
     pressedKeys_.erase(e->key());
 }
 
@@ -966,6 +1026,7 @@ void RetroView::stopAudio()
 void RetroView::pushAudio(const int16_t* data, size_t frames)
 {
     if (!audioIo_ || frames == 0) return;
+    if (fastForward_ || rewinding_) return; // muted: N× or reversed audio is just noise
     if (audioSrcRate_ == audioOutRate_)
         pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
     else
