@@ -162,6 +162,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Console harnesses (desktop-only): standalone executables for headless verification - not built for
     # Android, where the app is a shared lib + APK.
     if(NOT ANDROID)
+    # Crash triage (Windows): symbolize a minidump's faulting-thread stack against the Release .pdb, since there's
+    # no cdb/WinDbg on the box. No Qt — just DbgHelp. Usage: symbolize_dump <crash.dmp> C:\MyMediaVault-app
+    if(WIN32)
+        add_executable(symbolize_dump tools/symbolize_dump.cpp)
+        target_link_libraries(symbolize_dump PRIVATE dbghelp)
+    endif()
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)

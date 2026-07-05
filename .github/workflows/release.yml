@@ -101,17 +101,24 @@ jobs:
           if (Test-Path native/addons)    { Copy-Item native/addons    "$dist/addons"    -Recurse -Force }
           if (Test-Path native/themes2)   { Copy-Item native/themes2   "$dist/themes2"   -Recurse -Force }
           Compress-Archive -Path "$dist/*" -DestinationPath MyMediaVault-windows-x64.zip -Force
+          # Ship the debug symbols as a SEPARATE asset (not in the app zip — no need to bloat every download by
+          # ~25 MB). Keep it to symbolize a crash report from this exact build: match the .pdb to a dump by GUID.
+          if (Test-Path build/MyMediaVault.pdb) { Compress-Archive -Path build/MyMediaVault.pdb -DestinationPath MyMediaVault-windows-x64-pdb.zip -Force }
 
       - uses: actions/upload-artifact@v4
         with:
           name: MyMediaVault-windows-x64
-          path: MyMediaVault-windows-x64.zip
+          path: |
+            MyMediaVault-windows-x64.zip
+            MyMediaVault-windows-x64-pdb.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-windows-x64.zip
+          files: |
+            MyMediaVault-windows-x64.zip
+            MyMediaVault-windows-x64-pdb.zip
           generate_release_notes: true
 
   # ------------------------------------------------------------------ macOS ---
