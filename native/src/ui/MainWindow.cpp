@@ -492,7 +492,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     fastFwd->setToolTip(tr("Forward 10s"));
     nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
-    subsBtn->setToolTip(tr("Subtitles — pick a track, sync, size, load or download"));
+    subsBtn->setToolTip(tr("Audio & subtitles — pick tracks, sync, size, load or download"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
@@ -3442,7 +3442,7 @@ void MainWindow::showSubtitleMenu()
 
     // Header: title + close.
     auto* headRow = new QHBoxLayout();
-    auto* title = new QLabel(tr("Subtitles"), card);
+    auto* title = new QLabel(tr("Audio & Subtitles"), card);
     title->setStyleSheet(QStringLiteral("font-size:20px;font-weight:bold;"));
     headRow->addWidget(title, 1);
     auto* closeBtn = new QPushButton(QString(QChar(0x00D7)), card); // × (U+00D7) renders in every font
@@ -3486,8 +3486,7 @@ void MainWindow::showSubtitleMenu()
         return b;
     };
 
-    // --- LEFT: track picker (Off + each track), scrollable so a long list stays contained. ---
-    leftCol->addWidget(sectionLabel(tr("TRACK")));
+    // --- LEFT: audio-track picker + subtitle-track picker, scrollable so long lists stay contained. ---
     auto* trackScroll = new QScrollArea(card);
     trackScroll->setWidgetResizable(true);
     trackScroll->setFrameShape(QFrame::NoFrame);
@@ -3498,23 +3497,48 @@ void MainWindow::showSubtitleMenu()
     auto* tv = new QVBoxLayout(trackHost);
     tv->setContentsMargins(0, 0, 6, 0);
     tv->setSpacing(6);
+    subLeftCol_ = {};
+    QPushButton* initial = nullptr;
 
+    // A track's display label: "LANG · Title", or a numbered fallback.
+    auto trackLabel = [this](const MpvWidget::Track& t) {
+        const QString lang = t.lang.isEmpty() ? QString() : t.lang.toUpper();
+        QString label = lang;
+        if (!t.title.isEmpty()) label = label.isEmpty() ? t.title : lang + QStringLiteral("  ·  ") + t.title;
+        return label.isEmpty() ? tr("Track %1").arg(t.id) : label;
+    };
+
+    // Audio tracks (only when the file actually has some to choose between / label).
+    const auto audio = player_->audioTracks();
+    if (!audio.isEmpty())
+    {
+        tv->addWidget(sectionLabel(tr("AUDIO")));
+        for (const MpvWidget::Track& t : audio)
+        {
+            auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("     ")) + trackLabel(t), t.selected);
+            const int id = t.id;
+            connect(b, &QPushButton::clicked, this, [this, id] { player_->setAudioTrack(id); hideSubtitleMenu(); });
+            tv->addWidget(b);
+            subLeftCol_ << b;
+            if (t.selected && !initial) initial = b;
+        }
+        tv->addSpacing(8);
+    }
+
+    // Subtitle tracks (Off + each).
+    tv->addWidget(sectionLabel(tr("SUBTITLE")));
     const auto tracks = player_->subtitleTracks();
     bool anySelected = false;
-    for (const MpvWidget::SubtitleTrack& t : tracks) if (t.selected) anySelected = true;
+    for (const MpvWidget::Track& t : tracks) if (t.selected) anySelected = true;
 
     auto* offBtn = rowButton(tr("Off"), !anySelected);
     connect(offBtn, &QPushButton::clicked, this, [this] { player_->setSubtitleTrack(-1); hideSubtitleMenu(); });
     tv->addWidget(offBtn);
-    subLeftCol_ = { offBtn };
-    QPushButton* initial = offBtn;
-    for (const MpvWidget::SubtitleTrack& t : tracks)
+    subLeftCol_ << offBtn;
+    if (!initial) initial = offBtn;
+    for (const MpvWidget::Track& t : tracks)
     {
-        const QString lang = t.lang.isEmpty() ? QString() : t.lang.toUpper();
-        QString label = lang;
-        if (!t.title.isEmpty()) label = label.isEmpty() ? t.title : lang + QStringLiteral("  ·  ") + t.title;
-        if (label.isEmpty()) label = tr("Track %1").arg(t.id);
-        auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("     ")) + label, t.selected);
+        auto* b = rowButton((t.selected ? QStringLiteral("✓  ") : QStringLiteral("     ")) + trackLabel(t), t.selected);
         const int id = t.id;
         connect(b, &QPushButton::clicked, this, [this, id] { player_->setSubtitleTrack(id); hideSubtitleMenu(); });
         tv->addWidget(b);
@@ -3523,7 +3547,7 @@ void MainWindow::showSubtitleMenu()
     }
     if (tracks.isEmpty())
     {
-        auto* none = new QLabel(tr("This video has no embedded subtitle tracks."), card);
+        auto* none = new QLabel(tr("No subtitle tracks — load or download one on the right."), card);
         none->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
         none->setWordWrap(true);
         tv->addWidget(none);

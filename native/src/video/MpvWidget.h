@@ -28,10 +28,12 @@ public:
     void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
     void takeScreenshot(const QString& path); // save the current frame (with subtitles) to a PNG file
 
-    // One subtitle track in the current file, for building a picker menu.
-    struct SubtitleTrack { int id = 0; QString title; QString lang; bool selected = false; };
-    QVector<SubtitleTrack> subtitleTracks() const; // sub tracks in the current file (empty if none)
-    void setSubtitleTrack(int id);            // select track id; id < 0 turns subtitles off
+    // One audio or subtitle track in the current file, for building a picker menu.
+    struct Track { int id = 0; QString title; QString lang; bool selected = false; };
+    QVector<Track> subtitleTracks() const;    // sub tracks in the current file (empty if none)
+    QVector<Track> audioTracks() const;       // audio tracks in the current file (empty if none)
+    void setSubtitleTrack(int id);            // select subtitle track id; id < 0 turns subtitles off
+    void setAudioTrack(int id);               // select audio track id; id < 0 disables audio
     double subtitleDelay() const;             // current subtitle timing offset, seconds
     void setSubtitleDelay(double seconds);
     double subtitleScale() const;             // current subtitle size multiplier (1.0 = default)

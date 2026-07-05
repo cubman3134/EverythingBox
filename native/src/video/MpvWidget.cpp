@@ -399,9 +399,10 @@ void MpvWidget::takeScreenshot(const QString& path)
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
 }
 
-QVector<MpvWidget::SubtitleTrack> MpvWidget::subtitleTracks() const
+// Enumerate the current file's tracks of one type ("sub" or "audio") from mpv's track-list.
+static QVector<MpvWidget::Track> tracksOfType(mpv_handle* mpv, const char* wantType)
 {
-    QVector<SubtitleTrack> out;
+    QVector<MpvWidget::Track> out;
     if (!mpv) return out;
     int64_t count = 0;
     mpv_get_property(mpv, "track-list/count", MPV_FORMAT_INT64, &count);
@@ -413,11 +414,11 @@ QVector<MpvWidget::SubtitleTrack> MpvWidget::subtitleTracks() const
             return key;
         };
         char* ty = mpv_get_property_string(mpv, field("type"));
-        const bool isSub = ty && std::strcmp(ty, "sub") == 0;
+        const bool match = ty && std::strcmp(ty, wantType) == 0;
         if (ty) mpv_free(ty);
-        if (!isSub) continue;
+        if (!match) continue;
 
-        SubtitleTrack t;
+        MpvWidget::Track t;
         int64_t id = 0;
         mpv_get_property(mpv, field("id"), MPV_FORMAT_INT64, &id);
         t.id = static_cast<int>(id);
@@ -433,12 +434,23 @@ QVector<MpvWidget::SubtitleTrack> MpvWidget::subtitleTracks() const
     return out;
 }
 
+QVector<MpvWidget::Track> MpvWidget::subtitleTracks() const { return tracksOfType(mpv, "sub"); }
+QVector<MpvWidget::Track> MpvWidget::audioTracks() const { return tracksOfType(mpv, "audio"); }
+
 void MpvWidget::setSubtitleTrack(int id)
 {
     if (!mpv) return;
     if (id < 0) { mpv_set_property_string(mpv, "sid", "no"); return; }
     const QByteArray v = QByteArray::number(id);
     mpv_set_property_string(mpv, "sid", v.constData());
+}
+
+void MpvWidget::setAudioTrack(int id)
+{
+    if (!mpv) return;
+    if (id < 0) { mpv_set_property_string(mpv, "aid", "no"); return; }
+    const QByteArray v = QByteArray::number(id);
+    mpv_set_property_string(mpv, "aid", v.constData());
 }
 
 double MpvWidget::subtitleDelay() const
