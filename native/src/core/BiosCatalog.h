@@ -37,6 +37,7 @@ namespace BiosCatalog
             { QStringLiteral("3do"),    QStringLiteral("3DO") },
             { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
             { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
+            { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
         };
         return list;
     }
@@ -81,11 +82,21 @@ namespace BiosCatalog
               QStringLiteral("ca30b50f880eb660a320674ed365ef7a") },
         };
 
+        // Sega CD / Mega-CD (genesis_plus_gx): a CD image won't boot without the region BIOS, which the core
+        // looks for as bios_CD_U/E/J.bin in the system folder. Plain Genesis carts don't need it. Shipping
+        // all three region dumps covers any disc (the core picks the one matching the disc's region).
+        static const QList<BiosFile> segacd = {
+            { QStringLiteral("bios_CD_U.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_U.bin")), QStringLiteral("2efd74e3232ff260e371b99f84024f7f") }, // US
+            { QStringLiteral("bios_CD_E.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_E.bin")), QStringLiteral("e66fa1dc5820d254611fdcdba0662372") }, // EU
+            { QStringLiteral("bios_CD_J.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_J.bin")), QStringLiteral("278a9397d192149e84e820ac621a8edd") }, // JP
+        };
+
         if (systemId == QStringLiteral("psx"))    return psx;
         if (systemId == QStringLiteral("saturn")) return saturn;
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
         if (systemId == QStringLiteral("nes"))    return nes;
+        if (systemId == QStringLiteral("segacd")) return segacd;
         return none;
     }
 
