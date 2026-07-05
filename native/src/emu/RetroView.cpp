@@ -51,9 +51,6 @@ RetroView::RetroView(QWidget* parent) : QWidget(parent)
 
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &RetroView::tick);
-    // Drives the pause menu from the controller while the game timer is stopped (full-screen mode).
-    menuPadTimer_ = new QTimer(this);
-    connect(menuPadTimer_, &QTimer::timeout, this, &RetroView::pollMenuPad);
 
     loadVideoFilter();
     buildMenu();
@@ -810,18 +807,6 @@ bool RetroView::menuComboHeld()
     return any(RETRO_DEVICE_ID_JOYPAD_START) && any(RETRO_DEVICE_ID_JOYPAD_SELECT);
 }
 
-// While the pause menu is open the game timer is stopped, so this timer keeps polling the pad: Start+Select
-// closes the menu, and the d-pad/A/B drive it. Non-threaded (full-screen) only; split panes use pollInput().
-void RetroView::pollMenuPad()
-{
-    if (!menu_ || !menu_->isVisible()) return;
-    pad_.poll();
-    const bool combo = menuComboHeld();
-    if (combo && !menuComboPrev_) { menuComboPrev_ = true; hideMenu(); return; }
-    menuComboPrev_ = combo;
-    handleMenuPad();
-}
-
 void RetroView::pollInput() // GUI: poll the pad + keyboard, resolve, and publish a snapshot for the worker
 {
     pad_.poll();
@@ -907,15 +892,16 @@ void RetroView::showMenu()
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason); // arrow keys work at once
     menuPadPrev_ = menuPadMask(); // seed edge state so buttons held while opening aren't read as a press
     menuComboPrev_ = menuComboHeld(); // don't read the still-held opening combo as an immediate close
-    if (!threaded_ && menuPadTimer_) menuPadTimer_->start(30); // keep the pad driving the menu while paused
+    // setPaused(true) stopped the frame timer; in full-screen restart it so tick() keeps polling the pad and
+    // driving the menu (it skips the game frame while the menu is visible). Split panes use pollInput().
+    if (!threaded_ && timer_) timer_->start(frameIntervalMs_);
 }
 
 void RetroView::hideMenu()
 {
-    if (menuPadTimer_) menuPadTimer_->stop();
     menuComboPrev_ = menuComboHeld(); // carry the still-held closing combo so tick() doesn't reopen at once
     menu_->hide();
-    setPaused(false);
+    setPaused(false);                 // resumes the game frame loop
     setFocus(); // keep Esc / gameplay keys coming to the view
 }
 
@@ -1041,14 +1027,17 @@ void RetroView::tick()
     if (!running_) return;
     pad_.poll();        // refresh controller state + handle hot-plug before the core reads input
     updateControllerPorts(); // pick up controllers plugged in/out mid-game
-    // Start+Select opens the pause menu (controller-only players). Edge-detected; skip the frame it opens on
-    // so the game doesn't also see Start+Select. pollMenuPad() then drives it while it's up.
+    // Start+Select toggles the pause menu (controller-only players). Edge-detected; on the frame it opens,
+    // skip the game so it doesn't also see the combo. The timer keeps running while the menu is up (see
+    // showMenu), so this same tick drives the menu below without advancing the game.
     if (!netActive_)
     {
         const bool combo = menuComboHeld();
         if (combo && !menuComboPrev_) { menuComboPrev_ = true; toggleMenu(); return; }
         menuComboPrev_ = combo;
     }
+    if (menu_ && menu_->isVisible()) { handleMenuPad(); update(); return; } // menu open: drive it, don't run a frame
+
     // Advance the autofire phase: on for turboHalfPeriod_ frames, then off for the same.
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
