@@ -648,6 +648,65 @@ void EmulatorManager::prepareControllerConfig(const QString& binDir)
             "RUp = SDL-0/-RightY\n");
         return;
     }
+
+    // ---- melonDS: ships with every input unmapped (-1), so a fresh install plays nothing until you configure
+    // it by hand. Seed a working keyboard + XInput controller map (RetroBat-style). Keyboard values are Qt::Key
+    // codes; joystick values are SDL joystick button indices, with the D-pad as hat 0 (0x100|dir). Only applied
+    // when still unmapped, so a user's own mapping is never clobbered. ----
+    if (id == QStringLiteral("melonds"))
+    {
+        struct M { const char* k; int kb; int joy; };
+        static const M kMap[] = {
+            { "A", 88, 1 }, { "B", 90, 0 }, { "Select", 16777219, 6 }, { "Start", 16777220, 7 },
+            { "Right", 16777236, 258 }, { "Left", 16777234, 264 }, { "Up", 16777235, 257 }, { "Down", 16777237, 260 },
+            { "R", 87, 5 }, { "L", 81, 4 }, { "X", 83, 3 }, { "Y", 65, 2 },
+        };
+        const QString tomlPath = binDir + QStringLiteral("/melonDS.toml");
+        QFile f(tomlPath);
+        if (f.exists())
+        {
+            if (!f.open(QIODevice::ReadOnly)) return;
+            QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'));
+            f.close();
+            // Patch only if the Keyboard section's A is still unmapped (i.e. melonDS's fresh default).
+            QString sec; bool unmapped = false;
+            for (const QString& l : lines)
+            {
+                const QString s = l.trimmed();
+                if (s.startsWith(QLatin1Char('['))) sec = s;
+                else if (sec == QLatin1String("[Instance0.Keyboard]") && s.startsWith(QLatin1String("A "))
+                         && s.endsWith(QLatin1String("-1"))) unmapped = true;
+            }
+            if (!unmapped) return; // already mapped (by the user or a prior seed) -> leave it
+            sec.clear();
+            for (QString& l : lines)
+            {
+                const QString s = l.trimmed();
+                if (s.startsWith(QLatin1Char('['))) { sec = s; continue; }
+                const int eq = s.indexOf(QLatin1Char('='));
+                if (eq < 0) continue;
+                const QString key = s.left(eq).trimmed();
+                for (const M& m : kMap)
+                    if (key == QLatin1String(m.k))
+                    {
+                        if (sec == QLatin1String("[Instance0.Keyboard]")) l = QStringLiteral("%1 = %2").arg(key).arg(m.kb);
+                        else if (sec == QLatin1String("[Instance0.Joystick]")) l = QStringLiteral("%1 = %2").arg(key).arg(m.joy);
+                    }
+            }
+            if (f.open(QIODevice::WriteOnly)) { f.write(lines.join(QLatin1Char('\n')).toUtf8()); f.close(); }
+        }
+        else
+        {
+            // Brand-new install (melonDS hasn't run yet): write a minimal toml with just the input sections;
+            // melonDS merges it and fills everything else with its own defaults.
+            QString t = QStringLiteral("[Instance0]\nJoystickID = 0\n\n[Instance0.Keyboard]\n");
+            for (const M& m : kMap) t += QStringLiteral("%1 = %2\n").arg(QLatin1String(m.k)).arg(m.kb);
+            t += QStringLiteral("\n[Instance0.Joystick]\n");
+            for (const M& m : kMap) t += QStringLiteral("%1 = %2\n").arg(QLatin1String(m.k)).arg(m.joy);
+            seedFileIfAbsent(tomlPath, t.toUtf8());
+        }
+        return;
+    }
 }
 
 // Several standalone emulators block a fresh install with a first-run wizard / consent dialog / welcome screen
