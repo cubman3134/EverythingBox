@@ -1640,6 +1640,9 @@ void MainWindow::ensureEmu()
         // often full screen and would otherwise sit on top of the freshly-launched emulator.)
         emuReturnState_ = windowState();
         showMinimized();
+        emuDisplayName_ = name;
+        emuUserClosing_ = false;
+        emuRunClock_.start();  // to spot a boot that fails and exits instantly (missing BIOS/firmware)
         startEmuHotkeyWatch(); // Start+Select / Esc closes the standalone emulator back to MMV
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
@@ -1656,6 +1659,26 @@ void MainWindow::ensureEmu()
             activateWindow();
         }
         if (stack_->currentWidget() == emuPage_) openHome();
+
+        // Closed within a couple of seconds, and we didn't ask it to? That's a failed boot, not a play session —
+        // most often a missing console BIOS/firmware, which -batch-style launches quit on silently. Tell the user
+        // what happened instead of just bouncing back to the home screen with no explanation.
+        if (!emuUserClosing_ && emuRunClock_.isValid() && emuRunClock_.elapsed() < 4000)
+        {
+            const QString emuName = emuDisplayName_.isEmpty() ? tr("The emulator") : emuDisplayName_;
+            const bool needsBios = !pendingEmuSystem_.isEmpty()
+                                   && !BiosCatalog::forSystem(pendingEmuSystem_).isEmpty();
+            const GameSystem* sys = pendingEmuSystem_.isEmpty() ? nullptr : SystemCatalog::byId(pendingEmuSystem_);
+            const QString sysName = sys ? sys->name : tr("This system");
+            if (needsBios)
+                notify(tr("%1 closed immediately. %2 games need a console BIOS to boot. I try to fetch it "
+                          "automatically — if it still won’t start, the BIOS couldn’t be downloaded and you’ll "
+                          "need to place it in the emulator’s “bios” folder yourself.").arg(emuName, sysName), 12000);
+            else
+                notify(tr("%1 closed immediately — the game may be missing files it needs to boot, or the "
+                          "emulator needs firmware set up.").arg(emuName), 9000);
+        }
+        emuRunClock_.invalidate();
     });
     connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {
         statusBar()->showMessage(tr("%1 is installed.").arg(name), 5000);
@@ -1722,6 +1745,7 @@ void MainWindow::pollEmuExitHotkey()
     {
         mwLog(QStringLiteral("emu: exit hotkey (Start+Select / Esc) — closing the standalone emulator"));
         stopEmuHotkeyWatch();   // one shot: don't fire again while it's tearing down
+        emuUserClosing_ = true; // a deliberate close — don't mistake it for a failed boot
         emu_->closeGame();
     }
 }
@@ -1742,7 +1766,7 @@ void MainWindow::ensureEmuPage()
     emuStopBtn_ = new QPushButton(tr("Force-close emulator"), emuPage_);
     emuStopBtn_->setFixedWidth(240);
     emuStopBtn_->setVisible(false);
-    connect(emuStopBtn_, &QPushButton::clicked, this, [this] { if (emu_) emu_->terminateGame(); });
+    connect(emuStopBtn_, &QPushButton::clicked, this, [this] { emuUserClosing_ = true; if (emu_) emu_->terminateGame(); });
     v->addWidget(emuStopBtn_, 0, Qt::AlignHCenter);
     v->addStretch(1);
     stack_->addWidget(emuPage_);

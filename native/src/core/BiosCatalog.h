@@ -102,6 +102,11 @@ namespace BiosCatalog
     {
         if (emulatorId == QStringLiteral("pcsx2"))
             return { QStringLiteral("ps2"), true };
+        // DuckStation can't boot a PS1 disc without a BIOS. It already runs portable (portable.txt) and auto-scans
+        // its "bios" folder by hash, so we just fetch the PS1 BIOS into <dir>/bios — no portable.ini/PCSX2.ini.
+        // Without this, DuckStation's -batch launch fails to boot and exits instantly (code 0) with no message.
+        if (emulatorId == QStringLiteral("duckstation"))
+            return { QStringLiteral("psx"), false };
         return { QString(), false };
     }
 }

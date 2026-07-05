@@ -6,6 +6,7 @@
 #include <QHash>
 #include <QColor>
 #include <QPointer>
+#include <QElapsedTimer>
 #include <memory>
 #include <functional>
 #include "../addons/AddonModels.h"
@@ -344,6 +345,11 @@ private:
     void startEmuHotkeyWatch();
     void stopEmuHotkeyWatch();
     void pollEmuExitHotkey();
+    // Detect a standalone emulator that closes almost immediately (a failed boot — usually a missing BIOS/firmware,
+    // which -batch-style launches exit silently on). Only warn when the user didn't close it themselves.
+    QElapsedTimer emuRunClock_;
+    QString emuDisplayName_;              // the running emulator's display name (from the launched signal)
+    bool emuUserClosing_ = false;         // set when WE ask it to close (exit hotkey / force-close), to suppress the warning
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
