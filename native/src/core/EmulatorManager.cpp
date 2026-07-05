@@ -764,10 +764,25 @@ void EmulatorManager::prepareFirstRunConfig(const QString& binDir)
     }
     else if (id == QStringLiteral("vita3k"))
     {
-        // Blocking "install firmware" welcome modal + a separate missing-firmware launch warning. config.yml
-        // next to the exe is portable. (Firmware is optional for Vita3K — many titles run without it.)
-        seedFileIfAbsent(binDir + QStringLiteral("/config.yml"),
-            "show-welcome: false\nwarn-missing-firmware: false\ninitial-setup: true\n");
+        // Vita3K REJECTS a partial config.yml — it validates the whole schema and, on any missing key, discards
+        // the file and regenerates its own with the welcome/firmware prompts back ON. So seeding a few keys never
+        // worked. Instead, patch those keys in the (complete) config.yml Vita3K writes itself: it's absent on the
+        // very first launch (the welcome shows once — fine, since Vita3K needs a one-time firmware/setup step
+        // anyway), then suppressed on every launch after. Version-robust: we edit whatever schema is present.
+        const QString cfg = binDir + QStringLiteral("/config.yml");
+        QFile f(cfg);
+        if (QFile::exists(cfg) && f.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
+            QStringList lines = QString::fromUtf8(f.readAll()).split(QLatin1Char('\n'));
+            f.close();
+            struct KV { const char* key; const char* val; };
+            static const KV kWant[] = { { "show-welcome", "false" }, { "warn-missing-firmware", "false" }, { "initial-setup", "true" } };
+            for (QString& line : lines)
+                for (const KV& kv : kWant)
+                    if (line.startsWith(QLatin1String(kv.key) + QLatin1Char(':')))
+                        line = QStringLiteral("%1: %2").arg(QLatin1String(kv.key), QLatin1String(kv.val));
+            if (f.open(QIODevice::WriteOnly | QIODevice::Text)) { f.write(lines.join(QLatin1Char('\n')).toUtf8()); f.close(); }
+        }
     }
     else if (id == QStringLiteral("xemu"))
     {
