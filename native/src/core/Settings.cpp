@@ -48,6 +48,12 @@ void Settings::setOpenSubPassword(const QString& pass)
     store().setValue(QStringLiteral("subs/osPass"), pass); store().sync();
 }
 
+QString Settings::videoFilter() { return store().value(QStringLiteral("emu/videoFilter"), QStringLiteral("off")).toString(); }
+void Settings::setVideoFilter(const QString& id)
+{
+    store().setValue(QStringLiteral("emu/videoFilter"), id); store().sync();
+}
+
 bool Settings::startFullscreen() { return store().value(QStringLiteral("general/startFullscreen"), false).toBool(); }
 void Settings::setStartFullscreen(bool on)
 {

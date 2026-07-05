@@ -41,6 +41,10 @@ namespace Settings
     int  bgmVolume();                  // 0..100
     void setBgmVolume(int pct);
 
+    // Retro video filter applied over the emulator image: "off" (default) | "scanlines" | "crt" | "lcd".
+    QString videoFilter();
+    void setVideoFilter(const QString& id);
+
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 

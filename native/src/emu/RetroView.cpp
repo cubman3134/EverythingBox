@@ -41,6 +41,7 @@ RetroView::RetroView(QWidget* parent) : QWidget(parent)
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &RetroView::tick);
 
+    loadVideoFilter();
     buildMenu();
 }
 
@@ -73,8 +74,9 @@ void RetroView::buildMenu()
     auto* resume = new QPushButton(tr("Resume"), mainPage_);
     auto* save   = new QPushButton(tr("Save State"), mainPage_);
     auto* load   = new QPushButton(tr("Load State"), mainPage_);
+    filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, filterBtn_, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -86,8 +88,9 @@ void RetroView::buildMenu()
     connect(exit,   &QPushButton::clicked, this, [this] { hideMenu(); emit exitRequested(); });
     connect(save,   &QPushButton::clicked, this, [this] { showStateSlots(true); });
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
+    connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, exit };
+    mainButtons_ = { resume, save, load, filterBtn_, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -170,6 +173,84 @@ void RetroView::showStateSlots(bool saveMode)
     menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+void RetroView::loadVideoFilter()
+{
+    const QString id = Settings::videoFilter();
+    filter_ = id == QStringLiteral("scanlines") ? FilterScanlines
+            : id == QStringLiteral("crt")       ? FilterCrt
+            : id == QStringLiteral("lcd")       ? FilterLcd
+                                                : FilterOff;
+}
+
+QString RetroView::videoFilterLabel() const
+{
+    const QString name = filter_ == FilterScanlines ? tr("Scanlines")
+                       : filter_ == FilterCrt       ? tr("CRT")
+                       : filter_ == FilterLcd       ? tr("LCD")
+                                                    : tr("Off");
+    return tr("Video Filter: %1").arg(name);
+}
+
+void RetroView::cycleVideoFilter()
+{
+    filter_ = static_cast<VideoFilter>((filter_ + 1) % 4);
+    const char* id = filter_ == FilterScanlines ? "scanlines"
+                   : filter_ == FilterCrt       ? "crt"
+                   : filter_ == FilterLcd       ? "lcd" : "off";
+    Settings::setVideoFilter(QString::fromLatin1(id));
+    crtKey_.clear();  // force the overlay to rebuild for the new filter
+    update();
+}
+
+// Composite the cached retro overlay over the drawn frame. The overlay is rebuilt only when the destination
+// size, source geometry, or filter changes — each paint is then a single drawImage.
+void RetroView::applyVideoFilter(QPainter& p, const QRect& dst, int srcW, int srcH)
+{
+    if (filter_ == FilterOff || dst.isEmpty() || srcW <= 0 || srcH <= 0) return;
+    const QString key = QStringLiteral("%1x%2:%3x%4:%5")
+                            .arg(dst.width()).arg(dst.height()).arg(srcW).arg(srcH).arg(int(filter_));
+    if (key != crtKey_) { crtOverlay_ = buildFilterOverlay(dst.size(), srcW, srcH, filter_); crtKey_ = key; }
+    if (!crtOverlay_.isNull()) p.drawImage(dst.topLeft(), crtOverlay_);
+}
+
+// Build the translucent black overlay for a filter, at display resolution. Scanlines darken the gap below
+// each source line; CRT adds a dim aperture-grille (vertical triads); LCD draws a faint per-pixel grid.
+QImage RetroView::buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter f)
+{
+    QImage img(dst, QImage::Format_ARGB32_Premultiplied);
+    img.fill(Qt::transparent);
+    if (f == FilterOff) return img;
+    QPainter q(&img);
+    q.setPen(Qt::NoPen);
+
+    if (f == FilterScanlines || f == FilterCrt)
+    {
+        const double lineH = double(dst.height()) / srcH; // display pixels per source scanline
+        const int alpha = (f == FilterCrt) ? 105 : 80;
+        for (int i = 0; i < srcH; ++i)
+            q.fillRect(QRectF(0, (i + 0.5) * lineH, dst.width(), lineH * 0.5), QColor(0, 0, 0, alpha));
+    }
+    if (f == FilterCrt)
+    {
+        // One dim vertical stripe per source column (aperture-grille look), only if columns are wide enough
+        // on screen to be visible without turning the picture to mush.
+        const double colW = double(dst.width()) / srcW;
+        if (colW >= 3.0)
+            for (int i = 0; i < srcW; ++i)
+                q.fillRect(QRectF((i + 0.5) * colW, 0, qMax(1.0, colW * 0.22), dst.height()), QColor(0, 0, 0, 55));
+    }
+    if (f == FilterLcd)
+    {
+        const double lineH = double(dst.height()) / srcH, colW = double(dst.width()) / srcW;
+        if (lineH >= 3.0)
+            for (int i = 1; i < srcH; ++i) q.fillRect(QRectF(0, i * lineH - 0.5, dst.width(), 1.0), QColor(0, 0, 0, 45));
+        if (colW >= 3.0)
+            for (int i = 1; i < srcW; ++i) q.fillRect(QRectF(i * colW - 0.5, 0, 1.0, dst.height()), QColor(0, 0, 0, 45));
+    }
+    q.end();
+    return img;
 }
 
 RetroView::~RetroView() { stop(); }
@@ -662,6 +743,7 @@ void RetroView::paintEvent(QPaintEvent*)
         const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(dst, frameImg_);
+        applyVideoFilter(p, dst, frameImg_.width(), frameImg_.height());
         return;
     }
 
@@ -672,6 +754,7 @@ void RetroView::paintEvent(QPaintEvent*)
         const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(dst, hwImg_);
+        applyVideoFilter(p, dst, hwImg_.width(), hwImg_.height());
         return;
     }
 
@@ -686,6 +769,7 @@ void RetroView::paintEvent(QPaintEvent*)
     const QRect dst(QPoint((width() - target.width()) / 2, (height() - target.height()) / 2), target);
     p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
     p.drawImage(dst, img);
+    applyVideoFilter(p, dst, static_cast<int>(w), static_cast<int>(h));
 }
 
 void RetroView::keyPressEvent(QKeyEvent* e)

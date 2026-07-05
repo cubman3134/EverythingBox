@@ -73,6 +73,14 @@ private slots:
     void pollInput();     // GUI-thread input poll -> snapshot (threaded mode)
 
 private:
+    // Retro post-process filters drawn over the emulator image (a cached translucent overlay).
+    enum VideoFilter { FilterOff, FilterScanlines, FilterCrt, FilterLcd };
+    void loadVideoFilter();               // read the persisted choice into filter_
+    void cycleVideoFilter();              // Off -> Scanlines -> CRT -> LCD -> Off, persisted + repainted
+    QString videoFilterLabel() const;     // "Video Filter: <name>" for the menu button
+    void applyVideoFilter(QPainter& p, const QRect& dst, int srcW, int srcH); // composite the overlay over dst
+    static QImage buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter f);
+
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     void startEmu();           // begin the frame loop after a game loads (GUI timer or worker thread)
     void stopEmu();            // stop the loop / tear down the worker thread
@@ -142,8 +150,13 @@ private:
     QVBoxLayout* menuBody_ = nullptr; // holds mainPage_ then slotsPage_
     bool slotsMode_ = false;        // true while the slot grid (not the main page) is showing
     int currentSlot_ = 1;           // slot F2/F4 act on; follows the last slot used in the visual menu
-    QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Exit (fixed, on the main page)
+    QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Filter/Exit (fixed, on the main page)
     QVector<QPushButton*> menuButtons_; // the current page's buttons, in order, for arrow-key + Enter navigation
+    QPushButton* filterBtn_ = nullptr;  // the "Video Filter: X" cycle button on the main page
+
+    VideoFilter filter_ = FilterOff;    // active retro filter
+    QImage crtOverlay_;                 // cached filter overlay (rebuilt on size/source/filter change)
+    QString crtKey_;                    // cache key for crtOverlay_ (dst size + source dims + filter)
     int menuPadPrev_ = 0;               // previous frame's menu d-pad/confirm mask (edge detection)
     bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
     int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad
