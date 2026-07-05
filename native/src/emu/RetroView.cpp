@@ -18,6 +18,9 @@
 #include <QFrame>
 #include <QLabel>
 #include <QPushButton>
+#include <QDateTime>
+#include <QIcon>
+#include <QPixmap>
 #include <QVBoxLayout>
 #include <QThread>
 #include <QOpenGLContext>
@@ -53,17 +56,26 @@ void RetroView::buildMenu()
     v->setContentsMargins(20, 18, 20, 18);
     v->setSpacing(8);
 
-    auto* title = new QLabel(tr("Paused"), menu_);
-    title->setAlignment(Qt::AlignCenter);
-    title->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
-    v->addWidget(title);
+    menuTitle_ = new QLabel(tr("Paused"), menu_);
+    menuTitle_->setAlignment(Qt::AlignCenter);
+    menuTitle_->setStyleSheet(QStringLiteral("font-size:18px; font-weight:600;"));
+    v->addWidget(menuTitle_);
 
-    auto* resume = new QPushButton(tr("Resume"), menu_);
-    auto* save   = new QPushButton(tr("Save State"), menu_);
-    auto* load   = new QPushButton(tr("Load State"), menu_);
-    auto* exit   = new QPushButton(tr("Exit Emulator"), menu_);
-    for (QPushButton* b : { resume, save, load, exit }) v->addWidget(b);
-    menuButtons_ = { resume, save, load, exit }; // arrow-key / Enter navigation order
+    // Body holds the two pages: the main button list and (built on demand) the state-slot grid.
+    menuBody_ = new QVBoxLayout();
+    menuBody_->setSpacing(8);
+    v->addLayout(menuBody_);
+
+    mainPage_ = new QWidget(menu_);
+    auto* mp = new QVBoxLayout(mainPage_);
+    mp->setContentsMargins(0, 0, 0, 0);
+    mp->setSpacing(8);
+    auto* resume = new QPushButton(tr("Resume"), mainPage_);
+    auto* save   = new QPushButton(tr("Save State"), mainPage_);
+    auto* load   = new QPushButton(tr("Load State"), mainPage_);
+    auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
+    for (QPushButton* b : { resume, save, load, exit }) mp->addWidget(b);
+    menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
     menuStatus_->setAlignment(Qt::AlignCenter);
@@ -72,12 +84,92 @@ void RetroView::buildMenu()
 
     connect(resume, &QPushButton::clicked, this, &RetroView::hideMenu);
     connect(exit,   &QPushButton::clicked, this, [this] { hideMenu(); emit exitRequested(); });
-    connect(save,   &QPushButton::clicked, this, [this] {
-        QString e; menuStatus_->setText(saveState(&e) ? tr("State saved") : e); });
-    connect(load,   &QPushButton::clicked, this, [this] {
-        QString e; menuStatus_->setText(loadState(&e) ? tr("State loaded") : e); });
+    connect(save,   &QPushButton::clicked, this, [this] { showStateSlots(true); });
+    connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
+    // Remember the main buttons so showMainMenu() can restore navigation to them.
+    mainButtons_ = { resume, save, load, exit };
+    menuButtons_ = mainButtons_;
 
     menu_->hide();
+}
+
+// Switch the pause menu back to its main page (Resume / Save / Load / Exit).
+void RetroView::showMainMenu()
+{
+    slotsMode_ = false;
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+    menuTitle_->setText(tr("Paused"));
+    mainPage_->show();
+    menuButtons_ = mainButtons_; // restore navigation to the main page
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+// Show the per-game state-slot grid. Each slot shows its thumbnail + timestamp (or "Empty"). In save mode
+// every slot is writable; in load mode empty slots are disabled. Rebuilt each time so thumbnails stay fresh.
+void RetroView::showStateSlots(bool saveMode)
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(saveMode ? tr("Save State") : tr("Load State"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    for (int slot = 1; slot <= kStateSlots; ++slot)
+    {
+        const bool exists = QFile::exists(statePath(slot))
+                            || (slot == 1 && QFile::exists(statePath())); // legacy single-slot fallback
+        auto* b = new QPushButton(slotsPage_);
+        b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 10px; }"));
+        b->setIconSize(QSize(80, 60));
+        QString label = tr("Slot %1").arg(slot);
+        if (exists)
+        {
+            const QString tp = thumbPath(slot);
+            if (QFile::exists(tp)) b->setIcon(QIcon(QPixmap(tp)));
+            const QDateTime when = QFileInfo(statePath(slot)).lastModified();
+            label += when.isValid() ? QStringLiteral("   ·   %1").arg(when.toString(QStringLiteral("MMM d, h:mm ap")))
+                                    : QStringLiteral("   ·   saved");
+        }
+        else
+        {
+            label += QStringLiteral("   ·   ") + tr("Empty");
+            if (!saveMode) b->setEnabled(false); // nothing to load
+        }
+        b->setText(label);
+        connect(b, &QPushButton::clicked, this, [this, slot, saveMode] {
+            QString e;
+            if (saveMode)
+            {
+                if (saveState(slot, &e)) { menuStatus_->setText(tr("Saved to slot %1").arg(slot)); showStateSlots(true); }
+                else menuStatus_->setText(e);
+            }
+            else
+            {
+                if (loadState(slot, &e)) hideMenu();           // resume straight into the restored state
+                else menuStatus_->setText(e);
+            }
+        });
+        sv->addWidget(b);
+        if (b->isEnabled()) menuButtons_ << b;
+    }
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back);
+    menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
 RetroView::~RetroView() { stop(); }
@@ -220,7 +312,8 @@ int RetroView::menuPadMask() const
     int m = 0;
     if (any(RETRO_DEVICE_ID_JOYPAD_UP))   m |= 1;
     if (any(RETRO_DEVICE_ID_JOYPAD_DOWN)) m |= 2;
-    if (any(RETRO_DEVICE_ID_JOYPAD_A) || any(RETRO_DEVICE_ID_JOYPAD_B)) m |= 4; // either face button confirms
+    if (any(RETRO_DEVICE_ID_JOYPAD_A))    m |= 4; // A confirms
+    if (any(RETRO_DEVICE_ID_JOYPAD_B))    m |= 8; // B confirms on the main page, backs out of the slot grid
     return m;
 }
 
@@ -234,9 +327,10 @@ void RetroView::handleMenuPad()
     if (menuButtons_.isEmpty()) return;
     int idx = menuButtons_.indexOf(qobject_cast<QPushButton*>(focusWidget()));
     if (idx < 0) idx = 0;
+    if (slotsMode_ && (pressed & 8)) { showMainMenu(); return; } // B backs out of the slot grid
     if      (pressed & 1) menuButtons_[(idx + menuButtons_.size() - 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     else if (pressed & 2) menuButtons_[(idx + 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
-    if (pressed & 4)
+    if ((pressed & 4) || (!slotsMode_ && (pressed & 8))) // A always confirms; B also confirms on the main page
     {
         if (auto* b = qobject_cast<QPushButton*>(focusWidget())) b->click();
         else menuButtons_.first()->click();
@@ -314,8 +408,7 @@ void RetroView::showMenu()
     if (!running_) return;
     setPaused(true);
     menuStatus_->clear();
-    menu_->adjustSize();
-    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    showMainMenu();               // always open on the main page (centres + focuses the first button)
     menu_->show();
     menu_->raise();
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason); // arrow keys work at once
@@ -458,6 +551,24 @@ QString RetroView::statePath() const
     return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".state");
 }
 
+QString RetroView::statePath(int slot) const
+{
+    return statePath() + QString::number(slot); // <base>.state1 … .state6 (legacy .state = quick slot fallback)
+}
+
+QString RetroView::thumbPath(int slot) const { return statePath(slot) + QStringLiteral(".png"); }
+
+// A copy of the frame currently on screen (software or hardware path), for a slot thumbnail. Save states are
+// blocked in threaded/split mode, so the worker-frame path isn't needed here.
+QImage RetroView::currentFrameImage()
+{
+    if (hwMode_) return hwImg_;
+    if (!core_.hasFrame()) return QImage();
+    const unsigned w = core_.frameWidth(), h = core_.frameHeight();
+    return QImage(core_.frameBGRA(), static_cast<int>(w), static_cast<int>(h),
+                  static_cast<int>(w * 4), QImage::Format_RGB32).copy();
+}
+
 QString RetroView::sramPath() const
 {
     const QString dir = AppPaths::dataDir() + QStringLiteral("/saves");
@@ -488,7 +599,11 @@ void RetroView::saveSram()
         f.write(reinterpret_cast<const char*>(src), qint64(sz));
 }
 
-bool RetroView::saveState(QString* error)
+// F2/F4 quick save/load act on the current slot (which follows the last slot used in the visual menu).
+bool RetroView::saveState(QString* error) { return saveState(currentSlot_, error); }
+bool RetroView::loadState(QString* error) { return loadState(currentSlot_, error); }
+
+bool RetroView::saveState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
     if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
@@ -498,23 +613,30 @@ bool RetroView::saveState(QString* error)
         if (error) *error = tr("This core doesn't support save states for this game.");
         return false;
     }
-    QFile f(statePath());
+    QFile f(statePath(slot));
     if (!f.open(QIODevice::WriteOnly) ||
         f.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size())) != static_cast<qint64>(data.size()))
     {
         if (error) *error = tr("Couldn't write the save-state file.");
         return false;
     }
-    emit statusMessage(tr("State saved"));
+    f.close();
+    // A thumbnail of the current frame, so the slot menu shows what's in each slot.
+    const QImage img = currentFrameImage();
+    if (!img.isNull()) img.scaledToWidth(240, Qt::SmoothTransformation).save(thumbPath(slot), "PNG");
+    currentSlot_ = slot;
+    emit statusMessage(tr("State saved to slot %1").arg(slot));
     return true;
 }
 
-bool RetroView::loadState(QString* error)
+bool RetroView::loadState(int slot, QString* error)
 {
     if (!running_) { if (error) *error = tr("No game is running."); return false; }
     if (threaded_) { if (error) *error = tr("Save states aren’t available in split screen."); return false; }
-    QFile f(statePath());
-    if (!f.exists()) { if (error) *error = tr("No saved state for this game yet."); return false; }
+    QString path = statePath(slot);
+    if (!QFile::exists(path) && slot == 1 && QFile::exists(statePath())) path = statePath(); // legacy slot
+    QFile f(path);
+    if (!f.exists()) { if (error) *error = tr("No saved state in slot %1 yet.").arg(slot); return false; }
     if (!f.open(QIODevice::ReadOnly)) { if (error) *error = tr("Couldn't read the save-state file."); return false; }
     const QByteArray bytes = f.readAll();
     if (!core_.loadState(reinterpret_cast<const uint8_t*>(bytes.constData()), static_cast<size_t>(bytes.size())))
@@ -522,7 +644,8 @@ bool RetroView::loadState(QString* error)
         if (error) *error = tr("The saved state couldn't be restored (it may be from a different core).");
         return false;
     }
-    emit statusMessage(tr("State loaded"));
+    currentSlot_ = slot;
+    emit statusMessage(tr("State loaded from slot %1").arg(slot));
     return true;
 }
 
@@ -569,8 +692,12 @@ void RetroView::keyPressEvent(QKeyEvent* e)
 {
     if (e->isAutoRepeat()) return;
 
-    // Esc toggles the in-game pause menu (Resume / Save / Load / Exit).
-    if (e->key() == Qt::Key_Escape) { toggleMenu(); return; }
+    // Esc toggles the in-game pause menu; within the slot grid it steps back to the main page first.
+    if (e->key() == Qt::Key_Escape)
+    {
+        if (menu_ && menu_->isVisible() && slotsMode_) { showMainMenu(); return; }
+        toggleMenu(); return;
+    }
 
     // While the pause menu is up, arrow keys move between its buttons and Enter activates one; every other
     // key is swallowed so it never reaches the (paused) game.

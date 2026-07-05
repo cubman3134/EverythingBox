@@ -18,6 +18,7 @@ class QIODevice;
 class QFrame;
 class QLabel;
 class QPushButton;
+class QVBoxLayout;
 class QOpenGLContext;
 class QOffscreenSurface;
 class QOpenGLFramebufferObject;
@@ -35,10 +36,14 @@ public:
     void stop();
     bool running() const { return running_; }
 
-    // Quick save/load to a per-game slot under <app>/states. Return false (with *error set) if the core
-    // can't serialize, nothing is running, or file I/O fails.
+    // Quick save/load (F2/F4) to the current slot under <app>/states. Return false (with *error set) if the
+    // core can't serialize, nothing is running, or file I/O fails.
     bool saveState(QString* error = nullptr);
     bool loadState(QString* error = nullptr);
+    // Save/load a specific numbered slot (1..kStateSlots). saveState also writes a PNG thumbnail of the frame.
+    bool saveState(int slot, QString* error = nullptr);
+    bool loadState(int slot, QString* error = nullptr);
+    static constexpr int kStateSlots = 6;
 
     Gamepad* gamepad() { return &pad_; }  // for the controller-remapping UI
     Keymap*  keymap()  { return &keymap_; } // for the keyboard-remapping UI
@@ -76,7 +81,12 @@ private:
     void toggleMenu();
     void showMenu();
     void hideMenu();
-    QString statePath() const; // <app>/states/<romBaseName>.state
+    void showMainMenu();                // pause menu: main page (Resume / Save / Load / Exit)
+    void showStateSlots(bool saveMode); // pause menu: the slot grid, in save or load mode
+    QImage currentFrameImage();         // a copy of the frame currently on screen, for a slot thumbnail
+    QString statePath() const;          // <app>/states/<romBaseName>.state  (legacy single slot)
+    QString statePath(int slot) const;  // <app>/states/<romBaseName>.stateN
+    QString thumbPath(int slot) const;  // <app>/states/<romBaseName>.stateN.png
     QString sramPath() const;  // <app>/saves/<romBaseName>.srm  (battery-backed in-game saves)
     void loadSram();           // restore battery RAM after a game loads
     void saveSram();           // persist battery RAM (on stop, exit, and periodically)
@@ -125,8 +135,15 @@ private:
     int portsMask_ = -1;      // bitmask of player ports currently enabled on the core (-1 = unset)
 
     QFrame* menu_ = nullptr;        // Esc pause menu overlay
+    QLabel* menuTitle_ = nullptr;   // "Paused" / "Save State" / "Load State"
     QLabel* menuStatus_ = nullptr;  // save/load feedback inside the menu
-    QVector<QPushButton*> menuButtons_; // Resume/Save/Load/Exit, in order, for arrow-key + Enter navigation
+    QWidget* mainPage_ = nullptr;   // the Resume/Save/Load/Exit page
+    QWidget* slotsPage_ = nullptr;  // the state-slot grid page (rebuilt each time it's shown)
+    QVBoxLayout* menuBody_ = nullptr; // holds mainPage_ then slotsPage_
+    bool slotsMode_ = false;        // true while the slot grid (not the main page) is showing
+    int currentSlot_ = 1;           // slot F2/F4 act on; follows the last slot used in the visual menu
+    QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Exit (fixed, on the main page)
+    QVector<QPushButton*> menuButtons_; // the current page's buttons, in order, for arrow-key + Enter navigation
     int menuPadPrev_ = 0;               // previous frame's menu d-pad/confirm mask (edge detection)
     bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
     int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad
