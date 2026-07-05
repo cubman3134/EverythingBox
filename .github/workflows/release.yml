@@ -100,6 +100,7 @@ jobs:
           # Bundle the sample addons + the StreamingAssets the app ships with.
           if (Test-Path native/addons)    { Copy-Item native/addons    "$dist/addons"    -Recurse -Force }
           if (Test-Path native/themes2)   { Copy-Item native/themes2   "$dist/themes2"   -Recurse -Force }
+          Copy-Item native/resources/Uninstall.cmd "$dist/"  # standalone uninstaller (for when the app won't launch)
           Compress-Archive -Path "$dist/*" -DestinationPath MyMediaVault-windows-x64.zip -Force
           # Ship the debug symbols as a SEPARATE asset (not in the app zip — no need to bloat every download by
           # ~25 MB). Keep it to symbolize a crash report from this exact build: match the .pdb to a dump by GUID.
