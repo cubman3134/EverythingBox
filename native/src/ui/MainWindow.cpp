@@ -475,6 +475,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
+    auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
     prevChap->setToolTip(tr("Previous chapter"));
     rewind->setToolTip(tr("Rewind 10s"));
@@ -483,6 +484,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
     subsBtn->setToolTip(tr("Subtitles — pick a track, sync, size, load or download"));
+    shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
@@ -508,10 +510,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
     mc->addWidget(subsBtn);
+    mc->addWidget(shotBtn);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, shotBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -671,6 +674,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
+    connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
@@ -1057,6 +1061,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             if (auto* b = qobject_cast<QAbstractButton*>(focusWidget())) { b->click(); return; }
             player_->togglePause(); return;          // nothing focused -> play/pause
         case Qt::Key_Space: player_->togglePause(); revealMediaControls(); return;
+        case Qt::Key_F12: captureVideoScreenshot(); revealMediaControls(); return;
         case Qt::Key_Backspace:
             player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome(); return;
         default: break;
@@ -3308,6 +3313,16 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
     subCtx_.title = item.title;
     subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
+}
+
+void MainWindow::captureVideoScreenshot()
+{
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/screenshots");
+    QDir().mkpath(dir);
+    const QString path = QStringLiteral("%1/video-%2.png")
+        .arg(dir, QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    player_->takeScreenshot(path);                 // async in mpv; the file lands a moment later
+    notify(tr("Screenshot saved to the screenshots folder."), 3000);
 }
 
 void MainWindow::hideSubtitleMenu()

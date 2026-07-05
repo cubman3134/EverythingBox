@@ -391,6 +391,14 @@ void MpvWidget::addSubtitle(const QString& path)
     mpv_command_async(mpv, 0, cmd); // mpv copies the args
 }
 
+void MpvWidget::takeScreenshot(const QString& path)
+{
+    QByteArray p = path.toUtf8();
+    // "subtitles" = the video frame with rendered subtitles, but without the player's OSD/controls.
+    const char* cmd[] = { "screenshot-to-file", p.constData(), "subtitles", nullptr };
+    mpv_command_async(mpv, 0, cmd); // mpv copies the args
+}
+
 QVector<MpvWidget::SubtitleTrack> MpvWidget::subtitleTracks() const
 {
     QVector<SubtitleTrack> out;

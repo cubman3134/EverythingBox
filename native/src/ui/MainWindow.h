@@ -294,6 +294,7 @@ private:
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
     void showSubtitleMenu();
     void hideSubtitleMenu();
+    void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
     // within a column, Left/Right jump between them - so you reach the settings without walking the track list.

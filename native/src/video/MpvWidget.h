@@ -26,6 +26,7 @@ public:
     void setPosition(double seconds);
     void cycleSubtitle();                     // step through subtitle tracks (… -> off -> 1 -> 2 -> …)
     void addSubtitle(const QString& path);    // load + select an external subtitle file (.srt/.ass/…)
+    void takeScreenshot(const QString& path); // save the current frame (with subtitles) to a PNG file
 
     // One subtitle track in the current file, for building a picker menu.
     struct SubtitleTrack { int id = 0; QString title; QString lang; bool selected = false; };

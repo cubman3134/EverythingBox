@@ -81,8 +81,9 @@ void RetroView::buildMenu()
     auto* load   = new QPushButton(tr("Load State"), mainPage_);
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
+    auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, shot, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -96,8 +97,12 @@ void RetroView::buildMenu()
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
     connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
     connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
+    connect(shot, &QPushButton::clicked, this, [this] {
+        const QString p = captureScreenshot();
+        menuStatus_->setText(p.isEmpty() ? tr("Couldn't save screenshot.")
+                                         : tr("Saved: %1").arg(QFileInfo(p).fileName())); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, cheats, filterBtn_, exit };
+    mainButtons_ = { resume, save, load, cheats, filterBtn_, shot, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -180,6 +185,19 @@ void RetroView::showStateSlots(bool saveMode)
     menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+QString RetroView::captureScreenshot()
+{
+    const QImage img = currentFrameImage(); // the clean source frame (no scaling, no CRT overlay)
+    if (img.isNull()) return QString();
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/screenshots");
+    QDir().mkpath(dir);
+    const QString base = QFileInfo(romPath_).completeBaseName();
+    const QString path = QStringLiteral("%1/%2-%3.png")
+        .arg(dir, base.isEmpty() ? QStringLiteral("screenshot") : base,
+             QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    return img.save(path, "PNG") ? path : QString();
 }
 
 QString RetroView::cheatsPath() const
@@ -999,6 +1017,14 @@ void RetroView::keyPressEvent(QKeyEvent* e)
     // Fast-forward (hold Tab) and rewind (hold R) - reserved hotkeys, kept out of the gameplay keymap.
     if (e->key() == Qt::Key_Tab) { ffKey_ = true; return; }
     if (e->key() == Qt::Key_R)   { rewindKey_ = true; return; }
+    // Screenshot (F12) - saves the clean frame to <app>/screenshots.
+    if (e->key() == Qt::Key_F12)
+    {
+        const QString p = captureScreenshot();
+        emit statusMessage(p.isEmpty() ? tr("Couldn't save screenshot.")
+                                       : tr("Screenshot saved: %1").arg(QFileInfo(p).fileName()));
+        return;
+    }
 
     pressedKeys_.insert(e->key()); // resolved to a (port, button) per the keymap in inputState()
 }

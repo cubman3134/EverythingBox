@@ -103,6 +103,7 @@ private:
     void saveCheats();                  // persist this game's cheats
     void applyCheats();                 // push the enabled cheats into the running core
     QImage currentFrameImage();         // a copy of the frame currently on screen, for a slot thumbnail
+    QString captureScreenshot();        // save the current (clean, unscaled) frame to <app>/screenshots; "" on fail
     QString statePath() const;          // <app>/states/<romBaseName>.state  (legacy single slot)
     QString statePath(int slot) const;  // <app>/states/<romBaseName>.stateN
     QString thumbPath(int slot) const;  // <app>/states/<romBaseName>.stateN.png
