@@ -199,6 +199,9 @@ private:
     bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
     int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad
     void handleMenuPad();               // drive the pause menu from the controller while it's open
+    bool menuComboHeld();               // Start+Select held on any connected pad (opens/closes the menu)
+    void pollMenuPad();                 // non-threaded: keeps the pad driving the menu while the game is paused
+    QTimer* menuPadTimer_ = nullptr;    // runs pollMenuPad() while the menu is open (tick() is stopped then)
 
     int turboMask_[4] = { 0, 0, 0, 0 }; // per port: bit set = that RetroPad button auto-fires
     int turboHalfPeriod_ = 3; // frames the autofire stays on (and off) each cycle
