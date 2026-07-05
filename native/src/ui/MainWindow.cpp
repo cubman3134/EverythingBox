@@ -22,6 +22,7 @@
 #include "../core/EmulatorManager.h"
 #include "../core/AppUpdater.h"
 #include "../core/SubtitleFetcher.h"
+#include "../core/CastManager.h"
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -77,6 +78,7 @@
 #include <QShortcut>
 #include <QKeyEvent>
 #include <QFileDialog>
+#include <QMenu>
 #include <QFileInfo>
 #include <QFile>
 #include <QDir>
@@ -256,6 +258,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Auto-subtitle download: when an eligible video finishes loading with no subtitle in the preferred
     // language, fetch one from OpenSubtitles and hand it to the player. Dormant unless the user configured
     // OpenSubtitles credentials and enabled "show subtitles by default".
+    castMgr_ = new CastManager(this);
+    connect(castMgr_, &CastManager::castStarted, this, [this](const QString& name) {
+        notify(tr("Casting to %1.").arg(name), 4000); });
+    connect(castMgr_, &CastManager::castError, this, [this](const QString& msg) { notify(msg, 6000); });
+    connect(castMgr_, &CastManager::castStopped, this, [this] { notify(tr("Stopped casting."), 3000); });
+
     subFetcher_ = new SubtitleFetcher(this);
     connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
@@ -476,6 +484,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
+    auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
     prevChap->setToolTip(tr("Previous chapter"));
     rewind->setToolTip(tr("Rewind 10s"));
@@ -485,6 +494,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stop->setToolTip(tr("Stop"));
     subsBtn->setToolTip(tr("Subtitles — pick a track, sync, size, load or download"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
+    castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
     // Chapter nav is only meaningful for chaptered media (M4B audiobooks, some videos); hidden otherwise.
     prevChap->hide();
@@ -511,10 +521,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(volume_);
     mc->addWidget(subsBtn);
     mc->addWidget(shotBtn);
+    mc->addWidget(castBtn);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, shotBtn, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, shotBtn, castBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -675,6 +686,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
+    connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
@@ -1751,6 +1763,7 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
 {
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
+    castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -3315,6 +3328,56 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }
 
+// The cast button's popup: kick off discovery, then list found Chromecast / DLNA devices. Selecting one hands
+// it the current stream URL and stops local playback; a "Stop casting" row appears while a cast is active.
+void MainWindow::showCastMenu(QWidget* anchor)
+{
+    revealMediaControls();
+    castMgr_->startDiscovery(); // refresh the device list each time the menu opens
+
+    QMenu menu(this);
+    menu.setStyleSheet(QStringLiteral(
+        "QMenu { background:#1c1c22; color:#e8e8e8; border:1px solid rgba(255,255,255,0.14); padding:6px; }"
+        "QMenu::item { padding:7px 26px; border-radius:6px; } QMenu::item:selected { background:rgba(90,140,255,0.55); }"
+        "QMenu::item:disabled { color:#888; }"
+        "QMenu::separator { height:1px; background:rgba(255,255,255,0.12); margin:6px 8px; }"));
+
+    if (castMgr_->isCasting())
+    {
+        QAction* s = menu.addAction(tr("■  Stop casting to %1").arg(castMgr_->currentDeviceName()));
+        connect(s, &QAction::triggered, this, [this] { castMgr_->stopCasting(); });
+        menu.addSeparator();
+    }
+
+    if (castUrl_.isEmpty() || !(castUrl_.startsWith(QStringLiteral("http"))))
+    {
+        QAction* n = menu.addAction(tr("Nothing castable is playing"));
+        n->setEnabled(false);
+    }
+
+    const QList<CastDevice> devs = castMgr_->devices();
+    if (devs.isEmpty())
+    {
+        QAction* searching = menu.addAction(tr("Searching for devices…"));
+        searching->setEnabled(false);
+    }
+    for (const CastDevice& d : devs)
+    {
+        const QString icon = d.type == CastDevice::Chromecast ? QStringLiteral("📺  ") : QStringLiteral("📡  ");
+        QAction* a = menu.addAction(icon + d.name);
+        const bool ready = !castUrl_.isEmpty() && castUrl_.startsWith(QStringLiteral("http"));
+        a->setEnabled(ready);
+        const CastDevice dev = d;
+        connect(a, &QAction::triggered, this, [this, dev] {
+            player_->stop();                         // hand playback to the device; free the local decoder
+            castMgr_->cast(dev, castUrl_, castTitle_, castMime_);
+        });
+    }
+
+    const QSize sh = menu.sizeHint();
+    menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
+}
+
 void MainWindow::captureVideoScreenshot()
 {
     const QString dir = AppPaths::dataDir() + QStringLiteral("/screenshots");
@@ -3712,6 +3775,8 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const QString rkey = item.id.isEmpty() ? url : item.id;
         beginResume(rkey);
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
+        castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
+        castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();

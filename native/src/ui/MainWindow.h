@@ -289,6 +289,12 @@ private:
     class SubtitleFetcher* subFetcher_ = nullptr;
     struct SubContext { QString imdbStreamId; QString title; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
+
+    // Casting the current stream to a Chromecast / DLNA device on the LAN. castUrl_ etc. hold the currently
+    // playing stream so the picker can hand it to the chosen device.
+    class CastManager* castMgr_ = nullptr;
+    QString castUrl_, castTitle_, castMime_;
+    void showCastMenu(QWidget* anchor);           // device picker popup for the cast button
     // The player bar's single subtitle button opens a full-player overlay panel (Stremio-style): track pick,
     // sync/size, load-from-file, download. subOverlay_ is the scrim+panel (null when closed); the focusable
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
