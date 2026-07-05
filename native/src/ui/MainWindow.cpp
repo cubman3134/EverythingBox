@@ -129,7 +129,6 @@
   #endif
   #include <windows.h>
   #include <shellapi.h>
-  #include <xinput.h> // read the exit hotkey (Start+Select) without holding the pad away from the emulator
   #include <QWinEventNotifier>
 #endif
 
@@ -919,9 +918,8 @@ void MainWindow::pollMenuPad()
 {
     Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
     if (!pad || !pad->available()) return;
-    // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay. A standalone
-    // emulator owns it too — and we've released our SDL handle for it — so don't poll (it would reopen the pad).
-    if (retro_->running() || stack_->currentWidget() == retro_ || (emu_ && emu_->busy())) return;
+    // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay.
+    if (retro_->running() || stack_->currentWidget() == retro_) return;
     // Only act when our window (or its pause menu) is focused, so we never steal input from another app.
     if (!isActiveWindow() && !(escMenu_ && escMenu_->isActiveWindow())) return;
     // Don't fight text entry (a focused search box / key field): let the keyboard handle those.
@@ -1650,7 +1648,6 @@ void MainWindow::ensureEmu()
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         mwLog(QStringLiteral("emu: process exited (code %1)").arg(code));
         stopEmuHotkeyWatch();
-        if (retro_ && retro_->gamepad()) retro_->gamepad()->resume(); // take the controller back for our own menus
         endPlaySession(); // bank the external emulator's play time
 
         if (isMinimized()) // come back to where we were before handing off to the emulator
@@ -1689,7 +1686,6 @@ void MainWindow::ensureEmu()
     connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
         mwLog(QStringLiteral("emu: failed: %1").arg(msg));
         stopEmuHotkeyWatch();
-        if (retro_ && retro_->gamepad()) retro_->gamepad()->resume(); // launch failed — take the controller back
         statusBar()->showMessage(msg, 9000);
         if (stack_->currentWidget() == emuPage_) openHome();
     });
@@ -1725,20 +1721,20 @@ void MainWindow::pollEmuExitHotkey()
     if (!emu_ || !emu_->busy()) { stopEmuHotkeyWatch(); return; }
     bool exitNow = false;
 
-#if defined(Q_OS_WIN)
-    // Controller via XInput: a read-only, multi-reader query. We deliberately do NOT poll our SDL pad here — it's
-    // released (suspend()) while the emulator runs so the emulator gets uncontested input; XInput reads the pad
-    // state without holding the device. Start+Back(Select) on any of the four ports triggers the exit.
-    bool combo = false;
-    for (DWORD i = 0; i < 4 && !combo; ++i)
+    // Controller: Start+Select on any connected pad. Reuse RetroView's Gamepad (idle while a standalone emulator
+    // runs, so borrowing it to poll is free and avoids opening the device twice).
+    if (retro_ && retro_->gamepad() && retro_->gamepad()->available())
     {
-        XINPUT_STATE st;
-        if (XInputGetState(i, &st) == ERROR_SUCCESS)
-            combo = (st.Gamepad.wButtons & XINPUT_GAMEPAD_START) && (st.Gamepad.wButtons & XINPUT_GAMEPAD_BACK);
+        Gamepad* pad = retro_->gamepad();
+        pad->poll();
+        bool combo = false;
+        for (unsigned p = 0; p < Gamepad::kMaxPlayers && !combo; ++p)
+            combo = pad->button(p, RETRO_DEVICE_ID_JOYPAD_START) && pad->button(p, RETRO_DEVICE_ID_JOYPAD_SELECT);
+        if (combo && !emuComboPrev_) exitNow = true;
+        emuComboPrev_ = combo;
     }
-    if (combo && !emuComboPrev_) exitNow = true;
-    emuComboPrev_ = combo;
 
+#if defined(Q_OS_WIN)
     // Keyboard: Qt can't see Esc while the emulator owns focus, so read the global key state.
     const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
     if (esc && !emuEscPrev_) exitNow = true;
@@ -1808,9 +1804,6 @@ void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, con
     retro_->stop();
     book_->persist(); pdf_->persist(); comic_->persist();
     clearAudioQueue();
-    // Release our SDL grip on the controller so the emulator gets uncontested input (an open SDL handle can
-    // starve another app on Windows). We watch the exit hotkey via XInput meanwhile, and reacquire on exit.
-    if (retro_ && retro_->gamepad()) retro_->gamepad()->suspend();
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
     ensureEmuPage();
