@@ -500,7 +500,9 @@ void EmulatorManager::prepareBios(const QString& binDir)
             if (f.open(QIODevice::WriteOnly | QIODevice::Text))
             {
                 QTextStream ts(&f);
-                ts << "[UI]\n" << "SetupWizardIncomplete = false\n\n"
+                // SettingsVersion is mandatory: without it PCSX2's settings-version check fails at startup with
+                // "settings failed to load" and it never boots. SetupWizardIncomplete=false skips the first-run wizard.
+                ts << "[UI]\n" << "SettingsVersion = 1\n" << "SetupWizardIncomplete = false\n\n"
                    << "[Filenames]\n" << "BIOS = " << bios.first().fileName << "\n";
                 f.close();
             }
@@ -1011,10 +1013,13 @@ void EmulatorManager::launch(const QString& binary)
     tmpl.replace(QStringLiteral("{fs}"), launchFullscreen() ? em_.fullscreenArgs : em_.windowedArgs);
 
     QStringList args;
+    // Use the platform's native separators for the ROM path: PCSX2 rejects a forward-slash path on Windows
+    // ("filename does not exist") even though most emulators accept it. No-op on Linux/macOS where / is native.
+    const QString romNative = QDir::toNativeSeparators(rom_);
     const QStringList parts = tmpl.split(QLatin1Char(' '), Qt::SkipEmptyParts); // empties (e.g. blank {fs}) dropped
     for (QString a : parts)
     {
-        if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), rom_);
+        if (a.contains(QStringLiteral("{rom}"))) a.replace(QStringLiteral("{rom}"), romNative);
         if (!a.isEmpty()) args << a; // drop a blank {rom} (a no-game launch, e.g. opening an emulator's own UI)
     }
 
