@@ -78,6 +78,8 @@ bool LibretroCore::loadCore(const std::string& corePath, std::string* error)
     resolve("retro_unserialize", (void**)&retro_unserialize_);
     resolve("retro_get_memory_data", (void**)&retro_get_memory_data_); // for RetroAchievements memory reads
     resolve("retro_get_memory_size", (void**)&retro_get_memory_size_);
+    resolve("retro_cheat_reset", (void**)&retro_cheat_reset_);
+    resolve("retro_cheat_set", (void**)&retro_cheat_set_);
 
     if (!retro_init_ || !retro_run_ || !retro_load_game_ || !retro_get_system_info_)
     { if (error) *error = "core is missing required libretro exports"; unload(); return false; }
@@ -155,6 +157,18 @@ bool LibretroCore::loadState(const uint8_t* data, size_t size)
     // Some cores grow their state between save and load; only sizes >= current are guaranteed loadable.
     if (retro_serialize_size_ && size > retro_serialize_size_()) return false;
     return retro_unserialize_(data, size);
+}
+
+void LibretroCore::cheatReset()
+{
+    if (!gameLoaded_ || !retro_cheat_reset_) return;
+    guardedCall([&] { retro_cheat_reset_(); });
+}
+
+void LibretroCore::cheatSet(unsigned index, bool enabled, const std::string& code)
+{
+    if (!gameLoaded_ || !retro_cheat_set_ || code.empty()) return;
+    guardedCall([&] { retro_cheat_set_(index, enabled, code.c_str()); });
 }
 
 void LibretroCore::unload()

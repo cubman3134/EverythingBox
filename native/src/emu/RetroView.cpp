@@ -22,6 +22,11 @@
 #include <QIcon>
 #include <QPixmap>
 #include <QVBoxLayout>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QJsonDocument>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QThread>
 #include <QOpenGLContext>
 #include <QOffscreenSurface>
@@ -74,9 +79,10 @@ void RetroView::buildMenu()
     auto* resume = new QPushButton(tr("Resume"), mainPage_);
     auto* save   = new QPushButton(tr("Save State"), mainPage_);
     auto* load   = new QPushButton(tr("Load State"), mainPage_);
+    auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, filterBtn_, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -88,9 +94,10 @@ void RetroView::buildMenu()
     connect(exit,   &QPushButton::clicked, this, [this] { hideMenu(); emit exitRequested(); });
     connect(save,   &QPushButton::clicked, this, [this] { showStateSlots(true); });
     connect(load,   &QPushButton::clicked, this, [this] { showStateSlots(false); });
+    connect(cheats, &QPushButton::clicked, this, [this] { showCheats(); });
     connect(filterBtn_, &QPushButton::clicked, this, [this] { cycleVideoFilter(); filterBtn_->setText(videoFilterLabel()); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, filterBtn_, exit };
+    mainButtons_ = { resume, save, load, cheats, filterBtn_, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -163,6 +170,133 @@ void RetroView::showStateSlots(bool saveMode)
         sv->addWidget(b);
         if (b->isEnabled()) menuButtons_ << b;
     }
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back);
+    menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+QString RetroView::cheatsPath() const
+{
+    const QString dir = AppPaths::dataDir() + QStringLiteral("/cheats");
+    QDir().mkpath(dir);
+    return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".json");
+}
+
+void RetroView::loadCheats()
+{
+    cheats_.clear();
+    QFile f(cheatsPath());
+    if (!f.open(QIODevice::ReadOnly)) return;
+    const QJsonArray arr = QJsonDocument::fromJson(f.readAll()).array();
+    for (const QJsonValue& v : arr)
+    {
+        const QJsonObject o = v.toObject();
+        Cheat c;
+        c.desc = o.value(QStringLiteral("desc")).toString();
+        c.code = o.value(QStringLiteral("code")).toString();
+        c.enabled = o.value(QStringLiteral("enabled")).toBool(true);
+        if (!c.code.isEmpty()) cheats_ << c;
+    }
+}
+
+void RetroView::saveCheats()
+{
+    QJsonArray arr;
+    for (const Cheat& c : cheats_)
+        arr.append(QJsonObject{ { QStringLiteral("desc"), c.desc },
+                                { QStringLiteral("code"), c.code },
+                                { QStringLiteral("enabled"), c.enabled } });
+    QFile f(cheatsPath());
+    if (f.open(QIODevice::WriteOnly)) f.write(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+// Reset the core's cheat set and push the enabled ones, numbered sequentially.
+void RetroView::applyCheats()
+{
+    if (!running_) return;
+    core_.cheatReset();
+    unsigned idx = 0;
+    for (const Cheat& c : cheats_)
+        if (c.enabled && !c.code.isEmpty()) core_.cheatSet(idx++, true, c.code.toStdString());
+}
+
+void RetroView::addCheatDialog()
+{
+    bool ok = false;
+    const QString code = QInputDialog::getText(this, tr("Add Cheat"),
+        tr("Cheat code (Game Genie / Action Replay / raw, as the core expects).\n"
+           "Join multi-line codes with '+'."), QLineEdit::Normal, QString(), &ok).trimmed();
+    if (!ok || code.isEmpty()) { showCheats(); return; }
+    const QString desc = QInputDialog::getText(this, tr("Add Cheat"),
+        tr("Description (optional):"), QLineEdit::Normal, QString(), &ok).trimmed();
+    cheats_.push_back({ desc, code, true });
+    saveCheats();
+    applyCheats();
+    showCheats();
+}
+
+// The per-game cheat list: each cheat toggles on click; plus add / remove-all / back.
+void RetroView::showCheats()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Cheats"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    if (!core_.supportsCheats())
+    {
+        auto* note = new QLabel(tr("This core doesn't support cheats."), slotsPage_);
+        note->setStyleSheet(QStringLiteral("color:#999; font-size:13px;"));
+        note->setWordWrap(true);
+        sv->addWidget(note);
+    }
+    else
+    {
+        for (int i = 0; i < cheats_.size(); ++i)
+        {
+            const Cheat& c = cheats_[i];
+            const QString name = c.desc.isEmpty() ? c.code : c.desc;
+            auto* b = new QPushButton((c.enabled ? QStringLiteral("✓  ") : QStringLiteral("○  ")) + name, slotsPage_);
+            b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
+            connect(b, &QPushButton::clicked, this, [this, i] {
+                if (i < cheats_.size()) { cheats_[i].enabled = !cheats_[i].enabled; saveCheats(); applyCheats(); showCheats(); }
+            });
+            sv->addWidget(b);
+            menuButtons_ << b;
+        }
+        if (cheats_.isEmpty())
+        {
+            auto* none = new QLabel(tr("No cheats yet. Add one below."), slotsPage_);
+            none->setStyleSheet(QStringLiteral("color:#999; font-size:13px;"));
+            sv->addWidget(none);
+        }
+        auto* add = new QPushButton(tr("＋  Add cheat…"), slotsPage_);
+        connect(add, &QPushButton::clicked, this, [this] { addCheatDialog(); });
+        sv->addWidget(add);
+        menuButtons_ << add;
+        if (!cheats_.isEmpty())
+        {
+            auto* clear = new QPushButton(tr("🗑  Remove all"), slotsPage_);
+            connect(clear, &QPushButton::clicked, this, [this] { cheats_.clear(); saveCheats(); applyCheats(); showCheats(); });
+            sv->addWidget(clear);
+            menuButtons_ << clear;
+        }
+    }
+
     auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
     connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
     sv->addWidget(back);
@@ -306,6 +440,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     paused_ = false;
     running_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
+    loadCheats(); applyCheats(); // this game's saved cheats, pushed into the core
     setFocus();
     // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
     if (ach_)

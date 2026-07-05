@@ -42,6 +42,13 @@ public:
     bool saveState(std::vector<uint8_t>& out);
     bool loadState(const uint8_t* data, size_t size);
 
+    // Cheats (libretro cheat API). cheatReset() clears all; cheatSet() enables/updates the code at an index
+    // (Game Genie / Action Replay / raw, format depends on the core). Frontend re-applies the whole enabled
+    // set after a reset whenever the list changes. No-ops if the core doesn't export the cheat functions.
+    void cheatReset();
+    void cheatSet(unsigned index, bool enabled, const std::string& code);
+    bool supportsCheats() const { return retro_cheat_set_ != nullptr; }
+
     bool coreLoaded() const { return handle_ != nullptr; }
     bool gameLoaded() const { return gameLoaded_; }
     bool crashed() const { return crashed_; } // a core hard-faulted during runFrame(); stop using it
@@ -118,6 +125,8 @@ private:
     size_t (*retro_serialize_size_)() = nullptr;
     bool (*retro_serialize_)(void*, size_t) = nullptr;
     bool (*retro_unserialize_)(const void*, size_t) = nullptr;
+    void (*retro_cheat_reset_)() = nullptr;
+    void (*retro_cheat_set_)(unsigned, bool, const char*) = nullptr;
     void* (*retro_get_memory_data_)(unsigned) = nullptr;
     size_t (*retro_get_memory_size_)(unsigned) = nullptr;
 

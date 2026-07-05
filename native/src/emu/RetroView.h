@@ -96,6 +96,12 @@ private:
     void hideMenu();
     void showMainMenu();                // pause menu: main page (Resume / Save / Load / Exit)
     void showStateSlots(bool saveMode); // pause menu: the slot grid, in save or load mode
+    void showCheats();                  // pause menu: the per-game cheat list (toggle / add / remove)
+    void addCheatDialog();              // prompt for a new cheat code + description
+    QString cheatsPath() const;         // <app>/cheats/<romBaseName>.json
+    void loadCheats();                  // read this game's cheats from disk
+    void saveCheats();                  // persist this game's cheats
+    void applyCheats();                 // push the enabled cheats into the running core
     QImage currentFrameImage();         // a copy of the frame currently on screen, for a slot thumbnail
     QString statePath() const;          // <app>/states/<romBaseName>.state  (legacy single slot)
     QString statePath(int slot) const;  // <app>/states/<romBaseName>.stateN
@@ -158,6 +164,9 @@ private:
     QVector<QPushButton*> mainButtons_; // Resume/Save/Load/Filter/Exit (fixed, on the main page)
     QVector<QPushButton*> menuButtons_; // the current page's buttons, in order, for arrow-key + Enter navigation
     QPushButton* filterBtn_ = nullptr;  // the "Video Filter: X" cycle button on the main page
+
+    struct Cheat { QString desc; QString code; bool enabled = true; }; // one per-game cheat
+    QVector<Cheat> cheats_;             // this game's cheats (persisted per ROM)
 
     VideoFilter filter_ = FilterOff;    // active retro filter
     QImage crtOverlay_;                 // cached filter overlay (rebuilt on size/source/filter change)
