@@ -893,9 +893,14 @@ void MainWindow::sendNavKey(int key)
 {
     auto deliver = [](QObject* target, int k) {
         if (!target) return;
+        // The press can delete the target: a confirm key on a menu row runs its handler synchronously, and
+        // opening a new panel (showPanel) deletes the focused row. Guard with a QPointer so we don't then send
+        // the release to a freed object — that dereferenced a dangling receiver in QCoreApplication and crashed.
+        QPointer<QObject> guard(target);
         QKeyEvent press(QEvent::KeyPress, k, Qt::NoModifier);
-        QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &press);
+        if (!guard) return;
+        QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &release);
     };
     // The app pause menu is a top-level window and owns input while it's open.
@@ -4395,6 +4400,10 @@ void MainWindow::onThemeChanged(const QColor& background, const QColor& accent)
 void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxLayout*)>& build,
                            const std::function<void()>& onBack)
 {
+    // Any panel we show replaces the previous content (deleting its widgets). The Downloads panel keeps live
+    // pointers to its progress bars; clear the "is-open" flag here so a stray download tick can never touch the
+    // freed widgets of a panel we've navigated away from. openDownloadManager re-sets it once it has rebuilt.
+    dlPanelOpen_ = false;
     panelTitle_->setText(title);
     panelOnBack_ = onBack;
     auto* content = new QWidget;
@@ -4533,7 +4542,6 @@ static QString downloadStatusText(const DownloadJob& j)
 // a controller D-pad, or the mouse. Rebuilt on state changes; progress ticks update the bars in place.
 void MainWindow::openDownloadManager()
 {
-    dlPanelOpen_ = true;
     dlBars_.clear();
     dlStatus_.clear();
 
@@ -4634,6 +4642,7 @@ void MainWindow::openDownloadManager()
         dlPanelOpen_ = false;
         openSettingsHub();
     });
+    dlPanelOpen_ = true; // set after showPanel (which clears it); the bars are now built and safe to update live
 }
 
 // Refresh a single job's progress bar + status line in place (called on every jobProgress tick — cheap, and it
