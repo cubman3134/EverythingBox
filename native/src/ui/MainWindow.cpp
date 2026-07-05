@@ -1494,6 +1494,43 @@ void MainWindow::openGame()
     openGamePath(rom);
 }
 
+// A disc dumped as a descriptor + raw tracks (Redump: "Game.cue" + "Game (Track N).bin"; or a GDI dump: a
+// ".gdi" + "trackNN.bin/.raw") must be booted via the .cue/.gdi — handing the emulator a raw data track mounts
+// nothing and it exits immediately (the Flycast "process exited (code 0)" symptom). If `rom` is such a track,
+// return its descriptor; otherwise return `rom` unchanged. Safe for direct images (.iso/.chd/.cdi) and for a
+// lone .bin with no descriptor beside it (e.g. an Atari 2600 cart), which are left untouched.
+static QString resolveDiscDescriptor(const QString& rom)
+{
+    const QFileInfo fi(rom);
+    static const QSet<QString> trackExts = { QStringLiteral("bin"), QStringLiteral("img"), QStringLiteral("raw") };
+    if (!trackExts.contains(fi.suffix().toLower())) return rom;
+
+    const QFileInfoList descs = fi.absoluteDir().entryInfoList(
+        { QStringLiteral("*.cue"), QStringLiteral("*.gdi") }, QDir::Files);
+    if (descs.isEmpty()) return rom;
+
+    const QString binName = fi.fileName();
+    // 1) A descriptor that textually references this exact track file is definitive (handles GDI dumps whose
+    //    track names — track03.bin — don't resemble the .gdi's name, and multi-.cue folders).
+    for (const QFileInfo& d : descs)
+    {
+        QFile f(d.absoluteFilePath());
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+        if (QString::fromUtf8(f.read(1 << 20)).contains(binName, Qt::CaseInsensitive))
+            return d.absoluteFilePath();
+    }
+    // 2) Else match by name: strip a trailing " (Track N)" and compare base names (Redump layout).
+    QString base = fi.completeBaseName();
+    base.remove(QRegularExpression(QStringLiteral("\\s*\\(Track\\s*\\d+\\)\\s*$"),
+                                   QRegularExpression::CaseInsensitiveOption));
+    for (const QFileInfo& d : descs)
+        if (d.completeBaseName().compare(base, Qt::CaseInsensitive) == 0) return d.absoluteFilePath();
+
+    // No positive evidence this .bin belongs to any descriptor here (it may be a cart, e.g. an Atari 2600
+    // .bin sitting next to an unrelated .cue) — leave it as-is rather than redirect to the wrong disc.
+    return rom;
+}
+
 void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb, const QString& key,
                              const QString& systemHint)
 {
@@ -1526,9 +1563,6 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         return;
     }
 
-    // The Recent entry shows the catalog item's name/cover when we have them; otherwise the file name. A
-    // remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
-    const QString recentTitle = title.isEmpty() ? QFileInfo(rom).completeBaseName() : title;
     const QString ext = QFileInfo(rom).suffix().toLower();
     // Prefer the console/platform the game was opened from (when known): it disambiguates extensions shared
     // across systems (PSP .iso vs GameCube .iso, PSP .pbp vs PlayStation .pbp). Fall back to the extension.
@@ -1552,6 +1586,17 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         return;
     }
 
+    // If the user opened a raw disc track (a "(Track N).bin" / GDI track), boot its .cue/.gdi descriptor instead —
+    // the emulator can't mount a bare track. No-op for direct images and lone .bin carts. Covers cores + externals.
+    const QString launchRom = resolveDiscDescriptor(rom);
+    if (launchRom != rom)
+        mwLog(QStringLiteral("game: track \"%1\" -> disc descriptor \"%2\"")
+                  .arg(QFileInfo(rom).fileName(), QFileInfo(launchRom).fileName()));
+
+    // The Recent entry shows the catalog item's name/cover when we have them; otherwise the descriptor's file
+    // name. A remote ROM is cached under a hashed file name, so without the passed title it would show as that hash.
+    const QString recentTitle = title.isEmpty() ? QFileInfo(launchRom).completeBaseName() : title;
+
     // Standalone-emulator systems (GameCube/Wii → Dolphin) launch an external process instead of a core.
     // Not possible on Android (the sandbox can't spawn downloaded desktop executables - see android-port.md).
     if (!sys->externalEmulator.isEmpty())
@@ -1560,7 +1605,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         statusBar()->showMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
                                      .arg(sys->name), 6000);
 #else
-        launchExternalGame(sys, rom, recentTitle, thumb, key);
+        launchExternalGame(sys, launchRom, recentTitle, thumb, key);
 #endif
         return;
     }
@@ -1595,9 +1640,9 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     if (splitTarget_)
     {
         mwLog(QStringLiteral("game: launching in split pane"));
-        splitTarget_->openGame(corePath, rom, core);
-        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
-        PlayStats::markPlayed(PlayStats::identity(key, rom)); // split panes aren't session-timed; stamp last-played
+        splitTarget_->openGame(corePath, launchRom, core);
+        RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
+        PlayStats::markPlayed(PlayStats::identity(key, launchRom)); // split panes aren't session-timed; stamp last-played
         finishSplitOpen();
         return;
     }
@@ -1608,12 +1653,12 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     comic_->persist();
     clearAudioQueue();
     QString err;
-    if (retro_->openGame(corePath, rom, core, &err))
+    if (retro_->openGame(corePath, launchRom, core, &err))
     {
         mwLog(QStringLiteral("game: running \"%1\"").arg(recentTitle));
         stack_->setCurrentWidget(retro_);
-        RecentStore::add({ rom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
-        beginPlaySession(PlayStats::identity(key, rom));
+        RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, sys->id });
+        beginPlaySession(PlayStats::identity(key, launchRom));
     }
     else
     {
