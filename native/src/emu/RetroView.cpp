@@ -1,4 +1,5 @@
 #include "RetroView.h"
+#include "NetplaySession.h"
 #include "../core/AppPaths.h"
 #include "../core/CoreManager.h"
 #include "../core/Settings.h"
@@ -27,6 +28,9 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QNetworkInterface>
+#include <QHostAddress>
+#include <QAbstractSocket>
 #include <QThread>
 #include <QOpenGLContext>
 #include <QOffscreenSurface>
@@ -82,8 +86,9 @@ void RetroView::buildMenu()
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
+    auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, shot, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -101,8 +106,9 @@ void RetroView::buildMenu()
         const QString p = captureScreenshot();
         menuStatus_->setText(p.isEmpty() ? tr("Couldn't save screenshot.")
                                          : tr("Saved: %1").arg(QFileInfo(p).fileName())); });
+    connect(netp, &QPushButton::clicked, this, [this] { showNetplay(); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, cheats, filterBtn_, shot, exit };
+    mainButtons_ = { resume, save, load, cheats, filterBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -198,6 +204,64 @@ QString RetroView::captureScreenshot()
         .arg(dir, base.isEmpty() ? QStringLiteral("screenshot") : base,
              QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
     return img.save(path, "PNG") ? path : QString();
+}
+
+// Pause-menu sub-page: host a game or join one. Both sides must have the same game + core already loaded.
+void RetroView::showNetplay()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Netplay"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    auto* note = new QLabel(tr("2-player over your local network. Both players must already have the SAME game "
+                               "and core loaded; the host's state syncs to player 2."), slotsPage_);
+    note->setStyleSheet(QStringLiteral("color:#999;font-size:12px;")); note->setWordWrap(true);
+    sv->addWidget(note);
+
+    QString ip;
+    for (const QHostAddress& a : QNetworkInterface::allAddresses())
+        if (a.protocol() == QAbstractSocket::IPv4Protocol && !a.isLoopback()) { ip = a.toString(); break; }
+
+    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }")); return b; };
+
+    auto* hostBtn = flat(new QPushButton(tr("Host game  (you are Player 1)"), slotsPage_));
+    connect(hostBtn, &QPushButton::clicked, this, [this, ip] {
+        startNetplay(true);
+        if (menuStatus_)
+            menuStatus_->setText(tr("Waiting for player 2 — join %1 : 55420").arg(ip.isEmpty() ? tr("your IP") : ip)); });
+    sv->addWidget(hostBtn); menuButtons_ << hostBtn;
+
+    auto* joinBtn = flat(new QPushButton(tr("Join game…  (Player 2)"), slotsPage_));
+    connect(joinBtn, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString host = QInputDialog::getText(this, tr("Join Netplay"), tr("Host's IP address:"),
+                                                    QLineEdit::Normal, QString(), &ok).trimmed();
+        if (ok && !host.isEmpty()) startNetplay(false, host); });
+    sv->addWidget(joinBtn); menuButtons_ << joinBtn;
+
+    if (netActive_ || (net_ && net_->active()))
+    {
+        auto* leave = flat(new QPushButton(tr("Leave netplay"), slotsPage_));
+        connect(leave, &QPushButton::clicked, this, [this] { if (net_) net_->stop(); netActive_ = false; showMainMenu(); });
+        sv->addWidget(leave); menuButtons_ << leave;
+    }
+
+    auto* back = flat(new QPushButton(tr("‹ Back"), slotsPage_));
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back); menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
 QString RetroView::cheatsPath() const
@@ -443,6 +507,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         return false;
     }
     romPath_ = romPath;
+    coreName_ = coreName;
     // A GL/GLES core (N64 with GLideN64, Beetle PSX HW, Flycast, ...) asks for hardware rendering during
     // loadGame. Stand up the offscreen GL context + FBO now, before the first frame. HW rendering runs on the
     // GUI thread (one GL context), so a split-pane HW core drops out of threaded mode.
@@ -607,6 +672,9 @@ void RetroView::stop()
     stopEmu();          // stop the GUI timer or the worker thread (+ its audio); no core access afterward
     paused_ = false;
     hideMenu();
+    if (net_) net_->stop();
+    netActive_ = false;
+    netLocalInputs_.clear();
     pressedKeys_.clear();
     ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
     rewindBuf_.clear();
@@ -706,6 +774,77 @@ void RetroView::captureRewind()
     }
 }
 
+// This peer's RetroPad button mask, read from its own port-0 controls (keyboard + pad, with turbo applied).
+quint16 RetroView::captureLocalButtons()
+{
+    quint16 m = 0;
+    for (unsigned id = 0; id < 16; ++id)
+        if (resolveInput(0, RETRO_DEVICE_JOYPAD, 0, id)) m |= quint16(1u << id);
+    return m;
+}
+
+// The netplay frame loop: generate + send local input a few frames ahead, then advance the core only for
+// frames where BOTH peers' inputs have arrived (lockstep). Stalls (advances nothing) if the peer is behind.
+void RetroView::netTick()
+{
+    if (!net_ || !net_->ready()) { update(); return; }
+    while (netGenFrame_ <= netFrame_ + kNetDelay)
+    {
+        const quint16 b = captureLocalButtons();
+        netLocalInputs_.insert(netGenFrame_, b);
+        net_->sendLocalInput(netGenFrame_, b);
+        netGenFrame_++;
+    }
+    int advanced = 0;
+    quint16 rb = 0;
+    while (advanced < 8 && netLocalInputs_.contains(netFrame_) && net_->remoteInput(netFrame_, rb))
+    {
+        netCurLocal_  = netLocalInputs_.value(netFrame_);
+        netCurRemote_ = rb;
+        if (!runOneCoreFrame()) return; // core crashed -> stop()
+        netFrame_++;
+        advanced++;
+        if (netFrame_ > quint32(kNetDelay + 2)) // prune inputs we'll never need again
+        {
+            netLocalInputs_.remove(netFrame_ - kNetDelay - 2);
+            net_->pruneBefore(netFrame_ - kNetDelay - 2);
+        }
+    }
+    update();
+}
+
+void RetroView::startNetplay(bool asHost, const QString& hostAddr)
+{
+    if (!running_ || threaded_) return;
+    if (!net_)
+    {
+        net_ = new NetplaySession(this);
+        net_->serializeState = [this] {
+            std::vector<uint8_t> s; core_.saveState(s);
+            return QByteArray(reinterpret_cast<const char*>(s.data()), int(s.size())); };
+        net_->applyState = [this](const QByteArray& b) {
+            core_.loadState(reinterpret_cast<const uint8_t*>(b.constData()), size_t(b.size())); };
+        connect(net_, &NetplaySession::status, this, [this](const QString& m) {
+            if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(m);
+            emit statusMessage(m); });
+        connect(net_, &NetplaySession::started, this, [this] {
+            netActive_ = true; netFrame_ = netGenFrame_ = 0; netCurLocal_ = netCurRemote_ = 0;
+            netLocalInputs_.clear();
+            netLocalPort_  = net_->isHost() ? 0 : 1;
+            netRemotePort_ = net_->isHost() ? 1 : 0;
+            hideMenu(); // unpause into the lockstep loop
+            emit statusMessage(tr("Netplay started — you are Player %1.").arg(netLocalPort_ + 1)); });
+        connect(net_, &NetplaySession::ended, this, [this](const QString& reason) {
+            netActive_ = false;
+            if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(reason);
+            emit statusMessage(tr("Netplay ended: %1").arg(reason)); });
+    }
+    net_->gameId = QFileInfo(romPath_).completeBaseName() + QStringLiteral("|") + QString::number(QFileInfo(romPath_).size());
+    net_->coreName = coreName_;
+    if (asHost) net_->host(55420);
+    else        net_->join(hostAddr, 55420);
+}
+
 void RetroView::tick()
 {
     if (!running_) return;
@@ -714,6 +853,8 @@ void RetroView::tick()
     // Advance the autofire phase: on for turboHalfPeriod_ frames, then off for the same.
     if (++turboCounter_ >= 2 * turboHalfPeriod_) turboCounter_ = 0;
     turboOn_ = turboCounter_ < turboHalfPeriod_;
+
+    if (netActive_) { netTick(); return; } // netplay drives frame pacing itself (lockstep); no ff/rewind
 
     // Resolve fast-forward / rewind from the keyboard (Tab / R) or a controller combo (Select+R2 / Select+L2).
     auto anyPad = [this](unsigned id) {
@@ -1047,6 +1188,16 @@ int16_t RetroView::inputState(unsigned port, unsigned device, unsigned index, un
         QMutexLocker lk(&inputMutex_);
         if (device == RETRO_DEVICE_JOYPAD) return (snapBtn_[port] >> id) & 1;
         if (device == RETRO_DEVICE_ANALOG && index < 2 && id < 2) return snapAxis_[port][index][id];
+        return 0;
+    }
+    // Netplay: the core reads both players from the synced input buffers, not the live devices (digital only).
+    if (netActive_ && net_ && net_->ready())
+    {
+        if (device == RETRO_DEVICE_JOYPAD)
+        {
+            if (port == netLocalPort_)  return (netCurLocal_  >> id) & 1;
+            if (port == netRemotePort_) return (netCurRemote_ >> id) & 1;
+        }
         return 0;
     }
     return resolveInput(port, device, index, id);

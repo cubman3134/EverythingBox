@@ -10,6 +10,7 @@
 #include <deque>
 #include <vector>
 #include <cstdint>
+#include <QHash>
 #include "LibretroCore.h"   // mymediavault_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
@@ -25,6 +26,7 @@ class QVBoxLayout;
 class QOpenGLContext;
 class QOffscreenSurface;
 class QOpenGLFramebufferObject;
+class NetplaySession;
 
 class RetroView : public QWidget
 {
@@ -87,6 +89,19 @@ private:
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
     void captureRewind();      // snapshot the current state into the rewind ring buffer (bounded by bytes)
+
+    // ---- netplay (2-player LAN lockstep; full-screen only) ----
+    void showNetplay();                 // pause-menu sub-page: Host / Join
+    void startNetplay(bool asHost, const QString& hostAddr = QString());
+    void netTick();                     // the frame loop while netplay is active
+    quint16 captureLocalButtons();      // this peer's RetroPad button mask (port-0 controls)
+    NetplaySession* net_ = nullptr;
+    bool netActive_ = false;
+    unsigned netLocalPort_ = 0, netRemotePort_ = 1;
+    quint32 netFrame_ = 0, netGenFrame_ = 0;
+    quint16 netCurLocal_ = 0, netCurRemote_ = 0;
+    QHash<quint32, quint16> netLocalInputs_;
+    static constexpr int kNetDelay = 3; // input-delay frames
     void startEmu();           // begin the frame loop after a game loads (GUI timer or worker thread)
     void stopEmu();            // stop the loop / tear down the worker thread
     void publishFrame();       // copy the core's frame for the GUI to paint (threaded mode)
@@ -132,6 +147,7 @@ private:
     Gamepad pad_;             // physical controller (SDL2); merged with the keyboard
     Keymap keymap_;           // keyboard -> RetroPad (remappable)
     QString romPath_;         // current content, for naming its save-state slot
+    QString coreName_;        // the bare core id of the running game (for the netplay handshake)
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
     bool running_ = false;
