@@ -62,7 +62,11 @@ void RetroView::buildMenu()
     menu_->setObjectName(QStringLiteral("emuMenu"));
     menu_->setStyleSheet(QStringLiteral(
         "#emuMenu { background: rgba(20,20,24,0.94); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; }"
-        "#emuMenu QPushButton { padding: 9px 18px; font-size: 15px; }"
+        "#emuMenu QPushButton { padding: 9px 18px; font-size: 15px; color:#e8e8e8; background: transparent;"
+        " border: 1px solid transparent; border-radius: 6px; }"
+        // The selected entry (keyboard or controller) is highlighted so you can see where you are.
+        "#emuMenu QPushButton:focus { background: rgba(90,140,255,0.85); border: 1px solid rgba(255,255,255,0.6); }"
+        "#emuMenu QPushButton:hover { background: rgba(90,140,255,0.35); }"
         "#emuMenu QLabel { color: #e8e8e8; }"));
     auto* v = new QVBoxLayout(menu_);
     v->setContentsMargins(20, 18, 20, 18);
@@ -239,7 +243,7 @@ void RetroView::showDisk()
     sv->setContentsMargins(0, 0, 0, 0);
     sv->setSpacing(6);
     menuButtons_.clear();
-    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }")); return b; };
+    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }")); return b; };
 
     const unsigned count = core_.diskCount();
     const unsigned cur = core_.diskIndex();
@@ -316,7 +320,7 @@ void RetroView::showCoreOptions()
         if (opt.values.size() < 2) continue; // a fixed/1-choice option isn't worth a row
         const std::string key = opt.key;
         auto* b = new QPushButton(label(opt, core_.optionValue(key)), host);
-        b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
+        b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
         b->setToolTip(QString::fromStdString(opt.info));
         connect(b, &QPushButton::clicked, this, [this, key, opt, b, label] {
             // Advance to the next value in the option's list (wrapping), apply live, and persist per-core.
@@ -341,7 +345,7 @@ void RetroView::showCoreOptions()
     sv->addWidget(note);
 
     auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
-    back->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
+    back->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
     connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
     sv->addWidget(back); menuButtons_ << back;
 
@@ -375,7 +379,7 @@ void RetroView::showNetplay()
     for (const QHostAddress& a : QNetworkInterface::allAddresses())
         if (a.protocol() == QAbstractSocket::IPv4Protocol && !a.isLoopback()) { ip = a.toString(); break; }
 
-    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }")); return b; };
+    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }")); return b; };
 
     auto* hostBtn = flat(new QPushButton(tr("Host game  (you are Player 1)"), slotsPage_));
     connect(hostBtn, &QPushButton::clicked, this, [this, ip] {
@@ -499,7 +503,7 @@ void RetroView::showCheats()
             const Cheat& c = cheats_[i];
             const QString name = c.desc.isEmpty() ? c.code : c.desc;
             auto* b = new QPushButton((c.enabled ? QStringLiteral("✓  ") : QStringLiteral("○  ")) + name, slotsPage_);
-            b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
+            b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; border-radius:6px; } QPushButton:focus { background: rgba(90,140,255,0.85); border:1px solid rgba(255,255,255,0.6); }"));
             connect(b, &QPushButton::clicked, this, [this, i] {
                 if (i < cheats_.size()) { cheats_[i].enabled = !cheats_[i].enabled; saveCheats(); applyCheats(); showCheats(); }
             });
