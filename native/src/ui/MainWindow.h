@@ -287,6 +287,14 @@ private:
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
+    // "Continue watching" cloud sync: a small resume+recent JSON file, pulled+merged on startup and pushed
+    // (debounced) when a position changes — separate from the heavy state bundle so it stays timely across devices.
+    QTimer* progressSyncTimer_ = nullptr;
+    void scheduleProgressSync();          // (re)arm the debounced push after a resume/recent change
+    void pushProgressNow();               // serialize local progress + upload the small JSON to Drive
+    void pullAndMergeProgress();          // download remote progress + merge into local, then refresh the home view
+    QByteArray serializeProgress() const; // current resume positions + per-profile recent lists -> JSON
+    void mergeProgress(const QByteArray& json); // merge remote JSON into local by recency (never deletes local)
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
 
     class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place

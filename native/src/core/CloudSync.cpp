@@ -549,3 +549,27 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
         });
     });
 }
+
+static const char* kProgressName = "mymediavault-progress.json";
+
+void CloudSync::pullProgress(std::function<void(bool, const QByteArray&)> cb)
+{
+    ensureFolder([this, cb](const QString& folderId) {
+        if (folderId.isEmpty()) { cb(false, QByteArray()); return; }
+        findFile(folderId, QString::fromLatin1(kProgressName), [this, cb](const QString& id, const QString&, const QString&) {
+            if (id.isEmpty()) { cb(true, QByteArray()); return; } // no progress file yet — a valid "nothing to merge"
+            downloadFile(id, [cb](bool ok, const QByteArray& data) { cb(ok, data); });
+        });
+    });
+}
+
+void CloudSync::pushProgress(const QByteArray& json, std::function<void(bool)> cb)
+{
+    ensureFolder([this, json, cb](const QString& folderId) {
+        if (folderId.isEmpty()) { cb(false); return; }
+        findFile(folderId, QString::fromLatin1(kProgressName), [this, folderId, json, cb](const QString& id, const QString&, const QString&) {
+            uploadFile(folderId, id, QString::fromLatin1(kProgressName), QStringLiteral("application/json"), json,
+                       QString(), [cb](const QString& newId) { cb(!newId.isEmpty()); });
+        });
+    });
+}

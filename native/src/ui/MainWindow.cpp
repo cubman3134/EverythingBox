@@ -98,7 +98,11 @@
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <algorithm>
 #include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 
 #include "miniz.h"
 
@@ -737,6 +741,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
     showHomeScreen(); // the catalog landing screen (classic, or the themed home if enabled) is shown first
+
+    // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
+    // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
+    QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
@@ -1449,8 +1457,10 @@ void MainWindow::persistResume()
     store().setValue(k + QStringLiteral("pos"), audioPos_);
     store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
     store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
+    store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
     store().sync();
     lastSavedPos_ = audioPos_;
+    scheduleProgressSync(); // push this position to the cloud "continue watching" file (debounced)
 }
 
 void MainWindow::finishResume()
@@ -5299,9 +5309,124 @@ void MainWindow::cloudSyncNow()
     });
 }
 
+// ---- "Continue watching" cross-device sync ---------------------------------------------------------------
+// Resume positions ("resume/<hash>/{pos,dur,ts,title}") and the per-profile recent lists ("recent/<id>/items")
+// both already live in the ini; this syncs JUST those, in a small file pushed far more often than the heavy
+// state bundle, and MERGES on pull (by recency) so two devices' progress combine instead of clobbering.
+
+QByteArray MainWindow::serializeProgress() const
+{
+    QJsonObject resume, recent;
+    for (const QString& key : store().allKeys())
+    {
+        if (key.startsWith(QStringLiteral("resume/")))
+        {
+            const QString rest = key.mid(7);       // "<hash>/<field>"
+            const int slash = rest.indexOf(QLatin1Char('/'));
+            if (slash <= 0) continue;
+            const QString hash = rest.left(slash), field = rest.mid(slash + 1);
+            QJsonObject e = resume.value(hash).toObject();
+            if      (field == QStringLiteral("pos"))   e.insert(field, store().value(key).toDouble());
+            else if (field == QStringLiteral("dur"))   e.insert(field, store().value(key).toDouble());
+            else if (field == QStringLiteral("ts"))    e.insert(field, store().value(key).toDouble());
+            else if (field == QStringLiteral("title")) e.insert(field, store().value(key).toString());
+            resume.insert(hash, e);
+        }
+        else if (key.startsWith(QStringLiteral("recent/"))) // "recent/<profile>/items" -> the list JSON string
+        {
+            recent.insert(key.mid(7), store().value(key).toString());
+        }
+    }
+    return QJsonDocument(QJsonObject{ { QStringLiteral("resume"), resume }, { QStringLiteral("recent"), recent } })
+        .toJson(QJsonDocument::Compact);
+}
+
+void MainWindow::mergeProgress(const QByteArray& json)
+{
+    const QJsonObject root = QJsonDocument::fromJson(json).object();
+
+    // Resume: for each item, keep whichever position was saved more recently (ts). Never delete a local entry.
+    const QJsonObject resume = root.value(QStringLiteral("resume")).toObject();
+    for (auto it = resume.begin(); it != resume.end(); ++it)
+    {
+        const QJsonObject re = it.value().toObject();
+        const QString prefix = QStringLiteral("resume/") + it.key() + QLatin1Char('/');
+        const double localTs = store().value(prefix + QStringLiteral("ts"), 0.0).toDouble();
+        const bool haveLocal = store().contains(prefix + QStringLiteral("pos"));
+        if (haveLocal && re.value(QStringLiteral("ts")).toDouble() <= localTs) continue; // local is newer/equal
+        if (re.contains(QStringLiteral("pos")))   store().setValue(prefix + QStringLiteral("pos"),   re.value(QStringLiteral("pos")).toDouble());
+        if (re.contains(QStringLiteral("dur")))   store().setValue(prefix + QStringLiteral("dur"),   re.value(QStringLiteral("dur")).toDouble());
+        if (re.contains(QStringLiteral("ts")))    store().setValue(prefix + QStringLiteral("ts"),    re.value(QStringLiteral("ts")).toDouble());
+        if (re.contains(QStringLiteral("title"))) store().setValue(prefix + QStringLiteral("title"), re.value(QStringLiteral("title")).toString());
+    }
+
+    // Recent: union the local + remote lists per profile by stable identity (key, else path), keeping the newest
+    // ts for each, sorted newest-first and capped.
+    const QJsonObject recent = root.value(QStringLiteral("recent")).toObject();
+    for (auto it = recent.begin(); it != recent.end(); ++it)
+    {
+        const QString localKey = QStringLiteral("recent/") + it.key();
+        QHash<QString, QJsonObject> byId;
+        auto ingest = [&byId](const QJsonArray& arr) {
+            for (const QJsonValue& v : arr)
+            {
+                const QJsonObject o = v.toObject();
+                const QString id = o.value(QStringLiteral("key")).toString().isEmpty()
+                                       ? o.value(QStringLiteral("path")).toString()
+                                       : o.value(QStringLiteral("key")).toString();
+                if (id.isEmpty()) continue;
+                if (!byId.contains(id) || o.value(QStringLiteral("ts")).toDouble() >= byId[id].value(QStringLiteral("ts")).toDouble())
+                    byId.insert(id, o);
+            }
+        };
+        ingest(QJsonDocument::fromJson(store().value(localKey).toString().toUtf8()).array()); // local first
+        ingest(QJsonDocument::fromJson(it.value().toString().toUtf8()).array());              // then remote
+        QList<QJsonObject> merged = byId.values();
+        std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {
+            return a.value(QStringLiteral("ts")).toDouble() > b.value(QStringLiteral("ts")).toDouble();
+        });
+        QJsonArray out;
+        for (int i = 0; i < merged.size() && i < 40; ++i) out.append(merged[i]); // cap matches RecentStore's
+        store().setValue(localKey, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+    }
+    store().sync();
+}
+
+void MainWindow::pushProgressNow()
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return;
+    if (progressSyncTimer_) progressSyncTimer_->stop(); // this covers any pending debounce
+    cloud_->pushProgress(serializeProgress(), [](bool) {}); // best-effort
+}
+
+void MainWindow::scheduleProgressSync()
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return;
+    if (!progressSyncTimer_)
+    {
+        progressSyncTimer_ = new QTimer(this);
+        progressSyncTimer_->setSingleShot(true);
+        connect(progressSyncTimer_, &QTimer::timeout, this, [this] { pushProgressNow(); });
+    }
+    progressSyncTimer_->start(15000); // debounce: push ~15s after the last position change (i.e. shortly after you stop)
+}
+
+void MainWindow::pullAndMergeProgress()
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return;
+    cloud_->pullProgress([this](bool ok, const QByteArray& json) {
+        if (!ok || json.isEmpty()) return;
+        mergeProgress(json);
+        // If the home is on screen, rebuild it so freshly-merged resume progress + recent entries show at once.
+        QWidget* cur = stack_->currentWidget();
+        if ((cur == home_ || cur == themedHome_) && home_) { home_->refresh(); showHomeScreen(); }
+    });
+}
+
 void MainWindow::closeEvent(QCloseEvent* e)
 {
     persistResume(); // flush the current media's playback position before anything else on exit
+    pushProgressNow(); // and push the small "continue watching" file (runs alongside the bundle push below)
     retro_->stop();  // flush battery-RAM saves before the cloud push captures them (no-op if no game running)
 
     // Already pushed (or nothing to do)? let the close through.

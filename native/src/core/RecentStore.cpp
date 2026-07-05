@@ -3,6 +3,7 @@
 #include "ProfileStore.h"
 
 #include <QSettings>
+#include <QDateTime>
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -41,6 +42,7 @@ QVector<RecentItem> RecentStore::list()
         it.thumb = o.value(QStringLiteral("thumb")).toString();
         it.key   = o.value(QStringLiteral("key")).toString();
         it.system = o.value(QStringLiteral("system")).toString();
+        it.ts    = (qint64)o.value(QStringLiteral("ts")).toDouble();
         if (!it.path.isEmpty()) out.push_back(it);
     }
     return out;
@@ -49,15 +51,17 @@ QVector<RecentItem> RecentStore::list()
 void RecentStore::add(const RecentItem& item)
 {
     if (item.path.isEmpty()) return;
+    RecentItem entry = item;
+    if (entry.ts == 0) entry.ts = QDateTime::currentSecsSinceEpoch(); // stamp so cross-device sync can merge by recency
     QVector<RecentItem> items = list();
     // De-dup by stable key when present (a streamed item's path/URL changes per session), else by path.
-    const QString ident = item.key.isEmpty() ? item.path : item.key;
+    const QString ident = entry.key.isEmpty() ? entry.path : entry.key;
     for (int i = items.size() - 1; i >= 0; --i)
     {
         const QString other = items[i].key.isEmpty() ? items[i].path : items[i].key;
         if (other == ident) items.remove(i);
     }
-    items.prepend(item);                               // newest first
+    items.prepend(entry);                              // newest first
     while (items.size() > kMaxRecents) items.removeLast();
 
     QJsonArray arr;
@@ -70,6 +74,7 @@ void RecentStore::add(const RecentItem& item)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (it.ts > 0) o.insert(QStringLiteral("ts"), (double)it.ts);
         arr.append(o);
     }
     store().setValue(recentsKey(),
@@ -97,6 +102,7 @@ void RecentStore::remove(const QString& pathOrKey)
         if (!it.thumb.isEmpty()) o.insert(QStringLiteral("thumb"), it.thumb);
         if (!it.key.isEmpty())   o.insert(QStringLiteral("key"), it.key);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        if (it.ts > 0) o.insert(QStringLiteral("ts"), (double)it.ts);
         arr.append(o);
     }
     store().setValue(recentsKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));

@@ -52,6 +52,11 @@ public:
                      const QString& remoteHash, std::function<void(bool ok)> cb);
     void pushLocal(std::function<void(bool ok, const QString& message)> cb);  // zip + upload the local state
 
+    // ---- "continue watching" progress (a small JSON file synced far more often than the heavy state bundle) ----
+    // Merge-based: the caller serializes/merges, these just move the bytes. Empty json on pull => none yet.
+    void pullProgress(std::function<void(bool ok, const QByteArray& json)> cb);
+    void pushProgress(const QByteArray& json, std::function<void(bool ok)> cb);
+
 signals:
     void signedIn(const QString& email);
     void signInFailed(const QString& error);

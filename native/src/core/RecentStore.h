@@ -16,6 +16,7 @@ struct RecentItem
     QString system; // games only: the resolved SystemCatalog id (e.g. "psx", "gc") the game launched with,
                     // so re-opening picks the right console instead of guessing from a shared extension
                     // (.iso/.cue/.chd/.bin). Empty for non-games / legacy entries.
+    qint64  ts = 0; // last-opened time (unix seconds); set on add(). Lets cross-device sync merge by recency.
 };
 
 namespace RecentStore
