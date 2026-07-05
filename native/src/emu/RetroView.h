@@ -23,6 +23,7 @@ class QFrame;
 class QLabel;
 class QPushButton;
 class QVBoxLayout;
+class QScrollArea;
 class QOpenGLContext;
 class QOffscreenSurface;
 class QOpenGLFramebufferObject;
@@ -112,6 +113,7 @@ private:
     void showMainMenu();                // pause menu: main page (Resume / Save / Load / Exit)
     void showStateSlots(bool saveMode); // pause menu: the slot grid, in save or load mode
     void showDisk();                    // pause menu: disk control (eject / insert / switch side)
+    void showCoreOptions();             // pause menu: live libretro core options (cycle each value)
     void showCheats();                  // pause menu: the per-game cheat list (toggle / add / remove)
     void addCheatDialog();              // prompt for a new cheat code + description
     QString cheatsPath() const;         // <app>/cheats/<romBaseName>.json
@@ -183,6 +185,8 @@ private:
     QVector<QPushButton*> menuButtons_; // the current page's buttons, in order, for arrow-key + Enter navigation
     QPushButton* filterBtn_ = nullptr;  // the "Video Filter: X" cycle button on the main page
     QPushButton* diskBtn_ = nullptr;    // "Disk" entry, shown only when the core has a disk-control interface
+    QPushButton* optBtn_ = nullptr;     // "Core Options" entry, shown only when the core exposes options
+    QScrollArea* subScroll_ = nullptr;  // the scroll area of a scrollable sub-page (core options), for focus-follow
 
     struct Cheat { QString desc; QString code; bool enabled = true; }; // one per-game cheat
     QVector<Cheat> cheats_;             // this game's cheats (persisted per ROM)

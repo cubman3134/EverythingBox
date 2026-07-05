@@ -32,6 +32,7 @@
 #include <QNetworkInterface>
 #include <QHostAddress>
 #include <QAbstractSocket>
+#include <QScrollArea>
 #include <QThread>
 #include <QOpenGLContext>
 #include <QOffscreenSurface>
@@ -85,12 +86,13 @@ void RetroView::buildMenu()
     auto* save   = new QPushButton(tr("Save State"), mainPage_);
     auto* load   = new QPushButton(tr("Load State"), mainPage_);
     diskBtn_     = new QPushButton(tr("Disk"), mainPage_);
+    optBtn_      = new QPushButton(tr("Core Options"), mainPage_);
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, diskBtn_, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -110,8 +112,9 @@ void RetroView::buildMenu()
                                          : tr("Saved: %1").arg(QFileInfo(p).fileName())); });
     connect(netp, &QPushButton::clicked, this, [this] { showNetplay(); });
     connect(diskBtn_, &QPushButton::clicked, this, [this] { showDisk(); });
+    connect(optBtn_, &QPushButton::clicked, this, [this] { showCoreOptions(); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, diskBtn_, cheats, filterBtn_, shot, netp, exit };
+    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -124,7 +127,9 @@ void RetroView::showMainMenu()
     if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
     menuTitle_->setText(tr("Paused"));
     mainPage_->show();
+    subScroll_ = nullptr;               // main page doesn't scroll
     if (diskBtn_) diskBtn_->setVisible(running_ && core_.hasDiskControl()); // only for disk-based systems
+    if (optBtn_)  optBtn_->setVisible(running_ && !core_.options().empty()); // only when the core exposes options
     menuButtons_.clear();               // navigation over the visible main-page buttons
     for (QPushButton* b : mainButtons_) if (b && !b->isHidden()) menuButtons_ << b;
     menu_->adjustSize();
@@ -253,6 +258,81 @@ void RetroView::showDisk()
     }
 
     auto* back = flat(new QPushButton(tr("‹ Back"), slotsPage_));
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back); menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
+}
+
+// Pause-menu sub-page: the running core's libretro options. Each row cycles that option's value on click;
+// the core re-reads it live (setOptionValue flags it), and the choice persists per-core for next launch.
+void RetroView::showCoreOptions()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Core Options"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+
+    // Options can be many, so they live in a scroll area (capped to the window); focus-follow scrolls to the
+    // selected row (see the menu key/pad nav).
+    subScroll_ = new QScrollArea(slotsPage_);
+    subScroll_->setWidgetResizable(true);
+    subScroll_->setFrameShape(QFrame::NoFrame);
+    subScroll_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    subScroll_->setMaximumHeight(qMax(200, height() - 200));
+    subScroll_->setStyleSheet(QStringLiteral("background:transparent;"));
+    auto* host = new QWidget(subScroll_);
+    auto* ov = new QVBoxLayout(host);
+    ov->setContentsMargins(0, 0, 6, 0);
+    ov->setSpacing(6);
+
+    auto label = [](const CoreOption& o, const std::string& val) {
+        QString vlabel = QString::fromStdString(val);
+        for (const auto& vp : o.values) if (vp.first == val) { vlabel = QString::fromStdString(vp.second); break; }
+        return QString::fromStdString(o.desc) + QStringLiteral(":   ") + vlabel;
+    };
+
+    for (const CoreOption& opt : core_.options())
+    {
+        if (opt.values.size() < 2) continue; // a fixed/1-choice option isn't worth a row
+        const std::string key = opt.key;
+        auto* b = new QPushButton(label(opt, core_.optionValue(key)), host);
+        b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
+        b->setToolTip(QString::fromStdString(opt.info));
+        connect(b, &QPushButton::clicked, this, [this, key, opt, b, label] {
+            // Advance to the next value in the option's list (wrapping), apply live, and persist per-core.
+            const std::string cur = core_.optionValue(key);
+            int idx = 0;
+            for (int i = 0; i < int(opt.values.size()); ++i) if (opt.values[i].first == cur) { idx = i; break; }
+            const std::string next = opt.values[(idx + 1) % opt.values.size()].first;
+            core_.setOptionValue(key, next);
+            Settings::setOptionValue(coreName_, QString::fromStdString(key), QString::fromStdString(next));
+            b->setText(label(opt, next));
+        });
+        ov->addWidget(b);
+        menuButtons_ << b;
+    }
+    ov->addStretch(1);
+    subScroll_->setWidget(host);
+    sv->addWidget(subScroll_);
+
+    auto* note = new QLabel(tr("Most options apply immediately; a few (e.g. resolution) take effect on the next "
+                              "game load."), slotsPage_);
+    note->setStyleSheet(QStringLiteral("color:#9aa0aa;font-size:12px;")); note->setWordWrap(true);
+    sv->addWidget(note);
+
+    auto* back = new QPushButton(tr("‹ Back"), slotsPage_);
+    back->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }"));
     connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
     sv->addWidget(back); menuButtons_ << back;
 
@@ -702,6 +782,7 @@ void RetroView::handleMenuPad()
     if (slotsMode_ && (pressed & 8)) { showMainMenu(); return; } // B backs out of the slot grid
     if      (pressed & 1) menuButtons_[(idx + menuButtons_.size() - 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
     else if (pressed & 2) menuButtons_[(idx + 1) % menuButtons_.size()]->setFocus(Qt::TabFocusReason);
+    if (subScroll_ && focusWidget()) subScroll_->ensureWidgetVisible(focusWidget()); // scroll to the focused row
     if ((pressed & 4) || (!slotsMode_ && (pressed & 8))) // A always confirms; B also confirms on the main page
     {
         if (auto* b = qobject_cast<QPushButton*>(focusWidget())) b->click();
@@ -1220,6 +1301,7 @@ void RetroView::keyPressEvent(QKeyEvent* e)
             if (idx < 0) idx = 0;
             else         idx = (idx + (key == Qt::Key_Down ? 1 : menuButtons_.size() - 1)) % menuButtons_.size();
             menuButtons_[idx]->setFocus(Qt::TabFocusReason); // wraps around the short list
+            if (subScroll_ && focusWidget()) subScroll_->ensureWidgetVisible(focusWidget()); // follow focus in a long list
         }
         else if (key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Select)
         {
