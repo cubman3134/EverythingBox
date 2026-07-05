@@ -84,12 +84,13 @@ void RetroView::buildMenu()
     auto* resume = new QPushButton(tr("Resume"), mainPage_);
     auto* save   = new QPushButton(tr("Save State"), mainPage_);
     auto* load   = new QPushButton(tr("Load State"), mainPage_);
+    diskBtn_     = new QPushButton(tr("Disk"), mainPage_);
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, diskBtn_, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -108,8 +109,9 @@ void RetroView::buildMenu()
         menuStatus_->setText(p.isEmpty() ? tr("Couldn't save screenshot.")
                                          : tr("Saved: %1").arg(QFileInfo(p).fileName())); });
     connect(netp, &QPushButton::clicked, this, [this] { showNetplay(); });
+    connect(diskBtn_, &QPushButton::clicked, this, [this] { showDisk(); });
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, cheats, filterBtn_, shot, netp, exit };
+    mainButtons_ = { resume, save, load, diskBtn_, cheats, filterBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -122,7 +124,9 @@ void RetroView::showMainMenu()
     if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
     menuTitle_->setText(tr("Paused"));
     mainPage_->show();
-    menuButtons_ = mainButtons_; // restore navigation to the main page
+    if (diskBtn_) diskBtn_->setVisible(running_ && core_.hasDiskControl()); // only for disk-based systems
+    menuButtons_.clear();               // navigation over the visible main-page buttons
+    for (QPushButton* b : mainButtons_) if (b && !b->isHidden()) menuButtons_ << b;
     menu_->adjustSize();
     menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
@@ -205,6 +209,58 @@ QString RetroView::captureScreenshot()
         .arg(dir, base.isEmpty() ? QStringLiteral("screenshot") : base,
              QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
     return img.save(path, "PNG") ? path : QString();
+}
+
+// Pause-menu sub-page: disk control. Eject/insert the disk and pick which disk/side is loaded (FDS side-flip,
+// multi-disc PS1, ...). Switching a disk ejects, sets the index, and re-inserts, as the libretro API requires.
+void RetroView::showDisk()
+{
+    slotsMode_ = true;
+    menuStatus_->clear();
+    menuTitle_->setText(tr("Disk"));
+    mainPage_->hide();
+    if (slotsPage_) { slotsPage_->hide(); slotsPage_->deleteLater(); slotsPage_ = nullptr; }
+    slotsPage_ = new QWidget(menu_);
+    auto* sv = new QVBoxLayout(slotsPage_);
+    sv->setContentsMargins(0, 0, 0, 0);
+    sv->setSpacing(6);
+    menuButtons_.clear();
+    auto flat = [](QPushButton* b) { b->setStyleSheet(QStringLiteral("QPushButton { text-align:left; padding:6px 12px; }")); return b; };
+
+    const unsigned count = core_.diskCount();
+    const unsigned cur = core_.diskIndex();
+
+    auto* ejectBtn = flat(new QPushButton(core_.diskEjected() ? tr("Insert disk") : tr("Eject disk"), slotsPage_));
+    connect(ejectBtn, &QPushButton::clicked, this, [this] { core_.setDiskEject(!core_.diskEjected()); showDisk(); });
+    sv->addWidget(ejectBtn); menuButtons_ << ejectBtn;
+
+    if (count > 1)
+    {
+        auto* lbl = new QLabel(tr("Insert disk / side:"), slotsPage_);
+        lbl->setStyleSheet(QStringLiteral("color:#9aa0aa;font-size:13px;"));
+        sv->addWidget(lbl);
+        for (unsigned i = 0; i < count; ++i)
+        {
+            const std::string lab = core_.diskLabel(i);
+            const QString name = lab.empty() ? tr("Disk %1").arg(i + 1) : QString::fromStdString(lab);
+            auto* b = flat(new QPushButton((i == cur ? QStringLiteral("✓  ") : QStringLiteral("     ")) + name, slotsPage_));
+            connect(b, &QPushButton::clicked, this, [this, i] {
+                core_.setDiskEject(true); core_.setDiskIndex(i); core_.setDiskEject(false); // eject -> switch -> insert
+                emit statusMessage(tr("Inserted disk %1").arg(i + 1));
+                showDisk(); });
+            sv->addWidget(b); menuButtons_ << b;
+        }
+    }
+
+    auto* back = flat(new QPushButton(tr("‹ Back"), slotsPage_));
+    connect(back, &QPushButton::clicked, this, [this] { showMainMenu(); });
+    sv->addWidget(back); menuButtons_ << back;
+
+    menuBody_->addWidget(slotsPage_);
+    slotsPage_->show();
+    menu_->adjustSize();
+    menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
+    if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason);
 }
 
 // Pause-menu sub-page: host a game or join one. Both sides must have the same game + core already loaded.

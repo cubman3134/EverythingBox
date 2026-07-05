@@ -49,6 +49,16 @@ public:
     void cheatSet(unsigned index, bool enabled, const std::string& code);
     bool supportsCheats() const { return retro_cheat_set_ != nullptr; }
 
+    // Disk control (FDS side-flip, multi-disc PS1, ...). A core registers the interface during load; these
+    // wrap it. To change a disk you must eject, set the index, then re-insert. index<count.
+    bool hasDiskControl() const { return hasDisk_ && disk_.get_num_images && disk_.set_image_index; }
+    unsigned diskCount() const;
+    unsigned diskIndex() const;
+    bool diskEjected() const;
+    void setDiskEject(bool ejected);
+    void setDiskIndex(unsigned index);          // takes effect only while ejected
+    std::string diskLabel(unsigned index) const; // "" if the core provides no label
+
     bool coreLoaded() const { return handle_ != nullptr; }
     bool gameLoaded() const { return gameLoaded_; }
     bool crashed() const { return crashed_; } // a core hard-faulted during runFrame(); stop using it
@@ -146,6 +156,8 @@ private:
     bool gameLoaded_ = false;
     bool crashed_ = false;
     retro_pixel_format pixelFormat_ = RETRO_PIXEL_FORMAT_0RGB1555;
+    retro_disk_control_ext_callback disk_{}; // disk-control interface (base fields are a prefix of the ext one)
+    bool hasDisk_ = false;
     retro_hw_render_callback hwRender_{}; // the core's HW-render request (context_reset/destroy fns, flags)
     bool hwRenderRequested_ = false;      // true once a GL/GLES SET_HW_RENDER was accepted
     bool hwFramePending_ = false;         // videoRefreshCb saw RETRO_HW_FRAME_BUFFER_VALID: the FBO has a frame

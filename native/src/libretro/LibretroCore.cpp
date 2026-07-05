@@ -171,6 +171,21 @@ void LibretroCore::cheatSet(unsigned index, bool enabled, const std::string& cod
     guardedCall([&] { retro_cheat_set_(index, enabled, code.c_str()); });
 }
 
+unsigned LibretroCore::diskCount() const { return (hasDisk_ && disk_.get_num_images) ? disk_.get_num_images() : 0; }
+unsigned LibretroCore::diskIndex() const { return (hasDisk_ && disk_.get_image_index) ? disk_.get_image_index() : 0; }
+bool LibretroCore::diskEjected() const { return (hasDisk_ && disk_.get_eject_state) ? disk_.get_eject_state() : false; }
+void LibretroCore::setDiskEject(bool ejected) { if (hasDisk_ && disk_.set_eject_state) guardedCall([&] { disk_.set_eject_state(ejected); }); }
+void LibretroCore::setDiskIndex(unsigned index) { if (hasDisk_ && disk_.set_image_index) guardedCall([&] { disk_.set_image_index(index); }); }
+std::string LibretroCore::diskLabel(unsigned index) const
+{
+    if (hasDisk_ && disk_.get_image_label)
+    {
+        char buf[256] = { 0 };
+        if (disk_.get_image_label(index, buf, sizeof buf) && buf[0]) return std::string(buf);
+    }
+    return {};
+}
+
 void LibretroCore::unload()
 {
     if (gameLoaded_ && retro_unload_game_) retro_unload_game_();
@@ -334,6 +349,30 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
         if (auto* v2i = (const retro_core_options_v2_intl*)data)
             if (v2i->us) self->registerOptionDefsV2(v2i->us->definitions);
         return true;
+    case RETRO_ENVIRONMENT_SET_DISK_CONTROL_INTERFACE:
+    {
+        // Base interface: copy the 7 shared function pointers into our ext struct (label/path stay null).
+        auto* cb = (const retro_disk_control_callback*)data;
+        if (!cb) return false;
+        self->disk_ = {};
+        self->disk_.set_eject_state    = cb->set_eject_state;
+        self->disk_.get_eject_state    = cb->get_eject_state;
+        self->disk_.get_image_index    = cb->get_image_index;
+        self->disk_.set_image_index    = cb->set_image_index;
+        self->disk_.get_num_images     = cb->get_num_images;
+        self->disk_.replace_image_index = cb->replace_image_index;
+        self->disk_.add_image_index    = cb->add_image_index;
+        self->hasDisk_ = true;
+        return true;
+    }
+    case RETRO_ENVIRONMENT_SET_DISK_CONTROL_EXT_INTERFACE:
+    {
+        auto* cb = (const retro_disk_control_ext_callback*)data;
+        if (!cb) return false;
+        self->disk_ = *cb;   // includes get_image_label for nicer disk names
+        self->hasDisk_ = true;
+        return true;
+    }
     case RETRO_ENVIRONMENT_SET_HW_RENDER:
     {
         // A core wants to render with a GPU API. We can host OpenGL / OpenGL ES via an offscreen context +
