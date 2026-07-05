@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 #include <QList>
+#include <QRegularExpression>
 
 struct GameSystem
 {
@@ -175,6 +176,10 @@ namespace SystemCatalog
         const QString n = consoleName.toLower().trimmed();
         if (n.isEmpty()) return nullptr;
         auto has = [&](const char* s) { return n.contains(QLatin1String(s)); };
+        // Word-boundary match for short, ambiguous keys like "nes" that are substrings of unrelated
+        // console names ("Sega Ge-nes-is"). Split on non-alphanumerics and test whole tokens.
+        const auto words = n.split(QRegularExpression(QStringLiteral("[^a-z0-9]+")), Qt::SkipEmptyParts);
+        auto hasWord = [&](const char* s) { return words.contains(QLatin1String(s)); };
         QString id;
         if      (has("vita"))                                              id = QStringLiteral("psvita");
         else if (has("psp") || has("playstation portable"))               id = QStringLiteral("psp");
@@ -187,7 +192,8 @@ namespace SystemCatalog
         else if (has("snes") || has("super nintendo") || has("super famicom")) id = QStringLiteral("snes");
         else if (has("game boy advance") || has("gba"))                   id = QStringLiteral("gba");
         else if (has("game boy") || has("gbc"))                           id = QStringLiteral("gb");
-        else if (has("famicom") || has("nes"))                            id = QStringLiteral("nes"); // after snes
+        else if (has("famicom") || has("nintendo entertainment system") || hasWord("nes"))
+                                                                          id = QStringLiteral("nes"); // after snes; word-boundary "nes" so "Sega Genesis" doesn't match it
         else if (has("dreamcast"))                                        id = QStringLiteral("dreamcast");
         else if (has("saturn"))                                           id = QStringLiteral("saturn");
         else if (has("sega cd 32x") || has("mega cd 32x") || has("mega-cd 32x")) id = QStringLiteral("segacd32x");
