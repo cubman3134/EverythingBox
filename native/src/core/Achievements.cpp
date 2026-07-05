@@ -73,6 +73,11 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
         reply = g_st->nam->get(rq);
     }
     QObject::connect(reply, &QNetworkReply::finished, reply, [reply, callback, callback_data] {
+        // The rc_client owns `callback_data` (a load_state that points back at the client). If the client has been
+        // torn down (app shutdown destroys our QNetworkAccessManager, which aborts this in-flight request and fires
+        // finished), calling the rcheevos callback would dereference freed state — an access violation inside
+        // rc_client_load_error. Skip it once the client is gone; the process is exiting so the leaked load_state is moot.
+        if (!g_st || !g_st->client) { reply->deleteLater(); return; }
         const QByteArray body = reply->readAll();
         const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         rc_api_server_response_t resp;
@@ -155,13 +160,17 @@ Achievements::Achievements(QObject* parent) : QObject(parent)
 Achievements::~Achievements()
 {
     auto* st = static_cast<RAState*>(impl_);
+    // Null the globals FIRST: our QNetworkAccessManager is a child QObject destroyed AFTER this body runs, and
+    // aborting its in-flight replies fires their finished handlers — which must now see the client as gone and
+    // skip the rcheevos callback rather than call into the memory we free just below.
+    if (g_ach == this) { g_ach = nullptr; g_st = nullptr; }
     if (st)
     {
         if (st->memReady) rc_libretro_memory_destroy(&st->regions);
         if (st->client) rc_client_destroy(st->client);
         delete st;
     }
-    if (g_ach == this) { g_ach = nullptr; g_st = nullptr; }
+    impl_ = nullptr;
 }
 
 bool Achievements::isLoggedIn() const { auto* st = static_cast<RAState*>(impl_); return st && st->loggedIn; }
