@@ -3,6 +3,18 @@ project(MyMediaVaultNative VERSION 0.3.0 LANGUAGES C CXX) # keep in sync with kA
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# MSVC: emit a .pdb for Release too, so a crash's WER fault offset can be mapped back to a function/line (the
+# Release build otherwise ships no symbols — we had to reverse-engineer a Qt crash from a bare module offset).
+# /Zi only writes symbols to a side .pdb (the exe stays fully optimized); /DEBUG makes the linker emit the .pdb,
+# and /OPT:REF,/OPT:ICF restore the dead-code/COMDAT-folding size optimizations that a bare /DEBUG turns off.
+# Set before any target so the static libs (our libretro frontend, etc.) contribute symbols to the final .pdb.
+if(MSVC)
+    add_compile_options($<$<CONFIG:Release>:/Zi>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG>)
+    add_link_options($<$<CONFIG:Release>:/OPT:REF>)
+    add_link_options($<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 # ---------------------------------------------------------------------------
 # libretro frontend - no external deps. Loads/runs any libretro core via the
 # C ABI and exposes BGRA frames. VERIFIED: builds with MSVC, loads + inits mGBA.
