@@ -4557,11 +4557,78 @@ void MainWindow::openSettingsHub()
         add(tr("BIOS Check"),         [this] { openBiosCheck(); });        // per-system BIOS presence (RetroBat-style)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
+        add(tr("Uninstall My Media Vault…"), [this] { confirmUninstall(); }); // remove the app + all its data
     }, [this] {
         // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
         if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
         else stack_->setCurrentWidget(panelReturnTo_);
     });
+}
+
+// Ask before wiping everything (this deletes the whole portable install folder, so downloads/saves/music inside
+// it go too), then hand off to a detached script that removes the folder once we've exited.
+void MainWindow::confirmUninstall()
+{
+    const QString dir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Uninstall My Media Vault"));
+    box.setText(tr("<b>Permanently remove My Media Vault and all of its data?</b>"));
+    box.setInformativeText(tr("This deletes the whole app folder:<br><code>%1</code><br><br>"
+                              "That includes your <b>settings, cloud sign-in, downloaded games/music, emulator "
+                              "saves and save states, and installed emulators/cores</b>, plus the cache and crash "
+                              "logs. This cannot be undone.<br><br>If you want to keep any downloads, copy them out "
+                              "of that folder first.").arg(dir.toHtmlEscaped()));
+    auto* uninstall = box.addButton(tr("Uninstall"), QMessageBox::DestructiveRole);
+    box.addButton(tr("Cancel"), QMessageBox::RejectRole);
+    box.setDefaultButton(qobject_cast<QPushButton*>(box.buttons().last())); // default to Cancel
+    box.exec();
+    if (box.clickedButton() == uninstall) performUninstall();
+}
+
+void MainWindow::performUninstall()
+{
+#if defined(Q_OS_WIN)
+    const QString installDir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
+    const QString cacheDir   = QDir::toNativeSeparators(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    const QString localApp   = qEnvironmentVariable("LOCALAPPDATA");
+    const qint64  pid        = QCoreApplication::applicationPid();
+
+    // Run from %TEMP% (outside the install dir) so it can delete the install dir AND then delete itself. Waits for
+    // our process to exit first — we can't remove the running exe's folder from inside the app.
+    QString del = QStringLiteral(
+        "@echo off\r\n"
+        ":wait\r\n"
+        "tasklist /FI \"PID eq %1\" 2>NUL | find \"%1\" >NUL && ( timeout /t 1 /nobreak >NUL & goto wait )\r\n"
+        "rmdir /S /Q \"%2\" 2>NUL\r\n").arg(QString::number(pid), installDir);
+    if (!cacheDir.isEmpty())  del += QStringLiteral("rmdir /S /Q \"%1\" 2>NUL\r\n").arg(cacheDir);
+    del += QStringLiteral("reg delete \"HKCU\\SOFTWARE\\Xenia\" /f >NUL 2>&1\r\n"); // the Xenia disclaimer flag we set
+    if (!localApp.isEmpty())
+        del += QStringLiteral("del /Q \"%1\\CrashDumps\\MyMediaVault.exe.*.dmp\" >NUL 2>&1\r\n")
+                   .arg(QDir::toNativeSeparators(localApp));
+    del += QStringLiteral("(goto) 2>nul & del \"%~f0\"\r\n"); // self-delete this script
+
+    const QString cmdPath = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+                                .filePath(QStringLiteral("mmv-uninstall.cmd"));
+    QFile cf(cmdPath);
+    if (!cf.open(QIODevice::WriteOnly | QIODevice::Text))
+    { notify(tr("Couldn't start the uninstaller."), 6000); return; }
+    cf.write(del.toLocal8Bit());
+    cf.close();
+
+    // Detached + minimized so it outlives us; then quit hard (skip the cloud-push-on-exit — everything's going).
+    QProcess::startDetached(QStringLiteral("cmd"),
+        { QStringLiteral("/c"), QStringLiteral("start"), QString(), QStringLiteral("/min"),
+          QStringLiteral("cmd"), QStringLiteral("/c"), QDir::toNativeSeparators(cmdPath) });
+    forceClose_ = true;
+    qApp->quit();
+#else
+    // macOS/Linux: the app is a bundle/AppImage the user removes by deleting it. Clear our data dir + cache + quit.
+    QDir(QCoreApplication::applicationDirPath()).removeRecursively();
+    QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
+    forceClose_ = true;
+    qApp->quit();
+#endif
 }
 
 // Human-readable byte counts for the download rows ("612 MB", "1.4 GB").

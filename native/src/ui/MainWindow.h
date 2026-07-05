@@ -86,6 +86,8 @@ private slots:
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
     void openDebug();         // diagnostic log viewer (refresh / clear / open file location)
+    void confirmUninstall();  // Settings ▸ Uninstall: warn, then performUninstall() on confirm
+    void performUninstall();  // remove the app folder + cache/registry/dumps via a detached post-exit script
     void openRetroAchievements(); // RetroAchievements sign-in panel
     void openBiosCheck();         // per-system BIOS presence check + download-missing (RetroBat-style)
     void openEmulatorSettings();
