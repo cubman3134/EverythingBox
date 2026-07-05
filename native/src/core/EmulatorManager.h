@@ -31,7 +31,8 @@ public:
 
     void play(const ExternalEmulator& em, const QString& rom); // ensure installed, then boot + monitor
     void install(const ExternalEmulator& em);                  // download + extract only (Settings button)
-    void terminateGame();                                      // force-close the running emulator
+    void terminateGame();                                      // force-close the running emulator (hard kill)
+    void closeGame();                                          // ask it to close (WM_CLOSE), force-kill if it lingers
     bool busy() const { return busy_; }
 
 signals:

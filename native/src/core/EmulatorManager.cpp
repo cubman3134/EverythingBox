@@ -15,6 +15,7 @@
 #include <QEventLoop>
 #include <cctype>
 #include <QProcess>
+#include <QTimer>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -154,6 +155,18 @@ void EmulatorManager::install(const ExternalEmulator& em)
 void EmulatorManager::terminateGame()
 {
     if (game_) game_->kill();
+}
+
+void EmulatorManager::closeGame()
+{
+    if (!game_) return;
+    // Ask the emulator to close (posts WM_CLOSE on Windows) so it saves SRAM/state and quits cleanly, the way
+    // RetroBat's exit hotkey does. If it ignores the request, force it after a short grace period. The finished
+    // handler clears game_, so the fallback is a no-op once it has actually exited.
+    game_->terminate();
+    QTimer::singleShot(3000, this, [this] {
+        if (game_ && game_->state() != QProcess::NotRunning) game_->kill();
+    });
 }
 
 QString EmulatorManager::platformArtifact() const

@@ -1622,7 +1622,8 @@ void MainWindow::ensureEmu()
     });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         ensureEmuPage();
-        emuLabel_->setText(tr("Playing in %1.\n\nClose the %1 window to return to My Media Vault.").arg(name));
+        emuLabel_->setText(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "
+                              "or Esc — to return to My Media Vault.").arg(name));
         emuStopBtn_->setVisible(true);
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
         {
@@ -1634,9 +1635,11 @@ void MainWindow::ensureEmu()
         // often full screen and would otherwise sit on top of the freshly-launched emulator.)
         emuReturnState_ = windowState();
         showMinimized();
+        startEmuHotkeyWatch(); // Start+Select / Esc closes the standalone emulator back to MMV
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         mwLog(QStringLiteral("emu: process exited (code %1)").arg(code));
+        stopEmuHotkeyWatch();
         endPlaySession(); // bank the external emulator's play time
 
         if (isMinimized()) // come back to where we were before handing off to the emulator
@@ -1654,9 +1657,68 @@ void MainWindow::ensureEmu()
     });
     connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
         mwLog(QStringLiteral("emu: failed: %1").arg(msg));
+        stopEmuHotkeyWatch();
         statusBar()->showMessage(msg, 9000);
         if (stack_->currentWidget() == emuPage_) openHome();
     });
+}
+
+// ---- Standalone-emulator exit hotkey: close melonDS/Dolphin/etc. back to MMV on Start+Select or Esc ---------
+// A libretro core shows MMV's own pause menu on Start+Select; a standalone emulator is a separate process we
+// can't inject a menu into, so the RetroBat-equivalent is to close it and come back. We poll while MMV is
+// minimized (Qt gets no input then): the pad works because SDL keeps device state live in the background
+// (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS), and Esc is read from the global key state on Windows.
+void MainWindow::startEmuHotkeyWatch()
+{
+    if (!emuHotkeyTimer_)
+    {
+        emuHotkeyTimer_ = new QTimer(this);
+        emuHotkeyTimer_->setInterval(60);
+        connect(emuHotkeyTimer_, &QTimer::timeout, this, &MainWindow::pollEmuExitHotkey);
+    }
+    // Prime the edge-detectors as "held" so a combo/Esc still down from the moment of launch doesn't instantly
+    // close the emulator — we only act on a fresh press.
+    emuComboPrev_ = true;
+    emuEscPrev_ = true;
+    emuHotkeyTimer_->start();
+}
+
+void MainWindow::stopEmuHotkeyWatch()
+{
+    if (emuHotkeyTimer_) emuHotkeyTimer_->stop();
+}
+
+void MainWindow::pollEmuExitHotkey()
+{
+    if (!emu_ || !emu_->busy()) { stopEmuHotkeyWatch(); return; }
+    bool exitNow = false;
+
+    // Controller: Start+Select on any connected pad. Reuse RetroView's Gamepad (idle while a standalone emulator
+    // runs, so borrowing it to poll is free and avoids opening the device twice).
+    if (retro_ && retro_->gamepad() && retro_->gamepad()->available())
+    {
+        Gamepad* pad = retro_->gamepad();
+        pad->poll();
+        bool combo = false;
+        for (unsigned p = 0; p < Gamepad::kMaxPlayers && !combo; ++p)
+            combo = pad->button(p, RETRO_DEVICE_ID_JOYPAD_START) && pad->button(p, RETRO_DEVICE_ID_JOYPAD_SELECT);
+        if (combo && !emuComboPrev_) exitNow = true;
+        emuComboPrev_ = combo;
+    }
+
+#if defined(Q_OS_WIN)
+    // Keyboard: Qt can't see Esc while the emulator owns focus, so read the global key state.
+    const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+    if (esc && !emuEscPrev_) exitNow = true;
+    emuEscPrev_ = esc;
+#endif
+
+    if (exitNow)
+    {
+        mwLog(QStringLiteral("emu: exit hotkey (Start+Select / Esc) — closing the standalone emulator"));
+        stopEmuHotkeyWatch();   // one shot: don't fire again while it's tearing down
+        emu_->closeGame();
+    }
 }
 
 void MainWindow::ensureEmuPage()

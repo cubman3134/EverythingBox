@@ -335,6 +335,15 @@ private:
     QPushButton* emuStopBtn_ = nullptr;
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     Qt::WindowStates emuReturnState_ = Qt::WindowNoState; // our window state to restore after the emulator exits
+    // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select
+    // on a pad, or Esc on the keyboard — and close it back to MMV, the way RetroBat does. Runs only between the
+    // emulator's launched and finished signals (MMV is minimized then, so Qt can't see the input itself).
+    QTimer* emuHotkeyTimer_ = nullptr;
+    bool emuComboPrev_ = false;          // edge-detect: Start+Select was held last poll
+    bool emuEscPrev_ = false;            // edge-detect: Esc was held last poll
+    void startEmuHotkeyWatch();
+    void stopEmuHotkeyWatch();
+    void pollEmuExitHotkey();
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
