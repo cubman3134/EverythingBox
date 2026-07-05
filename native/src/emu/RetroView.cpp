@@ -6,6 +6,10 @@
 #include "../core/Achievements.h"
 #include "../core/SystemCatalog.h"
 #include <QTimer>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
+#include <QNetworkReply>
+#include <QFontMetrics>
 #include <QPainter>
 #include <QKeyEvent>
 #include <QAudioSink>
@@ -846,6 +850,7 @@ void RetroView::stop()
     running_ = false;
     stopEmu();          // stop the GUI timer or the worker thread (+ its audio); no core access afterward
     paused_ = false;
+    achActive_ = false; achQueue_.clear(); if (achTimer_) achTimer_->stop(); // drop any pending unlock toast
     hideMenu();
     if (net_) net_->stop();
     netActive_ = false;
@@ -1282,38 +1287,161 @@ void RetroView::paintEvent(QPaintEvent*)
     if (threaded_) // paint the worker's last handed-off frame (never touch the core from the GUI thread)
     {
         QMutexLocker lk(&frameMutex_);
-        if (frameImg_.isNull()) return;
-        const QSize t = frameImg_.size().scaled(size(), Qt::KeepAspectRatio);
-        const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        p.drawImage(dst, frameImg_);
-        applyVideoFilter(p, dst, frameImg_.width(), frameImg_.height());
-        return;
+        if (!frameImg_.isNull())
+        {
+            const QSize t = frameImg_.size().scaled(size(), Qt::KeepAspectRatio);
+            const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            p.drawImage(dst, frameImg_);
+            applyVideoFilter(p, dst, frameImg_.width(), frameImg_.height());
+        }
     }
-
-    if (hwMode_) // hardware core: paint the frame we read back from the GL FBO
+    else if (hwMode_) // hardware core: paint the frame we read back from the GL FBO
     {
-        if (hwImg_.isNull()) return;
-        const QSize t = hwImg_.size().scaled(size(), Qt::KeepAspectRatio);
-        const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
-        p.drawImage(dst, hwImg_);
-        applyVideoFilter(p, dst, hwImg_.width(), hwImg_.height());
-        return;
+        if (!hwImg_.isNull())
+        {
+            const QSize t = hwImg_.size().scaled(size(), Qt::KeepAspectRatio);
+            const QRect dst(QPoint((width() - t.width()) / 2, (height() - t.height()) / 2), t);
+            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            p.drawImage(dst, hwImg_);
+            applyVideoFilter(p, dst, hwImg_.width(), hwImg_.height());
+        }
+    }
+    else if (core_.hasFrame())
+    {
+        const unsigned w = core_.frameWidth(), h = core_.frameHeight();
+        // frameBGRA() is tightly packed BGRA == QImage::Format_RGB32 byte order on little-endian.
+        QImage img(core_.frameBGRA(), static_cast<int>(w), static_cast<int>(h),
+                   static_cast<int>(w * 4), QImage::Format_RGB32);
+
+        const QSize target = img.size().scaled(size(), Qt::KeepAspectRatio);
+        const QRect dst(QPoint((width() - target.width()) / 2, (height() - target.height()) / 2), target);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
+        p.drawImage(dst, img);
+        applyVideoFilter(p, dst, static_cast<int>(w), static_cast<int>(h));
     }
 
-    if (!core_.hasFrame()) return;
+    paintAchievementToast(p); // RetroAchievements unlock popup, over both render paths
+}
 
-    const unsigned w = core_.frameWidth(), h = core_.frameHeight();
-    // frameBGRA() is tightly packed BGRA == QImage::Format_RGB32 byte order on little-endian.
-    QImage img(core_.frameBGRA(), static_cast<int>(w), static_cast<int>(h),
-               static_cast<int>(w * 4), QImage::Format_RGB32);
+// ---- On-screen RetroAchievements unlock toast ------------------------------------------------------------
+// Fade-in / hold / fade-out timings (ms). The status bar is hidden in full-screen emulation, so the unlock
+// has to be drawn on the game surface here or the player never sees it.
+static constexpr int kAchFadeIn = 300, kAchHold = 3600, kAchFadeOut = 600;
+static constexpr int kAchTotal = kAchFadeIn + kAchHold + kAchFadeOut;
 
-    const QSize target = img.size().scaled(size(), Qt::KeepAspectRatio);
-    const QRect dst(QPoint((width() - target.width()) / 2, (height() - target.height()) / 2), target);
-    p.setRenderHint(QPainter::SmoothPixmapTransform, false); // crisp, non-blurry pixels
-    p.drawImage(dst, img);
-    applyVideoFilter(p, dst, static_cast<int>(w), static_cast<int>(h));
+void RetroView::showAchievement(const QString& title, const QString& description, int points, const QString& badgeUrl)
+{
+    AchToast t;
+    t.title = title;
+    t.sub = points > 0 ? tr("Achievement unlocked · %1 pts").arg(points) : tr("Achievement unlocked");
+    if (!description.isEmpty()) t.sub += QStringLiteral(" — ") + description;
+    t.badgeUrl = badgeUrl;
+    achQueue_.push_back(t);
+    if (!achActive_) startNextToast(); // otherwise it plays after the current one finishes
+}
+
+void RetroView::startNextToast()
+{
+    if (achQueue_.empty()) { achActive_ = false; if (achTimer_) achTimer_->stop(); update(); return; }
+    achCur_ = achQueue_.front();
+    achQueue_.pop_front();
+    achBadge_ = QImage();
+    achActive_ = true;
+    achClock_.restart();
+
+    // Fetch the badge art (best-effort; the toast shows text + a trophy glyph until/if it arrives).
+    if (!achCur_.badgeUrl.isEmpty())
+    {
+        if (!achNam_) achNam_ = new QNetworkAccessManager(this);
+        QNetworkRequest rq{ QUrl(achCur_.badgeUrl) };
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        const QString wantUrl = achCur_.badgeUrl;
+        QNetworkReply* reply = achNam_->get(rq);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, wantUrl] {
+            reply->deleteLater();
+            if (reply->error() == QNetworkReply::NoError && achActive_ && achCur_.badgeUrl == wantUrl)
+            {
+                QImage img; if (img.loadFromData(reply->readAll())) { achBadge_ = img; update(); }
+            }
+        });
+    }
+
+    if (!achTimer_) // ~30fps repaint so the fade animates even while the game is paused
+    {
+        achTimer_ = new QTimer(this);
+        achTimer_->setInterval(33);
+        connect(achTimer_, &QTimer::timeout, this, [this] {
+            if (!achActive_) { achTimer_->stop(); return; }
+            if (achClock_.elapsed() >= kAchTotal) startNextToast(); // advance to the next queued unlock (or stop)
+            else update();
+        });
+    }
+    achTimer_->start();
+    update();
+}
+
+void RetroView::paintAchievementToast(QPainter& p)
+{
+    if (!achActive_) return;
+    const qint64 e = achClock_.elapsed();
+    if (e >= kAchTotal) return;
+    // Opacity envelope: ease in, hold at full, ease out.
+    double op = 1.0;
+    if (e < kAchFadeIn)                    op = double(e) / kAchFadeIn;
+    else if (e > kAchFadeIn + kAchHold)    op = 1.0 - double(e - kAchFadeIn - kAchHold) / kAchFadeOut;
+    op = qBound(0.0, op, 1.0);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+    // Card sized to the widget; a small badge on the left, two lines of text on the right. Anchored bottom-centre,
+    // rising slightly as it fades in (a subtle slide, like the RetroArch/RA popup).
+    const int pad = qMax(8, height() / 90);
+    const int badge = qMax(40, height() / 12);
+    QFont titleFont = p.font(); titleFont.setPixelSize(qMax(14, height() / 30)); titleFont.setBold(true);
+    QFont subFont = p.font();   subFont.setPixelSize(qMax(11, height() / 45));
+    const QFontMetrics tfm(titleFont), sfm(subFont);
+    const int textW = qMax(tfm.horizontalAdvance(achCur_.title), sfm.horizontalAdvance(achCur_.sub));
+    const int cardW = qMin(width() - 2 * pad, badge + 3 * pad + qMin(textW, width() * 2 / 3));
+    const int cardH = badge + 2 * pad;
+    const int rise = int((1.0 - op) * 24);
+    const QRect card((width() - cardW) / 2, height() - cardH - pad * 2 + rise, cardW, cardH);
+
+    p.setOpacity(op);
+    // Card background + gold accent border.
+    p.setPen(QPen(QColor(255, 200, 60, 220), 2));
+    p.setBrush(QColor(18, 22, 30, 235));
+    p.drawRoundedRect(card, 12, 12);
+
+    // Badge (fetched art, else a trophy glyph on a gold chip).
+    const QRect bRect(card.left() + pad, card.top() + pad, badge, badge);
+    if (!achBadge_.isNull())
+    {
+        p.setBrush(Qt::NoBrush); p.setPen(Qt::NoPen);
+        p.drawImage(bRect, achBadge_.scaled(bRect.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    }
+    else
+    {
+        p.setPen(Qt::NoPen); p.setBrush(QColor(255, 200, 60, 200));
+        p.drawRoundedRect(bRect, 8, 8);
+        p.setPen(QColor(30, 25, 10)); QFont gf = p.font(); gf.setPixelSize(badge * 3 / 5); p.setFont(gf);
+        p.drawText(bRect, Qt::AlignCenter, QStringLiteral("🏆"));
+    }
+
+    // Text block: title (bold) over the "Achievement unlocked · N pts — desc" subtitle, both elided to fit.
+    const int tx = bRect.right() + pad + 4;
+    const int tw = card.right() - pad - tx;
+    p.setPen(QColor(245, 246, 250));
+    p.setFont(titleFont);
+    p.drawText(QRect(tx, card.top() + pad, tw, tfm.height()),
+               Qt::AlignLeft | Qt::AlignVCenter, tfm.elidedText(achCur_.title, Qt::ElideRight, tw));
+    p.setPen(QColor(255, 205, 90));
+    p.setFont(subFont);
+    p.drawText(QRect(tx, card.bottom() - pad - sfm.height(), tw, sfm.height()),
+               Qt::AlignLeft | Qt::AlignVCenter, sfm.elidedText(achCur_.sub, Qt::ElideRight, tw));
+    p.restore();
 }
 
 void RetroView::keyPressEvent(QKeyEvent* e)

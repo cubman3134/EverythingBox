@@ -33,7 +33,7 @@ public:
 signals:
     void loginResult(bool ok, const QString& message);
     void gameLoaded(bool ok, const QString& title, int unlocked, int total);
-    void achievementUnlocked(const QString& title, const QString& description, int points);
+    void achievementUnlocked(const QString& title, const QString& description, int points, const QString& badgeUrl);
 
 private:
     void* impl_ = nullptr; // opaque rcheevos state (keeps the C headers out of this header)

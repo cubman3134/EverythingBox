@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QMutex>
 #include <QVector>
+#include <QElapsedTimer>
 #include <set>
 #include <deque>
 #include <vector>
@@ -27,6 +28,7 @@ class QScrollArea;
 class QOpenGLContext;
 class QOffscreenSurface;
 class QOpenGLFramebufferObject;
+class QNetworkAccessManager;
 class NetplaySession;
 
 class RetroView : public QWidget
@@ -58,6 +60,8 @@ public:
     void setVolume(qreal v);              // 0.0..1.0 audio level (per-pane mixing in split screen)
     void setInputActive(bool active);     // when false, ignore controller/keyboard (unfocused split pane)
     void setAchievements(class Achievements* a) { ach_ = a; } // RetroAchievements (full-screen emulator only)
+    // Show a RetroAchievements unlock toast (badge + title + points) over the game. Queues if one is already up.
+    void showAchievement(const QString& title, const QString& description, int points, const QString& badgeUrl);
     // Run emulation on a dedicated worker thread instead of the GUI timer. Used for split-screen panes so the
     // game isn't throttled by the other pane's video rendering on the shared GUI thread. Call before openGame.
     void setThreaded(bool on) { threaded_ = on; }
@@ -90,6 +94,18 @@ private:
     void buildMenu();          // the in-game Esc overlay (Resume / Save / Load / Exit)
     bool runOneCoreFrame();    // advance the core one frame (hw or sw), returns false if it crashed + stopped
     void captureRewind();      // snapshot the current state into the rewind ring buffer (bounded by bytes)
+
+    // ---- on-screen RetroAchievements unlock toast (badge + title + points, fades in/out over the game) ----
+    struct AchToast { QString title; QString sub; QString badgeUrl; };
+    void startNextToast();                 // pop the queue -> show the next toast (fetch its badge)
+    void paintAchievementToast(QPainter& p);
+    std::deque<AchToast> achQueue_;        // pending unlocks (shown one at a time)
+    AchToast achCur_;                      // the toast currently on screen
+    QImage achBadge_;                      // fetched badge for achCur_ (empty until it loads / on failure)
+    QElapsedTimer achClock_;               // drives the fade-in / hold / fade-out timing
+    QTimer* achTimer_ = nullptr;           // ~30fps repaint while a toast is up (game may be paused)
+    QNetworkAccessManager* achNam_ = nullptr;
+    bool achActive_ = false;
 
     // ---- netplay (2-player LAN lockstep; full-screen only) ----
     void showNetplay();                 // pause-menu sub-page: Host / Join

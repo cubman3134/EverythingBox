@@ -88,9 +88,14 @@ void eventHandlerCb(const rc_client_event_t* event, rc_client_t*)
 {
     if (!g_ach) return;
     if (event->type == RC_CLIENT_EVENT_ACHIEVEMENT_TRIGGERED && event->achievement)
+    {
+        char badge[256] = { 0 };
+        rc_client_achievement_get_image_url(event->achievement, RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED, badge, sizeof(badge));
         emit g_ach->achievementUnlocked(QString::fromUtf8(event->achievement->title),
                                         QString::fromUtf8(event->achievement->description),
-                                        (int)event->achievement->points);
+                                        (int)event->achievement->points,
+                                        QString::fromUtf8(badge));
+    }
 }
 
 void loginCb(int result, const char* error_message, rc_client_t* client, void*)

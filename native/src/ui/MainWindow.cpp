@@ -288,7 +288,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // saved, and announces unlocks. Split-screen panes don't participate (one active game at a time).
     ach_ = new Achievements(this);
     retro_->setAchievements(ach_);
-    connect(ach_, &Achievements::achievementUnlocked, this, [this](const QString& title, const QString&, int pts) {
+    connect(ach_, &Achievements::achievementUnlocked, this,
+            [this](const QString& title, const QString& desc, int pts, const QString& badge) {
+        retro_->showAchievement(title, desc, pts, badge); // on-screen popup over the game (full-screen has no status bar)
         statusBar()->showMessage(tr("🏆  Achievement unlocked: %1  (%2 pts)").arg(title).arg(pts), 8000);
     });
     connect(ach_, &Achievements::gameLoaded, this, [this](bool ok, const QString& title, int unlocked, int total) {
