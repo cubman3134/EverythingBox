@@ -1806,6 +1806,22 @@ void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, con
     clearAudioQueue();
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
+    // Tell the emulator's SDL to ignore any phantom controller (e.g. a Keychron HE keyboard that presents a
+    // gamepad interface). Otherwise it can take the first device slot and the emulator, bound to "SDL-0", listens
+    // to the keyboard instead of the real pad. The child QProcess inherits these; we set both the SDL2 and SDL3
+    // hint names since standalone emulators use either.
+    if (retro_ && retro_->gamepad())
+    {
+        const std::string ignore = retro_->gamepad()->phantomControllerIgnoreList();
+        if (!ignore.empty())
+        {
+            const QByteArray v = QByteArray::fromStdString(ignore);
+            qputenv("SDL_JOYSTICK_IGNORE_DEVICES", v);       // SDL3 (DuckStation, current PCSX2…)
+            qputenv("SDL_GAMECONTROLLER_IGNORE_DEVICES", v); // SDL2-based emulators
+            mwLog(QStringLiteral("emu: ignoring phantom controller(s) for the emulator: %1").arg(QString::fromUtf8(v)));
+        }
+        else { qunsetenv("SDL_JOYSTICK_IGNORE_DEVICES"); qunsetenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"); }
+    }
     ensureEmuPage();
     emuLabel_->setText(EmulatorManager::isInstalled(em)
                            ? tr("Starting %1…").arg(em.displayName)

@@ -105,6 +105,27 @@ void Gamepad::closeAll()
         }
 }
 
+std::string Gamepad::phantomControllerIgnoreList() const
+{
+    if (!initialized_) return {};
+    std::string unknowns;
+    bool haveRecognized = false;
+    for (int p = 0; p < kMaxPlayers; ++p)
+    {
+        if (!slots_[p]) continue;
+        auto* gc = static_cast<SDL_GameController*>(slots_[p]);
+        if (SDL_GameControllerGetType(gc) != SDL_CONTROLLER_TYPE_UNKNOWN) { haveRecognized = true; continue; }
+        const Uint16 vid = SDL_GameControllerGetVendor(gc);
+        const Uint16 pid = SDL_GameControllerGetProduct(gc);
+        if (!vid && !pid) continue; // no identity to match on — leave it alone
+        char buf[24];
+        SDL_snprintf(buf, sizeof(buf), "0x%04x/0x%04x", vid, pid);
+        if (!unknowns.empty()) unknowns += ",";
+        unknowns += buf;
+    }
+    return haveRecognized ? unknowns : std::string(); // don't suppress a lone unrecognized pad
+}
+
 void Gamepad::poll()
 {
     if (!initialized_) return;
@@ -239,6 +260,7 @@ int Gamepad::firstConnectedPort() const { return -1; }
 std::string Gamepad::name(unsigned) const { return {}; }
 void Gamepad::openControllers() {}
 void Gamepad::closeAll() {}
+std::string Gamepad::phantomControllerIgnoreList() const { return {}; }
 void Gamepad::poll() {}
 bool Gamepad::button(unsigned, unsigned) const { return false; }
 int16_t Gamepad::axis(unsigned, unsigned, unsigned) const { return 0; }

@@ -31,6 +31,13 @@ public:
 
     void poll();   // call once per frame, before reading state (also handles connect/disconnect)
 
+    // Some HID keyboards (e.g. Keychron HE) expose a game-controller interface, so SDL treats the keyboard as a
+    // controller and it can grab the first device slot — an emulator bound to "SDL-0" then listens to the keyboard
+    // instead of the real pad. Returns the VID/PID list (SDL *_IGNORE_DEVICES format, e.g. "0x3434/0x0e20") of
+    // connected "controllers" SDL can't identify as a real type, but only when a properly recognized controller is
+    // also present, so a lone unrecognized third-party pad is never suppressed. Empty when there's nothing to skip.
+    std::string phantomControllerIgnoreList() const;
+
     // Digital RetroPad button for a player port. id is a RETRO_DEVICE_ID_JOYPAD_* value. The d-pad also
     // responds to the left analog stick past a deadzone, so stick-only pads still drive d-pad games.
     bool button(unsigned port, unsigned retroId) const;
