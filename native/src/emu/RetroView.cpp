@@ -672,7 +672,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
         for (const QString& cand : { dir + coreName + QStringLiteral(".png"), dir + QStringLiteral("default.png") })
             if (QFile::exists(cand)) { bezel_.load(cand); break; }
     }
-    frameIntervalMs_ = qMax(1, static_cast<int>(1000.0 / fps));
+    frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest ms (e.g. 17 for 59.7fps, not 16) — less audio drift
     paused_ = false;
     running_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
@@ -1446,12 +1446,13 @@ void RetroView::startAudio(int sampleRate)
     fmt.setSampleFormat(QAudioFormat::Int16);
 
     audioSink_ = new QAudioSink(dev, fmt, this);
-    audioSink_->setBufferSize(fmt.bytesForDuration(100000)); // ~100 ms
+    audioSink_->setBufferSize(fmt.bytesForDuration(120000)); // ~120 ms of slack for timer jitter
     audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
     audioSrcRate_ = sampleRate;
     audioOutRate_ = outRate;
     audioBytesPerSec_ = outRate * 2 * 2;                     // stereo S16 at the OUTPUT rate
-    rsStep_ = double(sampleRate) / double(outRate);
+    rsStepBase_ = double(sampleRate) / double(outRate);
+    rsStep_ = rsStepBase_;
     rsPos_ = 0.0; rsPrev_[0] = rsPrev_[1] = 0;
     audioIo_ = audioSink_->start();                          // push mode: write samples to this
 }
@@ -1501,7 +1502,22 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
     if (audioSrcRate_ == audioOutRate_)
         pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
     else
+    {
+        // Dynamic rate control: the frame timer's integer-ms interval never exactly matches the core's true
+        // frame rate, so audio slowly drifts. Nudge the resample ratio (±0.5%, inaudible) to hold the buffered
+        // audio near half-full, instead of letting it overflow (backlog trim) or run dry (underrun) — both click.
+        if (audioSink_)
+        {
+            const qint64 bufSize = audioSink_->bufferSize();
+            if (bufSize > 0)
+            {
+                const qint64 queued = (bufSize - audioSink_->bytesFree()) + pendingAudio_.size();
+                const double err = qBound(-1.0, double(queued) / double(bufSize) - 0.5, 1.0); // fill vs 50%
+                rsStep_ = rsStepBase_ * (1.0 + 0.005 * err); // too full -> consume source faster -> fewer out samples
+            }
+        }
         resampleAppend(data, frames); // core rate (e.g. 32040) -> device native rate (e.g. 48000)
+    }
 
     const qint64 freeBytes = audioSink_->bytesFree();
     if (freeBytes > 0 && !pendingAudio_.isEmpty())
