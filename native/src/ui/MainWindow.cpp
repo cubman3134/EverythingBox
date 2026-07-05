@@ -23,6 +23,7 @@
 #include "../core/AppUpdater.h"
 #include "../core/SubtitleFetcher.h"
 #include "../core/CastManager.h"
+#include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -258,6 +259,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Auto-subtitle download: when an eligible video finishes loading with no subtitle in the preferred
     // language, fetch one from OpenSubtitles and hand it to the player. Dormant unless the user configured
     // OpenSubtitles credentials and enabled "show subtitles by default".
+    trakt_ = new TraktClient(this);
+    connect(trakt_, &TraktClient::log, this, [this](const QString& l) { mwLog(l); });
+
     castMgr_ = new CastManager(this);
     connect(castMgr_, &CastManager::castStarted, this, [this](const QString& name) {
         notify(tr("Casting to %1.").arg(name), 4000); });
@@ -1356,6 +1360,7 @@ void MainWindow::prevTrack()
 void MainWindow::onTrackEnded()
 {
     finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
+    stopScrobble(); // Trakt: a finished video scrobbles a stop at ~100% -> marked watched
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
     if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playTrack(trackIndex_ + 1); return; }
     // A TV episode that played to the end -> roll to the next episode, if enabled.
@@ -1814,6 +1819,7 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
 {
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
+    stopScrobble();                    // leaving whatever was playing
     castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
@@ -1907,6 +1913,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
 {
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     subCtx_ = {};           // audio has no subtitles to fetch
+    stopScrobble();         // leaving whatever video was playing
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
     clearAudioQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
@@ -1979,6 +1986,7 @@ void MainWindow::openHome()
 {
     // Leaving whatever was open: stop playback/emulation, save reader positions.
     hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
+    stopScrobble();     // Trakt: close out the current watch
     player_->stop();
     retro_->stop();
     book_->persist();
@@ -3361,6 +3369,22 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
     notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), 7000);
 }
 
+void MainWindow::startScrobble(const QString& imdbStreamId)
+{
+    stopScrobble();  // close out any previous video first
+    if (imdbStreamId.isEmpty() || !TraktClient::connected()) return;
+    scrobbleImdb_ = imdbStreamId;
+    trakt_->scrobbleStart(imdbStreamId, 0.0);
+}
+
+void MainWindow::stopScrobble()
+{
+    if (scrobbleImdb_.isEmpty()) return;
+    const double pct = duration_ > 0.0 ? qBound(0.0, audioPos_ / duration_ * 100.0, 100.0) : 0.0;
+    trakt_->scrobbleStop(scrobbleImdb_, pct); // Trakt marks it watched when the stop is past ~80%
+    scrobbleImdb_.clear();
+}
+
 // Decide whether the video about to play should get an auto-downloaded subtitle, and stash the match hints
 // for the MpvWidget::fileLoaded handler. Only movies/episodes qualify, and only when the feature is enabled
 // and configured. Always resets subCtx_ first, so a prior video's context can't leak into an ineligible open.
@@ -3872,6 +3896,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
         castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened
+        startScrobble(item.imdbStreamId); // Trakt: begin tracking this movie/episode
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();
@@ -4614,6 +4639,45 @@ void MainWindow::openGeneralSettings()
                    [](const QString& t) { Settings::setOpenSubUsername(t); });
         addCredRow(tr("Password:"), Settings::openSubPassword(), true,
                    [](const QString& t) { Settings::setOpenSubPassword(t); });
+
+        // --- Trakt.tv scrobbling: mark movies/episodes watched on your Trakt profile as you play them. ---
+        v->addSpacing(12);
+        auto* tkHeading = new QLabel(tr("Trakt.tv"));
+        tkHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(tkHeading);
+        auto* tkNote = new QLabel(tr("Sync what you watch to your Trakt profile (movies + episodes are marked "
+                                     "watched automatically). Create a free API app at trakt.tv/oauth/applications "
+                                     "(redirect URI: urn:ietf:wg:oauth:2.0:oob), paste its Client ID + Secret, then "
+                                     "Connect."));
+        tkNote->setWordWrap(true);
+        tkNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(tkNote);
+        addCredRow(tr("Client ID:"), Settings::traktClientId(), false,
+                   [](const QString& t) { Settings::setTraktClientId(t); });
+        addCredRow(tr("Client secret:"), Settings::traktClientSecret(), true,
+                   [](const QString& t) { Settings::setTraktClientSecret(t); });
+
+        auto* tkStatus = new QLabel(TraktClient::connected() ? tr("✓ Connected to Trakt.") : tr("Not connected."));
+        tkStatus->setWordWrap(true);
+        tkStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* tkBtn = new QPushButton(TraktClient::connected() ? tr("Disconnect") : tr("Connect to Trakt"));
+        tkBtn->setMinimumHeight(32);
+        auto* tkRow = new QHBoxLayout(); tkRow->addWidget(tkBtn); tkRow->addStretch(1);
+        v->addLayout(tkRow);
+        v->addWidget(tkStatus);
+        // Wire this panel's Trakt signals; disconnected when the panel is torn down (the labels are its children).
+        connect(trakt_, &TraktClient::deviceCode, tkStatus, [tkStatus](const QString& code, const QString& url) {
+            tkStatus->setText(tr("Go to %1 and enter code:  %2").arg(url, code)); });
+        connect(trakt_, &TraktClient::connectError, tkStatus, [tkStatus](const QString& m) { tkStatus->setText(m); });
+        connect(trakt_, &TraktClient::connectedChanged, tkBtn, [tkBtn, tkStatus](bool on) {
+            tkBtn->setText(on ? tr("Disconnect") : tr("Connect to Trakt"));
+            tkStatus->setText(on ? tr("✓ Connected to Trakt.") : tr("Not connected.")); });
+        connect(tkBtn, &QPushButton::clicked, this, [this, tkStatus] {
+            if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
+            if (!TraktClient::configured()) { tkStatus->setText(tr("Enter your Client ID and Secret first.")); return; }
+            tkStatus->setText(tr("Requesting a code from Trakt…"));
+            trakt_->connectAccount();
+        });
 
         // --- Background music: play tracks dropped in <data>/music while browsing the menus. ---
         v->addSpacing(10);

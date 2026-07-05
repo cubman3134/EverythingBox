@@ -38,6 +38,28 @@ void Settings::setAutoplayNextEpisode(bool on)
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
 }
 
+QString Settings::traktClientId() { return store().value(QStringLiteral("trakt/clientId")).toString(); }
+void Settings::setTraktClientId(const QString& v) { store().setValue(QStringLiteral("trakt/clientId"), v.trimmed()); store().sync(); }
+QString Settings::traktClientSecret() { return store().value(QStringLiteral("trakt/clientSecret")).toString(); }
+void Settings::setTraktClientSecret(const QString& v) { store().setValue(QStringLiteral("trakt/clientSecret"), v.trimmed()); store().sync(); }
+QString Settings::traktAccessToken() { return store().value(QStringLiteral("trakt/access")).toString(); }
+QString Settings::traktRefreshToken() { return store().value(QStringLiteral("trakt/refresh")).toString(); }
+qint64  Settings::traktTokenExpiry() { return store().value(QStringLiteral("trakt/expiry"), 0).toLongLong(); }
+void Settings::setTraktTokens(const QString& access, const QString& refresh, qint64 expiryUnix)
+{
+    store().setValue(QStringLiteral("trakt/access"), access);
+    store().setValue(QStringLiteral("trakt/refresh"), refresh);
+    store().setValue(QStringLiteral("trakt/expiry"), expiryUnix);
+    store().sync();
+}
+void Settings::clearTraktTokens()
+{
+    store().remove(QStringLiteral("trakt/access"));
+    store().remove(QStringLiteral("trakt/refresh"));
+    store().remove(QStringLiteral("trakt/expiry"));
+    store().sync();
+}
+
 QString Settings::openSubApiKey() { return store().value(QStringLiteral("subs/osApiKey")).toString(); }
 void Settings::setOpenSubApiKey(const QString& key)
 {

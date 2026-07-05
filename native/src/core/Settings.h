@@ -15,6 +15,18 @@ namespace Settings
     bool autoplayNextEpisode();
     void setAutoplayNextEpisode(bool on);
 
+    // Trakt.tv scrobbling. Client id/secret come from a Trakt API app the user registers; the tokens are
+    // obtained via the device-code OAuth flow and refreshed automatically. All empty => Trakt is off.
+    QString traktClientId();
+    void setTraktClientId(const QString& v);
+    QString traktClientSecret();
+    void setTraktClientSecret(const QString& v);
+    QString traktAccessToken();
+    QString traktRefreshToken();
+    qint64  traktTokenExpiry();          // unix seconds; 0 = not connected
+    void setTraktTokens(const QString& access, const QString& refresh, qint64 expiryUnix);
+    void clearTraktTokens();
+
     // OpenSubtitles.com credentials for auto-downloading subtitles when a video has none in the preferred
     // language. The REST API needs an app API key (register once, free) for search, plus the user's account
     // (login is required to download). All three empty => the feature is dormant. Stored in the local INI.
