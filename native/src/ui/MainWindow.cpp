@@ -2622,8 +2622,22 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     else if (kind == QStringLiteral("document")) openDocumentPath(path);
 }
 
+// When a restricted (kids) profile is active and a PIN is set, require it before an "escape" action. Returns
+// true when the action may proceed (no restriction, no PIN, or the correct PIN was entered).
+bool MainWindow::parentalUnlock(const QString& reason)
+{
+    if (!Settings::hasParentalPin() || !ProfileStore::current().restricted) return true;
+    bool ok = false;
+    const QString pin = QInputDialog::getText(this, tr("Parental PIN"), reason, QLineEdit::Password, QString(), &ok);
+    if (!ok) return false;
+    if (Settings::checkParentalPin(pin)) return true;
+    notify(tr("Incorrect PIN."), 3000);
+    return false;
+}
+
 void MainWindow::onSwitchProfile()
 {
+    if (!parentalUnlock(tr("Enter the parental PIN to switch profiles."))) return;
     auto* dlg = new ProfileDialog(/*mustChoose*/ false, this);
     showDialogPanel(tr("Profiles"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
@@ -4427,6 +4441,7 @@ void MainWindow::updateThemedNowPlaying()
 
 void MainWindow::openSettingsHub()
 {
+    if (!parentalUnlock(tr("Enter the parental PIN to open Settings."))) return;
     // Entering the settings area from a real page: remember it so the top-level Back returns there.
     if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
     showPanel(tr("Settings"), [this](QVBoxLayout* v) {
@@ -4678,6 +4693,63 @@ void MainWindow::openGeneralSettings()
             tkStatus->setText(tr("Requesting a code from Trakt…"));
             trakt_->connectAccount();
         });
+
+        // --- Parental controls: a PIN that gates leaving a restricted (kids) profile. ---
+        v->addSpacing(12);
+        auto* pcHeading = new QLabel(tr("Parental Controls"));
+        pcHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(pcHeading);
+        auto* pcNote = new QLabel(tr("Set a PIN, then mark the kids' profiles below as restricted. While a "
+                                     "restricted profile is active, switching profiles or opening Settings "
+                                     "requires the PIN."));
+        pcNote->setWordWrap(true); pcNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(pcNote);
+
+        auto* pcStatus = new QLabel(Settings::hasParentalPin() ? tr("A PIN is set.") : tr("No PIN set."));
+        pcStatus->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        auto* setPin = new QPushButton(Settings::hasParentalPin() ? tr("Change PIN") : tr("Set PIN"));
+        auto* clrPin = new QPushButton(tr("Remove PIN"));
+        setPin->setMinimumHeight(32); clrPin->setMinimumHeight(32);
+        clrPin->setEnabled(Settings::hasParentalPin());
+        auto* pcRow = new QHBoxLayout(); pcRow->addWidget(setPin); pcRow->addWidget(clrPin); pcRow->addStretch(1);
+        v->addLayout(pcRow);
+        v->addWidget(pcStatus);
+        connect(setPin, &QPushButton::clicked, this, [this, setPin, clrPin, pcStatus] {
+            bool ok = false;
+            if (Settings::hasParentalPin()) {
+                const QString cur = QInputDialog::getText(this, tr("Change PIN"), tr("Enter the current PIN:"), QLineEdit::Password, QString(), &ok);
+                if (!ok) return;
+                if (!Settings::checkParentalPin(cur)) { pcStatus->setText(tr("Incorrect PIN.")); return; }
+            }
+            const QString a = QInputDialog::getText(this, tr("Set PIN"), tr("New PIN:"), QLineEdit::Password, QString(), &ok);
+            if (!ok || a.isEmpty()) return;
+            const QString b = QInputDialog::getText(this, tr("Set PIN"), tr("Confirm PIN:"), QLineEdit::Password, QString(), &ok);
+            if (!ok) return;
+            if (a != b) { pcStatus->setText(tr("PINs didn't match.")); return; }
+            Settings::setParentalPin(a);
+            pcStatus->setText(tr("A PIN is set.")); setPin->setText(tr("Change PIN")); clrPin->setEnabled(true);
+        });
+        connect(clrPin, &QPushButton::clicked, this, [this, setPin, clrPin, pcStatus] {
+            bool ok = false;
+            const QString cur = QInputDialog::getText(this, tr("Remove PIN"), tr("Enter the current PIN:"), QLineEdit::Password, QString(), &ok);
+            if (!ok) return;
+            if (!Settings::checkParentalPin(cur)) { pcStatus->setText(tr("Incorrect PIN.")); return; }
+            Settings::setParentalPin(QString());
+            pcStatus->setText(tr("No PIN set.")); setPin->setText(tr("Set PIN")); clrPin->setEnabled(false);
+        });
+
+        v->addSpacing(6);
+        auto* pcProfiles = new QLabel(tr("Restricted (kids) profiles:"));
+        pcProfiles->setStyleSheet(QStringLiteral("font-size:13px;color:#bbb;"));
+        v->addWidget(pcProfiles);
+        for (const Profile& pr : ProfileStore::list()) {
+            auto* cb = new QCheckBox((pr.icon.isEmpty() ? QString() : pr.icon + QStringLiteral("  ")) + pr.name);
+            cb->setStyleSheet(QStringLiteral("font-size:15px;"));
+            cb->setChecked(pr.restricted);
+            const QString id = pr.id;
+            connect(cb, &QCheckBox::toggled, this, [id](bool c) { ProfileStore::setRestricted(id, c); });
+            v->addWidget(cb);
+        }
 
         // --- Background music: play tracks dropped in <data>/music while browsing the menus. ---
         v->addSpacing(10);

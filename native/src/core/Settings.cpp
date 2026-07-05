@@ -2,6 +2,7 @@
 #include "AppPaths.h"
 #include <QSettings>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 
 static QSettings& store()
 {
@@ -36,6 +37,26 @@ bool Settings::autoplayNextEpisode() { return store().value(QStringLiteral("play
 void Settings::setAutoplayNextEpisode(bool on)
 {
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
+}
+
+// The PIN is stored as SHA-256(salt + pin) — enough to keep it out of the ini in the clear and deter a
+// casual child; it isn't a cryptographic secret store.
+static QString pinHash(const QString& pin)
+{
+    const QByteArray in = QByteArrayLiteral("mmv-parental:") + pin.toUtf8();
+    return QString::fromLatin1(QCryptographicHash::hash(in, QCryptographicHash::Sha256).toHex());
+}
+bool Settings::hasParentalPin() { return !store().value(QStringLiteral("parental/pinHash")).toString().isEmpty(); }
+void Settings::setParentalPin(const QString& pin)
+{
+    if (pin.isEmpty()) store().remove(QStringLiteral("parental/pinHash"));
+    else store().setValue(QStringLiteral("parental/pinHash"), pinHash(pin));
+    store().sync();
+}
+bool Settings::checkParentalPin(const QString& pin)
+{
+    const QString h = store().value(QStringLiteral("parental/pinHash")).toString();
+    return !h.isEmpty() && h == pinHash(pin);
 }
 
 QString Settings::traktClientId() { return store().value(QStringLiteral("trakt/clientId")).toString(); }

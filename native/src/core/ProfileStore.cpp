@@ -27,6 +27,7 @@ QVector<Profile> ProfileStore::list()
         p.id   = o.value(QStringLiteral("id")).toString();
         p.name = o.value(QStringLiteral("name")).toString();
         p.icon = o.value(QStringLiteral("icon")).toString();
+        p.restricted = o.value(QStringLiteral("restricted")).toBool();
         if (!p.id.isEmpty()) out.push_back(p);
     }
     return out;
@@ -41,6 +42,7 @@ static void save(const QVector<Profile>& items)
         o.insert(QStringLiteral("id"), p.id);
         o.insert(QStringLiteral("name"), p.name);
         o.insert(QStringLiteral("icon"), p.icon);
+        o.insert(QStringLiteral("restricted"), p.restricted);
         arr.append(o);
     }
     store().setValue(QStringLiteral("profiles/list"),
@@ -69,6 +71,13 @@ void ProfileStore::update(const QString& id, const QString& name, const QString&
             if (!name.trimmed().isEmpty()) p.name = name.trimmed();
             if (!icon.isEmpty())           p.icon = icon;
         }
+    save(items);
+}
+
+void ProfileStore::setRestricted(const QString& id, bool restricted)
+{
+    QVector<Profile> items = list();
+    for (Profile& p : items) if (p.id == id) p.restricted = restricted;
     save(items);
 }
 

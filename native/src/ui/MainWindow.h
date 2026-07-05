@@ -305,6 +305,10 @@ private:
     QString scrobbleImdb_;
     void startScrobble(const QString& imdbStreamId); // begin scrobbling a video (stops any prior one)
     void stopScrobble();                             // stop + mark-watched the current scrobble
+
+    // Parental gate: true if the action may proceed. When a restricted (kids) profile is active and a PIN is
+    // set, prompt for it; otherwise allow. `reason` is shown in the prompt.
+    bool parentalUnlock(const QString& reason);
     // The player bar's single subtitle button opens a full-player overlay panel (Stremio-style): track pick,
     // sync/size, load-from-file, download. subOverlay_ is the scrim+panel (null when closed); the focusable
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.

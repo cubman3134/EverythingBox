@@ -15,6 +15,11 @@ namespace Settings
     bool autoplayNextEpisode();
     void setAutoplayNextEpisode(bool on);
 
+    // Parental PIN (stored as a salted hash, never in the clear). Gates leaving a restricted "kids" profile.
+    bool hasParentalPin();
+    void setParentalPin(const QString& pin); // empty pin clears it
+    bool checkParentalPin(const QString& pin);
+
     // Trakt.tv scrobbling. Client id/secret come from a Trakt API app the user registers; the tokens are
     // obtained via the device-code OAuth flow and refreshed automatically. All empty => Trakt is off.
     QString traktClientId();
