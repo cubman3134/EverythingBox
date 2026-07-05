@@ -4110,6 +4110,30 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             notify(e, 6000);
             return;
         }
+        // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the body
+        // is an error page, not the ROM. Reject a >=400 status so we don't cache and open a bogus file.
+        const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (http >= 400)
+        {
+            QFile::remove(partPath);
+            mwLog(QStringLiteral("download: HTTP %1 for \"%2\"").arg(http).arg(title));
+            const QString e = tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).").arg(title).arg(http);
+            statusBar()->showMessage(e, 8000);
+            notify(e, 8000);
+            return;
+        }
+        // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front, reject a
+        // body that came up short rather than caching a truncated ROM/movie that would fail to open.
+        const qint64 expected = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        if (expected > 0 && QFileInfo(partPath).size() < expected)
+        {
+            QFile::remove(partPath);
+            mwLog(QStringLiteral("download: truncated \"%1\" (%2/%3 bytes)").arg(title).arg(QFileInfo(partPath).size()).arg(expected));
+            const QString e = tr("The download for “%1” stopped before it finished — please try again.").arg(title);
+            statusBar()->showMessage(e, 8000);
+            notify(e, 8000);
+            return;
+        }
         if (!writeOk)
         {
             QFile::remove(partPath);

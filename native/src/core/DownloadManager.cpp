@@ -139,13 +139,21 @@ void DownloadManager::onReadyRead()
 void DownloadManager::onFinished()
 {
     if (!reply_) return;
-    const bool ok = reply_->error() == QNetworkReply::NoError;
-    const QString err = reply_->errorString();
+    // A transport-level success (NoError) does NOT mean the download is good: an HTTP 404/403/5xx delivers an
+    // error page with NoError, and a dropped connection can end "cleanly" mid-file. Treat a >=400 status, or a
+    // body shorter than the advertised size, as a failure so we never record a broken file as complete.
+    const int http = reply_->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    bool ok = reply_->error() == QNetworkReply::NoError;
+    QString err = ok ? QString() : reply_->errorString();
+    // An HTTP error body is an error page, not our file — the .part is garbage and must be discarded so a retry
+    // starts clean (a connection drop, by contrast, leaves a valid partial we can resume from).
+    bool discardPart = false;
+    if (ok && http >= 400) { ok = false; err = tr("the source returned HTTP %1").arg(http); discardPart = true; }
     reply_->deleteLater(); reply_ = nullptr;
-    finishActive(ok, ok ? QString() : err);
+    finishActive(ok, err, discardPart);
 }
 
-void DownloadManager::finishActive(bool ok, const QString& err)
+void DownloadManager::finishActive(bool ok, const QString& err, bool discardPart)
 {
     const int idx = activeIndex();
     if (file_) { file_->close(); delete file_; file_ = nullptr; }
@@ -156,6 +164,14 @@ void DownloadManager::finishActive(bool ok, const QString& err)
     {
         // Keep the .part so a retry resumes. If it was paused/cancelled we've already handled the state.
         if (j.state == DownloadJob::Active) { j.state = DownloadJob::Failed; j.error = err; }
+        if (discardPart) { QFile::remove(j.dest + QStringLiteral(".part")); j.received = 0; }
+    }
+    else if (j.total > 0 && j.received < j.total)
+    {
+        // The stream ended before the whole file arrived. Keep the .part so a retry resumes from here rather
+        // than recording a partial file as a finished download.
+        j.state = DownloadJob::Failed;
+        j.error = tr("the download stopped before it finished (%1 of %2 bytes)").arg(j.received).arg(j.total);
     }
     else
     {

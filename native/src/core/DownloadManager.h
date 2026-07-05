@@ -56,7 +56,7 @@ private:
     void start(int idx);
     void onReadyRead();
     void onFinished();
-    void finishActive(bool ok, const QString& error);
+    void finishActive(bool ok, const QString& error, bool discardPart = false);
     int indexOf(const QString& id) const;
     int activeIndex() const;
     void save() const;
