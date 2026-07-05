@@ -1483,13 +1483,14 @@ void RetroView::startAudio(int sampleRate)
     fmt.setSampleFormat(QAudioFormat::Int16);
 
     audioSink_ = new QAudioSink(dev, fmt, this);
-    audioSink_->setBufferSize(fmt.bytesForDuration(120000)); // ~120 ms of slack for timer jitter
+    audioSink_->setBufferSize(fmt.bytesForDuration(150000)); // ~150 ms of slack for timer jitter
     audioSink_->setVolume(volume_);                          // per-pane mix level (1.0 = full)
     audioSrcRate_ = sampleRate;
     audioOutRate_ = outRate;
     audioBytesPerSec_ = outRate * 2 * 2;                     // stereo S16 at the OUTPUT rate
     rsStepBase_ = double(sampleRate) / double(outRate);
     rsStep_ = rsStepBase_;
+    rsIntegral_ = 0.0;
     rsPos_ = 0.0; rsPrev_[0] = rsPrev_[1] = 0;
     audioIo_ = audioSink_->start();                          // push mode: write samples to this
 }
@@ -1540,17 +1541,20 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
         pendingAudio_.append(reinterpret_cast<const char*>(data), static_cast<qsizetype>(frames) * 4); // 4 bytes/frame
     else
     {
-        // Dynamic rate control: the frame timer's integer-ms interval never exactly matches the core's true
-        // frame rate, so audio slowly drifts. Nudge the resample ratio (±0.5%, inaudible) to hold the buffered
-        // audio near half-full, instead of letting it overflow (backlog trim) or run dry (underrun) — both click.
+        // Dynamic rate control (PI): the frame timer's integer-ms interval never matches the core's true frame
+        // rate (17ms vs GBA's 16.74ms => ~1.5% slow => the buffer drains and underruns, which clicks). Nudge the
+        // resample ratio to hold the buffered audio near 50%. The integral term cancels the *steady* drift (a
+        // proportional-only controller would sit near-empty to keep producing extra, still risking underrun).
         if (audioSink_)
         {
             const qint64 bufSize = audioSink_->bufferSize();
             if (bufSize > 0)
             {
                 const qint64 queued = (bufSize - audioSink_->bytesFree()) + pendingAudio_.size();
-                const double err = qBound(-1.0, double(queued) / double(bufSize) - 0.5, 1.0); // fill vs 50%
-                rsStep_ = rsStepBase_ * (1.0 + 0.005 * err); // too full -> consume source faster -> fewer out samples
+                const double err = double(queued) / double(bufSize) - 0.5; // + = too full, - = draining
+                rsIntegral_ = qBound(-0.03, rsIntegral_ + err * 0.0004, 0.03); // cancels the steady drift (±3%)
+                const double corr = qBound(-0.05, 0.05 * err + rsIntegral_, 0.05);
+                rsStep_ = rsStepBase_ * (1.0 + corr); // too full -> larger step -> fewer out samples -> drains
             }
         }
         resampleAppend(data, frames); // core rate (e.g. 32040) -> device native rate (e.g. 48000)
@@ -1563,8 +1567,9 @@ void RetroView::pushAudio(const int16_t* data, size_t frames)
         const qint64 written = audioIo_->write(pendingAudio_.constData(), n);
         if (written > 0) pendingAudio_.remove(0, written);
     }
-    // Bound the backlog (~120 ms) so audio can't drift behind the picture.
-    const qsizetype maxBacklog = static_cast<qsizetype>(audioBytesPerSec_) * 120 / 1000;
+    // Safety net only: with DRC holding the buffer steady the pending backlog stays tiny, so this rarely fires
+    // (raised well above the DRC target so it isn't a periodic click source). Trims the oldest queued audio.
+    const qsizetype maxBacklog = static_cast<qsizetype>(audioBytesPerSec_) * 300 / 1000;
     if (audioBytesPerSec_ > 0 && pendingAudio_.size() > maxBacklog)
         pendingAudio_.remove(0, pendingAudio_.size() - maxBacklog);
 }

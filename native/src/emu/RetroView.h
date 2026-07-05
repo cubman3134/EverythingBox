@@ -226,6 +226,7 @@ private:
     int audioOutRate_ = 0;         // the QAudioSink's rate (device native)
     double rsStep_ = 1.0;          // input frames per output frame (src/out); nudged by dynamic rate control
     double rsStepBase_ = 1.0;      // the nominal ratio (src/out); rsStep_ oscillates around this
+    double rsIntegral_ = 0.0;      // DRC integral term: accumulates buffer error to cancel steady timer drift
     double rsPos_ = 0.0;           // carried fractional read position
     int16_t rsPrev_[2] = { 0, 0 }; // last input frame from the previous push (for cross-buffer interpolation)
     void resampleAppend(const int16_t* in, size_t frames); // src-rate -> out-rate, appends to pendingAudio_
