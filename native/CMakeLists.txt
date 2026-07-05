@@ -168,6 +168,10 @@ if(MYMEDIAVAULT_BUILD_APP)
         add_executable(symbolize_dump tools/symbolize_dump.cpp)
         target_link_libraries(symbolize_dump PRIVATE dbghelp)
     endif()
+    # Headless check of the relay netplay path (two NetplaySession objects through a local relay).
+    add_executable(probe_netplay tools/probe_netplay.cpp src/emu/NetplaySession.cpp)
+    target_include_directories(probe_netplay PRIVATE src src/emu)
+    target_link_libraries(probe_netplay PRIVATE Qt6::Core Qt6::Network)
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)

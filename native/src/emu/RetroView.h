@@ -109,7 +109,9 @@ private:
 
     // ---- netplay (2-player LAN lockstep; full-screen only) ----
     void showNetplay();                 // pause-menu sub-page: Host / Join
-    void startNetplay(bool asHost, const QString& hostAddr = QString());
+    void startNetplay(bool asHost, const QString& hostAddr = QString());     // LAN (direct)
+    void startNetplayOnline(bool asHost, const QString& code);               // online via the relay (room code)
+    void ensureNetSession();            // build net_ + wire its callbacks/signals once
     void netTick();                     // the frame loop while netplay is active
     quint16 captureLocalButtons();      // this peer's RetroPad button mask (port-0 controls)
     NetplaySession* net_ = nullptr;

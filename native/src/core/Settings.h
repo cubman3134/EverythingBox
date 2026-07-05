@@ -66,6 +66,9 @@ namespace Settings
     QString videoFilter();
     void setVideoFilter(const QString& id);
 
+    QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
+    void setNetplayRelay(const QString& hostPort);
+
     // Draw bezel / border artwork around the emulator picture (PNG in <data>/bezels). Default off.
     bool bezelEnabled();
     void setBezelEnabled(bool on);

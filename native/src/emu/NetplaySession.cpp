@@ -50,14 +50,76 @@ void NetplaySession::join(const QString& hostAddr, quint16 port)
     s->connectToHost(hostAddr, port);
 }
 
+void NetplaySession::wireSocketErrors(QTcpSocket* s)
+{
+    s->setSocketOption(QAbstractSocket::LowDelayOption, 1); // TCP_NODELAY: send input packets immediately
+    connect(s, &QAbstractSocket::disconnected, this, [this] { if (active_) emit ended(tr("The other player disconnected.")); });
+    connect(s, &QAbstractSocket::errorOccurred, this, [this] {
+        if (active_ && !ready_) emit ended(tr("Couldn't connect (%1).").arg(sock_ ? sock_->errorString() : QString())); });
+}
+
 void NetplaySession::attachSocket(QTcpSocket* s)
 {
     sock_ = s;
-    sock_->setSocketOption(QAbstractSocket::LowDelayOption, 1); // TCP_NODELAY: send input packets immediately
+    wireSocketErrors(s);
     connect(sock_, &QTcpSocket::readyRead, this, &NetplaySession::onReadyRead);
-    connect(sock_, &QAbstractSocket::disconnected, this, [this] { if (active_) emit ended(tr("The other player disconnected.")); });
-    connect(sock_, &QAbstractSocket::errorOccurred, this, [this] {
-        if (active_ && !ready_) emit ended(tr("Couldn't connect (%1).").arg(sock_ ? sock_->errorString() : QString())); });
+}
+
+// Connect to the relay and send our HOST/JOIN line; onRelayHandshake() takes over once the relay answers.
+void NetplaySession::connectToRelay(const QString& relayHost, quint16 relayPort, const QByteArray& verbLine)
+{
+    stop();
+    active_ = true; ready_ = false; awaitingPair_ = true;
+    relayBuf_.clear();
+    sock_ = new QTcpSocket(this);
+    wireSocketErrors(sock_);
+    connect(sock_, &QTcpSocket::connected, this, [this, verbLine] {
+        emit status(tr("Reached the relay — waiting for the other player…"));
+        sock_->write(verbLine);
+    });
+    connect(sock_, &QTcpSocket::readyRead, this, &NetplaySession::onRelayHandshake);
+    emit status(tr("Connecting to the netplay relay…"));
+    sock_->connectToHost(relayHost, relayPort);
+}
+
+void NetplaySession::hostViaRelay(const QString& relayHost, quint16 relayPort, const QString& code)
+{
+    host_ = true;
+    connectToRelay(relayHost, relayPort, "HOST " + code.toUtf8() + "\n");
+}
+
+void NetplaySession::joinViaRelay(const QString& relayHost, quint16 relayPort, const QString& code)
+{
+    host_ = false;
+    connectToRelay(relayHost, relayPort, "JOIN " + code.toUtf8() + "\n");
+}
+
+// The relay speaks one line (PAIRED / NOHOST / BUSY), then pipes raw bytes. Consume just that line, hand any
+// trailing bytes to the session's rx_, then run the normal handshake over the now-transparent pipe.
+void NetplaySession::onRelayHandshake()
+{
+    if (!sock_) return;
+    relayBuf_ += sock_->readAll();
+    const int nl = relayBuf_.indexOf('\n');
+    if (nl < 0) return; // wait for the full line
+    const QByteArray line = relayBuf_.left(nl).trimmed();
+    const QByteArray leftover = relayBuf_.mid(nl + 1); // session bytes that arrived alongside PAIRED
+    relayBuf_.clear();
+    disconnect(sock_, &QTcpSocket::readyRead, this, &NetplaySession::onRelayHandshake);
+
+    if (line != "PAIRED")
+    {
+        emit ended(line == "NOHOST" ? tr("No one is hosting with that code.")
+                 : line == "BUSY"   ? tr("That code is already in use — pick another.")
+                                    : tr("The relay gave an unexpected response."));
+        stop();
+        return;
+    }
+    awaitingPair_ = false;
+    connect(sock_, &QTcpSocket::readyRead, this, &NetplaySession::onReadyRead);
+    rx_ = leftover;
+    if (host_) beginAsHost();                 // host now sends HELLO + STATE
+    else { emit status(tr("Connected — syncing game state…")); if (!rx_.isEmpty()) onReadyRead(); }
 }
 
 void NetplaySession::onConnected() // client
@@ -151,9 +213,9 @@ void NetplaySession::pruneBefore(quint32 frame)
 
 void NetplaySession::stop()
 {
-    active_ = false; ready_ = false;
+    active_ = false; ready_ = false; awaitingPair_ = false;
     remoteInputs_.clear();
-    rx_.clear();
+    rx_.clear(); relayBuf_.clear();
     if (sock_) { sock_->disconnect(this); sock_->abort(); sock_->deleteLater(); sock_ = nullptr; }
     if (server_) { server_->deleteLater(); server_ = nullptr; }
 }

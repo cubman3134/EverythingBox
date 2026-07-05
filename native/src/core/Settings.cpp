@@ -103,6 +103,12 @@ void Settings::setVideoFilter(const QString& id)
     store().setValue(QStringLiteral("emu/videoFilter"), id); store().sync();
 }
 
+QString Settings::netplayRelay() { return store().value(QStringLiteral("netplay/relay")).toString(); }
+void Settings::setNetplayRelay(const QString& hostPort)
+{
+    store().setValue(QStringLiteral("netplay/relay"), hostPort.trimmed()); store().sync();
+}
+
 bool Settings::startFullscreen() { return store().value(QStringLiteral("general/startFullscreen"), false).toBool(); }
 void Settings::setStartFullscreen(bool on)
 {

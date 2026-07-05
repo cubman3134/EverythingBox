@@ -23,8 +23,12 @@ public:
     explicit NetplaySession(QObject* parent = nullptr);
     ~NetplaySession() override;
 
-    void host(quint16 port);                       // listen for a peer
-    void join(const QString& host, quint16 port);  // connect to a host
+    void host(quint16 port);                       // LAN: listen for a peer directly
+    void join(const QString& host, quint16 port);  // LAN / UPnP-direct: connect straight to a host
+    // Online via a relay both peers reach outbound (no port-forwarding). Same room `code` on both sides; the relay
+    // pairs them and then just pipes bytes, so the lockstep protocol runs over it unchanged.
+    void hostViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
+    void joinViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
     void stop();
 
     bool active() const { return active_; }
@@ -50,7 +54,10 @@ signals:
 
 private:
     void attachSocket(QTcpSocket* s);
+    void wireSocketErrors(QTcpSocket* s);          // disconnected/errorOccurred handlers (shared by all modes)
     void onReadyRead();
+    void onRelayHandshake();                       // consume the relay's PAIRED/NOHOST/BUSY line, then start the session
+    void connectToRelay(const QString& relayHost, quint16 relayPort, const QByteArray& verbLine);
     void sendFrame(quint8 type, const QByteArray& payload);
     void onConnected();                            // client side: connected, waiting for HELLO+STATE
     void beginAsHost();                            // host side: peer connected, send HELLO+STATE, start
@@ -58,6 +65,7 @@ private:
     QTcpServer* server_ = nullptr;
     QTcpSocket* sock_ = nullptr;
     QByteArray rx_;
-    bool active_ = false, host_ = false, ready_ = false;
+    QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
+    bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;
     QHash<quint32, quint16> remoteInputs_;
 };

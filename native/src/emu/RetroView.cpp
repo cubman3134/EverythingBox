@@ -29,6 +29,7 @@
 #include <QPixmap>
 #include <QVBoxLayout>
 #include <QInputDialog>
+#include <QRandomGenerator>
 #include <QLineEdit>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -374,8 +375,8 @@ void RetroView::showNetplay()
     sv->setSpacing(6);
     menuButtons_.clear();
 
-    auto* note = new QLabel(tr("2-player over your local network. Both players must already have the SAME game "
-                               "and core loaded; the host's state syncs to player 2."), slotsPage_);
+    auto* note = new QLabel(tr("2-player. Both players must already have the SAME game and core loaded; the host's "
+                               "state syncs to player 2. Play on your local network, or online via a relay server."), slotsPage_);
     note->setStyleSheet(QStringLiteral("color:#999;font-size:12px;")); note->setWordWrap(true);
     sv->addWidget(note);
 
@@ -392,13 +393,45 @@ void RetroView::showNetplay()
             menuStatus_->setText(tr("Waiting for player 2 — join %1 : 55420").arg(ip.isEmpty() ? tr("your IP") : ip)); });
     sv->addWidget(hostBtn); menuButtons_ << hostBtn;
 
-    auto* joinBtn = flat(new QPushButton(tr("Join game…  (Player 2)"), slotsPage_));
+    auto* joinBtn = flat(new QPushButton(tr("Join game…  (Player 2, same network)"), slotsPage_));
     connect(joinBtn, &QPushButton::clicked, this, [this] {
         bool ok = false;
         const QString host = QInputDialog::getText(this, tr("Join Netplay"), tr("Host's IP address:"),
                                                     QLineEdit::Normal, QString(), &ok).trimmed();
         if (ok && !host.isEmpty()) startNetplay(false, host); });
     sv->addWidget(joinBtn); menuButtons_ << joinBtn;
+
+    // ---- online (via the relay; no port-forwarding needed on either end) ----
+    auto* hostOnlineBtn = flat(new QPushButton(tr("Host online  (over the internet)"), slotsPage_));
+    connect(hostOnlineBtn, &QPushButton::clicked, this, [this] {
+        if (Settings::netplayRelay().trimmed().isEmpty()) {
+            if (menuStatus_) menuStatus_->setText(tr("Set a relay server first (the “Relay server…” button below.)"));
+            return;
+        }
+        static const QString cs = QStringLiteral("ABCDEFGHJKLMNPQRSTUVWXYZ23456789"); // no ambiguous 0/O/1/I
+        QString code;
+        for (int i = 0; i < 5; ++i) code += cs.at(int(QRandomGenerator::global()->bounded(cs.size())));
+        startNetplayOnline(true, code);
+        if (menuStatus_) menuStatus_->setText(tr("Waiting for player 2 — give them this code:  %1").arg(code)); });
+    sv->addWidget(hostOnlineBtn); menuButtons_ << hostOnlineBtn;
+
+    auto* joinOnlineBtn = flat(new QPushButton(tr("Join online…  (enter a friend's code)"), slotsPage_));
+    connect(joinOnlineBtn, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString code = QInputDialog::getText(this, tr("Join Online Netplay"), tr("Room code from the host:"),
+                                                    QLineEdit::Normal, QString(), &ok).trimmed().toUpper();
+        if (ok && !code.isEmpty()) startNetplayOnline(false, code); });
+    sv->addWidget(joinOnlineBtn); menuButtons_ << joinOnlineBtn;
+
+    auto* relayBtn = flat(new QPushButton(tr("Relay server…  (for online play)"), slotsPage_));
+    connect(relayBtn, &QPushButton::clicked, this, [this] {
+        bool ok = false;
+        const QString v = QInputDialog::getText(this, tr("Netplay Relay Server"),
+            tr("Relay address as host:port.\nRun tools/netplay-relay.py on a public server and enter it here."),
+            QLineEdit::Normal, Settings::netplayRelay(), &ok).trimmed();
+        if (ok) { Settings::setNetplayRelay(v);
+                  if (menuStatus_) menuStatus_->setText(v.isEmpty() ? tr("Relay cleared.") : tr("Relay set: %1").arg(v)); } });
+    sv->addWidget(relayBtn); menuButtons_ << relayBtn;
 
     if (netActive_ || (net_ && net_->active()))
     {
@@ -999,36 +1032,57 @@ void RetroView::netTick()
     update();
 }
 
+void RetroView::ensureNetSession()
+{
+    if (net_) { net_->gameId = QFileInfo(romPath_).completeBaseName() + QStringLiteral("|") + QString::number(QFileInfo(romPath_).size());
+                net_->coreName = coreName_; return; }
+    net_ = new NetplaySession(this);
+    net_->serializeState = [this] {
+        std::vector<uint8_t> s; core_.saveState(s);
+        return QByteArray(reinterpret_cast<const char*>(s.data()), int(s.size())); };
+    net_->applyState = [this](const QByteArray& b) {
+        core_.loadState(reinterpret_cast<const uint8_t*>(b.constData()), size_t(b.size())); };
+    connect(net_, &NetplaySession::status, this, [this](const QString& m) {
+        if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(m);
+        emit statusMessage(m); });
+    connect(net_, &NetplaySession::started, this, [this] {
+        netActive_ = true; netFrame_ = netGenFrame_ = 0; netCurLocal_ = netCurRemote_ = 0;
+        netLocalInputs_.clear();
+        netLocalPort_  = net_->isHost() ? 0 : 1;
+        netRemotePort_ = net_->isHost() ? 1 : 0;
+        hideMenu(); // unpause into the lockstep loop
+        emit statusMessage(tr("Netplay started — you are Player %1.").arg(netLocalPort_ + 1)); });
+    connect(net_, &NetplaySession::ended, this, [this](const QString& reason) {
+        netActive_ = false;
+        if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(reason);
+        emit statusMessage(tr("Netplay ended: %1").arg(reason)); });
+    net_->gameId = QFileInfo(romPath_).completeBaseName() + QStringLiteral("|") + QString::number(QFileInfo(romPath_).size());
+    net_->coreName = coreName_;
+}
+
 void RetroView::startNetplay(bool asHost, const QString& hostAddr)
 {
     if (!running_ || threaded_) return;
-    if (!net_)
-    {
-        net_ = new NetplaySession(this);
-        net_->serializeState = [this] {
-            std::vector<uint8_t> s; core_.saveState(s);
-            return QByteArray(reinterpret_cast<const char*>(s.data()), int(s.size())); };
-        net_->applyState = [this](const QByteArray& b) {
-            core_.loadState(reinterpret_cast<const uint8_t*>(b.constData()), size_t(b.size())); };
-        connect(net_, &NetplaySession::status, this, [this](const QString& m) {
-            if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(m);
-            emit statusMessage(m); });
-        connect(net_, &NetplaySession::started, this, [this] {
-            netActive_ = true; netFrame_ = netGenFrame_ = 0; netCurLocal_ = netCurRemote_ = 0;
-            netLocalInputs_.clear();
-            netLocalPort_  = net_->isHost() ? 0 : 1;
-            netRemotePort_ = net_->isHost() ? 1 : 0;
-            hideMenu(); // unpause into the lockstep loop
-            emit statusMessage(tr("Netplay started — you are Player %1.").arg(netLocalPort_ + 1)); });
-        connect(net_, &NetplaySession::ended, this, [this](const QString& reason) {
-            netActive_ = false;
-            if (menuStatus_ && menu_ && menu_->isVisible()) menuStatus_->setText(reason);
-            emit statusMessage(tr("Netplay ended: %1").arg(reason)); });
-    }
-    net_->gameId = QFileInfo(romPath_).completeBaseName() + QStringLiteral("|") + QString::number(QFileInfo(romPath_).size());
-    net_->coreName = coreName_;
+    ensureNetSession();
     if (asHost) net_->host(55420);
     else        net_->join(hostAddr, 55420);
+}
+
+void RetroView::startNetplayOnline(bool asHost, const QString& code)
+{
+    if (!running_ || threaded_) return;
+    const QString relay = Settings::netplayRelay().trimmed();
+    if (relay.isEmpty())
+    {
+        if (menuStatus_) menuStatus_->setText(tr("Set a relay server first (the “Relay server…” button)."));
+        return;
+    }
+    const int colon = relay.lastIndexOf(QLatin1Char(':'));
+    const QString host = colon > 0 ? relay.left(colon) : relay;
+    const quint16 port = colon > 0 ? quint16(relay.mid(colon + 1).toUInt()) : quint16(55666);
+    ensureNetSession();
+    if (asHost) net_->hostViaRelay(host, port ? port : 55666, code);
+    else        net_->joinViaRelay(host, port ? port : 55666, code);
 }
 
 void RetroView::tick()
