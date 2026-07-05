@@ -2754,6 +2754,34 @@ void HomeView::playThemedLeaf(int idx)
     resolvePlay(addon, it, parentTitle, console, QString(), QString());
 }
 
+// "Download" chosen on a themed leaf: resolve its source and queue it for keeps (no playback), reusing the same
+// crawl machinery as the detail-page Download button. An expandable row (a season/folder) downloads its contents.
+void HomeView::downloadThemedLeaf(int idx)
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    const MediaItem it = items_[browseRowMap_[idx]];
+    if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("“%1” is already saved.").arg(it.title), 4000); return; }
+    if (dlBusy_) { showToast(tr("A download is already being prepared…"), 4000); return; }
+
+    DlNode node;
+    node.addon = stack_.last().addon;
+    node.item = it;
+    node.parentTitle = stack_.last().item.title;               // the level this leaf hangs under
+    node.parentType  = stack_.last().item.type;
+    // The download crawl derives a game's console from parentType == "platform"; find the nearest platform level.
+    for (int i = stack_.size() - 1; i >= 0; --i)
+        if (stack_[i].item.type == QStringLiteral("platform"))
+        { node.parentTitle = stack_[i].item.title; node.parentType = QStringLiteral("platform"); break; }
+
+    dlQueue_.clear();
+    dlQueue_.append(node);
+    dlQueued_ = 0;
+    dlBusy_ = true;
+    showToast(it.expandable ? tr("Preparing downloads for “%1”…").arg(it.title)
+                            : tr("Preparing download for “%1”…").arg(it.title), 0);
+    dlNext();
+}
+
 void HomeView::requestMeta(const MediaItem& item)
 {
     metaItem_ = item;             // remembered for the meta fallback in onMetaReady

@@ -34,7 +34,7 @@ Item {
     signal details()               // entered the detail view (for the host's "open details" sound)
     signal categoryChanged()       // XMB: moved to another category (host loads its column); read catIndex
     signal selectionMoved()        // XMB: the column selection moved (host fetches that item's metadata)
-    signal actionChosen(int which) // XMB: chose an inline action (0 = Play, 1 = Favorite, 2 = Add to playlist)
+    signal actionChosen(int which) // XMB: chose an inline action (0 = Play, 1 = Favorite, 2 = Add to playlist, 3 = Download)
     signal addToPlaylistRequested() // XMB: "P" on the highlighted item -> host adds it to a playlist
     signal actionRequested(string name) // a `button` element was clicked -> host runs the named action
 
@@ -162,8 +162,8 @@ Item {
         // two options, Enter fires the chosen one, Esc dismisses. Everything else is swallowed so the cross
         // behind it stays put.
         if (actionsOpen) {
-            if (e.key === Qt.Key_Down)      { actionIndex = (actionIndex + 1) % 3; navigate() }
-            else if (e.key === Qt.Key_Up)   { actionIndex = (actionIndex + 2) % 3; navigate() }
+            if (e.key === Qt.Key_Down)      { actionIndex = (actionIndex + 1) % 4; navigate() }
+            else if (e.key === Qt.Key_Up)   { actionIndex = (actionIndex + 3) % 4; navigate() }
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                             { actionChosen(actionIndex) }
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { actionsOpen = false }

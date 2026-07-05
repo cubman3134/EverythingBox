@@ -95,6 +95,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
+        src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
         src/core/SevenZip.cpp     src/core/SevenZip.h

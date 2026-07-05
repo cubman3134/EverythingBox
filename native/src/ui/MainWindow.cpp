@@ -27,6 +27,7 @@
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
 #include "../core/BiosCatalog.h"
@@ -299,6 +300,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
     library_ = new LibraryView(addons_.get(), this);
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
+    dm_ = new DownloadManager(this);
+    // A finished download joins Recent + the catalogue's Downloaded folder (offline-openable).
+    connect(dm_, &DownloadManager::jobCompleted, this, [this](const DownloadJob& j) {
+        RecentStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
+        DownloadsStore::add({ j.dest, j.title, j.kind, j.thumb, j.key, j.sysId });
+        notify(tr("Downloaded “%1”.").arg(j.title), 4000);
+    });
+    // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
+    connect(dm_, &DownloadManager::jobProgress, this, &MainWindow::updateDownloadRow);
+    // State changes (queued/active/failed/removed) change which buttons a row needs, so rebuild the panel.
+    connect(dm_, &DownloadManager::changed, this, [this] {
+        if (dlPanelOpen_ && stack_->currentWidget() == panelPage_) openDownloadManager();
+    });
+
     home_ = new HomeView(addons_.get(), this);
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
@@ -2354,13 +2369,15 @@ void MainWindow::showThemedXmb()
     // The column selection moved: refresh the live metadata panel for the new row (only while in a catalog).
     auto onSelect = [this](int idx) { if (themedXmbInCatalog_) refreshThemedMeta(idx); };
     // The inline chooser fired: 0 = Play the leaf (and close), 1 = toggle Favorite (and stay, so the heart
-    // updates in place; the metadata panel's "★ Favorited" follows too), 2 = Add to a playlist (and close).
+    // updates in place; the metadata panel's "★ Favorited" follows too), 2 = Add to a playlist (and close),
+    // 3 = Download the leaf for keeps (and close).
     auto onAction = [this](int which) {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         if (!r) return;
         const int idx = r->property("actionItem").toInt();
         if (which == 0)      { r->setProperty("actionsOpen", false); home_->playThemedLeaf(idx); }
         else if (which == 2) { r->setProperty("actionsOpen", false); home_->addBrowseItemToPlaylist(idx); }
+        else if (which == 3) { r->setProperty("actionsOpen", false); home_->downloadThemedLeaf(idx); }
         else
         {
             home_->favoriteThemedLeaf(idx);
@@ -4183,99 +4200,22 @@ QString downloadSystemId(const QString& systemHint, const QString& ext)
 void MainWindow::enqueueDownload(const MediaItem& item)
 {
     if (item.url.isEmpty()) return;
-    downloadQueue_.append(item);
-    mwLog(QStringLiteral("download(library): queued \"%1\" (%2 in queue)").arg(item.title).arg(downloadQueue_.size()));
-    if (!downloadBusy_) startNextDownload();
-}
-
-void MainWindow::startNextDownload()
-{
-    if (downloadQueue_.isEmpty())
-    {
-        downloadBusy_ = false;
-        statusBar()->showMessage(tr("Downloads complete."), 5000);
-        notify(tr("Downloads complete."), 4000);
-        mwLog(QStringLiteral("download(library): queue drained"));
-        return;
-    }
-    downloadBusy_ = true;
-    const MediaItem item = downloadQueue_.takeFirst();
-    const int remaining = downloadQueue_.size();
-
-    const QString dir = AppPaths::dataDir() + QStringLiteral("/downloads");
-    QDir().mkpath(dir);
     const QString ext = downloadExt(item);
     const QString kind = downloadKind(item.type, ext);
-    const QString sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
-    const QString dest = dir + QStringLiteral("/") + safeFileName(item.title) + ext;
-
-    if (QFileInfo::exists(dest) && QFileInfo(dest).size() > 0) // skip existing, but make sure it's recorded
-    {
-        mwLog(QStringLiteral("download(library): \"%1\" already downloaded — skipping").arg(item.title));
-        RecentStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, sysId });
-        DownloadsStore::add({ dest, item.title, kind, item.thumbnailUrl, item.id, sysId });
-        startNextDownload();
-        return;
-    }
-
-    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
-    const QString startMsg = tr("Downloading “%1”…%2").arg(item.title,
-                             remaining > 0 ? tr("  (%1 more queued)").arg(remaining) : QString());
-    statusBar()->showMessage(startMsg);
-    notify(startMsg, 0); // window-level so it shows over any theme; sticky until progress/finish updates it
-    mwLog(QStringLiteral("download(library): GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(dest).fileName()));
-
-    QNetworkRequest rq{ QUrl(item.url) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
-    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = docNam_->get(rq);
-
-    auto humanMB = [](qint64 b) { return QString::number(b / 1048576.0, 'f', 1); };
-    connect(reply, &QNetworkReply::downloadProgress, this,
-            [this, title = item.title, remaining, humanMB, lastPct = -1](qint64 rec, qint64 total) mutable {
-        if (total <= 0) return;
-        const int pct = static_cast<int>(rec * 100 / total);
-        if (pct == lastPct) return;
-        lastPct = pct;
-        const QString msg = tr("Downloading “%1”… %2%  (%3 / %4 MB)%5")
-            .arg(title).arg(pct).arg(humanMB(rec), humanMB(total),
-                 remaining > 0 ? tr("  (%1 more)").arg(remaining) : QString());
-        statusBar()->showMessage(msg);
-        notify(msg, 0);
-    });
-
-    connect(reply, &QNetworkReply::finished, this,
-            [this, reply, dest, kind, sysId, title = item.title, thumb = item.thumbnailUrl, id = item.id] {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError)
-        {
-            mwLog(QStringLiteral("download(library): FAILED \"%1\": %2").arg(title, reply->errorString()));
-            const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
-            statusBar()->showMessage(e, 6000);
-            notify(e, 6000);
-            startNextDownload(); // keep the queue moving
-            return;
-        }
-        const QByteArray body = reply->readAll();
-        QFile f(dest + QStringLiteral(".part"));
-        if (!f.open(QIODevice::WriteOnly) || f.write(body) != body.size())
-        {
-            f.close(); f.remove();
-            mwLog(QStringLiteral("download(library): save failed for \"%1\"").arg(title));
-            startNextDownload();
-            return;
-        }
-        f.close();
-        QFile::remove(dest);
-        if (QFile::rename(dest + QStringLiteral(".part"), dest))
-        {
-            mwLog(QStringLiteral("download(library): saved \"%1\" (%2 bytes)").arg(title).arg(body.size()));
-            RecentStore::add({ dest, title, kind, thumb, id, sysId });    // appears in Recent, re-openable offline
-            DownloadsStore::add({ dest, title, kind, thumb, id, sysId }); // and in the catalogue's Downloaded folder
-        }
-        startNextDownload();
-    });
+    DownloadJob j;
+    j.title = item.title;
+    j.url = item.url;
+    j.dest = AppPaths::dataDir() + QStringLiteral("/downloads/") + safeFileName(item.title) + ext;
+    j.kind = kind;
+    j.sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
+    j.thumb = item.thumbnailUrl;
+    j.key = item.id;
+    dm_->enqueue(j);
+    notify(tr("“%1” added to Downloads. See Settings ▸ Downloads for progress.").arg(item.title), 4000);
+    mwLog(QStringLiteral("download(library): queued \"%1\" -> %2").arg(item.title, QFileInfo(j.dest).fileName()));
 }
+
+
 
 void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
 {
@@ -4458,6 +4398,7 @@ void MainWindow::openSettingsHub()
         add(tr("General"),            [this] { openGeneralSettings(); });
         add(tr("Appearance"),         [this] { openAppearance(); });        // the home theme picker
         add(tr("Add-ons"),            [this] { openLibrary(); });
+        add(tr("Downloads"),          [this] { openDownloadManager(); });   // resume / retry / cancel stalled downloads
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
         add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
@@ -4473,6 +4414,155 @@ void MainWindow::openSettingsHub()
         if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
         else stack_->setCurrentWidget(panelReturnTo_);
     });
+}
+
+// Human-readable byte counts for the download rows ("612 MB", "1.4 GB").
+static QString humanBytes(qint64 n)
+{
+    if (n <= 0) return QStringLiteral("—");
+    const double kb = 1024.0;
+    if (n < kb * kb)        return QStringLiteral("%1 KB").arg(n / kb, 0, 'f', 0);
+    if (n < kb * kb * kb)   return QStringLiteral("%1 MB").arg(n / (kb * kb), 0, 'f', n < 10 * kb * kb ? 1 : 0);
+    return QStringLiteral("%1 GB").arg(n / (kb * kb * kb), 0, 'f', 1);
+}
+
+// One line of status text for a job: "Downloading — 612 MB / 1.4 GB (43%)", "Paused — …", "Failed — <reason>".
+static QString downloadStatusText(const DownloadJob& j)
+{
+    const QString have = humanBytes(j.received);
+    const QString tot  = j.total > 0 ? humanBytes(j.total) : QStringLiteral("?");
+    const int pct = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
+    switch (j.state) {
+        case DownloadJob::Queued:  return MainWindow::tr("Queued");
+        case DownloadJob::Active:  return MainWindow::tr("Downloading — %1 / %2 (%3%)").arg(have, tot).arg(pct);
+        case DownloadJob::Paused:  return MainWindow::tr("Paused — %1 / %2").arg(have, tot);
+        case DownloadJob::Failed:  return MainWindow::tr("Failed — %1").arg(j.error.isEmpty() ? MainWindow::tr("download stopped") : j.error);
+        case DownloadJob::Done:    return MainWindow::tr("Done — %1").arg(tot);
+    }
+    return QString();
+}
+
+// Settings ▸ Downloads. Lists every persistent download job with a live progress bar and the actions that make
+// sense for its state (Pause/Resume, Retry, Cancel, Remove). Fully navigable by the panel nav ring — arrow keys,
+// a controller D-pad, or the mouse. Rebuilt on state changes; progress ticks update the bars in place.
+void MainWindow::openDownloadManager()
+{
+    dlPanelOpen_ = true;
+    dlBars_.clear();
+    dlStatus_.clear();
+
+    showPanel(tr("Downloads"), [this](QVBoxLayout* v) {
+        const QVector<DownloadJob>& jobs = dm_->jobs();
+
+        bool anyFinished = false;
+        if (jobs.isEmpty()) {
+            auto* none = new QLabel(tr("No downloads yet.\nChoose “Download” on a game, movie, or book to keep a copy here."));
+            none->setWordWrap(true);
+            none->setStyleSheet(QStringLiteral("color:#667085;font-size:16px;padding:8px 4px;"));
+            v->addWidget(none);
+        }
+
+        for (const DownloadJob& job : jobs) {
+            const DownloadJob j = job; // capture by value for the button lambdas
+            if (j.state == DownloadJob::Done || j.state == DownloadJob::Failed) anyFinished = true;
+
+            auto* card = new QFrame;
+            card->setStyleSheet(QStringLiteral(
+                "QFrame{border:1px solid rgba(0,0,0,0.12);border-radius:12px;background:rgba(0,0,0,0.03);}"));
+            auto* cv = new QVBoxLayout(card);
+            cv->setContentsMargins(16, 14, 16, 14);
+            cv->setSpacing(8);
+
+            auto* title = new QLabel(j.title.isEmpty() ? tr("(untitled)") : j.title);
+            title->setStyleSheet(QStringLiteral("font-size:17px;font-weight:600;border:none;background:transparent;"));
+            title->setWordWrap(true);
+            cv->addWidget(title);
+
+            auto* bar = new QProgressBar;
+            bar->setTextVisible(false);
+            bar->setFixedHeight(8);
+            bar->setRange(0, j.total > 0 ? 1000 : 0); // busy indicator until we know the size
+            if (j.total > 0) bar->setValue(int(1000.0 * double(j.received) / double(j.total)));
+            bar->setStyleSheet(QStringLiteral(
+                "QProgressBar{border:none;border-radius:4px;background:rgba(0,0,0,0.10);}"
+                "QProgressBar::chunk{border-radius:4px;background:#2C72C9;}"));
+            cv->addWidget(bar);
+            dlBars_.insert(j.id, bar);
+
+            auto* status = new QLabel(downloadStatusText(j));
+            status->setStyleSheet(QStringLiteral("color:#667085;font-size:14px;border:none;background:transparent;"));
+            status->setWordWrap(true);
+            cv->addWidget(status);
+            dlStatus_.insert(j.id, status);
+
+            // Action buttons — compact, focusable, so the panel nav ring picks them up in order.
+            auto* row = new QHBoxLayout;
+            row->setSpacing(10);
+            auto actionBtn = [](const QString& text) {
+                auto* b = new QPushButton(text);
+                b->setMinimumHeight(40);
+                b->setCursor(Qt::PointingHandCursor);
+                b->setStyleSheet(QStringLiteral(
+                    "QPushButton{font-size:15px;padding:8px 18px;border:1px solid rgba(0,0,0,0.15);"
+                    "border-radius:9px;background:rgba(0,0,0,0.04);} QPushButton:hover{background:rgba(0,0,0,0.10);}"
+                    "QPushButton:focus{border:2px solid #2C72C9;background:rgba(44,114,201,0.10);}"));
+                return b;
+            };
+            const QString id = j.id;
+            if (j.state == DownloadJob::Active || j.state == DownloadJob::Queued) {
+                auto* b = actionBtn(tr("Pause"));
+                connect(b, &QPushButton::clicked, this, [this, id] { dm_->pauseJob(id); });
+                row->addWidget(b);
+            }
+            if (j.state == DownloadJob::Paused) {
+                auto* b = actionBtn(tr("Resume"));
+                connect(b, &QPushButton::clicked, this, [this, id] { dm_->resumeJob(id); });
+                row->addWidget(b);
+            }
+            if (j.state == DownloadJob::Failed) {
+                auto* b = actionBtn(tr("Retry"));
+                connect(b, &QPushButton::clicked, this, [this, id] { dm_->retry(id); });
+                row->addWidget(b);
+            }
+            if (j.state == DownloadJob::Active || j.state == DownloadJob::Queued || j.state == DownloadJob::Paused) {
+                auto* b = actionBtn(tr("Cancel"));
+                connect(b, &QPushButton::clicked, this, [this, id] { dm_->cancel(id); });
+                row->addWidget(b);
+            }
+            if (j.state == DownloadJob::Failed || j.state == DownloadJob::Done) {
+                auto* b = actionBtn(tr("Remove"));
+                connect(b, &QPushButton::clicked, this, [this, id] { dm_->removeJob(id); });
+                row->addWidget(b);
+            }
+            row->addStretch(1);
+            cv->addLayout(row);
+            v->addWidget(card);
+        }
+
+        if (anyFinished) {
+            auto* clear = panelRow(tr("Clear finished"));
+            connect(clear, &QPushButton::clicked, this, [this] { dm_->clearFinished(); });
+            v->addWidget(clear);
+        }
+    }, [this] {
+        dlPanelOpen_ = false;
+        openSettingsHub();
+    });
+}
+
+// Refresh a single job's progress bar + status line in place (called on every jobProgress tick — cheap, and it
+// leaves keyboard/controller focus undisturbed, unlike a full panel rebuild).
+void MainWindow::updateDownloadRow(const QString& id)
+{
+    if (!dlPanelOpen_) return;
+    for (const DownloadJob& j : dm_->jobs()) {
+        if (j.id != id) continue;
+        if (QProgressBar* bar = dlBars_.value(id)) {
+            if (j.total > 0) { bar->setRange(0, 1000); bar->setValue(int(1000.0 * double(j.received) / double(j.total))); }
+        }
+        if (QLabel* s = dlStatus_.value(id)) s->setText(downloadStatusText(j));
+        return;
+    }
 }
 
 void MainWindow::openGeneralSettings()

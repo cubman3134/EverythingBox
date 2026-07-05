@@ -69,6 +69,7 @@ public:
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
     void requestThemedMeta(int browseIndex);
     void playThemedLeaf(int browseIndex);
+    void downloadThemedLeaf(int browseIndex);      // resolve + queue the browse-item to download (no play)
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;
     void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)

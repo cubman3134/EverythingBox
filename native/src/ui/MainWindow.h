@@ -3,6 +3,7 @@
 
 #include <QStringList>
 #include <QVector>
+#include <QHash>
 #include <QColor>
 #include <QPointer>
 #include <memory>
@@ -63,10 +64,11 @@ private slots:
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
-    // Download (for keeps) a resolved item to <app>/downloads and add it to Recent. enqueueDownload queues;
-    // startNextDownload runs them one at a time. Fed by HomeView's downloadItem signal (single item or a crawl).
+    // Download (for keeps) a resolved item to <app>/downloads and record it. Fed by HomeView's downloadItem
+    // signal (single item or a crawl); handed to the persistent DownloadManager which runs + tracks them.
     void enqueueDownload(const MediaItem& item);
-    void startNextDownload();
+    void openDownloadManager();          // Settings ▸ Downloads: the download-manager panel
+    void updateDownloadRow(const QString& id); // refresh one job's progress bar/label in place
     // Window-level notification overlay for download/resolve progress + errors. A top-level Tool window (not a
     // child widget) so it floats over ANY current view, including a themed home (a native QQuickView our own
     // child widgets can't paint over). Driven by HomeView's toastRequested/toastHideRequested and by the
@@ -105,6 +107,13 @@ protected:
     void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
 
 private:
+    class DownloadManager* dm_ = nullptr;
+    // Live widgets in the open Downloads panel, keyed by job id, so progress ticks update in place without
+    // rebuilding (which would steal keyboard/controller focus). Repopulated each time the panel is built.
+    QHash<QString, class QProgressBar*> dlBars_;
+    QHash<QString, class QLabel*> dlStatus_;
+    bool dlPanelOpen_ = false;           // the Downloads panel is the current view (rebuild it on state changes)
+
     static QString fmt(double seconds);
     // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
     // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
@@ -275,8 +284,6 @@ private:
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
-    QVector<MediaItem> downloadQueue_;       // pending library downloads (processed one at a time)
-    bool downloadBusy_ = false;
     std::unique_ptr<AddonManager> addons_;
     std::unique_ptr<CloudSync> cloud_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
