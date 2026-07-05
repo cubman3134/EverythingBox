@@ -1,0 +1,69 @@
+name: CI (headless probes)
+
+# Fast, display-less regression tests that run on every push/PR — not just releases. Builds the standalone
+# probe harnesses and runs the headless "emulator" suite: two-instance netplay lockstep (relay + the "Both"
+# UPnP-direct/relay-fallback orchestration) and, best-effort, a real libretro core load. See
+# native/tools/run-headless-probes.sh.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'native/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'native/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+jobs:
+  headless-probes:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ninja-build cmake python3 \
+            libmpv-dev libsdl2-dev \
+            libgl1-mesa-dev libegl1-mesa-dev libpulse-dev libxkbcommon-dev
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: linux
+          target: desktop
+          arch: linux_gcc_64
+          modules: 'qtmultimedia qtpdf'
+          cache: true
+
+      - name: Configure
+        run: |
+          cmake -S native -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+
+      # Build ONLY the probe harnesses (not the whole app) — this is a test job, so keep it quick.
+      - name: Build probes
+        run: cmake --build build --target probe_core probe_netplay probe_netplay_both
+
+      # Best-effort: grab a small real libretro core so the suite can prove the frontend can load one. If the
+      # external buildbot is unavailable the suite just skips this check (it's advisory, never gates CI).
+      - name: Fetch a libretro core (optional)
+        continue-on-error: true
+        run: |
+          url="https://buildbot.libretro.com/nightly/linux/x86_64/latest/mgba_libretro.so.zip"
+          if curl -fsSL "$url" -o core.zip; then
+            unzip -o core.zip -d core
+            so="$(find core -name '*_libretro.so' | head -n1)"
+            [ -n "$so" ] && echo "CORE_SO=$(realpath "$so")" >> "$GITHUB_ENV"
+          else
+            echo "core download unavailable; the core-load probe will be skipped"
+          fi
+
+      - name: Run headless probe suite
+        run: BUILD_DIR=build bash native/tools/run-headless-probes.sh
