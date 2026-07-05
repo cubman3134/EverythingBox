@@ -313,6 +313,8 @@ void MpvWidget::play(const QString& url)
     if (!lang.isEmpty()) mpv_set_option_string(mpv, "slang", lang.toUtf8().constData());
     const bool subsOn = Settings::subtitlesOnByDefault();
     mpv_set_option_string(mpv, "subs-fallback", subsOn ? "yes" : "no");
+    double normalSpeed = 1.0;
+    mpv_set_property(mpv, "speed", MPV_FORMAT_DOUBLE, &normalSpeed); // each new video starts at normal speed
 
     QByteArray u = url.toUtf8();
     const char* cmd[] = { "loadfile", u.constData(), nullptr };
@@ -350,6 +352,18 @@ void MpvWidget::setMuted(bool muted)
 {
     int flag = muted ? 1 : 0;
     mpv_set_property(mpv, "mute", MPV_FORMAT_FLAG, &flag);
+}
+
+void MpvWidget::setSpeed(double factor)
+{
+    mpv_set_property(mpv, "speed", MPV_FORMAT_DOUBLE, &factor);
+}
+
+double MpvWidget::speed() const
+{
+    double s = 1.0;
+    if (mpv) mpv_get_property(mpv, "speed", MPV_FORMAT_DOUBLE, &s);
+    return s;
 }
 
 void MpvWidget::seekRelative(double seconds)

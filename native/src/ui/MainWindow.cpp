@@ -267,6 +267,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     subFetcher_ = new SubtitleFetcher(this);
     connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
+        if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
         if (!subCtx_.active) return;
         subCtx_.active = false; // one-shot per open
         if (hasSub || !isVideo) return;
@@ -482,6 +483,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* fastFwd = new QPushButton(tr("⏩"), mediaControls_);
     auto* nextChap = new QPushButton(tr("⏭"), mediaControls_);
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
+    speedBtn_ = new QPushButton(tr("1×"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
@@ -492,6 +494,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     fastFwd->setToolTip(tr("Forward 10s"));
     nextChap->setToolTip(tr("Next chapter"));
     stop->setToolTip(tr("Stop"));
+    speedBtn_->setToolTip(tr("Playback speed (click to cycle; [ and ] to adjust)"));
     subsBtn->setToolTip(tr("Audio & subtitles — pick tracks, sync, size, load or download"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
@@ -519,13 +522,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(time_);
     mc->addWidget(muteBtn_);
     mc->addWidget(volume_);
+    mc->addWidget(speedBtn_);
     mc->addWidget(subsBtn);
     mc->addWidget(shotBtn);
     mc->addWidget(castBtn);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, subsBtn, shotBtn, castBtn, fullScreen };
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn, shotBtn, castBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -684,6 +688,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         nextChap->setVisible(has);
     });
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
+    connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
     connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
@@ -1074,6 +1079,8 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             player_->togglePause(); return;          // nothing focused -> play/pause
         case Qt::Key_Space: player_->togglePause(); revealMediaControls(); return;
         case Qt::Key_F12: captureVideoScreenshot(); revealMediaControls(); return;
+        case Qt::Key_BracketRight: cyclePlaybackSpeed(+1); revealMediaControls(); return; // ]  faster
+        case Qt::Key_BracketLeft:  cyclePlaybackSpeed(-1); revealMediaControls(); return; // [  slower
         case Qt::Key_Backspace:
             player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome(); return;
         default: break;
@@ -3376,6 +3383,26 @@ void MainWindow::showCastMenu(QWidget* anchor)
 
     const QSize sh = menu.sizeHint();
     menu.exec(anchor->mapToGlobal(QPoint(0, -sh.height() - 6)));
+}
+
+// The preset playback rates the speed button / [ ] keys step through.
+static const double kSpeedPresets[] = { 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0 };
+
+void MainWindow::setPlaybackSpeed(double s)
+{
+    player_->setSpeed(s);
+    if (speedBtn_) speedBtn_->setText(QString::number(s, 'g', 3) + QStringLiteral("×")); // 1×, 1.25×, 0.75×
+}
+
+void MainWindow::cyclePlaybackSpeed(int dir)
+{
+    const int n = int(sizeof(kSpeedPresets) / sizeof(double));
+    const double cur = player_->speed();
+    // Find the nearest preset to the current speed, then step from there.
+    int idx = 0; double best = 1e9;
+    for (int i = 0; i < n; ++i) { const double d = qAbs(kSpeedPresets[i] - cur); if (d < best) { best = d; idx = i; } }
+    idx = qBound(0, idx + (dir >= 0 ? 1 : -1), n - 1);
+    setPlaybackSpeed(kSpeedPresets[idx]);
 }
 
 void MainWindow::captureVideoScreenshot()

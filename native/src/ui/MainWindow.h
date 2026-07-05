@@ -331,6 +331,9 @@ private:
     QLabel* time_ = nullptr;
     QSlider* volume_ = nullptr;        // player volume (0..200; above 100% = software boost)
     QPushButton* muteBtn_ = nullptr;   // speaker / mute toggle
+    QPushButton* speedBtn_ = nullptr;  // playback-speed cycle button (shows the current rate)
+    void setPlaybackSpeed(double s);   // apply a speed + refresh the button label
+    void cyclePlaybackSpeed(int dir);  // step to the next/previous preset speed
     bool muted_ = false;
     // Inline settings/panel page (replaces popup dialogs).
     QWidget* panelPage_ = nullptr;

@@ -42,6 +42,8 @@ public:
     void prevChapter();                       // jump to the previous chapter
     void setVolume(int percent);              // 0..200 (boost above 100%); 100 = original level
     void setMuted(bool muted);
+    void setSpeed(double factor);             // playback rate (1.0 = normal); pitch-corrected by mpv
+    double speed() const;                     // current playback rate
 
 signals:
     void durationChanged(double seconds);
