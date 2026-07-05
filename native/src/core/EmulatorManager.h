@@ -56,6 +56,7 @@ private:
     void prepareBios(const QString& binDir); // fetch + wire up a BIOS for emulators that need one (PCSX2)
     void prepareFirstRunConfig(const QString& binDir); // pre-seed configs so emulators skip their first-run prompts
     void prepareControllerConfig(const QString& binDir); // auto-map a standard pad as Player 1 in each emulator
+    void prepareAchievements(const QString& binDir); // sync MMV's RetroAchievements login into the emulator's own RA client
     void backupSaves(const QString& binDir);   // snapshot this emulator's saves into <app>/saves/emulators/<id>
     void restoreSaves(const QString& binDir);  // seed saves from that central copy when the emulator has none
     // Per-emulator save-data locations to back up: {absolute source dir, stable label under the central folder}.

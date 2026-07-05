@@ -555,6 +555,70 @@ static void appendIniSectionIfAbsent(const QString& path, const QByteArray& mark
     }
 }
 
+// Upsert "key = value" inside [section] of an INI: replace the value if the key is present, else add it (creating
+// the section if needed). Unlike appendIniSectionIfAbsent this UPDATES an existing key — needed for the RA token,
+// which can change on re-login and must stay in sync with MMV.
+static void setIniKey(const QString& path, const QString& section, const QString& key, const QString& value)
+{
+    QStringList lines;
+    { QFile r(path); if (r.open(QIODevice::ReadOnly | QIODevice::Text)) { lines = QString::fromUtf8(r.readAll()).split(QLatin1Char('\n')); r.close(); } }
+
+    const QString header = QStringLiteral("[%1]").arg(section);
+    const QString newLine = QStringLiteral("%1 = %2").arg(key, value);
+    int secStart = -1;
+    for (int i = 0; i < lines.size(); ++i) if (lines[i].trimmed() == header) { secStart = i; break; }
+
+    if (secStart < 0) // no such section — append it at the end
+    {
+        if (!lines.isEmpty() && !lines.last().trimmed().isEmpty()) lines << QString();
+        lines << header << newLine;
+    }
+    else
+    {
+        int keyIdx = -1, secEnd = lines.size();
+        for (int i = secStart + 1; i < lines.size(); ++i)
+        {
+            const QString t = lines[i].trimmed();
+            if (t.startsWith(QLatin1Char('['))) { secEnd = i; break; }          // next section starts
+            if (t.section(QLatin1Char('='), 0, 0).trimmed().compare(key, Qt::CaseInsensitive) == 0) { keyIdx = i; break; }
+        }
+        if (keyIdx >= 0) lines[keyIdx] = newLine;      // replace the value
+        else             lines.insert(secEnd, newLine); // add at the end of the section
+    }
+
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) { f.write(lines.join(QLatin1Char('\n')).toUtf8()); f.close(); }
+}
+
+// Feed MMV's RetroAchievements login into a standalone emulator's own RA client, so it unlocks natively against
+// the same account (a standalone emulator is a separate process — MMV can't run rcheevos against its memory the
+// way it does for in-process cores). Runs every launch to keep the token fresh; does nothing (leaves the config
+// untouched) when MMV isn't signed into RA.
+//
+// Only emulators that accept a RAW rcheevos token in their config qualify. VERIFIED LIVE:
+//   • PCSX2 ([Achievements] Username/Token) — logs in successfully with MMV's token.
+//   • DuckStation ([Cheevos]) — does NOT work: it ENCRYPTS its stored token with a machine key and rejects a raw
+//     one ("Invalid encrypted login token"). We only hold the token (not the password), so there's no way to feed
+//     it; writing one would just nag a failed login every launch. DuckStation manages its own RA login instead.
+// Other RA-capable emulators (RPCS3/Dolphin/Flycast/PPSSPP) can be added once verified the same way — check the
+// emulator's log shows "logged in successfully", not an encrypt/decrypt error, with a real token.
+void EmulatorManager::prepareAchievements(const QString& binDir)
+{
+    QSettings ini = appIni();
+    const QString user = ini.value(QStringLiteral("ra/user")).toString();
+    const QString token = ini.value(QStringLiteral("ra/token")).toString();
+    if (user.isEmpty() || token.isEmpty()) return; // not signed into RetroAchievements in MMV
+
+    QString path, section;
+    if (em_.id == QStringLiteral("pcsx2")) { path = binDir + QStringLiteral("/inis/PCSX2.ini"); section = QStringLiteral("Achievements"); }
+    else return;
+
+    setIniKey(path, section, QStringLiteral("Enabled"), QStringLiteral("true"));
+    setIniKey(path, section, QStringLiteral("Username"), user);
+    setIniKey(path, section, QStringLiteral("Token"), token); // credential — never logged
+}
+
 // Auto-map the player's controller inside each standalone emulator so a game boots with working input — the
 // thing RetroBat/ES-DE do that makes a pad "just work". Without this, most standalone emulators launch with no
 // binding and the user has to open each emulator's input menu and hand-map every button. We seed a config for a
@@ -1066,6 +1130,7 @@ void EmulatorManager::launch(const QString& binary)
         prepareFirstRunConfig(QFileInfo(binary).absolutePath());
         prepareCemuConfig(QFileInfo(binary).absolutePath());
         prepareControllerConfig(QFileInfo(binary).absolutePath()); // after the above wrote the base inis to append to
+        prepareAchievements(QFileInfo(binary).absolutePath());     // sync MMV's RetroAchievements login into the emulator
         prepareCemuKeys(QFileInfo(binary).absolutePath());
         prepareCemuDiscKey(QFileInfo(binary).absolutePath());
         restoreSaves(QFileInfo(binary).absolutePath()); // seed saves from the central backup if this install has none
