@@ -2,6 +2,7 @@
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 #include "../core/Settings.h"
+#include "../core/SystemCatalog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -39,7 +40,20 @@ ControllerRemapDialog::ControllerRemapDialog(Gamepad* pad, Keymap* keys, QWidget
             workingTurbo_[p][i] = Settings::turboButton(p, i);
         }
 
+    scope_ = Settings::inputScope();
+
     auto* v = new QVBoxLayout(this);
+
+    // Profile selector: edit the global default, or a per-console override that only applies to that system.
+    auto* scopeRow = new QHBoxLayout();
+    scopeRow->addWidget(new QLabel(tr("Profile:"), this));
+    scopeCombo_ = new QComboBox(this);
+    scopeCombo_->addItem(tr("All systems (default)"), QString());
+    for (const GameSystem& s : SystemCatalog::systems()) scopeCombo_->addItem(s.name, s.id);
+    { const int i = scopeCombo_->findData(scope_); scopeCombo_->setCurrentIndex(i >= 0 ? i : 0); }
+    connect(scopeCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this, &ControllerRemapDialog::onScopeChanged);
+    scopeRow->addWidget(scopeCombo_, 1);
+    v->addLayout(scopeRow);
 
     // Player selector: the controller and keyboard columns both edit this player's profile.
     auto* playerRow = new QHBoxLayout();
@@ -231,9 +245,8 @@ void ControllerRemapDialog::resetDefaults()
     }
 }
 
-void ControllerRemapDialog::save()
+void ControllerRemapDialog::commitWorking()
 {
-    cancelCapture();
     for (int p = 0; p < kPlayers; ++p)
         for (const Row& r : kRows)
         {
@@ -242,5 +255,36 @@ void ControllerRemapDialog::save()
             Settings::setTurboButton(p, r.retroId, workingTurbo_[p][r.retroId]);
         }
     Settings::setTurboHalfPeriod(turboSpeed_->currentData().toInt());
+}
+
+void ControllerRemapDialog::reloadWorking()
+{
+    for (int p = 0; p < kPlayers; ++p)
+        for (int i = 0; i < 16; ++i)
+        {
+            workingPad_[p][i]   = pad_ ? pad_->binding(p, i) : Gamepad::defaultBinding(i);
+            workingKey_[p][i]   = keys_ ? keys_->key(p, i) : Keymap::defaultKey(p, i);
+            workingTurbo_[p][i] = Settings::turboButton(p, i);
+        }
+}
+
+// Switch which per-system profile is being edited: persist the current edits to the old scope, point Settings
+// at the new scope, reload, and show that profile's bindings.
+void ControllerRemapDialog::onScopeChanged(int index)
+{
+    cancelCapture();
+    commitWorking();                       // keep edits made under the previous scope
+    scope_ = scopeCombo_->itemData(index).toString();
+    Settings::setInputScope(scope_);
+    if (pad_)  pad_->reloadMapping();
+    if (keys_) keys_->reload();
+    reloadWorking();
+    for (const Row& r : kRows) refreshRow(r.retroId);
+}
+
+void ControllerRemapDialog::save()
+{
+    cancelCapture();
+    commitWorking();
     accept();
 }

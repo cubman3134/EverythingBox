@@ -66,6 +66,15 @@ namespace Settings
     QString videoFilter();
     void setVideoFilter(const QString& id);
 
+    // Draw bezel / border artwork around the emulator picture (PNG in <data>/bezels). Default off.
+    bool bezelEnabled();
+    void setBezelEnabled(bool on);
+
+    // Per-system input profile: the system id whose scoped bindings the remap dialog is editing ("" = global
+    // default). Not a user-facing "setting" so much as the remap dialog's current scope, persisted for reuse.
+    QString inputScope();
+    void setInputScope(const QString& systemId);
+
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 

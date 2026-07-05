@@ -4,6 +4,7 @@
 #include "../core/CoreManager.h"
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
+#include "../core/SystemCatalog.h"
 #include <QTimer>
 #include <QPainter>
 #include <QKeyEvent>
@@ -517,8 +518,24 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     double fps = core_.avInfo().timing.fps;
     if (fps <= 0.0) fps = 60.0;
     portsMask_ = -1;            // force a fresh port setup for this game (done here while nothing else runs)
+    // Per-system input profile: point the bindings at this console's scope so its custom layout (if any) is
+    // used, then reload the keyboard + pad maps.
+    {
+        const GameSystem* sys = SystemCatalog::forExtension(QFileInfo(romPath).suffix().toLower());
+        Settings::setInputScope(sys ? sys->id : QString());
+        keymap_.reload();
+        pad_.reloadMapping();
+    }
     updateControllerPorts();
     loadTurbo();
+    // Bezel / border art: <data>/bezels/<core>.png, else default.png (only when enabled).
+    bezel_ = QImage();
+    if (Settings::bezelEnabled())
+    {
+        const QString dir = AppPaths::dataDir() + QStringLiteral("/bezels/");
+        for (const QString& cand : { dir + coreName + QStringLiteral(".png"), dir + QStringLiteral("default.png") })
+            if (QFile::exists(cand)) { bezel_.load(cand); break; }
+    }
     frameIntervalMs_ = qMax(1, static_cast<int>(1000.0 / fps));
     paused_ = false;
     running_ = true;
@@ -675,6 +692,7 @@ void RetroView::stop()
     if (net_) net_->stop();
     netActive_ = false;
     netLocalInputs_.clear();
+    Settings::setInputScope(QString()); // back to the global binding scope once no game is running
     pressedKeys_.clear();
     ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
     rewindBuf_.clear();
@@ -1083,6 +1101,9 @@ void RetroView::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
     p.fillRect(rect(), Qt::black);
+    // Bezel/border art fills the surround; the game is drawn on top (centered, aspect-fit) so it covers the
+    // bezel's transparent screen area and the artwork shows in the letterbox/pillarbox around it.
+    if (!bezel_.isNull()) p.drawImage(rect(), bezel_);
 
     if (threaded_) // paint the worker's last handed-off frame (never touch the core from the GUI thread)
     {

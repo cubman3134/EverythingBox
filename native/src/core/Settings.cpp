@@ -156,25 +156,57 @@ void Settings::setOptionValue(const QString& core, const QString& key, const QSt
     store().sync();
 }
 
+bool Settings::bezelEnabled() { return store().value(QStringLiteral("emu/bezel"), false).toBool(); }
+void Settings::setBezelEnabled(bool on) { store().setValue(QStringLiteral("emu/bezel"), on); store().sync(); }
+
+QString Settings::inputScope() { return store().value(QStringLiteral("input/scope")).toString(); }
+void Settings::setInputScope(const QString& systemId)
+{
+    store().setValue(QStringLiteral("input/scope"), systemId); store().sync();
+}
+
+// Bindings are scope-aware: a non-empty input scope (a system id) reads/writes a per-system override that
+// falls back to the global binding, which falls back to the hard-coded default. This lets each console keep
+// its own control layout while games with no override use the global one.
 int Settings::padBinding(int port, int retroId, int defaultCode)
 {
-    return store().value(QStringLiteral("pad/%1/%2").arg(port).arg(retroId), defaultCode).toInt();
+    const QString base = QStringLiteral("pad/%1/%2").arg(port).arg(retroId);
+    const QString sc = inputScope();
+    if (!sc.isEmpty())
+    {
+        const QString sk = QStringLiteral("padscope/%1/%2/%3").arg(sc).arg(port).arg(retroId);
+        if (store().contains(sk)) return store().value(sk).toInt();
+    }
+    return store().value(base, defaultCode).toInt();
 }
 
 void Settings::setPadBinding(int port, int retroId, int code)
 {
-    store().setValue(QStringLiteral("pad/%1/%2").arg(port).arg(retroId), code);
+    const QString sc = inputScope();
+    const QString key = sc.isEmpty() ? QStringLiteral("pad/%1/%2").arg(port).arg(retroId)
+                                      : QStringLiteral("padscope/%1/%2/%3").arg(sc).arg(port).arg(retroId);
+    store().setValue(key, code);
     store().sync();
 }
 
 int Settings::keyBinding(int port, int retroId, int defaultKey)
 {
-    return store().value(QStringLiteral("kbd/%1/%2").arg(port).arg(retroId), defaultKey).toInt();
+    const QString base = QStringLiteral("kbd/%1/%2").arg(port).arg(retroId);
+    const QString sc = inputScope();
+    if (!sc.isEmpty())
+    {
+        const QString sk = QStringLiteral("kbdscope/%1/%2/%3").arg(sc).arg(port).arg(retroId);
+        if (store().contains(sk)) return store().value(sk).toInt();
+    }
+    return store().value(base, defaultKey).toInt();
 }
 
 void Settings::setKeyBinding(int port, int retroId, int qtKey)
 {
-    store().setValue(QStringLiteral("kbd/%1/%2").arg(port).arg(retroId), qtKey);
+    const QString sc = inputScope();
+    const QString key = sc.isEmpty() ? QStringLiteral("kbd/%1/%2").arg(port).arg(retroId)
+                                      : QStringLiteral("kbdscope/%1/%2/%3").arg(sc).arg(port).arg(retroId);
+    store().setValue(key, qtKey);
     store().sync();
 }
 

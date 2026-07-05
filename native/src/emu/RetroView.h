@@ -188,6 +188,7 @@ private:
     VideoFilter filter_ = FilterOff;    // active retro filter
     QImage crtOverlay_;                 // cached filter overlay (rebuilt on size/source/filter change)
     QString crtKey_;                    // cache key for crtOverlay_ (dst size + source dims + filter)
+    QImage bezel_;                      // bezel/border art drawn behind the game (empty = none/disabled)
     int menuPadPrev_ = 0;               // previous frame's menu d-pad/confirm mask (edge detection)
     bool menuComboPrev_ = false;        // previous frame's Start+Select state (toggles the menu)
     int menuPadMask() const;            // bit0=Up bit1=Down bit2=confirm(A/B), held across any connected pad

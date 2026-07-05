@@ -4577,6 +4577,24 @@ void MainWindow::openGeneralSettings()
         autoNext->setChecked(Settings::autoplayNextEpisode());
         connect(autoNext, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoplayNextEpisode(c); });
         v->addWidget(autoNext);
+
+        auto* bezel = new QCheckBox(tr("Show bezel / border art around games"));
+        bezel->setStyleSheet(QStringLiteral("font-size:15px;"));
+        bezel->setChecked(Settings::bezelEnabled());
+        connect(bezel, &QCheckBox::toggled, this, [](bool c) { Settings::setBezelEnabled(c); });
+        v->addWidget(bezel);
+        auto* bezelNote = new QLabel(tr("Drop PNGs into the bezels folder named <core>.png (e.g. fceumm.png) "
+                                        "or default.png — with a transparent center where the game shows."));
+        bezelNote->setWordWrap(true); bezelNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(bezelNote);
+        auto* bezelOpen = new QPushButton(tr("Open bezels folder"));
+        connect(bezelOpen, &QPushButton::clicked, this, [] {
+            const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
+            QDir().mkpath(d);
+            QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+        });
+        auto* bezelRow = new QHBoxLayout(); bezelRow->addWidget(bezelOpen); bezelRow->addStretch(1);
+        v->addLayout(bezelRow);
         v->addSpacing(10);
 
         auto* heading = new QLabel(tr("Subtitles"));

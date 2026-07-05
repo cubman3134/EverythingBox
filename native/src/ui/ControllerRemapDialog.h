@@ -28,6 +28,7 @@ protected:
 private slots:
     void onTick();        // poll the controller; drive pad capture + live status
     void onPlayerChanged(int index);
+    void onScopeChanged(int index); // switch the per-system profile being edited
     void save();
     void resetDefaults();
 
@@ -36,11 +37,15 @@ private:
     void beginKeyCapture(int retroId);
     void cancelCapture();
     void refreshRow(int retroId);
+    void commitWorking();     // write the working bindings to the current scope (without closing)
+    void reloadWorking();     // (re)read the working bindings from the current scope
 
     Gamepad* pad_ = nullptr;
     Keymap*  keys_ = nullptr;
     QComboBox* playerCombo_ = nullptr;
     QComboBox* turboSpeed_ = nullptr;
+    QComboBox* scopeCombo_ = nullptr;     // "All systems" or a per-console profile
+    QString scope_;                       // system id currently being edited ("" = global default)
     QTimer* timer_ = nullptr;
     QLabel* status_ = nullptr;
     QHash<int, QPushButton*> padButtons_; // retroId -> controller-binding button
