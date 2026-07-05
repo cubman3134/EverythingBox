@@ -3818,7 +3818,12 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         {
             QString cand = mime.section(QLatin1Char('/'), -1).section(QLatin1Char(';'), 0, 0);
             if (cand.startsWith(QStringLiteral("x-"))) cand = cand.mid(2);
-            if (SystemCatalog::forExtension(cand) != nullptr) romExt = cand;
+            // A recognized ROM extension, OR an archive the ROM is packed in (a debrid link is a bare id with
+            // no filename, so the mime is our only clue — console ROMs are usually a .zip/.7z of the ROM, which
+            // openGamePath extracts). Without this the raw URL is handed to the emulator, which can't open it.
+            if (SystemCatalog::forExtension(cand) != nullptr
+                || cand == QStringLiteral("zip") || cand == QStringLiteral("7z") || cand == QStringLiteral("rar"))
+                romExt = cand;
         }
         if (!romExt.isEmpty() && (type == QStringLiteral("game") || SystemCatalog::forExtension(romExt) != nullptr))
         { fetchRemoteDocumentThenOpen(item, QStringLiteral(".") + romExt); return; }
