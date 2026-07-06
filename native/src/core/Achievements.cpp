@@ -54,12 +54,28 @@ void coreMemInfoCb(uint32_t id, rc_libretro_core_memory_info_t* info)
     else                    { info->data = nullptr; info->size = 0; }
 }
 
+// The User-Agent RetroAchievements identifies the client by. It must be "<client>/<version> <rcheevos clause>"
+// (the clause carries the rcheevos version + the console/hash support) — a bare name registers on RA as an
+// "unknown emulator". Built once from the app version + rc_client_get_user_agent_clause().
+QByteArray raUserAgent(rc_client_t* client)
+{
+    static QByteArray cached;
+    if (cached.isEmpty() && client)
+    {
+        cached = "MyMediaVault/" + QCoreApplication::applicationVersion().toUtf8();
+        char clause[128] = { 0 };
+        if (rc_client_get_user_agent_clause(client, clause, sizeof(clause)) > 0 && clause[0])
+        { cached += ' '; cached += clause; }
+    }
+    return cached.isEmpty() ? QByteArrayLiteral("MyMediaVault") : cached;
+}
+
 // rc_client server call -> HTTP via Qt. The response is handed back through the rcheevos callback.
-void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t callback, void* callback_data, rc_client_t*)
+void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t callback, void* callback_data, rc_client_t* client)
 {
     if (!g_st || !g_st->nam) { callback(nullptr, callback_data); return; }
     QNetworkRequest rq{ QUrl(QString::fromUtf8(request->url)) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromUtf8(raUserAgent(client ? client : g_st->client)));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply;
     if (request->post_data && request->post_data[0])
