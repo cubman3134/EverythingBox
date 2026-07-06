@@ -19,6 +19,7 @@ struct FavoriteItem
     // Empty for ordinary addon-catalog favourites.
     QString path;          // absolute file path to re-open
     QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
+    QString system;        // games: the SystemCatalog id (or "pc"), so favourites can be shown per-console
 };
 
 namespace FavoritesStore

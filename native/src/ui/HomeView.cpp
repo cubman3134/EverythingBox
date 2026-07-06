@@ -1656,7 +1656,7 @@ QString HomeView::catalogRecentKind() const
     return QStringLiteral("video");
 }
 
-void HomeView::openRecentsLevel(const QString& kind)
+void HomeView::openRecentsLevel(const QString& marker) // marker = "<kind>" or "<kind>|<system>"
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
@@ -1664,13 +1664,17 @@ void HomeView::openRecentsLevel(const QString& kind)
     lvl.item.id = QStringLiteral("_recents");
     lvl.item.type = QStringLiteral("_recents");
     lvl.item.expandable = true;
-    lvl.item.mime = QStringLiteral("recents:") + kind; // so loadTop() repopulates on Back
+    lvl.item.mime = QStringLiteral("recents:") + marker; // so loadTop() repopulates on Back
     stack_.push_back(lvl);
-    populateRecents(kind);
+    populateRecents(marker);
 }
 
-void HomeView::populateRecents(const QString& kind)
+void HomeView::populateRecents(const QString& marker)
 {
+    // marker = "<kind>" or "<kind>|<system>": the optional system scopes a games console (its SystemCatalog id,
+    // or "pc"); empty system = all of that kind (the catalogue-root Recent).
+    const QString kind = marker.section(QLatin1Char('|'), 0, 0);
+    const QString system = marker.section(QLatin1Char('|'), 1, 1);
     MediaCatalog cat; cat.title = tr("Recent");
     for (const RecentItem& r : RecentStore::list())
     {
@@ -1678,6 +1682,7 @@ void HomeView::populateRecents(const QString& kind)
         const bool match = r.kind == kind
                            || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame"));
         if (!kind.isEmpty() && !match) continue;
+        if (!system.isEmpty() && r.system != system) continue; // per-console scope
         MediaItem it;
         it.url = r.path;                                       // re-open target
         it.id = r.key;                                         // stable resume key (streamed items)
@@ -1698,6 +1703,12 @@ bool HomeView::atDownloadsLevel() const
 {
     return !stack_.isEmpty() && stack_.last().detail
         && stack_.last().item.type == QStringLiteral("_downloads");
+}
+
+bool HomeView::atFavoritesLevel() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.type == QStringLiteral("_favorites");
 }
 
 void HomeView::openDownloadsLevel(const QString& marker)
@@ -1732,6 +1743,42 @@ void HomeView::populateDownloads(const QString& marker)
         it.type = iconTypeForKind(d.kind);
         it.thumbnailUrl = d.thumb;
         it.title = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
+    hideMeta();
+    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
+    populate(cat, /*append*/ false);
+}
+
+void HomeView::openFavoritesLevel(const QString& system)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Favorites");
+    lvl.item.id = QStringLiteral("_favorites");
+    lvl.item.type = QStringLiteral("_favorites");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("favorites:") + system; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateFavorites(system);
+}
+
+void HomeView::populateFavorites(const QString& system)
+{
+    MediaCatalog cat; cat.title = tr("Favorites");
+    for (const FavoriteItem& f : FavoritesStore::list())
+    {
+        if (f.path.isEmpty()) continue;                 // only local games have a per-console home
+        if (!system.isEmpty() && f.system != system) continue;
+        MediaItem it;
+        it.url = f.path;
+        it.id = f.itemId;
+        it.mime = f.kind.isEmpty() ? QStringLiteral("game") : f.kind; // routing kind -> the game action menu
+        it.type = iconTypeForKind(it.mime);
+        it.thumbnailUrl = f.thumbnailUrl;
+        it.title = f.title.isEmpty() ? QFileInfo(f.path).completeBaseName() : f.title;
         cat.items.push_back(it);
     }
     cat.hasMore = false;
@@ -2094,6 +2141,13 @@ void HomeView::activateItem(int row)
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
+    // A console's synthetic Favorites folder: favourited games, same action menu as recents.
+    if (atFavoritesLevel() && it.type != QStringLiteral("_favorites"))
+    {
+        if (isGame) { queueMenu(it, /*isDownloads*/false); return; }
+        emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+        return;
+    }
 
     if (it.type == QStringLiteral("_open"))
     {
@@ -2118,6 +2172,10 @@ void HomeView::activateItem(int row)
     // The synthetic Downloaded folder drills into this catalogue's (or console's) fully-downloaded items.
     if (it.type == QStringLiteral("_downloads"))
         { openDownloadsLevel(it.mime.mid(QStringLiteral("downloads:").size())); return; }
+
+    // The synthetic Favorites folder (inside a console) drills into that console's favourited games.
+    if (it.type == QStringLiteral("_favorites"))
+        { openFavoritesLevel(it.mime.mid(QStringLiteral("favorites:").size())); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -2428,11 +2486,19 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
         f.thumbnailUrl = it.thumbnailUrl;
         f.path = it.url;          // re-open by path (openFavorite recovers the console from the stores)
         f.kind = it.mime;         // "game" | "pcgame"
+        // Record the console so the favourite can be shown inside that console's Favorites folder.
+        for (const DownloadedItem& d : DownloadsStore::list())
+            if (d.path == it.url || (!it.id.isEmpty() && d.key == it.id)) { f.system = d.system; break; }
+        if (f.system.isEmpty())
+            for (const RecentItem& r : RecentStore::list())
+                if (r.path == it.url || (!it.id.isEmpty() && r.key == it.id)) { f.system = r.system; break; }
         FavoritesStore::add(f);
         showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
     }
-    renderRecents(); // the Favorites section lives on the Home recents list
+    // Refresh the CURRENT view: the Home recents list, or the console Recent/Downloaded/Favorites level we're in.
     browseSelectKey_ = it.url.isEmpty() ? it.id : it.url; // keep the selection on this game after the re-sync
+    if (recentView_) renderRecents();
+    else             loadTop();
     emit browseItemsChanged(false); // re-sync a themed browse view (else its selection/metadata desync)
     browseSelectKey_.clear();
 }
@@ -2674,6 +2740,9 @@ void HomeView::loadTop()
     // Returning to a synthetic Downloaded level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_downloads"))
         { populateDownloads(top.item.mime.mid(QStringLiteral("downloads:").size())); return; }
+    // Returning to a console's synthetic Favorites level: rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_favorites"))
+        { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
     // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_playlists"))
         { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
@@ -3561,6 +3630,36 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 { kind = QStringLiteral("game"); system = s->id; }
             if (!kind.isEmpty())
             {
+                // "Recent" folder: games recently played on THIS console.
+                bool hasRec = false;
+                for (const RecentItem& r : RecentStore::list())
+                    if ((r.kind == kind || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame")))
+                        && r.system == system) { hasRec = true; break; }
+                if (hasRec)
+                {
+                    MediaItem rc;
+                    rc.id = QStringLiteral("_recents");
+                    rc.type = QStringLiteral("_recents");
+                    rc.title = tr("Recent");
+                    rc.expandable = true;
+                    rc.mime = QStringLiteral("recents:") + kind + QLatin1Char('|') + system;
+                    items_.push_back(rc);
+                }
+                // "★ Favorites" folder: games favourited on THIS console.
+                bool hasFav = false;
+                for (const FavoriteItem& f : FavoritesStore::list())
+                    if (!f.path.isEmpty() && f.system == system) { hasFav = true; break; }
+                if (hasFav)
+                {
+                    MediaItem fv;
+                    fv.id = QStringLiteral("_favorites");
+                    fv.type = QStringLiteral("_favorites");
+                    fv.title = tr("★ Favorites");
+                    fv.expandable = true;
+                    fv.mime = QStringLiteral("favorites:") + system;
+                    items_.push_back(fv);
+                }
+                // "Downloaded" folder: the fully-downloaded games for THIS console.
                 bool has = false;
                 for (const DownloadedItem& d : DownloadsStore::list())
                     if (d.kind == kind && d.system == system) { has = true; break; }

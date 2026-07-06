@@ -84,6 +84,7 @@ public:
     bool atDetailLevel() const;              // the current level is an item's detail/info page
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
+    bool atFavoritesLevel() const;           // the current level is a console's synthetic Favorites folder
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
@@ -181,6 +182,8 @@ private:
     // marker = "downloads:<kind>|<system>" (system empty for non-games, a SystemCatalog id / "pc" for games).
     void openDownloadsLevel(const QString& marker);      // drill it -> the matching downloads
     void populateDownloads(const QString& marker);       // (re)build that list as re-openable rows
+    void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
+    void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
     void requestSteamMeta(const MediaItem& item, int reqId); // native detail fetch for a Steam game
     QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
