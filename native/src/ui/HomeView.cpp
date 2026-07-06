@@ -2045,12 +2045,20 @@ void HomeView::activateItem(int row)
         QWidget* vis = window() ? window() : this;
         return vis->mapToGlobal(vis->rect().center());
     };
+    // Show the menu on a fresh event-loop turn, not synchronously here: in the themed modes activateItem runs
+    // inside the QML view's `activated` signal handler, and a nested QMenu::exec() event loop started from there
+    // never renders. Queuing lets the QML callback return first.
+    auto queueMenu = [this, menuAnchor](const MediaItem& g, bool dl) {
+        const MediaItem copy = g; const QPoint pos = menuAnchor();
+        QMetaObject::invokeMethod(this, [this, copy, dl, pos] { showGameItemMenu(copy, dl, pos); },
+                                  Qt::QueuedConnection);
+    };
 
     if (recentView_)
     {
         if (it.type == QStringLiteral("rechdr")) return;                 // a group header, not actionable
         if (it.mime.startsWith(QStringLiteral("fav:"))) { openFavorite(it); return; } // a favourite -> detail
-        if (isGame && !it.url.isEmpty()) { showGameItemMenu(it, /*isDownloads*/false, menuAnchor()); return; }
+        if (isGame && !it.url.isEmpty()) { queueMenu(it, /*isDownloads*/false); return; }
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); // a recent -> re-open
         return;
     }
@@ -2059,14 +2067,14 @@ void HomeView::activateItem(int row)
     // like the Home recents list. Intercept before the generic url path below (recents carry a url too).
     if (atRecentsLevel() && it.type != QStringLiteral("_recents"))
     {
-        if (isGame) { showGameItemMenu(it, /*isDownloads*/false, menuAnchor()); return; }
+        if (isGame) { queueMenu(it, /*isDownloads*/false); return; }
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
     // A catalogue's synthetic Downloaded folder: rows are local files, re-opened the same way as recents.
     if (atDownloadsLevel() && it.type != QStringLiteral("_downloads"))
     {
-        if (isGame) { showGameItemMenu(it, /*isDownloads*/true, menuAnchor()); return; }
+        if (isGame) { queueMenu(it, /*isDownloads*/true); return; }
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
@@ -2304,6 +2312,7 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& gl
     menu.setActiveAction(play); // pre-highlight Play so a controller's confirm just launches the game
 
     QAction* chosen = menu.exec(globalPos);
+    qInfo("home: game menu closed, chosen='%s'", chosen ? qUtf8Printable(chosen->text()) : "(none)");
     if (chosen == play)
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
     else if (chosen == favAct)  toggleGameFavorite(it);
