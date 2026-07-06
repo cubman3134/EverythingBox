@@ -455,16 +455,9 @@ static QString iconTypeForKind(const QString& kind)
 // Group key for a Recent entry: by media type, and per-console for games ("game:<console>").
 static QString recentGroupKey(const RecentItem& r)
 {
-    if (r.kind == QStringLiteral("pcgame"))
-        return QStringLiteral("game:") + QObject::tr("PC (Windows)");
-    if (r.kind == QStringLiteral("game"))
-    {
-        // Prefer the console the game was launched with (stored on the entry); fall back to the extension
-        // for legacy entries that predate that.
-        const GameSystem* sys = r.system.isEmpty() ? nullptr : SystemCatalog::byId(r.system);
-        if (!sys) sys = SystemCatalog::forExtension(QFileInfo(r.path).suffix().toLower());
-        return QStringLiteral("game:") + (sys ? sys->name : QObject::tr("Game"));
-    }
+    // One "Games" group at the top level — don't split by console here; the per-console split only happens
+    // when you drill into a specific console.
+    if (r.kind == QStringLiteral("game") || r.kind == QStringLiteral("pcgame")) return QStringLiteral("game");
     return r.kind; // video / audio / document
 }
 
@@ -473,7 +466,8 @@ static QString recentGroupLabel(const QString& key)
     if (key == QStringLiteral("video"))    return QObject::tr("Videos");
     if (key == QStringLiteral("audio"))    return QObject::tr("Audio");
     if (key == QStringLiteral("document")) return QObject::tr("Books");
-    if (key.startsWith(QStringLiteral("game:"))) return key.mid(5); // the console name
+    if (key == QStringLiteral("game"))     return QObject::tr("Games");
+    if (key.startsWith(QStringLiteral("game:"))) return key.mid(5); // the console name (per-console views)
     return key;
 }
 
