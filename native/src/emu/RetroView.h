@@ -177,6 +177,10 @@ private:
     bool paused_ = false;
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
 
+    // Black-screen diagnostics: one-shot log when a game first produces video, and a warning if it never does.
+    bool firstFrameLogged_ = false;
+    int noVideoTicks_ = 0;
+
     // ---- threaded mode (split-screen panes): emulation runs on emuThread_, painted on the GUI thread ----
     bool threaded_ = false;
     QThread* emuThread_ = nullptr;   // owns emuTimer_ + the audio sink; runs stepWorker()

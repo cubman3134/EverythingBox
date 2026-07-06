@@ -723,6 +723,10 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
             if (QFile::exists(cand)) { bezel_.load(cand); break; }
     }
     frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest ms (e.g. 17 for 59.7fps, not 16) — less audio drift
+    firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
+    qInfo("emu: loaded '%s' %ux%u fps=%.2f sr=%.0f hw=%d", coreName.toUtf8().constData(),
+          core_.avInfo().geometry.base_width, core_.avInfo().geometry.base_height,
+          fps, core_.avInfo().timing.sample_rate, int(core_.usesHwRender()));
     paused_ = false;
     running_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
@@ -976,6 +980,19 @@ bool RetroView::runOneCoreFrame()
     }
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory
     if (++sramAutosaveCounter_ >= 600) { sramAutosaveCounter_ = 0; saveSram(); } // ~10s autosave (crash safety)
+    // Black-screen watchdog: note when the game first paints, or warn if it produces no picture at all.
+    if (!firstFrameLogged_)
+    {
+        if (core_.hasFrame())
+        {
+            firstFrameLogged_ = true;
+            qInfo("emu: first video frame %ux%u ('%s')", core_.frameWidth(), core_.frameHeight(),
+                  coreName_.toUtf8().constData());
+        }
+        else if (++noVideoTicks_ == 180)
+            qWarning("emu: no video after 180 core frames ('%s') — the core produced no picture",
+                     coreName_.toUtf8().constData());
+    }
     return true;
 }
 
