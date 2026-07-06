@@ -180,7 +180,6 @@ private:
     // Black-screen diagnostics: one-shot log when a game first produces video, and a warning if it never does.
     bool firstFrameLogged_ = false;
     int noVideoTicks_ = 0;
-    int diagTicks_ = 0;   // counts tick() calls after a game loads, to log why the frame loop may not advance
 
     // ---- threaded mode (split-screen panes): emulation runs on emuThread_, painted on the GUI thread ----
     bool threaded_ = false;

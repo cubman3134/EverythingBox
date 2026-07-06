@@ -295,6 +295,17 @@ bool LibretroCore::environmentCb(unsigned cmd, void* data)
     case RETRO_ENVIRONMENT_SET_PIXEL_FORMAT:
         self->pixelFormat_ = *(const retro_pixel_format*)data;
         return true;
+    case RETRO_ENVIRONMENT_SET_CONTROLLER_INFO:
+    {
+        // The core lists one retro_controller_info per physical port, terminated by a { NULL, 0 } entry. Count
+        // the real ports so the frontend never calls retro_set_controller_port_device() past them — some cores
+        // (a5200) index a fixed-size array unchecked and corrupt memory (=> crash) if we set a port they lack.
+        const auto* info = (const retro_controller_info*)data;
+        unsigned n = 0;
+        if (info) while (info[n].types) ++n;
+        self->controllerPorts_ = n;
+        return true;
+    }
     case RETRO_ENVIRONMENT_SET_MEMORY_MAPS:
     {
         // The core describes its address space (used by RetroAchievements to map achievement addresses to

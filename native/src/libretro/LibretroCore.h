@@ -71,6 +71,10 @@ public:
 
     const retro_system_info& systemInfo() const { return sysInfo_; }
     const retro_system_av_info& avInfo() const { return avInfo_; }
+    // Number of controller ports the core declared via SET_CONTROLLER_INFO (0 = it didn't declare any, so the
+    // frontend shouldn't assume a limit). Some cores (a5200) corrupt memory + crash if the frontend calls
+    // retro_set_controller_port_device() for a port beyond this, so callers must clamp to it when it's non-zero.
+    unsigned controllerPortCount() const { return controllerPorts_; }
 
     // ---- hardware (OpenGL) rendering ----
     // A core that renders with OpenGL calls SET_HW_RENDER; we accept GL/GLES context types and hand it a
@@ -168,6 +172,7 @@ private:
     std::vector<uint8_t> gameData_; // kept alive while the game is loaded
     std::vector<retro_memory_descriptor> memDescriptors_; // copied from SET_MEMORY_MAPS (achievements)
     retro_memory_map memoryMap_{};
+    unsigned controllerPorts_ = 0;  // ports declared via SET_CONTROLLER_INFO (0 = undeclared)
 
     std::vector<CoreOption> options_;             // definitions, in menu order
     std::map<std::string, std::string> optionValues_; // key -> current value (c_str() served to the core)
