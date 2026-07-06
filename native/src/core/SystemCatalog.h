@@ -54,6 +54,9 @@ namespace SystemCatalog
                          { "stella" } },
             { "a7800",   "Atari 7800",                        { "a78" },
                          { "prosystem" } },
+            // Handy boots without the Lynx boot ROM (Beetle Lynx needs lynxboot.img), so it's the default.
+            { "lynx",    "Atari Lynx",                        { "lnx" },
+                         { "handy", "mednafen_lynx" } },
             // ---- 8/16-bit consoles & home computers (in-process libretro cores, auto-downloaded) ----------
             // Several share file extensions with each other / earlier systems (e.g. VIC-20 and C64 both use
             // .prg/.d64), so those collisions are resolved by the console hint (forConsoleName) when a game is
@@ -211,6 +214,7 @@ namespace SystemCatalog
         else if (has("atari st"))                                         id = QStringLiteral("atarist"); // before atari 2600
         else if (has("atari 7800") || has("7800"))                        id = QStringLiteral("a7800");
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
+        else if (has("atari lynx") || has("lynx"))                        id = QStringLiteral("lynx");
         else if (has("atari 800") || has("atari 8-bit") || has("atari800")) id = QStringLiteral("atari800");
         else if (has("apple ii") || has("apple //") || has("apple 2"))     id = QStringLiteral("apple2");
         else if (has("naomi 2") || has("naomi2"))                         id = QStringLiteral("naomi2");
