@@ -2374,7 +2374,7 @@ void HomeView::activateGameMenuChoice()
 
 void HomeView::closeGameMenu()
 {
-    if (gameMenu_) gameMenu_->deleteLater();
+    if (gameMenu_) { gameMenu_->hide(); gameMenu_->deleteLater(); }
     gameMenu_ = nullptr;
     gameMenuList_ = nullptr;
 }
@@ -2413,6 +2413,7 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
         showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
     }
     renderRecents(); // the Favorites section lives on the Home recents list
+    emit browseItemsChanged(false); // re-sync a themed browse view (else its selection/metadata desync)
 }
 
 void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
@@ -2461,8 +2462,8 @@ void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
     clearResume(resumeKeyFor(it));
     showToast(del ? tr("Uninstalled “%1”.").arg(it.title) : tr("Removed “%1”.").arg(it.title), 3000);
 
-    if (recentView_) renderRecents(); // Home list
-    else             loadTop();        // repopulate the catalogue Recent/Downloaded level
+    if (recentView_) { renderRecents(); emit browseItemsChanged(false); } // Home list (+ re-sync themed browse)
+    else             loadTop();        // repopulate the catalogue Recent/Downloaded level (emits its own sync)
 }
 
 void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
