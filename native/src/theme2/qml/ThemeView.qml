@@ -100,7 +100,7 @@ Item {
         forceActiveFocus()
         if (actionsOpen) return                            // the chooser is up; clicks go to its buttons
         var n = items ? items.length : 0
-        if (i < 0 || i >= n) return
+        if (i < 0 || i >= n || isHeader(i)) return         // dividers aren't clickable
         if (i === currentIndex) activated(i)               // click the focused item -> press it
         else { currentIndex = i; navigate() }              // click another -> move the selection there
     }
@@ -122,6 +122,11 @@ Item {
     property int lastNearEnd: -1
     onItemsChanged: { lastNearEnd = -1; actionsOpen = false; focusZone = 0 } // new set: re-arm, drop chooser + button focus
     onCurrentIndexChanged: {
+        if (isHeader(currentIndex)) { // host landed us on a divider -> hop to the nearest real item
+            var s = seekSelectable(currentIndex, 1); if (s < 0) s = seekSelectable(currentIndex, -1)
+            if (s >= 0 && s !== currentIndex) currentIndex = s // re-enters here with a selectable index
+            return
+        }
         var n = items ? items.length : 0
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
         selectionMoved() // host fetches the newly-selected item's metadata for the live panel (XMB)
@@ -135,11 +140,21 @@ Item {
                     return Math.max(1, Number(view.elements[i].columns || 4))
         return 1
     }
+    // Section dividers ({header:true}) are non-selectable: navigation steps over them.
+    function isHeader(i) { return !!(items && items[i] && items[i].header) }
+    function seekSelectable(from, dir) { // nearest non-header at/after `from` travelling `dir`; -1 if none
+        var n = items ? items.length : 0
+        for (var i = from; i >= 0 && i < n; i += dir) if (!isHeader(i)) return i
+        return -1
+    }
     function step(d) {
         var n = items ? items.length : 0
         if (n <= 0) return
-        var ni = Math.max(0, Math.min(n - 1, currentIndex + d))
-        if (ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
+        var dir = d >= 0 ? 1 : -1
+        var target = Math.max(0, Math.min(n - 1, currentIndex + d))
+        var ni = seekSelectable(target, dir)                 // skip dividers, continuing the travel direction
+        if (ni < 0) ni = seekSelectable(currentIndex, -dir)  // at the far edge -> fall back the other way
+        if (ni >= 0 && ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
     }
     // The vertical move (what Down/Up and the mouse wheel do): one item in the XMB column, one grid row else.
     function vstep(dir) { if (xmbMode) step(dir); else step(dir * gridCols) }
@@ -204,7 +219,7 @@ Item {
         }
         else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
-                                                                { activated(currentIndex); e.accepted = true }
+                                                                { if (!isHeader(currentIndex)) activated(currentIndex); e.accepted = true }
         // Info opens the theme's detail view for the focused item; Esc backs out of it to wherever it came
         // from (home or browse). Esc in home/browse asks the host to go back (it owns the home<->browse step).
         else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView !== "detail")

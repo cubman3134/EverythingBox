@@ -1330,9 +1330,14 @@ QVariantList HomeView::browseItems()
     for (int r = 0; r < items_.size(); ++r)
     {
         const MediaItem& it = items_[r];
-        if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr"))
+        if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info"))
             continue;
         browseRowMap_ << r;
+        if (it.type == QStringLiteral("rechdr")) // a section divider ("★ Favorites", "Games", …) — non-selectable
+        {
+            out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("header"), true } };
+            continue;
+        }
         out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
                             { QStringLiteral("image"), it.thumbnailUrl }, { QStringLiteral("type"), it.type },
                             { QStringLiteral("accent"), typeColor(it.type).name() },
@@ -1372,12 +1377,18 @@ int HomeView::browseRestoreIndex() const
             const MediaItem& it = items_[browseRowMap_[i]];
             if (it.url == browseSelectKey_ || (!it.id.isEmpty() && it.id == browseSelectKey_)) return i;
         }
-    if (stack_.isEmpty()) return 0;
+    // The first browse row can be a section header now; return the first SELECTABLE row from the restore point.
+    auto firstSelectableFrom = [this](int start) {
+        for (int i = qMax(0, start); i < browseRowMap_.size(); ++i)
+            if (items_[browseRowMap_[i]].type != QStringLiteral("rechdr")) return i;
+        return 0;
+    };
+    if (stack_.isEmpty()) return firstSelectableFrom(0);
     const int cr = stack_.last().childRow;
-    if (cr < 0) return 0;
+    if (cr < 0) return firstSelectableFrom(0);
     for (int i = 0; i < browseRowMap_.size(); ++i)
-        if (browseRowMap_[i] == cr) return i;
-    return 0;
+        if (browseRowMap_[i] == cr) return items_[cr].type == QStringLiteral("rechdr") ? firstSelectableFrom(i) : i;
+    return firstSelectableFrom(0);
 }
 
 void HomeView::browseLoadMore() { loadMore(); } // pull the next page; onCatalogReady fires browseItemsChanged
@@ -1754,6 +1765,7 @@ void HomeView::renderRecents()
     auto addHeader = [this](const QString& label) {
         MediaItem hdr;
         hdr.type = QStringLiteral("rechdr");
+        hdr.title = label; // carried into browseItems() so the themed column can draw it as a section divider
         items_.push_back(hdr);
         auto* h = new QListWidgetItem(label, grid_);
         QFont hf = h->font();

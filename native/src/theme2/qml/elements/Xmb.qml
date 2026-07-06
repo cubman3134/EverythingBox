@@ -165,24 +165,34 @@ Item {
             id: row
             required property var modelData
             required property int index
-            readonly property bool sel: index === xmb.itemIndex
+            readonly property bool hdr: !!(row.modelData && row.modelData.header) // a section divider, not a tile
+            readonly property bool sel: index === xmb.itemIndex && !hdr
             readonly property real dy: (index - xmb.itemScroll) * xmb.itemGap
             width: xmb.rowSize; height: xmb.rowSize
             x: xmb.crossX - width / 2
             y: xmb.colTop + dy - height / 2
-            opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (sel ? 1.0 : 0.6) // fade rows that rise above the column top
-            scale: sel ? 1.12 : 0.94
+            opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (hdr ? 0.9 : (sel ? 1.0 : 0.6)) // fade rows above the column top
+            scale: hdr ? 1.0 : (sel ? 1.12 : 0.94)
             Behavior on scale { NumberAnimation { duration: 140 } }
 
+            // Section divider label ("★ Favorites", "Games", …) shown in place of the tile for header rows.
+            Text {
+                visible: row.hdr
+                anchors.verticalCenter: parent.verticalCenter; anchors.left: parent.left
+                text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
+                color: xmb.descColor; font.bold: true
+                font.pixelSize: Math.max(10, xmb.height * 0.018); font.capitalization: Font.AllUppercase
+            }
+
             Rectangle {
-                anchors.fill: parent; radius: 8
+                anchors.fill: parent; radius: 8; visible: !row.hdr &&
+                    (!(row.modelData && row.modelData.image) || rowIcon.status !== Image.Ready)
                 color: (row.modelData && row.modelData.accent) ? row.modelData.accent : "#23272F"
                 // Show the accent tile until the icon is ready (and for off-screen rows whose icon isn't loaded).
-                visible: !(row.modelData && row.modelData.image) || rowIcon.status !== Image.Ready
             }
             Image {
                 id: rowIcon
-                anchors.fill: parent; visible: !!(row.modelData && row.modelData.image)
+                anchors.fill: parent; visible: !row.hdr && !!(row.modelData && row.modelData.image)
                 asynchronous: true; cache: true
                 sourceSize.width: width; sourceSize.height: height
                 // Only rasterize icons for rows near the cross: a full console list is ~56 SVGs, and decoding
@@ -193,6 +203,7 @@ Item {
             }
             // Title (and, for the selected row, a subtitle line beneath it) to the right of the icon.
             Column {
+                visible: !row.hdr // header rows draw their own left-aligned divider label instead
                 anchors.left: parent.right; anchors.leftMargin: xmb.width * 0.015
                 anchors.verticalCenter: parent.verticalCenter
                 // Kept narrow so it never runs under the metadata panel on the right (the full title shows there).
