@@ -2526,42 +2526,63 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
-        // Search every candidate name CONCURRENTLY and take the first hit, so a multi-name lookup costs one
-        // search's time instead of the sum (a not-found game exhausts the provider's ~38s budget per name —
-        // three names run one after another would be ~2 minutes). Bounded so a title with many alternate
-        // names can't fan out into a flood of parallel searches. Callbacks fire on the GUI thread, so the
-        // shared state needs no locking.
+        // Fire every candidate name at once (parallel — a multi-name miss would otherwise cost the provider's
+        // ~38s budget PER name), but keep the names' PRIORITY. `queries` is ordered best-first (the catalog
+        // title, then the alternate/original names), so we open the hit from the EARLIEST-ranked name — not
+        // whichever network reply happens to land first (which is how the Japanese "PC Genjin 2" once beat the
+        // wanted "Bonk's Revenge (USA)"). We commit the moment every name ahead of a decisive result has come
+        // back. Only a plain "no match" falls through to the next name; a hit / still-caching / provider error
+        // is decisive at its rank. Bounded so a title with many alternates can't flood the provider. Callbacks
+        // fire on the GUI thread, so the shared state needs no locking.
         constexpr int kMaxParallelNames = 5;
         if (queries.size() > kMaxParallelNames) queries = queries.mid(0, kMaxParallelNames);
-        struct MultiSearch { bool done = false; int pending = 0; QString err; bool caching = false; };
+        struct NameResult { bool done = false; QString url, mime, err; bool caching = false; };
+        struct MultiSearch { bool committed = false; QVector<NameResult> r; };
         auto ms = std::make_shared<MultiSearch>();
-        ms->pending = int(queries.size());
-        for (const QString& q : std::as_const(queries))
-        {
-            mgr_->resolveDocumentByQuery(q, catType,
-                [this, ms, it, title, console]
-                (const QString& url, const QString& mime, const QString& err, bool noMatches) {
-                if (ms->done) return;                        // another name already won or reported
-                if (!url.isEmpty())
+        ms->r.resize(int(queries.size()));
+        auto commit = std::make_shared<std::function<void()>>();
+        *commit = [this, ms, it, title, console]() {
+            if (ms->committed) return;
+            for (const NameResult& q : std::as_const(ms->r))
+            {
+                if (!q.done) return;                     // a higher-ranked name is still in flight — wait for it
+                if (!q.url.isEmpty())                     // best-ranked name that hit → open it
                 {
-                    ms->done = true;
+                    ms->committed = true;
                     if (playBtn_) playBtn_->setEnabled(true);
-                    hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m);
+                    hideToast(); MediaItem m = it; m.url = q.url; m.mime = q.mime; m.systemHint = console; emit openItem(m);
                     return;
                 }
-                if (!err.isEmpty())  ms->err = err;          // provider unreachable
-                else if (!noMatches) ms->caching = true;     // a copy exists but is still caching
-                if (--ms->pending > 0) return;               // wait for the other names to finish
-                ms->done = true;
-                if (playBtn_) playBtn_->setEnabled(true);
-                if (!ms->err.isEmpty())
-                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(ms->err), 9000);
-                else if (ms->caching)
+                if (!q.err.isEmpty())                     // provider unreachable at this rank → report it
+                {
+                    ms->committed = true;
+                    if (playBtn_) playBtn_->setEnabled(true);
+                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(q.err), 9000);
+                    return;
+                }
+                if (q.caching)                            // a copy exists at this rank but is still caching
+                {
+                    ms->committed = true;
+                    if (playBtn_) playBtn_->setEnabled(true);
                     showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
                                  "less-common titles take a while). Try again in a few minutes; if it never "
                                  "appears, there may be no copy.").arg(title), 10000);
-                else
-                    showToast(tr("No copies of “%1” were found.").arg(title), 8000);
+                    return;
+                }
+                // this name was a plain "no match" — fall through to the next-ranked name
+            }
+            ms->committed = true;                          // every name came back a plain miss
+            if (playBtn_) playBtn_->setEnabled(true);
+            showToast(tr("No copies of “%1” were found.").arg(title), 8000);
+        };
+        for (int i = 0; i < queries.size(); ++i)
+        {
+            mgr_->resolveDocumentByQuery(queries[i], catType,
+                [ms, commit, i](const QString& url, const QString& mime, const QString& err, bool noMatches) {
+                NameResult& q = ms->r[i];
+                q.done = true; q.url = url; q.mime = mime; q.err = err;
+                q.caching = url.isEmpty() && err.isEmpty() && !noMatches; // found-but-caching (no url, no error)
+                (*commit)();
             });
         }
         return;
