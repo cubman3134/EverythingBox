@@ -8,6 +8,7 @@
 #include <QSettings>
 #include <QCoreApplication>
 #include <QUrl>
+#include <QUrlQuery>
 #include <QByteArray>
 #include <cstring>
 
@@ -76,6 +77,9 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
     if (!g_st || !g_st->nam) { callback(nullptr, callback_data); return; }
     QNetworkRequest rq{ QUrl(QString::fromUtf8(request->url)) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromUtf8(raUserAgent(client ? client : g_st->client)));
+    // The RA request verb (login2 / gameid / startsession / patch / awardachievement) for diagnostics only —
+    // the rest of the URL and post_data carry the token, so they are never logged.
+    const QString raVerb = QUrlQuery(QUrl(QString::fromUtf8(request->url))).queryItemValue(QStringLiteral("r"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply;
     if (request->post_data && request->post_data[0])
@@ -88,7 +92,7 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
     {
         reply = g_st->nam->get(rq);
     }
-    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, callback, callback_data] {
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, callback, callback_data, raVerb] {
         // The rc_client owns `callback_data` (a load_state that points back at the client). If the client has been
         // torn down (app shutdown destroys our QNetworkAccessManager, which aborts this in-flight request and fires
         // finished), calling the rcheevos callback would dereference freed state — an access violation inside
@@ -96,6 +100,15 @@ void serverCallCb(const rc_api_request_t* request, rc_client_server_callback_t c
         if (!g_st || !g_st->client) { reply->deleteLater(); return; }
         const QByteArray body = reply->readAll();
         const int http = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        // Surface RA rejections (e.g. http 403 "unsupported_client") — the response body has no token, so log
+        // just the verb, status, and RA's Code field.
+        if (http >= 400 || body.contains("\"Success\":false"))
+        {
+            QString code; const int ci = body.indexOf("\"Code\":\"");
+            if (ci >= 0) { const int s = ci + 8; const int e = body.indexOf('"', s); if (e > s) code = QString::fromUtf8(body.mid(s, e - s)); }
+            qWarning("RA: %s -> http %d %s", qUtf8Printable(raVerb.isEmpty() ? QStringLiteral("?") : raVerb),
+                     http, qUtf8Printable(code));
+        }
         rc_api_server_response_t resp;
         resp.body = body.constData();
         resp.body_length = (size_t)body.size();
@@ -149,11 +162,14 @@ void gameLoadCb(int result, const char* error_message, rc_client_t* client, void
         const rc_client_game_t* g = rc_client_get_game_info(client);
         rc_client_user_game_summary_t sum; std::memset(&sum, 0, sizeof(sum));
         rc_client_get_user_game_summary(client, &sum);
+        qInfo("RA: loaded '%s' — %u/%u achievements", g && g->title ? g->title : "?",
+              sum.num_unlocked_achievements, sum.num_core_achievements);
         emit g_ach->gameLoaded(true, (g && g->title) ? QString::fromUtf8(g->title) : QString(),
                                (int)sum.num_unlocked_achievements, (int)sum.num_core_achievements);
     }
     else
     {
+        qWarning("RA: game load failed (rc %d): %s", result, error_message ? error_message : "");
         emit g_ach->gameLoaded(false, QString::fromUtf8(error_message ? error_message : ""), 0, 0);
     }
 }

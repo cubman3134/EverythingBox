@@ -181,6 +181,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_netplay_both tools/probe_netplay_both.cpp src/emu/NetplaySession.cpp)
     target_include_directories(probe_netplay_both PRIVATE src src/emu)
     target_link_libraries(probe_netplay_both PRIVATE Qt6::Core Qt6::Network)
+    # Compute the RetroAchievements ROM hash (rc_hash) to triage "unsupported game version".
+    add_executable(probe_rahash tools/probe_rahash.cpp)
+    target_link_libraries(probe_rahash PRIVATE rcheevos)
     # Console harness for the EPUB parser (Qt Core only) - used for headless verification.
     add_executable(probe_epub tools/probe_epub.cpp src/ebook/EpubBook.cpp third_party/miniz.c)
     target_include_directories(probe_epub PRIVATE src src/ebook third_party)
