@@ -218,7 +218,8 @@ namespace SystemCatalog
         else if (has("genesis") || has("mega drive") || has("master system")
                  || has("game gear"))                                     id = QStringLiteral("genesis");
         else if (has("sg-1000") || has("sg1000"))                         id = QStringLiteral("sg1000");
-        else if (has("pc engine cd") || has("turbografx cd") || has("turbo grafx cd") || has("tg-cd")) id = QStringLiteral("pcecd");
+        else if (has("pc engine cd") || has("turbografx cd") || has("turbografx-cd") || has("turbo grafx cd")
+                 || has("tg-cd") || has("tgcd") || has("pce cd") || has("pce-cd") || has("pcecd")) id = QStringLiteral("pcecd");
         else if (has("supergrafx") || has("super grafx") || has("pc engine") || has("turbografx") || has("turbo grafx")) id = QStringLiteral("pce");
         else if (has("wonderswan"))                                       id = QStringLiteral("ws");
         else if (has("virtual boy") || has("virtualboy"))                 id = QStringLiteral("virtualboy");

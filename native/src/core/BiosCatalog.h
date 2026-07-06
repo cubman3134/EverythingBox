@@ -40,6 +40,7 @@ namespace BiosCatalog
             { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
             { QStringLiteral("a5200"),  QStringLiteral("Atari 5200") },
             { QStringLiteral("atarist"), QStringLiteral("Atari ST") },
+            { QStringLiteral("pcecd"),  QStringLiteral("PC Engine CD / TurboGrafx-CD") },
         };
         return list;
     }
@@ -111,9 +112,17 @@ namespace BiosCatalog
               QStringLiteral("c1c57ce48e8ee4135885cee9e63a68a2") },
         };
 
+        // PC Engine CD / TurboGrafx-CD (Beetle PCE / mednafen_pce): a CD game won't boot without the Super
+        // System Card 3.0, which the core looks for as "syscard3.pce" in the system folder. HuCards don't need it.
+        static const QList<BiosFile> pcecd = {
+            { QStringLiteral("syscard3.pce"), retrobios(QStringLiteral("NEC/PC%20Engine/syscard3.pce")),
+              QStringLiteral("38179df8f4ac870017db21ebcbf53114") },
+        };
+
         if (systemId == QStringLiteral("psx"))    return psx;
         if (systemId == QStringLiteral("saturn")) return saturn;
         if (systemId == QStringLiteral("a5200"))  return a5200;
+        if (systemId == QStringLiteral("pcecd"))  return pcecd;
         if (systemId == QStringLiteral("atarist")) return atarist;
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
