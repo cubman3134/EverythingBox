@@ -1903,13 +1903,12 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
         auto* ke = static_cast<QKeyEvent*>(event);
         const int k = ke->key();
 
-        // The game-action overlay's list (real keyboard): Enter picks, Esc closes; Up/Down fall through to the
-        // list's native navigation. (The controller path goes through handleGameMenuNav.)
-        if (obj == gameMenuList_)
+        // The game-action overlay (real keyboard, delivered via its keyboard grab): route through the same
+        // handler the controller uses. Consume everything while it's up.
+        if (gameMenu_ && obj == gameMenu_)
         {
-            if (k == Qt::Key_Return || k == Qt::Key_Enter) { activateGameMenuChoice(); return true; }
-            if (k == Qt::Key_Escape || k == Qt::Key_Backspace) { closeGameMenu(); return true; }
-            return false;
+            handleGameMenuNav(k);
+            return true;
         }
 
         // --- Top chrome row: the search box (highlighted vs. typing) ---
@@ -2352,15 +2351,18 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
     for (int i = 0; i < list->count(); ++i) listH += list->sizeHintForRow(i) + 4;
     list->setFixedHeight(listH);
     connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { activateGameMenuChoice(); });
-    list->installEventFilter(this); // real-keyboard Enter/Esc (see eventFilter)
     v->addWidget(list);
 
     ol->addWidget(panel, 0, Qt::AlignCenter);
     gameMenu_ = overlay;
     gameMenuList_ = list;
+    overlay->installEventFilter(this); // real-keyboard nav routes through handleGameMenuNav (see eventFilter)
     overlay->raise();
     overlay->show();
-    list->setFocus();
+    // Grab the keyboard rather than taking focus: a real key press then comes to the overlay (so the view
+    // behind it isn't navigated), but the themed QML scene keeps its focus item — so once the overlay closes,
+    // navigation there works immediately (setFocus() here left it briefly unable to move).
+    overlay->grabKeyboard();
 }
 
 // PLAY / FAV / PLAYLIST / REMOVE, matching the row order in showGameItemMenu().
@@ -2382,7 +2384,7 @@ void HomeView::activateGameMenuChoice()
 
 void HomeView::closeGameMenu()
 {
-    if (gameMenu_) { gameMenu_->hide(); gameMenu_->deleteLater(); }
+    if (gameMenu_) { gameMenu_->releaseKeyboard(); gameMenu_->hide(); gameMenu_->deleteLater(); }
     gameMenu_ = nullptr;
     gameMenuList_ = nullptr;
 }
