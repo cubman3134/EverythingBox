@@ -52,11 +52,17 @@ namespace SystemCatalog
                          { "mednafen_vb" } },
             { "a2600",   "Atari 2600",                        { "a26" },
                          { "stella" } },
+            // Atari 5200 needs its own machine + the 5200 BIOS (auto-fetched, see BiosCatalog "a5200"); its .a52
+            // used to fall through to the Atari 800 core, which ran it as an 800 (wrong). Keep it above atari800.
+            { "a5200",   "Atari 5200",                        { "a52" },
+                         { "a5200" } },
             { "a7800",   "Atari 7800",                        { "a78" },
                          { "prosystem" } },
             // Handy boots without the Lynx boot ROM (Beetle Lynx needs lynxboot.img), so it's the default.
             { "lynx",    "Atari Lynx",                        { "lnx" },
                          { "handy", "mednafen_lynx" } },
+            { "ngp",     "Neo Geo Pocket / Color",            { "ngp", "ngc", "ngpc" },
+                         { "mednafen_ngp" } },
             // ---- 8/16-bit consoles & home computers (in-process libretro cores, auto-downloaded) ----------
             // Several share file extensions with each other / earlier systems (e.g. VIC-20 and C64 both use
             // .prg/.d64), so those collisions are resolved by the console hint (forConsoleName) when a game is
@@ -78,8 +84,13 @@ namespace SystemCatalog
             // More consoles / computers / arcade / CD systems. CD and arcade systems share cue/chd/iso/zip
             // with earlier systems, so they claim only unambiguous extensions (often none) and are routed by
             // the console hint (forConsoleName) when launched from their shelf.
-            { "atari800",     "Atari 800",           { "atr", "atx", "car", "a52", "cas" }, { "atari800" } },
+            { "atari800",     "Atari 800",           { "atr", "atx", "car", "cas" }, { "atari800" } },
             { "apple2",       "Apple II",            { "woz", "do", "po", "2mg", "nib", "dsk" }, { "applewin" } },
+            // Amstrad CPC: cap32 embeds the CPC firmware (no external BIOS). .dsk collides with Apple II, so
+            // claim the unambiguous tape/cartridge formats and route .dsk via the "Amstrad" console hint.
+            { "amstradcpc",   "Amstrad CPC",         { "cdt", "cpr" },        { "cap32", "crocods" } },
+            { "tic80",        "TIC-80 (fantasy)",    { "tic" },               { "tic80" } },
+            { "uzebox",       "Uzebox",              { "uze" },               { "uzem" } },
             { "pokemini",     "Pokemon Mini",        { "min" },               { "pokemini" } },
             { "supervision",  "Watara Supervision",  { "sv" },                { "potator" } },
             { "gameandwatch", "Nintendo Game & Watch", { "mgw" },             { "gw" } },
@@ -215,6 +226,7 @@ namespace SystemCatalog
         else if (has("atari 7800") || has("7800"))                        id = QStringLiteral("a7800");
         else if (has("atari 2600") || has("2600"))                        id = QStringLiteral("a2600");
         else if (has("atari lynx") || has("lynx"))                        id = QStringLiteral("lynx");
+        else if (has("atari 5200") || has("5200"))                        id = QStringLiteral("a5200");
         else if (has("atari 800") || has("atari 8-bit") || has("atari800")) id = QStringLiteral("atari800");
         else if (has("apple ii") || has("apple //") || has("apple 2"))     id = QStringLiteral("apple2");
         else if (has("naomi 2") || has("naomi2"))                         id = QStringLiteral("naomi2");
@@ -223,13 +235,16 @@ namespace SystemCatalog
         else if (has("pokemon mini") || has("poke mini"))                 id = QStringLiteral("pokemini");
         else if (has("supervision") || has("watara"))                    id = QStringLiteral("supervision");
         else if (has("game & watch") || has("game and watch") || has("game&watch")) id = QStringLiteral("gameandwatch");
-        else if (has("neo geo pocket") || has("neogeo pocket"))           id = QString();          // NGP/NGPC: no core yet
+        else if (has("neo geo pocket") || has("neogeo pocket") || has("ngpc") || hasWord("ngp")) id = QStringLiteral("ngp");
         else if (has("neo geo cd") || has("neogeo cd"))                   id = QStringLiteral("neogeocd");
         else if (has("neo geo") || has("neogeo"))                         id = QStringLiteral("neogeo");
         else if (has("pc-fx") || has("pcfx"))                             id = QStringLiteral("pcfx");
         else if (has("3do"))                                             id = QStringLiteral("3do");
         // Classic consoles & home computers
         else if (has("colecovision") || has("coleco"))                    id = QStringLiteral("coleco");
+        else if (has("amstrad") || has("cpc"))                            id = QStringLiteral("amstradcpc");
+        else if (has("tic-80") || has("tic80"))                           id = QStringLiteral("tic80");
+        else if (has("uzebox"))                                           id = QStringLiteral("uzebox");
         else if (has("vectrex"))                                          id = QStringLiteral("vectrex");
         else if (has("intellivision"))                                    id = QStringLiteral("intellivision");
         else if (has("odyssey") || has("videopac"))                       id = QStringLiteral("odyssey2");

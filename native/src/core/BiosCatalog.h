@@ -38,6 +38,7 @@ namespace BiosCatalog
             { QStringLiteral("ps2"),    QStringLiteral("PlayStation 2") },
             { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
             { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
+            { QStringLiteral("a5200"),  QStringLiteral("Atari 5200") },
         };
         return list;
     }
@@ -91,8 +92,16 @@ namespace BiosCatalog
             { QStringLiteral("bios_CD_J.bin"), retrobios(QStringLiteral("Sega/Mega%20CD/bios_CD_J.bin")), QStringLiteral("278a9397d192149e84e820ac621a8edd") }, // JP
         };
 
+        // Atari 5200 (a5200 core): the 2 KB 5200 BIOS, looked for as "5200.rom" in the system folder. Unlike
+        // the 2600/7800, the 5200 can't boot a cartridge without it.
+        static const QList<BiosFile> a5200 = {
+            { QStringLiteral("5200.rom"), retrobios(QStringLiteral("Atari/5200/5200.rom")),
+              QStringLiteral("281f20ea4320404ec820fb7ec0693b38") },
+        };
+
         if (systemId == QStringLiteral("psx"))    return psx;
         if (systemId == QStringLiteral("saturn")) return saturn;
+        if (systemId == QStringLiteral("a5200"))  return a5200;
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
         if (systemId == QStringLiteral("nes"))    return nes;
