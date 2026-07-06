@@ -2326,24 +2326,41 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint&)
     const bool fav = FavoritesStore::isFavorite(gameFavId(it));
     const bool canDelete = weOwnDownloadedFile(it.url);
 
+    // A frameless, in-app-styled overlay (not an OS window) centred on the app, matching the detail page's
+    // action buttons — a QMenu popup won't render over the themed modes' QML, but a modal dialog does.
     QDialog dlg(window() ? window() : this);
-    dlg.setWindowTitle(it.title);
+    dlg.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
     dlg.setModal(true);
+    dlg.setStyleSheet(QStringLiteral(
+        "QDialog{background:#20242F;border:1px solid #3A4257;border-radius:12px;}"
+        "QLabel#gtitle{color:#EDEFF3;font-size:16px;font-weight:bold;padding:2px 6px 10px 6px;}"
+        "QListWidget{background:transparent;border:none;outline:none;color:#DCE0EA;font-size:16px;}"
+        "QListWidget::item{padding:10px 12px;border-radius:8px;margin:2px 0;}"
+        "QListWidget::item:selected{background:#5A8CFF;color:white;}"));
     auto* v = new QVBoxLayout(&dlg);
-    v->setContentsMargins(10, 10, 10, 10);
+    v->setContentsMargins(14, 14, 14, 14);
+    v->setSpacing(4);
+    auto* titleLbl = new QLabel(it.title, &dlg);
+    titleLbl->setObjectName(QStringLiteral("gtitle"));
+    titleLbl->setWordWrap(true);
+    v->addWidget(titleLbl);
     auto* list = new QListWidget(&dlg);
+    list->setFrameShape(QFrame::NoFrame);
     list->addItem(tr("▶   Play"));
     list->addItem(fav ? tr("★   Unfavorite") : tr("☆   Favorite"));
     list->addItem(tr("➕   Add to playlist…"));
     list->addItem(canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"));
     list->setCurrentRow(PLAY);                 // pre-select Play
-    list->setStyleSheet(QStringLiteral("QListWidget{font-size:16px;} QListWidget::item{padding:8px 6px;}"));
+    list->setFixedWidth(320);
     list->installEventFilter(new ReturnAccepts(&dlg)); // Enter (incl. the gamepad's) picks the row
     connect(list, &QListWidget::itemActivated,     &dlg, &QDialog::accept);
     connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
     v->addWidget(list);
-    dlg.resize(360, 220);
     list->setFocus();
+
+    dlg.adjustSize();
+    QWidget* vis = window() ? window() : this;
+    dlg.move(vis->mapToGlobal(vis->rect().center()) - QPoint(dlg.width() / 2, dlg.height() / 2)); // centre in-app
 
     if (dlg.exec() != QDialog::Accepted) return;
     switch (list->currentRow())
