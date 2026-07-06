@@ -263,7 +263,7 @@ var CONSOLES = [
     { id: 59, name: "Atari 2600" }, { id: 66, name: "Atari 5200" }, { id: 60, name: "Atari 7800" },
     { id: 61, name: "Atari Lynx" }, { id: 62, name: "Atari Jaguar" }, { id: 63, name: "Atari ST" },
     // NEC
-    { id: 86, name: "TurboGrafx-16" }, { id: 128, name: "PC Engine SuperGrafx" },
+    { id: 86, name: "TurboGrafx-16" }, { id: 150, name: "TurboGrafx-CD" }, { id: 128, name: "PC Engine SuperGrafx" },
     // SNK
     { id: 80, name: "Neo Geo" }, { id: 119, name: "Neo Geo Pocket" }, { id: 120, name: "Neo Geo Pocket Color" },
     // Bandai
