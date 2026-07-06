@@ -247,6 +247,7 @@ private:
     QListWidget* gameMenuList_ = nullptr;
     MediaItem gameMenuItem_;
     bool gameMenuDownloads_ = false;
+    QString browseSelectKey_; // url/id to re-select after the next themed re-sync (keeps the spot after fav/uninstall)
     QLineEdit* search_ = nullptr;
     QWidget* filterBar_ = nullptr;       // row of filter dropdowns above the grid (per-catalog, dynamic)
     QHBoxLayout* filterLayout_ = nullptr;

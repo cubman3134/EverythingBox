@@ -1364,6 +1364,14 @@ bool HomeView::browseHasMore() const { return hasMore_ && !loading_; }
 // (it rebuilds browseRowMap_). Returns 0 for a fresh level (childRow < 0).
 int HomeView::browseRestoreIndex() const
 {
+    // A one-shot request to keep the selection on a specific item after a re-sync (e.g. the game just
+    // favourited/unfavourited), so it doesn't snap to the top of the list.
+    if (!browseSelectKey_.isEmpty())
+        for (int i = 0; i < browseRowMap_.size(); ++i)
+        {
+            const MediaItem& it = items_[browseRowMap_[i]];
+            if (it.url == browseSelectKey_ || (!it.id.isEmpty() && it.id == browseSelectKey_)) return i;
+        }
     if (stack_.isEmpty()) return 0;
     const int cr = stack_.last().childRow;
     if (cr < 0) return 0;
@@ -2413,7 +2421,9 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
         showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
     }
     renderRecents(); // the Favorites section lives on the Home recents list
+    browseSelectKey_ = it.url.isEmpty() ? it.id : it.url; // keep the selection on this game after the re-sync
     emit browseItemsChanged(false); // re-sync a themed browse view (else its selection/metadata desync)
+    browseSelectKey_.clear();
 }
 
 void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
