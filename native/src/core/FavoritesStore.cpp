@@ -39,6 +39,8 @@ QVector<FavoriteItem> FavoritesStore::list()
         it.type         = o.value(QStringLiteral("type")).toString();
         it.thumbnailUrl = o.value(QStringLiteral("thumbnailUrl")).toString();
         it.expandable   = o.value(QStringLiteral("expandable")).toBool();
+        it.path         = o.value(QStringLiteral("path")).toString();
+        it.kind         = o.value(QStringLiteral("kind")).toString();
         if (!it.itemId.isEmpty()) out.push_back(it);
     }
     return out;
@@ -57,6 +59,8 @@ static void save(const QVector<FavoriteItem>& items)
         o.insert(QStringLiteral("type"), it.type);
         o.insert(QStringLiteral("thumbnailUrl"), it.thumbnailUrl);
         o.insert(QStringLiteral("expandable"), it.expandable);
+        if (!it.path.isEmpty()) o.insert(QStringLiteral("path"), it.path);
+        if (!it.kind.isEmpty()) o.insert(QStringLiteral("kind"), it.kind);
         arr.append(o);
     }
     store().setValue(favKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));

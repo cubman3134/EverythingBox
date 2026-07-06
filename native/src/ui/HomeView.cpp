@@ -54,6 +54,8 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QFile>
+#include <QMessageBox>
+#include <QStandardPaths>
 #include <QBoxLayout>
 #include <QWheelEvent>
 #include <QKeyEvent>
@@ -1563,6 +1565,7 @@ void HomeView::populatePlaylistItems(const QString& playlistId)
         it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
         it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
         if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
+        else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);
     }
     cat.hasMore = false;
@@ -2027,10 +2030,24 @@ void HomeView::activateItem(int row)
     const MediaItem& it = items_[row];
     if (it.type == QStringLiteral("info")) return; // guidance rows aren't actionable
 
+    // A local game added to a playlist re-opens by path (recovers its console from the Recent/Downloads store).
+    if (it.mime.startsWith(QStringLiteral("localgame:")))
+    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return; }
+
+    // Games in the Recent / Downloaded lists open a small action menu (Play / Favorite / Add to playlist /
+    // Uninstall) instead of launching straight away, so they can be managed from the couch. Play is the default.
+    const bool isGame = (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame"));
+    auto menuAnchor = [this] {
+        if (grid_->isVisible() && grid_->currentItem())
+            return grid_->viewport()->mapToGlobal(grid_->visualItemRect(grid_->currentItem()).center());
+        return mapToGlobal(rect().center());
+    };
+
     if (recentView_)
     {
         if (it.type == QStringLiteral("rechdr")) return;                 // a group header, not actionable
         if (it.mime.startsWith(QStringLiteral("fav:"))) { openFavorite(it); return; } // a favourite -> detail
+        if (isGame && !it.url.isEmpty()) { showGameItemMenu(it, /*isDownloads*/false, menuAnchor()); return; }
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); // a recent -> re-open
         return;
     }
@@ -2039,12 +2056,14 @@ void HomeView::activateItem(int row)
     // like the Home recents list. Intercept before the generic url path below (recents carry a url too).
     if (atRecentsLevel() && it.type != QStringLiteral("_recents"))
     {
+        if (isGame) { showGameItemMenu(it, /*isDownloads*/false, menuAnchor()); return; }
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
     // A catalogue's synthetic Downloaded folder: rows are local files, re-opened the same way as recents.
     if (atDownloadsLevel() && it.type != QStringLiteral("_downloads"))
     {
+        if (isGame) { showGameItemMenu(it, /*isDownloads*/true, menuAnchor()); return; }
         emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
@@ -2247,12 +2266,127 @@ void HomeView::openDetailLevel(LoadedAddon* addon, const MediaItem& it)
 bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last().detail; }
 
 // Right-click on the Home list: offer to remove the Recent or Favorite under the cursor.
+// Identity for a local game favourite: its stable resume key, else its path.
+static QString gameFavId(const MediaItem& it) { return it.id.isEmpty() ? it.url : it.id; }
+
+// True if `path` is a file MyMediaVault downloaded (under our downloads folder or the remote cache), so it's
+// safe to delete on "Uninstall". A ROM the user keeps in their own library folder is left alone.
+static bool weOwnDownloadedFile(const QString& path)
+{
+    if (path.isEmpty() || path.contains(QStringLiteral("://"))) return false;
+    const QString file = QDir::cleanPath(path);
+    const QStringList ours = {
+        QDir::cleanPath(AppPaths::dataDir() + QStringLiteral("/downloads")),
+        QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)),
+    };
+    for (const QString& base : ours)
+        if (!base.isEmpty() && file.startsWith(base + QLatin1Char('/'), Qt::CaseInsensitive)) return true;
+    return false;
+}
+
+// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. Controller-navigable
+// (MainWindow::sendNavKey routes nav keys to the open popup).
+void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& globalPos)
+{
+    QMenu menu(this);
+    QAction* play = menu.addAction(tr("▶  Play"));
+    const bool fav = FavoritesStore::isFavorite(gameFavId(it));
+    QAction* favAct = menu.addAction(fav ? tr("★  Unfavorite") : tr("☆  Favorite"));
+    QAction* plAct = menu.addAction(tr("➕  Add to playlist…"));
+    menu.addSeparator();
+    const bool canDelete = weOwnDownloadedFile(it.url);
+    QAction* rm = menu.addAction(canDelete ? tr("🗑  Uninstall (delete file)") : tr("🗑  Remove from list"));
+    menu.setActiveAction(play); // pre-highlight Play so a controller's confirm just launches the game
+
+    QAction* chosen = menu.exec(globalPos);
+    if (chosen == play)
+        emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+    else if (chosen == favAct)  toggleGameFavorite(it);
+    else if (chosen == plAct)   addGameToPlaylistInteractive(it);
+    else if (chosen == rm)      uninstallGameItem(it, isDownloads);
+}
+
+void HomeView::toggleGameFavorite(const MediaItem& it)
+{
+    const QString id = gameFavId(it);
+    if (FavoritesStore::isFavorite(id)) { FavoritesStore::remove(id); showToast(tr("Removed from Favorites."), 2500); }
+    else
+    {
+        FavoriteItem f;
+        f.itemId = id;
+        f.title = it.title;
+        f.type = QStringLiteral("game");
+        f.thumbnailUrl = it.thumbnailUrl;
+        f.path = it.url;          // re-open by path (openFavorite recovers the console from the stores)
+        f.kind = it.mime;         // "game" | "pcgame"
+        FavoritesStore::add(f);
+        showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
+    }
+    renderRecents(); // the Favorites section lives on the Home recents list
+}
+
+void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
+{
+    const QString key = currentCatalogKey();
+    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    QStringList opts;
+    for (const Playlist& p : pls) opts << p.name;
+    const QString NEWP = tr("➕ New playlist…");
+    opts << NEWP;
+    bool ok = false;
+    const QString chosen = QInputDialog::getItem(window(), tr("Add to playlist"),
+        tr("Add “%1” to:").arg(it.title), opts, 0, /*editable*/ false, &ok);
+    if (!ok || chosen.isEmpty()) return;
+    QString plid;
+    if (chosen == NEWP)
+    {
+        const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
+                                                   QLineEdit::Normal, QString(), &ok).trimmed();
+        if (!ok || name.isEmpty()) return;
+        plid = PlaylistStore::create(key, name);
+    }
+    else for (const Playlist& p : pls) if (p.name == chosen) { plid = p.id; break; }
+    if (plid.isEmpty()) return;
+    PlaylistEntry e;
+    e.itemId = gameFavId(it); e.title = it.title; e.type = QStringLiteral("game");
+    e.thumbnailUrl = it.thumbnailUrl;
+    e.path = it.url; e.kind = it.mime; // re-open by path
+    PlaylistStore::addItem(plid, e);
+    showToast(tr("Added “%1” to “%2”.").arg(it.title, chosen), 3500);
+}
+
+void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
+{
+    const bool del = weOwnDownloadedFile(it.url);
+    const QString msg = del ? tr("Delete “%1” from disk? This removes the downloaded game file.").arg(it.title)
+                            : tr("Remove “%1” from the list? (The file on disk is left in place.)").arg(it.title);
+    if (QMessageBox::question(window(), tr("Uninstall game"), msg,
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+        return;
+
+    if (del) QFile::remove(it.url);
+    const QString keyOrPath = it.id.isEmpty() ? it.url : it.id;
+    DownloadsStore::remove(keyOrPath); DownloadsStore::remove(it.url);
+    RecentStore::remove(keyOrPath);    RecentStore::remove(it.url);
+    clearResume(resumeKeyFor(it));
+    showToast(del ? tr("Uninstalled “%1”.").arg(it.title) : tr("Removed “%1”.").arg(it.title), 3000);
+
+    if (recentView_) renderRecents(); // Home list
+    else             loadTop();        // repopulate the catalogue Recent/Downloaded level
+}
+
 void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
 {
-    if (!recentView_ || row < 0 || row >= items_.size()) return;
+    if (row < 0 || row >= items_.size()) return;
     const MediaItem& it = items_[row];
     if (it.type == QStringLiteral("rechdr") || it.type == QStringLiteral("info")) return; // a header, not actionable
 
+    // A game in the Recent/Downloaded lists gets the full action menu (same as activating it).
+    if ((it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty()
+        && (recentView_ || atRecentsLevel() || atDownloadsLevel()))
+    { showGameItemMenu(it, atDownloadsLevel(), globalPos); return; }
+
+    if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);
     const bool fav = it.mime.startsWith(QStringLiteral("fav:"));
     QAction* remove = menu.addAction(fav ? tr("Remove from Favorites") : tr("Remove from Recent"));
@@ -2269,6 +2403,14 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
 
 void HomeView::openFavorite(const MediaItem& favItem)
 {
+    // A favourited local game (starred from the Recent/Downloads menu) re-opens by path — openRecent recovers
+    // its console from the Recent/Downloads store.
+    for (const FavoriteItem& f : FavoritesStore::list())
+        if (f.itemId == favItem.id && !f.path.isEmpty())
+        {
+            emit openRecent(f.path, f.kind, f.itemId, f.title, f.thumbnailUrl);
+            return;
+        }
     // A favourited Steam game has no source addon - reopen its native info page (rooted at Home).
     if (favItem.id.startsWith(QStringLiteral("steam:")))
     {

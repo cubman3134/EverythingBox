@@ -921,6 +921,11 @@ void MainWindow::sendNavKey(int key)
         QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &release);
     };
+    // A popup (a QMenu, e.g. the Recent/Downloads game menu) grabs input while open — Qt routes real key events
+    // to it, but our synthetic ones must be aimed at it explicitly. Translate Back (Backspace) to Escape so the
+    // controller's B closes the menu.
+    if (QWidget* popup = QApplication::activePopupWidget())
+    { deliver(popup, key == Qt::Key_Backspace ? Qt::Key_Escape : key); return; }
     // The app pause menu is a top-level window and owns input while it's open.
     if (escMenuVisible()) { deliver(QApplication::focusWidget(), key); return; }
     QWidget* cur = stack_->currentWidget();

@@ -15,6 +15,10 @@ struct PlaylistEntry
     QString type;          // media type (movie/track/book/…) - drives the icon + open path
     QString thumbnailUrl;  // poster/cover to show
     bool expandable = false;
+    // Local-file entries (a Recent/Downloaded game added from its item menu): re-open by path through
+    // openRecent instead of via an addon. Empty for ordinary addon-catalog entries.
+    QString path;          // absolute file path to re-open
+    QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
 };
 
 struct Playlist

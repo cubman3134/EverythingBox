@@ -33,6 +33,8 @@ static PlaylistEntry entryFromJson(const QJsonObject& o)
     e.type         = o.value(QStringLiteral("type")).toString();
     e.thumbnailUrl = o.value(QStringLiteral("thumbnailUrl")).toString();
     e.expandable   = o.value(QStringLiteral("expandable")).toBool();
+    e.path         = o.value(QStringLiteral("path")).toString();
+    e.kind         = o.value(QStringLiteral("kind")).toString();
     return e;
 }
 
@@ -46,6 +48,8 @@ static QJsonObject entryToJson(const PlaylistEntry& e)
     o.insert(QStringLiteral("type"), e.type);
     o.insert(QStringLiteral("thumbnailUrl"), e.thumbnailUrl);
     o.insert(QStringLiteral("expandable"), e.expandable);
+    if (!e.path.isEmpty()) o.insert(QStringLiteral("path"), e.path);
+    if (!e.kind.isEmpty()) o.insert(QStringLiteral("kind"), e.kind);
     return o;
 }
 

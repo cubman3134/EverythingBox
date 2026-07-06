@@ -182,6 +182,12 @@ private:
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
     void showItemContextMenu(int row, const QPoint& globalPos); // Home: remove a Recent/Favorite entry
+    // The Recent/Downloads game action menu (Play / Favorite / Add to playlist / Uninstall). Shown when a game
+    // is activated, or from the item context menu. `isDownloads` = the item lives in the Downloaded store.
+    void showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& globalPos); // by value: actions rebuild items_
+    void toggleGameFavorite(const MediaItem& it);        // star/unstar a local game (re-opens by path)
+    void addGameToPlaylistInteractive(const MediaItem& it); // add a local game to a playlist (path-based entry)
+    void uninstallGameItem(const MediaItem& it, bool isDownloads); // delete the file (if ours) + drop from stores
     void applyGridMode(bool recentList); // switch grid_ between the catalog poster grid and the recent list
     void styleTypeButtons(const QString& activeKey); // colour the top tabs + tint the catalogue background
     void applyThemeFont();           // set the app font family/scale from the active theme

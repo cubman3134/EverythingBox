@@ -14,6 +14,11 @@ struct FavoriteItem
     QString type;          // media type (movie/series/album/...) - drives the icon
     QString thumbnailUrl;  // poster/cover to show
     bool expandable = false;
+    // Local-file favourites (a Recent/Downloaded game starred from its item menu): these re-open by path
+    // through openRecent (which recovers the console from the Recent/Downloads store) instead of via an addon.
+    // Empty for ordinary addon-catalog favourites.
+    QString path;          // absolute file path to re-open
+    QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
 };
 
 namespace FavoritesStore
