@@ -723,7 +723,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
             if (QFile::exists(cand)) { bezel_.load(cand); break; }
     }
     frameIntervalMs_ = qMax(1, qRound(1000.0 / fps)); // nearest ms (e.g. 17 for 59.7fps, not 16) — less audio drift
-    firstFrameLogged_ = false; noVideoTicks_ = 0; // reset the black-screen watchdog for this game
+    firstFrameLogged_ = false; noVideoTicks_ = 0; diagTicks_ = 0; // reset the black-screen watchdog for this game
     qInfo("emu: loaded '%s' %ux%u fps=%.2f sr=%.0f hw=%d", coreName.toUtf8().constData(),
           core_.avInfo().geometry.base_width, core_.avInfo().geometry.base_height,
           fps, core_.avInfo().timing.sample_rate, int(core_.usesHwRender()));
@@ -744,6 +744,7 @@ void RetroView::startEmu()
     {
         startAudio(static_cast<int>(core_.avInfo().timing.sample_rate));
         timer_->start(frameIntervalMs_);
+        qInfo("emu: startEmu non-threaded, timer interval=%dms active=%d", frameIntervalMs_, int(timer_->isActive()));
         return;
     }
     // Threaded: emulate on a worker thread so the other split pane's video rendering on the GUI thread can't
@@ -974,6 +975,7 @@ bool RetroView::runOneCoreFrame()
         core_.runFrame();   // audio is pushed via core_.onAudio (muted while fast-forwarding / rewinding)
     if (core_.crashed()) // a hard fault inside the core was caught; stop instead of faulting every frame
     {
+        qWarning("emu: core '%s' faulted during runFrame — stopping", coreName_.toUtf8().constData());
         stop();
         emit statusMessage(tr("The emulator core crashed and was stopped."));
         return false;
@@ -1140,6 +1142,12 @@ void RetroView::startNetplayOnline(bool asHost, const QString& code)
 
 void RetroView::tick()
 {
+    // Black-screen diagnostics: the first tick and tick #120 record why the frame loop may not be advancing
+    // (never fires => the timer isn't running; menuVis=1 => paused by the menu; running=0 => stopped).
+    if (++diagTicks_ == 1 || diagTicks_ == 120)
+        qInfo("emu: tick#%d running=%d menuVis=%d netActive=%d frameLogged=%d noVid=%d",
+              diagTicks_, int(running_), int(menu_ && menu_->isVisible()), int(netActive_),
+              int(firstFrameLogged_), noVideoTicks_);
     if (!running_) return;
     pad_.poll();        // refresh controller state + handle hot-plug before the core reads input
     updateControllerPorts(); // pick up controllers plugged in/out mid-game
