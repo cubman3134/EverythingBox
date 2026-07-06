@@ -300,6 +300,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(ach_, &Achievements::gameLoaded, this, [this](bool ok, const QString& title, int unlocked, int total) {
         if (ok && total > 0)
             statusBar()->showMessage(tr("🏆  %1 — %2/%3 achievements").arg(title).arg(unlocked).arg(total), 6000);
+        else if (ok && title.contains(QStringLiteral("Unsupported Game Version"), Qt::CaseInsensitive))
+            // RA recognized the ROM but it isn't the dump the achievement set is tied to — tell the user why
+            // there are no achievements so they know to grab the RetroAchievements-supported (No-Intro) dump.
+            notify(tr("🏆  This ROM isn't a RetroAchievements-supported version — no achievements. "
+                      "Try the No-Intro/RA-verified dump."), 8000);
+        else if (ok)
+            statusBar()->showMessage(tr("🏆  No RetroAchievements set for this game."), 5000);
     });
     ach_->tryLoginWithStoredToken();
 
