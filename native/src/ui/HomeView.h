@@ -10,6 +10,7 @@
 #include <QList>
 #include <QSet>
 #include <QHash>
+#include <QPointer>
 #include "../addons/AddonModels.h"
 
 class AddonManager;
@@ -102,6 +103,9 @@ public:
     // QQuickView our own child widgets can't paint over).
     void showToast(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
     void hideToast();                                   // dismiss it now (e.g. the content view takes over)
+    // Drive the open game-action overlay from a controller nav key (MainWindow forwards these). Returns true
+    // while the overlay is up (so the key is consumed and doesn't leak to the view behind it).
+    bool handleGameMenuNav(int key);
 
 signals:
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
@@ -182,9 +186,12 @@ private:
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
     void openFavorite(const MediaItem& favItem); // open a favourited item's detail page from Home
     void showItemContextMenu(int row, const QPoint& globalPos); // Home: remove a Recent/Favorite entry
-    // The Recent/Downloads game action menu (Play / Favorite / Add to playlist / Uninstall). Shown when a game
-    // is activated, or from the item context menu. `isDownloads` = the item lives in the Downloaded store.
-    void showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& globalPos); // by value: actions rebuild items_
+    // The Recent/Downloads game action menu (Play / Favorite / Add to playlist / Uninstall). An in-window child
+    // overlay (not a top-level dialog) so it doesn't make the themed QML view flash black; `isDownloads` = the
+    // item lives in the Downloaded store.
+    void showGameItemMenu(MediaItem it, bool isDownloads);
+    void closeGameMenu();            // tear down the overlay
+    void activateGameMenuChoice();   // run the highlighted action, then close
     void toggleGameFavorite(const MediaItem& it);        // star/unstar a local game (re-opens by path)
     void addGameToPlaylistInteractive(const MediaItem& it); // add a local game to a playlist (path-based entry)
     void uninstallGameItem(const MediaItem& it, bool isDownloads); // delete the file (if ours) + drop from stores
@@ -235,6 +242,11 @@ private:
     bool atXmbRoot_ = true;          // at a category's top level (Left/Right switch categories)
     QString lastMediaKey_;           // last media type entered (to re-highlight on return to the carousel)
     QListWidget* grid_ = nullptr;
+    // The Recent/Downloads game-action overlay (a child of the top-level window, so it doesn't flash the QML).
+    QPointer<QWidget> gameMenu_;
+    QListWidget* gameMenuList_ = nullptr;
+    MediaItem gameMenuItem_;
+    bool gameMenuDownloads_ = false;
     QLineEdit* search_ = nullptr;
     QWidget* filterBar_ = nullptr;       // row of filter dropdowns above the grid (per-catalog, dynamic)
     QHBoxLayout* filterLayout_ = nullptr;

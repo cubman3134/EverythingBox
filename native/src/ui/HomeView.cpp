@@ -1895,6 +1895,15 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
         auto* ke = static_cast<QKeyEvent*>(event);
         const int k = ke->key();
 
+        // The game-action overlay's list (real keyboard): Enter picks, Esc closes; Up/Down fall through to the
+        // list's native navigation. (The controller path goes through handleGameMenuNav.)
+        if (obj == gameMenuList_)
+        {
+            if (k == Qt::Key_Return || k == Qt::Key_Enter) { activateGameMenuChoice(); return true; }
+            if (k == Qt::Key_Escape || k == Qt::Key_Backspace) { closeGameMenu(); return true; }
+            return false;
+        }
+
         // --- Top chrome row: the search box (highlighted vs. typing) ---
         if (obj == search_)
         {
@@ -2038,21 +2047,11 @@ void HomeView::activateItem(int row)
     // Games in the Recent / Downloaded lists open a small action menu (Play / Favorite / Add to playlist /
     // Uninstall) instead of launching straight away, so they can be managed from the couch. Play is the default.
     const bool isGame = (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame"));
-    auto menuAnchor = [this]() -> QPoint {
-        if (grid_->isVisible() && grid_->currentItem())
-            return grid_->viewport()->mapToGlobal(grid_->visualItemRect(grid_->currentItem()).center());
-        // The themed (Triple/XMB) modes hide HomeView and show a QML view instead, so anchoring on `this` would
-        // land the menu off-screen. Center it on the visible top-level window.
-        QWidget* vis = window() ? window() : this;
-        return vis->mapToGlobal(vis->rect().center());
-    };
-    // Show the menu on a fresh event-loop turn, not synchronously here: in the themed modes activateItem runs
-    // inside the QML view's `activated` signal handler, and a nested QMenu::exec() event loop started from there
-    // never renders. Queuing lets the QML callback return first.
-    auto queueMenu = [this, menuAnchor](const MediaItem& g, bool dl) {
-        const MediaItem copy = g; const QPoint pos = menuAnchor();
-        QMetaObject::invokeMethod(this, [this, copy, dl, pos] { showGameItemMenu(copy, dl, pos); },
-                                  Qt::QueuedConnection);
+    // Open the overlay on a fresh event-loop turn: in the themed modes activateItem runs inside the QML view's
+    // `activated` signal handler, and building/showing widgets from there is best deferred.
+    auto queueMenu = [this](const MediaItem& g, bool dl) {
+        const MediaItem copy = g;
+        QMetaObject::invokeMethod(this, [this, copy, dl] { showGameItemMenu(copy, dl); }, Qt::QueuedConnection);
     };
 
     if (recentView_)
@@ -2296,86 +2295,105 @@ static bool weOwnDownloadedFile(const QString& path)
     return false;
 }
 
-// Makes Enter/Return on a focused list activate (accept) a dialog — QListWidget doesn't do this for the
-// synthetic key events the gamepad injects.
-namespace {
-class ReturnAccepts : public QObject
+// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. Built as a child
+// widget of the top-level window (a dimmed backdrop + a centred panel), NOT a top-level dialog — a separate
+// window makes the themed QML view flash black when it shows/hides. It renders over the QML because it's a
+// raised sibling in the same window. Nav comes via handleGameMenuNav() (controller) and the list (mouse).
+void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
 {
-public:
-    explicit ReturnAccepts(QDialog* d) : QObject(d), dlg_(d) {}
-protected:
-    bool eventFilter(QObject*, QEvent* e) override
-    {
-        if (e->type() == QEvent::KeyPress)
-        {
-            const int k = static_cast<QKeyEvent*>(e)->key();
-            if (k == Qt::Key_Return || k == Qt::Key_Enter) { dlg_->accept(); return true; }
-        }
-        return false;
-    }
-    QDialog* dlg_;
-};
-}
-
-// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. A modal QDialog (not
-// a QMenu) — a QMenu popup won't render over the themed modes' full-screen QML scene, but a dialog does.
-// Controller-navigable: MainWindow::sendNavKey routes nav keys to the active modal dialog.
-void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint&)
-{
-    enum { PLAY, FAV, PLAYLIST, REMOVE };
+    closeGameMenu(); // only one at a time
+    gameMenuItem_ = it;
+    gameMenuDownloads_ = isDownloads;
     const bool fav = FavoritesStore::isFavorite(gameFavId(it));
     const bool canDelete = weOwnDownloadedFile(it.url);
 
-    // A frameless, in-app-styled overlay (not an OS window) centred on the app, matching the detail page's
-    // action buttons — a QMenu popup won't render over the themed modes' QML, but a modal dialog does.
-    QDialog dlg(window() ? window() : this);
-    dlg.setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
-    dlg.setModal(true);
-    dlg.setStyleSheet(QStringLiteral(
-        "QDialog{background:#20242F;border:1px solid #3A4257;border-radius:12px;}"
-        "QLabel#gtitle{color:#EDEFF3;font-size:16px;font-weight:bold;padding:2px 6px 10px 6px;}"
+    QWidget* top = window() ? window() : this;
+    auto* overlay = new QWidget(top);
+    overlay->setGeometry(top->rect());
+    overlay->setStyleSheet(QStringLiteral("background: rgba(8,10,16,150);")); // dim the view behind
+    auto* ol = new QVBoxLayout(overlay);
+    ol->setContentsMargins(0, 0, 0, 0);
+
+    auto* panel = new QFrame(overlay);
+    panel->setStyleSheet(QStringLiteral(
+        "QFrame{background:#20242F;border:1px solid #3A4257;border-radius:12px;}"
+        "QLabel#gtitle{color:#EDEFF3;font-size:16px;font-weight:bold;padding:2px 6px 10px 6px;border:none;}"
         "QListWidget{background:transparent;border:none;outline:none;color:#DCE0EA;font-size:16px;}"
         "QListWidget::item{padding:10px 12px;border-radius:8px;margin:2px 0;}"
         "QListWidget::item:selected{background:#5A8CFF;color:white;}"));
-    auto* v = new QVBoxLayout(&dlg);
+    panel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    auto* v = new QVBoxLayout(panel);
     v->setContentsMargins(14, 14, 14, 14);
     v->setSpacing(4);
-    auto* titleLbl = new QLabel(it.title, &dlg);
+    auto* titleLbl = new QLabel(it.title, panel);
     titleLbl->setObjectName(QStringLiteral("gtitle"));
     titleLbl->setWordWrap(true);
     v->addWidget(titleLbl);
-    auto* list = new QListWidget(&dlg);
+
+    auto* list = new QListWidget(panel);
     list->setFrameShape(QFrame::NoFrame);
     list->addItem(tr("▶   Play"));
     list->addItem(fav ? tr("★   Unfavorite") : tr("☆   Favorite"));
     list->addItem(tr("➕   Add to playlist…"));
     list->addItem(canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"));
-    list->setCurrentRow(PLAY);                 // pre-select Play
+    list->setCurrentRow(0); // pre-select Play
     list->setFixedWidth(320);
-    // Size the list to show every row without a scrollbar (there are only a handful of actions).
-    list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);   // show every row, no scrollbar
     list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     int listH = 2 * list->frameWidth();
-    for (int i = 0; i < list->count(); ++i) listH += list->sizeHintForRow(i) + 4; // +4 = the item's 2px top/bottom margin
+    for (int i = 0; i < list->count(); ++i) listH += list->sizeHintForRow(i) + 4;
     list->setFixedHeight(listH);
-    list->installEventFilter(new ReturnAccepts(&dlg)); // Enter (incl. the gamepad's) picks the row
-    connect(list, &QListWidget::itemActivated,     &dlg, &QDialog::accept);
-    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+    connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { activateGameMenuChoice(); });
+    list->installEventFilter(this); // real-keyboard Enter/Esc (see eventFilter)
     v->addWidget(list);
+
+    ol->addWidget(panel, 0, Qt::AlignCenter);
+    gameMenu_ = overlay;
+    gameMenuList_ = list;
+    overlay->raise();
+    overlay->show();
     list->setFocus();
+}
 
-    dlg.adjustSize();
-    QWidget* vis = window() ? window() : this;
-    dlg.move(vis->mapToGlobal(vis->rect().center()) - QPoint(dlg.width() / 2, dlg.height() / 2)); // centre in-app
-
-    if (dlg.exec() != QDialog::Accepted) return;
-    switch (list->currentRow())
+// PLAY / FAV / PLAYLIST / REMOVE, matching the row order in showGameItemMenu().
+void HomeView::activateGameMenuChoice()
+{
+    if (!gameMenu_ || !gameMenuList_) return;
+    const int row = gameMenuList_->currentRow();
+    const MediaItem it = gameMenuItem_;       // copy before closing clears the members
+    const bool isDownloads = gameMenuDownloads_;
+    closeGameMenu();
+    switch (row)
     {
-    case PLAY:     emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
-    case FAV:      toggleGameFavorite(it); break;
-    case PLAYLIST: addGameToPlaylistInteractive(it); break;
-    case REMOVE:   uninstallGameItem(it, isDownloads); break;
+    case 0: emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
+    case 1: toggleGameFavorite(it); break;
+    case 2: addGameToPlaylistInteractive(it); break;
+    case 3: uninstallGameItem(it, isDownloads); break;
     }
+}
+
+void HomeView::closeGameMenu()
+{
+    if (gameMenu_) gameMenu_->deleteLater();
+    gameMenu_ = nullptr;
+    gameMenuList_ = nullptr;
+}
+
+bool HomeView::handleGameMenuNav(int key)
+{
+    if (!gameMenu_ || !gameMenuList_) return false;
+    QListWidget* l = gameMenuList_;
+    switch (key)
+    {
+    case Qt::Key_Up:     l->setCurrentRow(qMax(0, l->currentRow() - 1)); break;
+    case Qt::Key_Down:   l->setCurrentRow(qMin(l->count() - 1, l->currentRow() + 1)); break;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:  activateGameMenuChoice(); break;
+    case Qt::Key_Escape:
+    case Qt::Key_Backspace: closeGameMenu(); break;
+    default: break; // swallow everything else while the menu is up
+    }
+    return true;
 }
 
 void HomeView::toggleGameFavorite(const MediaItem& it)
@@ -2456,7 +2474,7 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
     // A game in the Recent/Downloaded lists gets the full action menu (same as activating it).
     if ((it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty()
         && (recentView_ || atRecentsLevel() || atDownloadsLevel()))
-    { showGameItemMenu(it, atDownloadsLevel(), globalPos); return; }
+    { showGameItemMenu(it, atDownloadsLevel()); return; }
 
     if (!recentView_) return; // the plain remove menu below is for the Home recents/favorites list only
     QMenu menu(this);

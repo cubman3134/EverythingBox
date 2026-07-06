@@ -924,9 +924,12 @@ void MainWindow::sendNavKey(int key)
     // A popup (a QMenu, e.g. the Recent/Downloads game menu) grabs input while open — Qt routes real key events
     // to it, but our synthetic ones must be aimed at it explicitly. Translate Back (Backspace) to Escape so the
     // controller's B closes the menu.
+    // The Recent/Downloads game-action overlay (an in-window child, not a popup/dialog) drives itself from nav
+    // keys — hand them straight to it while it's open.
+    if (home_ && home_->handleGameMenuNav(key)) return;
     if (QWidget* popup = QApplication::activePopupWidget())
     { deliver(popup, key == Qt::Key_Backspace ? Qt::Key_Escape : key); return; }
-    // A modal dialog (the Recent/Downloads game menu, its uninstall confirm, the playlist picker) must receive
+    // A modal dialog (its uninstall confirm, the playlist picker) must receive
     // nav keys, not the view behind it. Aim at its focused widget; Back (Backspace) becomes Escape so B cancels.
     if (QWidget* modal = QApplication::activeModalWidget())
     {
