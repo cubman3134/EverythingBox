@@ -926,6 +926,15 @@ void MainWindow::sendNavKey(int key)
     // controller's B closes the menu.
     if (QWidget* popup = QApplication::activePopupWidget())
     { deliver(popup, key == Qt::Key_Backspace ? Qt::Key_Escape : key); return; }
+    // A modal dialog (the Recent/Downloads game menu, its uninstall confirm, the playlist picker) must receive
+    // nav keys, not the view behind it. Aim at its focused widget; Back (Backspace) becomes Escape so B cancels.
+    if (QWidget* modal = QApplication::activeModalWidget())
+    {
+        QWidget* f = QApplication::focusWidget();
+        QWidget* tgt = (f && modal->isAncestorOf(f)) ? f : modal;
+        deliver(tgt, key == Qt::Key_Backspace ? Qt::Key_Escape : key);
+        return;
+    }
     // The app pause menu is a top-level window and owns input while it's open.
     if (escMenuVisible()) { deliver(QApplication::focusWidget(), key); return; }
     QWidget* cur = stack_->currentWidget();

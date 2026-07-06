@@ -56,6 +56,7 @@
 #include <QFile>
 #include <QMessageBox>
 #include <QStandardPaths>
+#include <QDialog>
 #include <QBoxLayout>
 #include <QWheelEvent>
 #include <QKeyEvent>
@@ -2295,29 +2296,63 @@ static bool weOwnDownloadedFile(const QString& path)
     return false;
 }
 
-// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. Controller-navigable
-// (MainWindow::sendNavKey routes nav keys to the open popup).
-void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& globalPos)
+// Makes Enter/Return on a focused list activate (accept) a dialog — QListWidget doesn't do this for the
+// synthetic key events the gamepad injects.
+namespace {
+class ReturnAccepts : public QObject
 {
-    qInfo("home: game menu for '%s' at %d,%d (visibleHome=%d)", qUtf8Printable(it.title),
-          globalPos.x(), globalPos.y(), int(isVisible()));
-    QMenu menu(window() ? window() : this); // parent on the visible window (HomeView is hidden in themed modes)
-    QAction* play = menu.addAction(tr("▶  Play"));
-    const bool fav = FavoritesStore::isFavorite(gameFavId(it));
-    QAction* favAct = menu.addAction(fav ? tr("★  Unfavorite") : tr("☆  Favorite"));
-    QAction* plAct = menu.addAction(tr("➕  Add to playlist…"));
-    menu.addSeparator();
-    const bool canDelete = weOwnDownloadedFile(it.url);
-    QAction* rm = menu.addAction(canDelete ? tr("🗑  Uninstall (delete file)") : tr("🗑  Remove from list"));
-    menu.setActiveAction(play); // pre-highlight Play so a controller's confirm just launches the game
+public:
+    explicit ReturnAccepts(QDialog* d) : QObject(d), dlg_(d) {}
+protected:
+    bool eventFilter(QObject*, QEvent* e) override
+    {
+        if (e->type() == QEvent::KeyPress)
+        {
+            const int k = static_cast<QKeyEvent*>(e)->key();
+            if (k == Qt::Key_Return || k == Qt::Key_Enter) { dlg_->accept(); return true; }
+        }
+        return false;
+    }
+    QDialog* dlg_;
+};
+}
 
-    QAction* chosen = menu.exec(globalPos);
-    qInfo("home: game menu closed, chosen='%s'", chosen ? qUtf8Printable(chosen->text()) : "(none)");
-    if (chosen == play)
-        emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
-    else if (chosen == favAct)  toggleGameFavorite(it);
-    else if (chosen == plAct)   addGameToPlaylistInteractive(it);
-    else if (chosen == rm)      uninstallGameItem(it, isDownloads);
+// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. A modal QDialog (not
+// a QMenu) — a QMenu popup won't render over the themed modes' full-screen QML scene, but a dialog does.
+// Controller-navigable: MainWindow::sendNavKey routes nav keys to the active modal dialog.
+void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint&)
+{
+    enum { PLAY, FAV, PLAYLIST, REMOVE };
+    const bool fav = FavoritesStore::isFavorite(gameFavId(it));
+    const bool canDelete = weOwnDownloadedFile(it.url);
+
+    QDialog dlg(window() ? window() : this);
+    dlg.setWindowTitle(it.title);
+    dlg.setModal(true);
+    auto* v = new QVBoxLayout(&dlg);
+    v->setContentsMargins(10, 10, 10, 10);
+    auto* list = new QListWidget(&dlg);
+    list->addItem(tr("▶   Play"));
+    list->addItem(fav ? tr("★   Unfavorite") : tr("☆   Favorite"));
+    list->addItem(tr("➕   Add to playlist…"));
+    list->addItem(canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"));
+    list->setCurrentRow(PLAY);                 // pre-select Play
+    list->setStyleSheet(QStringLiteral("QListWidget{font-size:16px;} QListWidget::item{padding:8px 6px;}"));
+    list->installEventFilter(new ReturnAccepts(&dlg)); // Enter (incl. the gamepad's) picks the row
+    connect(list, &QListWidget::itemActivated,     &dlg, &QDialog::accept);
+    connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+    v->addWidget(list);
+    dlg.resize(360, 220);
+    list->setFocus();
+
+    if (dlg.exec() != QDialog::Accepted) return;
+    switch (list->currentRow())
+    {
+    case PLAY:     emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
+    case FAV:      toggleGameFavorite(it); break;
+    case PLAYLIST: addGameToPlaylistInteractive(it); break;
+    case REMOVE:   uninstallGameItem(it, isDownloads); break;
+    }
 }
 
 void HomeView::toggleGameFavorite(const MediaItem& it)
