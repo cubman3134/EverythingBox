@@ -4210,7 +4210,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     // Continue the feedback in the same toast that showed "Finding/Looking…", so the file-pull progress
     // appears where the user is already looking (not just the status bar). Sticky until it opens/fails.
     notify(tr("Downloading “%1”…").arg(item.title), 0);
-    mwLog(QStringLiteral("download: GET %1 -> %2%3").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName(), ext));
+    mwLog(QStringLiteral("download: GET %1 -> %2").arg(logSafeUrl(item.url), QFileInfo(localPath).fileName()));
 
     // Stream the body straight to a .part file as it arrives instead of buffering the whole thing in memory
     // with readAll(): ROMs (Wii U / GameCube / PS2 disc images) can be several GB and would exhaust RAM.
