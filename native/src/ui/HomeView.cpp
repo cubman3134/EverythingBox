@@ -2037,10 +2037,13 @@ void HomeView::activateItem(int row)
     // Games in the Recent / Downloaded lists open a small action menu (Play / Favorite / Add to playlist /
     // Uninstall) instead of launching straight away, so they can be managed from the couch. Play is the default.
     const bool isGame = (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame"));
-    auto menuAnchor = [this] {
+    auto menuAnchor = [this]() -> QPoint {
         if (grid_->isVisible() && grid_->currentItem())
             return grid_->viewport()->mapToGlobal(grid_->visualItemRect(grid_->currentItem()).center());
-        return mapToGlobal(rect().center());
+        // The themed (Triple/XMB) modes hide HomeView and show a QML view instead, so anchoring on `this` would
+        // land the menu off-screen. Center it on the visible top-level window.
+        QWidget* vis = window() ? window() : this;
+        return vis->mapToGlobal(vis->rect().center());
     };
 
     if (recentView_)
@@ -2288,7 +2291,9 @@ static bool weOwnDownloadedFile(const QString& path)
 // (MainWindow::sendNavKey routes nav keys to the open popup).
 void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint& globalPos)
 {
-    QMenu menu(this);
+    qInfo("home: game menu for '%s' at %d,%d (visibleHome=%d)", qUtf8Printable(it.title),
+          globalPos.x(), globalPos.y(), int(isVisible()));
+    QMenu menu(window() ? window() : this); // parent on the visible window (HomeView is hidden in themed modes)
     QAction* play = menu.addAction(tr("▶  Play"));
     const bool fav = FavoritesStore::isFavorite(gameFavId(it));
     QAction* favAct = menu.addAction(fav ? tr("★  Unfavorite") : tr("☆  Favorite"));
