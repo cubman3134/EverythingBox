@@ -39,6 +39,7 @@ namespace BiosCatalog
             { QStringLiteral("nes"),    QStringLiteral("Famicom Disk System (FDS)") },
             { QStringLiteral("segacd"), QStringLiteral("Sega CD / Mega-CD") },
             { QStringLiteral("a5200"),  QStringLiteral("Atari 5200") },
+            { QStringLiteral("atarist"), QStringLiteral("Atari ST") },
         };
         return list;
     }
@@ -99,9 +100,21 @@ namespace BiosCatalog
               QStringLiteral("281f20ea4320404ec820fb7ec0693b38") },
         };
 
+        // Atari ST (hatari): needs the TOS ROM. This hatari build only loads it when it's present in BOTH the
+        // system root (its retro_init check) AND its hatari/tos/ subfolder (the named-image path the tosimage
+        // option resolves to) — with the option explicitly set (RetroView seeds hatari_tosimage), or its
+        // auto-detection builds an invalid "<tos.img>" path and rejects every game. Same file in both places.
+        static const QList<BiosFile> atarist = {
+            { QStringLiteral("tos.img"), retrobios(QStringLiteral("Atari/ST/tos.img")),
+              QStringLiteral("c1c57ce48e8ee4135885cee9e63a68a2") },
+            { QStringLiteral("hatari/tos/tos.img"), retrobios(QStringLiteral("Atari/ST/tos.img")),
+              QStringLiteral("c1c57ce48e8ee4135885cee9e63a68a2") },
+        };
+
         if (systemId == QStringLiteral("psx"))    return psx;
         if (systemId == QStringLiteral("saturn")) return saturn;
         if (systemId == QStringLiteral("a5200"))  return a5200;
+        if (systemId == QStringLiteral("atarist")) return atarist;
         if (systemId == QStringLiteral("3do"))    return threedo;
         if (systemId == QStringLiteral("ps2"))    return ps2;
         if (systemId == QStringLiteral("nes"))    return nes;

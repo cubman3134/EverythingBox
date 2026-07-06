@@ -680,6 +680,18 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
             if (!v.isEmpty())
                 core_.setOptionValue(opt.key, v.toStdString());
         }
+    // Work around cores whose auto-detected option default is broken: force a known-good value when the user
+    // hasn't chosen one. hatari's tosimage auto-detection resolves to an invalid "<tos.img>" path once the TOS
+    // is present, so pin it to "default" (with the TOS seeded in both places BiosCatalog fetches it).
+    {
+        static const struct { const char* core; const char* key; const char* val; } kSeeds[] = {
+            { "hatari", "hatari_tosimage", "default" },
+        };
+        for (const auto& s : kSeeds)
+            if (coreName == QLatin1String(s.core)
+                && Settings::optionValue(coreName, QString::fromLatin1(s.key)).isEmpty())
+                core_.setOptionValue(s.key, s.val);
+    }
     core_.onInput = [this](unsigned p, unsigned d, unsigned i, unsigned id) { return inputState(p, d, i, id); };
     core_.onAudio = [this](const int16_t* data, size_t frames) { pushAudio(data, frames); };
     core_.onRumble = [this](unsigned port, unsigned effect, uint16_t strength) {

@@ -176,6 +176,7 @@ void CoreManager::ensureBios(const QString& systemId, const QString& destDir,
         const QString out = destDir + QStringLiteral("/") + bf.fileName;
         if (QFile::exists(out))
             continue; // already have it
+        QDir().mkpath(QFileInfo(out).absolutePath()); // fileName may include a subfolder (e.g. hatari/tos/tos.img)
 
         if (onStatus) onStatus(QObject::tr("Downloading BIOS %1…").arg(bf.fileName));
         QNetworkRequest req((QUrl(bf.url)));
