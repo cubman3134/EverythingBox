@@ -1765,10 +1765,11 @@ void HomeView::renderRecents()
         h->setSizeHint(QSize(0, 30));
     };
 
-    // Favourites first (a per-profile, starred-media section).
-    const QVector<FavoriteItem> favs = FavoritesStore::list();
-    if (!favs.isEmpty())
-    {
+    // Favourites: a per-profile, starred-media section. Rendered AFTER the recents (below them) so the list
+    // leads with what was recently played and favourites are their own section at the bottom.
+    auto renderFavorites = [&]() {
+        const QVector<FavoriteItem> favs = FavoritesStore::list();
+        if (favs.isEmpty()) return;
         addHeader(tr("★ Favorites"));
         for (const FavoriteItem& f : favs)
         {
@@ -1786,7 +1787,7 @@ void HomeView::renderRecents()
             w->setSizeHint(QSize(0, 52));
             w->setIcon(defaultIcon(it.type, iconSz));
         }
-    }
+    };
 
     const QVector<RecentItem> recents = RecentStore::list();
 
@@ -1823,6 +1824,8 @@ void HomeView::renderRecents()
             w->setIcon(iconWithProgress(defaultIcon(it.type, iconSz).pixmap(iconSz), resumeKeyFor(it)));
         }
     }
+
+    renderFavorites(); // the Favorites section, below the recently-played groups
 
     loadThumbnails(0); // load posters for recents/favourites that have one (else the placeholder stays)
     updateChrome();
