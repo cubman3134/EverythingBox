@@ -2352,6 +2352,12 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads, const QPoint&)
     list->addItem(canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"));
     list->setCurrentRow(PLAY);                 // pre-select Play
     list->setFixedWidth(320);
+    // Size the list to show every row without a scrollbar (there are only a handful of actions).
+    list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    int listH = 2 * list->frameWidth();
+    for (int i = 0; i < list->count(); ++i) listH += list->sizeHintForRow(i) + 4; // +4 = the item's 2px top/bottom margin
+    list->setFixedHeight(listH);
     list->installEventFilter(new ReturnAccepts(&dlg)); // Enter (incl. the gamepad's) picks the row
     connect(list, &QListWidget::itemActivated,     &dlg, &QDialog::accept);
     connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
