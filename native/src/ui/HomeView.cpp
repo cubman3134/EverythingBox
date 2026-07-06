@@ -2526,33 +2526,44 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         showToast(read ? tr("Finding “%1” to read…").arg(it.title) : tr("Finding “%1” to play…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
         const QString title = it.title;
-        // Walk the query list: on a hit, open it; on "no match" advance to the next name; a real error or a
-        // still-caching result stops and reports. `self` keeps the recursion alive across the async calls.
-        auto attempt = std::make_shared<std::function<void(int)>>();
-        std::weak_ptr<std::function<void(int)>> weak = attempt;
-        *attempt = [this, queries, catType, it, title, console, weak](int i) {
-            mgr_->resolveDocumentByQuery(queries[i], catType,
-                [this, queries, it, title, console, weak, i, self = weak.lock()]
+        // Search every candidate name CONCURRENTLY and take the first hit, so a multi-name lookup costs one
+        // search's time instead of the sum (a not-found game exhausts the provider's ~38s budget per name —
+        // three names run one after another would be ~2 minutes). Bounded so a title with many alternate
+        // names can't fan out into a flood of parallel searches. Callbacks fire on the GUI thread, so the
+        // shared state needs no locking.
+        constexpr int kMaxParallelNames = 5;
+        if (queries.size() > kMaxParallelNames) queries = queries.mid(0, kMaxParallelNames);
+        struct MultiSearch { bool done = false; int pending = 0; QString err; bool caching = false; };
+        auto ms = std::make_shared<MultiSearch>();
+        ms->pending = int(queries.size());
+        for (const QString& q : std::as_const(queries))
+        {
+            mgr_->resolveDocumentByQuery(q, catType,
+                [this, ms, it, title, console]
                 (const QString& url, const QString& mime, const QString& err, bool noMatches) {
+                if (ms->done) return;                        // another name already won or reported
                 if (!url.isEmpty())
                 {
+                    ms->done = true;
                     if (playBtn_) playBtn_->setEnabled(true);
                     hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.systemHint = console; emit openItem(m);
                     return;
                 }
-                if (noMatches && i + 1 < queries.size()) { if (auto f = weak.lock()) (*f)(i + 1); return; }
+                if (!err.isEmpty())  ms->err = err;          // provider unreachable
+                else if (!noMatches) ms->caching = true;     // a copy exists but is still caching
+                if (--ms->pending > 0) return;               // wait for the other names to finish
+                ms->done = true;
                 if (playBtn_) playBtn_->setEnabled(true);
-                if (!err.isEmpty())
-                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(err), 9000);
-                else if (noMatches)
-                    showToast(tr("No copies of “%1” were found.").arg(title), 8000);
-                else
+                if (!ms->err.isEmpty())
+                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(ms->err), 9000);
+                else if (ms->caching)
                     showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
                                  "less-common titles take a while). Try again in a few minutes; if it never "
                                  "appears, there may be no copy.").arg(title), 10000);
+                else
+                    showToast(tr("No copies of “%1” were found.").arg(title), 8000);
             });
-        };
-        (*attempt)(0);
+        }
         return;
     }
     if (addon && addon->transport == LoadedAddon::RemoteHttp) // resolve via the addon's /stream
