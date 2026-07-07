@@ -2,12 +2,17 @@
 #include "Nav.h"
 
 #include <QApplication>
+#include <QCheckBox>
+#ifdef MMV_NAV_DEBUG
+#include <cstdio>
+#endif
 #include <QEventLoop>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -28,11 +33,11 @@ NavOverlay::NavOverlay(QWidget* window)
     panel_->setObjectName(QStringLiteral("navOverlayPanel"));
     panel_->setStyleSheet(QStringLiteral(
         "#navOverlayPanel { background: #14161d; border: 1px solid #2c2f3a; border-radius: 10px; }"
-        "QLabel { color: #e8eaf0; }"
+        "QLabel { color: #e8eaf0; font-size: 14px; }"
         "QPushButton { background: #1d2029; color: #e8eaf0; border: 1px solid #2c2f3a;"
-        "              border-radius: 6px; padding: 8px 18px; }"
+        "              border-radius: 6px; padding: 8px 18px; font-size: 14px; }"
         "QPushButton:focus { background: #2f5fd0; border-color: #4a79e8; }"
-        "QListWidget { background: transparent; border: none; color: #e8eaf0; outline: none; }"
+        "QListWidget { background: transparent; border: none; color: #e8eaf0; outline: none; font-size: 16px; }"
         "QListWidget::item { padding: 9px 14px; border-radius: 6px; }"
         "QListWidget::item:selected { background: #2f5fd0; }"));
     ring_ = new NavRing(panel_, this);
@@ -124,13 +129,127 @@ bool NavOverlay::eventFilter(QObject* obj, QEvent* ev)
 void NavOverlay::showEvent(QShowEvent* e)
 {
     QWidget::showEvent(e);
-    // Centre the panel once its layout knows its size, and land the selection.
+    // Size + centre the panel once its layout knows its content, and land the selection. (Deferred: the
+    // subclass ctor is still adding the content when the base ctor's show() lands here.)
     QTimer::singleShot(0, this, [this] {
         if (dismissed_) return;
-        panel_->adjustSize();
-        panel_->move((width() - panel_->width()) / 2, (height() - panel_->height()) / 2);
+        relayoutPanel();
         ring_->ensureSelection();
     });
+}
+
+// Size the panel to fit its content with NOTHING cut off. adjustSize() under-measures word-wrapped labels
+// (they report a near-single-line hint) and a stale layout cache reports empty content — both cut dialog
+// text. So: polish everything (style/fonts applied), INVALIDATE the layout cache, fix the width from the
+// fresh hint (clamped to the window), then let heightForWidth lay the wrapped text out at that width.
+void NavOverlay::relayoutPanel()
+{
+    QLayout* lay = panel_->layout();
+    if (lay)
+    {
+        // The content was added AFTER the panel became visible (the base ctor shows the overlay before the
+        // subclass builds its widgets), and Qt keeps children created on an already-visible parent hidden
+        // until each is explicitly shown — and hidden widgets are EMPTY layout items, which made the panel
+        // size to its bare margins and cut everything off. Show every layout-managed widget (recursing into
+        // nested layouts); anything the subclass explicitly hid stays hidden.
+        std::function<void(QLayoutItem*)> showItems = [&showItems](QLayoutItem* it) {
+            if (!it) return;
+            if (QWidget* cw = it->widget())
+            {
+                if (!cw->testAttribute(Qt::WA_WState_ExplicitShowHide)) cw->show();
+            }
+            else if (QLayout* cl = it->layout())
+                for (int i = 0; i < cl->count(); ++i) showItems(cl->itemAt(i));
+        };
+        for (int i = 0; i < lay->count(); ++i) showItems(lay->itemAt(i));
+        panel_->ensurePolished();
+        const QList<QWidget*> kids = panel_->findChildren<QWidget*>();
+        for (QWidget* c : kids) c->ensurePolished();
+        lay->invalidate();
+        lay->activate();
+        // +headroom: the panel's stylesheet border (1px a side) is painted inside the widget but is invisible
+        // to the layout, which otherwise shaves the last couple of pixels off the bottom line of text.
+        const int maxW = qMax(300, width() - 120);
+        const int w = qBound(320, panel_->sizeHint().width() + 4, maxW);
+#ifdef MMV_NAV_DEBUG
+        {
+            QWidget* k0 = lay->itemAt(0) ? lay->itemAt(0)->widget() : nullptr;
+            std::fprintf(stderr, "[relayout v2] overlay=%dx%d hint=%dx%d w=%d hfw=%d items=%d "
+                                 "kid0=%p kid0visible=%d kid0hidden=%d kid0hint=%dx%d panelVisible=%d\n",
+                         width(), height(), panel_->sizeHint().width(), panel_->sizeHint().height(),
+                         w, lay->hasHeightForWidth() ? lay->heightForWidth(w) : -1, lay->count(),
+                         static_cast<void*>(k0), k0 ? int(k0->isVisible()) : -1,
+                         k0 ? int(k0->isHidden()) : -1,
+                         k0 ? k0->sizeHint().width() : -1, k0 ? k0->sizeHint().height() : -1,
+                         int(panel_->isVisible()));
+        }
+#endif
+        panel_->setFixedWidth(w);
+        lay->invalidate();
+        lay->activate();
+        int h = lay->hasHeightForWidth() ? lay->heightForWidth(w) : panel_->sizeHint().height();
+        panel_->setFixedHeight(qMin(h + 6, qMax(200, height() - 80)));
+    }
+    else panel_->adjustSize();
+    panel_->move((width() - panel_->width()) / 2, (height() - panel_->height()) / 2);
+}
+
+// Walk the panel and report any text that doesn't fully fit its widget. This is the CI-probed contract
+// behind "no dialog text is ever cut off": labels (plain + word-wrapped), buttons, and list rows.
+QStringList NavOverlay::clippedTexts() const
+{
+    QStringList bad;
+    auto clip = [](const QString& s) { return s.length() > 40 ? s.left(37) + QStringLiteral("...") : s; };
+    if (!rect().contains(panel_->geometry()))
+        bad << QStringLiteral("panel %1x%2 exceeds the window %3x%4")
+                   .arg(panel_->width()).arg(panel_->height()).arg(width()).arg(height());
+    const QList<QWidget*> kids = panel_->findChildren<QWidget*>();
+    for (QWidget* w : kids)
+    {
+        if (!w->isVisible()) continue;
+        if (auto* lbl = qobject_cast<QLabel*>(w))
+        {
+            if (lbl->text().isEmpty()) continue;
+            const QFontMetrics fm = lbl->fontMetrics();
+            if (lbl->wordWrap())
+            {
+                if (lbl->heightForWidth(lbl->width()) > lbl->height() + 1)
+                    bad << QStringLiteral("label wrapped text cut: \"%1\"").arg(clip(lbl->text()));
+            }
+            else if (fm.horizontalAdvance(lbl->text()) > lbl->contentsRect().width())
+                bad << QStringLiteral("label text clipped: \"%1\"").arg(clip(lbl->text()));
+        }
+        else if (auto* btn = qobject_cast<QAbstractButton*>(w))
+        {
+            if (btn->text().isEmpty()) continue;
+            const int need = btn->fontMetrics().horizontalAdvance(btn->text())
+                             + (qobject_cast<QCheckBox*>(btn) ? 28 : 16); // indicator / frame allowance
+            if (need > btn->width())
+                bad << QStringLiteral("button text clipped: \"%1\" (needs %2px, has %3px)")
+                           .arg(clip(btn->text())).arg(need).arg(btn->width());
+        }
+        else if (auto* list = qobject_cast<QListWidget*>(w))
+        {
+            const bool scrolls = list->verticalScrollBar() && list->verticalScrollBar()->isVisible();
+            int totalH = 0;
+            for (int i = 0; i < list->count(); ++i)
+            {
+                const QRect r = list->visualItemRect(list->item(i));
+                totalH += r.height();
+                if (!list->wordWrap() && list->sizeHintForColumn(0) > list->viewport()->width())
+                {
+                    bad << QStringLiteral("list row wider than the menu: \"%1\"").arg(clip(list->item(i)->text()));
+                    break;
+                }
+                if (r.width() > list->viewport()->width() + 1)
+                    bad << QStringLiteral("list row clipped: \"%1\"").arg(clip(list->item(i)->text()));
+            }
+            if (!scrolls && totalH > list->viewport()->height() + 2)
+                bad << QStringLiteral("list rows overflow the menu (%1px in %2px, no scrollbar)")
+                           .arg(totalH).arg(list->viewport()->height());
+        }
+    }
+    return bad;
 }
 
 // ---------------------------------------------------------------- NavMenu
@@ -143,7 +262,8 @@ NavMenu::NavMenu(const QString& title, const QStringList& items,
     v->setContentsMargins(22, 18, 22, 18);
     v->setSpacing(10);
     auto* t = new QLabel(title, panel());
-    t->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 600;"));
+    t->setStyleSheet(QStringLiteral("font-size: 17px; font-weight: 600;"));
+    t->setWordWrap(true); // a long game title wraps instead of blowing the menu wide / getting cut
     v->addWidget(t);
     list_ = new QListWidget(panel());
     list_->addItems(items);
@@ -151,14 +271,19 @@ NavMenu::NavMenu(const QString& title, const QStringList& items,
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
     list_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    // Show every row without scrolling (the menus are short); width fits the longest row.
-    int h = list_->frameWidth() * 2, w = 260;
-    for (int i = 0; i < list_->count(); ++i)
-    {
-        h += list_->sizeHintForRow(i) + 2;
-        w = qMax(w, list_->sizeHintForColumn(0) + 40);
-    }
-    list_->setFixedSize(w, h + 6);
+    list_->setWordWrap(true);                 // an over-long row wraps rather than eliding
+    list_->setUniformItemSizes(false);
+    // Width: fit the longest row (and give the title room), capped to the window; every row shown in
+    // full, no scrolling. Heights are measured AFTER the width is fixed so wrapped rows count fully.
+    const int cap = qMax(320, parentWidget()->width() - 200);
+    int w = qMax(280, list_->sizeHintForColumn(0) + 44);
+    w = qMax(w, qMin(t->fontMetrics().horizontalAdvance(title) + 24, 520));
+    w = qMin(w, cap);
+    list_->setFixedWidth(w);
+    t->setMaximumWidth(w);
+    int h = list_->frameWidth() * 2;
+    for (int i = 0; i < list_->count(); ++i) h += list_->sizeHintForRow(i) + 2;
+    list_->setFixedHeight(h + 6);
     list_->setCurrentRow(0);
     // Mouse path: a click chooses the row directly (same flow as controller Enter).
     connect(list_, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { handleNavKey(Qt::Key_Return); });
@@ -204,13 +329,15 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
     v->setContentsMargins(26, 20, 26, 20);
     v->setSpacing(14);
     auto* t = new QLabel(title, panel());
-    t->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 600;"));
+    t->setStyleSheet(QStringLiteral("font-size: 17px; font-weight: 600;"));
+    t->setWordWrap(true);       // long questions wrap, never clip
+    t->setMaximumWidth(560);
     v->addWidget(t);
     if (!message.isEmpty())
     {
         auto* m = new QLabel(message, panel());
         m->setWordWrap(true);
-        m->setMaximumWidth(520);
+        m->setMaximumWidth(560);
         v->addWidget(m);
     }
     auto* row = new QHBoxLayout;

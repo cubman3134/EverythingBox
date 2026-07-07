@@ -41,6 +41,12 @@ QVector<QWidget*> NavRing::widgets() const
     const QList<QWidget*> all = container_->findChildren<QWidget*>();
     for (QWidget* w : all)
         if (ringMember(w)) out.push_back(w);
+    // A compound row (a spinbox/combo with its internal line edit, a list's viewport…) is ONE ring member:
+    // drop anything nested inside another member, or arrows would stop twice on the same row and Enter
+    // would open the wrong editor.
+    for (int i = out.size() - 1; i >= 0; --i)
+        for (QWidget* p = out[i]->parentWidget(); p && p != container_; p = p->parentWidget())
+            if (out.contains(p)) { out.remove(i); break; }
     // Geometry order (top-to-bottom, then left-to-right) so "first" and remember-by-index are stable.
     std::sort(out.begin(), out.end(), [this](QWidget* a, QWidget* b) {
         const QPoint pa = a->mapTo(container_, QPoint(0, 0));
@@ -101,6 +107,7 @@ void NavRing::activate(QWidget* w)
     if (auto* btn = qobject_cast<QAbstractButton*>(w)) { btn->click(); return; }
     if (auto* combo = qobject_cast<QComboBox*>(w)) { combo->showPopup(); return; }
     if (auto* edit = qobject_cast<QLineEdit*>(w)) { NavOverlay::editLineEdit(edit); return; }
+    if (auto* spin = qobject_cast<QAbstractSpinBox*>(w)) { NavOverlay::editSpinBox(spin); return; }
     // Anything else: synthesize the Return it would have received.
     QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
     QApplication::sendEvent(w, &press);
@@ -113,9 +120,9 @@ bool NavRing::handleKey(int key)
     case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:
     {
         QWidget* cur = QApplication::focusWidget();
-        // A slider/spinbox row edits its value with Left/Right — hand those through instead of moving.
-        if ((key == Qt::Key_Left || key == Qt::Key_Right)
-            && (qobject_cast<QSlider*>(cur) || qobject_cast<QAbstractSpinBox*>(cur)))
+        // A slider row edits its value with Left/Right — hand those through instead of moving. (Spinners
+        // are NOT value-edited by arrows: they hover like everything else and Enter opens the OSK.)
+        if ((key == Qt::Key_Left || key == Qt::Key_Right) && qobject_cast<QSlider*>(cur))
             return false;
         // Inside a list, Up/Down move the list's own current row; the ring only takes over when the
         // selection is already at the first/last row (stepping out to the widgets around it).

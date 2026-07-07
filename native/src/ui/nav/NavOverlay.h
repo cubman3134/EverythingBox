@@ -35,6 +35,14 @@ public:
     // Arrow-select a QLineEdit and press Enter: open the on-screen keyboard on it (implemented in
     // Osk.cpp). After commit the edit gets its text plus a synthetic Return, so returnPressed flows run.
     static void editLineEdit(QLineEdit* edit);
+    // Same for a spinner (QSpinBox/QDoubleSpinBox/...): Enter opens the OSK on its value — arrows move the
+    // selection instead of spinning it, so a row can't be changed just by walking over it.
+    static void editSpinBox(class QAbstractSpinBox* spin);
+
+    // Text-fit audit (used by the CI probe): every visible label/button/list row inside the panel must
+    // fully fit its widget — nothing elided, wrapped text not cut, panel inside the window. Returns
+    // human-readable offenders; empty = all good.
+    QStringList clippedTexts() const;
 
     // Close, restoring input to whatever was focused before the overlay opened. `result` reaches the
     // closed() signal (and the sync helpers): -1 = backed out.
@@ -54,6 +62,7 @@ protected:
 
     QFrame* panel() const { return panel_; }
     NavRing* ring() const { return ring_; }
+    void relayoutPanel(); // re-fit + centre the panel (run automatically after show; call after edits)
 
 private:
     QFrame* panel_ = nullptr;

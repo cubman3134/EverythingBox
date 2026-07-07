@@ -8,9 +8,15 @@
 #include "nav/Osk.h"
 
 #include <QApplication>
+#include <QCheckBox>
+#include <QComboBox>
 #include <QGridLayout>
+#include <QKeyEvent>
 #include <QLineEdit>
+#include <QListView>
 #include <QPushButton>
+#include <QSlider>
+#include <QSpinBox>
 #include <QVBoxLayout>
 #include <cstdio>
 
@@ -193,6 +199,125 @@ int main(int argc, char** argv)
         ctx.routeKey(Qt::Key_Escape); // commit (empty)
         pump();
         CHECK(NavOverlay::topmost() == nullptr, "the OSK closes back to the screen");
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
+    // ---------------------------------------------------------------- 10. no overlay text is ever cut off
+    {
+        auto fits = [](NavOverlay* o, const char* what) {
+            pump(); pump(); // the deferred showEvent sizing must run first
+            const QStringList bad = o->clippedTexts();
+            for (const QString& b : bad)
+                std::fprintf(stderr, "NAV-FAIL %s: %s\n", what, b.toUtf8().constData());
+            failures += bad.size();
+        };
+        // A confirm card with a long word-wrapped message (the uninstall warning shape) — this is the case
+        // adjustSize() used to under-measure, cutting the text off.
+        auto* confirm = new NavConfirm(
+            QStringLiteral("Permanently remove My Media Vault and all of its data?"),
+            QStringLiteral("This deletes the whole app folder. That includes your settings, cloud sign-in, "
+                           "downloaded games and music, emulator saves and save states, and installed "
+                           "emulators and cores, plus the cache and crash logs. This cannot be undone. If you "
+                           "want to keep any downloads, copy them out of that folder first, then run this "
+                           "again once you have everything you care about safely backed up somewhere else."),
+            { QStringLiteral("Uninstall everything now"), QStringLiteral("Cancel") }, 1, &win);
+        fits(confirm, "confirm(long message)");
+        confirm->dismiss(-1);
+        pump();
+
+        // A menu with a long title and long rows (a long game name in the Recent menu).
+        auto* menu = new NavMenu(
+            QStringLiteral("Super Ultra Mega Fighting Legends II: The Definitive Championship Edition (USA, Rev 2)"),
+            { QStringLiteral("▶   Play"), QStringLiteral("☆   Favorite"),
+              QStringLiteral("➕   Add to the playlist named after my very favourite childhood memories…"),
+              QStringLiteral("🗑   Uninstall (delete the downloaded file from disk)") },
+            nullptr, &win);
+        fits(menu, "menu(long title+rows)");
+        menu->dismiss(-1);
+        pump();
+
+        // The on-screen keyboard itself.
+        auto* osk = new Osk(QStringLiteral("Enter the name of the playlist you would like to create"),
+                            QStringLiteral("some text"), QLineEdit::Normal, nullptr, &win);
+        fits(osk, "osk");
+        osk->dismiss(0);
+        pump();
+    }
+
+    // ---------------------------------------------------------------- 11. rows "act right" under the ring
+    {
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        auto* check = new QCheckBox(QStringLiteral("Enable the thing"), page);
+        auto* combo = new QComboBox(page);
+        combo->addItems({ QStringLiteral("Any genre"), QStringLiteral("Action"), QStringLiteral("Puzzle") });
+        auto* slider = new QSlider(Qt::Horizontal, page);
+        slider->setRange(0, 100); slider->setValue(50);
+        auto* spin = new QSpinBox(page);
+        spin->setRange(0, 99); spin->setValue(7);
+        auto* btn = new QPushButton(QStringLiteral("Apply"), page);
+        v->addWidget(check); v->addWidget(combo); v->addWidget(slider); v->addWidget(spin); v->addWidget(btn);
+        page->setGeometry(0, 0, 360, 320);
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+
+        // The compound-row rule: the spinbox's internal line edit must not be a second ring stop.
+        CHECK(!ring.widgets().contains(spin->findChild<QLineEdit*>()),
+              "a spinbox's internal line edit is not its own ring stop");
+
+        // Walking over a dropdown/spinner NEVER changes its value.
+        check->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Down); // onto the combo
+        CHECK(QApplication::focusWidget() == combo, "Down lands on the dropdown");
+        ctx.routeKey(Qt::Key_Down); // over it, onto the slider
+        CHECK(combo->currentIndex() == 0, "walking over a dropdown does not change its value");
+        CHECK(QApplication::focusWidget() == slider, "Down moves past the dropdown");
+        ctx.routeKey(Qt::Key_Down); // onto the spin
+        CHECK(QApplication::focusWidget() == spin, "Down lands on the spinner");
+        ctx.routeKey(Qt::Key_Down); // over it
+        CHECK(spin->value() == 7, "walking over a spinner does not change its value");
+
+        // A slider row: Left/Right edit the value (the ring hands them through).
+        slider->setFocus(); pump();
+        CHECK(!ring.handleKey(Qt::Key_Left), "the ring hands Left through to a slider");
+        { QKeyEvent left(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier); QApplication::sendEvent(slider, &left); }
+        CHECK(slider->value() < 50, "Left adjusts the slider value");
+
+        // A checkbox row: Enter toggles it.
+        check->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Return);
+        CHECK(check->isChecked(), "Enter toggles a checkbox");
+
+        // A dropdown row: Enter opens the popup (hover-then-select), and the value still didn't change.
+        combo->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Return);
+        pump();
+        CHECK(combo->view() && combo->view()->isVisible(), "Enter pops a dropdown open");
+        combo->hidePopup();
+        pump();
+        CHECK(combo->currentIndex() == 0, "opening the dropdown did not change its value");
+
+        // A spinner row: Enter opens the OSK on the value; committing writes it back.
+        spin->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Return);
+        pump();
+        auto* valueOsk = qobject_cast<Osk*>(NavOverlay::topmost());
+        CHECK(valueOsk != nullptr, "Enter on a spinner opens the on-screen keyboard");
+        if (valueOsk)
+        {
+            CHECK(valueOsk->text() == QStringLiteral("7"), "the OSK starts from the spinner's value");
+            ctx.routeKey(Qt::Key_Backspace);           // delete the 7
+            QKeyEvent four(QEvent::KeyPress, Qt::Key_4, Qt::NoModifier, QStringLiteral("42"));
+            QApplication::sendEvent(valueOsk, &four);  // physical typing path
+            ctx.routeKey(Qt::Key_Escape);              // commit
+            pump();
+            CHECK(spin->value() == 42, "committing the OSK writes the spinner value");
+        }
         ctx.setActiveRing(nullptr);
         delete page;
         pump();

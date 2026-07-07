@@ -1,6 +1,7 @@
 #include "Osk.h"
 #include "Nav.h"
 
+#include <QAbstractSpinBox>
 #include <QApplication>
 #include <QEventLoop>
 #include <QGridLayout>
@@ -26,6 +27,8 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
 
     auto* t = new QLabel(title, panel());
     t->setStyleSheet(QStringLiteral("font-size: 16px; font-weight: 600;"));
+    t->setWordWrap(true);        // long prompts wrap over the keyboard, never clip
+    t->setMaximumWidth(540);
     v->addWidget(t);
 
     preview_ = new QLineEdit(initial, panel());
@@ -63,23 +66,26 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
     // Action row: Shift, symbols page, Space, delete, Cancel, Done.
     auto* actions = new QGridLayout;
     actions->setSpacing(6);
-    auto makeAction = [this](const QString& label, int width, const std::function<void()>& fn) {
+    // Width from the label itself (never below `least`): a fixed pixel budget clipped "Cancel"/"Done".
+    auto makeAction = [this](const QString& label, int least, const std::function<void()>& fn) {
         auto* b = new QPushButton(label, panel());
-        b->setFixedSize(width, 40);
+        b->setFixedHeight(40);
+        b->setMinimumWidth(qMax(least, b->fontMetrics().horizontalAdvance(label) + 30));
         b->setFocusPolicy(Qt::StrongFocus);
         connect(b, &QPushButton::clicked, this, fn);
         return b;
     };
-    actions->addWidget(makeAction(QStringLiteral("⇧"), 60, [this] { shift_ = !shift_; relabel(); }), 0, 0);
-    actions->addWidget(makeAction(QStringLiteral("#+="), 60, [this] { symbols_ = !symbols_; relabel(); }), 0, 1);
-    actions->addWidget(makeAction(QStringLiteral("Space"), 150, [this] { insert(QStringLiteral(" ")); }), 0, 2);
-    actions->addWidget(makeAction(QStringLiteral("⌫"), 60, [this] { backspaceChar(); }), 0, 3);
-    actions->addWidget(makeAction(QStringLiteral("Cancel"), 90, [this] { dismiss(0); }), 0, 4);
-    actions->addWidget(makeAction(QStringLiteral("Done"), 90, [this] { accept(); }), 0, 5);
+    actions->addWidget(makeAction(QStringLiteral("⇧"), 56, [this] { shift_ = !shift_; relabel(); }), 0, 0);
+    actions->addWidget(makeAction(QStringLiteral("#+="), 56, [this] { symbols_ = !symbols_; relabel(); }), 0, 1);
+    actions->addWidget(makeAction(QStringLiteral("Space"), 140, [this] { insert(QStringLiteral(" ")); }), 0, 2);
+    actions->addWidget(makeAction(QStringLiteral("⌫"), 56, [this] { backspaceChar(); }), 0, 3);
+    actions->addWidget(makeAction(QStringLiteral("Cancel"), 80, [this] { dismiss(0); }), 0, 4);
+    actions->addWidget(makeAction(QStringLiteral("Done"), 80, [this] { accept(); }), 0, 5);
     v->addLayout(actions);
 
     auto* hint = new QLabel(QStringLiteral("B: delete   Start: done   (a real keyboard types directly)"), panel());
     hint->setStyleSheet(QStringLiteral("color: #9aa0ad; font-size: 11px;"));
+    hint->setWordWrap(true);
     v->addWidget(hint);
 }
 
@@ -168,7 +174,23 @@ QString Osk::getText(const QString& title, const QString& initial, QLineEdit::Ec
     return result;
 }
 
-// Declared on NavOverlay so NavRing (Nav.cpp) can trigger it without depending on Osk directly.
+// Declared on NavOverlay so NavRing (Nav.cpp) can trigger these without depending on Osk directly.
+
+// A spinner's value edits through the OSK (numeric entry) — arrows only ever MOVE over spin rows, so a
+// value can't change just by walking past it. Works via the "value" property, which QVariant converts
+// from the typed string for both QSpinBox (int) and QDoubleSpinBox (double); the widget re-clamps to its
+// own min/max on write.
+void NavOverlay::editSpinBox(QAbstractSpinBox* spin)
+{
+    if (!spin) return;
+    const QString initial = spin->property("value").toString();
+    QPointer<QAbstractSpinBox> target(spin);
+    new Osk(QStringLiteral("Enter a value"), initial, QLineEdit::Normal, [target](const QString& t, bool ok) {
+        if (!ok || !target || t.trimmed().isEmpty()) return;
+        target->setProperty("value", t.trimmed());
+    });
+}
+
 void NavOverlay::editLineEdit(QLineEdit* edit)
 {
     if (!edit) return;

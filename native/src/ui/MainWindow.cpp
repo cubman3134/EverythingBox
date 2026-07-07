@@ -851,12 +851,11 @@ void MainWindow::sendNavKey(int key)
         QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &release);
     };
-    // 1. The nav kit: an open in-window overlay (menu / confirm / on-screen keyboard) owns every key; then
-    //    the active screen's ring (arrow nav + Enter) and its registered Back action. Screens on the kit
-    //    need no other wiring — this is what makes back + selection work uniformly.
-    if (navCtx_ && navCtx_->routeKey(key)) return;
-    // 2. A popup (a QMenu / combo dropdown) grabs input while open — Qt routes real key events to it, but our
-    //    synthetic ones must be aimed at it explicitly. Backspace becomes Escape so the pad's B closes it.
+    // 1. An open in-window overlay (menu / confirm / on-screen keyboard) owns every key.
+    if (NavOverlay::routeTopmost(key)) return;
+    // 2. A popup (a QMenu / an open combo dropdown) grabs input while open — Qt routes real key events to
+    //    it, but our synthetic ones must be aimed at it explicitly. This must beat the screen's ring, or
+    //    arrows would move the selection BEHIND an open dropdown. Backspace becomes Escape so B closes it.
     if (QWidget* popup = QApplication::activePopupWidget())
     { deliver(popup, key == Qt::Key_Backspace ? Qt::Key_Escape : key); return; }
     // 3. A modal dialog (a stray OS dialog not yet on the kit) must receive nav keys, not the view behind it.
@@ -867,18 +866,40 @@ void MainWindow::sendNavKey(int key)
         deliver(tgt, key == Qt::Key_Backspace ? Qt::Key_Escape : key);
         return;
     }
+    // 4. The active screen's ring (arrow nav + Enter) and its registered Back action. Screens on the kit
+    //    need no other wiring — this is what makes back + selection work uniformly.
+    if (navCtx_ && navCtx_->routeKey(key)) return;
     QWidget* cur = stack_->currentWidget();
-    // 4. The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
+    // 5. The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
     //    into the QML scene's Keys handler (arrow nav) like a real key press.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
     QWidget* w = QApplication::focusWidget();
     if (!w || !isAncestorOf(w)) w = cur; // keep injection within our own window
-    // 5. A pad key aimed at a focused text box (the home/library search, a settings field): Enter opens the
+    // 6. A pad key aimed at a focused text box (the home/library search, a settings field): Enter opens the
     //    on-screen keyboard, and Back must NEVER delete a character — it leaves the box (Escape) instead.
     if (auto* edit = qobject_cast<QLineEdit*>(w))
     {
         if (key == Qt::Key_Return || key == Qt::Key_Enter) { NavOverlay::editLineEdit(edit); return; }
         if (key == Qt::Key_Backspace) { deliver(w, Qt::Key_Escape); return; }
+    }
+    // 7. Arrows aimed at a closed dropdown / spinner on a screen without a ring would CYCLE ITS VALUE just
+    //    by walking over it. Hover-over instead: hop the focus geometrically; Enter opens the dropdown (or
+    //    the OSK on a spinner) — the same behaviour ring screens get from NavRing.
+    if (qobject_cast<QComboBox*>(w) || qobject_cast<QAbstractSpinBox*>(w))
+    {
+        if (key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_Left || key == Qt::Key_Right)
+        {
+            NavRing pageRing(cur ? cur : static_cast<QWidget*>(this));
+            if (QWidget* next = NavRing::pickNext(qobject_cast<QWidget*>(w), pageRing.widgets(), key))
+                next->setFocus(Qt::OtherFocusReason);
+            return; // nowhere to hop: swallow rather than let the value change
+        }
+        if (key == Qt::Key_Return || key == Qt::Key_Enter)
+        {
+            if (auto* combo = qobject_cast<QComboBox*>(w)) combo->showPopup();
+            else NavOverlay::editSpinBox(qobject_cast<QAbstractSpinBox*>(w));
+            return;
+        }
     }
     deliver(w, key);
 }
