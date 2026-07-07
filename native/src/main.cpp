@@ -127,11 +127,19 @@ int main(int argc, char** argv)
 
     // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
     // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
+    // The :focus rules are the app-wide SELECTION HIGHLIGHT: stylesheet-styled controls suppress the
+    // native focus rectangle, so any widget without its own :focus rule (e.g. the profile picker's
+    // buttons) looked completely unselected while focused — "the selection disappeared" when arrowing
+    // onto it. Screens with their own :focus styles (panel rows, overlays, the esc menu) win over these.
     app.setStyleSheet(QStringLiteral(
         "QPushButton{min-height:30px;padding:8px 16px;font-size:14px;}"
+        "QPushButton:focus{background:#2D6CDF;color:#fff;border:2px solid #5B8CFF;border-radius:6px;}"
         "QLineEdit,QComboBox,QAbstractSpinBox{min-height:30px;padding:5px 10px;font-size:14px;}"
+        "QLineEdit:focus,QComboBox:focus,QAbstractSpinBox:focus{border:2px solid #5B8CFF;border-radius:4px;}"
         "QCheckBox,QRadioButton{font-size:14px;spacing:8px;}"
+        "QCheckBox:focus,QRadioButton:focus{color:#2D6CDF;font-weight:bold;}"
         "QCheckBox::indicator,QRadioButton::indicator{width:20px;height:20px;}"
+        "QSlider:focus{background:rgba(91,140,255,0.20);border-radius:4px;}"
         "QListWidget::item,QListView::item{min-height:34px;}"
         "QScrollBar:vertical{width:14px;}QScrollBar:horizontal{height:14px;}"));
 

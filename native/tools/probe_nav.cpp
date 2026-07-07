@@ -370,6 +370,61 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // ------------------------------------------- 13. profile-menu shape: selection NEVER lost
+    {
+        // Mirror of the Profiles screen: header Back, then rows of [wide pick | ✎ 36px | ✕ 36px],
+        // a Create button and a Cancel button. Hammering arrows in any pattern must always leave the
+        // focus on a live ring member — the selection can never vanish.
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        v->addWidget(new QPushButton(QStringLiteral("‹ Back"), page));
+        for (int r = 0; r < 3; ++r)
+        {
+            auto* row = new QHBoxLayout;
+            auto* pick = new QPushButton(QStringLiteral("🐱   Profile %1").arg(r), page);
+            pick->setMinimumHeight(44);
+            row->addWidget(pick, 1);
+            auto* edit = new QPushButton(QStringLiteral("✎"), page); edit->setFixedWidth(36); row->addWidget(edit);
+            auto* del  = new QPushButton(QStringLiteral("✕"), page); del->setFixedWidth(36);  row->addWidget(del);
+            v->addLayout(row);
+        }
+        v->addWidget(new QPushButton(QStringLiteral("＋  Create New Profile"), page));
+        v->addWidget(new QPushButton(QStringLiteral("Cancel"), page));
+        v->addStretch(1);
+        page->setGeometry(0, 0, 420, 460);
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+        ring.ensureSelection();
+        static const int walk[] = { Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Right, Qt::Key_Down,
+                                    Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Left,
+                                    Qt::Key_Up, Qt::Key_Right, Qt::Key_Right, Qt::Key_Down, Qt::Key_Down,
+                                    Qt::Key_Down, Qt::Key_Up, Qt::Key_Up, Qt::Key_Up, Qt::Key_Up,
+                                    Qt::Key_Up, Qt::Key_Up, Qt::Key_Up, Qt::Key_Down };
+        int step = 0;
+        for (int key : walk)
+        {
+            ctx.routeKey(key);
+            QWidget* fw = QApplication::focusWidget();
+            if (!fw || !ring.widgets().contains(fw) || !fw->isVisible())
+            {
+                std::fprintf(stderr, "NAV-FAIL selection lost after step %d (key %d): focus=%p\n",
+                             step, key, static_cast<void*>(fw));
+                ++failures;
+                break;
+            }
+            ++step;
+        }
+        ctx.ensureFocus(); // and the watchdog can't lose it either
+        CHECK(QApplication::focusWidget() && ring.widgets().contains(QApplication::focusWidget()),
+              "the selection survives an arbitrary arrow-key hammering");
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAV-OK\n");
     return 0;
