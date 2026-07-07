@@ -36,7 +36,9 @@
 #include "../core/CloudSync.h"
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
-#include <QInputDialog>
+#include "nav/Nav.h"
+#include "nav/NavOverlay.h"
+#include "nav/Osk.h"
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
@@ -88,7 +90,6 @@
 #include <QHash>
 #include <QCoreApplication>
 #include <QCryptographicHash>
-#include <QMessageBox>
 #include <QStatusBar>
 #include <QChar>
 #include <QStandardPaths>
@@ -118,7 +119,6 @@
 #include <QLabel>
 #include <QFrame>
 #include <QFileSystemWatcher>
-#include <QInputDialog>
 #include <QLineEdit>
 #endif
 
@@ -412,6 +412,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull any manually-added ROMs sitting in the library folders into the Downloaded list, so they show up
     // in the home like downloaded games. Deferred so it never delays the window appearing.
     QTimer::singleShot(0, this, [] { RomLibrary::syncToDownloads(); });
+
+    // The controller-navigation kit: routes nav keys to overlays/rings before the legacy per-view paths,
+    // guarantees a live selection on ring-managed screens, and carries the per-screen Back action. The
+    // panel ring covers panelPage_ (its Back button + whatever rows showPanel builds).
+    navCtx_ = new NavContext(this);
+    panelRing_ = new NavRing(panelPage_, this);
+    connect(stack_, &QStackedWidget::currentChanged, this, [this](int) { updateNavForPage(); });
+    updateNavForPage();
 
     // Controller navigation of the menus: poll the gamepad ~60Hz and inject nav keys (see pollMenuPad). This
     // also opens a controller connected while browsing (Gamepad::poll handles hot-plug), so it works even if
@@ -766,30 +774,6 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     // clicks) dismisses the panel.
     if (obj == subOverlay_ && event->type() == QEvent::MouseButtonPress) { hideSubtitleMenu(); return true; }
 
-    // The Esc pause menu owns its keys while open (it's a separate top-level window): Up/Down move between
-    // Resume/Exit, Enter fires, Esc/Backspace resumes.
-    if (escMenu_ && event->type() == QEvent::KeyPress && (obj == escMenu_ || escMenuButtons_.contains(obj)))
-    {
-        const int key = static_cast<QKeyEvent*>(event)->key();
-        // The escMenu is its own top-level window, so QApplication::focusWidget() (the app-wide focus) is the
-        // focused button — QMainWindow::focusWidget() would report OUR window's focus and mis-index.
-        const int idx = escMenuButtons_.indexOf(qobject_cast<QPushButton*>(QApplication::focusWidget()));
-        switch (key)
-        {
-        case Qt::Key_Down: case Qt::Key_Right:
-            if (!escMenuButtons_.isEmpty()) escMenuButtons_[qMin(qMax(idx, 0) + 1, escMenuButtons_.size() - 1)]->setFocus(Qt::TabFocusReason);
-            return true;
-        case Qt::Key_Up: case Qt::Key_Left:
-            if (!escMenuButtons_.isEmpty()) escMenuButtons_[qMax(qMax(idx, 0) - 1, 0)]->setFocus(Qt::TabFocusReason);
-            return true;
-        case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
-            if (auto* b = qobject_cast<QPushButton*>(QApplication::focusWidget())) { b->click(); return true; }
-            return true;
-        case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back:
-            hideEscMenu(); return true;
-        default: break;
-        }
-    }
     return QMainWindow::eventFilter(obj, event);
 }
 
@@ -815,83 +799,22 @@ void MainWindow::leaveFullScreen()
 
 // ---- App pause menu (Esc) -------------------------------------------------------------------------------
 
-bool MainWindow::escMenuVisible() const { return escMenu_ && escMenu_->isVisible(); }
-
-void MainWindow::buildEscMenu()
-{
-    if (escMenu_) return;
-    // A top-level frameless window so it paints above the native QML/mpv surfaces (a child widget would be
-    // occluded by them). Styled like the in-game pause menu for consistency.
-    escMenu_ = new QFrame(this, Qt::FramelessWindowHint | Qt::Tool);
-    escMenu_->setObjectName(QStringLiteral("escMenu"));
-    escMenu_->setStyleSheet(QStringLiteral(
-        "#escMenu { background: rgba(20,20,24,0.97); border: 1px solid rgba(255,255,255,0.15); border-radius: 12px; }"
-        "#escMenu QPushButton { padding: 11px 30px; font-size: 16px; border-radius: 8px; background: rgba(255,255,255,0.06);"
-        " border: 1px solid transparent; color: #e8e8e8; }"
-        // Clear highlight on the selected button so arrow navigation is visible.
-        "#escMenu QPushButton:focus { background: #2D6CDF; color: white; border: 1px solid #5B8CFF; }"
-        "#escMenu QPushButton:hover { background: rgba(255,255,255,0.12); }"
-        "#escMenu QLabel { color: #e8e8e8; }"));
-    auto* v = new QVBoxLayout(escMenu_);
-    v->setContentsMargins(26, 22, 26, 22);
-    v->setSpacing(10);
-
-    auto* title = new QLabel(tr("My Media Vault"), escMenu_);
-    title->setAlignment(Qt::AlignCenter);
-    title->setStyleSheet(QStringLiteral("font-size:19px; font-weight:600;"));
-    v->addWidget(title);
-
-    auto* resume = new QPushButton(tr("Resume"), escMenu_);
-    auto* quit   = new QPushButton(tr("Exit My Media Vault"), escMenu_);
-    v->addWidget(resume);
-    v->addWidget(quit);
-    escMenuButtons_ = { resume, quit };
-
-    connect(resume, &QPushButton::clicked, this, [this] { hideEscMenu(); });
-    connect(quit,   &QPushButton::clicked, this, [this] { hideEscMenu(); close(); }); // close() runs the Drive-push exit
-
-    // Arrow / Enter / Esc navigation for the menu (it's its own top-level window, so route its keys here).
-    escMenu_->installEventFilter(this);
-    for (QPushButton* b : escMenuButtons_) b->installEventFilter(this);
-    escMenu_->hide();
-}
+bool MainWindow::escMenuVisible() const { return escMenuOverlay_ != nullptr; }
 
 void MainWindow::showEscMenu()
 {
     if (escMenuVisible()) return;
-    // Remember exactly what had focus (the themed view, or a specific classic-home item) so Resume returns
-    // there with its selection intact, rather than to the bare container.
-    escMenuPrevFocus_ = QApplication::focusWidget();
-    buildEscMenu();
-    escMenu_->adjustSize();
-    // Centre it over the window in global coordinates (it's a top-level window).
-    const QPoint tl = mapToGlobal(QPoint(0, 0));
-    escMenu_->move(tl.x() + (width() - escMenu_->width()) / 2,
-                   tl.y() + (height() - escMenu_->height()) / 2);
-    escMenu_->show();
-    escMenu_->raise();
-    escMenu_->activateWindow();
-    if (!escMenuButtons_.isEmpty()) escMenuButtons_.first()->setFocus(Qt::TabFocusReason); // Resume, arrows work at once
-}
-
-void MainWindow::hideEscMenu()
-{
-    if (!escMenu_) return;
-    escMenu_->hide();
-    activateWindow();
-    raise();
-    // Restore focus AFTER the window-activation settles: hiding the escMenu (a top-level window) hands the OS
-    // foreground back asynchronously, so doing this inline doesn't stick — the cross stays highlighted but
-    // dead. Deferred, our window is active again, so the focus + QML active-focus restore holds.
-    QTimer::singleShot(0, this, [this] {
-        QWidget* prev = escMenuPrevFocus_.data();
-        QWidget* cur = stack_->currentWidget();
-        QWidget* target = (prev && isAncestorOf(prev) && (prev == cur || (cur && cur->isAncestorOf(prev)))) ? prev : cur;
-        if (target) target->setFocus(Qt::OtherFocusReason);
+    // A NavMenu overlay: an in-window child, so it renders over the themed QML surface with no separate OS
+    // window (no focus tug-of-war, no black flash), and restores the previous selection when it closes.
+    auto* menu = new NavMenu(tr("My Media Vault"), { tr("Resume"), tr("Exit My Media Vault") },
+                             [this](int row) { if (row == 1) close(); }, // close() runs the Drive-push exit
+                             this);
+    escMenuOverlay_ = menu;
+    connect(menu, &NavOverlay::closed, this, [this](int) {
 #ifdef MMV_HAVE_QML
-        // A QQuickWidget forwards focus to its QML scene, but after focus was stolen the scene's active-focus
-        // item isn't restored by setFocus alone. Force focus onto the QML root so its Keys handler (and the
-        // selection) resume exactly where they were.
+        // A QQuickWidget forwards focus to its QML scene, but after a keyboard grab the scene's active-focus
+        // item may need a kick so its Keys handler (and the selection) resume exactly where they were.
+        QWidget* cur = stack_->currentWidget();
         if (cur == themedHome_ || cur == themedBrowse_)
         {
             cur->setFocus(Qt::OtherFocusReason);
@@ -899,6 +822,11 @@ void MainWindow::hideEscMenu()
         }
 #endif
     });
+}
+
+void MainWindow::hideEscMenu()
+{
+    if (auto* overlay = qobject_cast<NavOverlay*>(escMenuOverlay_.data())) overlay->dismiss(-1);
 }
 
 // ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------
@@ -909,6 +837,8 @@ namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PA
 
 void MainWindow::sendNavKey(int key)
 {
+    // Mark everything below as controller-origin, so widgets can tell a pad "Back" from a typed Backspace.
+    NavContext::SyntheticScope synth;
     auto deliver = [](QObject* target, int k) {
         if (!target) return;
         // The press can delete the target: a confirm key on a menu row runs its handler synchronously, and
@@ -921,16 +851,15 @@ void MainWindow::sendNavKey(int key)
         QKeyEvent release(QEvent::KeyRelease, k, Qt::NoModifier);
         QCoreApplication::sendEvent(target, &release);
     };
-    // A popup (a QMenu, e.g. the Recent/Downloads game menu) grabs input while open — Qt routes real key events
-    // to it, but our synthetic ones must be aimed at it explicitly. Translate Back (Backspace) to Escape so the
-    // controller's B closes the menu.
-    // The Recent/Downloads game-action overlay (an in-window child, not a popup/dialog) drives itself from nav
-    // keys — hand them straight to it while it's open.
-    if (home_ && home_->handleGameMenuNav(key)) return;
+    // 1. The nav kit: an open in-window overlay (menu / confirm / on-screen keyboard) owns every key; then
+    //    the active screen's ring (arrow nav + Enter) and its registered Back action. Screens on the kit
+    //    need no other wiring — this is what makes back + selection work uniformly.
+    if (navCtx_ && navCtx_->routeKey(key)) return;
+    // 2. A popup (a QMenu / combo dropdown) grabs input while open — Qt routes real key events to it, but our
+    //    synthetic ones must be aimed at it explicitly. Backspace becomes Escape so the pad's B closes it.
     if (QWidget* popup = QApplication::activePopupWidget())
     { deliver(popup, key == Qt::Key_Backspace ? Qt::Key_Escape : key); return; }
-    // A modal dialog (its uninstall confirm, the playlist picker) must receive
-    // nav keys, not the view behind it. Aim at its focused widget; Back (Backspace) becomes Escape so B cancels.
+    // 3. A modal dialog (a stray OS dialog not yet on the kit) must receive nav keys, not the view behind it.
     if (QWidget* modal = QApplication::activeModalWidget())
     {
         QWidget* f = QApplication::focusWidget();
@@ -938,15 +867,59 @@ void MainWindow::sendNavKey(int key)
         deliver(tgt, key == Qt::Key_Backspace ? Qt::Key_Escape : key);
         return;
     }
-    // The app pause menu is a top-level window and owns input while it's open.
-    if (escMenuVisible()) { deliver(QApplication::focusWidget(), key); return; }
     QWidget* cur = stack_->currentWidget();
-    // The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
-    // into the QML scene's Keys handler (arrow nav) like a real key press.
+    // 4. The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
+    //    into the QML scene's Keys handler (arrow nav) like a real key press.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
     QWidget* w = QApplication::focusWidget();
     if (!w || !isAncestorOf(w)) w = cur; // keep injection within our own window
+    // 5. A pad key aimed at a focused text box (the home/library search, a settings field): Enter opens the
+    //    on-screen keyboard, and Back must NEVER delete a character — it leaves the box (Escape) instead.
+    if (auto* edit = qobject_cast<QLineEdit*>(w))
+    {
+        if (key == Qt::Key_Return || key == Qt::Key_Enter) { NavOverlay::editLineEdit(edit); return; }
+        if (key == Qt::Key_Backspace) { deliver(w, Qt::Key_Escape); return; }
+    }
     deliver(w, key);
+}
+
+// Re-register the nav kit for the page the stack just switched to: which ring drives the arrow keys and
+// what the pad's Back does there. Screens with their own complete internal navigation (home, themed QML,
+// readers — which already map Backspace to back — and the emulator) register neither, so their key
+// handling is untouched; overlays still route above them.
+void MainWindow::updateNavForPage()
+{
+    if (!navCtx_) return;
+    QWidget* cur = stack_->currentWidget();
+    if (cur == panelPage_)
+    {
+        // Panels: the ring covers the header Back button + whatever rows showPanel built (including an
+        // embedded dialog's fields). The input-mapping dialog runs its own keyboard nav and raw-input
+        // capture, so the ring stays off there — pad Back still works via the panel header below.
+        const bool remapOwnsKeys = panelDialog_ && panelDialog_->inherits("ControllerRemapDialog");
+        navCtx_->setActiveRing(remapOwnsKeys ? nullptr : panelRing_);
+        navCtx_->setBackAction([this] { if (panelBack_) panelBack_->click(); });
+    }
+    else if (cur == playerPage_)
+    {
+        // The player keeps its transport-row Left/Right stepping; pad Back exits the way the on-screen
+        // "‹ Back" overlay does (stop + clear the queue + Home).
+        navCtx_->setActiveRing(nullptr);
+        navCtx_->setBackAction([this] { if (videoBack_) videoBack_->click(); });
+    }
+    else if (cur == library_)
+    {
+        // The Library: ring nav over its lists/buttons/search (lists keep their own Up/Down inside; the
+        // ring steps out at the ends). Back unwinds a pushed sub-page, then leaves to the Settings hub.
+        if (!libraryRing_) libraryRing_ = new NavRing(library_, this);
+        navCtx_->setActiveRing(libraryRing_);
+        navCtx_->setBackAction([this] { if (!library_->navBack()) openSettingsHub(); });
+    }
+    else
+    {
+        navCtx_->setActiveRing(nullptr);
+        navCtx_->setBackAction(nullptr);
+    }
 }
 
 void MainWindow::pollMenuPad()
@@ -955,12 +928,17 @@ void MainWindow::pollMenuPad()
     if (!pad || !pad->available()) return;
     // In a game the emulator polls and owns the pad; don't double-poll or inject keys over gameplay.
     if (retro_->running() || stack_->currentWidget() == retro_) return;
-    // Only act when our window (or its pause menu) is focused, so we never steal input from another app.
-    if (!isActiveWindow() && !(escMenu_ && escMenu_->isActiveWindow())) return;
-    // Don't fight text entry (a focused search box / key field): let the keyboard handle those.
+    // Only act when our window is focused, so we never steal input from another app. (All menus/overlays
+    // are in-window children now, so the main window stays the active one while they're open.)
+    if (!isActiveWindow()) return;
+    // Someone is capturing raw input (the input-mapping dialog grabs the keyboard while binding a button):
+    // injecting nav keys would fight the capture. Our own overlays also grab — those keep routing normally.
+    if (QWidget* grabber = QWidget::keyboardGrabber(); grabber && !qobject_cast<NavOverlay*>(grabber)) return;
+    // Don't fight MULTI-LINE text entry (a log viewer / notes field) where arrows must scroll/move the caret.
+    // Single-line boxes stay pad-navigable: sendNavKey opens the on-screen keyboard on Enter and turns Back
+    // into "leave the box" — the pad no longer goes dead when the selector lands on a search field.
     QWidget* fw = QApplication::focusWidget();
-    if (qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
-        || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw)) return;
+    if (!NavOverlay::topmost() && (qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw))) return;
 
     pad->poll();
     padTick_ += 16;
@@ -2239,14 +2217,13 @@ bool MainWindow::themedHomeEnabled() const
 }
 
 #ifdef MMV_HAVE_QML
-// Modal text prompt for a themed-mode search. A plain Qt dialog (top-level window) sits cleanly above the
-// themed QQuickView. Null return = cancelled; "" = user cleared the box (restores the full list).
+// Text prompt for a themed-mode search: the in-window on-screen keyboard, so it's typeable from the couch
+// and never spawns a separate window. Null return = cancelled; "" = user cleared the box (full list).
 QString MainWindow::promptThemedSearch(const QString& scope)
 {
-    bool ok = false;
     const QString label = scope.isEmpty() ? tr("Search") : tr("Search %1").arg(scope);
-    const QString q = QInputDialog::getText(this, tr("Search"), label, QLineEdit::Normal, QString(), &ok);
-    return ok ? q.trimmed() : QString(); // QString() is null -> "cancelled"
+    const QString q = Osk::getText(label, QString(), QLineEdit::Normal, this);
+    return q.isNull() ? QString() : q.trimmed();
 }
 
 // Build + show the themed "system view": the media-type catalogs as a themed carousel/grid, plus an
@@ -2833,9 +2810,8 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
 bool MainWindow::parentalUnlock(const QString& reason)
 {
     if (!Settings::hasParentalPin() || !ProfileStore::current().restricted) return true;
-    bool ok = false;
-    const QString pin = QInputDialog::getText(this, tr("Parental PIN"), reason, QLineEdit::Password, QString(), &ok);
-    if (!ok) return false;
+    const QString pin = Osk::getText(reason, QString(), QLineEdit::Password, this); // in-window PIN pad
+    if (pin.isNull()) return false; // backed out
     if (Settings::checkParentalPin(pin)) return true;
     notify(tr("Incorrect PIN."), 3000);
     return false;
@@ -3345,20 +3321,16 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
 void MainWindow::onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe)
 {
     const QString folder = QFileInfo(exe).absolutePath();
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(tr("“%1” didn't stay open").arg(title));
-    box.setText(tr("“%1” closed right after it launched.").arg(title));
-    box.setInformativeText(tr("This usually means it's missing components — install the redistributables in its "
-                              "folder (often a _Redist / _CommonRedist folder) — or the launched file was the "
-                              "wrong one."));
-    QPushButton* openBtn = box.addButton(tr("Open game folder"), QMessageBox::AcceptRole);
-    QPushButton* pickBtn = box.addButton(tr("Choose a different .exe"), QMessageBox::ActionRole);
-    box.addButton(QMessageBox::Close);
-    box.exec();
-    if (box.clickedButton() == openBtn)
+    const int choice = NavConfirm::ask(
+        tr("“%1” didn't stay open").arg(title),
+        tr("“%1” closed right after it launched.\n\nThis usually means it's missing components — install the "
+           "redistributables in its folder (often a _Redist / _CommonRedist folder) — or the launched file "
+           "was the wrong one.").arg(title),
+        { tr("Open game folder"), tr("Choose a different .exe"), tr("Close") },
+        /*focusIndex=*/0, /*cancelIndex=*/2, this);
+    if (choice == 0)
         QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
-    else if (box.clickedButton() == pickBtn)
+    else if (choice == 1)
     {
         const QString picked = QFileDialog::getOpenFileName(this,
             tr("Pick the .exe that launches “%1”").arg(title), folder, tr("Programs (*.exe)"));
@@ -4537,6 +4509,7 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     panelScroll_->setWidget(content); // deletes the previous content widget
     stack_->setCurrentWidget(panelPage_);
     panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
+    updateNavForPage();     // panel -> panel doesn't fire currentChanged; re-register the ring explicitly
     // Drop focus onto the first interactive row so arrow keys / a remote work without a click first.
     // Deferred a tick so the new content widget is laid out and its children are focusable.
     QTimer::singleShot(0, this, [this] {
@@ -4566,6 +4539,7 @@ void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
     showPanel(title, [dlg](QVBoxLayout* v) { v->addWidget(dlg); }, onBack);
     panelDialog_ = dlg; // its own widgets handle the keyboard; suppress the panel's row arrow-nav
     dlg->setFocus();
+    updateNavForPage(); // panelDialog_ changed after showPanel: re-register the ring choice for it
 }
 
 // A large, left-aligned menu row for the inline settings pages (TV/remote-friendly target size).
@@ -4639,20 +4613,15 @@ void MainWindow::openSettingsHub()
 void MainWindow::confirmUninstall()
 {
     const QString dir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
-    QMessageBox box(this);
-    box.setIcon(QMessageBox::Warning);
-    box.setWindowTitle(tr("Uninstall My Media Vault"));
-    box.setText(tr("<b>Permanently remove My Media Vault and all of its data?</b>"));
-    box.setInformativeText(tr("This deletes the whole app folder:<br><code>%1</code><br><br>"
-                              "That includes your <b>settings, cloud sign-in, downloaded games/music, emulator "
-                              "saves and save states, and installed emulators/cores</b>, plus the cache and crash "
-                              "logs. This cannot be undone.<br><br>If you want to keep any downloads, copy them out "
-                              "of that folder first.").arg(dir.toHtmlEscaped()));
-    auto* uninstall = box.addButton(tr("Uninstall"), QMessageBox::DestructiveRole);
-    box.addButton(tr("Cancel"), QMessageBox::RejectRole);
-    box.setDefaultButton(qobject_cast<QPushButton*>(box.buttons().last())); // default to Cancel
-    box.exec();
-    if (box.clickedButton() == uninstall) performUninstall();
+    // An in-window confirm card (controller-navigable, no OS dialog); Cancel is focused and Back cancels.
+    const int choice = NavConfirm::ask(
+        tr("Permanently remove My Media Vault and all of its data?"),
+        tr("This deletes the whole app folder:\n%1\n\n"
+           "That includes your settings, cloud sign-in, downloaded games/music, emulator saves and save "
+           "states, and installed emulators/cores, plus the cache and crash logs. This cannot be undone.\n\n"
+           "If you want to keep any downloads, copy them out of that folder first.").arg(dir),
+        { tr("Uninstall"), tr("Cancel") }, /*focusIndex=*/1, /*cancelIndex=*/1, this);
+    if (choice == 0) performUninstall();
 }
 
 void MainWindow::performUninstall()
@@ -5111,25 +5080,24 @@ void MainWindow::openGeneralSettings()
         auto* pcRow = new QHBoxLayout(); pcRow->addWidget(setPin); pcRow->addWidget(clrPin); pcRow->addStretch(1);
         v->addLayout(pcRow);
         v->addWidget(pcStatus);
+        // PIN entry via the in-window on-screen keyboard (password echo): typeable from the couch, no popup.
         connect(setPin, &QPushButton::clicked, this, [this, setPin, clrPin, pcStatus] {
-            bool ok = false;
             if (Settings::hasParentalPin()) {
-                const QString cur = QInputDialog::getText(this, tr("Change PIN"), tr("Enter the current PIN:"), QLineEdit::Password, QString(), &ok);
-                if (!ok) return;
+                const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(), QLineEdit::Password, this);
+                if (cur.isNull()) return;
                 if (!Settings::checkParentalPin(cur)) { pcStatus->setText(tr("Incorrect PIN.")); return; }
             }
-            const QString a = QInputDialog::getText(this, tr("Set PIN"), tr("New PIN:"), QLineEdit::Password, QString(), &ok);
-            if (!ok || a.isEmpty()) return;
-            const QString b = QInputDialog::getText(this, tr("Set PIN"), tr("Confirm PIN:"), QLineEdit::Password, QString(), &ok);
-            if (!ok) return;
+            const QString a = Osk::getText(tr("New PIN:"), QString(), QLineEdit::Password, this);
+            if (a.isNull() || a.isEmpty()) return;
+            const QString b = Osk::getText(tr("Confirm PIN:"), QString(), QLineEdit::Password, this);
+            if (b.isNull()) return;
             if (a != b) { pcStatus->setText(tr("PINs didn't match.")); return; }
             Settings::setParentalPin(a);
             pcStatus->setText(tr("A PIN is set.")); setPin->setText(tr("Change PIN")); clrPin->setEnabled(true);
         });
         connect(clrPin, &QPushButton::clicked, this, [this, setPin, clrPin, pcStatus] {
-            bool ok = false;
-            const QString cur = QInputDialog::getText(this, tr("Remove PIN"), tr("Enter the current PIN:"), QLineEdit::Password, QString(), &ok);
-            if (!ok) return;
+            const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(), QLineEdit::Password, this);
+            if (cur.isNull()) return;
             if (!Settings::checkParentalPin(cur)) { pcStatus->setText(tr("Incorrect PIN.")); return; }
             Settings::setParentalPin(QString());
             pcStatus->setText(tr("No PIN set.")); setPin->setText(tr("Set PIN")); clrPin->setEnabled(false);

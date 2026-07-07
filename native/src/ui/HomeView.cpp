@@ -22,10 +22,11 @@
 #include <QPaintEvent>
 #include <QSet>
 #include <QListWidget>
+#include "nav/NavOverlay.h"
+#include "nav/Osk.h"
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QLineEdit>
-#include <QInputDialog>
 #include <QLabel>
 #include <QComboBox>
 #include <QTimer>
@@ -54,7 +55,6 @@
 #include <QFileInfo>
 #include <QDir>
 #include <QFile>
-#include <QMessageBox>
 #include <QStandardPaths>
 #include <QDialog>
 #include <QBoxLayout>
@@ -1591,10 +1591,8 @@ void HomeView::populatePlaylistItems(const QString& playlistId)
 
 void HomeView::createPlaylistInteractive(const QString& catalogKey)
 {
-    bool ok = false;
-    const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
-                                               QLineEdit::Normal, QString(), &ok).trimmed();
-    if (!ok || name.isEmpty()) return;
+    const QString name = Osk::getText(tr("Playlist name:"), QString(), QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty()) return; // covers backed-out (null) too
     PlaylistStore::create(catalogKey, name);
     populatePlaylists(catalogKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
 }
@@ -1607,21 +1605,17 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     QVector<Playlist> pls = PlaylistStore::forCatalog(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
-    const QString NEWP = tr("➕ New playlist…");
-    opts << NEWP;
-    bool ok = false;
-    const QString chosen = QInputDialog::getItem(window(), tr("Add to playlist"),
-        tr("Add “%1” to:").arg(it.title), opts, 0, /*editable*/ false, &ok);
-    if (!ok || chosen.isEmpty()) return;
-    QString plid, plname = chosen;
-    if (chosen == NEWP)
+    opts << tr("➕ New playlist…");
+    const int row = NavMenu::pick(tr("Add “%1” to:").arg(it.title), opts, window()); // in-window picker
+    if (row < 0) return;
+    QString plid, plname;
+    if (row == pls.size()) // the "New playlist…" row
     {
-        const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
-                                                   QLineEdit::Normal, QString(), &ok).trimmed();
-        if (!ok || name.isEmpty()) return;
+        const QString name = Osk::getText(tr("Playlist name:"), QString(), QLineEdit::Normal, window()).trimmed();
+        if (name.isEmpty()) return;
         plid = PlaylistStore::create(key, name); plname = name;
     }
-    else for (const Playlist& p : pls) if (p.name == chosen) { plid = p.id; break; }
+    else { plid = pls[row].id; plname = pls[row].name; }
     if (plid.isEmpty()) return;
     PlaylistEntry e;
     e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
@@ -1958,14 +1952,6 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
     {
         auto* ke = static_cast<QKeyEvent*>(event);
         const int k = ke->key();
-
-        // The game-action overlay (real keyboard, delivered via its keyboard grab): route through the same
-        // handler the controller uses. Consume everything while it's up.
-        if (gameMenu_ && obj == gameMenu_)
-        {
-            handleGameMenuNav(k);
-            return true;
-        }
 
         // --- Top chrome row: the search box (highlighted vs. typing) ---
         if (obj == search_)
@@ -2369,108 +2355,28 @@ static bool weOwnDownloadedFile(const QString& path)
     return false;
 }
 
-// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. Built as a child
-// widget of the top-level window (a dimmed backdrop + a centred panel), NOT a top-level dialog — a separate
-// window makes the themed QML view flash black when it shows/hides. It renders over the QML because it's a
-// raised sibling in the same window. Nav comes via handleGameMenuNav() (controller) and the list (mouse).
+// The Recent/Downloads game menu: Play (default) / Favorite / Add to playlist / Uninstall. A NavMenu from
+// the nav kit — an in-window child overlay (no separate window, so the themed QML view doesn't flash), with
+// controller + keyboard + mouse navigation and previous-selection restore built in.
 void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
 {
-    closeGameMenu(); // only one at a time
-    gameMenuItem_ = it;
-    gameMenuDownloads_ = isDownloads;
     const bool fav = FavoritesStore::isFavorite(gameFavId(it));
     const bool canDelete = weOwnDownloadedFile(it.url);
-
-    QWidget* top = window() ? window() : this;
-    auto* overlay = new QWidget(top);
-    overlay->setGeometry(top->rect());
-    overlay->setStyleSheet(QStringLiteral("background: rgba(8,10,16,150);")); // dim the view behind
-    auto* ol = new QVBoxLayout(overlay);
-    ol->setContentsMargins(0, 0, 0, 0);
-
-    auto* panel = new QFrame(overlay);
-    panel->setStyleSheet(QStringLiteral(
-        "QFrame{background:#20242F;border:1px solid #3A4257;border-radius:12px;}"
-        "QLabel#gtitle{color:#EDEFF3;font-size:16px;font-weight:bold;padding:2px 6px 10px 6px;border:none;}"
-        "QListWidget{background:transparent;border:none;outline:none;color:#DCE0EA;font-size:16px;}"
-        "QListWidget::item{padding:10px 12px;border-radius:8px;margin:2px 0;}"
-        "QListWidget::item:selected{background:#5A8CFF;color:white;}"));
-    panel->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
-    auto* v = new QVBoxLayout(panel);
-    v->setContentsMargins(14, 14, 14, 14);
-    v->setSpacing(4);
-    auto* titleLbl = new QLabel(it.title, panel);
-    titleLbl->setObjectName(QStringLiteral("gtitle"));
-    titleLbl->setWordWrap(true);
-    v->addWidget(titleLbl);
-
-    auto* list = new QListWidget(panel);
-    list->setFrameShape(QFrame::NoFrame);
-    list->addItem(tr("▶   Play"));
-    list->addItem(fav ? tr("★   Unfavorite") : tr("☆   Favorite"));
-    list->addItem(tr("➕   Add to playlist…"));
-    list->addItem(canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"));
-    list->setCurrentRow(0); // pre-select Play
-    list->setFixedWidth(320);
-    list->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);   // show every row, no scrollbar
-    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    int listH = 2 * list->frameWidth();
-    for (int i = 0; i < list->count(); ++i) listH += list->sizeHintForRow(i) + 4;
-    list->setFixedHeight(listH);
-    connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { activateGameMenuChoice(); });
-    v->addWidget(list);
-
-    ol->addWidget(panel, 0, Qt::AlignCenter);
-    gameMenu_ = overlay;
-    gameMenuList_ = list;
-    overlay->installEventFilter(this); // real-keyboard nav routes through handleGameMenuNav (see eventFilter)
-    overlay->raise();
-    overlay->show();
-    // Grab the keyboard rather than taking focus: a real key press then comes to the overlay (so the view
-    // behind it isn't navigated), but the themed QML scene keeps its focus item — so once the overlay closes,
-    // navigation there works immediately (setFocus() here left it briefly unable to move).
-    overlay->grabKeyboard();
-}
-
-// PLAY / FAV / PLAYLIST / REMOVE, matching the row order in showGameItemMenu().
-void HomeView::activateGameMenuChoice()
-{
-    if (!gameMenu_ || !gameMenuList_) return;
-    const int row = gameMenuList_->currentRow();
-    const MediaItem it = gameMenuItem_;       // copy before closing clears the members
-    const bool isDownloads = gameMenuDownloads_;
-    closeGameMenu();
-    switch (row)
-    {
-    case 0: emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
-    case 1: toggleGameFavorite(it); break;
-    case 2: addGameToPlaylistInteractive(it); break;
-    case 3: uninstallGameItem(it, isDownloads); break;
-    }
-}
-
-void HomeView::closeGameMenu()
-{
-    if (gameMenu_) { gameMenu_->releaseKeyboard(); gameMenu_->hide(); gameMenu_->deleteLater(); }
-    gameMenu_ = nullptr;
-    gameMenuList_ = nullptr;
-}
-
-bool HomeView::handleGameMenuNav(int key)
-{
-    if (!gameMenu_ || !gameMenuList_) return false;
-    QListWidget* l = gameMenuList_;
-    switch (key)
-    {
-    case Qt::Key_Up:     l->setCurrentRow(qMax(0, l->currentRow() - 1)); break;
-    case Qt::Key_Down:   l->setCurrentRow(qMin(l->count() - 1, l->currentRow() + 1)); break;
-    case Qt::Key_Return:
-    case Qt::Key_Enter:  activateGameMenuChoice(); break;
-    case Qt::Key_Escape:
-    case Qt::Key_Backspace: closeGameMenu(); break;
-    default: break; // swallow everything else while the menu is up
-    }
-    return true;
+    const QStringList rows = {
+        tr("▶   Play"),
+        fav ? tr("★   Unfavorite") : tr("☆   Favorite"),
+        tr("➕   Add to playlist…"),
+        canDelete ? tr("🗑   Uninstall (delete file)") : tr("🗑   Remove from list"),
+    };
+    new NavMenu(it.title, rows, [this, it, isDownloads](int row) {
+        switch (row)
+        {
+        case 0: emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
+        case 1: toggleGameFavorite(it); break;
+        case 2: addGameToPlaylistInteractive(it); break;
+        case 3: uninstallGameItem(it, isDownloads); break;
+        }
+    }, window());
 }
 
 void HomeView::toggleGameFavorite(const MediaItem& it)
@@ -2509,28 +2415,24 @@ void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
     QVector<Playlist> pls = PlaylistStore::forCatalog(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
-    const QString NEWP = tr("➕ New playlist…");
-    opts << NEWP;
-    bool ok = false;
-    const QString chosen = QInputDialog::getItem(window(), tr("Add to playlist"),
-        tr("Add “%1” to:").arg(it.title), opts, 0, /*editable*/ false, &ok);
-    if (!ok || chosen.isEmpty()) return;
-    QString plid;
-    if (chosen == NEWP)
+    opts << tr("➕ New playlist…");
+    const int row = NavMenu::pick(tr("Add “%1” to:").arg(it.title), opts, window()); // in-window picker
+    if (row < 0) return;
+    QString plid, plname;
+    if (row == pls.size()) // the "New playlist…" row
     {
-        const QString name = QInputDialog::getText(window(), tr("New playlist"), tr("Playlist name:"),
-                                                   QLineEdit::Normal, QString(), &ok).trimmed();
-        if (!ok || name.isEmpty()) return;
-        plid = PlaylistStore::create(key, name);
+        const QString name = Osk::getText(tr("Playlist name:"), QString(), QLineEdit::Normal, window()).trimmed();
+        if (name.isEmpty()) return;
+        plid = PlaylistStore::create(key, name); plname = name;
     }
-    else for (const Playlist& p : pls) if (p.name == chosen) { plid = p.id; break; }
+    else { plid = pls[row].id; plname = pls[row].name; }
     if (plid.isEmpty()) return;
     PlaylistEntry e;
     e.itemId = gameFavId(it); e.title = it.title; e.type = QStringLiteral("game");
     e.thumbnailUrl = it.thumbnailUrl;
     e.path = it.url; e.kind = it.mime; // re-open by path
     PlaylistStore::addItem(plid, e);
-    showToast(tr("Added “%1” to “%2”.").arg(it.title, chosen), 3500);
+    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), 3500);
 }
 
 void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
@@ -2538,8 +2440,9 @@ void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
     const bool del = weOwnDownloadedFile(it.url);
     const QString msg = del ? tr("Delete “%1” from disk? This removes the downloaded game file.").arg(it.title)
                             : tr("Remove “%1” from the list? (The file on disk is left in place.)").arg(it.title);
-    if (QMessageBox::question(window(), tr("Uninstall game"), msg,
-                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No) != QMessageBox::Yes)
+    // In-window confirm card (controller-navigable); No is focused and Back cancels.
+    if (NavConfirm::ask(tr("Uninstall game"), msg, { tr("Yes"), tr("No") },
+                        /*focusIndex=*/1, /*cancelIndex=*/1, window()) != 0)
         return;
 
     if (del) QFile::remove(it.url);

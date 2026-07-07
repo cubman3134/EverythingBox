@@ -23,6 +23,7 @@ class LibraryView : public QWidget
 public:
     explicit LibraryView(AddonManager* mgr, QWidget* parent = nullptr);
     void refreshSources();
+    bool navBack(); // pad Back: unwind a pushed sub-page; false at the root (host leaves the Library)
 
 signals:
     void openItem(const MediaItem& item);

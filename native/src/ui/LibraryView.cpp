@@ -98,6 +98,17 @@ void LibraryView::popPage(QWidget* page)
     page->deleteLater();
 }
 
+// Pad Back inside the Library: unwind a pushed sub-page (registry browser / addon settings / confirm)
+// first; false at the root so the host can leave the Library itself.
+bool LibraryView::navBack()
+{
+    if (stack_->currentIndex() == 0) return false;
+    QWidget* cur = stack_->currentWidget();
+    if (auto* dlg = qobject_cast<QDialog*>(cur)) dlg->reject(); // its finished handler pops the page
+    else popPage(cur);
+    return true;
+}
+
 void LibraryView::showDialogPage(QDialog* dlg, const std::function<void(int)>& onFinished)
 {
     dlg->setWindowFlags(Qt::Widget); // render inline instead of as a separate window

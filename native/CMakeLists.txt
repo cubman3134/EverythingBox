@@ -96,6 +96,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/RegistryBrowser.cpp src/ui/RegistryBrowser.h
         src/ui/CarouselView.cpp   src/ui/CarouselView.h
         src/ui/XmbView.cpp        src/ui/XmbView.h
+        src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
+        src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
+        src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
@@ -214,6 +217,15 @@ if(MYMEDIAVAULT_BUILD_APP)
         target_include_directories(probe_theme2 PRIVATE src src/theme2)
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia)
     endif()
+
+    # Headless tests for the controller-navigation kit (rings, overlays, on-screen keyboard, back routing).
+    # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.
+    add_executable(probe_nav tools/probe_nav.cpp
+        src/ui/nav/Nav.cpp src/ui/nav/Nav.h
+        src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
+        src/ui/nav/Osk.cpp src/ui/nav/Osk.h)
+    target_include_directories(probe_nav PRIVATE src src/ui)
+    target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)

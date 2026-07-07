@@ -203,16 +203,21 @@ private:
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
 
-    // App pause menu (Esc): a small "Resume / Exit My Media Vault" overlay, à la the in-game pause menu. It's
-    // a top-level window so it sits above the themed QML surface too, and gives a clean way to quit in full
-    // screen. Shown at the themed home's root and from the classic home; navigated with arrows / Enter / Esc.
-    void buildEscMenu();
+    // App pause menu (Esc): a small "Resume / Exit My Media Vault" overlay, à la the in-game pause menu.
+    // A NavMenu (in-window child overlay from the nav kit) — it renders over the themed QML surface without
+    // spawning a separate OS window, and restores the previous selection when it closes.
     void showEscMenu();
     void hideEscMenu();
     bool escMenuVisible() const;
-    QFrame* escMenu_ = nullptr;
-    QVector<QPushButton*> escMenuButtons_; // { Resume, Exit }, in arrow-navigation order
-    QPointer<QWidget> escMenuPrevFocus_;   // widget focused before the menu opened, restored on Resume
+    QPointer<class NavOverlay> escMenuOverlay_; // alive while the pause menu is open
+
+    // The controller-navigation kit (src/ui/nav): overlay routing, the panel's selection ring, and the
+    // per-screen Back action. updateNavForPage() re-registers both whenever the stack page changes, so
+    // every screen gets arrow navigation + a working Back without per-screen wiring.
+    class NavContext* navCtx_ = nullptr;
+    class NavRing* panelRing_ = nullptr;   // covers panelPage_ (header Back button + the built rows)
+    class NavRing* libraryRing_ = nullptr; // covers the Library view (lists + buttons + search)
+    void updateNavForPage();
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
