@@ -2199,8 +2199,13 @@ void MainWindow::openHome()
     clearAudioQueue();
     // Restore the full-screen state we had before opening content: a full-screen browser stays full screen
     // after exiting the emulator/movie; one that went full screen only for a movie drops back to a window.
-    if (fsBeforeContent_ && !isFullScreen()) showFullScreen();
-    else if (!fsBeforeContent_ && isFullScreen()) leaveFullScreen();
+    // ONLY when actually returning FROM content — a menu-to-menu hop (Profiles/Settings -> Home) must never
+    // touch the window state (the stale flag used to drop a full-screen browser to a window).
+    if (inContent_)
+    {
+        if (fsBeforeContent_ && !isFullScreen()) showFullScreen();
+        else if (!fsBeforeContent_ && isFullScreen()) leaveFullScreen();
+    }
     home_->refresh();
     showHomeScreen(); // classic HomeView, or the themed home if the user enabled it
 }
@@ -2763,9 +2768,9 @@ void MainWindow::enterSplitScreen()
             home_->focusContent();
         });
     }
-    // Park the full-screen views (don't leave a movie playing behind the split) and show the empty split.
+    // Park the playing views (don't leave a movie playing behind the split) and show the empty split.
+    // The window state is left exactly as it is — no screen ever changes it on the user's behalf.
     player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
-    if (isFullScreen()) leaveFullScreen();
     splitMode_ = true;
     splitTarget_ = nullptr;
     stack_->setCurrentWidget(splitView_);
