@@ -25,12 +25,18 @@ NavRing::NavRing(QWidget* container, QObject* parent)
 
 // A widget is a ring member when a user could land on it: visible, enabled, and focusable by Tab (which
 // covers buttons, checkboxes, combos, sliders, line edits). Scrollbars/viewports are skipped — arrows act
-// on rows, and QScrollArea::ensureWidgetVisible keeps the focused row in view.
+// on rows, and QScrollArea::ensureWidgetVisible keeps the focused row in view. A plain scroll CONTAINER
+// (QScrollArea holds StrongFocus by default!) is skipped too: its ROWS are the stops — treating it as a
+// member made the nested filter below drop every row inside it, and the watchdog then kept snapping the
+// selection to the first ring widget (the settings panels' Back button). Item views (lists/tables) stay
+// members: there the view itself IS the row-carrying stop.
 static bool ringMember(const QWidget* w)
 {
-    if (!w || !w->isVisibleTo(nullptr) || !w->isVisible() || !w->isEnabled()) return false;
+    if (!w || !w->isVisible() || !w->isEnabled()) return false;
     if (!(w->focusPolicy() & Qt::TabFocus)) return false;
     if (qobject_cast<const QScrollBar*>(w)) return false;
+    if (qobject_cast<const QAbstractScrollArea*>(w) && !qobject_cast<const QAbstractItemView*>(w))
+        return false;
     return true;
 }
 
@@ -164,7 +170,12 @@ QWidget* NavRing::ensureSelection()
     }
     QWidget* pick = nullptr;
     if (lastFocus_ && ring.contains(lastFocus_)) pick = lastFocus_;
-    if (!pick && !lastCenter_.isNull())
+    // Reference point for "nearest": where the user last was — the still-focused non-member widget when
+    // there is one (recovery should land beside it, not at the top), else the last ring position.
+    QPoint ref = lastCenter_;
+    if (cur && container_ && container_->isAncestorOf(cur))
+        ref = cur->mapTo(container_, cur->rect().center());
+    if (!pick && !ref.isNull())
     {
         // The remembered widget died (row deleted, list rebuilt): land on the nearest survivor so the
         // selector stays where the user was looking instead of snapping to the top.
@@ -172,7 +183,7 @@ QWidget* NavRing::ensureSelection()
         for (QWidget* w : ring)
         {
             const QPoint p = w->mapTo(container_, w->rect().center());
-            const double d = QPoint(p - lastCenter_).manhattanLength();
+            const double d = QPoint(p - ref).manhattanLength();
             if (d < bestD) { bestD = d; pick = w; }
         }
     }
@@ -288,9 +299,12 @@ void NavContext::ensureFocus()
     if (NavOverlay::topmost()) return;         // an overlay owns focus (and guards its own)
     if (!activeRing_) return;                  // screen manages itself (themed QML, readers, player)
     QWidget* fw = QApplication::focusWidget();
-    // Live text entry via a physical keyboard: leave the caret alone.
-    if ((qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw))
-        && fw->hasFocus() && activeRing_->widgets().contains(fw))
+    // A live, focusable widget on this screen IS a valid selection — never steal it, even when the ring's
+    // own membership rules would skip it (a dialog's exotic control, Qt's own focus handling landing
+    // somewhere reasonable). The watchdog only recovers when focus is genuinely gone: null, dead, hidden,
+    // disabled, or outside the screen entirely.
+    if (fw && fw->isVisible() && fw->isEnabled() && activeRing_->container()
+        && activeRing_->container()->isAncestorOf(fw))
         return;
     activeRing_->ensureSelection();
 }

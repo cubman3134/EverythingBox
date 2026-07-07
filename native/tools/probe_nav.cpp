@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QPushButton>
+#include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
@@ -318,6 +319,52 @@ int main(int argc, char** argv)
             pump();
             CHECK(spin->value() == 42, "committing the OSK writes the spinner value");
         }
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
+    // ------------------------------------------- 12. settings-panel shape: scroll area + header Back
+    {
+        // Regression: QScrollArea holds StrongFocus by default, so it joined the ring as a "member" and
+        // the compound-row filter then dropped every row inside it — the watchdog kept snapping the
+        // selection back to the header's Back button whenever the user paused.
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        auto* back = new QPushButton(QStringLiteral("‹ Back"), page);
+        v->addWidget(back);
+        auto* scroll = new QScrollArea(page);
+        scroll->setWidgetResizable(true);
+        auto* content = new QWidget;
+        auto* cv = new QVBoxLayout(content);
+        QVector<QPushButton*> rows;
+        for (int i = 0; i < 8; ++i)
+        { auto* b = new QPushButton(QStringLiteral("setting %1").arg(i), content); cv->addWidget(b); rows.push_back(b); }
+        scroll->setWidget(content);
+        v->addWidget(scroll, 1);
+        page->setGeometry(0, 0, 420, 340); // short enough that the rows actually scroll
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+        const QVector<QWidget*> members = ring.widgets();
+        CHECK(!members.contains(scroll), "a plain scroll container is not a ring stop");
+        CHECK(members.contains(back) && members.contains(rows[0]) && members.contains(rows[7]),
+              "the Back button and the scrolled rows are all ring stops");
+
+        rows[0]->setFocus();
+        pump();
+        for (int i = 0; i < 7; ++i) ctx.routeKey(Qt::Key_Down); // walk to the bottom (scrolls on the way)
+        CHECK(QApplication::focusWidget() == rows[7], "Down walks every row inside the scroll area");
+        ctx.ensureFocus(); // the watchdog tick that used to snap the selection to Back
+        pump();
+        ctx.ensureFocus();
+        CHECK(QApplication::focusWidget() == rows[7], "the focus watchdog never steals the selection");
+        ctx.routeKey(Qt::Key_Down); // clamp at the end
+        CHECK(QApplication::focusWidget() == rows[7], "Down clamps at the last row");
+        for (int i = 0; i < 12; ++i) ctx.routeKey(Qt::Key_Up); // all the way back up
+        CHECK(QApplication::focusWidget() == back, "Up walks out of the scroll area to the header Back");
         ctx.setActiveRing(nullptr);
         delete page;
         pump();
