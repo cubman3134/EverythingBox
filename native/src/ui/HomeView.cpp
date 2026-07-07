@@ -24,6 +24,7 @@
 #include <QListWidget>
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
+#include "../core/MetaCache.h"
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QLineEdit>
@@ -1682,7 +1683,8 @@ void HomeView::populateRecents(const QString& marker)
         it.id = r.key;                                         // stable resume key (streamed items)
         it.mime = r.kind;                                      // routing kind
         it.type = iconTypeForKind(r.kind);                    // drives the placeholder icon + resume bar
-        it.thumbnailUrl = r.thumb;
+        // Offline-first artwork: a downloaded item's locally cached poster wins over the remote url.
+        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, r.thumb);
         it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
         cat.items.push_back(it);
     }
@@ -1735,7 +1737,8 @@ void HomeView::populateDownloads(const QString& marker)
         it.id = d.key;
         it.mime = d.kind;                       // routing kind (openRecent dispatches on it)
         it.type = iconTypeForKind(d.kind);
-        it.thumbnailUrl = d.thumb;
+        // Offline-first artwork: the locally cached poster wins over the remote url.
+        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, d.thumb);
         it.title = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
         cat.items.push_back(it);
     }
@@ -1771,7 +1774,8 @@ void HomeView::populateFavorites(const QString& system)
         it.id = f.itemId;
         it.mime = f.kind.isEmpty() ? QStringLiteral("game") : f.kind; // routing kind -> the game action menu
         it.type = iconTypeForKind(it.mime);
-        it.thumbnailUrl = f.thumbnailUrl;
+        // Offline-first artwork: the locally cached poster wins over the remote url.
+        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, f.thumbnailUrl);
         it.title = f.title.isEmpty() ? QFileInfo(f.path).completeBaseName() : f.title;
         cat.items.push_back(it);
     }
@@ -1825,7 +1829,7 @@ void HomeView::renderRecents()
             it.type = f.type;
             it.title = f.title;
             it.subtitle = f.subtitle;
-            it.thumbnailUrl = f.thumbnailUrl;
+            it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl); // offline-first artwork
             it.expandable = f.expandable;
             it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
             items_.push_back(it);
@@ -1858,7 +1862,9 @@ void HomeView::renderRecents()
             it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
             it.type = iconTypeForKind(r.kind);       // drives the placeholder icon
-            it.thumbnailUrl = r.thumb;               // the real poster (streamed media records it), else a placeholder
+            // The real poster (streamed media records it), else a placeholder — the locally cached copy
+            // (saved when the item was downloaded) wins so the shelf renders offline.
+            it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             items_.push_back(it);
 
@@ -2317,6 +2323,21 @@ void HomeView::dlResolveLeaf(const DlNode& node)
 void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime)
 {
     MediaItem m = it; m.url = url; m.mime = mime;
+    // Downloading for keeps: save the catalog metadata + artwork locally (MetaCache) so this item's
+    // poster and info page keep working offline. Only items with a stable id are cached — a transient
+    // stream url would never match the item again. The rich detail card comes from the open info page
+    // when it's showing this item; a container crawl saves each episode's own card (see onMetaReady).
+    if (!it.id.isEmpty())
+    {
+        MetaCache::saveItem(it);
+        const QString key = MetaCache::keyFor(it);
+        MetaCache::cacheImage(key, QStringLiteral("thumb"), it.thumbnailUrl);
+        if (key == lastMetaKey_ && lastMeta_.valid)
+        {
+            MetaCache::saveDetail(key, lastMeta_);
+            MetaCache::cacheImage(key, QStringLiteral("poster"), lastMeta_.imageUrl);
+        }
+    }
     emit downloadItem(m);
     ++dlQueued_;
 }
@@ -2449,6 +2470,7 @@ void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
     const QString keyOrPath = it.id.isEmpty() ? it.url : it.id;
     DownloadsStore::remove(keyOrPath); DownloadsStore::remove(it.url);
     RecentStore::remove(keyOrPath);    RecentStore::remove(it.url);
+    MetaCache::remove(keyOrPath);      // drop its offline metadata/artwork bundle too
     clearResume(resumeKeyFor(it));
     showToast(del ? tr("Uninstalled “%1”.").arg(it.title) : tr("Removed “%1”.").arg(it.title), 3000);
 
@@ -3141,9 +3163,10 @@ void HomeView::requestMeta(const MediaItem& item)
     // Show the catalog poster + title right away (guarded by the request id we just set), so the info page
     // has a cover immediately - and still shows one if the addon returns no /meta at all (e.g. Allarr). A
     // valid /meta result later overrides this with the addon's own cover + facts + synopsis.
-    if (!item.thumbnailUrl.isEmpty())
+    const QString cover = MetaCache::displayImage(MetaCache::keyFor(item), item.thumbnailUrl);
+    if (!cover.isEmpty())
     {
-        MediaDetail d0; d0.title = item.title; d0.imageUrl = item.thumbnailUrl; d0.valid = true;
+        MediaDetail d0; d0.title = item.title; d0.imageUrl = cover; d0.valid = true;
         showMeta(d0);
     }
 }
@@ -3203,8 +3226,17 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         {
             const QString stremioType = (it.type == QStringLiteral("movie")) ? QStringLiteral("movie")
                                                                               : QStringLiteral("series");
-            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it](const QString& url, const QString& mime) {
-                if (!url.isEmpty()) dlEmit(it, url, mime);
+            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail](const QString& url, const QString& mime) {
+                if (!url.isEmpty())
+                {
+                    dlEmit(it, url, mime);
+                    // The crawl fetched this item's own /meta to bridge it — save the card for offline too.
+                    if (!it.id.isEmpty())
+                    {
+                        MetaCache::saveDetail(MetaCache::keyFor(it), detail);
+                        MetaCache::cacheImage(MetaCache::keyFor(it), QStringLiteral("poster"), detail.imageUrl);
+                    }
+                }
                 dlNext();
             });
         }
@@ -3215,22 +3247,26 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     if (requestId == themedMetaReq_)
     {
         themedMetaReq_ = -1;
+        const bool rowOk = themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size();
+        // Offline: the addon returned nothing for a row we have a downloaded bundle for — use its saved card.
+        MediaDetail det = detail;
+        if (!det.valid && rowOk)
+            det = MetaCache::cachedDetail(MetaCache::keyFor(items_[browseRowMap_[themedMetaIndex_]]));
         QVariantMap m;
         m.insert(QStringLiteral("index"), themedMetaIndex_);
-        m.insert(QStringLiteral("overview"), detail.overview);
+        m.insert(QStringLiteral("overview"), det.overview);
         // For games, drop "Released": the year already shows on the subtitle line, so it'd be redundant.
         // (Play history is carried on separate fields that survive this facts merge — see requestThemedMeta.)
-        const bool isGame = themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size()
-                            && items_[browseRowMap_[themedMetaIndex_]].type == QStringLiteral("game");
+        const bool isGame = rowOk && items_[browseRowMap_[themedMetaIndex_]].type == QStringLiteral("game");
         QVariantList facts;
-        for (const MediaFact& f : detail.facts)
+        for (const MediaFact& f : det.facts)
         {
             if (isGame && f.label == tr("Released")) continue;
             facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
         }
         m.insert(QStringLiteral("facts"), facts);
-        if (!detail.imageUrl.isEmpty()) m.insert(QStringLiteral("image"), detail.imageUrl);
-        if (!detail.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), detail.subtitle);
+        if (!det.imageUrl.isEmpty()) m.insert(QStringLiteral("image"), det.imageUrl);
+        if (!det.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), det.subtitle);
         emit themedMetaReady(themedMetaIndex_, m);
         return;
     }
@@ -3252,7 +3288,21 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         return;
     }
     if (requestId != pendingMetaReqId_) return; // stale (navigated away / newer item)
-    if (detail.valid) { showMeta(detail); return; }
+    if (detail.valid)
+    {
+        // Remember the last shown card so a Download from this info page saves it for offline (dlEmit).
+        lastMeta_ = detail;
+        lastMetaKey_ = MetaCache::keyFor(metaItem_);
+        showMeta(detail);
+        return;
+    }
+
+    // The addon returned nothing — offline, or the item is gone upstream. A previously downloaded item has
+    // its card saved locally (MetaCache), so the info page still gets its synopsis/facts/cover.
+    {
+        const MediaDetail cached = MetaCache::cachedDetail(MetaCache::keyFor(metaItem_));
+        if (cached.valid) { showMeta(cached); return; }
+    }
 
     // The source addon returned no metadata. If this is a movie/episode with an embedded IMDB id and another
     // installed addon (e.g. AIO Catalog) can supply metadata, enrich from it - once - so the info page isn't bare.

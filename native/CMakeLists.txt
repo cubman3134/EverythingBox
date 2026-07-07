@@ -117,6 +117,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SevenZip.cpp     src/core/SevenZip.h
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
+        src/core/MetaCache.cpp    src/core/MetaCache.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
@@ -217,6 +218,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         target_include_directories(probe_theme2 PRIVATE src src/theme2)
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia)
     endif()
+
+    # Headless tests for the offline metadata cache: merge-preserves-unknown-keys (future metadata),
+    # item/detail round-trips, artwork path resolution, uninstall cleanup.
+    add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaCache.h)
+    target_include_directories(probe_meta PRIVATE src src/core src/addons)
+    target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
 
     # Headless tests for the controller-navigation kit (rings, overlays, on-screen keyboard, back routing).
     # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.

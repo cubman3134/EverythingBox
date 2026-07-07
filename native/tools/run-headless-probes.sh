@@ -53,6 +53,7 @@ echo "relay: $(cat /tmp/mmv-relay.log 2>/dev/null | head -1)"; echo
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
 NAV="$(findexe probe_nav)"               || { echo "FATAL: probe_nav not built"; exit 2; }
+META="$(findexe probe_meta)"             || { echo "FATAL: probe_meta not built"; exit 2; }
 
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
@@ -61,6 +62,10 @@ run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.
 run "nav kit"             NAV-OK           "$NAV" -platform offscreen
+
+# Offline metadata cache: item/detail round-trips, merge preserves unknown (future) keys, cached artwork
+# wins over remote urls, uninstall removes the bundle.
+run "meta cache"          META-OK          "$META"
 
 # Optional: prove the libretro frontend can load a real core headlessly. Best-effort — a missing/incompatible
 # core is a warning, not a CI failure (the core comes from an external buildbot we don't control).

@@ -305,6 +305,8 @@ private:
     int pendingMetaReqId_ = -1;
     bool metaFallbackTried_ = false; // tried enriching this item's empty /meta from a provider (AIO) already
     MediaItem metaItem_;             // the item whose detail header is showing (for the meta fallback)
+    MediaDetail lastMeta_;           // the last VALID detail card shown, so a Download from the info page
+    QString lastMetaKey_;            // can save it for offline use (MetaCache); keyed like the cache
 
     QVector<Level> stack_;       // navigation breadcrumb (top = current view)
     QVector<MediaItem> items_;   // items in the current view (parallel to grid_ rows)

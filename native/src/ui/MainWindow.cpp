@@ -36,6 +36,7 @@
 #include "../core/CloudSync.h"
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
+#include "../core/MetaCache.h"
 #include "nav/Nav.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
@@ -3077,6 +3078,11 @@ void MainWindow::openPcGame(const MediaItem& item)
         return;
     }
 
+    // Downloading for keeps: save the catalog metadata + poster locally so the game's shelf entry and
+    // info render offline (MetaCache; the detail card is added by the Home info page when it was shown).
+    MetaCache::saveItem(item);
+    MetaCache::cacheImage(MetaCache::keyFor(item), QStringLiteral("thumb"), item.thumbnailUrl);
+
     mwLog(QStringLiteral("pcgame: download \"%1\" from %2").arg(item.title, logSafeUrl(item.url)));
     QNetworkRequest rq{ QUrl(item.url) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
@@ -3552,6 +3558,7 @@ void MainWindow::forgetPcGame(const QString& id, const QString& title)
     PcGameStore::clear(id);
     RecentStore::remove(id);
     DownloadsStore::remove(id);
+    MetaCache::remove(id); // drop its offline metadata/artwork bundle too
     mwLog(QStringLiteral("pcgame: forgot \"%1\" (no exe chosen) — cleared store/recent/downloads + media").arg(title));
 }
 
