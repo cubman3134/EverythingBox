@@ -2289,7 +2289,11 @@ void MainWindow::showThemedHome()
         if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
         { themedHomeIndex_ = idx; home_->activateNav(navKeys[idx]); showThemedBrowse(); } // remember + open catalog
     };
-    auto onBack  = [this] { openAppearance(); }; // Esc at the root -> settings (a reliable way back out)
+    // Esc at the themed root: the theme is the BOTTOM of the stack — there is nothing to go "back" to, so
+    // bring up the app pause menu (Resume / Exit), exactly like the XMB home. (This used to jump to the
+    // Appearance settings as "a reliable way back out", which read as Esc randomly opening settings.
+    // Appearance stays reachable via Settings ▸ Appearance and a theme's own settings/appearance buttons.)
+    auto onBack  = [this] { showEscMenu(); };
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
