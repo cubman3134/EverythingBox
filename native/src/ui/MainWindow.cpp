@@ -699,6 +699,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::switchProfileRequested, this, &MainWindow::onSwitchProfile);
     connect(home_, &HomeView::themeChanged, this, &MainWindow::onThemeChanged);
     connect(home_, &HomeView::settingsRequested, this, &MainWindow::openSettingsHub);
+    // At the classic home root, Back has nowhere further to go -> the app pause menu (the one Back rule).
+    connect(home_, &HomeView::backRequested, this, &MainWindow::showEscMenu);
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
@@ -871,22 +873,23 @@ void MainWindow::sendNavKey(int key)
         deliver(tgt, key == Qt::Key_Backspace ? Qt::Key_Escape : key);
         return;
     }
-    // 4. The active screen's ring (arrow nav + Enter) and its registered Back action. Screens on the kit
-    //    need no other wiring — this is what makes back + selection work uniformly.
-    if (navCtx_ && navCtx_->routeKey(key)) return;
     QWidget* cur = stack_->currentWidget();
-    // 5. The themed home/browse is a QQuickWidget — a plain widget — so hand it the key directly; it forwards
-    //    into the QML scene's Keys handler (arrow nav) like a real key press.
+    // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
+    //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
+    // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
+    //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
+    //    home root. (Overlays/popups/modals above already consumed their own Back.)
+    if (key == Qt::Key_Backspace || key == Qt::Key_Escape) { goBack(); return; }
+    // 6. The active screen's ring (arrow nav + Enter). Screens on the kit need no other wiring.
+    if (navCtx_ && navCtx_->routeKey(key)) return;
     QWidget* w = QApplication::focusWidget();
     if (!w) w = focusWidget(); // window inactive (UI-test injection): it still remembers its focus child
     if (!w || !isAncestorOf(w)) w = cur; // keep injection within our own window
-    // 6. A pad key aimed at a focused text box (the home/library search, a settings field): Enter opens the
-    //    on-screen keyboard, and Back must NEVER delete a character — it leaves the box (Escape) instead.
+    // 7. Enter on a focused text box (a search field / settings input) opens the on-screen keyboard.
     if (auto* edit = qobject_cast<QLineEdit*>(w))
     {
         if (key == Qt::Key_Return || key == Qt::Key_Enter) { NavOverlay::editLineEdit(edit); return; }
-        if (key == Qt::Key_Backspace) { deliver(w, Qt::Key_Escape); return; }
     }
     // 7. Arrows aimed at a closed dropdown / spinner on a screen without a ring would CYCLE ITS VALUE just
     //    by walking over it. Hover-over instead: hop the focus geometrically; Enter opens the dropdown (or
@@ -908,6 +911,42 @@ void MainWindow::sendNavKey(int key)
         }
     }
     deliver(w, key);
+}
+
+// The one Back rule for the whole app: Escape, Backspace and the controller's Back all call this, so a
+// "go back" gesture behaves identically on every screen — it always takes you to the previous screen, and
+// only at the home root does it open the app pause menu (Resume / Exit). Anything layered on top (an
+// overlay/menu/keyboard, or the pause menu itself) is dismissed first.
+void MainWindow::goBack()
+{
+    if (NavOverlay* top = NavOverlay::topmost()) { top->dismiss(-1); return; } // close the thing on top
+    if (subOverlay_ && subOverlay_->isVisible()) { hideSubtitleMenu(); return; }
+    if (escMenuVisible()) { hideEscMenu(); return; }                            // pause menu -> resume
+
+    QWidget* cur = stack_->currentWidget();
+
+    // Themed (QML) home/browse: it owns a multi-level back (drill up a catalog, then the pause menu at its
+    // root) — run the same handler its own back() signal uses.
+    if ((cur == themedHome_ || cur == themedBrowse_) && themedOnBack_) { themedOnBack_(); return; }
+    // Classic home: pop a drill level, or (at the root) emit backRequested -> the pause menu.
+    if (cur == home_) { home_->goBack(); return; }
+    // Settings / dialog panels: their header Back = the previous panel or the screen we came from.
+    if (cur == panelPage_) { if (panelBack_) panelBack_->click(); return; }
+    // Library: unwind a pushed sub-page (registry/addon settings), else back to the Settings hub.
+    if (cur == library_) { if (!library_->navBack()) openSettingsHub(); return; }
+    // Readers: back to the home they were opened from (persist positions first).
+    if (cur == book_ || cur == pdf_ || cur == comic_)
+    { book_->persist(); pdf_->persist(); comic_->persist(); stack_->setCurrentWidget(home_); home_->focusContent(); return; }
+    // Standalone-emulator wait page: close the emulator.
+    if (cur == emuPage_) { if (emuStopBtn_) emuStopBtn_->click(); return; }
+    // Split screen: leave it.
+    if (splitMode_) { exitSplitScreen(); return; }
+    // Player (and any other content page): stop playback and return home.
+    player_->stop();
+    if (mediaControls_) mediaControls_->hide();
+    if (videoBack_) videoBack_->hide();
+    clearAudioQueue();
+    openHome();
 }
 
 // Re-register the nav kit for the page the stack just switched to: which ring drives the arrow keys and
@@ -1136,16 +1175,19 @@ bool MainWindow::focusNextPrevChild(bool next)
 
 void MainWindow::keyPressEvent(QKeyEvent* e)
 {
-    // Esc brings up the app pause menu (Resume / Exit) in the browsing UI — the themed home routes its own
-    // root Esc here via onBack (see showThemedXmb). In the player / readers, Esc keeps its old job of leaving
-    // full screen. (The emulator view consumes its own Esc for the in-game menu, so it never reaches here.)
-    if (e->key() == Qt::Key_Escape)
+    // One Back rule for the whole app: Escape and Backspace both "go back" — to the previous screen on any
+    // page, and to the app pause menu at the home root (see goBack). A focused text field consumes its own
+    // Backspace before this (so typing still deletes); its Escape reaching here still means "leave", which is
+    // right. The subtitle overlay (handled just below) and the emulator (consumes Esc itself) are the
+    // exceptions that manage their own Back. F11 still toggles full screen independently.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace)
     {
-        if (escMenuVisible()) { hideEscMenu(); return; }
-        QWidget* cur = stack_->currentWidget();
-        if (cur == home_ || cur == panelPage_) { showEscMenu(); return; }
-        if (cur == themedHome_ || cur == themedBrowse_) return; // themed view drives Esc itself (onBack)
-        if (isFullScreen()) { leaveFullScreen(); return; }      // player / readers
+        QWidget* fw = focusWidget();
+        const bool typing = e->key() == Qt::Key_Backspace
+                            && (qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
+                                || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw));
+        const bool subOpen = subOverlay_ && subOverlay_->isVisible(); // its own handler (below) closes it
+        if (!typing && !subOpen) { goBack(); e->accept(); return; }
     }
 
     // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …). Up/Down
@@ -1181,10 +1223,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
             case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
                 if (auto* b = qobject_cast<QAbstractButton*>(fw)) { b->click(); return; }
                 break;
-            case Qt::Key_Backspace:
-                if (panelOnBack_) { panelOnBack_(); return; }
-                break;
-            default: break;
+            default: break; // Backspace/Escape handled by the unified Back above
             }
         }
     }
@@ -1229,9 +1268,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         case Qt::Key_F12: captureVideoScreenshot(); revealMediaControls(); return;
         case Qt::Key_BracketRight: cyclePlaybackSpeed(+1); revealMediaControls(); return; // ]  faster
         case Qt::Key_BracketLeft:  cyclePlaybackSpeed(-1); revealMediaControls(); return; // [  slower
-        case Qt::Key_Backspace:
-            player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome(); return;
-        default: break;
+        default: break; // Backspace/Escape exit via the unified Back above (stop + return home)
         }
     }
     QMainWindow::keyPressEvent(e);
@@ -2388,6 +2425,7 @@ void MainWindow::showThemedHome()
     // Appearance settings as "a reliable way back out", which read as Esc randomly opening settings.
     // Appearance stays reachable via Settings ▸ Appearance and a theme's own settings/appearance buttons.)
     auto onBack  = [this] { showEscMenu(); };
+    themedOnBack_ = onBack; // the base window's goBack() shares this themed back
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -2625,6 +2663,7 @@ void MainWindow::showThemedXmb()
         }
         showEscMenu(); // at the top of the themed home: bring up the app pause menu (Resume / Exit)
     };
+    themedOnBack_ = onBack;
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -2723,6 +2762,7 @@ void MainWindow::showThemedBrowse()
     QVariantMap system; system.insert(QStringLiteral("name"), home_->browseTitle());
     auto onActivated = [this](int idx) { home_->browseActivate(idx); }; // opens media, or drills (-> refresh)
     auto onBack = [this] { if (!home_->browseBack()) showThemedHome(); }; // up a level, or back to the system view
+    themedOnBack_ = onBack;
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];

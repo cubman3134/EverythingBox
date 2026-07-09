@@ -1975,7 +1975,7 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (k == Qt::Key_Up)    { return true; }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
             { searchEditing_ = true; return true; } // select/Enter -> cursor in the field, start typing
-            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            if (k == Qt::Key_Backspace || k == Qt::Key_Escape) { goBack(); return true; }
             if (!ke->text().isEmpty() && ke->text().at(0).isPrint()) { searchEditing_ = true; return false; }
             return true; // swallow other keys while highlighted (not yet typing)
         }
@@ -1988,7 +1988,7 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (k == Qt::Key_Up)    { return true; }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
             { if (auto* b = qobject_cast<QPushButton*>(obj)) b->click(); return true; }
-            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            if (k == Qt::Key_Backspace || k == Qt::Key_Escape) { goBack(); return true; }
             return false;
         }
         // --- Detail page: the action button (Favorite, or Play for a Steam game) ---
@@ -2010,12 +2010,12 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
             { if (auto* b = qobject_cast<QPushButton*>(obj)) b->click(); return true; }
-            if (k == Qt::Key_Backspace) { goBack(); return true; }
+            if (k == Qt::Key_Backspace || k == Qt::Key_Escape) { goBack(); return true; }
             return false;
         }
 
         // Backspace acts as the Back button when focus is on a tab or the grid.
-        if (k == Qt::Key_Backspace) { goBack(); return true; }
+        if (k == Qt::Key_Backspace || k == Qt::Key_Escape) { goBack(); return true; }
 
         const int idx = typeButtons_.indexOf(qobject_cast<QPushButton*>(obj));
         if (idx >= 0)
@@ -2560,6 +2560,9 @@ void HomeView::goBack()
     if (stack_.size() == 1 && stack_.last().detail) { selectRecent(); return; }
     // In carousel layout, Back from a catalog (or Home) returns to the media-type carousel.
     if (carouselMode_ && !atCarouselLanding_) { showCarousel(); return; }
+    // Nothing left to pop: we're at the home root. The host decides (the app pause menu) — this keeps the
+    // one Back rule (previous screen everywhere; app menu at the home root) in the base window.
+    emit backRequested();
 }
 
 void HomeView::doSearch()

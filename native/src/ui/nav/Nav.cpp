@@ -275,9 +275,9 @@ bool NavContext::routeKey(int key)
     if (activeRing_)
     {
         if (activeRing_->handleKey(key)) { ensureFocus(); return true; }
-        // On a ring-managed screen a pad Back ALWAYS means "go back" — never "delete a character in
-        // whatever text row happens to be focused".
-        if (key == Qt::Key_Backspace && backAction_) { runBackAction(); return true; }
+        // The one Back rule: Backspace AND Escape both mean "go back" on a ring-managed screen (never
+        // "delete a character in whatever text row happens to be focused"). Same action for both keys.
+        if ((key == Qt::Key_Backspace || key == Qt::Key_Escape) && backAction_) { runBackAction(); return true; }
     }
     return false; // not ours: the caller's legacy delivery (themed QML, readers, player) takes it
 }

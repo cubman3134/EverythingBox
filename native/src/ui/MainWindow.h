@@ -210,6 +210,12 @@ private:
     void showEscMenu();
     void hideEscMenu();
     bool escMenuVisible() const;
+    // The one Back rule, shared by Escape, Backspace and the controller's Back: close the topmost overlay /
+    // pause menu, else go to the previous screen for whatever page is showing, and at the home root open the
+    // app pause menu. Lives in the base window so every screen behaves identically. themedOnBack_ carries the
+    // themed (QML) home's own multi-level back (drill up, then the menu), set when that home is built.
+    void goBack();
+    std::function<void()> themedOnBack_;
     QPointer<class NavOverlay> escMenuOverlay_; // alive while the pause menu is open
 
     // The controller-navigation kit (src/ui/nav): overlay routing, the panel's selection ring, and the

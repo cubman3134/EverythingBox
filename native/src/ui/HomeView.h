@@ -61,6 +61,7 @@ public:
     QString browseTitle() const;             // the current level's title
     void browseActivate(int index);          // open/drill the item at this (filtered) index
     bool browseBack();                       // go up a level; false if already at the catalog root
+    void goBack();                           // classic-home Back: pop a drill level, or emit backRequested at root
     bool browseHasMore() const;              // the current level has another page to pull
     void browseLoadMore();                   // pull the next page (no-op if none / already loading)
     int  browseRestoreIndex() const;         // the browse index of the row we last drilled into (for Back), else 0
@@ -114,6 +115,8 @@ signals:
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
+    // At the home root there's nowhere further back -> the host opens the app pause menu (one Back rule).
+    void backRequested();
     void settingsRequested();                  // the "Settings" button in the top bar
     void switchProfileRequested();             // the profile button in the top bar
     void themeChanged(const QColor& background, const QColor& accent); // active tab colour changed
@@ -131,7 +134,6 @@ private slots:
     void onCatalogReady(int requestId, const MediaCatalog& cat); // async result from AddonManager
     void onMetaReady(int requestId, const MediaDetail& detail);  // async detail-header metadata
     void doSearch();
-    void goBack();
 
 private:
     // A navigation level: a top-level catalog (by type), or a drilled-into container's children.

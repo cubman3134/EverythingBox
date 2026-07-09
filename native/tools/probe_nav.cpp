@@ -425,6 +425,34 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // ------------------------------------------- 14. one Back rule: Escape == Backspace, everywhere
+    {
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        for (int i = 0; i < 3; ++i) v->addWidget(new QPushButton(QStringLiteral("row%1").arg(i), page));
+        page->setGeometry(0, 0, 300, 240);
+        page->show();
+        pump();
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+
+        int backs = 0;
+        ctx.setBackAction([&backs] { ++backs; });
+        // Both keys must run the SAME back action, and neither may leak (both consumed).
+        CHECK(ctx.routeKey(Qt::Key_Backspace), "Backspace is consumed on a ring screen");
+        CHECK(backs == 1, "Backspace runs the screen's back action");
+        CHECK(ctx.routeKey(Qt::Key_Escape), "Escape is consumed on a ring screen");
+        CHECK(backs == 2, "Escape runs the SAME back action as Backspace");
+        // Arrows still move the selection (Back handling didn't swallow everything).
+        const int before = ring.widgets().indexOf(QApplication::focusWidget());
+        ctx.routeKey(Qt::Key_Down);
+        CHECK(ring.widgets().indexOf(QApplication::focusWidget()) != before, "arrows still navigate");
+        ctx.setBackAction(nullptr);
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAV-OK\n");
     return 0;
