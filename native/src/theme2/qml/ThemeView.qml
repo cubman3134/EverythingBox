@@ -80,6 +80,16 @@ Item {
     readonly property string focusedButtonAction:
         (focusZone === 1 && buttonIndex >= 0 && buttonIndex < buttonList.length) ? buttonList[buttonIndex] : ""
 
+    // UI-test introspection: expose the current selection as plain strings, computed in QML (the items /
+    // categories are native JS arrays here). The C++ UiTestServer reads these directly, instead of
+    // marshaling the whole `var` arrays across the boundary.
+    readonly property string uitestSelection:
+        (items && currentIndex >= 0 && currentIndex < items.length && items[currentIndex]
+         && items[currentIndex].title) ? items[currentIndex].title : ""
+    readonly property string uitestCategory:
+        (xmbMode && categories && catIndex >= 0 && catIndex < categories.length && categories[catIndex]
+         && categories[catIndex].title) ? categories[catIndex].title : ""
+
     readonly property bool xmbMode: {
         if (view && view.elements)
             for (var i = 0; i < view.elements.length; i++)

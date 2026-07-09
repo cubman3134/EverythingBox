@@ -953,6 +953,36 @@ void MainWindow::updateNavForPage()
 // --uitest, or the Settings ▸ Debug toggle. Lets a test agent drive navigation and capture the window
 // WITHOUT bringing it to the front or giving it OS focus — injected keys ride the app's own sendNavKey
 // routing, and grab() renders the widget tree even while occluded/backgrounded.
+// Report the themed (QML) home/browse selection into the UI-test `state` snapshot: the QQuickWidget
+// hides its internal selection behind an opaque focus, so read the scene root's live properties instead.
+// No-op unless `page` is the themed home/browse (and only compiled with the QML engine).
+void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
+{
+#ifdef MMV_HAVE_QML
+    if (page != themedHome_ && page != themedBrowse_) return;
+    QQuickItem* r = ThemeEngine::rootItem(page);
+    if (!r) return;
+    // Read plain-string/int properties only (the arrays are reduced to strings QML-side, see ThemeView.qml's
+    // uitestSelection/uitestCategory) — marshaling the `var` item arrays across the boundary is unsafe.
+    const QString sel = r->property("uitestSelection").toString();
+    o.insert(QStringLiteral("themedView"), r->property("currentView").toString());
+    o.insert(QStringLiteral("themedIndex"), r->property("currentIndex").toInt());
+    o.insert(QStringLiteral("themedSelection"), sel);
+    const QString cat = r->property("uitestCategory").toString();
+    if (!cat.isEmpty()) o.insert(QStringLiteral("themedCategory"), cat);
+    // What Enter would act on right now: a corner button, the inline action chooser, or the tile above.
+    if (r->property("focusZone").toInt() == 1)
+        o.insert(QStringLiteral("themedFocus"), r->property("focusedButtonAction").toString());
+    else if (r->property("actionsOpen").toBool())
+        o.insert(QStringLiteral("themedFocus"),
+                 QStringLiteral("action:") + QString::number(r->property("actionIndex").toInt()));
+    else
+        o.insert(QStringLiteral("themedFocus"), sel);
+#else
+    Q_UNUSED(o); Q_UNUSED(page);
+#endif
+}
+
 void MainWindow::updateUiTestServer()
 {
     if (!UiTestServer::wanted())
@@ -988,6 +1018,10 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("overlay"), QString::fromLatin1(top->metaObject()->className()));
             o.insert(QStringLiteral("overlaySelection"), top->describe());
         }
+        // Themed (QML) home/browse: focus is opaque (just "QQuickWidget"), so read the scene's own
+        // selection state — the highlighted tile's title, the view, and (XMB) the category / (button
+        // zone) the focused corner button — so QML-side automation is as precise as the Qt panels.
+        addThemedSelection(o, cur);
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
         o.insert(QStringLiteral("fullscreen"), isFullScreen());
         o.insert(QStringLiteral("active"), isActiveWindow());

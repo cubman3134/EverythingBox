@@ -33,6 +33,7 @@ class QVBoxLayout;
 class QNetworkAccessManager;
 class QLabel;
 class EmulatorManager;
+class QJsonObject;
 struct GameSystem;
 struct ExternalEmulator;
 
@@ -218,6 +219,7 @@ private:
     // Settings ▸ Debug toggle), torn down when the toggle turns it off. updateUiTestServer() reconciles.
     class UiTestServer* uiTest_ = nullptr;
     void updateUiTestServer();
+    void addThemedSelection(class QJsonObject& o, QWidget* page); // themed-home selection -> UI-test state
 
     class NavContext* navCtx_ = nullptr;
     class NavRing* panelRing_ = nullptr;   // covers panelPage_ (header Back button + the built rows)
