@@ -118,6 +118,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/MetaCache.cpp    src/core/MetaCache.h
+        src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h

@@ -40,6 +40,16 @@ static bool ringMember(const QWidget* w)
     return true;
 }
 
+// The current focus, tolerant of the window being INACTIVE: UI-test injection drives the app in the
+// background, where QApplication::focusWidget() is null — but the window still remembers its focus child,
+// which is where the selection really is.
+static QWidget* focusIn(const QWidget* container)
+{
+    QWidget* fw = QApplication::focusWidget();
+    if (!fw && container && container->window()) fw = container->window()->focusWidget();
+    return fw;
+}
+
 QVector<QWidget*> NavRing::widgets() const
 {
     QVector<QWidget*> out;
@@ -95,7 +105,7 @@ bool NavRing::step(int key)
 {
     const QVector<QWidget*> ring = widgets();
     if (ring.isEmpty()) return false;
-    QWidget* cur = QApplication::focusWidget();
+    QWidget* cur = focusIn(container_);
     if (!cur || !ring.contains(cur)) { ensureSelection(); return true; }
     QWidget* next = pickNext(cur, ring, key);
     if (!next) return false; // at an edge: not consumed (the screen may hop zones or just stay put)
@@ -125,7 +135,7 @@ bool NavRing::handleKey(int key)
     {
     case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:
     {
-        QWidget* cur = QApplication::focusWidget();
+        QWidget* cur = focusIn(container_);
         // A slider row edits its value with Left/Right — hand those through instead of moving. (Spinners
         // are NOT value-edited by arrows: they hover like everything else and Enter opens the OSK.)
         if ((key == Qt::Key_Left || key == Qt::Key_Right) && qobject_cast<QSlider*>(cur))
@@ -146,7 +156,7 @@ bool NavRing::handleKey(int key)
     }
     case Qt::Key_Return: case Qt::Key_Enter:
     {
-        QWidget* cur = QApplication::focusWidget();
+        QWidget* cur = focusIn(container_);
         const QVector<QWidget*> ring = widgets();
         if (!cur || !ring.contains(cur)) { ensureSelection(); return true; }
         activate(cur);
@@ -161,7 +171,7 @@ QWidget* NavRing::ensureSelection()
 {
     const QVector<QWidget*> ring = widgets();
     if (ring.isEmpty()) return nullptr;
-    QWidget* cur = QApplication::focusWidget();
+    QWidget* cur = focusIn(container_);
     if (cur && ring.contains(cur))
     {
         lastFocus_ = cur;
@@ -196,7 +206,7 @@ QWidget* NavRing::ensureSelection()
 
 QString NavRing::rememberSelection() const
 {
-    QWidget* cur = QApplication::focusWidget();
+    QWidget* cur = focusIn(container_);
     const QVector<QWidget*> ring = widgets();
     const int idx = ring.indexOf(cur);
     if (idx < 0) return QString();
@@ -299,6 +309,7 @@ void NavContext::ensureFocus()
     if (NavOverlay::topmost()) return;         // an overlay owns focus (and guards its own)
     if (!activeRing_) return;                  // screen manages itself (themed QML, readers, player)
     QWidget* fw = QApplication::focusWidget();
+    if (!fw && window_) fw = window_->focusWidget(); // inactive window (UI-test): its focus child is the selection
     // A live, focusable widget on this screen IS a valid selection — never steal it, even when the ring's
     // own membership rules would skip it (a dialog's exotic control, Qt's own focus handling landing
     // somewhere reasonable). The watchdog only recovers when focus is genuinely gone: null, dead, hidden,

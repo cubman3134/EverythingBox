@@ -48,6 +48,10 @@ public:
     // closed() signal (and the sync helpers): -1 = backed out.
     void dismiss(int result = -1);
 
+    // Human-readable "what's selected in this overlay" for the UI-test channel (menu row text, OSK
+    // buffer, the focused button). Empty when there's nothing meaningful to report.
+    virtual QString describe() const;
+
 signals:
     void closed(int result);
 
@@ -84,6 +88,8 @@ public:
 
     // Blocking picker (a controller-navigable QInputDialog::getItem): the chosen row, or -1 backed out.
     static int pick(const QString& title, const QStringList& items, QWidget* window = nullptr);
+
+    QString describe() const override; // the highlighted row's text
 
 protected:
     bool handleNavKey(int key) override;

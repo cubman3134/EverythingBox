@@ -119,6 +119,16 @@ void NavOverlay::keyPressEvent(QKeyEvent* e)
     }
 }
 
+QString NavOverlay::describe() const
+{
+    // Default: the focused button's caption (confirm cards, the OSK's key grid).
+    QWidget* fw = QApplication::focusWidget();
+    if (!fw && window()) fw = window()->focusWidget();
+    if (auto* b = qobject_cast<QAbstractButton*>(fw); b && panel_ && panel_->isAncestorOf(b))
+        return b->text();
+    return {};
+}
+
 bool NavOverlay::eventFilter(QObject* obj, QEvent* ev)
 {
     if (obj == parentWidget() && ev->type() == QEvent::Resize)
@@ -307,6 +317,11 @@ bool NavMenu::handleNavKey(int key)
     default:
         return NavOverlay::handleNavKey(key); // Back/Escape close
     }
+}
+
+QString NavMenu::describe() const
+{
+    return list_ && list_->currentItem() ? list_->currentItem()->text() : QString();
 }
 
 int NavMenu::pick(const QString& title, const QStringList& items, QWidget* window)
