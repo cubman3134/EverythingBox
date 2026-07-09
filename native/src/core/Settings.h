@@ -50,6 +50,11 @@ namespace Settings
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
 
+    // The local UI-test/automation channel (Settings ▸ Debug): lets a test agent drive navigation and take
+    // screenshots without the window needing focus (see core/UiTestServer). Default off.
+    bool uiTestChannel();
+    void setUiTestChannel(bool on);
+
     // Root of the local ROM library, organized RetroBat / ES-DE style as <root>/<system>/<rom files>.
     // Empty => the default (<data>/roms). Settable to anywhere on the system in General settings.
     QString romsFolder();          // resolved path (never empty)

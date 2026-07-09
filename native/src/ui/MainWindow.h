@@ -214,6 +214,11 @@ private:
     // The controller-navigation kit (src/ui/nav): overlay routing, the panel's selection ring, and the
     // per-screen Back action. updateNavForPage() re-registers both whenever the stack page changes, so
     // every screen gets arrow navigation + a working Back without per-screen wiring.
+    // UI-test/automation channel (core/UiTestServer): created when enabled (env var / --uitest / the
+    // Settings ▸ Debug toggle), torn down when the toggle turns it off. updateUiTestServer() reconciles.
+    class UiTestServer* uiTest_ = nullptr;
+    void updateUiTestServer();
+
     class NavContext* navCtx_ = nullptr;
     class NavRing* panelRing_ = nullptr;   // covers panelPage_ (header Back button + the built rows)
     class NavRing* libraryRing_ = nullptr; // covers the Library view (lists + buttons + search)

@@ -423,48 +423,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(stack_, &QStackedWidget::currentChanged, this, [this](int) { updateNavForPage(); });
     updateNavForPage();
 
-    // UI-test channel (opt-in: MMV_UITEST=1 or --uitest): lets a test agent drive navigation and capture
-    // the window WITHOUT bringing it to the front or giving it OS focus — injected keys ride the app's own
-    // sendNavKey routing, and grab() renders the widget tree even while occluded/backgrounded.
-    if (UiTestServer::wanted())
-    {
-        UiTestServer::Hooks h;
-        h.sendKey = [this](int k) {
-            // Qt-INTERNAL activation only (no OS foreground change): focus events + :focus styling then
-            // behave exactly as they would live, while another app keeps the real foreground.
-            if (!isActiveWindow()) QApplication::setActiveWindow(this);
-            sendNavKey(k);
-        };
-        h.state = [this]() -> QString {
-            QJsonObject o;
-            QWidget* cur = stack_->currentWidget();
-            o.insert(QStringLiteral("page"), cur ? QString::fromLatin1(cur->metaObject()->className()) : QString());
-            o.insert(QStringLiteral("pageName"), cur ? cur->objectName() : QString());
-            if (cur == panelPage_ && panelTitle_) o.insert(QStringLiteral("panelTitle"), panelTitle_->text());
-            QWidget* fw = QApplication::focusWidget();
-            if (!fw) fw = focusWidget();
-            o.insert(QStringLiteral("focus"), fw ? QString::fromLatin1(fw->metaObject()->className()) : QString());
-            o.insert(QStringLiteral("focusName"), fw ? fw->objectName() : QString());
-            QString ft;
-            if (auto* b = qobject_cast<QAbstractButton*>(fw)) ft = b->text();
-            else if (auto* e = qobject_cast<QLineEdit*>(fw)) ft = e->text();
-            else if (auto* l = qobject_cast<QListWidget*>(fw)) ft = l->currentItem() ? l->currentItem()->text() : QString();
-            o.insert(QStringLiteral("focusText"), ft);
-            if (NavOverlay* top = NavOverlay::topmost())
-            {
-                o.insert(QStringLiteral("overlay"), QString::fromLatin1(top->metaObject()->className()));
-                o.insert(QStringLiteral("overlaySelection"), top->describe());
-            }
-            o.insert(QStringLiteral("escMenu"), escMenuVisible());
-            o.insert(QStringLiteral("fullscreen"), isFullScreen());
-            o.insert(QStringLiteral("active"), isActiveWindow());
-            o.insert(QStringLiteral("size"), QStringLiteral("%1x%2").arg(width()).arg(height()));
-            return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
-        };
-        h.screenshot = [this](const QString& path) { return grab().save(path); };
-        new UiTestServer(h, this);
-        mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
-    }
+    // UI-test/automation channel (opt-in): see updateUiTestServer(). Created here when enabled at launch.
+    updateUiTestServer();
 
     // Controller navigation of the menus: poll the gamepad ~60Hz and inject nav keys (see pollMenuPad). This
     // also opens a controller connected while browsing (Gamepad::poll handles hot-plug), so it works even if
@@ -987,6 +947,56 @@ void MainWindow::updateNavForPage()
         navCtx_->setActiveRing(nullptr);
         navCtx_->setBackAction(nullptr);
     }
+}
+
+// Create or tear down the UI-test channel (core/UiTestServer) to match its enablement: MMV_UITEST=1,
+// --uitest, or the Settings ▸ Debug toggle. Lets a test agent drive navigation and capture the window
+// WITHOUT bringing it to the front or giving it OS focus — injected keys ride the app's own sendNavKey
+// routing, and grab() renders the widget tree even while occluded/backgrounded.
+void MainWindow::updateUiTestServer()
+{
+    if (!UiTestServer::wanted())
+    {
+        if (uiTest_) { delete uiTest_; uiTest_ = nullptr; mwLog(QStringLiteral("uitest: control channel stopped")); }
+        return;
+    }
+    if (uiTest_) return; // already listening
+    UiTestServer::Hooks h;
+    h.sendKey = [this](int k) {
+        // Qt-INTERNAL activation only (no OS foreground change): focus events + :focus styling then
+        // behave exactly as they would live, while another app keeps the real foreground.
+        if (!isActiveWindow()) QApplication::setActiveWindow(this);
+        sendNavKey(k);
+    };
+    h.state = [this]() -> QString {
+        QJsonObject o;
+        QWidget* cur = stack_->currentWidget();
+        o.insert(QStringLiteral("page"), cur ? QString::fromLatin1(cur->metaObject()->className()) : QString());
+        o.insert(QStringLiteral("pageName"), cur ? cur->objectName() : QString());
+        if (cur == panelPage_ && panelTitle_) o.insert(QStringLiteral("panelTitle"), panelTitle_->text());
+        QWidget* fw = QApplication::focusWidget();
+        if (!fw) fw = focusWidget();
+        o.insert(QStringLiteral("focus"), fw ? QString::fromLatin1(fw->metaObject()->className()) : QString());
+        o.insert(QStringLiteral("focusName"), fw ? fw->objectName() : QString());
+        QString ft;
+        if (auto* b = qobject_cast<QAbstractButton*>(fw)) ft = b->text();
+        else if (auto* e = qobject_cast<QLineEdit*>(fw)) ft = e->text();
+        else if (auto* l = qobject_cast<QListWidget*>(fw)) ft = l->currentItem() ? l->currentItem()->text() : QString();
+        o.insert(QStringLiteral("focusText"), ft);
+        if (NavOverlay* top = NavOverlay::topmost())
+        {
+            o.insert(QStringLiteral("overlay"), QString::fromLatin1(top->metaObject()->className()));
+            o.insert(QStringLiteral("overlaySelection"), top->describe());
+        }
+        o.insert(QStringLiteral("escMenu"), escMenuVisible());
+        o.insert(QStringLiteral("fullscreen"), isFullScreen());
+        o.insert(QStringLiteral("active"), isActiveWindow());
+        o.insert(QStringLiteral("size"), QStringLiteral("%1x%2").arg(width()).arg(height()));
+        return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+    };
+    h.screenshot = [this](const QString& path) { return grab().save(path); };
+    uiTest_ = new UiTestServer(h, this);
+    mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
 }
 
 void MainWindow::pollMenuPad()
@@ -5743,6 +5753,17 @@ void MainWindow::openDebug()
         connect(openLoc, &QPushButton::clicked, this, [path] {
             QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
         });
+
+        // UI-test/automation channel: a local pipe test tools drive the app through (navigate, inspect,
+        // screenshot) without it needing focus. Applies immediately and persists across launches.
+        auto* uitest = new QCheckBox(tr("UI test channel (local automation pipe for testing — no focus needed)"));
+        uitest->setChecked(Settings::uiTestChannel());
+        connect(uitest, &QCheckBox::toggled, this, [this](bool on) {
+            Settings::setUiTestChannel(on);
+            updateUiTestServer(); // start/stop the pipe right away
+        });
+        v->addSpacing(8);
+        v->addWidget(uitest);
     }, [this] { openSettingsHub(); });
 }
 

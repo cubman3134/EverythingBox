@@ -1,4 +1,5 @@
 #include "UiTestServer.h"
+#include "Settings.h"
 
 #include <QCoreApplication>
 #include <QLocalServer>
@@ -7,7 +8,8 @@
 bool UiTestServer::wanted()
 {
     return qEnvironmentVariableIntValue("MMV_UITEST") == 1
-           || QCoreApplication::arguments().contains(QStringLiteral("--uitest"));
+           || QCoreApplication::arguments().contains(QStringLiteral("--uitest"))
+           || Settings::uiTestChannel(); // the Settings ▸ Debug toggle
 }
 
 UiTestServer::UiTestServer(const Hooks& hooks, QObject* parent)

@@ -119,6 +119,11 @@ void Settings::setCheckUpdatesOnStartup(bool on)
 {
     store().setValue(QStringLiteral("general/checkUpdatesOnStartup"), on); store().sync();
 }
+bool Settings::uiTestChannel() { return store().value(QStringLiteral("debug/uiTestChannel"), false).toBool(); }
+void Settings::setUiTestChannel(bool on)
+{
+    store().setValue(QStringLiteral("debug/uiTestChannel"), on); store().sync();
+}
 
 QString Settings::romsFolder()
 {
