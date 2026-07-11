@@ -41,7 +41,8 @@ private:
     explicit NavTextField(QWidget* w);
     void setInteracting(bool on);
     QPointer<QWidget> w_;
-    bool lineEdit_ = false;   // an editable QLineEdit (vs a read-only scrollable text view)
+    bool lineEdit_ = false;   // a QLineEdit (vs a scrollable QTextEdit/QPlainTextEdit view)
+    bool editable_ = false;   // a real EDIT field (vs a read-only display box you never type into)
     bool interacting_ = false;
 };
 

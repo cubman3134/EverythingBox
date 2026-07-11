@@ -38,24 +38,28 @@ void NavTextField::ensure(QWidget* w)
 {
     if (!w || w->property(kNavTextGuard).toBool()) return;
     auto* le = qobject_cast<QLineEdit*>(w);
+    bool editable = false;
     if (le)
     {
-        // A line edit the app deliberately made read-only (a display field, the OSK's own preview) isn't a
-        // place you type, so it keeps its behaviour.
-        if (le->isReadOnly()) return;
-        le->setReadOnly(true); // start SELECTED (outline, no typing until you activate it)
+        // An EDITABLE line edit starts SELECTED (made read-only until you activate it, so it doesn't type on
+        // navigate). A read-only DISPLAY line edit (the ROMs-folder path, changed via its picker) keeps its
+        // read-only-ness but ALSO gets the two-state guard, so arrowing onto it selects it instead of the
+        // cursor swallowing Left/Right and trapping you.
+        editable = !le->isReadOnly();
+        if (editable) le->setReadOnly(true);
     }
     else if (isTextView(w))
     {
-        // A scrollable text view (the Debug log): it stays read-only; make sure it's Tab-reachable so it can
-        // be a ring stop, and start SELECTED so arrows navigate AWAY instead of scrolling it.
+        // A scrollable text view (the Debug log): stays read-only; make it Tab-reachable so it's a ring stop.
         w->setFocusPolicy(Qt::StrongFocus);
     }
     else return; // not a text widget we manage
 
     w->setProperty(kNavTextGuard, true);
     w->setProperty(kNavTextEditing, false);
-    w->installEventFilter(new NavTextField(w));
+    auto* guard = new NavTextField(w);
+    guard->editable_ = editable;
+    w->installEventFilter(guard);
 }
 
 bool NavTextField::isInteracting(const QWidget* w)
@@ -71,7 +75,8 @@ void NavTextField::setInteracting(bool on)
     if (lineEdit_)
     {
         auto* le = static_cast<QLineEdit*>(w_.data());
-        le->setReadOnly(!on);          // editable only while interacting
+        if (editable_) le->setReadOnly(!on); // an editable field becomes writable only while interacting
+        // (a read-only DISPLAY field stays read-only — interacting just lets arrows move its cursor / select)
         if (on) { le->setFocus(Qt::OtherFocusReason); le->deselect(); le->end(false); }
         else le->deselect();
     }
@@ -116,9 +121,9 @@ bool NavTextField::eventFilter(QObject* obj, QEvent* ev)
         if (NavContext::instance() && NavContext::instance()->routeKey(key)) return true;
         return true; // no ring: still swallow, so focus never gets stuck inside an unmanaged widget
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
-        // Select into it. A controller can't type into a line edit inline, so its Enter opens the on-screen
-        // keyboard; everything else (a physical line-edit Enter, or any text-view activation) goes inline.
-        if (lineEdit_ && NavContext::syntheticKey()) NavOverlay::editLineEdit(static_cast<QLineEdit*>(w_.data()));
+        // Select into it. Only an EDITABLE line edit opens the on-screen keyboard on a controller's Enter (a
+        // read-only display field / a text view has nothing to type — Enter just moves into cursor/scroll mode).
+        if (editable_ && NavContext::syntheticKey()) NavOverlay::editLineEdit(static_cast<QLineEdit*>(w_.data()));
         else setInteracting(true);
         return true;
     case Qt::Key_Backspace: case Qt::Key_Escape:

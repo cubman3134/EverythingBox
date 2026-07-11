@@ -1208,9 +1208,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         // outline) isn't typing/scrolling, so its Backspace/Escape goes back like anywhere else.
         auto* le = qobject_cast<QLineEdit*>(fw);
         const bool textView = qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw);
+        // "Busy" = a widget actively taking keys: an editable line edit being edited, or ANY text widget in
+        // its interacting (cursor/scroll) state. Its Backspace stays in the widget instead of going back.
         const bool typing = e->key() == Qt::Key_Backspace
                             && ((le && !le->isReadOnly())
-                                || (textView && NavTextField::isInteracting(fw))
+                                || ((le || textView) && NavTextField::isInteracting(fw))
                                 || qobject_cast<QAbstractSpinBox*>(fw));
         const bool subOpen = subOverlay_ && subOverlay_->isVisible(); // its own handler (below) closes it
         if (!typing && !subOpen) { goBack(); e->accept(); return; }

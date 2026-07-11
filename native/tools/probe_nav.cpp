@@ -489,15 +489,17 @@ int main(int argc, char** argv)
         auto* v = new QVBoxLayout(page);
         auto* top = new QPushButton(QStringLiteral("Top"), page);
         auto* edit = new QLineEdit(QStringLiteral("hello"), page);
+        auto* display = new QLineEdit(QStringLiteral("C:/roms"), page); // a read-only DISPLAY field (issue #3)
+        display->setReadOnly(true);
         auto* bot = new QPushButton(QStringLiteral("Bottom"), page);
-        v->addWidget(top); v->addWidget(edit); v->addWidget(bot);
-        page->setGeometry(0, 0, 320, 200);
+        v->addWidget(top); v->addWidget(edit); v->addWidget(display); v->addWidget(bot);
+        page->setGeometry(0, 0, 320, 240);
         page->show();
         pump();
 
         NavRing ring(page);
         ctx.setActiveRing(&ring);
-        ring.widgets(); // triggers NavTextField::ensure on the QLineEdit
+        ring.widgets(); // triggers NavTextField::ensure on both line edits
 
         // Navigated to -> SELECTED: read-only outline, not a live cursor.
         edit->setFocus(Qt::OtherFocusReason);
@@ -528,6 +530,26 @@ int main(int argc, char** argv)
         CHECK(qobject_cast<Osk*>(NavOverlay::topmost()) != nullptr, "a controller Enter opens the on-screen keyboard");
         if (NavOverlay::topmost()) NavOverlay::topmost()->dismiss(-1);
         pump();
+
+        // Read-only DISPLAY field (issue #3): it's a selectable ring stop that does NOT trap the arrows and
+        // never becomes editable — all textboxes behave the same.
+        CHECK(ring.widgets().contains(display), "a read-only display field is a selectable ring stop");
+        display->setFocus(Qt::OtherFocusReason);
+        pump();
+        CHECK(display->isReadOnly() && !NavTextField::isInteracting(display), "arrowing onto a display field selects it");
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier); QApplication::sendEvent(display, &k); }
+        CHECK(QApplication::focusWidget() == edit, "Up from a selected display field navigates away (not trapped)");
+        display->setFocus(Qt::OtherFocusReason); pump();
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier); QApplication::sendEvent(display, &k); }
+        CHECK(QApplication::focusWidget() == bot, "Down from a selected display field navigates away");
+        // Selecting into it (cursor mode) must never make it writable.
+        display->setFocus(Qt::OtherFocusReason); pump();
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(display, &k); }
+        CHECK(NavTextField::isInteracting(display) && display->isReadOnly(),
+              "a display field selected-into stays read-only (never typeable)");
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier); QApplication::sendEvent(display, &k); }
+        CHECK(!NavTextField::isInteracting(display), "Escape leaves the display field back to just selected");
+
         ctx.setBackAction(nullptr);
         ctx.setActiveRing(nullptr);
         delete page;
