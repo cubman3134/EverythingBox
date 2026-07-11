@@ -6,15 +6,114 @@
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QComboBox>
+#include <QFocusEvent>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
+#include <QStyle>
 #include <QTextEdit>
 #include <QTimer>
 #include <algorithm>
 #include <limits>
+
+// ---------------------------------------------------------------- NavTextField
+
+// A property on the QLineEdit marks that a guard is installed (idempotent attach) and its editing state
+// (so isEditing() and stylesheets can read it without reaching the filter object).
+static const char* kNavTextGuard = "mmvNavText";
+static const char* kNavTextEditing = "mmvEditing";
+
+NavTextField::NavTextField(QLineEdit* edit) : QObject(edit), edit_(edit) {}
+
+void NavTextField::ensure(QLineEdit* edit)
+{
+    if (!edit || edit->property(kNavTextGuard).toBool()) return;
+    // A field the app deliberately made read-only (e.g. a display field, the OSK's own preview) is left
+    // exactly as it is — it isn't a place you type, so it doesn't get the two-state behaviour.
+    if (edit->isReadOnly()) return;
+    edit->setProperty(kNavTextGuard, true);
+    auto* guard = new NavTextField(edit);
+    edit->installEventFilter(guard);
+    // Start SELECTED: focused (when navigated to) shows the outline, but read-only so keystrokes don't type
+    // and Left/Right don't get stuck moving a cursor — they navigate away instead.
+    edit->setReadOnly(true);
+    edit->setProperty(kNavTextEditing, false);
+}
+
+bool NavTextField::isEditing(const QLineEdit* edit)
+{
+    return edit && edit->property(kNavTextEditing).toBool();
+}
+
+void NavTextField::setEditing(bool on)
+{
+    if (!edit_) return;
+    editing_ = on;
+    edit_->setReadOnly(!on);
+    edit_->setProperty(kNavTextEditing, on);
+    if (on)
+    {
+        edit_->setFocus(Qt::OtherFocusReason);
+        edit_->deselect();
+        edit_->end(false); // cursor at the end, ready to type
+    }
+    else
+    {
+        edit_->deselect();
+    }
+    edit_->style()->unpolish(edit_); edit_->style()->polish(edit_); // re-evaluate any [mmvEditing] style
+}
+
+bool NavTextField::eventFilter(QObject* obj, QEvent* ev)
+{
+    auto* e = qobject_cast<QLineEdit*>(obj);
+    if (!e || e != edit_) return false;
+
+    if (ev->type() == QEvent::FocusIn)
+    {
+        // Navigated/tabbed to -> SELECTED (read-only outline). A mouse click -> straight to editing.
+        const auto reason = static_cast<QFocusEvent*>(ev)->reason();
+        setEditing(reason == Qt::MouseFocusReason);
+        return false;
+    }
+    if (ev->type() == QEvent::FocusOut) { setEditing(false); return false; }
+    if (ev->type() == QEvent::MouseButtonPress) { if (!editing_) setEditing(true); return false; }
+
+    if (ev->type() != QEvent::KeyPress) return false;
+    const int key = static_cast<QKeyEvent*>(ev)->key();
+
+    if (editing_)
+    {
+        // Editing: Escape drops back to the SELECTION (no leaving the screen); Enter commits (fires the
+        // field's returnPressed) and also drops back to the selection; everything else types normally.
+        if (key == Qt::Key_Escape) { setEditing(false); return true; }
+        if (key == Qt::Key_Return || key == Qt::Key_Enter) { setEditing(false); return false; }
+        return false;
+    }
+
+    // Selected: keys drive navigation/activation, never the field.
+    switch (key)
+    {
+    case Qt::Key_Left: case Qt::Key_Right: case Qt::Key_Up: case Qt::Key_Down:
+        // Route to the ring so Left/Right move to the next control instead of a hidden cursor.
+        if (NavContext::instance() && NavContext::instance()->routeKey(key)) return true;
+        return true; // no ring: still swallow, so focus never gets stuck editing an unmanaged field
+    case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
+        // Enter starts typing: a controller (synthetic key) can't type inline, so it opens the on-screen
+        // keyboard; a physical Enter edits inline.
+        if (NavContext::syntheticKey()) NavOverlay::editLineEdit(e);
+        else setEditing(true);
+        return true;
+    case Qt::Key_Backspace: case Qt::Key_Escape:
+        return false; // selected-state Back leaves the screen (the unified Back rule handles it)
+    default:
+        // A printable key does NOT auto-start typing (the whole point: navigate = select, not type).
+        return true;
+    }
+}
 
 // ---------------------------------------------------------------- NavRing
 
@@ -56,7 +155,12 @@ QVector<QWidget*> NavRing::widgets() const
     if (!container_) return out;
     const QList<QWidget*> all = container_->findChildren<QWidget*>();
     for (QWidget* w : all)
-        if (ringMember(w)) out.push_back(w);
+        if (ringMember(w))
+        {
+            out.push_back(w);
+            // Any navigable text box gets the two-state select/edit behaviour (idempotent).
+            if (auto* le = qobject_cast<QLineEdit*>(w)) NavTextField::ensure(le);
+        }
     // A compound row (a spinbox/combo with its internal line edit, a list's viewport…) is ONE ring member:
     // drop anything nested inside another member, or arrows would stop twice on the same row and Enter
     // would open the wrong editor.

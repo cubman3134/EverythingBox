@@ -1088,7 +1088,12 @@ void MainWindow::pollMenuPad()
     // Single-line boxes stay pad-navigable: sendNavKey opens the on-screen keyboard on Enter and turns Back
     // into "leave the box" — the pad no longer goes dead when the selector lands on a search field.
     QWidget* fw = QApplication::focusWidget();
-    if (!NavOverlay::topmost() && (qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw))) return;
+    if (!NavOverlay::topmost()
+        && (qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw)
+            // A text box that's actively being EDITED (a live cursor) keeps the pad out of the way; a merely
+            // SELECTED (read-only) box stays pad-navigable so you can arrow off it.
+            || (qobject_cast<QLineEdit*>(fw) && !static_cast<QLineEdit*>(fw)->isReadOnly())))
+        return;
 
     pad->poll();
     padTick_ += 16;
@@ -1183,8 +1188,12 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace)
     {
         QWidget* fw = focusWidget();
+        // Backspace deletes a character only in a field that's actually being EDITED (a live cursor). A text
+        // box that's merely SELECTED (read-only, the two-state NavTextField outline) isn't typing, so its
+        // Backspace/Escape goes back like anywhere else.
+        auto* le = qobject_cast<QLineEdit*>(fw);
         const bool typing = e->key() == Qt::Key_Backspace
-                            && (qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
+                            && ((le && !le->isReadOnly()) || qobject_cast<QTextEdit*>(fw)
                                 || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw));
         const bool subOpen = subOverlay_ && subOverlay_->isVisible(); // its own handler (below) closes it
         if (!typing && !subOpen) { goBack(); e->accept(); return; }

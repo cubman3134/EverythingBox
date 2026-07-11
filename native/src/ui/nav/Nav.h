@@ -20,6 +20,28 @@
 
 class QLineEdit;
 
+// Two-state "console" behaviour for a text box reached by navigation, so arrowing onto one shows a
+// SELECTION (an outline, read-only, arrows keep navigating, keys don't type) instead of dropping you into
+// a live cursor. Enter starts editing — a physical Enter edits inline, a controller's Enter opens the
+// on-screen keyboard — and Escape leaves editing back to the selection WITHOUT leaving the screen.
+// Auto-attached (idempotent) to every QLineEdit a NavRing collects, so all navigable text boxes match.
+class NavTextField : public QObject
+{
+    Q_OBJECT
+public:
+    static void ensure(QLineEdit* edit);        // attach once + start in the selected (read-only) state
+    static bool isEditing(const QLineEdit* edit); // true while inline-editing (a live cursor)
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* ev) override;
+
+private:
+    explicit NavTextField(QLineEdit* edit);
+    void setEditing(bool on);
+    QPointer<QLineEdit> edit_;
+    bool editing_ = false;
+};
+
 // One navigable surface: the focusable widgets inside `container`, stepped with arrow keys by geometry.
 // Create it once per screen/panel/overlay; it re-collects lazily so dynamically built content just works.
 class NavRing : public QObject

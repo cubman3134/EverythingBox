@@ -482,6 +482,57 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // ------------------------------------------- 15. text boxes: select vs edit (two-state)
+    {
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        auto* top = new QPushButton(QStringLiteral("Top"), page);
+        auto* edit = new QLineEdit(QStringLiteral("hello"), page);
+        auto* bot = new QPushButton(QStringLiteral("Bottom"), page);
+        v->addWidget(top); v->addWidget(edit); v->addWidget(bot);
+        page->setGeometry(0, 0, 320, 200);
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+        ring.widgets(); // triggers NavTextField::ensure on the QLineEdit
+
+        // Navigated to -> SELECTED: read-only outline, not a live cursor.
+        edit->setFocus(Qt::OtherFocusReason);
+        pump();
+        CHECK(edit->isReadOnly() && !NavTextField::isEditing(edit), "arrowing onto a text box selects it (read-only, not editing)");
+
+        // A printable key while selected does NOT type into it.
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QStringLiteral("a")); QApplication::sendEvent(edit, &k); }
+        CHECK(edit->text() == QStringLiteral("hello"), "a printable key does not auto-type into a selected box");
+
+        // A physical Enter starts EDITING (a live cursor).
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(edit, &k); }
+        CHECK(!edit->isReadOnly() && NavTextField::isEditing(edit), "Enter starts editing (cursor, typeable)");
+
+        // Escape leaves editing back to the SELECTION — it does NOT bubble to the screen's Back.
+        int backs = 0; ctx.setBackAction([&backs] { ++backs; });
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier); QApplication::sendEvent(edit, &k); }
+        CHECK(edit->isReadOnly() && !NavTextField::isEditing(edit), "Escape leaves editing back to the selection");
+        CHECK(backs == 0, "Escape while editing does NOT go back a screen");
+
+        // A controller (synthetic) Enter opens the on-screen keyboard instead of an inline cursor.
+        {
+            NavContext::SyntheticScope synth;
+            QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QApplication::sendEvent(edit, &k);
+        }
+        pump();
+        CHECK(qobject_cast<Osk*>(NavOverlay::topmost()) != nullptr, "a controller Enter opens the on-screen keyboard");
+        if (NavOverlay::topmost()) NavOverlay::topmost()->dismiss(-1);
+        pump();
+        ctx.setBackAction(nullptr);
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAV-OK\n");
     return 0;

@@ -135,7 +135,11 @@ int main(int argc, char** argv)
         "QPushButton{min-height:30px;padding:8px 16px;font-size:14px;}"
         "QPushButton:focus{background:#2D6CDF;color:#fff;border:2px solid #5B8CFF;border-radius:6px;}"
         "QLineEdit,QComboBox,QAbstractSpinBox{min-height:30px;padding:5px 10px;font-size:14px;}"
+        // Focused = SELECTED: an outline around the box (you navigated to it, you're not typing yet).
         "QLineEdit:focus,QComboBox:focus,QAbstractSpinBox:focus{border:2px solid #5B8CFF;border-radius:4px;}"
+        // EDITING (a live cursor, set by NavTextField): a brighter, filled look so it's clearly distinct
+        // from the plain selection outline.
+        "QLineEdit[mmvEditing=\"true\"]{background:#0d0f14;border:2px solid #8FB2FF;border-radius:4px;}"
         "QCheckBox,QRadioButton{font-size:14px;spacing:8px;}"
         "QCheckBox:focus,QRadioButton:focus{color:#2D6CDF;font-weight:bold;}"
         "QCheckBox::indicator,QRadioButton::indicator{width:20px;height:20px;}"
