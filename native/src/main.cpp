@@ -140,6 +140,10 @@ int main(int argc, char** argv)
         // EDITING (a live cursor, set by NavTextField): a brighter, filled look so it's clearly distinct
         // from the plain selection outline.
         "QLineEdit[mmvEditing=\"true\"]{background:#0d0f14;border:2px solid #8FB2FF;border-radius:4px;}"
+        // A scrollable text view (the Debug log) gets the same two-state outline: SELECTED shows a border,
+        // INTERACTING (scroll mode) shows the brighter one.
+        "QPlainTextEdit:focus,QTextEdit:focus{border:2px solid #5B8CFF;}"
+        "QPlainTextEdit[mmvEditing=\"true\"],QTextEdit[mmvEditing=\"true\"]{border:2px solid #8FB2FF;}"
         "QCheckBox,QRadioButton{font-size:14px;spacing:8px;}"
         "QCheckBox:focus,QRadioButton:focus{color:#2D6CDF;font-weight:bold;}"
         "QCheckBox::indicator,QRadioButton::indicator{width:20px;height:20px;}"

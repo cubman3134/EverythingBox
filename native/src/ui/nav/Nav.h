@@ -20,26 +20,29 @@
 
 class QLineEdit;
 
-// Two-state "console" behaviour for a text box reached by navigation, so arrowing onto one shows a
-// SELECTION (an outline, read-only, arrows keep navigating, keys don't type) instead of dropping you into
-// a live cursor. Enter starts editing — a physical Enter edits inline, a controller's Enter opens the
-// on-screen keyboard — and Escape leaves editing back to the selection WITHOUT leaving the screen.
-// Auto-attached (idempotent) to every QLineEdit a NavRing collects, so all navigable text boxes match.
+// Two-state "console" behaviour for a text widget reached by navigation, so arrowing onto one shows a
+// SELECTION (an outline; arrows keep navigating to other controls) instead of dropping you into it. A
+// second press "selects into" it: an editable QLineEdit starts editing (physical Enter inline, controller
+// Enter opens the on-screen keyboard); a read-only scrollable view (QPlainTextEdit/QTextEdit — e.g. the
+// Debug log) starts scroll mode where arrows move through the text. Escape leaves the interacting state
+// back to the plain selection WITHOUT leaving the screen. Auto-attached (idempotent) to every such widget
+// a NavRing collects, so all navigable text widgets behave the same.
 class NavTextField : public QObject
 {
     Q_OBJECT
 public:
-    static void ensure(QLineEdit* edit);        // attach once + start in the selected (read-only) state
-    static bool isEditing(const QLineEdit* edit); // true while inline-editing (a live cursor)
+    static void ensure(QWidget* w);              // QLineEdit / QTextEdit / QPlainTextEdit; attach once
+    static bool isInteracting(const QWidget* w); // true while editing (line edit) or scrolling (text view)
 
 protected:
     bool eventFilter(QObject* obj, QEvent* ev) override;
 
 private:
-    explicit NavTextField(QLineEdit* edit);
-    void setEditing(bool on);
-    QPointer<QLineEdit> edit_;
-    bool editing_ = false;
+    explicit NavTextField(QWidget* w);
+    void setInteracting(bool on);
+    QPointer<QWidget> w_;
+    bool lineEdit_ = false;   // an editable QLineEdit (vs a read-only scrollable text view)
+    bool interacting_ = false;
 };
 
 // One navigable surface: the focusable widgets inside `container`, stepped with arrow keys by geometry.

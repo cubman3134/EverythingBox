@@ -873,6 +873,17 @@ void MainWindow::sendNavKey(int key)
         deliver(tgt, key == Qt::Key_Backspace ? Qt::Key_Escape : key);
         return;
     }
+    // 3.5. A text widget that's being INTERACTED with (a line edit being edited, or the Debug log in scroll
+    //      mode) owns its keys: deliver straight to it so its two-state filter handles Escape (leave to the
+    //      selection, NOT the screen's Back), arrows (scroll / move the cursor), and Enter (commit). Physical
+    //      keys reach the filter directly; the controller's synthetic ones have to be aimed here.
+    {
+        QWidget* fwi = QApplication::focusWidget();
+        if (!fwi) fwi = focusWidget();
+        if ((qobject_cast<QLineEdit*>(fwi) || qobject_cast<QTextEdit*>(fwi) || qobject_cast<QPlainTextEdit*>(fwi))
+            && NavTextField::isInteracting(fwi))
+        { deliver(fwi, key); return; }
+    }
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
@@ -1088,12 +1099,16 @@ void MainWindow::pollMenuPad()
     // Single-line boxes stay pad-navigable: sendNavKey opens the on-screen keyboard on Enter and turns Back
     // into "leave the box" — the pad no longer goes dead when the selector lands on a search field.
     QWidget* fw = QApplication::focusWidget();
-    if (!NavOverlay::topmost()
-        && (qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw)
-            // A text box that's actively being EDITED (a live cursor) keeps the pad out of the way; a merely
-            // SELECTED (read-only) box stays pad-navigable so you can arrow off it.
-            || (qobject_cast<QLineEdit*>(fw) && !static_cast<QLineEdit*>(fw)->isReadOnly())))
-        return;
+    if (!NavOverlay::topmost())
+    {
+        // A line edit being inline-edited on the keyboard keeps the pad out. But a nav-kit text view (the
+        // Debug log) stays pad-driven EVEN in scroll mode — that's how the controller scrolls it and Escapes
+        // back out (sendNavKey routes the pad keys into it). Only an UNGUARDED raw multi-line editor keeps
+        // the pad out, as before.
+        const bool textView = qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw);
+        if (qobject_cast<QLineEdit*>(fw) && !static_cast<QLineEdit*>(fw)->isReadOnly()) return;
+        if (textView && !fw->property("mmvNavText").toBool()) return;
+    }
 
     pad->poll();
     padTick_ += 16;
@@ -1188,13 +1203,15 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace)
     {
         QWidget* fw = focusWidget();
-        // Backspace deletes a character only in a field that's actually being EDITED (a live cursor). A text
-        // box that's merely SELECTED (read-only, the two-state NavTextField outline) isn't typing, so its
-        // Backspace/Escape goes back like anywhere else.
+        // Backspace belongs to a text widget only while it's actually being INTERACTED with (a live cursor,
+        // or a scrollable view in scroll mode). A widget that's merely SELECTED (the two-state NavTextField
+        // outline) isn't typing/scrolling, so its Backspace/Escape goes back like anywhere else.
         auto* le = qobject_cast<QLineEdit*>(fw);
+        const bool textView = qobject_cast<QTextEdit*>(fw) || qobject_cast<QPlainTextEdit*>(fw);
         const bool typing = e->key() == Qt::Key_Backspace
-                            && ((le && !le->isReadOnly()) || qobject_cast<QTextEdit*>(fw)
-                                || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw));
+                            && ((le && !le->isReadOnly())
+                                || (textView && NavTextField::isInteracting(fw))
+                                || qobject_cast<QAbstractSpinBox*>(fw));
         const bool subOpen = subOverlay_ && subOverlay_->isVisible(); // its own handler (below) closes it
         if (!typing && !subOpen) { goBack(); e->accept(); return; }
     }

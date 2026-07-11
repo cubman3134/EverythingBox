@@ -26,92 +26,105 @@
 static const char* kNavTextGuard = "mmvNavText";
 static const char* kNavTextEditing = "mmvEditing";
 
-NavTextField::NavTextField(QLineEdit* edit) : QObject(edit), edit_(edit) {}
-
-void NavTextField::ensure(QLineEdit* edit)
+static bool isTextView(const QWidget* w)  // a read-only scrollable text display (log viewer, etc.)
 {
-    if (!edit || edit->property(kNavTextGuard).toBool()) return;
-    // A field the app deliberately made read-only (e.g. a display field, the OSK's own preview) is left
-    // exactly as it is — it isn't a place you type, so it doesn't get the two-state behaviour.
-    if (edit->isReadOnly()) return;
-    edit->setProperty(kNavTextGuard, true);
-    auto* guard = new NavTextField(edit);
-    edit->installEventFilter(guard);
-    // Start SELECTED: focused (when navigated to) shows the outline, but read-only so keystrokes don't type
-    // and Left/Right don't get stuck moving a cursor — they navigate away instead.
-    edit->setReadOnly(true);
-    edit->setProperty(kNavTextEditing, false);
+    return qobject_cast<const QTextEdit*>(w) || qobject_cast<const QPlainTextEdit*>(w);
 }
 
-bool NavTextField::isEditing(const QLineEdit* edit)
+NavTextField::NavTextField(QWidget* w)
+    : QObject(w), w_(w), lineEdit_(qobject_cast<QLineEdit*>(w) != nullptr) {}
+
+void NavTextField::ensure(QWidget* w)
 {
-    return edit && edit->property(kNavTextEditing).toBool();
+    if (!w || w->property(kNavTextGuard).toBool()) return;
+    auto* le = qobject_cast<QLineEdit*>(w);
+    if (le)
+    {
+        // A line edit the app deliberately made read-only (a display field, the OSK's own preview) isn't a
+        // place you type, so it keeps its behaviour.
+        if (le->isReadOnly()) return;
+        le->setReadOnly(true); // start SELECTED (outline, no typing until you activate it)
+    }
+    else if (isTextView(w))
+    {
+        // A scrollable text view (the Debug log): it stays read-only; make sure it's Tab-reachable so it can
+        // be a ring stop, and start SELECTED so arrows navigate AWAY instead of scrolling it.
+        w->setFocusPolicy(Qt::StrongFocus);
+    }
+    else return; // not a text widget we manage
+
+    w->setProperty(kNavTextGuard, true);
+    w->setProperty(kNavTextEditing, false);
+    w->installEventFilter(new NavTextField(w));
 }
 
-void NavTextField::setEditing(bool on)
+bool NavTextField::isInteracting(const QWidget* w)
 {
-    if (!edit_) return;
-    editing_ = on;
-    edit_->setReadOnly(!on);
-    edit_->setProperty(kNavTextEditing, on);
-    if (on)
+    return w && w->property(kNavTextEditing).toBool();
+}
+
+void NavTextField::setInteracting(bool on)
+{
+    if (!w_) return;
+    interacting_ = on;
+    w_->setProperty(kNavTextEditing, on);
+    if (lineEdit_)
     {
-        edit_->setFocus(Qt::OtherFocusReason);
-        edit_->deselect();
-        edit_->end(false); // cursor at the end, ready to type
+        auto* le = static_cast<QLineEdit*>(w_.data());
+        le->setReadOnly(!on);          // editable only while interacting
+        if (on) { le->setFocus(Qt::OtherFocusReason); le->deselect(); le->end(false); }
+        else le->deselect();
     }
-    else
-    {
-        edit_->deselect();
-    }
-    edit_->style()->unpolish(edit_); edit_->style()->polish(edit_); // re-evaluate any [mmvEditing] style
+    // (A text view stays read-only either way — the state only decides whether arrows scroll it or navigate.)
+    w_->style()->unpolish(w_); w_->style()->polish(w_); // re-evaluate the [mmvEditing] style
 }
 
 bool NavTextField::eventFilter(QObject* obj, QEvent* ev)
 {
-    auto* e = qobject_cast<QLineEdit*>(obj);
-    if (!e || e != edit_) return false;
+    if (obj != w_) return false;
+    // During a widget's destruction Qt demotes its dynamic type and still delivers a teardown FocusOut; a
+    // failed cast means it's going away — bail before touching it (else restyling a half-dead widget crashes).
+    if (lineEdit_ ? (qobject_cast<QLineEdit*>(obj) == nullptr) : !isTextView(static_cast<QWidget*>(obj)))
+        return false;
 
     if (ev->type() == QEvent::FocusIn)
     {
-        // Navigated/tabbed to -> SELECTED (read-only outline). A mouse click -> straight to editing.
-        const auto reason = static_cast<QFocusEvent*>(ev)->reason();
-        setEditing(reason == Qt::MouseFocusReason);
+        // Navigated/tabbed to -> SELECTED (outline). A mouse click -> straight into it.
+        setInteracting(static_cast<QFocusEvent*>(ev)->reason() == Qt::MouseFocusReason);
         return false;
     }
-    if (ev->type() == QEvent::FocusOut) { setEditing(false); return false; }
-    if (ev->type() == QEvent::MouseButtonPress) { if (!editing_) setEditing(true); return false; }
+    if (ev->type() == QEvent::FocusOut) { setInteracting(false); return false; }
+    if (ev->type() == QEvent::MouseButtonPress) { if (!interacting_) setInteracting(true); return false; }
 
     if (ev->type() != QEvent::KeyPress) return false;
     const int key = static_cast<QKeyEvent*>(ev)->key();
 
-    if (editing_)
+    if (interacting_)
     {
-        // Editing: Escape drops back to the SELECTION (no leaving the screen); Enter commits (fires the
-        // field's returnPressed) and also drops back to the selection; everything else types normally.
-        if (key == Qt::Key_Escape) { setEditing(false); return true; }
-        if (key == Qt::Key_Return || key == Qt::Key_Enter) { setEditing(false); return false; }
-        return false;
+        // Interacting (editing a line edit / scrolling a view): Escape drops back to the plain SELECTION
+        // without leaving the screen. A line edit's Enter commits (returnPressed fires) and drops back.
+        if (key == Qt::Key_Escape) { setInteracting(false); return true; }
+        if (lineEdit_ && (key == Qt::Key_Return || key == Qt::Key_Enter)) { setInteracting(false); return false; }
+        return false; // otherwise the widget types / scrolls normally
     }
 
-    // Selected: keys drive navigation/activation, never the field.
+    // Selected: keys drive navigation/activation, never the widget itself.
     switch (key)
     {
     case Qt::Key_Left: case Qt::Key_Right: case Qt::Key_Up: case Qt::Key_Down:
-        // Route to the ring so Left/Right move to the next control instead of a hidden cursor.
+        // Route to the ring so arrows move to the next control instead of scrolling / moving a hidden cursor.
         if (NavContext::instance() && NavContext::instance()->routeKey(key)) return true;
-        return true; // no ring: still swallow, so focus never gets stuck editing an unmanaged field
+        return true; // no ring: still swallow, so focus never gets stuck inside an unmanaged widget
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
-        // Enter starts typing: a controller (synthetic key) can't type inline, so it opens the on-screen
-        // keyboard; a physical Enter edits inline.
-        if (NavContext::syntheticKey()) NavOverlay::editLineEdit(e);
-        else setEditing(true);
+        // Select into it. A controller can't type into a line edit inline, so its Enter opens the on-screen
+        // keyboard; everything else (a physical line-edit Enter, or any text-view activation) goes inline.
+        if (lineEdit_ && NavContext::syntheticKey()) NavOverlay::editLineEdit(static_cast<QLineEdit*>(w_.data()));
+        else setInteracting(true);
         return true;
     case Qt::Key_Backspace: case Qt::Key_Escape:
         return false; // selected-state Back leaves the screen (the unified Back rule handles it)
     default:
-        // A printable key does NOT auto-start typing (the whole point: navigate = select, not type).
-        return true;
+        return true;  // a printable key does NOT auto-start typing — navigate = select, not type
     }
 }
 
@@ -134,7 +147,10 @@ static bool ringMember(const QWidget* w)
     if (!w || !w->isVisible() || !w->isEnabled()) return false;
     if (!(w->focusPolicy() & Qt::TabFocus)) return false;
     if (qobject_cast<const QScrollBar*>(w)) return false;
-    if (qobject_cast<const QAbstractScrollArea*>(w) && !qobject_cast<const QAbstractItemView*>(w))
+    // A plain scroll CONTAINER isn't a stop (its rows are). Item views (lists) and read-only text views
+    // (the Debug log) ARE stops: they're a single selectable widget you can then "select into".
+    if (qobject_cast<const QAbstractScrollArea*>(w) && !qobject_cast<const QAbstractItemView*>(w)
+        && !qobject_cast<const QTextEdit*>(w) && !qobject_cast<const QPlainTextEdit*>(w))
         return false;
     return true;
 }
@@ -158,8 +174,9 @@ QVector<QWidget*> NavRing::widgets() const
         if (ringMember(w))
         {
             out.push_back(w);
-            // Any navigable text box gets the two-state select/edit behaviour (idempotent).
-            if (auto* le = qobject_cast<QLineEdit*>(w)) NavTextField::ensure(le);
+            // Any navigable text widget (a line edit, or a read-only scrollable view like the Debug log)
+            // gets the two-state select/interact behaviour (idempotent).
+            if (qobject_cast<QLineEdit*>(w) || isTextView(w)) NavTextField::ensure(w);
         }
     // A compound row (a spinbox/combo with its internal line edit, a list's viewport…) is ONE ring member:
     // drop anything nested inside another member, or arrows would stop twice on the same row and Enter

@@ -14,6 +14,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListView>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QSlider>
@@ -501,7 +502,7 @@ int main(int argc, char** argv)
         // Navigated to -> SELECTED: read-only outline, not a live cursor.
         edit->setFocus(Qt::OtherFocusReason);
         pump();
-        CHECK(edit->isReadOnly() && !NavTextField::isEditing(edit), "arrowing onto a text box selects it (read-only, not editing)");
+        CHECK(edit->isReadOnly() && !NavTextField::isInteracting(edit), "arrowing onto a text box selects it (read-only, not editing)");
 
         // A printable key while selected does NOT type into it.
         { QKeyEvent k(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, QStringLiteral("a")); QApplication::sendEvent(edit, &k); }
@@ -509,12 +510,12 @@ int main(int argc, char** argv)
 
         // A physical Enter starts EDITING (a live cursor).
         { QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(edit, &k); }
-        CHECK(!edit->isReadOnly() && NavTextField::isEditing(edit), "Enter starts editing (cursor, typeable)");
+        CHECK(!edit->isReadOnly() && NavTextField::isInteracting(edit), "Enter starts editing (cursor, typeable)");
 
         // Escape leaves editing back to the SELECTION — it does NOT bubble to the screen's Back.
         int backs = 0; ctx.setBackAction([&backs] { ++backs; });
         { QKeyEvent k(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier); QApplication::sendEvent(edit, &k); }
-        CHECK(edit->isReadOnly() && !NavTextField::isEditing(edit), "Escape leaves editing back to the selection");
+        CHECK(edit->isReadOnly() && !NavTextField::isInteracting(edit), "Escape leaves editing back to the selection");
         CHECK(backs == 0, "Escape while editing does NOT go back a screen");
 
         // A controller (synthetic) Enter opens the on-screen keyboard instead of an inline cursor.
@@ -527,6 +528,52 @@ int main(int argc, char** argv)
         CHECK(qobject_cast<Osk*>(NavOverlay::topmost()) != nullptr, "a controller Enter opens the on-screen keyboard");
         if (NavOverlay::topmost()) NavOverlay::topmost()->dismiss(-1);
         pump();
+        ctx.setBackAction(nullptr);
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
+    // ------------------------------------------- 16. Debug-log shape: a scrollable text view is selectable,
+    //                                                 not an arrow-key trap (github issue #1)
+    {
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        auto* top = new QPushButton(QStringLiteral("Refresh"), page);
+        auto* log = new QPlainTextEdit(page);
+        log->setReadOnly(true);
+        for (int i = 0; i < 200; ++i) log->appendPlainText(QStringLiteral("log line %1").arg(i));
+        auto* bot = new QPushButton(QStringLiteral("Clear"), page);
+        v->addWidget(top); v->addWidget(log, 1); v->addWidget(bot);
+        page->setGeometry(0, 0, 360, 300);
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+        const QVector<QWidget*> ring0 = ring.widgets(); // triggers NavTextField::ensure on the log view
+        CHECK(ring0.contains(log), "the read-only log view is a selectable ring stop");
+
+        // Selected: arrows navigate to the surrounding buttons instead of scrolling the log.
+        log->setFocus(Qt::OtherFocusReason);
+        pump();
+        CHECK(!NavTextField::isInteracting(log), "arrowing onto the log selects it (not scroll mode)");
+        int backs = 0; ctx.setBackAction([&backs] { ++backs; });
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier); QApplication::sendEvent(log, &k); }
+        CHECK(QApplication::focusWidget() == top, "Up from the selected log moves to the button above it");
+        log->setFocus(Qt::OtherFocusReason); pump();
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier); QApplication::sendEvent(log, &k); }
+        CHECK(QApplication::focusWidget() == bot, "Down from the selected log moves to the button below it");
+
+        // Enter "selects into" it: scroll mode. Escape returns to just selecting it (never leaves the screen).
+        log->setFocus(Qt::OtherFocusReason); pump();
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(log, &k); }
+        CHECK(NavTextField::isInteracting(log), "Enter selects into the log (scroll mode)");
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier); QApplication::sendEvent(log, &k); }
+        CHECK(!NavTextField::isInteracting(log) && QApplication::focusWidget() == log,
+              "Escape leaves scroll mode back to just selecting the log");
+        CHECK(backs == 0, "Escape in the log never leaves the Debug screen");
+
         ctx.setBackAction(nullptr);
         ctx.setActiveRing(nullptr);
         delete page;
