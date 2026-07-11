@@ -19,6 +19,25 @@
 #include <functional>
 
 class QLineEdit;
+class QComboBox;
+
+// Two-state behaviour for a dropdown reached by navigation (the QComboBox analogue of NavTextField):
+// arrowing onto a combo SELECTS it (a focus outline; arrows navigate away; the value does NOT change; a
+// scroll-wheel over it does nothing), and Enter / click OPENS its scrollable popup. Auto-attached to every
+// combo a NavRing collects; ring-off screens (the Input Mapping dialog) attach it to their own combos.
+class NavCombo : public QObject
+{
+    Q_OBJECT
+public:
+    static void ensure(QComboBox* combo);  // idempotent
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* ev) override;
+
+private:
+    explicit NavCombo(QComboBox* combo);
+    QPointer<QComboBox> combo_;
+};
 
 // Two-state "console" behaviour for a text widget reached by navigation, so arrowing onto one shows a
 // SELECTION (an outline; arrows keep navigating to other controls) instead of dropping you into it. A

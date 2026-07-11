@@ -16,8 +16,64 @@
 #include <QStyle>
 #include <QTextEdit>
 #include <QTimer>
+#include <QWheelEvent>
 #include <algorithm>
 #include <limits>
+
+// ---------------------------------------------------------------- NavCombo
+
+static const char* kNavComboGuard = "mmvNavCombo";
+
+NavCombo::NavCombo(QComboBox* combo) : QObject(combo), combo_(combo) {}
+
+void NavCombo::ensure(QComboBox* combo)
+{
+    if (!combo || combo->property(kNavComboGuard).toBool()) return;
+    combo->setProperty(kNavComboGuard, true);
+    combo->installEventFilter(new NavCombo(combo));
+}
+
+bool NavCombo::eventFilter(QObject* obj, QEvent* ev)
+{
+    // Only the wheel + key events are ours — bail on everything else BEFORE touching view(). (Calling
+    // QComboBox::view() lazily CREATES the popup, whose ChildAdded event re-enters this filter; checking
+    // view() for those events recursed forever. Now view() is only reached for events we actually handle.)
+    const QEvent::Type type = ev->type();
+    if (type != QEvent::Wheel && type != QEvent::KeyPress) return false;
+    // qobject_cast also guards teardown (a demoted dynamic type during destruction fails the cast).
+    auto* c = qobject_cast<QComboBox*>(obj);
+    if (!c || c != combo_) return false;
+
+    // Once the popup is open the combo's own list view owns the keys (scroll/pick/Escape); only the CLOSED
+    // (selected) state is guarded.
+    const bool open = c->view() && c->view()->isVisible();
+    if (type == QEvent::Wheel)
+        return !open; // scrolling OVER a closed dropdown must not spin its value
+    if (open) return false;
+
+    switch (static_cast<QKeyEvent*>(ev)->key())
+    {
+    case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:
+    {
+        const int key = static_cast<QKeyEvent*>(ev)->key();
+        // Navigate AWAY instead of changing the value: the active ring if there is one, else hop focus
+        // geometrically within this window (covers the ring-off Input Mapping dialog).
+        if (!(NavContext::instance() && NavContext::instance()->routeKey(key)) && c->window())
+        {
+            NavRing tmp(c->window());
+            if (QWidget* next = NavRing::pickNext(c, tmp.widgets(), key)) next->setFocus(Qt::OtherFocusReason);
+        }
+        return true;
+    }
+    case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
+        c->showPopup();   // "select into" it -> the scrollable popup
+        return true;
+    case Qt::Key_Backspace: case Qt::Key_Escape:
+        return false;     // Back leaves the screen (the unified Back rule handles it)
+    default:
+        return true;      // no type-ahead / Page/Home/End value change until it's opened
+    }
+}
 
 // ---------------------------------------------------------------- NavTextField
 
@@ -180,8 +236,9 @@ QVector<QWidget*> NavRing::widgets() const
         {
             out.push_back(w);
             // Any navigable text widget (a line edit, or a read-only scrollable view like the Debug log)
-            // gets the two-state select/interact behaviour (idempotent).
+            // gets the two-state select/interact behaviour; dropdowns get the combo two-state (idempotent).
             if (qobject_cast<QLineEdit*>(w) || isTextView(w)) NavTextField::ensure(w);
+            else if (auto* cb = qobject_cast<QComboBox*>(w)) NavCombo::ensure(cb);
         }
     // A compound row (a spinbox/combo with its internal line edit, a list's viewport…) is ONE ring member:
     // drop anything nested inside another member, or arrows would stop twice on the same row and Enter

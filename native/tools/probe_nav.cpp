@@ -20,6 +20,7 @@
 #include <QSlider>
 #include <QSpinBox>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 #include <cstdio>
 
 static int failures = 0;
@@ -597,6 +598,50 @@ int main(int argc, char** argv)
         CHECK(backs == 0, "Escape in the log never leaves the Debug screen");
 
         ctx.setBackAction(nullptr);
+        ctx.setActiveRing(nullptr);
+        delete page;
+        pump();
+    }
+
+    // ------------------------------------------- 17. dropdowns: select vs open (two-state, github issue #4)
+    {
+        auto* page = new QWidget(&win);
+        auto* v = new QVBoxLayout(page);
+        auto* top = new QPushButton(QStringLiteral("Top"), page);
+        auto* combo = new QComboBox(page);
+        combo->addItems({ QStringLiteral("Player 1"), QStringLiteral("Player 2"), QStringLiteral("Player 3") });
+        auto* bot = new QPushButton(QStringLiteral("Bottom"), page);
+        v->addWidget(top); v->addWidget(combo); v->addWidget(bot);
+        page->setGeometry(0, 0, 320, 200);
+        page->show();
+        pump();
+
+        NavRing ring(page);
+        ctx.setActiveRing(&ring);
+        CHECK(ring.widgets().contains(combo), "a dropdown is a ring stop"); // also triggers NavCombo::ensure
+
+        combo->setCurrentIndex(1);
+        combo->setFocus(Qt::OtherFocusReason);
+        pump();
+        // Arrowing over a SELECTED (closed) dropdown must navigate away, NOT change its value.
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier); QApplication::sendEvent(combo, &k); }
+        CHECK(combo->currentIndex() == 1, "Up over a closed dropdown does not change its value");
+        CHECK(QApplication::focusWidget() == top, "Up navigates away from the dropdown");
+        combo->setFocus(Qt::OtherFocusReason); pump();
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier); QApplication::sendEvent(combo, &k); }
+        CHECK(combo->currentIndex() == 1 && QApplication::focusWidget() == bot,
+              "Down navigates away without changing the value");
+        // A scroll-wheel over the closed dropdown does nothing.
+        combo->setFocus(Qt::OtherFocusReason); pump();
+        { QWheelEvent w(QPointF(5, 5), combo->mapToGlobal(QPoint(5, 5)), QPoint(), QPoint(0, -120),
+                        Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+          QApplication::sendEvent(combo, &w); }
+        CHECK(combo->currentIndex() == 1, "scrolling over a closed dropdown does not spin its value");
+        // Enter opens the popup (select into it).
+        { QKeyEvent k(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier); QApplication::sendEvent(combo, &k); }
+        pump();
+        CHECK(combo->view() && combo->view()->isVisible(), "Enter opens the dropdown popup");
+        combo->hidePopup();
         ctx.setActiveRing(nullptr);
         delete page;
         pump();

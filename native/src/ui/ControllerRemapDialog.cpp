@@ -3,6 +3,7 @@
 #include "../input/Keymap.h"
 #include "../core/Settings.h"
 #include "../core/SystemCatalog.h"
+#include "nav/Nav.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -77,6 +78,13 @@ ControllerRemapDialog::ControllerRemapDialog(Gamepad* pad, Keymap* keys, QWidget
     playerRow->addWidget(turboSpeed_);
     playerRow->addStretch(1);
     v->addLayout(playerRow);
+
+    // This dialog runs ring-off (it grabs the keyboard for bind capture), so its dropdowns don't get the
+    // nav ring's auto-attach — give them the two-state select/open behaviour explicitly, so arrowing onto
+    // the Profile/Player/Turbo dropdowns navigates away instead of changing the value.
+    NavCombo::ensure(scopeCombo_);
+    NavCombo::ensure(playerCombo_);
+    NavCombo::ensure(turboSpeed_);
 
     status_ = new QLabel(this);
     status_->setWordWrap(true);
