@@ -93,9 +93,13 @@ QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, i
         default: return nullptr;
         }
         if (primary <= 0) continue;                      // not in that direction
-        // Prefer the geometrically nearest widget, weighting sideways drift heavily so a grid steps within
-        // its column/row instead of diagonally.
-        const double score = primary + 2.5 * orth;
+        // A candidate that's more SIDEWAYS than in-direction isn't really "that way" (e.g. the header Back
+        // button sitting up-and-slightly-right of a row must not win a Right press) — skip it so we land on
+        // the widget actually in the pressed direction.
+        if (orth > primary + 4) continue;
+        // Among the rest, prefer the nearest, weighting sideways drift heavily so a grid/row steps straight
+        // (stay in the column on Up/Down, on the row for Left/Right) instead of drifting diagonally.
+        const double score = primary + 4.0 * orth;
         if (score < bestScore) { bestScore = score; best = w; }
     }
     return best;

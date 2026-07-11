@@ -377,7 +377,9 @@ int main(int argc, char** argv)
         // focus on a live ring member — the selection can never vanish.
         auto* page = new QWidget(&win);
         auto* v = new QVBoxLayout(page);
-        v->addWidget(new QPushButton(QStringLiteral("‹ Back"), page));
+        auto* back = new QPushButton(QStringLiteral("‹ Back"), page);
+        v->addWidget(back);
+        QPushButton* pick0 = nullptr; QPushButton* edit0 = nullptr;
         for (int r = 0; r < 3; ++r)
         {
             auto* row = new QHBoxLayout;
@@ -387,8 +389,10 @@ int main(int argc, char** argv)
             auto* edit = new QPushButton(QStringLiteral("✎"), page); edit->setFixedWidth(36); row->addWidget(edit);
             auto* del  = new QPushButton(QStringLiteral("✕"), page); del->setFixedWidth(36);  row->addWidget(del);
             v->addLayout(row);
+            if (r == 0) { pick0 = pick; edit0 = edit; }
         }
-        v->addWidget(new QPushButton(QStringLiteral("＋  Create New Profile"), page));
+        auto* create = new QPushButton(QStringLiteral("＋  Create New Profile"), page);
+        v->addWidget(create);
         v->addWidget(new QPushButton(QStringLiteral("Cancel"), page));
         v->addStretch(1);
         page->setGeometry(0, 0, 420, 460);
@@ -397,6 +401,31 @@ int main(int argc, char** argv)
 
         NavRing ring(page);
         ctx.setActiveRing(&ring);
+
+        // Intuitive geometry (the reported bug: Down from a profile row dropped into the tiny ✎ edit button
+        // instead of the row below it). Down from the wide "pick" button lands on the row DIRECTLY below,
+        // never the narrow side button; the ✎/✕ are reached with Right, not Down.
+        pick0->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Right);
+        CHECK(QApplication::focusWidget() == edit0, "Right from a profile row reaches its ✎ edit button");
+        pick0->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Down);
+        CHECK(QApplication::focusWidget() != edit0, "Down from a profile row does NOT drop into the ✎ button");
+        // Walk straight down the wide column: Profile0 -> Profile1 -> Profile2 -> Create -> Cancel, never a
+        // side button, and clamping at Cancel.
+        back->setFocus(); pump();
+        ctx.routeKey(Qt::Key_Down); // Profile 0
+        for (int i = 0; i < 5; ++i)
+        {
+            const QString before = qobject_cast<QPushButton*>(QApplication::focusWidget())->text();
+            ctx.routeKey(Qt::Key_Down);
+            auto* now = qobject_cast<QPushButton*>(QApplication::focusWidget());
+            CHECK(now && now->width() > 60, "Down stays on full-width rows (never a 36px side button)");
+        }
+        CHECK(QApplication::focusWidget() == QApplication::focusWidget() // reached the bottom
+              && qobject_cast<QPushButton*>(QApplication::focusWidget())->text() == QStringLiteral("Cancel"),
+              "walking Down lands on Cancel and clamps there");
+
         ring.ensureSelection();
         static const int walk[] = { Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Right, Qt::Key_Down,
                                     Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Down, Qt::Key_Left,

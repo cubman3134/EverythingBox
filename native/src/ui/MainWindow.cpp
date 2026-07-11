@@ -1190,42 +1190,19 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         if (!typing && !subOpen) { goBack(); e->accept(); return; }
     }
 
-    // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …). Up/Down
-    // (and Left/Right) move focus within a bounded ring of the header Back button + the visible content rows, so
-    // the selection can NEVER be lost to an off-screen widget; Backspace goes back; Enter/Select activates the
-    // focused row. This runs for embedded dialogs too so their header Back is reachable and Backspace works -
-    // it's skipped only while a text field / spin box / editable combo is focused, so typing keeps its keys.
-    if (stack_->currentWidget() == panelPage_)
+    // Arrow-key / remote navigation for the inline settings AND dialog panels (Settings, Profiles, …): route
+    // physical keys through the SAME geometric ring the controller uses (navCtx_ -> panelRing_), so both input
+    // paths behave identically. Geometric nav places a row's side buttons Left/Right of it (e.g. a profile's
+    // ✎/✕ beside the name) and the next row Down — matching where you'd expect to land, unlike the old linear
+    // walk that dropped into the tiny edit button on the way down. Skipped while a text field is focused (so
+    // typing keeps its keys); Backspace/Escape already went to the unified Back above.
+    if (stack_->currentWidget() == panelPage_ && navCtx_)
     {
         QWidget* fw = focusWidget();
         const bool editing = qobject_cast<QLineEdit*>(fw) || qobject_cast<QTextEdit*>(fw)
                            || qobject_cast<QPlainTextEdit*>(fw) || qobject_cast<QAbstractSpinBox*>(fw)
                            || (qobject_cast<QComboBox*>(fw) && qobject_cast<QComboBox*>(fw)->isEditable());
-        if (!editing)
-        {
-            const int key = e->key();
-            // Only Up/Down move between rows (a vertical list). Left/Right do nothing here - so, e.g., they
-            // never nudge focus off the header Back button, and a focused slider keeps them for its own use.
-            const bool prev = (key == Qt::Key_Up);
-            const bool next = (key == Qt::Key_Down);
-            if (prev || next)
-            {
-                // A strict top-to-bottom list: Back at the top, then the rows in order. Down stops at the last
-                // row, Up stops at Back - never wraps around.
-                const QVector<QWidget*> ring = panelNavRing();
-                const int idx = ring.indexOf(fw);
-                if (idx >= 0) // clamp; if focus isn't on a known row, leave it put (never jump to Back)
-                    ring[qBound(0, idx + (next ? 1 : -1), ring.size() - 1)]->setFocus(Qt::TabFocusReason);
-                return;
-            }
-            switch (key)
-            {
-            case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select:
-                if (auto* b = qobject_cast<QAbstractButton*>(fw)) { b->click(); return; }
-                break;
-            default: break; // Backspace/Escape handled by the unified Back above
-            }
-        }
+        if (!editing && navCtx_->routeKey(e->key())) { e->accept(); return; }
     }
 
     // Arrow-key / remote navigation for the media player transport. Left/Right move across the buttons,
@@ -1318,6 +1295,10 @@ void MainWindow::changeEvent(QEvent* event)
                 if (auto* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
 #endif
             }
+            // Alt-Tabbing away drops the focus widget; on the way back, put the selection right back where it
+            // was (or the nearest valid row) so the selector is NEVER lost to a window switch. Runs on every
+            // ring-managed screen (panels/library); other screens keep their own focus handling above.
+            if (navCtx_) navCtx_->ensureFocus();
         });
 }
 
