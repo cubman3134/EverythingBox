@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "Notifier.h"
 #include "../media/StreamResolver.h"
+#include "../media/PlaybackSession.h"
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
@@ -175,20 +176,6 @@ static QSettings& store()
 
 static QPushButton* panelRow(const QString& label); // large TV-friendly menu row (defined below)
 
-// Stable, path-derived key prefix for one file's resume state (shared by video / audio / audiobooks).
-static QString mediaResumeKey(const QString& path)
-{
-    const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    return QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
-}
-
-// Pre-generalization audiobooks were stored under "audiobook/"; read those too so in-progress books resume.
-static QString legacyAudiobookKey(const QString& path)
-{
-    const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    return QStringLiteral("audiobook/") + QString::fromLatin1(h) + QStringLiteral("/");
-}
-
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
@@ -275,7 +262,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     playlist_->setVisible(false);
     playlist_->setMinimumWidth(180); // stay readable when the splitter shows it
     connect(playlist_, &QListWidget::itemActivated, this,
-            [this] { playTrack(playlist_->currentRow()); });
+            [this] { session_->playIndex(playlist_->currentRow()); });
     auto* playerPage = new QSplitter(Qt::Horizontal, this);
     playerPage->addWidget(playlist_);
     playerPage->addWidget(player_);
@@ -557,7 +544,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     videoBack_->hide();
     videoBack_->installEventFilter(this); // keep the overlay alive while hovering it
     connect(videoBack_, &QPushButton::clicked, this, [this] {
-        player_->stop(); mediaControls_->hide(); videoBack_->hide(); clearAudioQueue(); openHome();
+        player_->stop(); mediaControls_->hide(); videoBack_->hide(); session_->clearQueue(); openHome();
     });
 
     // "Issue with Streaming" overlay next to Back: asks Allarr for the next-best source for the current item
@@ -597,10 +584,37 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
         currentNextSourceCapable_ = false;
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-        setAudioQueue(urls, 0, titles);
+        session_->setQueue(urls, 0, titles);
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
                            QStringLiteral("video"), QString(), src });
     });
+
+    // The audio-queue + resume state machine: owns the track list/position, tells us what to play and where
+    // to resume via signals; we own the actual player + playlist widget.
+    session_ = new PlaybackSession(QString(), this);
+    connect(session_, &PlaybackSession::playRequested, this,
+            [this](const QString& p) { player_->play(p); });
+    connect(session_, &PlaybackSession::queueChanged, this,
+            [this](const QStringList& titles, int current) {
+        playlist_->clear();
+        for (const QString& t : titles) playlist_->addItem(t);
+        playlist_->setCurrentRow(current);
+        playlist_->setVisible(true);
+        stack_->setCurrentWidget(playerPage_);
+        revealMediaControls();
+    });
+    connect(session_, &PlaybackSession::trackChanged, this,
+            [this](int i, int n, const QString&) {
+        playlist_->setCurrentRow(i);
+        statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
+    });
+    connect(session_, &PlaybackSession::queueCleared, this,
+            [this] { if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
+    connect(session_, &PlaybackSession::queueFinished, this, [this] {
+        stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
+    });
+    connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -681,7 +695,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(retro_, &RetroView::gameStopped, this, [this] { endPlaySession(); });
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
     connect(stop, &QPushButton::clicked, this, [this] {
-        player_->stop(); mediaControls_->hide(); clearAudioQueue(); openHome(); });
+        player_->stop(); mediaControls_->hide(); session_->clearQueue(); openHome(); });
     connect(player_, &MpvWidget::durationChanged, this, &MainWindow::onDuration);
     connect(player_, &MpvWidget::positionChanged, this, &MainWindow::onPosition);
     connect(seek_, &QSlider::sliderPressed, this, [this] { sliderDown_ = true; });
@@ -890,7 +904,7 @@ void MainWindow::goBack()
     player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
-    clearAudioQueue();
+    session_->clearQueue();
     openHome();
 }
 
@@ -1348,8 +1362,8 @@ void MainWindow::openVideoPath(const QString& path)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    clearAudioQueue();      // saves+clears any previous timed media
-    beginResume(path);      // track this video's position (and resume it if we've watched it before)
+    session_->clearQueue();      // saves+clears any previous timed media
+    session_->beginResume(path); // track this video's position (and resume it if we've watched it before)
     stack_->setCurrentWidget(playerPage_);
     player_->play(path);
     revealMediaControls();
@@ -1372,7 +1386,7 @@ void MainWindow::openAudio()
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    setAudioQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
+    session_->setQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
     const QString first = sel.first();
     RecentStore::add({ first, QFileInfo(first).completeBaseName(), QStringLiteral("audio"), QString() });
 }
@@ -1386,7 +1400,7 @@ void MainWindow::openAudioPath(const QString& path)
     if (fi.suffix().toLower() == QStringLiteral("m4b"))
     {
         // An audiobook is one self-contained file (often with chapters) - don't queue the rest of the folder.
-        // (Resume is handled generically for all timed media by playTrack/beginResume.)
+        // (Resume is handled generically for all timed media by PlaybackSession.)
         queue = { fi.absoluteFilePath() };
     }
     else
@@ -1404,52 +1418,23 @@ void MainWindow::openAudioPath(const QString& path)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    setAudioQueue(queue, start);
+    session_->setQueue(queue, start);
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
-}
-
-void MainWindow::setAudioQueue(const QStringList& files, int startIndex, const QStringList& titles)
-{
-    tracks_ = files;
-    playlist_->clear();
-    for (int i = 0; i < tracks_.size(); ++i)
-        playlist_->addItem(i < titles.size() && !titles[i].isEmpty()
-                               ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
-    playlist_->setVisible(true);
-    stack_->setCurrentWidget(playerPage_);
-    playTrack(startIndex);
-    revealMediaControls();
-}
-
-void MainWindow::playTrack(int index)
-{
-    if (index < 0 || index >= tracks_.size()) return;
-    persistResume();              // save where we were in the outgoing track (if any)
-    trackIndex_ = index;
-    playlist_->setCurrentRow(index);
-    statusBar()->showMessage(tr("Track %1 of %2").arg(index + 1).arg(tracks_.size()), 3000);
-    beginResume(tracks_[index]);  // track the new file's position (and resume it if seen before)
-    player_->play(tracks_[index]);
 }
 
 void MainWindow::nextTrack()
 {
-    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) playTrack(trackIndex_ + 1);
+    session_->next();
 }
 
 void MainWindow::prevTrack()
 {
-    if (trackIndex_ > 0) playTrack(trackIndex_ - 1);
+    session_->prev();
 }
 
 void MainWindow::onTrackEnded()
 {
-    finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
-    stopScrobble(); // Trakt: a finished video scrobbles a stop at ~100% -> marked watched
-    // Auto-advance the audio queue when a track finishes (ignored for video / single files).
-    if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playTrack(trackIndex_ + 1); return; }
-    // A TV episode that played to the end -> roll to the next episode, if enabled.
-    if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
+    session_->handleTrackEnd(); // scrobble-stop / next-episode now hang off PlaybackSession::queueFinished
 }
 
 // Resolve and play the episode after the one that just finished. The current episode's id is "ttShow:s:e";
@@ -1492,50 +1477,6 @@ void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString&
     it.id = imdbStreamId; // stable resume/Recent key for this episode
     notify(tr("Up next: %1").arg(it.title), 4000);
     openLibraryItem(it); // plays it, and re-arms subCtx_ so the following episode auto-advances too
-}
-
-void MainWindow::beginResume(const QString& path)
-{
-    resumePath_ = path;
-    double pos = store().value(mediaResumeKey(path) + QStringLiteral("pos"), 0.0).toDouble();
-    if (pos <= 0.0) pos = store().value(legacyAudiobookKey(path) + QStringLiteral("pos"), 0.0).toDouble();
-    resumeSeek_ = pos;       // applied once the duration is known (see onDuration)
-    audioPos_ = 0.0;
-    lastSavedPos_ = -100.0;
-}
-
-void MainWindow::persistResume()
-{
-    if (resumePath_.isEmpty() || audioPos_ <= 1.0) return; // nothing meaningful to remember yet
-    const QString k = mediaResumeKey(resumePath_);
-    store().setValue(k + QStringLiteral("pos"), audioPos_);
-    store().setValue(k + QStringLiteral("dur"), duration_); // lets the home screen show a progress bar
-    store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
-    store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
-    store().sync();
-    lastSavedPos_ = audioPos_;
-    scheduleProgressSync(); // push this position to the cloud "continue watching" file (debounced)
-}
-
-void MainWindow::finishResume()
-{
-    if (resumePath_.isEmpty()) return;
-    store().remove(mediaResumeKey(resumePath_));
-    store().remove(legacyAudiobookKey(resumePath_)); // also clear any legacy audiobook bookmark
-    store().sync();
-    resumePath_.clear();
-    lastSavedPos_ = -100.0;
-}
-
-void MainWindow::clearAudioQueue()
-{
-    persistResume();      // save where we left off before leaving this media
-    resumePath_.clear();
-    resumeSeek_ = 0.0;
-    lastSavedPos_ = -100.0;
-    tracks_.clear();
-    trackIndex_ = -1;
-    if (playlist_) { playlist_->clear(); playlist_->setVisible(false); }
 }
 
 void MainWindow::openGame()
@@ -1705,7 +1646,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    clearAudioQueue();
+    session_->clearQueue();
     QString err;
     if (retro_->openGame(corePath, launchRom, core, &err))
     {
@@ -1915,7 +1856,7 @@ void MainWindow::runEmulator(const ExternalEmulator& em, const QString& rom, con
     player_->stop();
     retro_->stop();
     book_->persist(); pdf_->persist(); comic_->persist();
-    clearAudioQueue();
+    session_->clearQueue();
 
     pendingEmuRom_ = rom; pendingEmuTitle_ = title; pendingEmuThumb_ = thumb; pendingEmuKey_ = key; pendingEmuSystem_ = system;
     // Tell the emulator's SDL to ignore any phantom controller (e.g. a Keychron HE keyboard that presents a
@@ -2060,10 +2001,10 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    clearAudioQueue();      // saves+clears any previous timed media
+    session_->clearQueue();      // saves+clears any previous timed media
     // Resume + Recent keyed by the stable id when given (a re-opened catalog stream), else by the link itself.
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
-    beginResume(rkey);
+    session_->beginResume(rkey);
     stack_->setCurrentWidget(playerPage_);
     player_->play(url);
     revealMediaControls();
@@ -2083,19 +2024,11 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     subCtx_ = {};           // audio has no subtitles to fetch
     stopScrobble();         // leaving whatever video was playing
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-    clearAudioQueue();      // saves+clears any previous timed media, then we build a one-track queue
+    session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
-    tracks_ = QStringList{ url };
-    trackIndex_ = 0;
-    playlist_->clear();
-    playlist_->addItem(t);
-    playlist_->setCurrentRow(0);
-    playlist_->setVisible(true); // the now-playing list (vs. the bare video surface) marks this as audio
-    stack_->setCurrentWidget(playerPage_);
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
-    beginResume(rkey);      // a long audiobook must resume where you left off, keyed by the stable id
-    player_->play(url);
-    revealMediaControls();
+    session_->setQueue({ url }, 0, { t }); // the now-playing list (vs. the bare video surface) marks this as audio
+    session_->beginResume(rkey);           // a long audiobook must resume where you left off, keyed by the stable id
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
 }
 
@@ -2126,19 +2059,19 @@ void MainWindow::openDocumentPath(const QString& f)
     if (ext == QStringLiteral("pdf"))
     {
         if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(pdf_);
     }
     else if (ext == QStringLiteral("cbz"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(book_);
     }
     RecentStore::add({ f, QFileInfo(f).completeBaseName(), QStringLiteral("document"), QString() });
@@ -2160,7 +2093,7 @@ void MainWindow::openHome()
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    clearAudioQueue();
+    session_->clearQueue();
     // Restore the full-screen state we had before opening content: a full-screen browser stays full screen
     // after exiting the emulator/movie; one that went full screen only for a movie drops back to a window.
     // ONLY when actually returning FROM content — a menu-to-menu hop (Profiles/Settings -> Home) must never
@@ -2743,7 +2676,7 @@ void MainWindow::enterSplitScreen()
     }
     // Park the playing views (don't leave a movie playing behind the split) and show the empty split.
     // The window state is left exactly as it is — no screen ever changes it on the user's behalf.
-    player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+    player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
     splitMode_ = true;
     splitTarget_ = nullptr;
     stack_->setCurrentWidget(splitView_);
@@ -3582,7 +3515,7 @@ void MainWindow::startScrobble(const QString& imdbStreamId)
 void MainWindow::stopScrobble()
 {
     if (scrobbleImdb_.isEmpty()) return;
-    const double pct = duration_ > 0.0 ? qBound(0.0, audioPos_ / duration_ * 100.0, 100.0) : 0.0;
+    const double pct = duration_ > 0.0 ? qBound(0.0, session_->position() / duration_ * 100.0, 100.0) : 0.0;
     trakt_->scrobbleStop(scrobbleImdb_, pct); // Trakt marks it watched when the stop is past ~80%
     scrobbleImdb_.clear();
 }
@@ -4044,7 +3977,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(book_);
         recordDocument();
@@ -4055,14 +3988,14 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // book app. Fall back to the fixed page-image view for scanned PDFs that have no text layer.
         if (book_->openBook(url, &err))
         {
-            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+            player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
             stack_->setCurrentWidget(book_);
             recordDocument();
         }
         else if (pdf_->openPdf(url, &err))
         {
-            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); clearAudioQueue();
+            player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
             pdf_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
             stack_->setCurrentWidget(pdf_);
             recordDocument();
@@ -4072,7 +4005,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {
         if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
         recordDocument();
     }
@@ -4085,7 +4018,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     else if (type == QStringLiteral("audio"))
     {
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-        setAudioQueue({ url }, 0); // a single-track queue; libmpv also streams http(s) audio
+        session_->setQueue({ url }, 0); // a single-track queue; libmpv also streams http(s) audio
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
@@ -4095,11 +4028,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
-        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); clearAudioQueue();
+        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         // Resume + Recent are keyed by the item's stable id when it has one (a debrid/stream URL changes every
         // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
         const QString rkey = item.id.isEmpty() ? url : item.id;
-        beginResume(rkey);
+        session_->beginResume(rkey);
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
         castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened
@@ -4428,7 +4361,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
         QString err;
         if (!comic_->openComic(cbzPath, &err))
         { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
-        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); clearAudioQueue();
+        player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
         mwLog(QStringLiteral("openImagePages: reader shown"));
     };
@@ -5563,7 +5496,7 @@ void MainWindow::pullAndMergeProgress()
 
 void MainWindow::closeEvent(QCloseEvent* e)
 {
-    persistResume(); // flush the current media's playback position before anything else on exit
+    session_->persistResume(); // flush the current media's playback position before anything else on exit
     pushProgressNow(); // and push the small "continue watching" file (runs alongside the bundle push below)
     retro_->stop();  // flush battery-RAM saves before the cloud push captures them (no-op if no game running)
 
@@ -5731,11 +5664,12 @@ void MainWindow::openInputMapping()
 void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
+    session_->setDuration(seconds);
     // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
     // is essentially the end (treat a near-finished file as "watched" and start it fresh).
-    if (!resumePath_.isEmpty() && resumeSeek_ > 1.0 && resumeSeek_ < seconds - 5.0)
-        player_->setPosition(resumeSeek_);
-    resumeSeek_ = 0.0; // one-shot
+    const double at = session_->takeResumeSeek(); // one-shot
+    if (at > 1.0 && at < seconds - 5.0)
+        player_->setPosition(at);
 }
 
 void MainWindow::onPosition(double seconds)
@@ -5744,10 +5678,7 @@ void MainWindow::onPosition(double seconds)
         seek_->setValue(static_cast<int>(seconds / duration_ * 1000.0));
     time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
-    audioPos_ = seconds;
-    // Throttle resume writes so we're not hammering the ini every position tick.
-    if (!resumePath_.isEmpty() && std::abs(seconds - lastSavedPos_) >= 5.0)
-        persistResume();
+    session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 }
 
 void MainWindow::onSeekReleased()

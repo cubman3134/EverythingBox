@@ -139,6 +139,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
         src/ui/Notifier.cpp       src/ui/Notifier.h
         src/media/StreamResolver.cpp src/media/StreamResolver.h
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -266,6 +267,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/media/StreamResolver.cpp src/media/StreamResolver.h)
     target_include_directories(probe_m3u PRIVATE src src/media)
     target_link_libraries(probe_m3u PRIVATE Qt6::Core Qt6::Network)
+
+    # Headless test for PlaybackSession (queue advance + resume persistence).
+    add_executable(probe_playback tools/probe_playback.cpp
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h)
+    target_include_directories(probe_playback PRIVATE src src/media)
+    target_link_libraries(probe_playback PRIVATE Qt6::Core)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)

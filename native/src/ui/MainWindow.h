@@ -189,13 +189,6 @@ private:
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString());
     void openDocumentPath(const QString& path); // .epub / .pdf by extension
-    void setAudioQueue(const QStringList& files, int startIndex, const QStringList& titles = {});
-    void playTrack(int index);
-    void clearAudioQueue();   // leave audio mode (video/game/doc)
-    // Resume tracking for timed media (video / audio / audiobooks): remember the playback position per file.
-    void beginResume(const QString& path); // start tracking this file (and queue its saved spot to seek to)
-    void persistResume();                  // save the current file's position (throttled / on leave / on exit)
-    void finishResume();                   // a file played to the end -> drop its saved position
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
 
@@ -381,6 +374,7 @@ private:
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
+    class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;
@@ -405,11 +399,4 @@ private:
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
     bool forceClose_ = false;        // set once the exit push completes, so closeEvent stops deferring the quit
     bool startupChooseProfile_ = false; // show the profile picker inline on first show
-
-    QStringList tracks_;     // current audio queue (absolute paths)
-    int trackIndex_ = -1;    // index into tracks_, or -1 when not playing a queue
-    QString resumePath_;     // the timed-media file (video/audio/audiobook) whose position we track, or empty
-    double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
-    double audioPos_ = 0.0;        // last reported playback position
-    double lastSavedPos_ = -100.0; // throttle resume writes
 };
