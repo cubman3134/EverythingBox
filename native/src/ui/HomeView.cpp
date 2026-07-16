@@ -2938,21 +2938,19 @@ void HomeView::requestThemedMeta(int idx)
                              ? Achievements::consoleIdForExtension(sys->extensions.first()) : 0u;
         const int reqIdx = idx;
 
-        // Aggregated artwork/metadata: fan the configured game providers (SteamGridDB / IGDB / ScreenScraper /
-        // TheGamesDB) out on this hover and merge the best of each into the live panel — logo, box, hero,
-        // screenshots, trailers, theme music + facts. The merged result is cached, so a re-hover is instant
-        // and works offline (already surfaced above via loadArt).
+        // Aggregated artwork/metadata: scrape this game at high priority across the configured providers
+        // (SteamGridDB / IGDB / ScreenScraper / TheGamesDB) and merge the best of each into the live panel —
+        // logo, box, hero, screenshots, trailers, theme music + facts. The aggregator caches the merged result
+        // (so re-hover is instant + offline) and the console's other games are prefetched in the background
+        // (see prefetchThemedGames), so scrolling shows art without a per-item wait.
         if (!gameAgg_) gameAgg_ = new GameMetaAggregator(mgr_, this);
         if (gameAgg_->hasProviders())
         {
-            const QString aggKey = MetaCache::keyFor(it);
             MediaItem q;
             q.id = it.id; q.title = it.title; q.type = QStringLiteral("game"); q.altNames = it.altNames;
-            gameAgg_->fetch(q, console, [this, reqIdx, aggKey](const MediaDetail& d) {
-                if (reqIdx != themedMetaIndex_) return;    // the selection moved on; drop this result
+            gameAgg_->request(q, console, [this, reqIdx](const MediaDetail& d) {
+                if (reqIdx != themedMetaIndex_) return;    // the selection moved on; drop this panel update
                 if (!d.valid && d.art.isEmpty()) return;
-                MetaCache::saveArt(aggKey, d.art);         // persist for offline + instant re-hover
-                if (d.valid) MetaCache::saveDetail(aggKey, d);
                 QVariantMap m; m.insert(QStringLiteral("index"), reqIdx);
                 if (!d.overview.isEmpty()) m.insert(QStringLiteral("overview"), d.overview);
                 if (!d.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), d.subtitle);
@@ -3762,6 +3760,30 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     }
 
     emit browseItemsChanged(append); // let a themed browse view mirror the new items (append -> keep selection)
+    prefetchThemedGames();           // scrape + cache the console's games in the background (hover stays instant)
+}
+
+// On entering a game console in a themed view, kick off a throttled background scrape of ALL its games so
+// their art/metadata is cached before you hover them (instead of a per-item wait). The aggregator dedups and
+// skips games already cached, and throttles to respect the providers' rate limits. No-op unless a themed view
+// is showing and at least one game provider is configured.
+void HomeView::prefetchThemedGames()
+{
+    if (!(xmbMode_ || carouselMode_)) return;         // only when a themed view (with the live panel) is up
+    if (!gameAgg_) gameAgg_ = new GameMetaAggregator(mgr_, this);
+    if (!gameAgg_->hasProviders()) return;
+    QString console;
+    for (int i = stack_.size() - 1; i >= 0; --i)
+        if (stack_[i].item.type == QStringLiteral("platform")) { console = stack_[i].item.title.trimmed(); break; }
+    QVector<MediaItem> games;
+    for (int r = 0; r < items_.size(); ++r)
+        if (items_[r].type == QStringLiteral("game")) games << items_[r];
+    if (!games.isEmpty())
+    {
+        qInfo().noquote() << QStringLiteral("[gamemeta] prefetching %1 games for console '%2'")
+                                 .arg(games.size()).arg(console);
+        gameAgg_->prefetch(games, console);
+    }
 }
 
 // Scroll to / select the row we last drilled into (stack childRow). If it hasn't been loaded yet (it was on a

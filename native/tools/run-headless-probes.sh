@@ -72,6 +72,13 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# Queued game-metadata aggregator: entering a console prefetches + caches all its games (throttled), a hover
+# scrapes at priority, every result is cached (scroll-past never drops a scrape), cached games aren't
+# re-scraped. Uses a canned keyless provider in the build tree (no API keys). Optional: only if built.
+GAMEAGG="$(findexe probe_gameagg || true)"
+[ -n "$GAMEAGG" ] && run "game meta aggregator" GAMEAGG-OK "$GAMEAGG" \
+  || echo "(skip) probe_gameagg not built"
+
 # Themed video: MpvPreview (libmpv software-render) decodes mpv's built-in lavfi test source and paints real
 # frames into a Qt Quick software-backend scene — the RetroBat-style in-menu playback path. Optional: only
 # runs where the QML build (+ libmpv) produced the probe.

@@ -133,6 +133,7 @@ protected:
 private slots:
     void onItemActivated();
     void onCatalogReady(int requestId, const MediaCatalog& cat); // async result from AddonManager
+    void prefetchThemedGames(); // entering a game console -> background-scrape + cache all its games
     void onMetaReady(int requestId, const MediaDetail& detail);  // async detail-header metadata
     void doSearch();
 

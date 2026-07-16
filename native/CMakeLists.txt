@@ -267,6 +267,15 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape)
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
+    # Queued game-metadata aggregator: prefetch-on-console-entry + cache, priority hover, dedup/skip-cached.
+    add_executable(probe_gameagg tools/probe_gameagg.cpp
+        src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
+        src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape)
+    target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_gameagg PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
     endif() # NOT ANDROID (console probes)
 
     # Gamepad support via SDL2 (optional). Install SDL2 and pass CMAKE_PREFIX_PATH, or
