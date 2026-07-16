@@ -33,6 +33,7 @@ class QVBoxLayout;
 class QNetworkAccessManager;
 class QLabel;
 class EmulatorManager;
+class GameLauncher;
 class QJsonObject;
 struct GameSystem;
 struct ExternalEmulator;
@@ -136,13 +137,8 @@ private:
     // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
     bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
     void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
-    // Play-time tracking for the full-screen emulator / external-emulator flow: stamp last-played + start the
-    // clock when a game begins, and bank the elapsed session when it ends. (PC games are timed separately in
-    // launchPcExe, off their own process handle.) beginPlaySession auto-closes any session still open.
-    void beginPlaySession(const QString& identity);
-    void endPlaySession();
-    QString activePlayId_;          // identity of the game currently being timed ("" = none)
-    qint64  activePlayStart_ = 0;   // epoch seconds the active session began
+    // (The full-screen emulator / external-emulator play-time tracking lives in GameLauncher now. PC games are
+    // still timed separately in launchPcExe, off their own process handle.)
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,
     // or the wrong exe). Tell the user and offer to open its folder or pick a different exe.
     void onPcGameFailedToOpen(const QString& id, const QString& title, const QString& thumb, const QString& exe);
@@ -168,15 +164,6 @@ private:
     // leftover install media under games/pc. Used when the user cancels the "locate the exe" prompt, so
     // re-opening it starts a fresh download/install.
     void forgetPcGame(const QString& id, const QString& title);
-    // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a
-    // child process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
-    void launchExternalGame(const GameSystem* sys, const QString& rom, const QString& title,
-                            const QString& thumb, const QString& key);
-    // Run a standalone emulator: stop our playback, show the wait page, minimise, and launch (auto-installing
-    // if needed). rom empty => open the emulator's own UI (e.g. TeknoParrot, or another emulator for setup).
-    void runEmulator(const ExternalEmulator& em, const QString& rom = QString(), const QString& title = QString(),
-                     const QString& thumb = QString(), const QString& key = QString(), const QString& system = QString());
-    void ensureEmu();        // lazily create EmulatorManager + wire its signals
     void ensureEmuPage();    // lazily build the "playing in <emulator>" wait page
     void openEmulatorManager(); // Settings > Emulators: folder + per-emulator install status
     void openStreamPrompt();                    // inline form to paste a stream/URL link
@@ -345,27 +332,14 @@ private:
     QVector<QPushButton*> subLeftCol_;
     QVector<QPushButton*> subRightCol_;
 
-    // External (standalone) emulators: install/run manager + the in-app wait page shown while one runs.
-    EmulatorManager* emu_ = nullptr;
+    // External (standalone) emulators: the launch pipeline + process lifecycle lives in GameLauncher; this window
+    // keeps only the in-app "playing in <emulator>" wait page it drives via signals, and the state to restore
+    // after the emulator exits.
+    GameLauncher* launcher_ = nullptr;
     QWidget* emuPage_ = nullptr;
     QLabel* emuLabel_ = nullptr;
     QPushButton* emuStopBtn_ = nullptr;
-    QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     Qt::WindowStates emuReturnState_ = Qt::WindowNoState; // our window state to restore after the emulator exits
-    // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select
-    // on a pad, or Esc on the keyboard — and close it back to MMV, the way RetroBat does. Runs only between the
-    // emulator's launched and finished signals (MMV is minimized then, so Qt can't see the input itself).
-    QTimer* emuHotkeyTimer_ = nullptr;
-    bool emuComboPrev_ = false;          // edge-detect: Start+Select was held last poll
-    bool emuEscPrev_ = false;            // edge-detect: Esc was held last poll
-    void startEmuHotkeyWatch();
-    void stopEmuHotkeyWatch();
-    void pollEmuExitHotkey();
-    // Detect a standalone emulator that closes almost immediately (a failed boot — usually a missing BIOS/firmware,
-    // which -batch-style launches exit silently on). Only warn when the user didn't close it themselves.
-    QElapsedTimer emuRunClock_;
-    QString emuDisplayName_;              // the running emulator's display name (from the launched signal)
-    bool emuUserClosing_ = false;         // set when WE ask it to close (exit hotkey / force-close), to suppress the warning
     QListWidget* playlist_ = nullptr; // track list, shown only in audio mode
     QWidget* playerPage_ = nullptr;   // playlist + libmpv surface (stack page 0)
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
