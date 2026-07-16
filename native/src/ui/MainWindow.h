@@ -184,10 +184,6 @@ private:
                        const QString& title = QString()); // route an http(s) link (or .m3u/.m3u8) to libmpv
     void playStream(const QString& url, const QString& resumeKey = QString(),
                     const QString& title = QString());    // play a single resolved link via libmpv
-    // .m3u/.m3u8 playlists: openM3u reads the file/URL, handleM3u dispatches its contents - an HLS manifest
-    // streams via libmpv, an IPTV/media list becomes a channel queue, a PlayStation disc list opens the emulator.
-    void openM3u(const QString& src, const QString& title = QString());
-    void handleM3u(const QString& src, const QString& text, const QString& title);
     // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
@@ -384,6 +380,7 @@ private:
     QPushButton* streamIssueBtn_ = nullptr; // top-left "Issue with Streaming" overlay (next to Back) for Allarr media
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
+    class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
     QStackedWidget* stack_ = nullptr;

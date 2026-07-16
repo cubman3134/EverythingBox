@@ -138,6 +138,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
         src/ui/Notifier.cpp       src/ui/Notifier.h
+        src/media/StreamResolver.cpp src/media/StreamResolver.h
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -259,6 +260,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/Notifier.cpp src/ui/Notifier.h)
     target_include_directories(probe_notifier PRIVATE src src/ui)
     target_link_libraries(probe_notifier PRIVATE Qt6::Widgets)
+
+    # Headless test for StreamResolver's m3u classification (HLS vs IPTV vs multi-disc).
+    add_executable(probe_m3u tools/probe_m3u.cpp
+        src/media/StreamResolver.cpp src/media/StreamResolver.h)
+    target_include_directories(probe_m3u PRIVATE src src/media)
+    target_link_libraries(probe_m3u PRIVATE Qt6::Core Qt6::Network)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)
