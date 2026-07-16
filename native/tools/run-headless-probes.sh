@@ -72,6 +72,13 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
+# ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
+# (CI), verifies for real where C:\RetroBat exists. Optional: only if built.
+GAMELIST="$(findexe probe_gamelist || true)"
+[ -n "$GAMELIST" ] && run "gamelist (ES/RetroBat)" GAMELIST-OK "$GAMELIST" \
+  || echo "(skip) probe_gamelist not built"
+
 # Queued game-metadata aggregator: entering a console prefetches + caches all its games (throttled), a hover
 # scrapes at priority, every result is cached (scroll-past never drops a scrape), cached games aren't
 # re-scraped. Uses a canned keyless provider in the build tree (no API keys). Optional: only if built.

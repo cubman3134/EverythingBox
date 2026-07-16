@@ -1,6 +1,8 @@
 #include "GameMetaAggregator.h"
 #include "AddonManager.h"
+#include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../core/Settings.h"
 
 #include <QTimer>
 #include <algorithm>
@@ -160,6 +162,12 @@ void GameMetaAggregator::finishJob(quint64 id)
     {
         MetaCache::saveArt(job->key, merged.art);
         if (merged.valid) MetaCache::saveDetail(job->key, merged);
+        // "Keep scraped data": persist a freshly-scraped game back into its ROM system's gamelist.xml +
+        // media folders (ES/RetroBat layout), so it's reused from the folder next time. Only for local ROMs
+        // (item.url is the ROM path); GamelistStore skips games already listed.
+        if (Settings::keepScrapedData() && !job->item.url.isEmpty()
+            && !job->item.url.startsWith(QStringLiteral("http")))
+            GamelistStore::write(job->item.url, merged);
     }
     if (job->done) job->done(merged);
     pump(); // a slot freed -> start the next queued game

@@ -25,6 +25,7 @@
 #include <QListWidget>
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
+#include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
 #include <QAbstractItemView>
 #include <QMenu>
@@ -744,6 +745,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
 
 void HomeView::refresh()
 {
+    themedArtCache_.clear(); // a full rebuild -> drop the per-session page cache of resolved panel art
     g_theme = ThemeStore::current(); // the active profile's colour theme
     applyThemeFont();
     // A theme with a dark background image (low dim) wants a dark, light-text detail card so it stays
@@ -2906,13 +2908,44 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("type"), it.type);
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
-    // Whatever art the catalog row already carries PLUS anything we cached from a previous hover/aggregation
-    // shows instantly (logo/box/screenshots/videos/audio/meta) — so a re-hover is immediate and works offline;
-    // the addon /meta + game aggregator below enrich it further in place via another themedMetaReady emit.
+    // Resolve the rich art + facts for the panel in PRIORITY ORDER, so scrolling never re-does work and the
+    // ROMs folder's own data is used before the network:
+    //   1) this session's page cache (already resolved while scrolling this console)
+    //   2) the ROM system's gamelist.xml (EmulationStation / RetroBat data sitting in the ROMs folder)
+    //   3) our own scrape cache (MetaCache)
+    // Only if none of those have it do we scrape online (the aggregator, below) — gated on `resolvedRich`.
+    const QString metaKey = MetaCache::keyFor(it);
+    bool resolvedRich = false;
+    const auto cachedRich = themedArtCache_.constFind(metaKey);
+    if (cachedRich != themedArtCache_.constEnd())
     {
-        MediaArt art = it.art;
-        art.mergeLowerPriority(MetaCache::loadArt(MetaCache::keyFor(it)));
-        art.writeInto(base);
+        for (auto kv = cachedRich->constBegin(); kv != cachedRich->constEnd(); ++kv) base.insert(kv.key(), kv.value());
+        resolvedRich = true;
+    }
+    else
+    {
+        QVariantMap rich;            // the resolved enrichment we cache per item for instant scroll-back
+        MediaArt art = it.art;       // the catalog row's own art (a thumbnail) is the floor
+        if (it.type == QStringLiteral("game"))
+        {
+            const MediaDetail gl = GamelistStore::lookup(it.url); // the ROMs-folder gamelist.xml, first
+            if (gl.valid)
+            {
+                resolvedRich = true;
+                art.mergeLowerPriority(gl.art);
+                if (!gl.overview.isEmpty()) rich.insert(QStringLiteral("overview"), gl.overview);
+                if (!gl.subtitle.isEmpty()) rich.insert(QStringLiteral("subtitle"), gl.subtitle);
+                QVariantList facts;
+                for (const MediaFact& f : gl.facts)
+                    facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+                if (!facts.isEmpty()) rich.insert(QStringLiteral("facts"), facts);
+            }
+        }
+        const MediaArt scraped = MetaCache::loadArt(metaKey); // our own previously-scraped art backfills
+        if (!scraped.isEmpty()) { art.mergeLowerPriority(scraped); resolvedRich = true; }
+        art.writeInto(rich);
+        for (auto kv = rich.constBegin(); kv != rich.constEnd(); ++kv) base.insert(kv.key(), kv.value());
+        if (resolvedRich) themedArtCache_.insert(metaKey, rich); // remember (and skip scraping this one)
     }
     // Play history rides on the subtitle line (beside the year), not the facts line — see Xmb.qml. Emitted
     // as its own fields so it shows straight away, even for a game with no addon /meta to enrich it below.
@@ -2938,20 +2971,20 @@ void HomeView::requestThemedMeta(int idx)
                              ? Achievements::consoleIdForExtension(sys->extensions.first()) : 0u;
         const int reqIdx = idx;
 
-        // Aggregated artwork/metadata: scrape this game at high priority across the configured providers
-        // (SteamGridDB / IGDB / ScreenScraper / TheGamesDB) and merge the best of each into the live panel —
-        // logo, box, hero, screenshots, trailers, theme music + facts. The aggregator caches the merged result
-        // (so re-hover is instant + offline) and the console's other games are prefetched in the background
-        // (see prefetchThemedGames), so scrolling shows art without a per-item wait.
+        // Only scrape online when the ROMs folder / our cache didn't already have it (resolvedRich). The
+        // aggregator scrapes at high priority across the configured providers and merges the best of each into
+        // the panel; it caches the merged result (+ writes it back to the gamelist when "keep scraped data" is
+        // on) so re-hover is instant. The console's other missing games are prefetched in the background.
         if (!gameAgg_) gameAgg_ = new GameMetaAggregator(mgr_, this);
-        if (gameAgg_->hasProviders())
+        if (!resolvedRich && gameAgg_->hasProviders())
         {
             MediaItem q;
-            q.id = it.id; q.title = it.title; q.type = QStringLiteral("game"); q.altNames = it.altNames;
-            gameAgg_->request(q, console, [this, reqIdx](const MediaDetail& d) {
-                if (reqIdx != themedMetaIndex_) return;    // the selection moved on; drop this panel update
+            q.id = it.id; q.title = it.title; q.type = QStringLiteral("game");
+            q.url = it.url; q.systemHint = it.systemHint; q.altNames = it.altNames; // url -> gamelist write-back
+            const QString cacheKey = metaKey;
+            gameAgg_->request(q, console, [this, reqIdx, cacheKey](const MediaDetail& d) {
                 if (!d.valid && d.art.isEmpty()) return;
-                QVariantMap m; m.insert(QStringLiteral("index"), reqIdx);
+                QVariantMap m;
                 if (!d.overview.isEmpty()) m.insert(QStringLiteral("overview"), d.overview);
                 if (!d.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), d.subtitle);
                 QVariantList facts;
@@ -2959,7 +2992,10 @@ void HomeView::requestThemedMeta(int idx)
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
                 if (!facts.isEmpty()) m.insert(QStringLiteral("facts"), facts);
                 d.art.writeInto(m); // logo/box/hero/screenshots/videos/audio/meta -> the panel bindings
-                emit themedMetaReady(reqIdx, m);
+                themedArtCache_.insert(cacheKey, m); // remember for scroll-back (no re-scrape)
+                if (reqIdx != themedMetaIndex_) return; // selection moved on; cached above, just don't emit now
+                QVariantMap out = m; out.insert(QStringLiteral("index"), reqIdx);
+                emit themedMetaReady(reqIdx, out);
             });
         }
         // Publish a list of { title, icon(full URL), earned } into the panel.
@@ -3777,10 +3813,16 @@ void HomeView::prefetchThemedGames()
         if (stack_[i].item.type == QStringLiteral("platform")) { console = stack_[i].item.title.trimmed(); break; }
     QVector<MediaItem> games;
     for (int r = 0; r < items_.size(); ++r)
-        if (items_[r].type == QStringLiteral("game")) games << items_[r];
+    {
+        const MediaItem& g = items_[r];
+        if (g.type != QStringLiteral("game")) continue;
+        if (GamelistStore::has(g.url)) continue;                        // the ROMs-folder gamelist covers it
+        if (!MetaCache::loadArt(MetaCache::keyFor(g)).isEmpty()) continue; // already scraped this/prev session
+        games << g;
+    }
     if (!games.isEmpty())
     {
-        qInfo().noquote() << QStringLiteral("[gamemeta] prefetching %1 games for console '%2'")
+        qInfo().noquote() << QStringLiteral("[gamemeta] prefetching %1 games for console '%2' (rest from gamelist/cache)")
                                  .arg(games.size()).arg(console);
         gameAgg_->prefetch(games, console);
     }

@@ -149,8 +149,11 @@ QVector<RomLibrary::SystemGroup> RomLibrary::scan()
         {
             const QString path = it.next();
             const QString ext = QFileInfo(path).suffix().toLower();
-            const bool ok = sys->extensions.isEmpty() ? isDiscOrArcadeRom(ext)
-                                                       : sys->extensions.contains(ext);
+            // Accept the system's native extensions, plus zip/7z everywhere: RetroBat / EmulationStation
+            // commonly store even cartridge ROMs zipped (e.g. atari2600 "*.zip"), and most cores load them.
+            const bool ok = sys->extensions.isEmpty()
+                                ? isDiscOrArcadeRom(ext)
+                                : (sys->extensions.contains(ext) || ext == QStringLiteral("zip") || ext == QStringLiteral("7z"));
             if (!ok) continue;
             Rom r;
             r.path = path;

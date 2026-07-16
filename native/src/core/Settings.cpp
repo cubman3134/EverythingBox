@@ -167,6 +167,9 @@ void Settings::setOptionValue(const QString& core, const QString& key, const QSt
     store().sync();
 }
 
+bool Settings::keepScrapedData() { return store().value(QStringLiteral("scrape/keepData"), true).toBool(); }
+void Settings::setKeepScrapedData(bool on) { store().setValue(QStringLiteral("scrape/keepData"), on); store().sync(); }
+
 bool Settings::bezelEnabled() { return store().value(QStringLiteral("emu/bezel"), false).toBool(); }
 void Settings::setBezelEnabled(bool on) { store().setValue(QStringLiteral("emu/bezel"), on); store().sync(); }
 

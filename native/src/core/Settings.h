@@ -78,6 +78,12 @@ namespace Settings
     bool bezelEnabled();
     void setBezelEnabled(bool on);
 
+    // Keep scraped game data: persist freshly-scraped metadata + art back into the ROM system's gamelist.xml
+    // + ./images ./videos (EmulationStation / RetroBat layout), so it's reused on the folder next time and by
+    // other ES-based frontends. Reading an existing gamelist happens regardless; this controls WRITE-back.
+    bool keepScrapedData();
+    void setKeepScrapedData(bool on);
+
     // Per-system input profile: the system id whose scoped bindings the remap dialog is editing ("" = global
     // default). Not a user-facing "setting" so much as the remap dialog's current scope, persisted for reuse.
     QString inputScope();

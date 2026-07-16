@@ -119,6 +119,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/MetaCache.cpp    src/core/MetaCache.h
+        src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
@@ -237,6 +238,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
 
+    # EmulationStation / RetroBat gamelist.xml reader (parse + ES-role mapping + local media resolve).
+    add_executable(probe_gamelist tools/probe_gamelist.cpp
+        src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp)
+    target_include_directories(probe_gamelist PRIVATE src src/core src/addons)
+    target_link_libraries(probe_gamelist PRIVATE Qt6::Core Qt6::Network)
+
     # Headless tests for the controller-navigation kit (rings, overlays, on-screen keyboard, back routing).
     # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.
     add_executable(probe_nav tools/probe_nav.cpp
@@ -272,6 +279,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
+        src/core/GamelistStore.cpp src/core/Settings.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape)
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

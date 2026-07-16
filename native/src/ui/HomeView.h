@@ -261,6 +261,7 @@ private:
     RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
     SteamAchievements* steamAch_ = nullptr; // Steam achievements for installed PC games (Hydra-style, lazy)
     GameMetaAggregator* gameAgg_ = nullptr; // fans out SteamGridDB/IGDB/ScreenScraper/TheGamesDB on hover (lazy)
+    QHash<QString, QVariantMap> themedArtCache_; // per-session page cache of resolved panel art/facts by item key
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
     QFrame* meta_ = nullptr;

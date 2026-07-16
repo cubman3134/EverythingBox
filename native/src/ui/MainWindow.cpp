@@ -5115,6 +5115,14 @@ void MainWindow::openGeneralSettings()
             QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
         });
         v->addWidget(rOpen);
+        auto* keepScrape = new QCheckBox(tr("Keep scraped data in the ROMs folder (EmulationStation gamelist.xml)"));
+        keepScrape->setStyleSheet(QStringLiteral("font-size:15px;"));
+        keepScrape->setChecked(Settings::keepScrapedData());
+        keepScrape->setToolTip(tr("When a game is scraped online, also save its info + art into the system's "
+                                  "gamelist.xml + media folders, so it's reused from the folder next time and by "
+                                  "other EmulationStation/RetroBat frontends. Existing gamelist data is always read."));
+        connect(keepScrape, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepScrapedData(c); });
+        v->addWidget(keepScrape);
         v->addSpacing(10);
 
         auto* pbHeading = new QLabel(tr("Playback"));
