@@ -77,13 +77,14 @@ Item {
             }
         }
 
-        // Play badge: filled red when a real clip exists, hollow otherwise. Hidden once the clip plays.
+        // A ▶ badge ONLY when there's a directly-playable clip (it starts on its own a moment later, so this
+        // is just a brief "trailer loading" cue). No playable video -> it's plain artwork, no dead play button.
         Rectangle {
             anchors.centerIn: parent
-            visible: !root.playing
+            visible: !root.playing && root.playUrl !== ""
             width: Math.min(parent.width, parent.height) * 0.22
             height: width; radius: width / 2
-            color: root.hasVideo ? Qt.rgba(0.85, 0.1, 0.1, 0.55) : Qt.rgba(0, 0, 0, 0.45)
+            color: Qt.rgba(0.85, 0.1, 0.1, 0.55)
             border.width: 2; border.color: Qt.rgba(1, 1, 1, 0.9)
             Canvas {
                 anchors.centerIn: parent

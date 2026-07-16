@@ -54,10 +54,11 @@ int main(int argc, char** argv)
             m["images"] = images;
             m["logo"] = s; m["box"] = s;
             // PROBE_MPV=1 -> a real, file-less test clip (mpv lavfi) so the Video element actually plays;
-            // otherwise a bogus url that just proves the badge + graceful fallback.
-            m["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
-                ? QStringLiteral("av://lavfi:testsrc=size=480x360:rate=25")
-                : QStringLiteral("http://x.invalid/trailer.mp4") };
+            // PROBE_NOVIDEO=1 -> no clip at all (verify NO play badge); else a bogus url (badge + fallback).
+            if (!qEnvironmentVariableIntValue("PROBE_NOVIDEO"))
+                m["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
+                    ? QStringLiteral("av://lavfi:testsrc=size=480x360:rate=25")
+                    : QStringLiteral("http://x.invalid/trailer.mp4") };
             m["audio"] = QStringList{ QStringLiteral("http://x.invalid/theme.mp3") };
             m["meta"] = QVariantMap{ { QStringLiteral("developer"), QStringLiteral("Probe Studios") } };
         }
