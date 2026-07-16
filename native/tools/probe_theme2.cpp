@@ -88,6 +88,32 @@ int main(int argc, char** argv)
         root->setProperty("categories", cats);
         root->setProperty("catIndex", 0);
     }
+    // A rich selected item for the XMB/Triple metadata panel: title logo art, a hero video (real lavfi clip
+    // under PROBE_MPV), box art, and provider facts — so the panel's logo/video/facts wiring is exercised.
+    {
+        QVariantMap sm;
+        sm["title"] = QStringLiteral("Chrono Trigger");
+        sm["subtitle"] = QStringLiteral("1995");
+        sm["type"] = QStringLiteral("game");
+        sm["overview"] = QStringLiteral("A band of adventurers travels through time to prevent a catastrophe.");
+        if (!sampleImg.isEmpty())
+        {
+            sm["image"] = sampleImg; sm["box"] = sampleImg; sm["logo"] = sampleImg; sm["hero"] = sampleImg;
+            QVariantMap images;
+            images["box"] = QStringList{ sampleImg };
+            images["logo"] = QStringList{ sampleImg };
+            images["screenshot"] = QStringList{ sampleImg, sampleImg };
+            sm["images"] = images;
+        }
+        sm["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
+            ? QStringLiteral("av://lavfi:testsrc=size=480x360:rate=25") : QStringLiteral("http://x.invalid/t.mp4") };
+        QVariantList facts;
+        facts << QVariantMap{ { "label", "Developer" }, { "value", "Square" } };
+        facts << QVariantMap{ { "label", "Genre" }, { "value", "RPG" } };
+        facts << QVariantMap{ { "label", "Players" }, { "value", "1" } };
+        sm["facts"] = facts;
+        root->setProperty("selectedMeta", sm);
+    }
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
     if (argc >= 5) root->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());
     // PROBE_VIEW selects which theme view to render (e.g. "detail") - verifies per-view theming.

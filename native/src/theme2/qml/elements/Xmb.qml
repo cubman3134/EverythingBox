@@ -257,13 +257,29 @@ Item {
             id: metaTop
             anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
             spacing: xmb.height * 0.014
+            // Hero media: PRIORITIZE the trailer — it streams + plays in-menu via MpvPreview — with the box/
+            // poster art as the still fallback (not screenshots). The item's theme song (the `audio` role)
+            // plays host-side alongside. Reuses the Video element so all the playback logic is shared.
+            Video {
+                width: parent.width
+                height: Math.min(parent.width * 0.5625, meta.height * 0.40) // 16:9, capped so the panel fits
+                visible: !!(meta.m && (meta.m.videos || meta.m.box || meta.m.poster || meta.m.hero || meta.m.image))
+                el: ({ "radius": 10, "role": "box", "fallback": "poster" })
+                ctx: ({ "selected": meta.m })
+                host: xmb.host
+            }
+            // The actual game TITLE ART (clear logo) when a provider supplied one, else the title as text.
             Image {
-                width: parent.width * 0.36; height: Math.min(width * 1.4, meta.height * 0.38)
-                source: (meta.m && meta.m.image && xmb.host) ? xmb.host.resolve(meta.m.image) : ""
-                fillMode: Image.PreserveAspectCrop; smooth: true; visible: source != ""
+                id: titleLogo
+                width: parent.width; height: meta.height * 0.10
+                property string logoSrc: (meta.m && meta.m.logo && xmb.host) ? xmb.host.resolve(meta.m.logo) : ""
+                source: logoSrc; visible: logoSrc !== "" && status === Image.Ready
+                fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignLeft; smooth: true
             }
             Text {
-                width: parent.width; text: meta.m.title ? meta.m.title : ""
+                width: parent.width
+                visible: titleLogo.logoSrc === "" || titleLogo.status === Image.Error
+                text: meta.m.title ? meta.m.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(15, xmb.height * 0.036)
                 wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
             }
@@ -279,13 +295,12 @@ Item {
                 color: xmb.subColor; font.pixelSize: Math.max(11, xmb.height * 0.024)
                 wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
             }
-            Text { // facts (rating / genres / developer / …) the addon supplied, a few at most
+            Text { // facts (developer / genre / players / rating / …) the provider or aggregator supplied
                 width: parent.width; visible: text !== ""; textFormat: Text.RichText
                 text: {
-                    if (meta.m.type === "game") return "" // games: year + play line covers it; drop the facts/platforms row
                     var f = meta.m.facts; if (!f || !f.length) return ""
                     var out = []
-                    for (var i = 0; i < f.length && i < 4; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
+                    for (var i = 0; i < f.length && i < 5; i++) out.push("<b>" + f[i].label + ":</b> " + f[i].value)
                     return out.join("&nbsp;&nbsp;&nbsp;")
                 }
                 color: xmb.descColor; font.pixelSize: Math.max(10, xmb.height * 0.021)

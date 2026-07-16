@@ -33,8 +33,9 @@ Item {
     readonly property string still: {
         var s = host ? host.resolve(T.imageSource(el, ctx)) : ""
         if (s) return s
-        var order = hasVideo ? ["hero", "screenshot", "fanart", "background", "poster", "box"]
-                             : ["poster", "box", "hero", "screenshot"]
+        // Box/poster art is preferred as the still; screenshots are the LAST resort (video is the priority).
+        var order = hasVideo ? ["hero", "poster", "box", "fanart", "background", "thumb", "image", "screenshot"]
+                             : ["poster", "box", "hero", "fanart", "thumb", "image", "screenshot"]
         for (var i = 0; i < order.length; i++) {
             var u = T.artUrl(ctx, order[i])
             if (u) return host ? host.resolve(u) : u
