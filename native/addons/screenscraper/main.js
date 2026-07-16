@@ -90,13 +90,23 @@ function getMeta(argJson) {
 
     var ssid = getConfig("ssid");
     var sspassword = getConfig("sspassword");
+    var devid = getConfig("devid") || "";
+    var devpassword = getConfig("devpassword") || "";
+
+    // ScreenScraper's API mandates REGISTERED DEVELOPER credentials (devid/devpassword) — a personal user
+    // account (ssid) alone is refused with HTTP 403 "Vérifier vos identifiants développeur". Get a devid from
+    // screenscraper.fr (their forum grants them to apps), or just reuse RetroBat's already-scraped data by
+    // pointing the ROMs folder at your RetroBat roms (it reads the gamelist.xml).
+    if (!devid || !devpassword) {
+        log("ScreenScraper: NOT scraping — no devid/devpassword set. ScreenScraper's API requires registered "
+            + "developer credentials (a user account alone is rejected). Set devid/devpassword in this addon's "
+            + "settings, or point the ROMs folder at your RetroBat roms to reuse its scraped gamelist.xml.");
+        return "{}";
+    }
     if (!ssid) return "{}";
 
     var title = a.title || "";
     if (!title) return "{}";
-
-    var devid = getConfig("devid") || "";
-    var devpassword = getConfig("devpassword") || "";
 
     var url = SS + "?devid=" + enc(devid) + "&devpassword=" + enc(devpassword) +
         "&softname=mymediavault&output=json&ssid=" + enc(ssid) +
@@ -105,7 +115,12 @@ function getMeta(argJson) {
     var sid = systemId(a.systemHint);
     if (sid) url += "&systemeid=" + sid;
 
-    var r = J(httpRequest({ url: url, method: "GET", headers: { "Accept": "application/json" } }));
+    var body = httpRequest({ url: url, method: "GET", headers: { "Accept": "application/json" } });
+    if (body && body.indexOf("Erreur de login") >= 0) {  // SS returns a plain-text login error, not JSON
+        log("ScreenScraper login rejected: " + String(body).substring(0, 140));
+        return "{}";
+    }
+    var r = J(body);
     if (!r || !r.response || !r.response.jeu) return "{}";
 
     var jeu = r.response.jeu;
