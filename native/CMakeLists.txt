@@ -88,6 +88,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
         src/addons/AddonManager.cpp src/addons/AddonManager.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
         src/ui/MediaPane.cpp      src/ui/MediaPane.h
@@ -247,6 +248,13 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/GamelistStore.cpp src/core/GamelistStore.h src/addons/AddonModels.cpp)
     target_include_directories(probe_gamelist PRIVATE src src/core src/addons)
     target_link_libraries(probe_gamelist PRIVATE Qt6::Core Qt6::Network)
+
+    # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites).
+    add_executable(probe_browse tools/probe_browse.cpp
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/MetaCache.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
+    target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless tests for the controller-navigation kit (rings, overlays, on-screen keyboard, back routing).
     # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.

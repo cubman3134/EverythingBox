@@ -27,6 +27,7 @@
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../browse/SyntheticCatalogs.h"
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QLineEdit>
@@ -443,16 +444,6 @@ static QString openTitleFor(const QString& kind)
     if (kind == QStringLiteral("document")) return QObject::tr("Open a book (EPUB/PDF)…");
     if (kind == QStringLiteral("game"))     return QObject::tr("Open a game file…");
     return QObject::tr("Open a file…");
-}
-
-// Map a Recent entry's kind to a media type (for the placeholder icon) and a human label (subtitle).
-static QString iconTypeForKind(const QString& kind)
-{
-    if (kind == QStringLiteral("video"))    return QStringLiteral("movie");
-    if (kind == QStringLiteral("audio"))    return QStringLiteral("album");
-    if (kind == QStringLiteral("document")) return QStringLiteral("book");
-    if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")) return QStringLiteral("game");
-    return QString();
 }
 
 // Group key for a Recent entry: by media type, and per-console for games ("game:<console>").
@@ -1671,36 +1662,17 @@ void HomeView::openRecentsLevel(const QString& marker) // marker = "<kind>" or "
     populateRecents(marker);
 }
 
-void HomeView::populateRecents(const QString& marker)
+// Show a locally built (addon-less) catalog level: reset paging state and hand it to the grid.
+void HomeView::showSyntheticCatalog(const MediaCatalog& cat)
 {
-    // marker = "<kind>" or "<kind>|<system>": the optional system scopes a games console (its SystemCatalog id,
-    // or "pc"); empty system = all of that kind (the catalogue-root Recent).
-    const QString kind = marker.section(QLatin1Char('|'), 0, 0);
-    const QString system = marker.section(QLatin1Char('|'), 1, 1);
-    MediaCatalog cat; cat.title = tr("Recent");
-    for (const RecentItem& r : RecentStore::list())
-    {
-        // PC games belong to the game catalogue's Recent view alongside emulated ones.
-        const bool match = r.kind == kind
-                           || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame"));
-        if (!kind.isEmpty() && !match) continue;
-        if (!system.isEmpty() && r.system != system) continue; // per-console scope
-        MediaItem it;
-        it.url = r.path;                                       // re-open target
-        it.id = r.key;                                         // stable resume key (streamed items)
-        it.mime = r.kind;                                      // routing kind
-        it.type = iconTypeForKind(r.kind);                    // drives the placeholder icon + resume bar
-        // Offline-first artwork: a downloaded item's locally cached poster wins over the remote url.
-        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, r.thumb);
-        it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
     pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
     hideMeta();
     if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
     populate(cat, /*append*/ false);
 }
+
+void HomeView::populateRecents(const QString& marker)
+{ showSyntheticCatalog(browse::recentsCatalog(RecentStore::list(), marker)); }
 
 bool HomeView::atDownloadsLevel() const
 {
@@ -1728,33 +1700,7 @@ void HomeView::openDownloadsLevel(const QString& marker)
 }
 
 void HomeView::populateDownloads(const QString& marker)
-{
-    // marker = "<kind>|<system>": kind filters the catalogue; system (a SystemCatalog id, or "pc") scopes a
-    // games console. An empty system matches any (non-game catalogues).
-    const QString kind = marker.section(QLatin1Char('|'), 0, 0);
-    const QString system = marker.section(QLatin1Char('|'), 1, 1);
-    MediaCatalog cat; cat.title = tr("Downloaded");
-    for (const DownloadedItem& d : DownloadsStore::list())
-    {
-        if (!kind.isEmpty() && d.kind != kind) continue;
-        if (!system.isEmpty() && d.system != system) continue;
-        if (!QFileInfo::exists(d.path)) continue; // hide entries whose file was deleted outside the app
-        MediaItem it;
-        it.url = d.path;
-        it.id = d.key;
-        it.mime = d.kind;                       // routing kind (openRecent dispatches on it)
-        it.type = iconTypeForKind(d.kind);
-        // Offline-first artwork: the locally cached poster wins over the remote url.
-        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, d.thumb);
-        it.title = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
-    hideMeta();
-    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
-    populate(cat, /*append*/ false);
-}
+{ showSyntheticCatalog(browse::downloadsCatalog(DownloadsStore::list(), marker)); }
 
 void HomeView::openFavoritesLevel(const QString& system)
 {
@@ -1770,28 +1716,7 @@ void HomeView::openFavoritesLevel(const QString& system)
 }
 
 void HomeView::populateFavorites(const QString& system)
-{
-    MediaCatalog cat; cat.title = tr("Favorites");
-    for (const FavoriteItem& f : FavoritesStore::list())
-    {
-        if (f.path.isEmpty()) continue;                 // only local games have a per-console home
-        if (!system.isEmpty() && f.system != system) continue;
-        MediaItem it;
-        it.url = f.path;
-        it.id = f.itemId;
-        it.mime = f.kind.isEmpty() ? QStringLiteral("game") : f.kind; // routing kind -> the game action menu
-        it.type = iconTypeForKind(it.mime);
-        // Offline-first artwork: the locally cached poster wins over the remote url.
-        it.thumbnailUrl = MetaCache::displayImage(it.id.isEmpty() ? it.url : it.id, f.thumbnailUrl);
-        it.title = f.title.isEmpty() ? QFileInfo(f.path).completeBaseName() : f.title;
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
-    hideMeta();
-    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
-    populate(cat, /*append*/ false);
-}
+{ showSyntheticCatalog(browse::favoritesCatalog(FavoritesStore::list(), system)); }
 
 void HomeView::renderRecents()
 {
@@ -1868,7 +1793,7 @@ void HomeView::renderRecents()
             it.url = r.path;                         // re-open target
             it.id = r.key;                           // stable resume key (streamed items); also read by XMB/carousel
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
-            it.type = iconTypeForKind(r.kind);       // drives the placeholder icon
+            it.type = browse::iconTypeForKind(r.kind); // drives the placeholder icon
             // The real poster (streamed media records it), else a placeholder — the locally cached copy
             // (saved when the item was downloaded) wins so the shelf renders offline.
             it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);

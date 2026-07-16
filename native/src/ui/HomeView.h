@@ -213,6 +213,9 @@ private:
     void maybeRestoreSelection();          // on Back, scroll to the drilled-into item (paging in if needed)
     void issueRequest(bool append);        // dispatch an async page request for the current view
     void populate(const MediaCatalog& cat, bool append);
+    // Show a locally built (addon-less) catalog level: reset paging state and hand it to the grid. Shared
+    // boilerplate for the three synthetic levels below (Recent/Downloaded/Favorites).
+    void showSyntheticCatalog(const MediaCatalog& cat);
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
