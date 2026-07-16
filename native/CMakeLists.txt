@@ -137,6 +137,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/Notifier.cpp       src/ui/Notifier.h
         resources/appicon.qrc
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
@@ -252,6 +253,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/nav/Osk.cpp src/ui/nav/Osk.h)
     target_include_directories(probe_nav PRIVATE src src/ui)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
+
+    # Headless test for the Notifier overlay (the single user-feedback channel).
+    add_executable(probe_notifier tools/probe_notifier.cpp
+        src/ui/Notifier.cpp src/ui/Notifier.h)
+    target_include_directories(probe_notifier PRIVATE src src/ui)
+    target_link_libraries(probe_notifier PRIVATE Qt6::Widgets)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
     add_executable(probe_pdf tools/probe_pdf.cpp)

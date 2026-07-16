@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Notifier.h"
 #include "../core/AppPaths.h"
 #include "../video/MpvWidget.h"
 #include "../emu/RetroView.h"
@@ -639,41 +640,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     streamIssueBtn_->hide();
     streamIssueBtn_->installEventFilter(this);
     connect(streamIssueBtn_, &QPushButton::clicked, this, [this] {
-        showPlayerNotice(tr("Finding another source…"), 30000);
+        notifier_->playerNotice(tr("Finding another source…"), 30000);
         home_->requestNextSource();
     });
 
-    // Transient centred message over the player for next-source feedback (visible in full screen, where the
-    // status bar isn't). Hidden by default.
-    playerNotice_ = new QLabel(player_);
-    playerNotice_->setObjectName(QStringLiteral("playerNotice"));
-    playerNotice_->setStyleSheet(QStringLiteral(
-        "#playerNotice { background: rgba(20,20,24,0.90); color:#f2f2f2; border-radius:8px; padding:10px 18px;"
-        " font-size:15px; font-weight:bold; }"));
-    playerNotice_->setAlignment(Qt::AlignCenter);
-    playerNotice_->hide();
-    playerNoticeTimer_ = new QTimer(this);
-    playerNoticeTimer_->setSingleShot(true);
-    connect(playerNoticeTimer_, &QTimer::timeout, this, [this] { if (playerNotice_) playerNotice_->hide(); });
-
-    // Notification overlay (download/resolve progress + errors). A CHILD widget of the central area, raised
-    // over the current page — NOT a separate top-level window. A top-level window is trapped behind a
-    // foreground fullscreen main window (Windows' boosted fullscreen z-band), so it only appeared when you
-    // alt-tabbed away. As a child it's part of the window and composites over everything: the QQuickWidget
-    // themed home and the libmpv QOpenGLWidget both composite with sibling widgets. Click-through, no focus.
-    notice_ = new QLabel(centralWidget());
-    notice_->setObjectName(QStringLiteral("mwNotice"));
-    notice_->setAttribute(Qt::WA_TransparentForMouseEvents);
-    notice_->setFocusPolicy(Qt::NoFocus);
-    notice_->setWordWrap(true);
-    notice_->setAlignment(Qt::AlignCenter);
-    notice_->setStyleSheet(QStringLiteral(
-        "#mwNotice { background:rgba(18,20,26,0.95); color:#f4f6f8; border:1px solid rgba(255,255,255,0.18);"
-        " border-radius:10px; padding:12px 22px; font-size:12pt; font-weight:600; }"));
-    notice_->hide();
-    noticeTimer_ = new QTimer(this);
-    noticeTimer_->setSingleShot(true);
-    connect(noticeTimer_, &QTimer::timeout, this, [this] { if (notice_) notice_->hide(); });
+    // The app's single user-feedback channel: a window-level notice (download/resolve progress + errors,
+    // over ANY view) and a transient centred message over the player (visible in full screen).
+    notifier_ = new Notifier(this, this);
+    notifier_->setPlayerHost(player_, [this]{ return 16 + videoBack_->height() + 14; });
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
@@ -729,7 +703,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         showNextSourceFeedback(tr("Finding another source…")); home_->requestNextSource(); });
     // Result of a next-source request: on success the new file opens itself; on failure show why.
     connect(home_, &HomeView::nextSourceResult, this, [this](bool ok, const QString& msg) {
-        if (ok) { if (playerNotice_) playerNotice_->hide(); }
+        if (ok) { notifier_->hidePlayerNotice(); }
         else    { showNextSourceFeedback(msg); }
     });
     connect(rewind, &QPushButton::clicked, this, [this] { player_->seekRelative(-10.0); revealMediaControls(); });
@@ -796,13 +770,13 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     QMainWindow::resizeEvent(event);
     if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_)
         positionMediaControls();
-    positionNotice();
+    notifier_->reposition();
 }
 
 void MainWindow::moveEvent(QMoveEvent* event)
 {
     QMainWindow::moveEvent(event);
-    positionNotice(); // the notice is a separate top-level window; keep it stuck to us as we drag
+    notifier_->reposition(); // the notice is a separate top-level window; keep it stuck to us as we drag
 }
 
 void MainWindow::leaveFullScreen()
@@ -1379,64 +1353,25 @@ void MainWindow::positionMediaControls()
     videoBack_->move(margin, margin); // top-left
     streamIssueBtn_->adjustSize();
     streamIssueBtn_->move(margin + videoBack_->width() + 10, margin); // just right of Back
-    if (playerNotice_ && playerNotice_->isVisible())
-    {
-        playerNotice_->adjustSize();
-        playerNotice_->move((player_->width() - playerNotice_->width()) / 2, margin + videoBack_->height() + 14);
-    }
+    notifier_->reposition();
     if (subOverlay_) subOverlay_->setGeometry(player_->rect()); // keep the subtitle scrim covering the player
-}
-
-void MainWindow::showPlayerNotice(const QString& msg, int ms)
-{
-    if (!playerNotice_) return;
-    playerNotice_->setText(msg);
-    playerNotice_->adjustSize();
-    const int margin = 16;
-    playerNotice_->move((player_->width() - playerNotice_->width()) / 2, margin + videoBack_->height() + 14);
-    playerNotice_->show();
-    playerNotice_->raise();
-    playerNoticeTimer_->start(ms);
-}
-
-void MainWindow::positionNotice()
-{
-    if (!notice_ || !notice_->isVisible()) return;
-    QWidget* area = notice_->parentWidget() ? notice_->parentWidget() : this;
-    notice_->setMaximumWidth(qMax(280, int(area->width() * 0.7)));
-    notice_->adjustSize();
-    // Child overlay: local coordinates over the bottom-centre of the central area.
-    const int x = (area->width() - notice_->width()) / 2;
-    const int y = area->height() - notice_->height() - 56; // floats just above the bottom edge
-    notice_->move(qMax(8, x), qMax(8, y));
-    notice_->raise(); // keep it above the current page
 }
 
 void MainWindow::notify(const QString& text, int ms)
 {
-    if (!notice_) return;
-    notice_->setText(text);
-    notice_->setMaximumWidth(qMax(280, int(width() * 0.7)));
-    notice_->adjustSize();
-    notice_->show();
-    notice_->raise();
-    positionNotice();
-    notice_->repaint(); // paint synchronously now, so a message set right before a blocking step (e.g. archive
-                        // extraction) is actually visible instead of queued behind the freeze
-    if (noticeTimer_) { if (ms > 0) noticeTimer_->start(ms); else noticeTimer_->stop(); } // ms<=0 => sticky
+    notifier_->notify(text, ms);
 }
 
 void MainWindow::hideNotice()
 {
-    if (notice_) notice_->hide();
-    if (noticeTimer_) noticeTimer_->stop();
+    notifier_->hideNotice();
 }
 
 void MainWindow::showNextSourceFeedback(const QString& msg)
 {
     // Over the player while playing (the status bar may be hidden in full screen); otherwise the status bar
     // (the book/PDF readers keep it visible).
-    if (stack_->currentWidget() == playerPage_) showPlayerNotice(msg);
+    if (stack_->currentWidget() == playerPage_) notifier_->playerNotice(msg);
     else                                        statusBar()->showMessage(msg, 6000);
 }
 
@@ -1578,7 +1513,7 @@ void MainWindow::tryPlayNextEpisode()
 
     const QString nextEp = QStringLiteral("%1:%2:%3").arg(show).arg(s).arg(e + 1);
     const QString nextSeason = QStringLiteral("%1:%2:%3").arg(show).arg(s + 1).arg(1);
-    showPlayerNotice(tr("Up next — finding the next episode…"), 20000);
+    notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
         [this, nextEp, nextSeason](const QString& url, const QString& mime) {
         if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
@@ -1586,14 +1521,14 @@ void MainWindow::tryPlayNextEpisode()
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
             [this, nextSeason](const QString& url2, const QString& mime2) {
             if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
-            else { if (playerNotice_) playerNotice_->hide(); notify(tr("No next episode found — that looks like the finale."), 6000); }
+            else { notifier_->hidePlayerNotice(); notify(tr("No next episode found — that looks like the finale."), 6000); }
         });
     });
 }
 
 void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime)
 {
-    if (playerNotice_) playerNotice_->hide();
+    notifier_->hidePlayerNotice();
     const QStringList p = imdbStreamId.split(QLatin1Char(':'));
     MediaItem it;
     it.url = url;
