@@ -2526,6 +2526,10 @@ void MainWindow::refreshThemedMeta(int idx)
     sk.insert(QStringLiteral("favorite"), home_->isThemedLeafFavorite(idx));
     r->setProperty("selectedMeta", sk);
     themedMetaWant_ = idx;
+    // Resolve the LOCAL data (session cache / gamelist.xml / MetaCache) right now — it's in-memory/fast, so
+    // the logo + facts + video show instantly with no plain-title flash. Only the networked enrichment
+    // (online scrape + achievements) is debounced below, so fast scrolling doesn't hit the network per row.
+    home_->requestThemedMeta(idx);
     if (themedMetaTimer_) themedMetaTimer_->start();
 }
 
@@ -2543,7 +2547,7 @@ void MainWindow::showThemedXmb()
         themedMetaTimer_->setInterval(160);
         connect(themedMetaTimer_, &QTimer::timeout, this, [this] {
             if (themedHomeIsXmb_ && themedXmbInCatalog_ && themedMetaWant_ >= 0)
-                home_->requestThemedMeta(themedMetaWant_);
+                home_->enrichThemedMeta(); // the networked half, for the row we settled on
         });
     }
 

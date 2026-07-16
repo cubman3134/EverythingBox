@@ -70,7 +70,8 @@ public:
     // Triple/XMB theme: live metadata beside the selection + an inline Play/Favorite on a leaf, all without
     // leaving the themed view. requestThemedMeta() emits themedMetaReady() (a skeleton at once, then the
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
-    void requestThemedMeta(int browseIndex);
+    void requestThemedMeta(int browseIndex); // INSTANT: local (session cache / gamelist / MetaCache) art + facts
+    void enrichThemedMeta();                  // DEBOUNCED: online scrape + achievements + addon /meta for that row
     void playThemedLeaf(int browseIndex);
     void downloadThemedLeaf(int browseIndex);      // resolve + queue the browse-item to download (no play)
     void favoriteThemedLeaf(int browseIndex);
@@ -262,6 +263,7 @@ private:
     SteamAchievements* steamAch_ = nullptr; // Steam achievements for installed PC games (Hydra-style, lazy)
     GameMetaAggregator* gameAgg_ = nullptr; // fans out SteamGridDB/IGDB/ScreenScraper/TheGamesDB on hover (lazy)
     QHash<QString, QVariantMap> themedArtCache_; // per-session page cache of resolved panel art/facts by item key
+    bool themedResolvedRich_ = false;            // did requestThemedMeta resolve locally? (enrich skips scraping if so)
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
     QFrame* meta_ = nullptr;

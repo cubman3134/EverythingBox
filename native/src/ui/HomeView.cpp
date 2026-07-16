@@ -2957,6 +2957,20 @@ void HomeView::requestThemedMeta(int idx)
             base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
     }
     emit themedMetaReady(idx, base);
+    // The LOCAL art/facts above are resolved + shown instantly (no debounce), so scrolling over cached /
+    // gamelist rows shows the logo + metadata immediately with no plain-title flash. Only the NETWORK half
+    // (online scrape + achievements + the catalog addon's /meta) is deferred to enrichThemedMeta(), fired on
+    // the host's settle debounce so scrolling doesn't hit the network for every row.
+    themedResolvedRich_ = resolvedRich;
+}
+
+void HomeView::enrichThemedMeta()
+{
+    const int idx = themedMetaIndex_;
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    const QString metaKey = MetaCache::keyFor(it);
+    const bool resolvedRich = themedResolvedRich_;
 
     // Achievements for a game -> the live panel (earned first, so they highlight "at the front"). Retro
     // consoles use RetroAchievements; a PC game uses Steam (its schema + the local emulator's unlock file).
