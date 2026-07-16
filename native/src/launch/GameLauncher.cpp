@@ -90,7 +90,36 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
 {
     CorePlan plan;
 
-    const QString ext = QFileInfo(rom).suffix().toLower();
+    // Archived ROM (.zip / .7z): extract the inner ROM and resolve against that. Every libretro core and external
+    // emulator loads from a path, so this single spot handles archives for all of them (both the full-screen open()
+    // and the split-pane router go through here). If we know the system (from the hint), narrow the member pick to
+    // its extensions; otherwise take the largest file. Loop in case the extracted member is itself an archive.
+    QString game = rom;
+    while (ArchiveRom::isArchive(game))
+    {
+        QStringList wanted;
+        if (!systemHint.isEmpty())
+        {
+            const GameSystem* hs = SystemCatalog::byId(systemHint);
+            if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
+            if (hs)
+                for (const QString& e : hs->extensions)
+                    wanted << (QStringLiteral(".") + e);
+        }
+        QString aerr;
+        const QString extracted = ArchiveRom::extractToTemp(game, wanted, &aerr);
+        if (extracted.isEmpty())
+        {
+            glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(game).fileName(), aerr));
+            plan.error = tr("Couldn't open the archived game: %1").arg(aerr);
+            return plan;
+        }
+        glLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
+                  .arg(QFileInfo(extracted).fileName(), QFileInfo(game).fileName()));
+        game = extracted;
+    }
+
+    const QString ext = QFileInfo(game).suffix().toLower();
     // Prefer the console/platform the game was opened from (when known): it disambiguates extensions shared
     // across systems (PSP .iso vs GameCube .iso, PSP .pbp vs PlayStation .pbp). Fall back to the extension.
     const GameSystem* sys = nullptr;
@@ -102,7 +131,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     const bool byHint = sys != nullptr;
     if (!sys) sys = SystemCatalog::forExtension(ext);
     glLog(QStringLiteral("game: open \"%1\" (.%2)%3 -> system %4")
-              .arg(QFileInfo(rom).fileName(), ext,
+              .arg(QFileInfo(game).fileName(), ext,
                    systemHint.isEmpty() ? QString() : QStringLiteral(" hint=\"%1\"%2").arg(systemHint,
                        byHint ? QString() : QStringLiteral("(unmatched)")),
                    sys ? sys->id : QStringLiteral("(none)")));
@@ -116,20 +145,19 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
 
     // If the user opened a raw disc track (a "(Track N).bin" / GDI track), boot its .cue/.gdi descriptor instead —
     // the emulator can't mount a bare track. No-op for direct images and lone .bin carts. Covers cores + externals.
-    const QString launchRom = resolveDiscDescriptor(rom);
-    if (launchRom != rom)
+    const QString launchRom = resolveDiscDescriptor(game);
+    if (launchRom != game)
         glLog(QStringLiteral("game: track \"%1\" -> disc descriptor \"%2\"")
-                  .arg(QFileInfo(rom).fileName(), QFileInfo(launchRom).fileName()));
+                  .arg(QFileInfo(game).fileName(), QFileInfo(launchRom).fileName()));
     plan.launchRom = launchRom;
 
-    // Standalone-emulator systems (GameCube/Wii → Dolphin) have no libretro core to prepare — open() routes them
-    // to a child-process emulator instead. A split pane can't host one, so leave corePath empty with a message
-    // the split-pane caller surfaces.
+    // Standalone-emulator systems (GameCube/Wii → Dolphin) have no libretro core to prepare — resolution stops here
+    // with the emulator id set and no error/corePath. open() routes these to a child-process emulator; the split-pane
+    // router surfaces "opens in its own window" and then launches full-screen anyway. (No core download for them —
+    // the old code never ran one for external systems.)
     if (!sys->externalEmulator.isEmpty())
     {
-        const ExternalEmulator* em = EmulatorRegistry::byId(sys->externalEmulator);
-        plan.error = em ? tr("%1 opens in its own window, not a split pane.").arg(em->displayName)
-                        : tr("No emulator is configured for %1.").arg(sys->name);
+        plan.externalEmulatorId = sys->externalEmulator;
         return plan;
     }
 
@@ -161,37 +189,9 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
 void GameLauncher::open(const QString& rom, const QString& title, const QString& thumb, const QString& key,
                         const QString& systemHint)
 {
-    // Archived ROM (.zip / .7z): extract the inner ROM once and open that. Every libretro core and external
-    // emulator loads from a path, so this single spot handles archives for all of them. If we know the
-    // system (from the hint), narrow the member pick to its extensions; otherwise take the largest file.
-    // The hint carries through the re-entry so disambiguation still works.
-    if (ArchiveRom::isArchive(rom))
-    {
-        QStringList wanted;
-        if (!systemHint.isEmpty())
-        {
-            const GameSystem* hs = SystemCatalog::byId(systemHint);
-            if (!hs) hs = SystemCatalog::forConsoleName(systemHint);
-            if (hs)
-                for (const QString& e : hs->extensions)
-                    wanted << (QStringLiteral(".") + e);
-        }
-        QString aerr;
-        const QString extracted = ArchiveRom::extractToTemp(rom, wanted, &aerr);
-        if (extracted.isEmpty())
-        {
-            glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(rom).fileName(), aerr));
-            emit notifyUser(tr("Couldn't open the archived game: %1").arg(aerr), 7000);
-            return;
-        }
-        glLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
-                  .arg(QFileInfo(extracted).fileName(), QFileInfo(rom).fileName()));
-        open(extracted, title, thumb, key, systemHint);
-        return;
-    }
-
-    // Resolve the system, disc descriptor, and (for a libretro system) the core. prepareCore short-circuits for
-    // standalone-emulator systems, which have no core — we route those to the external-emulator branch below.
+    // Resolve the system, disc descriptor, and (for a libretro system) the core, extracting an archive first.
+    // prepareCore short-circuits for standalone-emulator systems (externalEmulatorId set) — we route those to the
+    // external-emulator branch below.
     const CorePlan plan = prepareCore(rom, systemHint);
 
     // The Recent entry shows the catalog item's name/cover when we have them; otherwise the descriptor's file
@@ -201,12 +201,12 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
 
     // Standalone-emulator systems (GameCube/Wii → Dolphin) launch an external process instead of a core.
     // Not possible on Android (the sandbox can't spawn downloaded desktop executables - see android-port.md).
-    const GameSystem* sys = plan.systemId.isEmpty() ? nullptr : SystemCatalog::byId(plan.systemId);
-    if (sys && !sys->externalEmulator.isEmpty())
+    if (!plan.externalEmulatorId.isEmpty())
     {
+        const GameSystem* sys = SystemCatalog::byId(plan.systemId);
 #if defined(Q_OS_ANDROID)
         emit statusMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
-                               .arg(sys->name), 6000);
+                               .arg(sys ? sys->name : plan.systemId), 6000);
 #else
         launchExternalGame(sys, launchRom, recentTitle, thumb, key);
 #endif
@@ -251,8 +251,9 @@ void GameLauncher::ensureEmu()
     connect(emu_, &EmulatorManager::status, this, [this](const QString& t, int pct) {
         const QString line = pct >= 0 ? tr("%1  %2%").arg(t).arg(pct) : t;
         emit statusMessage(line, 0);
-        if (emu_->busy())
-            emit waitPage(line, false);
+        // Update the wait-page label only if it's already the current view — an install-only flow (Settings ▸
+        // Emulators) must NOT be yanked onto the wait page and stranded there. runEmulator/launched switch views.
+        emit waitPageStatus(line);
     });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         emit waitPage(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "

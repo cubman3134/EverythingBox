@@ -633,6 +633,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         emuStopBtn_->setVisible(stop);
         stack_->setCurrentWidget(emuPage_);
     });
+    // Install/launch progress: refresh the wait-page label only when it's already showing — never switch to it.
+    // (An install-only flow from Settings ▸ Emulators must leave the user on the settings panel.)
+    connect(launcher_, &GameLauncher::waitPageStatus, this, [this](const QString& t) {
+        if (emuPage_ && stack_->currentWidget() == emuPage_) { emuLabel_->setText(t); emuStopBtn_->setVisible(false); }
+    });
     connect(launcher_, &GameLauncher::waitPageDone, this,
             [this] { if (stack_->currentWidget() == emuPage_) openHome(); });
     connect(launcher_, &GameLauncher::minimizeRequested, this, [this] {
@@ -1530,11 +1535,25 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     if (splitTarget_) // run the ROM in the focused pane's own emulator instead of the full-screen one
     {
         const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint);
-        if (plan.corePath.isEmpty())
+        if (!plan.error.isEmpty()) { notifier_->notify(plan.error, 7000); return; }
+        if (!plan.externalEmulatorId.isEmpty()) // a standalone emulator owns its own window; it can't embed in a split pane
         {
-            notifier_->notify(plan.error.isEmpty() ? tr("Can't run game.") : plan.error, 7000);
+            const ExternalEmulator* em = EmulatorRegistry::byId(plan.externalEmulatorId);
+            if (!em)
+            {
+                const GameSystem* sys = SystemCatalog::byId(plan.systemId); // old launchExternalGame used the system NAME here
+                statusBar()->showMessage(tr("No emulator is configured for %1.").arg(sys ? sys->name : plan.systemId), 6000);
+                return;
+            }
+            statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
+            finishSplitOpen();
+            launcher_->open(plan.launchRom, title, thumb, key, systemHint); // full-screen launch, as before
             return;
         }
+        // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder — fetch any that are
+        // missing before the pane's core loads (best-effort; a failure falls back to the core's own message).
+        CoreManager::ensureBios(plan.systemId, CoreManager::systemDir(),
+                                [this](const QString& s) { statusBar()->showMessage(s); });
         const QString recentTitle = title.isEmpty() ? QFileInfo(plan.launchRom).completeBaseName() : title;
         splitTarget_->openGame(plan.corePath, plan.launchRom, plan.core);
         RecentStore::add({ plan.launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });

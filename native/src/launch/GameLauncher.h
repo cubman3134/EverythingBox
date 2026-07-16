@@ -30,7 +30,8 @@ public:
 
     // The pipeline's resolution half (system + disc descriptor + core ensure), reused by MainWindow's split-pane
     // branch to run a ROM in the focused pane's own emulator. corePath empty => couldn't resolve; `error` says why.
-    struct CorePlan { QString corePath; QString core; QString launchRom; QString systemId; QString error; };
+    struct CorePlan { QString corePath; QString core; QString launchRom; QString systemId; QString error;
+                      QString externalEmulatorId; }; // non-empty => a standalone-emulator system (no libretro core)
     CorePlan prepareCore(const QString& rom, const QString& systemHint);
 
     // Run a standalone emulator: stop our playback, show the wait page, minimise, and launch (auto-installing if
@@ -45,6 +46,7 @@ signals:
     void aboutToLaunch();        // host stops the player/readers and clears the audio queue
     void showRetroRequested();   // host shows the RetroView page (a libretro game started)
     void waitPage(const QString& text, bool stopVisible); // host builds/updates the emu wait page + shows it
+    void waitPageStatus(const QString& text); // install/launch progress: update the wait-page label IF it's showing, never switch to it
     void waitPageDone();         // host returns Home if the wait page is the current view
     void minimizeRequested();    // host saves its window state + minimises (step aside for the emulator)
     void restoreRequested();     // host restores the saved window state (the emulator exited)
