@@ -106,7 +106,9 @@ int main(int argc, char** argv)
             images["screenshot"] = QStringList{ sampleImg, sampleImg };
             sm["images"] = images;
         }
-        sm["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
+        if (!qEnvironmentVariable("PROBE_VIDEO").isEmpty())        // a real local file (e.g. a RetroBat .mp4)
+            sm["videos"] = QStringList{ qEnvironmentVariable("PROBE_VIDEO") };
+        else sm["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
             ? QStringLiteral("av://lavfi:testsrc=size=480x360:rate=25") : QStringLiteral("http://x.invalid/t.mp4") };
         QVariantList facts;
         facts << QVariantMap{ { "label", "Developer" }, { "value", "Square" } };

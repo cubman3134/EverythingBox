@@ -2,6 +2,7 @@
 
 #include <QMetaObject>
 #include <QPainter>
+#include <QUrl>
 
 #include <mpv/client.h>
 #include <mpv/render.h>
@@ -56,7 +57,12 @@ void MpvPreview::setSource(const QString& s)
         mpv_command_async(mpv_, 0, cmd);
         return;
     }
-    const QByteArray u = s.toUtf8();
+    // mpv wants a native path or a real URL. A file:// url (with %20-escapes, or unescaped spaces) is handed
+    // back as a plain local path so filenames with spaces/parentheses (RetroBat media) open correctly.
+    QString target = s;
+    const QUrl url(s);
+    if (url.isLocalFile()) target = url.toLocalFile();
+    const QByteArray u = target.toUtf8();
     const char* cmd[]{ "loadfile", u.constData(), nullptr };
     mpv_command_async(mpv_, 0, cmd);
 }

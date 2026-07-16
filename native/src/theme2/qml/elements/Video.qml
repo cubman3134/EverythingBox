@@ -113,7 +113,9 @@ Item {
     Timer {
         id: startDelay
         interval: Number(T.val(el, "delay", 700)); repeat: false
-        onTriggered: { root.ensurePlayer(); if (root.player) root.player.source = root.host ? root.host.resolve(root.playUrl) : root.playUrl }
+        // Hand mpv the RAW url/path (not host.resolve): mpv opens native paths, http and av:// directly, and a
+        // naive file:/// url would mangle the spaces/parens in RetroBat filenames.
+        onTriggered: { root.ensurePlayer(); if (root.player) root.player.source = root.playUrl }
     }
     onPlayUrlChanged: {
         root.playing = false
