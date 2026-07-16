@@ -110,6 +110,7 @@ void PlaybackSession::finishResume()
     store().remove(legacyAudiobookKey(resumePath_)); // also clear any legacy audiobook bookmark
     store().sync();
     resumePath_.clear();
+    resumeSeek_ = 0.0; // a finished file has no pending seek; don't let a stale target leak forward
     lastSavedPos_ = -100.0;
 }
 
@@ -139,6 +140,9 @@ void PlaybackSession::setDuration(double s)
 
 double PlaybackSession::takeResumeSeek()
 {
+    // Keep the old onDuration guard: with no tracked file there is no valid seek target — a stale
+    // value must never drive a seek on a late/duplicate durationChanged after finishResume().
+    if (resumePath_.isEmpty()) return 0.0;
     const double s = resumeSeek_;
     resumeSeek_ = 0.0;
     return s;

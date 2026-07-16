@@ -39,7 +39,11 @@ int main(int argc, char** argv)
     s2.beginResume("X:/book.m4b");
     CHECK(qFuzzyCompare(s2.takeResumeSeek(), 1234.0), "resume position survives a new session");
     CHECK(qFuzzyCompare(s2.takeResumeSeek() + 1.0, 1.0), "resume seek is consumed once");
+    // In-session: a pending (untaken) seek must die with finishResume — a late/duplicate
+    // durationChanged after the file finished must never drive a stale seek.
+    s2.beginResume("X:/book.m4b"); // re-arms the pending seek (1234) from the store
     s2.finishResume();
+    CHECK(qFuzzyCompare(s2.takeResumeSeek() + 1.0, 1.0), "finishResume kills the pending seek in-session");
     PlaybackSession s3(ini);
     s3.beginResume("X:/book.m4b");
     CHECK(qFuzzyCompare(s3.takeResumeSeek() + 1.0, 1.0), "finishResume drops the saved position");
