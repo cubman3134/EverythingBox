@@ -1,7 +1,7 @@
 # Foundation Refactor — Phase 1 Design
 
 **Date:** 2026-07-16
-**Status:** Approved design, pending implementation plan
+**Status:** Plan 1 implemented (MainWindow seams + synthetic catalogs); plan 2 pending (async browse providers + sweep)
 
 ## Problem
 

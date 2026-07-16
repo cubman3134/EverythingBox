@@ -107,5 +107,13 @@ else
   echo "note: no \$CORE_SO provided — skipping the libretro core-load probe"; echo
 fi
 
+# Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
+# classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
+# catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
+for p in "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK"; do
+  set -- $p
+  if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "SKIP: $1 (not built)"; fi
+done
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"
