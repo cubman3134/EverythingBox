@@ -14,6 +14,7 @@
 #include "../addons/AddonModels.h"
 
 class AddonManager;
+class GameMetaAggregator;
 class RaBrowse;
 class SteamAchievements;
 struct LoadedAddon;
@@ -258,6 +259,7 @@ private:
     QNetworkAccessManager* nam_ = nullptr;
     RaBrowse* raBrowse_ = nullptr;     // RetroAchievements web-API lookup for the themed metadata panel (lazy)
     SteamAchievements* steamAch_ = nullptr; // Steam achievements for installed PC games (Hydra-style, lazy)
+    GameMetaAggregator* gameAgg_ = nullptr; // fans out SteamGridDB/IGDB/ScreenScraper/TheGamesDB on hover (lazy)
 
     // Detail-page metadata header (shown when an item is opened; hidden on top-level catalog views).
     QFrame* meta_ = nullptr;

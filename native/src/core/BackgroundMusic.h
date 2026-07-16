@@ -27,11 +27,21 @@ public:
     bool hasTracks() const { return !tracks_.isEmpty(); }
     QString currentTitle() const { return title_; } // the playing track's name (empty if none)
 
+    // A track the active THEME ships (theme.json "music", an absolute path) — played as the default menu
+    // music when the user's own music folder is empty, so a theme has sound out of the box. "" clears it.
+    void setThemeDefault(const QString& absPath);
+
+    // Per-item "theme song": while hovering an item that carries preview audio (selected.audio), duck the
+    // shuffle and loop this track; call with "" when the hover leaves to resume the shuffle. A local path or
+    // an http(s) url. No-op when music is disabled or we're not on a menu screen.
+    void setPreview(const QString& src);
+
 signals:
     void nowPlayingChanged(const QString& title); // the track changed (or cleared)
 
 private:
     void applyState();              // play or pause based on enabled_ && active_ && hasTracks()
+    void rebuildPool();             // pool = user folder tracks, else the theme default; then applyState()
     void playIndex(int i);
     void setPaused(bool paused);
     Q_INVOKABLE void onMpvEvents(); // drain mpv events on the GUI thread (queued from the wakeup callback)
@@ -44,4 +54,7 @@ private:
     bool active_ = false;
     bool enabled_ = true;
     bool loaded_ = false;           // a track has been handed to mpv (so applyState resumes vs. starts fresh)
+    QStringList userTracks_;        // the music-folder tracks (the pool falls back to themeDefault_ when empty)
+    QString themeDefault_;          // the active theme's shipped default track (absolute path), or empty
+    bool previewing_ = false;       // a per-item theme song is ducking the shuffle right now
 };

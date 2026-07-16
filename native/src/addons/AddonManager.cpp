@@ -95,8 +95,15 @@ static MediaDetail executeMetaRequest(const AddonRequest& req)
 
 static QString itemArg(const MediaItem& item)
 {
-    return QString::fromUtf8(QJsonDocument(QJsonObject{
-        { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type } }).toJson(QJsonDocument::Compact));
+    // id + type have always been sent; also pass the title/subtitle/platform/alt-names so a metadata
+    // provider (esp. the game artwork aggregators) can search by name and disambiguate by console. All
+    // optional — existing addons that only read id/type are unaffected.
+    QJsonObject a{ { QStringLiteral("id"), item.id }, { QStringLiteral("type"), item.type } };
+    if (!item.title.isEmpty())      a.insert(QStringLiteral("title"), item.title);
+    if (!item.subtitle.isEmpty())   a.insert(QStringLiteral("subtitle"), item.subtitle);
+    if (!item.systemHint.isEmpty()) a.insert(QStringLiteral("systemHint"), item.systemHint);
+    if (!item.altNames.isEmpty())   a.insert(QStringLiteral("altNames"), QJsonArray::fromStringList(item.altNames));
+    return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact));
 }
 
 static QString catalogArg(const QString& catalogId, const QString& query, int page,
@@ -695,6 +702,9 @@ QVector<AddonCatalog> AddonManager::catalogs(LoadedAddon* src) const
     // A remote addon with no declared catalogs has nothing to browse - e.g. a stream-only resolver like
     // Allarr/Torrentio (resources:["stream"], catalogs:[]). Don't synthesize a phantom media-type tab for it.
     if (src->transport == LoadedAddon::RemoteHttp) return {};
+    // A pure metadata provider (metaFor set, catalogs empty) — SteamGridDB/IGDB/ScreenScraper/TheGamesDB —
+    // is only ever fanned out via getMeta and must NOT appear as a browsable source either.
+    if (!src->manifest.metaFor.isEmpty()) return {};
     // A local script addon with no declared catalogs implicitly exposes a single "mixed" catalog.
     AddonCatalog c;
     c.name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
@@ -1526,6 +1536,15 @@ LoadedAddon* AddonManager::metaProviderFor(LoadedAddon* exclude, const QString& 
         for (const AddonCatalog& c : catalogs(s)) if (c.type == type) return s;
     }
     return nullptr;
+}
+
+QVector<LoadedAddon*> AddonManager::metaProvidersFor(const QString& type) const
+{
+    QVector<LoadedAddon*> out;
+    for (LoadedAddon* s : sources_)
+        if (s->hasScript && isEnabled(s->manifest.id) && s->manifest.metaFor.contains(type))
+            out << s;
+    return out;
 }
 
 void AddonManager::setEnabled(const QString& id, bool enabled)

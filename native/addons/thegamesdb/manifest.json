@@ -1,0 +1,15 @@
+{
+  "id": "com.mymediavault.thegamesdb",
+  "name": "TheGamesDB",
+  "version": "1.0.0",
+  "type": "media-source",
+  "entry": "main.js",
+  "author": "My Media Vault",
+  "description": "Game artwork & metadata provider (TheGamesDB). Aggregated with other providers on hover. Requires a free API key configured in Settings.",
+  "permissions": ["network"],
+  "metaFor": ["game"],
+  "catalogs": [],
+  "settings": [
+    { "key": "apikey", "label": "TheGamesDB API key", "type": "password", "description": "Request a free public API key at https://thegamesdb.net (Account > My API Keys)." }
+  ]
+}

@@ -262,7 +262,8 @@ Item {
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
-        "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying"
+        "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying",
+        "gallery": "Gallery"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 

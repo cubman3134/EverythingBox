@@ -507,6 +507,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             QVariantMap cur = r->property("selectedMeta").toMap();
             for (auto it = meta.constBegin(); it != meta.constEnd(); ++it) cur.insert(it.key(), it.value());
             r->setProperty("selectedMeta", cur);
+            // Per-item "theme song": duck the shuffle and loop this item's preview audio while it's hovered
+            // (resume the shuffle when the selection carries none).
+            if (bgm_)
+            {
+                const QStringList au = cur.value(QStringLiteral("audio")).toStringList();
+                bgm_->setPreview(au.isEmpty() ? QString() : au.first());
+            }
         });
     }
 #endif
@@ -2470,6 +2477,7 @@ void MainWindow::showThemedHome()
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
     QWidget* old = themedHome_;
     themedHome_ = w;
+    applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
@@ -2735,6 +2743,7 @@ void MainWindow::showThemedXmb()
     }
     QWidget* old = themedHome_;
     themedHome_ = w;
+    applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
@@ -4738,6 +4747,22 @@ void MainWindow::updateBackgroundMusic()
     QWidget* w = stack_->currentWidget();
     const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
     bgm_->setActive(menu);
+}
+
+// A theme can ship default menu music via theme.json "music" (a path relative to the theme dir). It plays
+// only when the user's own music folder is empty, so every theme has sound out of the box.
+void MainWindow::applyThemeMusic(const QString& themeDir)
+{
+    if (!bgm_) return;
+    QFile f(themeDir + QStringLiteral("/theme.json"));
+    QString music;
+    if (f.open(QIODevice::ReadOnly))
+    {
+        const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+        music = o.value(QStringLiteral("music")).toString();
+    }
+    bgm_->setThemeDefault(music.isEmpty() ? QString()
+                                          : QDir(themeDir).absoluteFilePath(music));
 }
 
 // Push the current track name into the themed home so the Triple theme's "now playing" readout shows it.

@@ -38,6 +38,22 @@ int main(int argc, char** argv)
         m["overview"] = QStringLiteral("A short description of %1 goes here. The detail view binds to "
                                        "selected.overview and wraps it; themers control the layout entirely.").arg(names[i]);
         if (i < 3 && !sampleImg.isEmpty()) m["image"] = sampleImg;
+        // Exercise the extensible art schema on the first few rows: a title logo, box art, a screenshot reel,
+        // a preview clip/track, and a free-form meta fact — so the new image(role/fallback)/gallery/video
+        // elements and selected.meta bindings render with real data (PROBE_ART=1 to force even without a sample).
+        if (i < 3 && (!sampleImg.isEmpty() || qEnvironmentVariableIntValue("PROBE_ART")))
+        {
+            const QString s = sampleImg.isEmpty() ? QString() : sampleImg;
+            QVariantMap images;
+            images["logo"] = QStringList{ s };
+            images["box"] = QStringList{ s };
+            images["screenshot"] = QStringList{ s, s, s };
+            m["images"] = images;
+            m["logo"] = s; m["box"] = s;
+            m["videos"] = QStringList{ QStringLiteral("http://x.invalid/trailer.mp4") };
+            m["audio"] = QStringList{ QStringLiteral("http://x.invalid/theme.mp3") };
+            m["meta"] = QVariantMap{ { QStringLiteral("developer"), QStringLiteral("Probe Studios") } };
+        }
         items << m;
     }
     QVariantMap system; system["name"] = QFileInfo(themeDir).fileName();

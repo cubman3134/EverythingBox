@@ -100,6 +100,7 @@ void MetaCache::saveItem(const MediaItem& item)
     if (!item.imdbStreamId.isEmpty()) it.insert(QStringLiteral("imdbStreamId"), item.imdbStreamId);
     if (!item.altNames.isEmpty())     it.insert(QStringLiteral("altNames"), QJsonArray::fromStringList(item.altNames));
     merge(key, { { QStringLiteral("item"), it } });
+    saveArt(key, item.art); // extra artwork/videos/audio/meta the item carries (merges + prefetches)
 }
 
 void MetaCache::saveDetail(const QString& key, const MediaDetail& d)
@@ -116,6 +117,39 @@ void MetaCache::saveDetail(const QString& key, const MediaDetail& d)
         facts.append(QJsonObject{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } });
     det.insert(QStringLiteral("facts"), facts);
     merge(key, { { QStringLiteral("detail"), det } });
+    saveArt(key, d.art); // logo/box/fanart/screenshots/trailers/theme-music/extra facts (merges + prefetches)
+}
+
+void MetaCache::saveArt(const QString& key, const MediaArt& art)
+{
+    if (key.isEmpty() || art.isEmpty()) return;
+    // Record the whole bundle (urls + videos + audio + meta) so it survives offline even before downloads
+    // finish; merge keeps any roles a previous provider already stored.
+    QJsonObject blob = load(key).value(QStringLiteral("art")).toObject();
+    const QJsonObject fresh = QJsonObject::fromVariantMap(art.toVariant());
+    for (auto it = fresh.constBegin(); it != fresh.constEnd(); ++it) blob.insert(it.key(), it.value());
+    merge(key, { { QStringLiteral("art"), blob } });
+    // Prefetch the best image per role so posters/logos/box/fanart render with no network next time.
+    for (auto it = art.images.constBegin(); it != art.images.constEnd(); ++it)
+        if (!it.value().isEmpty()) cacheImage(key, it.key(), it.value().first());
+}
+
+MediaArt MetaCache::loadArt(const QString& key)
+{
+    const QJsonObject art = load(key).value(QStringLiteral("art")).toObject();
+    MediaArt a = MediaArt::fromJson(art); // same parser: images{role:[urls]} + videos + audio + meta
+    // Offline-first: put the locally cached file (if any) at the front of each role's candidate list.
+    QMap<QString, QStringList> resolved;
+    for (auto it = a.images.constBegin(); it != a.images.constEnd(); ++it)
+    {
+        QStringList list;
+        const QString local = imagePath(key, it.key());
+        if (!local.isEmpty()) list << local;
+        for (const QString& u : it.value()) if (!list.contains(u)) list << u;
+        resolved.insert(it.key(), list);
+    }
+    a.images = resolved;
+    return a;
 }
 
 MediaDetail MetaCache::cachedDetail(const QString& key)
@@ -139,7 +173,8 @@ MediaDetail MetaCache::cachedDetail(const QString& key)
     if (img.isEmpty()) img = imagePath(key, QStringLiteral("thumb"));
     if (img.isEmpty()) img = det.value(QStringLiteral("imageUrl")).toString(it.value(QStringLiteral("thumbnailUrl")).toString());
     d.imageUrl = img;
-    d.valid = !d.title.isEmpty();
+    d.art = loadArt(key); // rich artwork/videos/audio/meta, resolved to local files where cached
+    d.valid = !d.title.isEmpty() || !d.art.isEmpty();
     return d;
 }
 

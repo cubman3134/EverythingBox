@@ -43,11 +43,14 @@
     "detail": {
       "background": { "color": "#0E1015" },
       "elements": [
-        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "binding": "selected.image", "fillMode": "contain", "radius": 12 },
-        { "type": "text",   "id": "dTitle",   "pos": [0.42, 0.18], "size": [0.52, 0.1],  "origin": [0, 0.5], "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.062, "bold": true, "wrap": true, "lines": 2 },
-        { "type": "text",   "id": "dSub",     "pos": [0.42, 0.30], "size": [0.52, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.03 },
-        { "type": "rating", "id": "dStars",   "pos": [0.42, 0.37], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
-        { "type": "text",   "id": "dOverview","pos": [0.42, 0.62], "size": [0.52, 0.40], "origin": [0, 0.5], "binding": "selected.overview", "color": "#D6D9E0", "fontSize": 0.026, "wrap": true, "lines": 12 },
+        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "role": "box", "fallback": "poster", "binding": "selected.image", "fillMode": "contain", "radius": 12 },
+        { "type": "image",  "id": "dLogo",    "pos": [0.42, 0.20], "size": [0.52, 0.13], "origin": [0, 0.5], "role": "logo", "fallback": "clearlogo", "textFallback": true, "textBinding": "selected.title", "fillMode": "contain", "align": "left", "fontSize": 0.06 },
+        { "type": "text",   "id": "dSub",     "pos": [0.42, 0.32], "size": [0.52, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#AEB4C2", "fontSize": 0.03 },
+        { "type": "rating", "id": "dStars",   "pos": [0.42, 0.385], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#5B7FE0" },
+        { "type": "text",   "id": "dDev",     "pos": [0.42, 0.435], "size": [0.52, 0.04], "origin": [0, 0.5], "binding": "selected.meta.developer", "color": "#8990A0", "fontSize": 0.024 },
+        { "type": "gallery", "id": "dShots",  "pos": [0.42, 0.60], "size": [0.52, 0.26], "origin": [0, 0.5], "role": "screenshot", "fallback": "poster", "radius": 10, "interval": 4000 },
+
+        { "type": "text",   "id": "dOverview","pos": [0.42, 0.85], "size": [0.52, 0.22], "origin": [0, 0.5], "binding": "selected.overview", "color": "#D6D9E0", "fontSize": 0.024, "wrap": true, "lines": 6 },
 
         { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#FFFFFF", "fontSize": 0.024,
           "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }

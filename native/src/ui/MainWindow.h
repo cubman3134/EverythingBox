@@ -267,6 +267,7 @@ private:
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view
     void updateThemedNowPlaying();      // push the current BGM track name into the themed home (Triple theme)
+    void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
 
     // Themed (QML) home, opt-in via "themedHome/enabled" (default off). showHomeScreen() routes Home to it

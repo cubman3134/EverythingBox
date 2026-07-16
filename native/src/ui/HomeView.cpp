@@ -1,6 +1,7 @@
 #include "HomeView.h"
 #include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
+#include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/RaBrowse.h"
@@ -1333,10 +1334,14 @@ QVariantList HomeView::browseItems()
             out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("header"), true } };
             continue;
         }
-        out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
-                            { QStringLiteral("image"), it.thumbnailUrl }, { QStringLiteral("type"), it.type },
-                            { QStringLiteral("accent"), typeColor(it.type).name() },
-                            { QStringLiteral("expandable"), it.expandable } };
+        QVariantMap m{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
+                       { QStringLiteral("image"), it.thumbnailUrl }, { QStringLiteral("type"), it.type },
+                       { QStringLiteral("accent"), typeColor(it.type).name() },
+                       { QStringLiteral("expandable"), it.expandable } };
+        // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
+        // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
+        it.art.writeInto(m);
+        out << m;
     }
     return out;
 }
@@ -2901,6 +2906,14 @@ void HomeView::requestThemedMeta(int idx)
     base.insert(QStringLiteral("type"), it.type);
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
+    // Whatever art the catalog row already carries PLUS anything we cached from a previous hover/aggregation
+    // shows instantly (logo/box/screenshots/videos/audio/meta) — so a re-hover is immediate and works offline;
+    // the addon /meta + game aggregator below enrich it further in place via another themedMetaReady emit.
+    {
+        MediaArt art = it.art;
+        art.mergeLowerPriority(MetaCache::loadArt(MetaCache::keyFor(it)));
+        art.writeInto(base);
+    }
     // Play history rides on the subtitle line (beside the year), not the facts line — see Xmb.qml. Emitted
     // as its own fields so it shows straight away, even for a game with no addon /meta to enrich it below.
     const PlayStats::Stat ps = PlayStats::get(PlayStats::identity(it.id, QString()));
@@ -2924,6 +2937,33 @@ void HomeView::requestThemedMeta(int idx)
         const unsigned cid = (sys && !sys->extensions.isEmpty())
                              ? Achievements::consoleIdForExtension(sys->extensions.first()) : 0u;
         const int reqIdx = idx;
+
+        // Aggregated artwork/metadata: fan the configured game providers (SteamGridDB / IGDB / ScreenScraper /
+        // TheGamesDB) out on this hover and merge the best of each into the live panel — logo, box, hero,
+        // screenshots, trailers, theme music + facts. The merged result is cached, so a re-hover is instant
+        // and works offline (already surfaced above via loadArt).
+        if (!gameAgg_) gameAgg_ = new GameMetaAggregator(mgr_, this);
+        if (gameAgg_->hasProviders())
+        {
+            const QString aggKey = MetaCache::keyFor(it);
+            MediaItem q;
+            q.id = it.id; q.title = it.title; q.type = QStringLiteral("game"); q.altNames = it.altNames;
+            gameAgg_->fetch(q, console, [this, reqIdx, aggKey](const MediaDetail& d) {
+                if (reqIdx != themedMetaIndex_) return;    // the selection moved on; drop this result
+                if (!d.valid && d.art.isEmpty()) return;
+                MetaCache::saveArt(aggKey, d.art);         // persist for offline + instant re-hover
+                if (d.valid) MetaCache::saveDetail(aggKey, d);
+                QVariantMap m; m.insert(QStringLiteral("index"), reqIdx);
+                if (!d.overview.isEmpty()) m.insert(QStringLiteral("overview"), d.overview);
+                if (!d.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), d.subtitle);
+                QVariantList facts;
+                for (const MediaFact& f : d.facts)
+                    facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+                if (!facts.isEmpty()) m.insert(QStringLiteral("facts"), facts);
+                d.art.writeInto(m); // logo/box/hero/screenshots/videos/audio/meta -> the panel bindings
+                emit themedMetaReady(reqIdx, m);
+            });
+        }
         // Publish a list of { title, icon(full URL), earned } into the panel.
         auto publish = [this, reqIdx](const QVariantList& arr, int earned) {
             if (arr.isEmpty()) return;
@@ -3270,6 +3310,9 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         m.insert(QStringLiteral("facts"), facts);
         if (!det.imageUrl.isEmpty()) m.insert(QStringLiteral("image"), det.imageUrl);
         if (!det.subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), det.subtitle);
+        // The enriched artwork/videos/audio/meta from the provider (or the aggregator) -> the live panel:
+        // selected.logo, selected.box, selected.images.screenshot, selected.videos, selected.audio, ...
+        det.art.writeInto(m);
         emit themedMetaReady(themedMetaIndex_, m);
         return;
     }

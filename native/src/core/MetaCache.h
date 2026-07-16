@@ -29,6 +29,14 @@ namespace MetaCache
     void saveItem(const MediaItem& item);                        // -> "item"
     void saveDetail(const QString& key, const MediaDetail& d);   // -> "detail"
 
+    // The extensible artwork/videos/audio/metadata bundle (logo, box, fanart, screenshots, trailers, theme
+    // music, provider facts). saveArt records every role's URLs under "art" AND kicks off background
+    // downloads of each image role so it renders offline; loadArt reconstructs the bundle, resolving each
+    // image role to its locally cached file when present (best-first), else the stored URL. Roles/keys are
+    // open-ended, so a new metadata provider needs no change here.
+    void saveArt(const QString& key, const MediaArt& art);
+    MediaArt loadArt(const QString& key);
+
     // Reconstruct a detail card from the cache (valid=false when nothing usable is stored). The image
     // resolves to the locally cached artwork when present, so it renders fully offline.
     MediaDetail cachedDetail(const QString& key);

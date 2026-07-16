@@ -146,6 +146,10 @@ public:
     // IMDB id - used to enrich a movie/episode whose own source addon returns no /meta (e.g. Allarr via AIO).
     LoadedAddon* metaProviderFor(LoadedAddon* exclude, const QString& type) const;
 
+    // All enabled script addons that declared `metaFor` includes `type` (the aggregatable metadata providers,
+    // e.g. the four game artwork providers). The host fans getMeta() out across these and merges the results.
+    QVector<LoadedAddon*> metaProvidersFor(const QString& type) const;
+
     QString addonsRoot() const { return root_; }
 
 signals:

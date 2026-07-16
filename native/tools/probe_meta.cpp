@@ -2,11 +2,14 @@
 // poster/info keep working with no network. Asserts the contract the app relies on — and the one that
 // makes the cache future-proof: merge() must PRESERVE keys it doesn't know about, so new metadata kinds
 // can be added later without a migration. Prints META-OK on success; META-FAIL <what> and exits non-zero.
+#include "AddonModels.h"
 #include "MetaCache.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QStandardPaths>
 #include <cstdio>
@@ -90,6 +93,88 @@ int main(int argc, char** argv)
           "displayImage prefers the cached local artwork (offline shelves)");
     CHECK(MetaCache::cachedDetail(key).imageUrl == local,
           "the offline detail card uses the cached artwork");
+
+    // ================================================================ MediaArt: the extensible artwork/
+    // videos/audio/metadata schema themes bind to, the aggregator merge, and offline round-tripping.
+    {
+        // -- parse: images (object with string|array), flat role keys, synonyms, videos/audio/meta --------
+        const QByteArray providerJson = QJsonDocument(QJsonObject{
+            { QStringLiteral("title"), QStringLiteral("Chrono Trigger") },
+            { QStringLiteral("overview"), QStringLiteral("A time-travel RPG.") },
+            { QStringLiteral("image"), QStringLiteral("https://x.invalid/cover.jpg") },
+            { QStringLiteral("images"), QJsonObject{
+                { QStringLiteral("logo"), QStringLiteral("https://x.invalid/logo.png") },
+                { QStringLiteral("screenshot"), QJsonArray{ QStringLiteral("https://x.invalid/s1.jpg"),
+                                                            QStringLiteral("https://x.invalid/s2.jpg") } } } },
+            { QStringLiteral("boxart"), QStringLiteral("https://x.invalid/box.jpg") }, // synonym -> "box"
+            { QStringLiteral("videos"), QJsonArray{ QStringLiteral("https://x.invalid/trailer.mp4") } },
+            { QStringLiteral("audio"), QJsonArray{ QStringLiteral("https://x.invalid/theme.mp3") } },
+            { QStringLiteral("meta"), QJsonObject{ { QStringLiteral("developer"), QStringLiteral("Square") } } },
+        }).toJson(QJsonDocument::Compact);
+        const MediaDetail pd = MediaDetail::fromJson(providerJson);
+        CHECK(pd.art.image(QStringLiteral("logo")) == QStringLiteral("https://x.invalid/logo.png"),
+              "art: images.logo parses");
+        CHECK(pd.art.images.value(QStringLiteral("screenshot")).size() == 2, "art: screenshot list parses");
+        CHECK(pd.art.image(QStringLiteral("box")) == QStringLiteral("https://x.invalid/box.jpg"),
+              "art: flat 'boxart' key canonicalizes to role 'box'");
+        CHECK(pd.art.image(QStringLiteral("poster")) == QStringLiteral("https://x.invalid/cover.jpg"),
+              "art: back-compat 'image' registers as poster role");
+        CHECK(pd.art.videos.size() == 1 && pd.art.audio.size() == 1, "art: videos + audio parse");
+        CHECK(pd.art.meta.value(QStringLiteral("developer")).toString() == QStringLiteral("Square"),
+              "art: free-form meta bag parses");
+
+        // -- writeInto: scalar aliases + images sub-map, never clobbering reserved row keys ---------------
+        QVariantMap row{ { QStringLiteral("title"), QStringLiteral("Chrono Trigger") },
+                         { QStringLiteral("image"), QStringLiteral("grid-thumb.jpg") } };
+        pd.art.writeInto(row);
+        CHECK(row.value(QStringLiteral("logo")).toString() == QStringLiteral("https://x.invalid/logo.png"),
+              "writeInto: selected.logo scalar alias");
+        CHECK(row.value(QStringLiteral("box")).toString() == QStringLiteral("https://x.invalid/box.jpg"),
+              "writeInto: selected.box scalar alias");
+        CHECK(row.value(QStringLiteral("image")).toString() == QStringLiteral("grid-thumb.jpg"),
+              "writeInto: never clobbers a reserved key already on the row");
+        CHECK(row.value(QStringLiteral("images")).toMap().value(QStringLiteral("screenshot")).toStringList().size() == 2,
+              "writeInto: images sub-map carries the full list for galleries");
+        CHECK(row.value(QStringLiteral("videos")).toStringList().size() == 1, "writeInto: videos list");
+        CHECK(row.value(QStringLiteral("meta")).toMap().value(QStringLiteral("developer")).toString() == QStringLiteral("Square"),
+              "writeInto: meta bag passes through");
+
+        // -- mergeLowerPriority: the aggregator's role precedence (first source that has a role wins) ------
+        MediaArt best;                            // "SteamGridDB": great logo + box, no video
+        best.addImage(QStringLiteral("logo"), QStringLiteral("sgdb/logo.png"));
+        best.addImage(QStringLiteral("box"),  QStringLiteral("sgdb/box.jpg"));
+        MediaArt lower;                           // "IGDB": a different logo + a video + meta
+        lower.addImage(QStringLiteral("logo"), QStringLiteral("igdb/logo.png"));
+        lower.videos << QStringLiteral("igdb/trailer.mp4");
+        lower.meta.insert(QStringLiteral("rating"), 92);
+        best.mergeLowerPriority(lower);
+        CHECK(best.image(QStringLiteral("logo")) == QStringLiteral("sgdb/logo.png"),
+              "merge: higher-priority source keeps the role it has (logo stays SGDB)");
+        CHECK(best.images.value(QStringLiteral("logo")).size() == 2,
+              "merge: the lower source's logo is kept as an extra candidate");
+        CHECK(best.videos.value(0) == QStringLiteral("igdb/trailer.mp4"),
+              "merge: a role only the lower source has is backfilled (video from IGDB)");
+        CHECK(best.meta.value(QStringLiteral("rating")).toInt() == 92, "merge: meta backfills too");
+
+        // -- offline: saveArt records urls + prefetch record; loadArt puts the cached file first ----------
+        const QString akey = QStringLiteral("art:probe");
+        MetaCache::remove(akey);
+        MetaCache::saveArt(akey, pd.art);
+        QDir().mkpath(MetaCache::dirFor(akey));
+        { QFile f(MetaCache::dirFor(akey) + QStringLiteral("/logo.png")); f.open(QIODevice::WriteOnly); f.write("png"); }
+        MetaCache::merge(akey, { { QStringLiteral("images"),
+            QJsonObject{ { QStringLiteral("logo"), QStringLiteral("logo.png") } } } }); // simulate finished download
+        const MediaArt reloaded = MetaCache::loadArt(akey);
+        CHECK(reloaded.images.value(QStringLiteral("logo")).first().endsWith(QStringLiteral("logo.png"))
+                  && !reloaded.images.value(QStringLiteral("logo")).first().startsWith(QStringLiteral("http")),
+              "loadArt: cached local file is offered before the remote url (offline-first)");
+        CHECK(reloaded.videos.size() == 1, "loadArt: videos survive the round-trip");
+        CHECK(reloaded.meta.value(QStringLiteral("developer")).toString() == QStringLiteral("Square"),
+              "loadArt: meta bag survives the round-trip");
+        MetaCache::remove(akey);
+
+        std::printf("ART-OK\n");
+    }
 
     // ---------------------------------------------------------------- items without a stable identity
     CHECK(MetaCache::keyFor(MediaItem{}).isEmpty(), "no id and no url -> no key");

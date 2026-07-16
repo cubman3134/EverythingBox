@@ -1,9 +1,13 @@
 // Data models for the addon system, ported from the Unity AddonModels. An addon is a folder with a
 // manifest.json + an entry script (main.js). A "media-source" addon's JS returns catalogs of MediaItems.
 #pragma once
+#include <QMap>
 #include <QString>
 #include <QStringList>
+#include <QVariantMap>
 #include <QVector>
+
+class QJsonObject;
 
 // A user-configurable addon setting (API key, base URL, toggle, ...) declared in the manifest. The app
 // renders a form from these and stores the values per addon; the script reads them via getConfig(key).
@@ -63,9 +67,46 @@ struct AddonManifest
     QVector<AddonSetting> settings;       // user-configurable credentials/options
     QVector<AddonCatalog> catalogs;       // media-typed catalogs (empty = a single implicit catalog)
     QVector<AddonMediaType> mediaTypes;   // custom media types with their own colour/icon
+    // Media types this addon supplies AGGREGATABLE metadata/artwork for (e.g. ["game"]). A pure meta
+    // provider (SteamGridDB / IGDB / ScreenScraper / TheGamesDB) declares this + empty catalogs: it never
+    // shows as a browse source, but the host fans its getMeta() out on hover and merges it with the others.
+    QStringList metaFor;
 
     static AddonManifest fromJson(const QByteArray& json, bool* ok = nullptr);
     QString entryOrDefault() const { return entry.isEmpty() ? QStringLiteral("main.js") : entry; }
+};
+
+// Extensible artwork + preview media + free-form metadata for an item. Every field is optional: a theme
+// that binds to an absent role simply renders its default (Theme.js already degrades a missing binding to
+// the element's fallback). New metadata providers can add image roles, videos, audio or meta keys with NO
+// code change here — fromJson passes unknown roles/keys through verbatim, and so does toVariant().
+struct MediaArt
+{
+    // role -> ordered candidate URLs, best first. Conventional roles: "poster", "box", "logo", "clearlogo",
+    // "hero", "banner", "fanart", "background", "screenshot", "disc", "thumb", "icon". Open-ended.
+    QMap<QString, QStringList> images;
+    QStringList videos;   // preview / trailer clip URLs, best first
+    QStringList audio;    // theme song / preview music URLs, best first
+    QVariantMap meta;     // arbitrary extra metadata (developer, players, esrb, ...); providers add freely
+
+    bool isEmpty() const { return images.isEmpty() && videos.isEmpty() && audio.isEmpty() && meta.isEmpty(); }
+    QString image(const QString& role) const   // first (best) url for a role, else ""
+    {
+        const auto it = images.constFind(role);
+        return (it != images.constEnd() && !it->isEmpty()) ? it->first() : QString();
+    }
+    void addImage(const QString& role, const QString& url); // append a candidate (dedup, best-first order kept)
+
+    // Merge another source in at LOWER precedence: keep every candidate/role/video/meta we already have and
+    // append this source's extras after ours. The game aggregator calls this in priority order (best first).
+    void mergeLowerPriority(const MediaArt& other);
+
+    static MediaArt fromJson(const QJsonObject& o); // parse images/videos/audio/meta (+ flat role keys)
+    QVariantMap toVariant() const;                  // { images:{role:[urls]}, videos, audio, meta }
+    // Write the art into a themed item map: the `images/videos/audio/meta` sub-objects PLUS a scalar alias
+    // per role (selected.logo, selected.box, ... = that role's best url) for simple theme bindings. Never
+    // clobbers a key the row already holds (title/type/image/...), so reserved fields stay put.
+    void writeInto(QVariantMap& row) const;
 };
 
 struct MediaItem
@@ -97,6 +138,10 @@ struct MediaItem
     // rebrands like "Rockman"/"Mega Man" or "Probotector"/"Contra"). Used to retry a ROM/file-provider lookup
     // when the localized catalog title doesn't match the copy's original name. Not serialized.
     QStringList altNames;
+    // Extra artwork/videos/audio/metadata beyond the single grid `thumbnailUrl` (logo, box, fanart,
+    // screenshots, preview clips, theme music, provider facts). Optional; filled by richer providers and the
+    // game-metadata aggregator. Threaded into the themed item map so themes can bind selected.logo etc.
+    MediaArt art;
 };
 
 struct MediaCatalog
@@ -125,6 +170,9 @@ struct MediaDetail
     // resolve a playable source for a catalog whose own ids aren't IMDB.
     QString imdbStreamId;
     bool valid = false;        // false = addon returned nothing usable (header stays hidden)
+    // Rich artwork/videos/audio/metadata for the detail + themed live panel (logo, box, fanart gallery,
+    // trailers, theme music, extra facts). Optional; the single imageUrl above stays the primary cover.
+    MediaArt art;
 
     static MediaDetail fromJson(const QByteArray& json);
 };

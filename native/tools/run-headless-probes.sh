@@ -67,6 +67,11 @@ run "nav kit"             NAV-OK           "$NAV" -platform offscreen
 # wins over remote urls, uninstall removes the bundle.
 run "meta cache"          META-OK          "$META"
 
+# Extensible artwork/videos/audio/metadata schema (MediaArt): provider JSON parse (+ role synonyms), the
+# themed item-map bindings (scalar aliases + galleries), the game aggregator's role-precedence merge, and
+# offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
+run "media-art schema"    ART-OK           "$META"
+
 # Optional: prove the libretro frontend can load a real core headlessly. Best-effort — a missing/incompatible
 # core is a warning, not a CI failure (the core comes from an external buildbot we don't control).
 if [ -n "${CORE_SO:-}" ] && [ -f "$CORE_SO" ]; then

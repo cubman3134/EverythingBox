@@ -9,6 +9,7 @@
     <file alias="elements/Grid.qml">../src/theme2/qml/elements/Grid.qml</file>
     <file alias="elements/Carousel.qml">../src/theme2/qml/elements/Carousel.qml</file>
     <file alias="elements/Video.qml">../src/theme2/qml/elements/Video.qml</file>
+    <file alias="elements/Gallery.qml">../src/theme2/qml/elements/Gallery.qml</file>
     <file alias="elements/HelpSystem.qml">../src/theme2/qml/elements/HelpSystem.qml</file>
     <file alias="elements/Particles.qml">../src/theme2/qml/elements/Particles.qml</file>
     <file alias="elements/Xmb.qml">../src/theme2/qml/elements/Xmb.qml</file>

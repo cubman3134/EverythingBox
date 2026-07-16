@@ -87,6 +87,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
         src/addons/AddonManager.cpp src/addons/AddonManager.h
+        src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
         src/ui/MediaPane.cpp      src/ui/MediaPane.h
@@ -222,7 +223,8 @@ if(MYMEDIAVAULT_BUILD_APP)
 
     # Headless tests for the offline metadata cache: merge-preserves-unknown-keys (future metadata),
     # item/detail round-trips, artwork path resolution, uninstall cleanup.
-    add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaCache.h)
+    add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaCache.h
+        src/addons/AddonModels.cpp src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)
 

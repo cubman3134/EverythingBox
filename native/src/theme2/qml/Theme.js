@@ -35,3 +35,49 @@ function sourceOf(el, ctx) {
     if (el && el.binding) { var v = dig(ctx, el.binding); return v ? String(v) : "" }
     return ""
 }
+
+// --- Extensible artwork/media roles -------------------------------------------------------------------
+// Items carry an open-ended `images` map (role -> [urls], best first) plus scalar aliases (selected.logo,
+// selected.box, ...) and `videos` / `audio` lists, all optional. These helpers read a role with graceful
+// absence so a theme binding to art a provider didn't supply falls through to the element's default.
+
+// All urls for an image role on the selected item: selected.images[role] (array), else the scalar alias
+// selected[role] as a one-element list, else [].
+function artList(ctx, role) {
+    if (!ctx || !role) return []
+    var sel = ctx.selected
+    if (!sel) return []
+    var imgs = sel.images
+    if (imgs && imgs[role] && imgs[role].length) return imgs[role]
+    if (sel[role]) return [String(sel[role])]
+    return []
+}
+
+// The single best url for an image role, else "".
+function artUrl(ctx, role) { var l = artList(ctx, role); return l.length ? l[0] : "" }
+
+// A media list (videos / audio) on the selected item: selected[key] as an array, else [].
+function mediaList(ctx, key) {
+    if (!ctx) return []
+    var sel = ctx.selected
+    var v = sel ? sel[key] : undefined
+    if (v && v.length !== undefined && typeof v !== "string") return v
+    if (v) return [String(v)]
+    return []
+}
+
+// Resolve an Image element's source through the role + fallback chain:
+//   literal path / binding  ->  el.role (selected.images[role])  ->  el.fallback (another role, then a
+//   literal/default path). Returns "" when nothing resolves (the element then shows its placeholder or,
+//   if textFallback is set, the bound text).
+function imageSource(el, ctx) {
+    var s = sourceOf(el, ctx)
+    if (s) return s
+    if (el && el.role) { s = artUrl(ctx, el.role); if (s) return s }
+    if (el && el.fallback) {
+        var fb = artUrl(ctx, el.fallback) // treat the fallback as a role first...
+        if (fb) return fb
+        return el.fallback                // ...else a literal / default path (host.resolve handles it)
+    }
+    return ""
+}

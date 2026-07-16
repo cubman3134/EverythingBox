@@ -65,13 +65,29 @@ void BackgroundMusic::reload()
     const QDir d(musicDir());
     static const QStringList exts = { QStringLiteral("*.mp3"), QStringLiteral("*.ogg"), QStringLiteral("*.flac"),
         QStringLiteral("*.m4a"), QStringLiteral("*.wav"), QStringLiteral("*.opus"), QStringLiteral("*.aac") };
-    tracks_ = d.entryList(exts, QDir::Files, QDir::Name);
-    for (QString& t : tracks_) t = d.absoluteFilePath(t);
-    for (int i = tracks_.size() - 1; i > 0; --i) // Fisher-Yates shuffle
-        tracks_.swapItemsAt(i, QRandomGenerator::global()->bounded(i + 1));
+    userTracks_ = d.entryList(exts, QDir::Files, QDir::Name);
+    for (QString& t : userTracks_) t = d.absoluteFilePath(t);
+    for (int i = userTracks_.size() - 1; i > 0; --i) // Fisher-Yates shuffle
+        userTracks_.swapItemsAt(i, QRandomGenerator::global()->bounded(i + 1));
+    rebuildPool();
+}
+
+// The playback pool is the user's music-folder tracks, or — when that folder is empty — the theme's shipped
+// default track, so a fresh install still has menu music.
+void BackgroundMusic::rebuildPool()
+{
+    tracks_ = !userTracks_.isEmpty() ? userTracks_
+            : (!themeDefault_.isEmpty() ? QStringList{ themeDefault_ } : QStringList{});
     idx_ = tracks_.isEmpty() ? -1 : 0;
     if (tracks_.isEmpty() && !title_.isEmpty()) { title_.clear(); emit nowPlayingChanged(title_); }
     applyState(); // start playing if we're on a menu and just found tracks (won't interrupt a current one)
+}
+
+void BackgroundMusic::setThemeDefault(const QString& absPath)
+{
+    if (themeDefault_ == absPath) return;
+    themeDefault_ = absPath;
+    if (userTracks_.isEmpty()) rebuildPool(); // only matters when the user has no music of their own
 }
 
 void BackgroundMusic::playIndex(int i)
@@ -122,6 +138,30 @@ void BackgroundMusic::setVolume(int pct)
     mpv_set_property(mpv_, "volume", MPV_FORMAT_DOUBLE, &v);
 }
 
+void BackgroundMusic::setPreview(const QString& src)
+{
+    if (!mpv_) return;
+    if (src.isEmpty())
+    {
+        if (!previewing_) return;
+        previewing_ = false;
+        const char* off[] = { "set", "loop-file", "no", nullptr };
+        mpv_command(mpv_, off);
+        if (enabled_ && active_ && !tracks_.isEmpty()) playIndex(idx_); // resume the shuffle where we were
+        else { setPaused(true); if (!title_.isEmpty()) { title_.clear(); emit nowPlayingChanged(title_); } }
+        return;
+    }
+    if (!(enabled_ && active_)) return;                 // don't blare a preview when music is off / on content
+    previewing_ = true;
+    const char* loop[] = { "set", "loop-file", "inf", nullptr }; // a short theme song loops while hovering
+    mpv_command(mpv_, loop);
+    const QByteArray p = src.startsWith(QStringLiteral("http")) ? src.toUtf8() : QFile::encodeName(src);
+    const char* cmd[] = { "loadfile", p.constData(), nullptr };
+    mpv_command(mpv_, cmd);
+    loaded_ = true;
+    setPaused(false);
+}
+
 // Queued from mpv's (other-thread) wakeup callback so the event drain runs on the GUI thread.
 void BackgroundMusic::onWakeup(void* ctx)
 {
@@ -141,7 +181,7 @@ void BackgroundMusic::onMpvEvents()
             // A track finished (EOF) or couldn't be decoded (ERROR) -> move to the next one; loop forever.
             // A STOP/REDIRECT reason means WE replaced the file (playIndex), so don't double-advance.
             if (ef && (ef->reason == MPV_END_FILE_REASON_EOF || ef->reason == MPV_END_FILE_REASON_ERROR)
-                && !tracks_.isEmpty())
+                && !tracks_.isEmpty() && !previewing_) // a ducking preview loops itself; don't advance the shuffle
                 playIndex(idx_ + 1);
         }
     }
