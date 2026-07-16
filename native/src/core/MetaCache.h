@@ -48,5 +48,12 @@ namespace MetaCache
     QString imagePath(const QString& key, const QString& role);
     QString displayImage(const QString& key, const QString& url);
 
+    // Video/audio caching (the item's trailer + theme song): cacheMedia downloads the file into the bundle
+    // under <role>.<ext> (recorded under "media"; async; skips youtube / non-http urls) so it streams once
+    // and then plays instantly + offline; mediaPath returns the local file ("" if absent). loadArt puts a
+    // cached media file first in its role's candidate list, same as artwork.
+    void cacheMedia(const QString& key, const QString& role, const QString& url);
+    QString mediaPath(const QString& key, const QString& role);
+
     void remove(const QString& key);            // delete the item's whole metadata folder (uninstall)
 }

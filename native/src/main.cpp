@@ -1,6 +1,8 @@
 #include <QApplication>
 #ifdef MMV_HAVE_QML
+#include "theme2/MpvPreview.h"
 #include <QQuickWindow>
+#include <QtQml>
 #endif
 #include "core/AppPaths.h"
 #include <QIcon>
@@ -115,6 +117,9 @@ int main(int argc, char** argv)
     // Qt Quick's software backend. The app also drives libmpv through a QOpenGLWidget, and a GPU-accelerated
     // QQuickWidget sharing GL with it renders blank; the software QQuickView avoids the GL path entirely.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    // The themed Video element's real-playback path: a libmpv software-render item themes create as MMV
+    // MpvPreview (Video.qml instantiates it at runtime, guarded, when a playable clip exists).
+    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview");
 #endif
 
     QApplication app(argc, argv);

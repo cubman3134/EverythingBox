@@ -1,13 +1,13 @@
-// Video / preview element. Providers now supply real preview/trailer clips (selected.videos), but the themed
-// view runs on Qt Quick's SOFTWARE backend so it can coexist with the app's libmpv video widget, and QML
-// VideoOutput does not render reliably there. So the DEFAULT is a robust, always-works "live preview": a slow
-// Ken Burns (zoom + drift) over the best available still — a video thumbnail / hero / screenshot when a clip
-// exists (with a ▶ trailer badge), else the poster — which reads as motion without the backend risk.
+// Video / preview element. When a provider supplied a real, directly-playable clip (selected.videos), this
+// streams it in-menu via MpvPreview — a libmpv software-render item (RetroBat/EmulationStation style: mpv
+// decodes the clip and hands us frames we paint ourselves, which works on Qt Quick's software backend where
+// QML VideoOutput doesn't). Until the first frame arrives — and always, when there's no playable clip — it
+// shows a robust Ken Burns pan/zoom over the best available still (a video-ish frame + a ▶ badge when a clip
+// exists, else the poster). So it degrades gracefully: no clip, no module, or a backend that can't render ->
+// the still preview; a real clip -> real playback fading in over it.
 //
-// A theme (or a build where the QtMultimedia QML module is present and the backend cooperates) can opt into a
-// real-playback ATTEMPT with `"tryPlayback": true`: we create a MediaPlayer/VideoOutput at runtime inside a
-// try/catch, so a missing module or a backend that can't render simply falls back to the Ken Burns still
-// instead of breaking the element. The video URLs are fully plumbed either way for a future GPU path.
+// YouTube-id "videos" (IGDB) aren't directly playable, so they're skipped for playback (the badge/still still
+// signal that a trailer exists). Set "preview": false on the element to force the still-only behaviour.
 import QtQuick
 import "../Theme.js" as T
 
@@ -19,8 +19,17 @@ Item {
 
     readonly property var videos: T.mediaList(ctx, "videos")
     readonly property bool hasVideo: videos.length > 0
+    function firstPlayable() {
+        for (var i = 0; i < videos.length; i++) {
+            var u = String(videos[i])
+            if (u.indexOf("youtube") < 0 && u.indexOf("youtu.be") < 0) return u // needs a direct file, not YT
+        }
+        return ""
+    }
+    readonly property string playUrl: (el.preview === false) ? "" : firstPlayable()
+
     // Best still to animate: an explicit binding/role, else a video-ish still (hero/screenshot/fanart) when a
-    // clip exists, else the poster/box. Always something to show.
+    // clip exists, else the poster/box. Always something to show behind a not-yet-playing clip.
     readonly property string still: {
         var s = host ? host.resolve(T.imageSource(el, ctx)) : ""
         if (s) return s
@@ -32,6 +41,9 @@ Item {
         }
         return ""
     }
+
+    property bool playing: false   // a real clip is on screen (hides the Ken Burns still)
+    property var player: null      // the MpvPreview, created lazily/guarded
 
     Rectangle {
         id: frame
@@ -48,9 +60,6 @@ Item {
             visible: status === Image.Ready && !root.playing
             opacity: 0.9
             transformOrigin: Item.Center
-
-            // Gentle, continuous motion so a still reads as a "preview". Runs once the image is ready; the
-            // alternating pan + zoom loop indefinitely and restart with each new selection source.
             property real panX
             transform: Translate { x: poster.panX }
             SequentialAnimation on scale {
@@ -67,7 +76,7 @@ Item {
             }
         }
 
-        // Play badge: filled when a real clip exists, hollow otherwise. Drawn, so it needs no font glyph.
+        // Play badge: filled red when a real clip exists, hollow otherwise. Hidden once the clip plays.
         Rectangle {
             anchors.centerIn: parent
             visible: !root.playing
@@ -87,30 +96,28 @@ Item {
         }
     }
 
-    // --- optional real-playback attempt (opt-in; guarded so it can never break the element) ---------------
-    property bool playing: false
-    property var player: null
-    function tryRealPlayback() {
-        if (!(el.tryPlayback === true) || !hasVideo) return
+    // --- real playback via the libmpv software-render item -------------------------------------------------
+    // Created lazily and guarded: if the MMV type isn't registered (e.g. the headless theme probe) or mpv
+    // can't open the url, `player` stays without frames and the Ken Burns still keeps showing.
+    function ensurePlayer() {
+        if (player || playUrl === "") return
         try {
-            // Runtime-create the QtMultimedia objects so a missing module throws here (caught) instead of
-            // failing the whole element at import time.
-            var out = Qt.createQmlObject(
-                'import QtQuick; import QtMultimedia; VideoOutput { anchors.fill: parent; fillMode: VideoOutput.PreserveAspectCrop }',
-                frame, "themedVideoOut")
-            var mp = Qt.createQmlObject('import QtMultimedia; MediaPlayer { loops: MediaPlayer.Infinite; audioOutput: null }',
-                                        root, "themedVideoPlayer")
-            mp.videoOutput = out
-            mp.source = host ? host.resolve(videos[0]) : videos[0]
-            // Only commit to "playing" (which hides the Ken Burns still) once frames actually arrive; if the
-            // software backend can't render, we never flip and the still keeps showing.
-            mp.onPlayingChanged = function() { if (mp.playbackState === MediaPlayer.PlayingState) root.playing = true }
-            mp.play()
-            player = mp
-        } catch (e) {
-            root.playing = false // no module / backend can't do it -> stay on the robust Ken Burns still
-        }
+            player = Qt.createQmlObject(
+                'import QtQuick; import MMV 1.0; MpvPreview { anchors.fill: parent }', frame, "mpvPreview")
+            player.playingChanged.connect(function() { root.playing = player.playing })
+        } catch (e) { player = null } // no module / not registered -> stay on the still
     }
-    onStillChanged: { if (player) { try { player.stop(); player.destroy() } catch (e) {} player = null; playing = false } tryRealPlayback() }
-    Component.onCompleted: tryRealPlayback()
+    // A short hover-stable delay before streaming, so scrolling quickly past items doesn't load a clip each.
+    Timer {
+        id: startDelay
+        interval: Number(T.val(el, "delay", 700)); repeat: false
+        onTriggered: { root.ensurePlayer(); if (root.player) root.player.source = root.host ? root.host.resolve(root.playUrl) : root.playUrl }
+    }
+    onPlayUrlChanged: {
+        root.playing = false
+        if (player) player.source = ""
+        if (playUrl !== "") startDelay.restart(); else startDelay.stop()
+    }
+    Component.onCompleted: if (playUrl !== "") startDelay.restart()
+    Component.onDestruction: if (player) { try { player.source = ""; player.destroy() } catch (e) {} }
 }

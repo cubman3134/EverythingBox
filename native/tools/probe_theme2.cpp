@@ -2,7 +2,9 @@
 // qrc-embedded QML in a QQuickView (exactly what the app does), then grabs a frame to PNG.
 // Usage: probe_theme2 <themeDir> <out.png> [sampleImage] [startIndex]
 #include "ThemeEngine.h"
+#include "MpvPreview.h"
 #include <QApplication>
+#include <QtQml>
 #include <QWidget>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -19,6 +21,7 @@ int main(int argc, char** argv)
     qputenv("QT_QUICK_BACKEND", "software");
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software); // match the app
     QApplication app(argc, argv);
+    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview"); // so Video.qml's real-playback path is available
     if (argc < 3) { std::fprintf(stderr, "usage: probe_theme2 <themeDir> <out.png> [sampleImage]\n"); return 2; }
     const QString themeDir = QString::fromLocal8Bit(argv[1]);
     const QString outPng   = QString::fromLocal8Bit(argv[2]);
@@ -50,7 +53,11 @@ int main(int argc, char** argv)
             images["screenshot"] = QStringList{ s, s, s };
             m["images"] = images;
             m["logo"] = s; m["box"] = s;
-            m["videos"] = QStringList{ QStringLiteral("http://x.invalid/trailer.mp4") };
+            // PROBE_MPV=1 -> a real, file-less test clip (mpv lavfi) so the Video element actually plays;
+            // otherwise a bogus url that just proves the badge + graceful fallback.
+            m["videos"] = QStringList{ qEnvironmentVariableIntValue("PROBE_MPV")
+                ? QStringLiteral("av://lavfi:testsrc=size=480x360:rate=25")
+                : QStringLiteral("http://x.invalid/trailer.mp4") };
             m["audio"] = QStringList{ QStringLiteral("http://x.invalid/theme.mp3") };
             m["meta"] = QVariantMap{ { QStringLiteral("developer"), QStringLiteral("Probe Studios") } };
         }

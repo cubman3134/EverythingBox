@@ -49,6 +49,8 @@ QString imageExt(const QUrl& url, const QString& contentType)
 }
 } // namespace
 
+static bool isYoutube(const QString& url); // defined lower down; used by saveArt's prefetch
+
 QString MetaCache::keyFor(const MediaItem& item)
 {
     return item.id.isEmpty() ? item.url : item.id;
@@ -132,6 +134,11 @@ void MetaCache::saveArt(const QString& key, const MediaArt& art)
     // Prefetch the best image per role so posters/logos/box/fanart render with no network next time.
     for (auto it = art.images.constBegin(); it != art.images.constEnd(); ++it)
         if (!it.value().isEmpty()) cacheImage(key, it.key(), it.value().first());
+    // The theme song + first directly-playable trailer -> disk in the background, so they play instantly and
+    // offline next time (the video element streams the url meanwhile). YouTube ids are skipped by cacheMedia.
+    if (!art.audio.isEmpty()) cacheMedia(key, QStringLiteral("audio0"), art.audio.first());
+    for (const QString& v : art.videos)
+        if (!isYoutube(v)) { cacheMedia(key, QStringLiteral("video0"), v); break; }
 }
 
 MediaArt MetaCache::loadArt(const QString& key)
@@ -149,6 +156,11 @@ MediaArt MetaCache::loadArt(const QString& key)
         resolved.insert(it.key(), list);
     }
     a.images = resolved;
+    // Offline-first for the trailer + theme song too: a cached local file plays before the remote url.
+    const QString localVideo = mediaPath(key, QStringLiteral("video0"));
+    if (!localVideo.isEmpty() && !a.videos.contains(localVideo)) a.videos.prepend(localVideo);
+    const QString localAudio = mediaPath(key, QStringLiteral("audio0"));
+    if (!localAudio.isEmpty() && !a.audio.contains(localAudio)) a.audio.prepend(localAudio);
     return a;
 }
 
@@ -223,6 +235,56 @@ void MetaCache::cacheImage(const QString& key, const QString& role, const QStrin
         QJsonObject images = MetaCache::load(key).value(QStringLiteral("images")).toObject();
         images.insert(role, file);
         MetaCache::merge(key, { { QStringLiteral("images"), images } });
+    });
+}
+
+static bool isYoutube(const QString& url)
+{
+    return url.contains(QStringLiteral("youtube"), Qt::CaseInsensitive)
+        || url.contains(QStringLiteral("youtu.be"), Qt::CaseInsensitive);
+}
+
+QString MetaCache::mediaPath(const QString& key, const QString& role)
+{
+    if (key.isEmpty()) return {};
+    const QString file = load(key).value(QStringLiteral("media")).toObject().value(role).toString();
+    if (file.isEmpty()) return {};
+    const QString abs = dirFor(key) + QLatin1Char('/') + file;
+    return QFile::exists(abs) ? abs : QString();
+}
+
+void MetaCache::cacheMedia(const QString& key, const QString& role, const QString& url)
+{
+    if (key.isEmpty() || url.isEmpty() || !url.startsWith(QStringLiteral("http")) || isYoutube(url)) return;
+    if (!mediaPath(key, role).isEmpty()) return; // already cached
+    const QString tag = key + QLatin1Char('|') + QStringLiteral("media|") + role;
+    if (inflight().contains(tag)) return;
+    inflight().insert(tag);
+
+    QNetworkRequest req{ QUrl(url) };
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam()->get(req);
+    QObject::connect(reply, &QNetworkReply::finished, reply, [reply, key, role, tag] {
+        inflight().remove(tag);
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) return; // offline/404: keep streaming the url next time
+        const QByteArray data = reply->readAll();
+        if (data.isEmpty()) return;
+        QString ext = QFileInfo(reply->url().path()).suffix().toLower();
+        static const QStringList media = { QStringLiteral("mp4"), QStringLiteral("webm"), QStringLiteral("mkv"),
+                                           QStringLiteral("mov"), QStringLiteral("mp3"), QStringLiteral("m4a"),
+                                           QStringLiteral("ogg"), QStringLiteral("opus") };
+        if (!media.contains(ext)) ext = role.startsWith(QStringLiteral("audio")) ? QStringLiteral("mp3")
+                                                                                 : QStringLiteral("mp4");
+        const QString file = role + QLatin1Char('.') + ext;
+        QDir().mkpath(MetaCache::dirFor(key));
+        QSaveFile f(MetaCache::dirFor(key) + QLatin1Char('/') + file);
+        if (!f.open(QIODevice::WriteOnly)) return;
+        f.write(data);
+        if (!f.commit()) return;
+        QJsonObject m = MetaCache::load(key).value(QStringLiteral("media")).toObject();
+        m.insert(role, file);
+        MetaCache::merge(key, { { QStringLiteral("media"), m } });
     });
 }
 

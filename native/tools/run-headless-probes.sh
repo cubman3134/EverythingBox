@@ -72,6 +72,13 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# Themed video: MpvPreview (libmpv software-render) decodes mpv's built-in lavfi test source and paints real
+# frames into a Qt Quick software-backend scene — the RetroBat-style in-menu playback path. Optional: only
+# runs where the QML build (+ libmpv) produced the probe.
+MPVPREV="$(findexe probe_mpvpreview || true)"
+[ -n "$MPVPREV" ] && run "mpv video preview" MPV-PREVIEW-OK "$MPVPREV" -platform offscreen \
+  || echo "(skip) probe_mpvpreview not built"
+
 # Optional: prove the libretro frontend can load a real core headlessly. Best-effort — a missing/incompatible
 # core is a warning, not a CI failure (the core comes from an external buildbot we don't control).
 if [ -n "${CORE_SO:-}" ] && [ -f "$CORE_SO" ]; then

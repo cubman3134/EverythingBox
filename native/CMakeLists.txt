@@ -154,6 +154,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         qt_add_resources(MMV_THEME2_RCC resources/theme2.qrc)
         target_sources(mymediavault PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
+            src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
@@ -216,9 +217,17 @@ if(MYMEDIAVAULT_BUILD_APP)
     # resource in the exe and re-runs rcc when the listed .qml files change (AUTORCC only tracks the .qrc).
     if(MMV_HAVE_QML)
         qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
-        add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp ${MMV_THEME2_RCC_PROBE})
-        target_include_directories(probe_theme2 PRIVATE src src/theme2)
-        target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia)
+        add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
+            src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h ${MMV_THEME2_RCC_PROBE})
+        target_include_directories(probe_theme2 PRIVATE src src/theme2 ${MPV_INCLUDE_DIR})
+        target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
+
+        # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
+        # using mpv's built-in lavfi test source so no video file/key is needed.
+        add_executable(probe_mpvpreview tools/probe_mpvpreview.cpp
+            src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h)
+        target_include_directories(probe_mpvpreview PRIVATE src src/theme2 ${MPV_INCLUDE_DIR})
+        target_link_libraries(probe_mpvpreview PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick ${MPV_LIBRARY})
     endif()
 
     # Headless tests for the offline metadata cache: merge-preserves-unknown-keys (future metadata),
