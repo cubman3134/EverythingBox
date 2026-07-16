@@ -9,6 +9,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QSaveFile>
 #include <QUrl>
 #include <QVector>
@@ -24,13 +25,28 @@ struct Entry
     bool found = false;
 };
 
-// A parsed gamelist for one system folder: games keyed by ROM filename AND by base-name (no extension), so a
-// match works whether or not the extension lines up.
+// Normalized "clean" title for fuzzy matching: drop everything in () or [] (region / revision / hack tags),
+// then keep only lowercase alphanumerics. So "Super Mario Bros 3 (U) (PRG 0)" and the gamelist's
+// "Super Mario Bros. 3 (USA) (Rev 1)" / name "Super Mario Bros. 3" all collapse to "supermariobros3" — which
+// is how a GoodNES-named ROM matches a No-Intro-scraped gamelist (a very common RetroBat mismatch).
+static QString cleanTitle(const QString& s)
+{
+    static const QRegularExpression tags(QStringLiteral("[\\(\\[][^\\)\\]]*[\\)\\]]"));
+    QString t = s;
+    t.remove(tags);
+    QString out;
+    for (const QChar c : t) if (c.isLetterOrNumber()) out += c.toLower();
+    return out;
+}
+
+// A parsed gamelist for one system folder: games keyed by ROM filename, by base-name (no extension), and by
+// a normalized "clean" title, so a match works even when the extension or the region/version tags differ.
 struct Parsed
 {
     bool parsed = false;
-    QHash<QString, Entry> byFile; // "game (usa).zip" -> entry
-    QHash<QString, Entry> byBase; // "game (usa)"     -> entry
+    QHash<QString, Entry> byFile;  // "game (usa).zip" -> entry
+    QHash<QString, Entry> byBase;  // "game (usa)"     -> entry
+    QHash<QString, Entry> byClean; // "game"           -> entry (fuzzy: tags/punctuation stripped)
 };
 
 QHash<QString, Parsed>& cache() { static QHash<QString, Parsed> c; return c; }
@@ -75,6 +91,17 @@ const Parsed& parsedFor(const QString& romDir)
         const QFileInfo fi(path);
         p.byFile.insert(fi.fileName().toLower(), e);
         p.byBase.insert(fi.completeBaseName().toLower(), e);
+        // Fuzzy keys from BOTH the path base and the <name>, so a differently-named ROM still matches. On a
+        // collision (several regional/hacked entries clean to the same title) prefer the richer one — the one
+        // that actually has a video — so a fuzzy match isn't stuck with a video-less duplicate.
+        auto insertClean = [&](const QString& key) {
+            if (key.isEmpty()) return;
+            auto ex = p.byClean.find(key);
+            if (ex == p.byClean.end()) p.byClean.insert(key, e);
+            else if (!e.video.isEmpty() && ex.value().video.isEmpty()) ex.value() = e;
+        };
+        insertClean(cleanTitle(fi.completeBaseName()));
+        insertClean(cleanTitle(e.name));
     }
     return p;
 }
@@ -83,10 +110,13 @@ const Entry* entryFor(const QString& romPath)
 {
     const QFileInfo rfi(romPath);
     const Parsed& p = parsedFor(rfi.absolutePath());
-    auto it = p.byFile.constFind(rfi.fileName().toLower());
+    auto it = p.byFile.constFind(rfi.fileName().toLower());       // exact filename
     if (it != p.byFile.constEnd()) return &it.value();
-    it = p.byBase.constFind(rfi.completeBaseName().toLower());
-    return it != p.byBase.constEnd() ? &it.value() : nullptr;
+    it = p.byBase.constFind(rfi.completeBaseName().toLower());    // filename minus extension
+    if (it != p.byBase.constEnd()) return &it.value();
+    const QString clean = cleanTitle(rfi.completeBaseName());     // fuzzy: tags/punctuation stripped
+    it = clean.isEmpty() ? p.byClean.constEnd() : p.byClean.constFind(clean);
+    return it != p.byClean.constEnd() ? &it.value() : nullptr;
 }
 
 // A gamelist release date is YYYYMMDDThhmmss; show just the year when it's plausible.
@@ -116,7 +146,7 @@ MediaDetail GamelistStore::lookup(const QString& romPath)
     // often references art that wasn't downloaded).
     auto localMedia = [&](const QString& rel) -> QString {
         if (rel.isEmpty()) return {};
-        const QString abs = romDir.absoluteFilePath(rel);
+        const QString abs = QDir::cleanPath(romDir.absoluteFilePath(rel)); // collapse the "./" in "./images/…"
         return QFile::exists(abs) ? abs : QString();
     };
 

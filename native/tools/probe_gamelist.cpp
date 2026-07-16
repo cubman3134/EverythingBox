@@ -45,6 +45,20 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
     const QString romsRoot = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QStringLiteral("C:/RetroBat/roms");
 
+    // Ad-hoc: PROBE_ROM=<a rom path> resolves that exact ROM and dumps what it found (for diagnosing a
+    // specific game like a fuzzy-matched Super Mario Bros. 3).
+    if (!qEnvironmentVariable("PROBE_ROM").isEmpty())
+    {
+        const QString rp = qEnvironmentVariable("PROBE_ROM");
+        const MediaDetail d = GamelistStore::lookup(rp);
+        std::printf("PROBE_ROM %s\n  valid=%d title=\"%s\" facts=%d roles=%d video=%d\n    box=%s\n    logo=%s\n",
+                    rp.toUtf8().constData(), d.valid, d.title.toUtf8().constData(), int(d.facts.size()),
+                    int(d.art.images.size()), int(d.art.videos.size()),
+                    d.art.image(QStringLiteral("box")).toUtf8().constData(),
+                    d.art.image(QStringLiteral("logo")).toUtf8().constData());
+        return d.valid ? 0 : 1;
+    }
+
     // Find any system that has a gamelist + a scraped game we can resolve.
     QString sysDir, romFile;
     for (const QString& sys : { QStringLiteral("atari2600"), QStringLiteral("nes"), QStringLiteral("snes"),
