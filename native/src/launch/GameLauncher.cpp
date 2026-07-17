@@ -113,7 +113,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         {
             glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(game).fileName(), aerr));
             plan.error = tr("Couldn't open the archived game: %1").arg(aerr);
-            plan.errorMs = 7000;
+            plan.errorMs = kFeedbackLong;
             return plan;
         }
         glLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
@@ -241,7 +241,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     else
     {
         glLog(QStringLiteral("game: openGame failed: %1").arg(err));
-        emit notifyUser(tr("Can't run game: %1").arg(err), 7000);
+        emit notifyUser(tr("Can't run game: %1").arg(err), kFeedbackLong);
     }
 }
 

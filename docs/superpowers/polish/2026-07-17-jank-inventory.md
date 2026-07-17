@@ -115,7 +115,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** HomeView.cpp:2694 (9000), 2710 (8000), 2744 (12000), 2749/3271 (7000), 750 (6000); GameLauncher.cpp:244 (7000); MainWindow.cpp various 6000/8000.
 **Proposed fix:** route all error-class notices through `kFeedbackLong` (7000) via the constants header.
 **Cost:** small
-**Triage:** OBJECTIVE — one class, five+ different values.
+**Triage:** FIXED (468e136) — HomeView error toasts (No results / provider unreachable / no copies / provider notice / no playable source / no stream source) + GameLauncher `notifyUser` and `CorePlan::errorMs` (default and archive-extract) all → `kFeedbackLong`.
 
 ### J07: Success-confirmation toast durations are scattered (2500/3000/3500 ms)
 **Category:** feedback

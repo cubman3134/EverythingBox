@@ -9,6 +9,7 @@
 #include <QObject>
 #include <QString>
 #include <QElapsedTimer>
+#include "../ui/FeedbackPolicy.h"   // kFeedbackLong — error-class notice duration
 
 class RetroView;
 class EmulatorManager;
@@ -31,7 +32,7 @@ public:
     // The pipeline's resolution half (system + disc descriptor + core ensure), reused by MainWindow's split-pane
     // branch to run a ROM in the focused pane's own emulator. corePath empty => couldn't resolve; `error` says why.
     struct CorePlan { QString corePath; QString core; QString launchRom; QString systemId; QString error;
-                      int errorMs = 6000;                 // per-site toast duration for `error` (7000 for archive-extract)
+                      int errorMs = kFeedbackLong;        // error-class toast duration (J06 policy: all errors kFeedbackLong)
                       const GameSystem* sys = nullptr;    // the resolved system (borrowed; SystemCatalog entries are static)
                       QString externalEmulatorId; }; // non-empty => a standalone-emulator system (no libretro core)
     CorePlan prepareCore(const QString& rom, const QString& systemHint);

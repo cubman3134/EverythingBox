@@ -1,4 +1,5 @@
 #include "HomeView.h"
+#include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
@@ -747,7 +748,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(agg_, &SearchAggregator::finished, this, [this](int totalResults) {
         PerfTrace::end(QStringLiteral("search.drain"), QStringLiteral("total=%1").arg(totalResults));
         loading_ = false;
-        if (totalResults == 0) showToast(tr("No results for “%1”.").arg(agg_->query()), 6000);
+        if (totalResults == 0) showToast(tr("No results for “%1”.").arg(agg_->query()), kFeedbackLong);
         updateStatus();
     });
 
@@ -2691,7 +2692,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 {
                     ms->committed = true;
                     if (playBtn_) playBtn_->setEnabled(true);
-                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(q.err), 9000);
+                    showToast(tr("Can't reach the file provider (Allarr): %1.").arg(q.err), kFeedbackLong);
                     return;
                 }
                 if (q.caching)                            // a copy exists at this rank but is still caching
@@ -2707,7 +2708,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             }
             ms->committed = true;                          // every name came back a plain miss
             if (playBtn_) playBtn_->setEnabled(true);
-            showToast(tr("No copies of “%1” were found.").arg(title), 8000);
+            showToast(tr("No copies of “%1” were found.").arg(title), kFeedbackLong);
         };
         for (int i = 0; i < queries.size(); ++i)
         {
@@ -2741,12 +2742,12 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 // caching; for anything else it's simply no usable link.
                 const QString notice = mgr_->takeStreamNotice();
                 if (!notice.isEmpty())
-                    showToast(notice, 12000);
+                    showToast(notice, kFeedbackLong);
                 else if (fileProvider)
                     showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
                                  "minutes; if it never appears, there may be no copy.").arg(it.title), 10000);
                 else
-                    showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), 7000);
+                    showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), kFeedbackLong);
             }
         });
         return;
@@ -3269,7 +3270,7 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         {
             hideToast();
             showToast(tr("No stream source for “%1”. No stream addon (e.g. Allarr) returned a playable link.")
-                          .arg(themedPlayItem_.title), 7000);
+                          .arg(themedPlayItem_.title), kFeedbackLong);
         }
         return;
     }
