@@ -3739,7 +3739,9 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     else if (type == QStringLiteral("audio"))
     {
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-        session_->setQueue({ url }, 0); // a single-track queue; libmpv also streams http(s) audio
+        // J18: key resume by the stable catalog id, not the (re-resolved, ever-changing) stream URL — mirrors
+        // the audiobook branch, so Recent/resume survives a re-open.
+        session_->setQueue({ url }, 0, {}, item.id); // a single-track queue; libmpv also streams http(s) audio
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {

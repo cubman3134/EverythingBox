@@ -199,7 +199,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** MainWindow.cpp:3738-3742 — the `type == "audio"` branch calls `session_->setQueue({ url }, 0)` with no resumeKey, unlike the sibling audiobook branch (3736) which passes `item.id`. A re-resolved stream URL changes each open, so resume/Recent keying is lost.
 **Proposed fix:** pass `item.id` as `setQueue`'s 4th (resumeKey) arg, mirroring the audiobook branch.
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (4df740c) — the `type == "audio"` branch now calls `session_->setQueue({ url }, 0, {}, item.id)`. (probe_playback already asserts `setQueue resumeKey keys resume by the stable id`.)
 
 ### J19: Stale `notify` comment survivors
 **Category:** debris
