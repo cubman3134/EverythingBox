@@ -1524,26 +1524,7 @@ void HomeView::openPlaylistsLevel(const QString& catalogKey)
 
 void HomeView::populatePlaylists(const QString& catalogKey)
 {
-    MediaCatalog cat; cat.title = tr("Playlists");
-    for (const Playlist& p : PlaylistStore::forCatalog(catalogKey))
-    {
-        MediaItem it;
-        it.id = QStringLiteral("pl:") + p.id;
-        it.type = QStringLiteral("_playlist");
-        it.title = p.name;
-        it.subtitle = tr("%n item(s)", "", int(p.items.size()));
-        it.expandable = true;
-        it.mime = QStringLiteral("playlist:") + p.id;
-        cat.items.push_back(it);
-    }
-    MediaItem add; // a New-playlist entry at the bottom (activates -> name prompt)
-    add.id = QStringLiteral("_newplaylist");
-    add.type = QStringLiteral("_newplaylist");
-    add.title = tr("➕  New playlist…");
-    add.mime = QStringLiteral("newplaylist:") + catalogKey;
-    cat.items.push_back(add);
-    cat.hasMore = false;
-    showSyntheticCatalog(cat);
+    showSyntheticCatalog(browse::playlistsCatalog(PlaylistStore::forCatalog(catalogKey), catalogKey));
 }
 
 void HomeView::openPlaylistLevel(const QString& playlistId)
@@ -1565,18 +1546,7 @@ void HomeView::openPlaylistLevel(const QString& playlistId)
 void HomeView::populatePlaylistItems(const QString& playlistId)
 {
     Playlist p; PlaylistStore::get(playlistId, p);
-    MediaCatalog cat; cat.title = p.name;
-    for (const PlaylistEntry& e : p.items)
-    {
-        MediaItem it;
-        it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
-        it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
-        if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
-        else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    showSyntheticCatalog(cat);
+    showSyntheticCatalog(browse::playlistItemsCatalog(p));
 }
 
 void HomeView::createPlaylistInteractive(const QString& catalogKey)

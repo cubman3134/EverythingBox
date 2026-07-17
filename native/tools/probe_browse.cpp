@@ -2,6 +2,7 @@
 // kind+system filtering, the pcgame-in-games rule, and missing-file hiding. Prints BROWSE-OK.
 #include <QCoreApplication>
 #include "../src/browse/SyntheticCatalogs.h"
+#include "../src/core/PlaylistStore.h"
 
 static int fails = 0;
 #define CHECK(cond, name) do { if (cond) printf("PASS %s\n", name); \
@@ -36,6 +37,39 @@ int main(int argc, char** argv)
     { FavoriteItem f; f.path = "";               f.title = "NoPath"; favs << f; } // streamed fav: no console home
     auto snes = browse::favoritesCatalog(favs, "snes");
     CHECK(snes.items.size() == 1 && snes.items[0].title == "Zelda", "favorites: system scope + path-only");
+
+    // ---- Playlists level: this catalogue's playlists + the trailing synthetic New-playlist row -------------
+    QList<Playlist> pls;
+    { Playlist p; p.id = "id-a"; p.name = "Alpha"; PlaylistEntry e; p.items << e << e; pls << p; } // 2 items
+    { Playlist p; p.id = "id-b"; p.name = "Beta"; pls << p; }                                        // 0 items
+    auto plCat = browse::playlistsCatalog(pls, "native|cat|movie");
+    CHECK(plCat.items.size() == 3, "playlists: 2 playlists + New-playlist row");
+    CHECK(plCat.items[0].id == "pl:id-a" && plCat.items[0].type == "_playlist"
+          && plCat.items[0].title == "Alpha" && plCat.items[0].expandable
+          && plCat.items[0].mime == "playlist:id-a", "playlists: playlist row mapped");
+    CHECK(plCat.items[2].id == "_newplaylist" && plCat.items[2].type == "_newplaylist"
+          && plCat.items[2].mime == "newplaylist:native|cat|movie",
+          "playlists: New-playlist marker row (id/type/mime)");
+
+    // ---- Playlist items level: addon / steam / local-path entry variants -----------------------------------
+    Playlist items;
+    { PlaylistEntry e; e.itemId = "addon-1"; e.type = "movie"; e.title = "Film"; e.subtitle = "2020";
+      e.thumbnailUrl = "http://x/p.jpg"; e.expandable = true; items.items << e; }        // ordinary addon entry
+    { PlaylistEntry e; e.itemId = "steam:440"; e.type = "game"; e.title = "TF2"; items.items << e; } // steam
+    { PlaylistEntry e; e.itemId = "local-1"; e.type = "game"; e.title = "Mario"; e.path = "C:/g/m.nes";
+      e.kind = "game"; items.items << e; }                                              // local-file entry
+    auto plItems = browse::playlistItemsCatalog(items);
+    CHECK(plItems.items.size() == 3, "playlistItems: all three entries mapped");
+    CHECK(plItems.items[0].id == "addon-1" && plItems.items[0].type == "movie"
+          && plItems.items[0].title == "Film" && plItems.items[0].subtitle == "2020"
+          && plItems.items[0].thumbnailUrl == "http://x/p.jpg" && plItems.items[0].expandable
+          && plItems.items[0].mime.isEmpty() && plItems.items[0].url.isEmpty(),
+          "playlistItems: ordinary addon entry (no special-case mime/url)");
+    CHECK(plItems.items[1].id == "steam:440" && plItems.items[1].mime == "steamgame"
+          && plItems.items[1].url.isEmpty(), "playlistItems: steam: entry -> steamgame");
+    CHECK(plItems.items[2].id == "local-1" && plItems.items[2].url == "C:/g/m.nes"
+          && plItems.items[2].mime == "localgame:game",
+          "playlistItems: local-path entry -> url + localgame:<kind>");
 
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;

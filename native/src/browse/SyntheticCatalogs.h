@@ -9,6 +9,7 @@
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
+#include "../core/PlaylistStore.h"
 #include <functional>
 
 namespace browse
@@ -29,4 +30,14 @@ namespace browse
     // system scopes a games console (SystemCatalog id, or "pc"); empty system matches any. Only local-file
     // favourites (a path set) have a per-console home — streamed favourites are skipped.
     MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& system);
+
+    // The Playlists folder for one catalogue: a row per playlist (drills into playlistItemsCatalog) followed by
+    // the trailing synthetic "_newplaylist" row (activation opens the name prompt). Pure: addon resolution
+    // happens later, at activation time (addonForKey), not here — so no addon data is needed.
+    MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalogKey);
+
+    // One playlist's contents: PlaylistEntry -> MediaItem. Ordinary addon entries re-open through their addon;
+    // a "steam:" itemId launches natively (mime "steamgame"); a local-file entry (path set) re-opens by path
+    // (mime "localgame:<kind>", url = path).
+    MediaCatalog playlistItemsCatalog(const Playlist& p);
 }

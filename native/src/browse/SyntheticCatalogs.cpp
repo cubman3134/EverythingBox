@@ -92,4 +92,44 @@ MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& sys
     return cat;
 }
 
+MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalogKey)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Playlists");
+    for (const Playlist& p : all)
+    {
+        MediaItem it;
+        it.id = QStringLiteral("pl:") + p.id;
+        it.type = QStringLiteral("_playlist");
+        it.title = p.name;
+        it.subtitle = QObject::tr("%n item(s)", "", int(p.items.size()));
+        it.expandable = true;
+        it.mime = QStringLiteral("playlist:") + p.id;
+        cat.items.push_back(it);
+    }
+    MediaItem add; // a New-playlist entry at the bottom (activates -> name prompt)
+    add.id = QStringLiteral("_newplaylist");
+    add.type = QStringLiteral("_newplaylist");
+    add.title = QObject::tr("➕  New playlist…");
+    add.mime = QStringLiteral("newplaylist:") + catalogKey;
+    cat.items.push_back(add);
+    cat.hasMore = false;
+    return cat;
+}
+
+MediaCatalog playlistItemsCatalog(const Playlist& p)
+{
+    MediaCatalog cat; cat.title = p.name;
+    for (const PlaylistEntry& e : p.items)
+    {
+        MediaItem it;
+        it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
+        it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
+        if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
+        else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
 } // namespace browse
