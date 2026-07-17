@@ -110,7 +110,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK"; do
+for p in "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK"; do
   set -- $p
   if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "(skip) $1 not built"; fi
 done
