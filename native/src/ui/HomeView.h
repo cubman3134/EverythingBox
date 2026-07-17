@@ -327,6 +327,8 @@ private:
     bool searchEditing_ = false; // search box: false = highlighted (arrows navigate), true = typing
     QVector<int> thumbQueue_;    // item rows awaiting a remote poster load (throttled)
     int thumbActive_ = 0;        // remote poster loads currently in flight
+    int perfThumbCount_ = 0;     // thumbs.page span: remote posters queued this generation (span detail only)
+    bool perfSearchFirstSeen_ = false; // search.first span: end it once, on the first streamed batch
     int generation_ = 0;         // bumped on each fresh load so stale async thumbnails are ignored
     int currentPage_ = 1;        // last page loaded for the current view
     int pendingRestoreRow_ = -1; // on Back: keep paging until this row is loaded, then scroll to it

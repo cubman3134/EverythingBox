@@ -11,6 +11,7 @@
 #include "../core/RecentStore.h"
 #include "../core/PlayStats.h"
 #include "../core/BiosCatalog.h"
+#include "../core/PerfTrace.h"
 #include <QTimer>
 #include <QFileInfo>
 #include <QFile>
@@ -235,6 +236,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         emit showRetroRequested();
         RecentStore::add({ launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
         beginPlaySession(PlayStats::identity(key, launchRom));
+        PerfTrace::end(QStringLiteral("open.game"), QFileInfo(launchRom).fileName()); // libretro: measured to core load
     }
     else
     {
@@ -422,6 +424,7 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     glLog(QStringLiteral("emu: run %1 \"%2\"")
               .arg(em.displayName, rom.isEmpty() ? QStringLiteral("(no game)") : QFileInfo(rom).fileName()));
     emu_->play(em, rom);
+    PerfTrace::end(QStringLiteral("open.game"), em.displayName); // external: measured to process handoff
 }
 
 void GameLauncher::install(const ExternalEmulator& em)

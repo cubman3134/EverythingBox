@@ -27,6 +27,7 @@
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/SearchAggregator.h"
 #include <QAbstractItemView>
@@ -737,11 +738,14 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     // the old in-handler search branch, just split across two signals).
     agg_ = new SearchAggregator(mgr_, this);
     connect(agg_, &SearchAggregator::resultsAppended, this, [this](const MediaCatalog& add, bool /*firstBatch*/) {
+        if (!perfSearchFirstSeen_)
+        { perfSearchFirstSeen_ = true; PerfTrace::end(QStringLiteral("search.first"), QStringLiteral("n=%1").arg(add.items.size())); }
         if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_search") && !add.items.isEmpty())
             populate(add, /*append*/ !items_.isEmpty());
         updateStatus();
     });
     connect(agg_, &SearchAggregator::finished, this, [this](int totalResults) {
+        PerfTrace::end(QStringLiteral("search.drain"), QStringLiteral("total=%1").arg(totalResults));
         loading_ = false;
         if (totalResults == 0) showToast(tr("No results for “%1”.").arg(agg_->query()), 6000);
         updateStatus();
@@ -1439,6 +1443,9 @@ void HomeView::startSearch(const QString& query)
     pendingReqId_ = -1;                    // not driven by the single-request path
     hasMore_ = false;
     agg_->start(query);                    // clears prior state + fans the query out to every enabled source
+    perfSearchFirstSeen_ = false;
+    PerfTrace::begin(QStringLiteral("search.first"));
+    PerfTrace::begin(QStringLiteral("search.drain"));
     loading_ = agg_->active();
     populate(agg_->accumulated(), /*append*/ false); // clears the grid, shows the (empty) searching state
     if (!agg_->active()) showToast(tr("No add-ons to search."), 4000);
@@ -2826,6 +2833,7 @@ void HomeView::requestThemedMeta(int idx)
             base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
     }
     emit themedMetaReady(idx, base);
+    PerfTrace::end(QStringLiteral("nav.select"));
     // The LOCAL art/facts above are resolved + shown instantly (no debounce), so scrolling over cached /
     // gamelist rows shows the logo + metadata immediately with no plain-title flash. Only the NETWORK half
     // (online scrape + achievements + the catalog addon's /meta) is deferred to enrichThemedMeta(), fired on
@@ -3422,6 +3430,7 @@ void HomeView::issueRequest(bool append)
     loading_ = true;
     status_->setText(append ? tr("Loading more…") : tr("Loading…"));
 
+    PerfTrace::begin(QStringLiteral("catalog.load"));
     pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters, top.query)
                                : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
 }
@@ -3452,6 +3461,7 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
     currentPage_ = pendingPage_;
     hasMore_ = cat.hasMore;
     populate(cat, pendingAppend_);
+    PerfTrace::end(QStringLiteral("catalog.load"), QStringLiteral("page=%1 n=%2").arg(pendingPage_).arg(cat.items.size()));
     // Sync the filter dropdowns to whatever this response advertises (a catalog, or a container's children
     // like a console's games). Only on a fresh load - paging keeps the current filters.
     if (!pendingAppend_) rebuildFilterBar(cat.filters);
@@ -3745,7 +3755,8 @@ void HomeView::updateStatus()
 
 void HomeView::loadThumbnails(int fromIndex)
 {
-    if (fromIndex <= 0) thumbQueue_.clear(); // fresh view: drop any stale queued loads from the last one
+    if (fromIndex <= 0) { thumbQueue_.clear(); perfThumbCount_ = 0; } // fresh view: drop any stale queued loads from the last one
+    const bool queueWasEmpty = thumbQueue_.isEmpty();
     for (int i = qMax(0, fromIndex); i < items_.size(); ++i)
     {
         const QString url = items_[i].thumbnailUrl;
@@ -3763,7 +3774,9 @@ void HomeView::loadThumbnails(int fromIndex)
             continue;
         }
         thumbQueue_.push_back(i); // remote: fetched by pumpThumbnails(), capped so we don't flood the host
+        ++perfThumbCount_;
     }
+    if (queueWasEmpty && !thumbQueue_.isEmpty()) PerfTrace::begin(QStringLiteral("thumbs.page"));
     pumpThumbnails();
 }
 
@@ -3791,6 +3804,8 @@ void HomeView::pumpThumbnails()
         connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl] {
             reply->deleteLater();
             --thumbActive_;
+            if (thumbQueue_.isEmpty() && thumbActive_ == 0)
+                PerfTrace::end(QStringLiteral("thumbs.page"), QStringLiteral("n=%1").arg(perfThumbCount_));
             if (gen == generation_ && reply->error() == QNetworkReply::NoError) // else navigated away / failed
             {
                 QPixmap pm;

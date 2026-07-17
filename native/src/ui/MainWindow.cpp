@@ -206,6 +206,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     subFetcher_ = new SubtitleFetcher(this);
     connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
+        PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
+        PerfTrace::end(QStringLiteral("open.audio"));
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
         if (!subCtx_.active) return;
         subCtx_.active = false; // one-shot per open
@@ -851,6 +853,8 @@ namespace { constexpr int PAD_B = 0, PAD_START = 3, PAD_UP = 4, PAD_DOWN = 5, PA
 
 void MainWindow::sendNavKey(int key)
 {
+    if (key == Qt::Key_Up || key == Qt::Key_Down || key == Qt::Key_Left || key == Qt::Key_Right)
+        PerfTrace::begin(QStringLiteral("nav.select")); // ended in HomeView::requestThemedMeta; overwritten if no selection change
     // Mark everything below as controller-origin, so widgets can tell a pad "Back" from a typed Backspace.
     NavContext::SyntheticScope synth;
     auto deliver = [](QObject* target, int k) {
@@ -1413,6 +1417,7 @@ void MainWindow::openFile()
 
 void MainWindow::openVideoPath(const QString& path)
 {
+    PerfTrace::begin(QStringLiteral("open.video"));
     if (StreamResolver::isM3uRef(path)) { streams_->resolve(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
     subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
@@ -1452,6 +1457,7 @@ void MainWindow::openAudio()
 
 void MainWindow::openAudioPath(const QString& path)
 {
+    PerfTrace::begin(QStringLiteral("open.audio"));
     currentNextSourceCapable_ = false; // a local file/folder has no Allarr alternate source
     const QFileInfo fi(path);
     QStringList queue;
@@ -1551,6 +1557,7 @@ void MainWindow::openGame()
 void MainWindow::openGamePath(const QString& rom, const QString& title, const QString& thumb,
                               const QString& key, const QString& systemHint)
 {
+    PerfTrace::begin(QStringLiteral("open.game")); // ended in GameLauncher (libretro openGame or external runEmulator)
     if (splitTarget_) // run the ROM in the focused pane's own emulator instead of the full-screen one
     {
         const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint);
@@ -1718,6 +1725,7 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
 {
+    PerfTrace::begin(QStringLiteral("open.video"));
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     stopScrobble();                    // leaving whatever was playing
     castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
@@ -1745,6 +1753,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl)
 {
+    PerfTrace::begin(QStringLiteral("open.audio"));
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     subCtx_ = {};           // audio has no subtitles to fetch
     stopScrobble();         // leaving whatever video was playing
@@ -1770,6 +1779,7 @@ void MainWindow::openDocument()
 
 void MainWindow::openDocumentPath(const QString& f)
 {
+    PerfTrace::begin(QStringLiteral("open.reader"));
     const QString ext = QFileInfo(f).suffix().toLower();
     QString err;
 
@@ -1778,6 +1788,7 @@ void MainWindow::openDocumentPath(const QString& f)
         if (ext == QStringLiteral("pdf")) splitTarget_->openPdf(f);
         else if (ext == QStringLiteral("cbz")) splitTarget_->openComic(f);
         else splitTarget_->openBook(f); // .epub
+        PerfTrace::end(QStringLiteral("open.reader"), ext);
         finishSplitOpen();
         return;
     }
@@ -1787,18 +1798,21 @@ void MainWindow::openDocumentPath(const QString& f)
         if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(pdf_);
+        PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else if (ext == QStringLiteral("cbz"))
     {
         if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
+        PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(book_);
+        PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     RecentStore::add({ f, QFileInfo(f).completeBaseName(), QStringLiteral("document"), QString() });
 }
