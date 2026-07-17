@@ -80,7 +80,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** `evidence/search-osk-presubmit.png` (OSK renders fine pre-submit); crash on "Done". WER: Qt6Core.dll, 0xc0000005, fault offset 0x68e98. Repro 3× (Task 1 report §Notable rough spots #1).
 **Proposed fix:** fix the search-submit path (the OSK "Done" handler); a core action (search) and playlist-create are unusable until then.
 **Cost:** medium
-**Triage:** OBJECTIVE — fix in progress on this branch by a parallel debug task.
+**Triage:** FIXED (9109d7c) — harness-only UAF (UiTestServer), reclassified: real users never hit it
 
 ### J02: Movie action menu occludes its own detail panel
 **Category:** debris
@@ -178,7 +178,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** durations `4500`/`6000`/`7000` etc. are scattered magic numbers across HomeView.cpp, MainWindow.cpp, GameLauncher.cpp (see the feedback inventory).
 **Proposed fix:** add the `kFeedbackShort/Standard/Long/Sticky` constants (values above) in one shared header and migrate every call site to them; the feedback items reference these names.
 **Cost:** small
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (fd56007) — `native/src/ui/FeedbackPolicy.h` created; call sites migrated per the feedback items (J06–J08, J10, J11).
 
 ### J16: Unwired `nextTrack` / `prevTrack` slots (investigated)
 **Category:** debris
