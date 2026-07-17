@@ -10,6 +10,7 @@
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
+#include "../core/SteamLibrary.h"
 #include <functional>
 
 namespace browse
@@ -40,4 +41,12 @@ namespace browse
     // a "steam:" itemId launches natively (mime "steamgame"); a local-file entry (path set) re-opens by path
     // (mime "localgame:<kind>", url = path).
     MediaCatalog playlistItemsCatalog(const Playlist& p);
+
+    // The Steam console grid, built natively from the local library (no addon request). Each SteamGame maps to
+    // a MediaItem (id "steam:"+appid, mime "steamgame" — no url, so clicking opens the info page and Play
+    // launches it). A non-empty query scopes to library games whose name matches (case-insensitive; trimmed).
+    // poster resolves the vertical-capsule artwork; default {} uses SteamLibrary::posterUrl (which touches the
+    // local librarycache) — a test injects a pure one to stay I/O-free.
+    MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
+                                   const std::function<QString(const SteamGame&)>& poster = {});
 }

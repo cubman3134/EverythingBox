@@ -71,6 +71,20 @@ int main(int argc, char** argv)
           && plItems.items[2].mime == "localgame:game",
           "playlistItems: local-path entry -> url + localgame:<kind>");
 
+    // ---- Steam games level: SteamGame -> MediaItem mapping + the in-console query filter -------------------
+    QList<SteamGame> steam;
+    { SteamGame g; g.appid = "440"; g.name = "Team Fortress 2"; steam << g; }
+    { SteamGame g; g.appid = "570"; g.name = "Dota 2";          steam << g; }
+    auto poster = [](const SteamGame& g) { return QStringLiteral("poster:") + g.appid; }; // inject: no I/O
+    auto allSteam = browse::steamGamesCatalog(steam, QString(), poster);
+    CHECK(allSteam.items.size() == 2, "steam: empty query -> all installed");
+    auto tf2 = browse::steamGamesCatalog(steam, "fortress", poster);
+    CHECK(tf2.items.size() == 1 && tf2.items[0].id == "steam:440"
+          && tf2.items[0].mime == "steamgame" && tf2.items[0].type == "game"
+          && tf2.items[0].title == "Team Fortress 2" && tf2.items[0].thumbnailUrl == "poster:440"
+          && tf2.items[0].url.isEmpty(),
+          "steam: query filter -> one game with exact id/mime/poster/type mapping");
+
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;
 }

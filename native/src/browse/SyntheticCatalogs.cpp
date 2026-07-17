@@ -132,4 +132,26 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
     return cat;
 }
 
+MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
+                               const std::function<QString(const SteamGame&)>& poster)
+{
+    // A search while in the Steam console scopes to the library: keep only games whose name matches.
+    const QString q = query.trimmed();
+    MediaCatalog cat;
+    cat.title = q.isEmpty() ? QObject::tr("Steam") : QObject::tr("Steam · %1").arg(q);
+    for (const SteamGame& g : installed)
+    {
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
+        MediaItem it;
+        it.id = QStringLiteral("steam:") + g.appid;
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.mime = QStringLiteral("steamgame"); // no url -> clicking opens the info page; Play launches it
+        it.thumbnailUrl = poster ? poster(g) : SteamLibrary::posterUrl(g.appid);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
 } // namespace browse

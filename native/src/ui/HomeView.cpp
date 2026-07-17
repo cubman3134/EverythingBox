@@ -1469,25 +1469,9 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
 // (Re)build the Steam games grid/column natively from the local library (no addon request).
 void HomeView::populateSteamGames()
 {
-    // A search while in the Steam console scopes to the library: keep only games whose name matches.
-    const QString q = stack_.isEmpty() ? QString() : stack_.last().query.trimmed();
-
-    MediaCatalog cat;
-    cat.title = q.isEmpty() ? tr("Steam") : tr("Steam · %1").arg(q);
-    for (const SteamGame& g : SteamLibrary::installedGames())
-    {
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        it.id = QStringLiteral("steam:") + g.appid;
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.mime = QStringLiteral("steamgame"); // no url -> clicking opens the info page; Play launches it
-        it.thumbnailUrl = SteamLibrary::posterUrl(g.appid);
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-
-    showSyntheticCatalog(cat);
+    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse).
+    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
+    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query));
 }
 
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
