@@ -32,6 +32,12 @@ namespace browse
     // favourites (a path set) have a per-console home — streamed favourites are skipped.
     MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& system);
 
+    // The FavoriteItem for starring a local game (a Recent/Downloaded/themed list row): identity is the
+    // stable key, else the path; re-opens by path. Crucially stamps `system` — favoritesCatalog above only
+    // shows favourites whose system matches the console — from the caller's hint (the Recent/Downloads
+    // store entry, which knows ambiguous-extension consoles) or, failing that, the ROM extension.
+    FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint);
+
     // The Playlists folder for one catalogue: a row per playlist (drills into playlistItemsCatalog) followed by
     // the trailing synthetic "_newplaylist" row (activation opens the name prompt). Pure: addon resolution
     // happens later, at activation time (addonForKey), not here — so no addon data is needed.

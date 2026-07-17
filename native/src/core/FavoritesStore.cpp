@@ -1,12 +1,15 @@
 #include "FavoritesStore.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "RecentStore.h"
+#include "DownloadsStore.h"
 
 #include <QSettings>
 #include <QCoreApplication>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 
 static QSettings& store()
 {
@@ -22,6 +25,8 @@ static QString favKey()
     return QStringLiteral("favorites/") + (id.isEmpty() ? QStringLiteral("default") : id)
            + QStringLiteral("/items");
 }
+
+static void save(const QVector<FavoriteItem>& items);
 
 QVector<FavoriteItem> FavoritesStore::list()
 {
@@ -43,6 +48,22 @@ QVector<FavoriteItem> FavoritesStore::list()
         it.kind         = o.value(QStringLiteral("kind")).toString();
         it.system       = o.value(QStringLiteral("system")).toString();
         if (!it.itemId.isEmpty()) out.push_back(it);
+    }
+    // One-time (per profile per run) migration: local-game favourites saved before `system` was stamped
+    // never matched a console's ★ Favorites folder — recover it from the game's Recent/Downloads entry
+    // (authoritative for ambiguous extensions), else the ROM extension, and persist.
+    static QSet<QString> migrated;
+    if (!migrated.contains(favKey()))
+    {
+        migrated.insert(favKey());
+        auto storeSystem = [](const FavoriteItem& f) -> QString {
+            for (const DownloadedItem& d : DownloadsStore::list())
+                if (d.path == f.path || (!f.itemId.isEmpty() && d.key == f.itemId)) return d.system;
+            for (const RecentItem& r : RecentStore::list())
+                if (r.path == f.path || (!f.itemId.isEmpty() && r.key == f.itemId)) return r.system;
+            return QString();
+        };
+        if (backfillSystems(out, storeSystem)) save(out);
     }
     return out;
 }

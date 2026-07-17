@@ -92,6 +92,19 @@ MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& sys
     return cat;
 }
 
+FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint)
+{
+    FavoriteItem f;
+    f.itemId = it.id.isEmpty() ? it.url : it.id; // gameFavId rule: stable key, else path
+    f.title = it.title;
+    f.type = QStringLiteral("game");
+    f.thumbnailUrl = it.thumbnailUrl;
+    f.path = it.url;   // re-open by path (openFavorite recovers the console from the stores)
+    f.kind = it.mime;  // "game" | "pcgame" (openRecent routing kind)
+    f.system = systemHint.isEmpty() ? FavoritesStore::deriveSystem(f.path, f.kind) : systemHint;
+    return f;
+}
+
 MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalogKey)
 {
     MediaCatalog cat; cat.title = QObject::tr("Playlists");
