@@ -1487,10 +1487,7 @@ void HomeView::populateSteamGames()
     }
     cat.hasMore = false;
 
-    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
-    hideMeta();
-    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
-    populate(cat, /*append*/ false);
+    showSyntheticCatalog(cat);
 }
 
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
@@ -1546,10 +1543,7 @@ void HomeView::populatePlaylists(const QString& catalogKey)
     add.mime = QStringLiteral("newplaylist:") + catalogKey;
     cat.items.push_back(add);
     cat.hasMore = false;
-    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
-    hideMeta();
-    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
-    populate(cat, /*append*/ false);
+    showSyntheticCatalog(cat);
 }
 
 void HomeView::openPlaylistLevel(const QString& playlistId)
@@ -1582,10 +1576,7 @@ void HomeView::populatePlaylistItems(const QString& playlistId)
         cat.items.push_back(it);
     }
     cat.hasMore = false;
-    pendingReqId_ = -1; loading_ = false; hasMore_ = false; currentPage_ = 1;
-    hideMeta();
-    if (carouselMode_ || xmbMode_) grid_->hide(); else grid_->show();
-    populate(cat, /*append*/ false);
+    showSyntheticCatalog(cat);
 }
 
 void HomeView::createPlaylistInteractive(const QString& catalogKey)
