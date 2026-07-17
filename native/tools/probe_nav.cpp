@@ -28,6 +28,17 @@ static int failures = 0;
     if (!(cond)) { std::fprintf(stderr, "NAV-FAIL %s (line %d)\n", what, __LINE__); ++failures; } \
 } while (0)
 
+// Stand-in for a themed page's QML root item (ThemeEngine::buildView exposes the real one through the
+// widget's "mmvQuickRoot" property): dismissing an overlay must invoke forceActiveFocus() on it, because
+// widget focus alone does not revive a QQuickWidget scene's active-focus item after the keyboard grab.
+class FakeQuickRoot : public QObject
+{
+    Q_OBJECT
+public:
+    int kicks = 0;
+    Q_INVOKABLE void forceActiveFocus() { ++kicks; }
+};
+
 static void pump() { QApplication::processEvents(); QApplication::processEvents(); }
 
 int main(int argc, char** argv)
@@ -647,7 +658,50 @@ int main(int argc, char** argv)
         pump();
     }
 
+    // ------------------------------------------- 18. themed (QML) page: closing an overlay revives the scene
+    {
+        // The themed home/browse is a QQuickWidget: restoring widget focus on dismiss is not enough — the
+        // scene's active-focus item stays dead after the overlay's keyboard grab, and every QML Keys
+        // handler (arrow nav) goes deaf until something calls forceActiveFocus() on the root item (the bug:
+        // item navigation froze after the search OSK closed). dismiss() must kick the object exposed via
+        // the page's "mmvQuickRoot" property whenever it restores the page's focus.
+        auto* page = new QWidget(&win);
+        page->setGeometry(0, 0, 400, 300);
+        page->setFocusPolicy(Qt::StrongFocus);
+        FakeQuickRoot sceneRoot;
+        page->setProperty("mmvQuickRoot", QVariant::fromValue<QObject*>(&sceneRoot));
+        page->show();
+        page->setFocus();
+        pump();
+
+        auto* osk = new Osk(QStringLiteral("Search everything"), QString(), QLineEdit::Normal, nullptr, &win);
+        pump();
+        CHECK(NavOverlay::topmost() == osk, "the search OSK is the topmost overlay");
+        CHECK(sceneRoot.kicks == 0, "no focus kick while the overlay is still open");
+        ctx.routeKey(Qt::Key_Escape); // Start commits — the themed-search flow's close
+        pump();
+        CHECK(NavOverlay::topmost() == nullptr, "the OSK closed on commit");
+        CHECK(QApplication::focusWidget() == page, "widget focus returns to the themed page");
+        CHECK(sceneRoot.kicks == 1, "dismiss revives the themed page's scene (forceActiveFocus)");
+
+        // Stacked overlays: closing onto an overlay BELOW hands input to that overlay, not the page — no
+        // kick until the stack unwinds back to the page itself.
+        new NavMenu(QStringLiteral("Outer"), { QStringLiteral("a"), QStringLiteral("b") }, nullptr, &win);
+        new NavConfirm(QStringLiteral("Sure?"), QString(), { QStringLiteral("Do it"), QStringLiteral("Cancel") }, 0, &win);
+        pump();
+        ctx.routeKey(Qt::Key_Backspace); // pop the confirm — the menu below takes over
+        pump();
+        CHECK(sceneRoot.kicks == 1, "closing onto an overlay below does not kick the page");
+        ctx.routeKey(Qt::Key_Backspace); // pop the menu — back to the page
+        pump();
+        CHECK(sceneRoot.kicks == 2, "unwinding the last overlay revives the scene again");
+        delete page;
+        pump();
+    }
+
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAV-OK\n");
     return 0;
 }
+
+#include "probe_nav.moc"

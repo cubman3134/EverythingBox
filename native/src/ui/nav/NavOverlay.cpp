@@ -83,7 +83,15 @@ void NavOverlay::dismiss(int result)
     if (NavOverlay* below = topmost())
         below->grabKeyboard();          // hand input back to the overlay underneath
     else if (prevFocus_ && prevFocus_->isVisible())
+    {
         prevFocus_->setFocus(Qt::OtherFocusReason); // restore the selection from before we opened
+        // A themed (QML) page: widget focus alone doesn't revive a QQuickWidget scene's active-focus item
+        // after our keyboard grab, leaving every QML Keys handler (arrow nav) deaf until something kicks
+        // it. ThemeEngine::buildView exposes the scene root through this property; invoke by name so the
+        // nav kit stays QtQuick-free (QQuickItem::forceActiveFocus is Q_INVOKABLE).
+        if (QObject* sceneRoot = prevFocus_->property("mmvQuickRoot").value<QObject*>())
+            QMetaObject::invokeMethod(sceneRoot, "forceActiveFocus");
+    }
     else if (NavContext::instance())
         NavContext::instance()->ensureFocus();      // its widget died: land somewhere valid
     emit closed(result_);

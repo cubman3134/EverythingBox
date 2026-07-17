@@ -154,6 +154,10 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
 
     qv->setFocusPolicy(Qt::StrongFocus);
     qv->setProperty("mmvQuickView", QVariant::fromValue<QObject*>(qv)); // marks a themed page + for rootItem()
+    // The scene root, for the nav kit: NavOverlay::dismiss must forceActiveFocus() it when an overlay (the
+    // OSK, a menu, a confirm) closes back onto this page — widget focus alone leaves the scene's Keys
+    // handlers dead after the overlay's keyboard grab (arrow nav froze after every themed search).
+    qv->setProperty("mmvQuickRoot", QVariant::fromValue<QObject*>(qv->rootObject()));
     return qv;
 }
 
