@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QPointer>
 
 bool UiTestServer::wanted()
 {
@@ -24,12 +25,27 @@ UiTestServer::UiTestServer(const Hooks& hooks, QObject* parent)
         if (!sock) return;
         connect(sock, &QLocalSocket::disconnected, sock, &QObject::deleteLater);
         connect(sock, &QLocalSocket::readyRead, sock, [this, sock] {
-            while (sock->canReadLine())
+            // handle() can re-enter a nested event loop (a key that opens a BLOCKING prompt — e.g. "/"
+            // opens the OSK, whose Osk::getText spins a QEventLoop inside our synchronous sendKey hook).
+            // If the client disconnects while this frame is suspended in there (uitest.py is one
+            // connection per command; a timed-out/killed client closes the pipe), deleteLater() runs in
+            // that nested loop and frees `sock` under our feet — resuming into write()/canReadLine() on
+            // the freed socket was an 0xc0000005 in Qt6Core (the OSK search-submit crash). Guard every
+            // touch after handle() behind a QPointer: a dead client just drops the reply.
+            QPointer<QLocalSocket> alive(sock);
+            while (alive && alive->canReadLine())
             {
-                const QString line = QString::fromUtf8(sock->readLine()).trimmed();
+                const QString line = QString::fromUtf8(alive->readLine()).trimmed();
                 if (line.isEmpty()) continue;
-                sock->write((handle(line) + QLatin1Char('\n')).toUtf8());
-                sock->flush();
+                const QString reply = handle(line); // may nest an event loop; `sock` can die inside
+                if (!alive)
+                {
+                    qWarning("uitest: client vanished during a blocking command; dropping reply for '%s'",
+                             qPrintable(line));
+                    return;
+                }
+                alive->write((reply + QLatin1Char('\n')).toUtf8());
+                alive->flush();
             }
         });
     });
