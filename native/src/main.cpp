@@ -23,6 +23,7 @@
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
 #include "core/Settings.h"
+#include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
 static constexpr const char* kAppVersion = "0.3.0";
@@ -109,6 +110,8 @@ static void migrateLegacySettings()
 
 int main(int argc, char** argv)
 {
+    PerfTrace::begin(QStringLiteral("startup.total")); // ends after the first paint (zero-timer below)
+
     // libmpv requires the C numeric locale, otherwise option/number parsing breaks. Set it before Qt.
     std::setlocale(LC_NUMERIC, "C");
 
@@ -181,6 +184,8 @@ int main(int argc, char** argv)
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
     if (Settings::startFullscreen()) window.showFullScreen();
     else                             window.show();
+    // A zero-timer fires after the event loop's first pass (first paint), so startup.total spans launch->visible.
+    QTimer::singleShot(0, [] { PerfTrace::end(QStringLiteral("startup.total")); });
     window.raise();
     window.activateWindow(); // foreground + keyboard focus so arrow keys work without a click first
     return app.exec();

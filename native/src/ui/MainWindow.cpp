@@ -41,6 +41,7 @@
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
+#include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
 #include "nav/Nav.h"
 #include "nav/NavOverlay.h"
@@ -180,6 +181,9 @@ static QPushButton* panelRow(const QString& label); // large TV-friendly menu ro
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
+    // No standalone Settings-read block in this ctor; this brackets the initial subsystem construction that
+    // reads persisted state (achievements stored token below, subtitle prefs, saved volume follows later).
+    PerfTrace::begin(QStringLiteral("startup.settings"));
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
     if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
@@ -234,7 +238,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             statusBar()->showMessage(tr("🏆  No RetroAchievements set for this game."), 5000);
     });
     ach_->tryLoginWithStoredToken();
+    PerfTrace::end(QStringLiteral("startup.settings"));
 
+    // AddonManager's ctor performs the initial addon load (reload() off disk); this span also covers the
+    // addon-consuming views wired up alongside it (cloud, library, downloads).
+    PerfTrace::begin(QStringLiteral("startup.addons"));
     addons_ = std::make_unique<AddonManager>();
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
     library_ = new LibraryView(addons_.get(), this);
@@ -252,6 +260,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(dm_, &DownloadManager::changed, this, [this] {
         if (dlPanelOpen_ && stack_->currentWidget() == panelPage_) openDownloadManager();
     });
+    PerfTrace::end(QStringLiteral("startup.addons"));
 
     home_ = new HomeView(addons_.get(), this);
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
@@ -320,6 +329,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     setCentralWidget(central);
 
     // Menu background music (RetroBat-style): plays while browsing, pauses on games/video. Follow the view.
+    // Dominant contiguous theme/BGM block; themeWatcher_ is created lazily in showThemedHome() (excluded here)
+    // and the themed-home QML signal wiring further down is interleaved with nav/updater setup (excluded).
+    PerfTrace::begin(QStringLiteral("startup.theme"));
     bgm_ = new BackgroundMusic(this);
     connect(stack_, &QStackedWidget::currentChanged, this, [this] {
         updateBackgroundMusic();
@@ -332,6 +344,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         inContent_ = content;
     });
     connect(bgm_, &BackgroundMusic::nowPlayingChanged, this, [this] { updateThemedNowPlaying(); }); // Triple theme readout
+    PerfTrace::end(QStringLiteral("startup.theme"));
     statusBar()->hide(); // no bottom status strip; showMessage() calls stay harmless (they don't re-show it)
 
     // Pull any manually-added ROMs sitting in the library folders into the Downloaded list, so they show up
@@ -750,7 +763,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
+    // Dominant home-build cost (classic HomeView, or the themed QML home if enabled). The HomeView ctor
+    // (~40 lines up) is cheap and sits inside the startup.addons region, so it's excluded from this span.
+    PerfTrace::begin(QStringLiteral("startup.home"));
     showHomeScreen(); // the catalog landing screen (classic, or the themed home if enabled) is shown first
+    PerfTrace::end(QStringLiteral("startup.home"));
 
     // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
     // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
