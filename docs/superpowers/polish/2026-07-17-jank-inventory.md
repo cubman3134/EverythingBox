@@ -122,7 +122,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** HomeView.cpp:2293/2306 (2500), 2358 (3000), 1580/2339 (3500).
 **Proposed fix:** route success confirmations through `kFeedbackShort` (2500).
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (2d0c765) — Favorites add/remove, playlist add (both sites), uninstall/remove → `kFeedbackShort`.
 
 ### J08: Achievement toasts use the occluded status bar
 **Category:** feedback

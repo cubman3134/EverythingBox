@@ -1578,7 +1578,7 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     e.itemId = it.id; e.title = it.title; e.subtitle = it.subtitle;
     e.type = it.type; e.thumbnailUrl = it.thumbnailUrl; e.expandable = it.expandable;
     PlaylistStore::addItem(plid, e);
-    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), 3500);
+    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }
 
 void HomeView::addBrowseItemToPlaylist(int browseIndex)
@@ -2291,7 +2291,7 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
 void HomeView::toggleGameFavorite(const MediaItem& it)
 {
     const QString id = gameFavId(it);
-    if (FavoritesStore::isFavorite(id)) { FavoritesStore::remove(id); showToast(tr("Removed from Favorites."), 2500); }
+    if (FavoritesStore::isFavorite(id)) { FavoritesStore::remove(id); showToast(tr("Removed from Favorites."), kFeedbackShort); }
     else
     {
         // Record the console so the favourite shows inside that console's ★ Favorites folder: the
@@ -2304,7 +2304,7 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
             for (const RecentItem& r : RecentStore::list())
                 if (r.path == it.url || (!it.id.isEmpty() && r.key == it.id)) { hint = r.system; break; }
         FavoritesStore::add(browse::localGameFavorite(it, hint));
-        showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
+        showToast(tr("Added “%1” to Favorites.").arg(it.title), kFeedbackShort);
     }
     // Refresh the CURRENT view: the Home recents list, or the console Recent/Downloaded/Favorites level we're in.
     browseSelectKey_ = it.url.isEmpty() ? it.id : it.url; // keep the selection on this game after the re-sync
@@ -2337,7 +2337,7 @@ void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
     e.thumbnailUrl = it.thumbnailUrl;
     e.path = it.url; e.kind = it.mime; // re-open by path
     PlaylistStore::addItem(plid, e);
-    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), 3500);
+    showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }
 
 void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
@@ -2356,7 +2356,7 @@ void HomeView::uninstallGameItem(const MediaItem& it, bool /*isDownloads*/)
     RecentStore::remove(keyOrPath);    RecentStore::remove(it.url);
     MetaCache::remove(keyOrPath);      // drop its offline metadata/artwork bundle too
     clearResume(resumeKeyFor(it));
-    showToast(del ? tr("Uninstalled “%1”.").arg(it.title) : tr("Removed “%1”.").arg(it.title), 3000);
+    showToast(del ? tr("Uninstalled “%1”.").arg(it.title) : tr("Removed “%1”.").arg(it.title), kFeedbackShort);
 
     if (recentView_) { renderRecents(); emit browseItemsChanged(false); } // Home list (+ re-sync themed browse)
     else             loadTop();        // repopulate the catalogue Recent/Downloaded level (emits its own sync)
