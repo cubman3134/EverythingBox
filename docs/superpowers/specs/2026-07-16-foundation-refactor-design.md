@@ -60,8 +60,8 @@ provider pattern that reaches the same extensibility without rewriting HomeView'
 machinery. What shipped: HomeView keeps its existing Level/marker state machine, and each
 content type's *content logic* moves into a plain builder in `native/src/browse/`.
 `SyntheticCatalogs` holds pure functions (`recentsCatalog`/`downloadsCatalog`/
-`favoritesCatalog`/`playlistsCatalog`/`steamCatalog`) that take a store's list plus a
-marker string and return a `MediaCatalog` — no HomeView, UI, or singleton dependency, so
+`favoritesCatalog`/`playlistsCatalog`/`playlistItemsCatalog`/`steamGamesCatalog`) that
+take a store's list plus a marker string and return a `MediaCatalog` — no HomeView, UI, or singleton dependency, so
 `probe_browse` exercises every filtering/mapping rule in isolation. HomeView dispatches to
 these by marker and renders the result through one shared `showSyntheticCatalog(cat)` reset
 path (the analogue of the abandoned interface's shared load boilerplate). The one async
