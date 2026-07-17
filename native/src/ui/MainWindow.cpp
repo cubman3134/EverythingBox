@@ -1576,10 +1576,13 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
             if (!em)
             {
                 const GameSystem* sys = SystemCatalog::byId(plan.systemId); // old launchExternalGame used the system NAME here
-                statusBar()->showMessage(tr("No emulator is configured for %1.").arg(sys ? sys->name : plan.systemId), 6000);
+                // J11: match the sibling error above (notifier_->notify) — one channel for the whole split branch,
+                // since the status bar may be hidden in split view. "No emulator" is an error-class failure.
+                notifier_->notify(tr("No emulator is configured for %1.").arg(sys ? sys->name : plan.systemId), kFeedbackLong);
                 return;
             }
-            statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
+            // Informational: the game DID launch (full-screen), it just can't embed in a pane → ambient/standard.
+            notifier_->notify(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), kFeedbackStandard);
             finishSplitOpen();
             // Full-screen launch, as before. We route back through open() (a cheap re-resolve of the already-
             // extracted descriptor) rather than calling runEmulator directly, because open()'s external branch

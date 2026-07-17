@@ -150,7 +150,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** MainWindow.cpp:1564 (error → `notifier_->notify`) vs 1571/1574 ("no emulator" / "opens in its own window" → `statusBar()->showMessage`) in the same split-pane branch.
 **Proposed fix:** assign per the policy table — the "opens in its own window" and "no emulator configured" notices are ambient-status (`statusBar`, `kFeedbackStandard`) only if the status bar is visible in split view; otherwise route through `notify`. Make the two sibling notices use one channel.
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (a4fa3e4) — both siblings now use `notifier_->notify` (matching the branch's error sibling), since the status bar isn't a reliable channel in split view. "No emulator configured" is an error → `kFeedbackLong`; "opens in its own window" is ambient info (the game did launch full-screen) → `kFeedbackStandard`.
 
 ### J12: Empty Downloaded / Favorites folders vanish silently
 **Category:** empty
