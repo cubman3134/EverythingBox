@@ -81,6 +81,14 @@ void MpvPreview::renderFrame()
 {
     if (!rctx_) return;
     const uint64_t flags = mpv_render_context_update(rctx_);
+    // A cleared source must STAY blank: the render thread's redraw queued before the async "stop" lands
+    // would otherwise re-paint the previous clip's last frame here (and flip `playing` back on), ghosting
+    // the old item's video over the next item's artwork. Acknowledge the update, drop the frame.
+    if (source_.isEmpty())
+    {
+        if (!frame_.isNull()) { frame_ = QImage(); update(); }
+        return;
+    }
     if (!(flags & MPV_RENDER_UPDATE_FRAME)) return;
 
     const int w = qMax(1, int(width()));
