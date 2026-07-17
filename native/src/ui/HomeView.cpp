@@ -3795,23 +3795,33 @@ void HomeView::pumpThumbnails()
         QListWidgetItem* w = grid_->item(i);
         const int gen = generation_;
         const QString itemUrl = resumeKeyFor(items_[i]); // stable key for the resume-progress overlay
+        const QString cacheKey = MetaCache::keyFor(items_[i]); // to persist the fetched poster (offline-first)
 
         QNetworkRequest req((QUrl(url)));
         req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;
-        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl, url, cacheKey] {
             reply->deleteLater();
             --thumbActive_;
             if (thumbQueue_.isEmpty() && thumbActive_ == 0)
                 PerfTrace::end(QStringLiteral("thumbs.page"), QStringLiteral("n=%1").arg(perfThumbCount_));
-            if (gen == generation_ && reply->error() == QNetworkReply::NoError) // else navigated away / failed
+            if (reply->error() == QNetworkReply::NoError) // else navigated away / failed
             {
+                const QByteArray data = reply->readAll();
                 QPixmap pm;
-                if (pm.loadFromData(reply->readAll()))
-                    w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
-                                                itemUrl));
+                if (pm.loadFromData(data))
+                {
+                    // Persist this poster so displayImage() serves it locally next visit (no re-fetch on
+                    // Back / relaunch). Cheap + idempotent; a no-op once the role is cached. Cached even if
+                    // we've navigated away — the bytes are valid for this key regardless of the live view.
+                    MetaCache::storeImage(cacheKey, QStringLiteral("thumb"), url,
+                                          reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
+                    if (gen == generation_) // still the same view: paint it (else just kept for the cache)
+                        w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
+                                                    itemUrl));
+                }
             }
             pumpThumbnails(); // a slot freed up - start the next queued poster
         });

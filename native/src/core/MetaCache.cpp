@@ -238,6 +238,24 @@ void MetaCache::cacheImage(const QString& key, const QString& role, const QStrin
     });
 }
 
+void MetaCache::storeImage(const QString& key, const QString& role, const QString& url,
+                           const QString& contentType, const QByteArray& data)
+{
+    if (key.isEmpty() || role.isEmpty() || data.isEmpty()) return;
+    if (!imagePath(key, role).isEmpty()) return; // already cached
+    const QString ext = imageExt(QUrl(url), contentType.toLower());
+    const QString file = role + QLatin1Char('.') + ext;
+    QDir().mkpath(dirFor(key));
+    QSaveFile f(dirFor(key) + QLatin1Char('/') + file);
+    if (!f.open(QIODevice::WriteOnly)) return;
+    f.write(data);
+    if (!f.commit()) return;
+    // Record it under "images" (merge keeps any other roles already saved).
+    QJsonObject images = load(key).value(QStringLiteral("images")).toObject();
+    images.insert(role, file);
+    merge(key, { { QStringLiteral("images"), images } });
+}
+
 static bool isYoutube(const QString& url)
 {
     return url.contains(QStringLiteral("youtube"), Qt::CaseInsensitive)

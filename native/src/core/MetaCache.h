@@ -48,6 +48,13 @@ namespace MetaCache
     QString imagePath(const QString& key, const QString& role);
     QString displayImage(const QString& key, const QString& url);
 
+    // Persist image bytes we ALREADY downloaded elsewhere (e.g. a grid poster the shelf just fetched) as
+    // this item's cached art, so the offline-first displayImage()/imagePath() path serves it with no
+    // network next time. Same on-disk result as cacheImage but with no second fetch; no-op when the role
+    // is already cached or the data is empty. `url`/`contentType` only pick the file extension.
+    void storeImage(const QString& key, const QString& role, const QString& url,
+                    const QString& contentType, const QByteArray& data);
+
     // Video/audio caching (the item's trailer + theme song): cacheMedia downloads the file into the bundle
     // under <role>.<ext> (recorded under "media"; async; skips youtube / non-http urls) so it streams once
     // and then plays instantly + offline; mediaPath returns the local file ("" if absent). loadArt puts a
