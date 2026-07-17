@@ -109,6 +109,14 @@ def run_route(exe, log):
                 key("escape"); time.sleep(1.5)
             else:
                 break
+        # J21: the docstring promises every run ends on themedCategory=Games / themedSelection=Recent. Assert it
+        # so a route that drifted off (e.g. an extra escape popped a level, or the launch never came back) fails
+        # LOUDLY as a SKIPPED note instead of silently emitting a baseline that isn't comparable run-to-run.
+        end = _state()
+        if end.get("themedCategory") != "Games":
+            skipped.append("end-state drift (themedCategory=%r, expected 'Games')" % end.get("themedCategory"))
+        elif end.get("themedSelection") not in (None, "Recent"):
+            skipped.append("end-state drift (themedSelection=%r, expected 'Recent')" % end.get("themedSelection"))
     finally:
         time.sleep(1)
         proc.kill()

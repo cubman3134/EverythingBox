@@ -220,7 +220,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** perfbaseline.py docstring (line 14) claims "Verified end screen (every run): themedCategory=Games, themedSelection=Recent", but `run_route` (through line 114) just `proc.kill()`s without checking the final `_state()`.
 **Proposed fix:** add an end-state assert after the normalize loop — `assert _state().get("themedCategory") == "Games"` (and log/append to `skipped` on mismatch) so a route that drifts off Games/Recent fails loudly instead of emitting a silently-incomparable baseline.
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (4574ea3) — after the escape-normalize loop, `run_route` now checks `_state()`: a `themedCategory != "Games"` (or a non-Recent `themedSelection`) appends an "end-state drift" note to `skipped`, which the report surfaces as a loud SKIPPED line. Syntax-checked (`ast.parse`); can't run live here (needs the deployed app + UI drive), verified by inspection.
 
 ---
 
