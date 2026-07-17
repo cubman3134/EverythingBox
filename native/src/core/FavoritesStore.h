@@ -4,6 +4,7 @@
 #pragma once
 #include "SystemCatalog.h"
 #include <QFileInfo>
+#include <QSet>
 #include <QString>
 #include <QVector>
 #include <functional>
@@ -31,6 +32,10 @@ namespace FavoritesStore
     void add(const FavoriteItem& item);         // de-duped by itemId, newest first
     void remove(const QString& itemId);
     bool isFavorite(const QString& itemId);
+
+    // Identity keys (itemId + path) of EVERY profile's favourites, for image-cache pinning: a starred
+    // item's art must never be evicted, whichever profile starred it.
+    QSet<QString> allKeys();
 
     // The SystemCatalog id for a local-game favourite, derived from what it re-opens as: PC games are
     // always "pc" (checked first — .exe is also a psx disc extension), emulated ROMs map by extension.

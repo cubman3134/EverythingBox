@@ -31,6 +31,7 @@
 #include "../core/RecentStore.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/FavoritesStore.h"
 #include "../core/DownloadManager.h"
 #include "../core/PlayStats.h"
 #include "../core/RomLibrary.h"
@@ -181,6 +182,18 @@ static QPushButton* panelRow(const QString& label); // large TV-friendly menu ro
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
+    // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
+    // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.
+    MetaCache::setPinnedKeysProvider([] {
+        QSet<QString> keys = FavoritesStore::allKeys();
+        for (const DownloadedItem& d : DownloadsStore::list())
+        {
+            if (!d.key.isEmpty())  keys.insert(d.key);
+            if (!d.path.isEmpty()) keys.insert(d.path);
+        }
+        return keys;
+    });
+
     // No standalone Settings-read block in this ctor; this brackets the initial subsystem construction that
     // reads persisted state (achievements stored token below, subtitle prefs, saved volume follows later).
     PerfTrace::begin(QStringLiteral("startup.settings"));

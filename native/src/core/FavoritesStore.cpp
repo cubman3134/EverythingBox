@@ -108,6 +108,28 @@ void FavoritesStore::remove(const QString& itemId)
     save(items);
 }
 
+QSet<QString> FavoritesStore::allKeys()
+{
+    QSet<QString> keys;
+    QSettings& s = store();
+    s.beginGroup(QStringLiteral("favorites"));
+    const QStringList profiles = s.childGroups();
+    for (const QString& profile : profiles)
+    {
+        const QByteArray json = s.value(profile + QStringLiteral("/items")).toString().toUtf8();
+        for (const QJsonValue& v : QJsonDocument::fromJson(json).array())
+        {
+            const QJsonObject o = v.toObject();
+            const QString id   = o.value(QStringLiteral("itemId")).toString();
+            const QString path = o.value(QStringLiteral("path")).toString();
+            if (!id.isEmpty())   keys.insert(id);
+            if (!path.isEmpty()) keys.insert(path);
+        }
+    }
+    s.endGroup();
+    return keys;
+}
+
 bool FavoritesStore::isFavorite(const QString& itemId)
 {
     for (const FavoriteItem& it : list())

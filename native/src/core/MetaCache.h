@@ -13,7 +13,9 @@
 #pragma once
 #include "../addons/AddonModels.h"
 #include <QJsonObject>
+#include <QSet>
 #include <QString>
+#include <functional>
 
 namespace MetaCache
 {
@@ -63,4 +65,15 @@ namespace MetaCache
     QString mediaPath(const QString& key, const QString& role);
 
     void remove(const QString& key);            // delete the item's whole metadata folder (uninstall)
+
+    // Disk cap for the image cache. Browsing persists every scrolled poster (storeImage), so without a
+    // bound the cache grows forever; storeImage keeps a cheap running byte total and triggers eviction
+    // when it crosses the cap (mymediavault.ini "cache/imageCapMB", default 500; 0 = unlimited). Eviction
+    // deletes the least-recently-served thumb-role images first (imagePath bumps a served file's mtime
+    // once per run) until back under the cap — but never from a pinned bundle: the provider names the
+    // keys of downloaded/favorited items, whose art must keep working offline. Detail-page art (poster/
+    // logo/fanart…) is left alone — it only lands for items the user deliberately opened.
+    void setPinnedKeysProvider(std::function<QSet<QString>()> provider);
+    qint64 imageCacheCapBytes();                     // the configured cap (<= 0 means unlimited)
+    int enforceImageCacheCap(qint64 capBytes = -1);  // -1 = configured cap; returns #files evicted
 }

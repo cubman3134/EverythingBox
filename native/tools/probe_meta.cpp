@@ -6,8 +6,10 @@
 #include "MetaCache.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -174,6 +176,65 @@ int main(int argc, char** argv)
         MetaCache::remove(akey);
 
         std::printf("ART-OK\n");
+    }
+
+    // ================================================================ image-cache size cap + eviction
+    // Browsing persists every scrolled poster (storeImage), so the cache must stay bounded: beyond the
+    // cap, the oldest-accessed thumb-role images go first — but art of downloaded/favorited (pinned)
+    // items is never evicted; that's the offline-first promise.
+    {
+        const QString kOld = QStringLiteral("cap:old");   // oldest-accessed -> evicted first
+        const QString kFav = QStringLiteral("cap:fav");   // pinned (a favourite) -> never evicted
+        const QString kNew = QStringLiteral("cap:new");   // recently accessed -> evicted last
+        for (const QString& k : { kOld, kFav, kNew }) MetaCache::remove(k);
+
+        const QByteArray bytes(1000, 'x');
+        for (const QString& k : { kOld, kFav, kNew })
+            MetaCache::storeImage(k, QStringLiteral("thumb"), QStringLiteral("https://x.invalid/p.png"),
+                                  QStringLiteral("image/png"), bytes);
+        CHECK(!MetaCache::imagePath(kOld, QStringLiteral("thumb")).isEmpty(), "storeImage persists the poster");
+
+        // Age the files: kOld least recently accessed, kFav in between, kNew freshest.
+        auto setMtime = [](const QString& key, int daysAgo) {
+            QFile f(MetaCache::dirFor(key) + QStringLiteral("/thumb.png"));
+            if (f.open(QIODevice::ReadWrite))
+                f.setFileTime(QDateTime::currentDateTime().addDays(-daysAgo), QFileDevice::FileModificationTime);
+        };
+        setMtime(kOld, 3);
+        setMtime(kFav, 2);
+        setMtime(kNew, 1);
+        MetaCache::setPinnedKeysProvider([kFav] { return QSet<QString>{ kFav }; });
+
+        CHECK(MetaCache::enforceImageCacheCap(1024 * 1024) == 0, "under the cap nothing is evicted");
+        CHECK(MetaCache::enforceImageCacheCap(2500) >= 1, "over the cap eviction runs");
+        CHECK(MetaCache::imagePath(kOld, QStringLiteral("thumb")).isEmpty(),
+              "the oldest-accessed thumb is evicted first");
+        CHECK(MetaCache::load(kOld).value(QStringLiteral("images")).toObject()
+                  .value(QStringLiteral("thumb")).toString().isEmpty(),
+              "eviction also drops the bundle's images record");
+        CHECK(!MetaCache::imagePath(kNew, QStringLiteral("thumb")).isEmpty(),
+              "a recently accessed thumb survives when evicting the oldest suffices");
+
+        // Even a cap smaller than the pinned art alone must never touch it.
+        MetaCache::enforceImageCacheCap(1);
+        CHECK(MetaCache::imagePath(kNew, QStringLiteral("thumb")).isEmpty(), "unpinned art goes when the cap demands");
+        CHECK(!MetaCache::imagePath(kFav, QStringLiteral("thumb")).isEmpty(),
+              "downloaded/favorited art is NEVER evicted (offline-first promise)");
+
+        // Serving a cached image refreshes its recency (LRU-ish), so browsed-again art isn't first out.
+        const QString kSeen = QStringLiteral("cap:seen");
+        MetaCache::remove(kSeen);
+        MetaCache::storeImage(kSeen, QStringLiteral("thumb"), QStringLiteral("https://x.invalid/p.png"),
+                              QStringLiteral("image/png"), bytes);
+        setMtime(kSeen, 30);
+        const QString seenPath = MetaCache::imagePath(kSeen, QStringLiteral("thumb"));
+        CHECK(!seenPath.isEmpty()
+                  && QFileInfo(seenPath).lastModified() > QDateTime::currentDateTime().addDays(-1),
+              "serving a cached image bumps its access recency");
+
+        MetaCache::setPinnedKeysProvider({});
+        for (const QString& k : { kOld, kFav, kNew, kSeen }) MetaCache::remove(k);
+        std::printf("EVICT-OK\n");
     }
 
     // ---------------------------------------------------------------- items without a stable identity
