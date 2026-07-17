@@ -2942,6 +2942,7 @@ void HomeView::enrichThemedMeta()
     }
 
     if (!stack_.last().addon) { themedMetaReq_ = -1; return; }
+    themedMetaReqIndex_ = idx;                                   // J09: remember which row this /meta is for
     themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches
 }
 
@@ -3231,17 +3232,23 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     if (requestId == themedMetaReq_)
     {
         themedMetaReq_ = -1;
-        const bool rowOk = themedMetaIndex_ >= 0 && themedMetaIndex_ < browseRowMap_.size();
+        // J09: bind this response to the row it was REQUESTED for, not the live selection. A slow addon /meta
+        // (e.g. the Audiobooks rail, which has no local gamelist/cache to short-circuit it) can land after the
+        // user has scrolled on; keying off themedMetaIndex_ then painted one item's synopsis/cover onto the
+        // next row. If the selection has moved, drop it — the new row fires its own /meta on settle.
+        const int reqIdx = themedMetaReqIndex_;
+        if (reqIdx != themedMetaIndex_) return;
+        const bool rowOk = reqIdx >= 0 && reqIdx < browseRowMap_.size();
         // Offline: the addon returned nothing for a row we have a downloaded bundle for — use its saved card.
         MediaDetail det = detail;
         if (!det.valid && rowOk)
-            det = MetaCache::cachedDetail(MetaCache::keyFor(items_[browseRowMap_[themedMetaIndex_]]));
+            det = MetaCache::cachedDetail(MetaCache::keyFor(items_[browseRowMap_[reqIdx]]));
         QVariantMap m;
-        m.insert(QStringLiteral("index"), themedMetaIndex_);
+        m.insert(QStringLiteral("index"), reqIdx);
         m.insert(QStringLiteral("overview"), det.overview);
         // For games, drop "Released": the year already shows on the subtitle line, so it'd be redundant.
         // (Play history is carried on separate fields that survive this facts merge — see requestThemedMeta.)
-        const bool isGame = rowOk && items_[browseRowMap_[themedMetaIndex_]].type == QStringLiteral("game");
+        const bool isGame = rowOk && items_[browseRowMap_[reqIdx]].type == QStringLiteral("game");
         QVariantList facts;
         for (const MediaFact& f : det.facts)
         {
@@ -3254,7 +3261,7 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         // The enriched artwork/videos/audio/meta from the provider (or the aggregator) -> the live panel:
         // selected.logo, selected.box, selected.images.screenshot, selected.videos, selected.audio, ...
         det.art.writeInto(m);
-        emit themedMetaReady(themedMetaIndex_, m);
+        emit themedMetaReady(reqIdx, m);
         return;
     }
     // Triple/XMB theme: a themed Play that needed the IMDB id first -> resolve via stream addons now.

@@ -136,7 +136,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** `evidence/audiobooks-wrong-record-binding.png` — list highlights "The Skinner" (Neal Asher, 2004) while the detail panel shows "The Skinner" by **Jane Austen** with a **Sense and Sensibility** cover/synopsis.
 **Proposed fix:** fix the detail-panel binding for the Audiobooks rail so the panel follows the selected row (likely an index/id mismatch between the list model and the metadata lookup).
 **Cost:** small
-**Triage:** OBJECTIVE — wrong data shown, not taste. (Corner case: only the Audiobooks rail.)
+**Triage:** FIXED (e4810b5) — root cause: `HomeView::onMetaReady`'s themed-`/meta` branch keyed off the LIVE `themedMetaIndex_`, but the addon `/meta` request is async and `themedMetaIndex_` advances on every hover. A slow response (the Audiobooks rail has no gamelist/MetaCache short-circuit, unlike games/movies, so it always waits on the addon) landed after the user scrolled on and painted the previous item's synopsis/cover onto the new row. Fix: capture `themedMetaReqIndex_` when the request is issued and bind/emit the response to THAT index; drop it if the selection has moved on (mirrors the game-aggregator path, which already guarded this). Cannot live-repro (addon backend down) — verified by code path.
 
 ### J10: Core-crash error is shown for only 3 seconds
 **Category:** feedback

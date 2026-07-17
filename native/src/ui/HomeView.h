@@ -306,7 +306,9 @@ private:
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
     int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
-    int themedMetaIndex_ = -1;        // the browse index that fetch was for
+    int themedMetaIndex_ = -1;        // the currently-selected browse index (updated on every hover)
+    int themedMetaReqIndex_ = -1;     // the index themedMetaReq_ was issued FOR (J09: response must bind to THIS
+                                      // row, not the live selection, or a slow /meta paints onto the next row)
     int themedPlayReq_ = -1;          // in-flight /meta id for a themed Play that needs the IMDB id first
     MediaItem themedPlayItem_;        // the item that deferred Play is resolving
     QString themedPlayConsole_;       // its console (ROM core hint), if any
