@@ -67,6 +67,27 @@ int main(int argc, char** argv)
     const QImage grab = view.grabWindow();
     if (!looksLikePicture(grab)) { std::fprintf(stderr, "MPV-PREVIEW-FAIL grabbed frame is blank/uniform\n"); return 1; }
 
-    std::printf("MPV-PREVIEW-OK (%dx%d frame decoded + software-rendered)\n", grab.width(), grab.height());
+    // Clearing the source must actually blank the item — and KEEP it blank. mpv's render thread signals a
+    // redraw that was queued before the async "stop" lands; rendering it re-painted the previous clip's LAST
+    // frame (and flipped `playing` back on), ghosting the old game's video over the next game's artwork in
+    // the themed panel. Pump well past that race window and assert nothing came back.
+    root->setProperty("source", QString());
+    QElapsedTimer ct; ct.start();
+    bool ghostPlaying = false;
+    while (ct.elapsed() < 1500)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        if (root->property("playing").toBool()) { ghostPlaying = true; break; }
+    }
+    const QImage cleared = view.grabWindow();
+    if (ghostPlaying || looksLikePicture(cleared))
+    {
+        std::fprintf(stderr, "MPV-PREVIEW-FAIL stale frame ghosts after source cleared (playing=%d)\n",
+                     int(ghostPlaying));
+        return 1;
+    }
+
+    std::printf("MPV-PREVIEW-OK (%dx%d frame decoded + software-rendered; clear-source stays blank)\n",
+                grab.width(), grab.height());
     return 0;
 }
