@@ -66,6 +66,9 @@ void Notifier::setPlayerHost(QWidget* player, std::function<int()> topOffsetPx)
     player_ = player;
     playerTop_ = std::move(topOffsetPx);
 
+    // Single caller today; the guard keeps a future second caller from leaking the prior notice + its timer.
+    if (playerNotice_) { playerNotice_->deleteLater(); playerNoticeTimer_->deleteLater(); }
+
     // Transient centred message over the player for next-source feedback (visible in full screen, where the
     // status bar isn't). Hidden by default.
     playerNotice_ = new QLabel(player_);

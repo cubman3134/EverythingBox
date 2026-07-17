@@ -15,7 +15,11 @@ public:
     // scratch path so tests never touch the real user store.
     explicit PlaybackSession(const QString& settingsFile = QString(), QObject* parent = nullptr);
 
-    void setQueue(const QStringList& files, int startIndex, const QStringList& titles = {});
+    // resumeKey empty (default) = the starting track resumes keyed by its own file path (current behavior).
+    // Non-empty = the first-played track is resume-keyed by `resumeKey` instead (a stable catalog/audiobook
+    // id), folded in atomically so callers no longer re-key with a separate beginResume() after setQueue.
+    void setQueue(const QStringList& files, int startIndex, const QStringList& titles = {},
+                  const QString& resumeKey = QString());
     void playIndex(int index);
     void next();
     void prev();

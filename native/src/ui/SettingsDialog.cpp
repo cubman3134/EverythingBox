@@ -109,7 +109,7 @@ void SettingsDialog::editOptions(const QString& systemId)
     // Make sure the core is present (download on first use), then load it headlessly to read its options.
     // Progress + failures show inline in the status line (no popup).
     QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, this, &dlErr, [this, core](int pct) {
+    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
         status_->setText(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct));
         status_->setStyleSheet(QStringLiteral("color:#555;"));
         status_->show();

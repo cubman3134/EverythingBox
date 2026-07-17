@@ -48,6 +48,17 @@ int main(int argc, char** argv)
     s3.beginResume("X:/book.m4b");
     CHECK(qFuzzyCompare(s3.takeResumeSeek() + 1.0, 1.0), "finishResume drops the saved position");
 
+    // setQueue's resumeKey re-keys the starting track by a stable id instead of its file path, so a saved
+    // position survives even when the queue's URL changes on re-resolve (folds in the old post-setQueue re-key).
+    PlaybackSession s4(ini);
+    s4.setQueue({ "a.mp3" }, 0, {}, "stable-id");
+    s4.setDuration(1800.0);
+    s4.setPosition(567.0);
+    s4.persistResume();
+    PlaybackSession s5(ini);
+    s5.beginResume("stable-id");
+    CHECK(qFuzzyCompare(s5.takeResumeSeek(), 567.0), "setQueue resumeKey keys resume by the stable id");
+
     if (fails == 0) printf("PLAYBACK-OK\n");
     return fails == 0 ? 0 : 1;
 }

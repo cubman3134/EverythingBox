@@ -112,6 +112,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         {
             glLog(QStringLiteral("game: archive extract failed for \"%1\": %2").arg(QFileInfo(game).fileName(), aerr));
             plan.error = tr("Couldn't open the archived game: %1").arg(aerr);
+            plan.errorMs = 7000;
             return plan;
         }
         glLog(QStringLiteral("game: extracted \"%1\" from \"%2\"")
@@ -142,6 +143,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         return plan;
     }
     plan.systemId = sys->id;
+    plan.sys = sys;    // borrowed static-catalog pointer; lets callers skip a second SystemCatalog::byId lookup
 
     // If the user opened a raw disc track (a "(Track N).bin" / GDI track), boot its .cue/.gdi descriptor instead —
     // the emulator can't mount a bare track. No-op for direct images and lone .bin carts. Covers cores + externals.
@@ -170,7 +172,7 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
     // No prompt: use the configured core, downloading it from the buildbot if it isn't installed. Progress
     // shows inline in the status bar; failures report there too.
     QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, nullptr, &dlErr, [this, core](int pct) {
+    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
         emit statusMessage(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 0);
     });
     if (corePath.isEmpty())
@@ -203,7 +205,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
     // Not possible on Android (the sandbox can't spawn downloaded desktop executables - see android-port.md).
     if (!plan.externalEmulatorId.isEmpty())
     {
-        const GameSystem* sys = SystemCatalog::byId(plan.systemId);
+        const GameSystem* sys = plan.sys; // resolved in prepareCore (borrowed static-catalog pointer)
 #if defined(Q_OS_ANDROID)
         emit statusMessage(tr("“%1” needs a standalone emulator, which isn't supported on Android.")
                                .arg(sys ? sys->name : plan.systemId), 6000);
@@ -215,7 +217,7 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
 
     if (plan.corePath.isEmpty())
     {
-        emit notifyUser(plan.error.isEmpty() ? tr("Can't run game.") : plan.error, 6000);
+        emit notifyUser(plan.error.isEmpty() ? tr("Can't run game.") : plan.error, plan.errorMs);
         return;
     }
 

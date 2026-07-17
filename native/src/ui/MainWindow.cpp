@@ -568,7 +568,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     // The app's single user-feedback channel: a window-level notice (download/resolve progress + errors,
     // over ANY view) and a transient centred message over the player (visible in full screen).
-    notifier_ = new Notifier(this, this);
+    notifier_ = new Notifier(centralWidget(), this);
     notifier_->setPlayerHost(player_, [this]{ return 16 + videoBack_->height() + 14; });
 
     // .m3u/.m3u8 playlist + stream-link classification (HLS vs. IPTV/media list vs. PlayStation disc set).
@@ -777,13 +777,15 @@ void MainWindow::resizeEvent(QResizeEvent* event)
     QMainWindow::resizeEvent(event);
     if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_)
         positionMediaControls();
-    notifier_->reposition();
+    if (notifier_) notifier_->reposition();
 }
 
 void MainWindow::moveEvent(QMoveEvent* event)
 {
     QMainWindow::moveEvent(event);
-    notifier_->reposition(); // the notice is a separate top-level window; keep it stuck to us as we drag
+    // The notice is now a child overlay of the central area, so it tracks a resize on its own; this
+    // reposition only matters for DPI-change edge cases (a screen move can shift device-pixel metrics).
+    if (notifier_) notifier_->reposition();
 }
 
 void MainWindow::leaveFullScreen()
@@ -1366,12 +1368,12 @@ void MainWindow::positionMediaControls()
 
 void MainWindow::notify(const QString& text, int ms)
 {
-    notifier_->notify(text, ms);
+    if (notifier_) notifier_->notify(text, ms);
 }
 
 void MainWindow::hideNotice()
 {
-    notifier_->hideNotice();
+    if (notifier_) notifier_->hideNotice();
 }
 
 void MainWindow::showNextSourceFeedback(const QString& msg)
@@ -1535,7 +1537,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
     if (splitTarget_) // run the ROM in the focused pane's own emulator instead of the full-screen one
     {
         const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint);
-        if (!plan.error.isEmpty()) { notifier_->notify(plan.error, 7000); return; }
+        if (!plan.error.isEmpty()) { notifier_->notify(plan.error, plan.errorMs); return; }
         if (!plan.externalEmulatorId.isEmpty()) // a standalone emulator owns its own window; it can't embed in a split pane
         {
             const ExternalEmulator* em = EmulatorRegistry::byId(plan.externalEmulatorId);
@@ -1547,7 +1549,10 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
             }
             statusBar()->showMessage(tr("%1 opens in its own window, not a split pane.").arg(em->displayName), 5000);
             finishSplitOpen();
-            launcher_->open(plan.launchRom, title, thumb, key, systemHint); // full-screen launch, as before
+            // Full-screen launch, as before. We route back through open() (a cheap re-resolve of the already-
+            // extracted descriptor) rather than calling runEmulator directly, because open()'s external branch
+            // also applies the Android guard and the empty-title→file-name fallback for the Recent entry.
+            launcher_->open(plan.launchRom, title, thumb, key, systemHint);
             return;
         }
         // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder — fetch any that are
@@ -1555,6 +1560,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         CoreManager::ensureBios(plan.systemId, CoreManager::systemDir(),
                                 [this](const QString& s) { statusBar()->showMessage(s); });
         const QString recentTitle = title.isEmpty() ? QFileInfo(plan.launchRom).completeBaseName() : title;
+        mwLog(QStringLiteral("game: launching in split pane"));
         splitTarget_->openGame(plan.corePath, plan.launchRom, plan.core);
         RecentStore::add({ plan.launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
         PlayStats::markPlayed(PlayStats::identity(key, plan.launchRom)); // split panes aren't session-timed
@@ -1686,8 +1692,9 @@ void MainWindow::openStreamPrompt()
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
 {
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
-    // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else
-    // is a single link libmpv can play straight away. streams_->resolve() routes back here (playDirect) for the HLS case.
+    // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
+    // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
+    // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
     if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title); return; }
     playStream(url, resumeKey, title);
 }
@@ -1728,8 +1735,9 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
-    session_->setQueue({ url }, 0, { t }); // the now-playing list (vs. the bare video surface) marks this as audio
-    session_->beginResume(rkey);           // a long audiobook must resume where you left off, keyed by the stable id
+    // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
+    // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
+    session_->setQueue({ url }, 0, { t }, rkey);
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
 }
 

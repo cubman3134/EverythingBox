@@ -108,10 +108,9 @@ static bool unzipLibFromMemory(const QByteArray& zipData, const QString& destDir
     return ok;
 }
 
-QString CoreManager::ensureCore(const QString& coreName, QWidget* parent, QString* error,
+QString CoreManager::ensureCore(const QString& coreName, QString* error,
                                 const std::function<void(int)>& onProgress)
 {
-    Q_UNUSED(parent);
     if (isInstalled(coreName))
         return corePath(coreName);
 

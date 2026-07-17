@@ -41,7 +41,8 @@ QString PlaybackSession::titleAt(int index) const
     return QFileInfo(tracks_.value(index)).completeBaseName();
 }
 
-void PlaybackSession::setQueue(const QStringList& files, int startIndex, const QStringList& titles)
+void PlaybackSession::setQueue(const QStringList& files, int startIndex, const QStringList& titles,
+                               const QString& resumeKey)
 {
     tracks_ = files;
     QStringList displayTitles;
@@ -50,6 +51,11 @@ void PlaybackSession::setQueue(const QStringList& files, int startIndex, const Q
                                ? titles[i] : QFileInfo(tracks_[i]).completeBaseName());
     emit queueChanged(displayTitles, startIndex);
     playIndex(startIndex);
+    // playIndex resume-keyed the starting track by its file path; when the caller has a stable id (a catalog
+    // stream / audiobook whose URL changes on re-resolve), re-key that starting track here instead — folded in
+    // atomically so the re-key can't be forgotten or reordered by a caller (the old begin-after-setQueue bug).
+    if (!resumeKey.isEmpty())
+        beginResume(resumeKey);
 }
 
 void PlaybackSession::playIndex(int index)

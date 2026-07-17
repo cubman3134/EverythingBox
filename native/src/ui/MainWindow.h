@@ -72,10 +72,11 @@ private slots:
     void enqueueDownload(const MediaItem& item);
     void openDownloadManager();          // Settings ▸ Downloads: the download-manager panel
     void updateDownloadRow(const QString& id); // refresh one job's progress bar/label in place
-    // Window-level notification overlay for download/resolve progress + errors. A top-level Tool window (not a
-    // child widget) so it floats over ANY current view, including a themed home (a native QQuickView our own
-    // child widgets can't paint over). Driven by HomeView's toastRequested/toastHideRequested and by the
-    // library download queue, so the "info while pulling a file" feedback shows regardless of the active theme.
+    // Window-level notification overlay for download/resolve progress + errors. A child-widget overlay owned by
+    // Notifier, floating over the central area and raised above the current page so it shows over ANY view
+    // (the QQuickWidget themed home and the libmpv QOpenGLWidget both composite with sibling widgets). Driven by
+    // HomeView's toastRequested/toastHideRequested and by the library download queue, so the "info while pulling
+    // a file" feedback shows regardless of the active theme.
     void notify(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide); delegates to notifier_
     void hideNotice();                               // delegates to notifier_
     // A manga chapter resolves to a list of page image URLs; download them, pack into a cached CBZ,
