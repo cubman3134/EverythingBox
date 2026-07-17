@@ -206,7 +206,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** flagged in phase-1 reviews (MainWindow.h notify block). **Verified:** the block at MainWindow.h:77-80 is accurate to current behavior (documents Notifier delegation + toast plumbing) — not stale.
 **Proposed fix:** no change needed for the MainWindow.h block; if any other `notify`-related comment referencing the old begin-after-`setQueue` resume path survives (see PlaybackSession.cpp:56 which correctly documents the fix), leave it. Close unless a survivor is found during the feedback migration.
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (bdb5af7) — verified during the J06–J11/J18 migration: MainWindow.h:76–80 notify block is accurate to current behavior; PlaybackSession.cpp:55–56 is a correct historical note, not a stale survivor. No `notify` comment survivors found. No code change (documentation-only close).
 
 ### J20: `probe_perf` restart bound too tight (`<25` → `<30`)
 **Category:** debris
