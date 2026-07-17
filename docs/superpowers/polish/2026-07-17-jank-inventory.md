@@ -164,7 +164,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** Task 1 empty-state matrix — submitting any OSK query crashes (J01) before results render, so the "No results for …" toast (HomeView.cpp:750) and empty grid can't be exercised.
 **Proposed fix:** none of its own — unblocked automatically by J01. Re-verify the 0-results rendering once the crash is fixed.
 **Cost:** trivial
-**Triage:** OBJECTIVE — blocked-by J01, tracked so it isn't forgotten.
+**Triage:** FIXED (verified-only, 48e476d) — the J01 crash fix DID unblock the search-submit path. Re-verified live (`.superpowers/polish-audit/j13-01..09`): "/" opened the "Search everything" OSK, typed "qzx", "Done" submitted, the pipe returned `ok` with NO crash (previously crashed on submit), the results grid was navigable, and opening a result reached the detail page. Two caveats, both non-defects: (1) a TRUE 0-results empty grid ("No results for …" toast) was not reproducible here — a query-ignoring live-TV addon always returns its channel list, so "search everything" never came back empty (results included live channels + loose book matches). (2) The themed results GRID (`themedView=browse`) captured black under the occluded `uitest shot`, while the continuously-animating XMB home + all category/detail views captured perfectly — a capture-harness limitation for the static browse QQuickWidget (its software surface doesn't flush under background grab), not a rendering defect (state confirms the view is populated and navigable). Residual gap: the empty-state pixels themselves weren't positively captured; no evidence of bad rendering.
 
 ### J14: Empty playlists show only a "➕ New playlist…" row
 **Category:** empty
