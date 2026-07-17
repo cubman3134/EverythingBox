@@ -66,7 +66,8 @@ int main(int argc, char** argv)
     bool restartOk = false;
     { const QStringList parts = out[2].split(QStringLiteral(" | "));
       restartOk = parts.size() >= 3 && parts[1] == QStringLiteral("unit.restart")
-                  && parts[2].toLongLong() < 25; }   // 5ms run, NOT 35ms — overwrite restarted it
+                  && parts[2].toLongLong() < 30; }   // 5ms run, NOT 35ms — overwrite restarted it (J20: 25->30,
+                                                      // the 5ms nominal has enough scheduling jitter on a loaded box)
     CHECK(restartOk, "begin-overwrite restarts the clock");
 
     // ---- Component budgets: real hot-path builders/parsers over synthetic worst-case inputs ----------

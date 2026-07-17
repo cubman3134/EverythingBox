@@ -213,7 +213,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** probe_perf.cpp:66-70 — `restartOk = … parts[2].toLongLong() < 25` for the begin-overwrite-restarts-the-clock unit check.
 **Proposed fix:** loosen the bound to `< 30` (the 5 ms nominal run has enough scheduling jitter on a loaded box to occasionally exceed 25 ms).
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (a912986) — `probe_perf.cpp` restart bound `< 25` → `< 30`. Rebuilt; probe_perf still PASS (begin-overwrite restarts the clock).
 
 ### J21: `perfbaseline.py` never asserts its end-state
 **Category:** debris
