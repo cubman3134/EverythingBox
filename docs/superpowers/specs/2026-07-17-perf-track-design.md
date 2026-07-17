@@ -1,7 +1,7 @@
 # Phase 2, Perf Track — Design
 
 **Date:** 2026-07-17
-**Status:** Approved design, pending implementation plan
+**Status:** Perf track complete: baseline + 2 measured fixes + 9 at-floor verdicts; budgets CI-gated. Polish track next.
 **Builds on:** `2026-07-16-foundation-refactor-design.md` (phase 1 complete)
 
 ## Problem
