@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "Notifier.h"
+#include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J08/J10/J11)
 #include "../media/StreamResolver.h"
 #include "../media/PlaybackSession.h"
 #include "../launch/GameLauncher.h"
@@ -225,19 +226,23 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     retro_->setAchievements(ach_);
     connect(ach_, &Achievements::achievementUnlocked, this,
             [this](const QString& title, const QString& desc, int pts, const QString& badge) {
+        // J08: the unlock's visible channel is retro_->showAchievement (an on-screen popup over the emulator).
+        // The old statusBar() echo sat under the full-screen game surface and was never seen — dropped here as
+        // redundant. The gameLoaded summaries below have no such popup, so they route through the window-level
+        // notify() overlay ("over ANY view"), NOT playerNotice (playerNotice_ is parented to the mpv player,
+        // which is hidden during a RetroView game — so it'd be invisible exactly when achievements fire).
         retro_->showAchievement(title, desc, pts, badge); // on-screen popup over the game (full-screen has no status bar)
-        statusBar()->showMessage(tr("🏆  Achievement unlocked: %1  (%2 pts)").arg(title).arg(pts), 8000);
     });
     connect(ach_, &Achievements::gameLoaded, this, [this](bool ok, const QString& title, int unlocked, int total) {
         if (ok && total > 0)
-            statusBar()->showMessage(tr("🏆  %1 — %2/%3 achievements").arg(title).arg(unlocked).arg(total), 6000);
+            notify(tr("🏆  %1 — %2/%3 achievements").arg(title).arg(unlocked).arg(total), kFeedbackLong);
         else if (ok && title.contains(QStringLiteral("Unsupported Game Version"), Qt::CaseInsensitive))
             // RA recognized the ROM but it isn't the dump the achievement set is tied to — tell the user why
             // there are no achievements so they know to grab the RetroAchievements-supported (No-Intro) dump.
             notify(tr("🏆  This ROM isn't a RetroAchievements-supported version — no achievements. "
-                      "Try the No-Intro/RA-verified dump."), 8000);
+                      "Try the No-Intro/RA-verified dump."), kFeedbackLong);
         else if (ok)
-            statusBar()->showMessage(tr("🏆  No RetroAchievements set for this game."), 5000);
+            notify(tr("🏆  No RetroAchievements set for this game."), kFeedbackLong);
     });
     ach_->tryLoginWithStoredToken();
     PerfTrace::end(QStringLiteral("startup.settings"));

@@ -129,7 +129,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** MainWindow.cpp:229/233/240 — "🏆 Achievement unlocked" goes to `statusBar()->showMessage` (8000/6000/5000), but the status bar sits under the themed-home QQuickWidget and the full-screen player surface, so the unlock may never be seen.
 **Proposed fix:** treat achievement pop-ups as the **player-overlay** class (`notifier_->playerNotice`, `kFeedbackLong`) while a game is on screen; they earn a visible channel.
 **Cost:** small
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (6d4aad3) — root-cause corrected the proposed channel: `playerNotice_` is parented to the mpv `player_` widget, which is HIDDEN during a RetroView emulator game (exactly when achievements fire), so playerNotice would be invisible. Instead: the unlock's visible channel is the existing `retro_->showAchievement` on-screen popup (the redundant, occluded `statusBar()` echo is dropped), and the two gameLoaded summaries + the unsupported-version notice route through the window-level `notify()` overlay ("over ANY view") at `kFeedbackLong`.
 
 ### J09: Audiobooks detail panel is bound to the wrong record
 **Category:** debris
