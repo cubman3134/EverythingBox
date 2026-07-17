@@ -751,6 +751,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
     connect(retro_, &RetroView::statusMessage, this, [this](const QString& t) { statusBar()->showMessage(t, 3000); });
+    // J10: a core crash is an error the user must notice, not a 3 s ambient save/load blip — route it through the
+    // window-level notify() overlay (over ANY view, incl. the full-screen emulator) at kFeedbackLong.
+    connect(retro_, &RetroView::coreError, this, [this](const QString& t) { notify(t, kFeedbackLong); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);

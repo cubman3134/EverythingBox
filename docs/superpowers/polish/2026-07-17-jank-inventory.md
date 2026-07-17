@@ -143,7 +143,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** RetroView.cpp:805/991 emit "The emulator core crashed and was stopped." on `statusMessage`, which MainWindow.cpp:748 pins to 3000 ms — an error on the short ambient channel.
 **Proposed fix:** surface core-crash as an **error**-class notice (`notify`, `kFeedbackLong`); the 3000 ms path is fine for save/load-state confirmations but too short for a crash the user must notice.
 **Cost:** small
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (434005b) — added a `RetroView::coreError` signal; the two `core_.crashed()` sites emit it instead of `statusMessage`; MainWindow routes it to `notify(kFeedbackLong)`. Save/load-state stays on the 3000 ms `statusMessage` path.
 
 ### J11: Split-external launch — status/toast asymmetry
 **Category:** feedback

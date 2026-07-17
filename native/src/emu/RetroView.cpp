@@ -802,7 +802,7 @@ void RetroView::stepWorker() // runs on emuThread_
     {
         running_ = false;
         QMetaObject::invokeMethod(this, [this] {
-            stop(); emit statusMessage(tr("The emulator core crashed and was stopped.")); }, Qt::QueuedConnection);
+            stop(); emit coreError(tr("The emulator core crashed and was stopped.")); }, Qt::QueuedConnection);
         return;
     }
     publishFrame();
@@ -988,7 +988,7 @@ bool RetroView::runOneCoreFrame()
     {
         qWarning("emu: core '%s' faulted during runFrame — stopping", coreName_.toUtf8().constData());
         stop();
-        emit statusMessage(tr("The emulator core crashed and was stopped."));
+        emit coreError(tr("The emulator core crashed and was stopped."));
         return false;
     }
     if (ach_ && !paused_) ach_->doFrame(); // evaluate RetroAchievements against this frame's memory

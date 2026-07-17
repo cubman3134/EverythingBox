@@ -68,7 +68,8 @@ public:
     void setThreaded(bool on) { threaded_ = on; }
 
 signals:
-    void statusMessage(const QString& text); // surfaced by the main window (save/load feedback)
+    void statusMessage(const QString& text); // surfaced by the main window (save/load feedback) — ambient 3000 ms
+    void coreError(const QString& text);     // a hard core error (crash) — error-class notice, kFeedbackLong (J10)
     void exitRequested();                    // the Esc menu's "Exit" - main window stops + returns Home
     void gameStopped();                      // a running game was torn down (main window records playtime)
 
