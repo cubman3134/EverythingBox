@@ -56,6 +56,11 @@ signals:
     void notifyUser(const QString& text, int ms);    // user-facing notice (→ Notifier)
 
 private:
+    // The libretro launch tail — stop playback, load the core into RetroView, record the Recent entry and
+    // play session. Split out of open() so a missing BIOS can download asynchronously (UI responsive,
+    // progress in the status bar) with this tail running as the continuation once the files land.
+    void finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                              const QString& thumb, const QString& key);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
@@ -72,6 +77,9 @@ private:
 
     RetroView* retro_ = nullptr;
     EmulatorManager* emu_ = nullptr;
+    // Per-launch context the async BIOS fetch is parented to: recreated on every open(), so a newer launch
+    // supersedes (cancels) a still-downloading one instead of both booting when their downloads finish.
+    QObject* biosCtx_ = nullptr;
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select
     // on a pad, or Esc on the keyboard — and close it back to the app. Runs only between the emulator's launched
