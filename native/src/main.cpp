@@ -108,6 +108,31 @@ static void migrateLegacySettings()
     s.sync();
 }
 
+// Ends the startup.firstpaint span on the main window's first real Paint event — its true first on-screen
+// frame. This is deliberately distinct from startup.total's zero-timer end: a singleShot(0) can fire BEFORE
+// the window actually paints if the GUI thread is about to block on synchronous work, so a paint-based span
+// is the honest guard against a regression where startup work stalls the first paint (e.g. a slow audio /
+// device open landing on the GUI thread). Installed only under MMV_PERF, so normal runs pay nothing; it
+// removes itself and self-destructs once the first paint fires.
+class FirstPaintProbe : public QObject
+{
+public:
+    explicit FirstPaintProbe(QWidget* win) : win_(win) {}
+    bool eventFilter(QObject* o, QEvent* e) override
+    {
+        if (e->type() == QEvent::Paint)
+            if (auto* w = qobject_cast<QWidget*>(o); w && w->window() == win_)
+            {
+                PerfTrace::end(QStringLiteral("startup.firstpaint"));
+                qApp->removeEventFilter(this);
+                deleteLater();
+            }
+        return false;
+    }
+private:
+    QWidget* win_;
+};
+
 int main(int argc, char** argv)
 {
     PerfTrace::begin(QStringLiteral("startup.total")); // ends after the first paint (zero-timer below)
@@ -182,6 +207,13 @@ int main(int argc, char** argv)
     MainWindow window(chooseProfile);
     window.setWindowTitle(QStringLiteral("My Media Vault"));
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
+    // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
+    // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.
+    if (PerfTrace::enabled())
+    {
+        PerfTrace::begin(QStringLiteral("startup.firstpaint"));
+        qApp->installEventFilter(new FirstPaintProbe(&window));
+    }
     if (Settings::startFullscreen()) window.showFullScreen();
     else                             window.show();
     // A zero-timer fires after the event loop's first pass (first paint), so startup.total spans launch->visible.

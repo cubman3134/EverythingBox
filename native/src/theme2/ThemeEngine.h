@@ -20,6 +20,7 @@ class ThemeBridge : public QObject
     Q_OBJECT
 public:
     using QObject::QObject;
+    ~ThemeBridge() override;
     QQuickItem* root = nullptr;
     std::function<void(int)> onActivated;
     std::function<void()> onBack;

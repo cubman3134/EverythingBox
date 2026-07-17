@@ -13,24 +13,61 @@
 #include <QUrl>
 #include <QColor>
 #include <QSoundEffect>
+#include <QThread>
+#include <QCoreApplication>
 
-// Restart-and-play a UI sound effect (no-op if the theme defined none for this action). stop() first so
-// rapid navigation retriggers cleanly instead of waiting for the previous play to finish.
-static void playEffect(QSoundEffect* e) { if (e) { e->stop(); e->play(); } }
+// The theme UI sound effects live on a dedicated audio thread, not the GUI thread. Reason: the FIRST
+// QSoundEffect open in the process activates the Windows audio endpoint, and on slow outputs (HDMI TVs,
+// AVRs, Bluetooth — the norm for a couch media app) that activation blocks its caller for several seconds.
+// If it ran on the GUI thread it would stall the first paint of the themed home by that whole duration
+// (QSoundEffect loads asynchronously, so the open lands on the event loop's first pass, right when the home
+// should be appearing). Owning + opening + playing them here, off the GUI thread, keeps that cost entirely
+// out of the paint path — the home appears immediately and the effects are ready a moment later.
+static QThread* themeAudioThread()
+{
+    static QThread* t = [] {
+        auto* th = new QThread;                       // heap, never deleted: no ~QThread at exit -> no teardown race
+        th->setObjectName(QStringLiteral("mmv-theme-audio"));
+        // Stop accepting work and let the current open finish (bounded) when the app is quitting.
+        QObject::connect(qApp, &QCoreApplication::aboutToQuit, th, [th] { th->quit(); th->wait(2000); });
+        th->start();
+        return th;
+    }();
+    return t;
+}
+
+// Restart-and-play a UI sound effect (no-op if the theme defined none for this action). Queued onto the
+// audio thread (where the effect lives): stop()+play() there retriggers cleanly on rapid navigation without
+// ever touching the GUI thread's audio path.
+static void playEffect(QSoundEffect* e)
+{
+    if (!e) return;
+    QMetaObject::invokeMethod(e, [e] { e->stop(); e->play(); }, Qt::QueuedConnection);
+}
 
 // Build a QSoundEffect for one action from the theme's "sounds" map, or null if that action has no file.
 // `keys` lets an action accept aliases (e.g. "navigate"/"move"). Paths are relative to the theme folder;
-// QSoundEffect plays uncompressed WAV. Volume (0..1) applies to every effect in the theme.
-static QSoundEffect* loadEffect(QObject* parent, const QString& themeDir, const QVariantMap& sounds,
+// QSoundEffect plays uncompressed WAV. Volume (0..1) applies to every effect in the theme. The effect is
+// created unparented and moved to the theme audio thread; its source is loaded there (see themeAudioThread).
+static QSoundEffect* loadEffect(QObject* /*parent*/, const QString& themeDir, const QVariantMap& sounds,
                                 const QStringList& keys, qreal volume)
 {
     QString file;
     for (const QString& k : keys) { file = sounds.value(k).toString(); if (!file.isEmpty()) break; }
     if (file.isEmpty()) return nullptr;
-    auto* e = new QSoundEffect(parent);
-    e->setSource(QUrl::fromLocalFile(QDir(themeDir).absoluteFilePath(file)));
-    e->setVolume(volume);
+    auto* e = new QSoundEffect;                       // no parent: it lives on the audio thread, not the GUI thread
+    e->moveToThread(themeAudioThread());
+    const QUrl src = QUrl::fromLocalFile(QDir(themeDir).absoluteFilePath(file));
+    QMetaObject::invokeMethod(e, [e, src, volume] { e->setSource(src); e->setVolume(volume); }, Qt::QueuedConnection);
     return e;
+}
+
+// The sound effects live on the theme audio thread (not parented to this bridge, which is on the GUI
+// thread). deleteLater posts each delete to that thread, where it runs safely on the thread's event loop.
+ThemeBridge::~ThemeBridge()
+{
+    for (QSoundEffect* e : { sndNavigate, sndSelect, sndBack, sndDetails, sndTheme })
+        if (e) e->deleteLater();
 }
 
 void ThemeBridge::activated() { playEffect(sndSelect); if (onActivated && root) onActivated(root->property("currentIndex").toInt()); }
@@ -125,7 +162,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
-        // theme folder; WAV). Missing actions are simply silent.
+        // theme folder; WAV). Missing actions are simply silent. loadEffect owns + opens them on the theme
+        // audio thread so their (potentially slow) endpoint activation never touches the GUI thread.
         const QVariantMap sounds = theme.value(QStringLiteral("sounds")).toMap();
         if (!sounds.isEmpty())
         {
