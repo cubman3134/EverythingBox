@@ -39,6 +39,50 @@ int main(int argc, char** argv)
     auto snes = browse::favoritesCatalog(favs, "snes");
     CHECK(snes.items.size() == 1 && snes.items[0].title == "Zelda", "favorites: system scope + path-only");
 
+    // ---- Favorites write side: starring a local game must stamp the console (else the per-console ----------
+    // ---- ★ Favorites folder never matches it). Hint (from the Recent/Downloads store) wins; a ROM ----------
+    // ---- extension is the fallback; PC games are always "pc" (.exe would else collide with psx). ----------
+    {
+        MediaItem g; g.url = "C:/g/mario.nes"; g.id = "key1"; g.title = "Mario";
+        g.mime = "game"; g.thumbnailUrl = "http://x/m.jpg";
+        FavoriteItem f = browse::localGameFavorite(g, QString());
+        CHECK(f.system == "nes" && f.path == "C:/g/mario.nes" && f.kind == "game"
+              && f.itemId == "key1" && f.title == "Mario" && f.type == "game"
+              && f.thumbnailUrl == "http://x/m.jpg",
+              "favWrite: system derived from the ROM extension");
+        CHECK(browse::localGameFavorite(g, "snes").system == "snes",
+              "favWrite: store hint wins over the extension");
+        MediaItem pc; pc.url = "C:/pc/doom.exe"; pc.title = "Doom"; pc.mime = "pcgame";
+        FavoriteItem fp = browse::localGameFavorite(pc, QString());
+        CHECK(fp.system == "pc" && fp.kind == "pcgame", "favWrite: pcgame maps to pc, not psx(.exe)");
+        MediaItem nk = g; nk.id.clear();
+        CHECK(browse::localGameFavorite(nk, QString()).itemId == "C:/g/mario.nes",
+              "favWrite: itemId falls back to the path (gameFavId rule)");
+    }
+
+    // ---- Favorites backfill: favourites saved before `system` was stamped get it derived from their path ---
+    {
+        QVector<FavoriteItem> old;
+        { FavoriteItem f; f.itemId = "a"; f.path = "C:/g/zelda.sfc"; f.kind = "game"; old << f; }
+        { FavoriteItem f; f.itemId = "b"; f.path = "C:/pc/doom.exe"; f.kind = "pcgame"; old << f; }
+        { FavoriteItem f; f.itemId = "c"; f.path = "C:/g/mario.nes"; f.kind = "game"; f.system = "nes"; old << f; }
+        { FavoriteItem f; f.itemId = "d"; old << f; } // streamed favourite: no path, stays untouched
+        CHECK(FavoritesStore::backfillSystems(old), "backfill: reports a change");
+        CHECK(old[0].system == "snes" && old[1].system == "pc"
+              && old[2].system == "nes" && old[3].system.isEmpty(),
+              "backfill: derives only the missing local-game systems");
+        CHECK(!FavoritesStore::backfillSystems(old), "backfill: idempotent once stamped");
+
+        // A store hint (the Recent/Downloads entry for the same game) outranks the extension: e.g. an
+        // Atari ST ".st" disk that the extension table would read as snes (Sufami Turbo ".st").
+        QVector<FavoriteItem> amb;
+        { FavoriteItem f; f.itemId = "e"; f.path = "C:/g/creatures.st"; f.kind = "game"; amb << f; }
+        CHECK(FavoritesStore::backfillSystems(amb, [](const FavoriteItem& f) {
+                  return f.path.endsWith(QStringLiteral(".st")) ? QStringLiteral("atarist") : QString();
+              }) && amb[0].system == "atarist",
+              "backfill: store hint outranks the extension");
+    }
+
     // ---- Playlists level: this catalogue's playlists + the trailing synthetic New-playlist row -------------
     QList<Playlist> pls;
     { Playlist p; p.id = "id-a"; p.name = "Alpha"; PlaylistEntry e; p.items << e << e; pls << p; } // 2 items

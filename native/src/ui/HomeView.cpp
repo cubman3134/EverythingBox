@@ -2286,20 +2286,16 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
     if (FavoritesStore::isFavorite(id)) { FavoritesStore::remove(id); showToast(tr("Removed from Favorites."), 2500); }
     else
     {
-        FavoriteItem f;
-        f.itemId = id;
-        f.title = it.title;
-        f.type = QStringLiteral("game");
-        f.thumbnailUrl = it.thumbnailUrl;
-        f.path = it.url;          // re-open by path (openFavorite recovers the console from the stores)
-        f.kind = it.mime;         // "game" | "pcgame"
-        // Record the console so the favourite can be shown inside that console's Favorites folder.
+        // Record the console so the favourite shows inside that console's ★ Favorites folder: the
+        // Recent/Downloads store entry knows it best (ambiguous extensions like .iso/.cue), and
+        // localGameFavorite falls back to the ROM extension for games in neither store.
+        QString hint;
         for (const DownloadedItem& d : DownloadsStore::list())
-            if (d.path == it.url || (!it.id.isEmpty() && d.key == it.id)) { f.system = d.system; break; }
-        if (f.system.isEmpty())
+            if (d.path == it.url || (!it.id.isEmpty() && d.key == it.id)) { hint = d.system; break; }
+        if (hint.isEmpty())
             for (const RecentItem& r : RecentStore::list())
-                if (r.path == it.url || (!it.id.isEmpty() && r.key == it.id)) { f.system = r.system; break; }
-        FavoritesStore::add(f);
+                if (r.path == it.url || (!it.id.isEmpty() && r.key == it.id)) { hint = r.system; break; }
+        FavoritesStore::add(browse::localGameFavorite(it, hint));
         showToast(tr("Added “%1” to Favorites.").arg(it.title), 2500);
     }
     // Refresh the CURRENT view: the Home recents list, or the console Recent/Downloaded/Favorites level we're in.
@@ -2940,17 +2936,31 @@ void HomeView::enrichThemedMeta()
     themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches
 }
 
+// A themed leaf that is a local game file (a console Recent/Downloaded/Favorites row) favourites by
+// path+console like the game action menu does; its identity is gameFavId (stable key, else path), not it.id.
+static bool isLocalGameLeaf(const MediaItem& it)
+{
+    return (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty();
+}
+
 bool HomeView::isThemedLeafFavorite(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return false;
-    return FavoritesStore::isFavorite(items_[browseRowMap_[idx]].id);
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    return FavoritesStore::isFavorite(isLocalGameLeaf(it) ? gameFavId(it) : it.id);
 }
 
 void HomeView::favoriteThemedLeaf(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
-    const MediaItem& it = items_[browseRowMap_[idx]];
-    if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
+    const MediaItem it = items_[browseRowMap_[idx]]; // copy: toggleGameFavorite repopulates items_
+    if (isLocalGameLeaf(it))
+    {
+        // A local game: same path/kind/system stamping (and level refresh) as the game action menu, so the
+        // favourite lands in the console's ★ Favorites folder instead of a system-less orphan entry.
+        toggleGameFavorite(it);
+    }
+    else if (FavoritesStore::isFavorite(it.id)) FavoritesStore::remove(it.id);
     else
     {
         FavoriteItem f;
@@ -2962,7 +2972,8 @@ void HomeView::favoriteThemedLeaf(int idx)
     // Nudge the live panel so its heart reflects the new state.
     QVariantMap m;
     m.insert(QStringLiteral("index"), idx);
-    m.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
+    m.insert(QStringLiteral("favorite"),
+             FavoritesStore::isFavorite(isLocalGameLeaf(it) ? gameFavId(it) : it.id));
     emit themedMetaReady(idx, m);
 }
 
