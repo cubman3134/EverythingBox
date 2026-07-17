@@ -1247,6 +1247,7 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
     styleTypeButtons(catalogId);
     search_->clear();
     stack_.clear();
+    if (agg_) agg_->cancel(); // J17: switching to a catalog abandons any in-flight cross-addon search
     Level lvl;
     lvl.addon = addon; lvl.detail = false; lvl.catalogId = catalogId; lvl.catalogType = type; lvl.title = name;
     stack_.push_back(lvl);
@@ -1461,6 +1462,7 @@ void HomeView::selectRecent()
     stack_.clear();
     hideMeta();
     pendingReqId_ = -1; // ignore any in-flight addon result
+    if (agg_) agg_->cancel(); // J17: abandon any in-flight cross-addon search so stale results don't stream into Home
     loading_ = false;
     hasMore_ = false;
     renderRecents();

@@ -192,7 +192,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** SearchAggregator.cpp:35-39 defines `cancel()` (clears `reqs_`/`reqSrc_`); no caller exists (grep clean — HomeView never calls `agg_->cancel()`).
 **Proposed fix:** wire `cancel()` into search-level teardown (call it where a search is abandoned — closing the OSK / leaving the search view / starting a new query), per the plan-2 final review, so stale in-flight results don't stream into the next context.
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (00ad54a) — `agg_->cancel()` wired into the two search-abandon paths: `selectRecent()` (Back/Home out of the search view — the Back-from-search gesture routes here) and `selectType()` (switching to a catalog). A new query already clears via `agg_->start()`. Stops stale results + the trailing "No results" toast leaking into the next context.
 
 ### J18: `openLibraryItem` audio branch has no stable resume key
 **Category:** debris
