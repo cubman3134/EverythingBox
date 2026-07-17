@@ -94,21 +94,21 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** `evidence/retroview-launch-cut-black.png` (`trans-42-retroview-enter-b`); themed home → black core surface with no intermediate frame.
 **Proposed fix:** brief crossfade/hold (fade themed home out to black before the core surface swaps in) so the launch reads as a transition, not a flash.
 **Cost:** small
-**Triage:** PENDING — taste; every game launch hits it.
+**Triage:** SKIP (user) — keep the instant cut.
 
 ### J04: RetroView exit is a hard cut back to home
 **Category:** cut
 **Evidence:** `evidence/retroview-exit-cut-home.png` (`trans-44-retroview-exit-b`); black core → full themed home instantly on a single Escape.
 **Proposed fix:** symmetric fade-in of themed home on core exit (pairs with J03).
 **Cost:** small
-**Triage:** PENDING — taste; every game exit hits it.
+**Triage:** SKIP (user) — keep the instant cut.
 
 ### J05: XMB category/drill swaps are instantaneous (no transition)
 **Category:** cut
 **Evidence:** `notes.md` trans-02/04/06/08/10 (category swaps) and trans-12 (drill into Recent) — the `a` (at-keypress) and `b` (+200 ms) frames are identical, i.e. the page has fully changed by the keypress frame; no slide/fade between categories.
 **Proposed fix:** short horizontal slide/fade on category change and a subtle push on drill-in, matching the XMB idiom.
 **Cost:** medium
-**Triage:** PENDING — taste; this is the single most-repeated navigation in the app, so a small motion pass has high perceived-polish payoff.
+**Triage:** FIX — user-approved motion pass (short horizontal slide on category change, subtle push on drill).
 
 ### J06: Error-toast durations are scattered (5000–12000 ms)
 **Category:** feedback
@@ -157,7 +157,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** HomeView.cpp:3488 (`if (!f.present) continue`), roots 3512-3516, consoles 3543-3547 — the synthetic Downloaded/★ Favorites folders are guard-hidden entirely when their store is empty. Empty state = the folder is **absent**, not a blank grid (Task 1 empty-state matrix).
 **Proposed fix:** decide the empty affordance — either keep guard-hidden (current, defensible) or render the folder with a one-line "Nothing here yet" placeholder so the feature is discoverable. (Favorites is empty everywhere due to a known separate bug, so it never appears at all today.)
 **Cost:** small
-**Triage:** PENDING — taste (absence vs. placeholder).
+**Triage:** SKIP (user) — keep guard-hidden; clean rails preferred.
 
 ### J13: Search 0-results empty state is unreachable
 **Category:** empty
@@ -171,7 +171,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** `evidence/empty-playlists-only-newrow.png` (`empty-07`) — Games ▸ Playlists with no playlists renders a single create-affordance row.
 **Proposed fix:** none required — this is a clean, unambiguous empty-collection affordance. Logged only so the ranker can confirm it's intentional.
 **Cost:** trivial
-**Triage:** PENDING — taste; leave as-is unless a "no playlists yet" caption is wanted.
+**Triage:** SKIP (user) — the create row is the empty state; no caption.
 
 ### J15: Feedback duration constants header (enable J06–J08, J10, J11)
 **Category:** debris
