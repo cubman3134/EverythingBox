@@ -764,7 +764,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
     // Dominant home-build cost (classic HomeView, or the themed QML home if enabled). The HomeView ctor
-    // (~40 lines up) is cheap and sits inside the startup.addons region, so it's excluded from this span.
+    // sits in the unspanned gap just after the startup.addons region (cheap today), so it's excluded here.
     PerfTrace::begin(QStringLiteral("startup.home"));
     showHomeScreen(); // the catalog landing screen (classic, or the themed home if enabled) is shown first
     PerfTrace::end(QStringLiteral("startup.home"));
