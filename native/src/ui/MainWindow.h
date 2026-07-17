@@ -94,8 +94,6 @@ private slots:
     void openBiosCheck();         // per-system BIOS presence check + download-missing (RetroBat-style)
     void openEmulatorSettings();
     void openInputMapping();
-    void nextTrack();
-    void prevTrack();
     void onTrackEnded();
     void onDuration(double seconds);
     void onPosition(double seconds);

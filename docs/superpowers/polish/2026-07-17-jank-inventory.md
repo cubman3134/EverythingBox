@@ -185,7 +185,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** MainWindow.cpp:1490-1498 — `nextTrack()`→`session_->next()`, `prevTrack()`→`session_->prev()`, declared as slots MainWindow.h:97-98. **Investigation:** no `connect(...)` references either slot anywhere (grep clean). The visible transport buttons ⏮/⏭ (MainWindow.cpp:471,475) are wired to `player_->prevChapter()`/`nextChapter()` (lines 734-735, tooltips "Previous/Next chapter") — **chapter** nav, not track skip. Automatic track advance runs through `PlaybackSession::queueFinished` → `onTrackEnded()` (1500-1503). There is no media-key handling (`grep` finds no `Qt::Key_MediaNext`). So both slots are genuinely dead.
 **Proposed fix:** **delete** `nextTrack`/`prevTrack` (slots + declarations). Wiring them to hardware media keys is non-trivial (needs a global media-key hook) and out of polish scope; manual per-track skip in the now-playing audio view would be a new feature, not debris cleanup. `PlaybackSession::next/prev` stay (used by auto-advance).
 **Cost:** trivial
-**Triage:** OBJECTIVE.
+**Triage:** FIXED (c00b895) — re-confirmed grep-clean (only the defs + decls, no `connect`), deleted both slot definitions (MainWindow.cpp) and declarations (MainWindow.h). `PlaybackSession::next/prev` kept.
 
 ### J17: `SearchAggregator::cancel()` is unwired
 **Category:** debris

@@ -1495,16 +1495,6 @@ void MainWindow::openAudioPath(const QString& path)
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
-void MainWindow::nextTrack()
-{
-    session_->next();
-}
-
-void MainWindow::prevTrack()
-{
-    session_->prev();
-}
-
 void MainWindow::onTrackEnded()
 {
     session_->handleTrackEnd(); // scrobble-stop / next-episode now hang off PlaybackSession::queueFinished
