@@ -89,6 +89,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonManager.cpp src/addons/AddonManager.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
         src/ui/LibraryView.cpp    src/ui/LibraryView.h
         src/ui/HomeView.cpp       src/ui/HomeView.h
         src/ui/MediaPane.cpp      src/ui/MediaPane.h

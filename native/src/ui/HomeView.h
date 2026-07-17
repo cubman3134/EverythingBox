@@ -14,6 +14,7 @@
 #include "../addons/AddonModels.h"
 
 class AddonManager;
+class SearchAggregator;
 class GameMetaAggregator;
 class RaBrowse;
 class SteamAchievements;
@@ -333,13 +334,10 @@ private:
     bool loading_ = false;       // a page fetch is in progress (guards re-entrant scroll triggers)
     int pendingReqId_ = -1;      // in-flight async request; results with a different id are stale
 
-    // ---- cross-addon search (searchEverything): many catalog requests fanned out, results merged into one grid
-    void startSearchEverything(const QString& query); // (re)fire the fan-out for the current search level
-    QSet<int> searchAllReqs_;          // still-in-flight requestCatalog ids for this search
-    QHash<int, QString> searchAllReqSrc_; // reqId -> source manifest id (to tag each result's origin)
-    QSet<QString> searchAllSeen_;      // dedup keys "title|type" already added
-    MediaCatalog searchAllCat_;        // accumulated results (also used to re-populate on Back)
-    QString searchAllQuery_;
+    // ---- cross-addon search (searchEverything): the request fan-out + merge lives in SearchAggregator; HomeView
+    // keeps only the UI residue (the "_search" level, grid population, loading_ mirroring, the toasts).
+    void startSearch(const QString& query); // reset grid state, hand the fan-out to agg_, mirror its in-flight state
+    SearchAggregator* agg_ = nullptr;       // owns the cross-addon fan-out; streams results back via its signals
     int pendingPage_ = 1;        // page number of the in-flight request
     bool pendingAppend_ = false; // whether the in-flight request appends or replaces
 };

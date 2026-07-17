@@ -2,6 +2,7 @@
 // kind+system filtering, the pcgame-in-games rule, and missing-file hiding. Prints BROWSE-OK.
 #include <QCoreApplication>
 #include "../src/browse/SyntheticCatalogs.h"
+#include "../src/browse/SearchAggregator.h"
 #include "../src/core/PlaylistStore.h"
 
 static int fails = 0;
@@ -84,6 +85,26 @@ int main(int argc, char** argv)
           && tf2.items[0].title == "Team Fortress 2" && tf2.items[0].thumbnailUrl == "poster:440"
           && tf2.items[0].url.isEmpty(),
           "steam: query filter -> one game with exact id/mime/poster/type mapping");
+
+    // ---- SearchAggregator dedup/skip rule: the merge path's pure helper (see SearchAggregator::onCatalogReady).
+    {
+        QSet<QString> seen;
+        MediaItem a; a.title = "Halo"; a.type = "game";
+        CHECK(SearchAggregator::acceptResult(a, seen), "search: first result accepted");
+        MediaItem dup; dup.title = "HALO"; dup.type = "GAME"; // same title|type, different case
+        CHECK(!SearchAggregator::acceptResult(dup, seen),
+              "search: duplicate title|type rejected case-insensitively");
+        MediaItem diffType; diffType.title = "Halo"; diffType.type = "movie"; // same title, different type
+        CHECK(SearchAggregator::acceptResult(diffType, seen), "search: same title different type accepted");
+        MediaItem info; info.title = "A header"; info.type = "info";
+        CHECK(!SearchAggregator::acceptResult(info, seen), "search: info synthetic row skipped");
+        MediaItem rechdr; rechdr.title = "Recently played"; rechdr.type = "rechdr";
+        CHECK(!SearchAggregator::acceptResult(rechdr, seen), "search: rechdr synthetic row skipped");
+        MediaItem open; open.title = "Open a file…"; open.type = "_open";
+        CHECK(!SearchAggregator::acceptResult(open, seen), "search: _open synthetic row skipped");
+        MediaItem noTitle; noTitle.title = ""; noTitle.type = "game";
+        CHECK(!SearchAggregator::acceptResult(noTitle, seen), "search: empty-title row skipped");
+    }
 
     if (fails == 0) printf("BROWSE-OK\n");
     return fails == 0 ? 0 : 1;

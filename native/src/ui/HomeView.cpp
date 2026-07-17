@@ -28,6 +28,7 @@
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
 #include "../browse/SyntheticCatalogs.h"
+#include "../browse/SearchAggregator.h"
 #include <QAbstractItemView>
 #include <QMenu>
 #include <QLineEdit>
@@ -731,6 +732,21 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(mgr_, &AddonManager::metaReady, this, &HomeView::onMetaReady);
     connect(mgr_, &AddonManager::sourcesChanged, this, &HomeView::refresh); // a remote addon was added/removed
 
+    // Cross-addon "search everything" fan-out. The aggregator owns the request lifecycle + merge rules; HomeView
+    // paints each streamed batch into the "_search" grid and mirrors the loading/no-results UI (byte-for-byte
+    // the old in-handler search branch, just split across two signals).
+    agg_ = new SearchAggregator(mgr_, this);
+    connect(agg_, &SearchAggregator::resultsAppended, this, [this](const MediaCatalog& add, bool /*firstBatch*/) {
+        if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_search") && !add.items.isEmpty())
+            populate(add, /*append*/ !items_.isEmpty());
+        updateStatus();
+    });
+    connect(agg_, &SearchAggregator::finished, this, [this](int totalResults) {
+        loading_ = false;
+        if (totalResults == 0) showToast(tr("No results for “%1”.").arg(agg_->query()), 6000);
+        updateStatus();
+    });
+
     refresh();
 }
 
@@ -1412,33 +1428,20 @@ void HomeView::searchEverything(const QString& query)
     lvl.query = q;
     stack_.clear();
     stack_.push_back(lvl);
-    startSearchEverything(q);
+    startSearch(q);
 }
 
-void HomeView::startSearchEverything(const QString& query)
+// HomeView side of a cross-addon search: reset the grid state, hand the fan-out to the aggregator, and mirror
+// its in-flight state. The aggregator streams results back via resultsAppended/finished (wired in the ctor).
+void HomeView::startSearch(const QString& query)
 {
     ++generation_;                        // fresh grid -> ignore stale async thumbnails
-    searchAllReqs_.clear();
-    searchAllReqSrc_.clear();
-    searchAllSeen_.clear();
-    searchAllCat_ = MediaCatalog();
-    searchAllCat_.title = tr("Search: %1").arg(query);
-    searchAllQuery_ = query;
     pendingReqId_ = -1;                    // not driven by the single-request path
     hasMore_ = false;
-    for (LoadedAddon* s : mgr_->sources())
-    {
-        if (!s->isMediaSource() || !mgr_->isEnabled(s->manifest.id)) continue;
-        for (const AddonCatalog& c : mgr_->catalogs(s))
-        {
-            const int req = mgr_->requestCatalog(s, c.id, query, 1, {});
-            searchAllReqs_.insert(req);
-            searchAllReqSrc_.insert(req, s->manifest.id);
-        }
-    }
-    loading_ = !searchAllReqs_.isEmpty();
-    populate(searchAllCat_, /*append*/ false); // clears the grid, shows the (empty) searching state
-    if (searchAllReqs_.isEmpty()) showToast(tr("No add-ons to search."), 4000);
+    agg_->start(query);                    // clears prior state + fans the query out to every enabled source
+    loading_ = agg_->active();
+    populate(agg_->accumulated(), /*append*/ false); // clears the grid, shows the (empty) searching state
+    if (!agg_->active()) showToast(tr("No add-ons to search."), 4000);
     updateStatus();
 }
 
@@ -2538,7 +2541,7 @@ void HomeView::loadTop()
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
     // Returning to a cross-addon search (Back out of a result): re-run the fan-out.
     if (top.detail && top.item.type == QStringLiteral("_search"))
-        { startSearchEverything(top.item.mime.mid(QStringLiteral("search:").size())); return; }
+        { startSearch(top.item.mime.mid(QStringLiteral("search:").size())); return; }
     // Returning to a synthetic Recent level (Back from a re-opened item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_recents"))
         { populateRecents(top.item.mime.mid(QStringLiteral("recents:").size())); return; }
@@ -3430,31 +3433,8 @@ void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
         dlNext();
         return;
     }
-    if (searchAllReqs_.contains(requestId)) // one source's response to a cross-addon search
-    {
-        searchAllReqs_.remove(requestId);
-        const QString srcId = searchAllReqSrc_.take(requestId);
-        MediaCatalog add; // just this source's fresh, de-duped items, appended so the grid doesn't reset
-        for (MediaItem it : cat.items)
-        {
-            if (it.type == QStringLiteral("info") || it.type == QStringLiteral("rechdr") || it.title.isEmpty()) continue;
-            const QString dk = (it.title + QLatin1Char('|') + it.type).toLower();
-            if (searchAllSeen_.contains(dk)) continue;
-            searchAllSeen_.insert(dk);
-            it.sourceAddonId = srcId;                 // remember which addon to re-open it through
-            add.items.push_back(it);
-            searchAllCat_.items.push_back(it);
-        }
-        if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_search") && !add.items.isEmpty())
-            populate(add, /*append*/ !items_.isEmpty());
-        if (searchAllReqs_.isEmpty())
-        {
-            loading_ = false;
-            if (searchAllCat_.items.isEmpty()) showToast(tr("No results for “%1”.").arg(searchAllQuery_), 6000);
-        }
-        updateStatus();
-        return;
-    }
+    // (Cross-addon "search everything" responses are claimed by SearchAggregator's own catalogReady handler,
+    // filtered by its reqId set; they never match pendingReqId_ so they fall through here harmlessly.)
 
     if (requestId != pendingReqId_) return; // a superseded request (navigated away / newer page)
     loading_ = false;
