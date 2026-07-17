@@ -258,11 +258,16 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
-    # Headless test for the PerfTrace span harness (gating, format, overhead budget).
+    # Headless test for the PerfTrace span harness (gating, format, overhead budget) plus the
+    # component-budget asserts (browse builders, m3u parse, search dedup) — sources mirror
+    # probe_browse's builder/search deps + StreamResolver for parseM3u.
     add_executable(probe_perf tools/probe_perf.cpp
-        src/core/PerfTrace.cpp src/core/PerfTrace.h)
-    target_include_directories(probe_perf PRIVATE src src/core)
-    target_link_libraries(probe_perf PRIVATE Qt6::Core)
+        src/core/PerfTrace.cpp src/core/PerfTrace.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/media/StreamResolver.cpp src/media/StreamResolver.h)
+    target_include_directories(probe_perf PRIVATE src src/core src/addons src/browse src/media)
+    target_link_libraries(probe_perf PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless tests for the controller-navigation kit (rings, overlays, on-screen keyboard, back routing).
     # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.
