@@ -1,7 +1,7 @@
 # Foundation Refactor — Phase 1 Design
 
 **Date:** 2026-07-16
-**Status:** Plan 1 implemented (MainWindow seams + synthetic catalogs); plan 2 pending (async browse providers + sweep)
+**Status:** Phase 1 complete (plans 1+2): MainWindow seams, browse providers, shared reset path
 
 ## Problem
 
@@ -54,22 +54,26 @@ Esc menu. Delegates to new services:
 
 ### HomeView → presentation + focus (~1,200 lines)
 
-Keeps XMB/carousel presentation and focus management. Content comes from a
-`BrowseLevel` interface in `native/src/browse/`:
+Keeps XMB/carousel presentation and focus management. **The `BrowseLevel`
+polymorphic-interface originally sketched for this section was not built** — it was superseded by a lighter
+provider pattern that reaches the same extensibility without rewriting HomeView's Level
+machinery. What shipped: HomeView keeps its existing Level/marker state machine, and each
+content type's *content logic* moves into a plain builder in `native/src/browse/`.
+`SyntheticCatalogs` holds pure functions (`recentsCatalog`/`downloadsCatalog`/
+`favoritesCatalog`/`playlistsCatalog`/`steamCatalog`) that take a store's list plus a
+marker string and return a `MediaCatalog` — no HomeView, UI, or singleton dependency, so
+`probe_browse` exercises every filtering/mapping rule in isolation. HomeView dispatches to
+these by marker and renders the result through one shared `showSyntheticCatalog(cat)` reset
+path (the analogue of the abandoned interface's shared load boilerplate). The one async
+content type, "search everything", is its own object — `SearchAggregator` owns the
+cross-addon requestCatalog fan-out, reqId set, and dedup/merge rules and streams results
+back by signal, while HomeView keeps the `_search` level UI. Rationale: equal extensibility
+(a future level = one new pure builder + one marker branch, or one new aggregator for an
+async source) at a fraction of the churn, since the Level machinery and focus code stay put.
 
-```
-class BrowseLevel {
-  title(); items(); activate(index); back(); hasMore(); loadMore();
-  // + signals: itemsChanged, error(message)
-};
-```
-
-Each current content type becomes a small provider (~100 lines): `RecentsLevel`,
-`DownloadsLevel`, `FavoritesLevel`, `PlaylistsLevel`, `SteamLevel`, `SearchLevel`,
-`CatalogLevel` (addon catalogs). All providers share one async-load-with-cache path
-(reusing the existing MetaCache prefetch model) and report failures through `Notifier`.
-
-Adding a future level (e.g. collections) = one new provider file.
+Plan-3 candidate: `LibraryView` still carries its own copy of HomeView's async
+request idiom (issue/append/populate paging); sharing that request-lifecycle scaffolding
+between the two views is the natural next extraction.
 
 ## Extraction order
 
