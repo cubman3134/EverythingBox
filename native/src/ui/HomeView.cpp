@@ -3460,60 +3460,42 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         grid_->clear();
         items_.clear();
         settingsStore().sync(); // fresh resume positions for the progress bars
-        // A "Recent" folder at the very top of a catalogue (above Playlists), holding this catalogue's recently
-        // opened items - but only if there are any of its kind ("if applicable"). Opening a row re-opens it at
-        // its saved position. Same guard as Playlists (catalogue root, unfiltered, not Recents/detail).
+        // Synthetic "folder" marker rows (Recent / Downloaded / Playlists / Favorites): each drills natively via
+        // its mime marker and is shown only when `present`. id and type are the same tag in every case. The root
+        // group and the per-console group differ only in guard + store-scan predicate, so both feed one builder.
+        struct SyntheticFolder { QLatin1String tag; QString title; QString mime; bool present; };
+        auto pushFolders = [this](std::initializer_list<SyntheticFolder> folders) {
+            for (const SyntheticFolder& f : folders)
+            {
+                if (!f.present) continue;
+                MediaItem m;
+                m.id = f.tag;
+                m.type = f.tag;
+                m.title = f.title;
+                m.expandable = true;
+                m.mime = f.mime;
+                items_.push_back(m);
+            }
+        };
+        // At a catalogue root (unfiltered, not Recents/detail): a "Recent" folder (this catalogue's recently
+        // opened items, if any), a "Downloaded" folder (its fully-downloaded items — but NOT for games, which get
+        // one per console below), and a "Playlists" folder (always shown; the saved playlists + a New entry).
         if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
         {
             const QString rkind = catalogRecentKind();
             bool hasRecents = false;
             for (const RecentItem& r : RecentStore::list()) if (r.kind == rkind) { hasRecents = true; break; }
-            if (hasRecents)
-            {
-                MediaItem rc;
-                rc.id = QStringLiteral("_recents");
-                rc.type = QStringLiteral("_recents");
-                rc.title = tr("Recent");
-                rc.expandable = true;
-                rc.mime = QStringLiteral("recents:") + rkind; // marker -> drilled natively
-                items_.push_back(rc);
-            }
-        }
-        // A "Downloaded" folder holding this catalogue's fully-downloaded items - but NOT for games, which get
-        // one inside each console folder instead (see the platform block below). Only if there are any.
-        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
-        {
-            const QString rkind = catalogRecentKind();
+            bool hasDownloads = false;
             if (rkind != QStringLiteral("game"))
-            {
-                bool has = false;
-                for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { has = true; break; }
-                if (has)
-                {
-                    MediaItem dl;
-                    dl.id = QStringLiteral("_downloads");
-                    dl.type = QStringLiteral("_downloads");
-                    dl.title = tr("Downloaded");
-                    dl.expandable = true;
-                    dl.mime = QStringLiteral("downloads:") + rkind + QLatin1Char('|'); // no console filter
-                    items_.push_back(dl);
-                }
-            }
+                for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
+            pushFolders({
+                { QLatin1String("_recents"),   tr("Recent"),     QStringLiteral("recents:") + rkind,                      hasRecents },
+                { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
+                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCatalogKey(),      true },
+            });
         }
-        // A "Playlists" folder at the very top of every (unfiltered) catalogue root: the user's saved playlists
-        // for this catalogue plus a New-playlist entry, drilled natively (no addon). Not on detail levels (a
-        // drilled container / the playlist levels themselves), search results, or Recents.
-        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty() && !recentView_)
-        {
-            MediaItem pl;
-            pl.id = QStringLiteral("_playlists");
-            pl.type = QStringLiteral("_playlists");
-            pl.title = tr("Playlists");
-            pl.expandable = true;
-            pl.mime = QStringLiteral("playlists:") + currentCatalogKey(); // marker -> drilled natively
-            items_.push_back(pl);
-        }
-        // A "Downloaded" folder inside each games console folder: the fully-downloaded games for THIS console.
+        // Inside each games console folder: a "Recent", "★ Favorites" and "Downloaded" folder scoped to THIS
+        // console, each shown only if its store has a matching item.
         if (!stack_.isEmpty() && stack_.last().detail && stack_.last().query.isEmpty() && !recentView_
             && stack_.last().item.type == QStringLiteral("platform"))
         {
@@ -3527,49 +3509,21 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 { kind = QStringLiteral("game"); system = s->id; }
             if (!kind.isEmpty())
             {
-                // "Recent" folder: games recently played on THIS console.
                 bool hasRec = false;
                 for (const RecentItem& r : RecentStore::list())
                     if ((r.kind == kind || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame")))
                         && r.system == system) { hasRec = true; break; }
-                if (hasRec)
-                {
-                    MediaItem rc;
-                    rc.id = QStringLiteral("_recents");
-                    rc.type = QStringLiteral("_recents");
-                    rc.title = tr("Recent");
-                    rc.expandable = true;
-                    rc.mime = QStringLiteral("recents:") + kind + QLatin1Char('|') + system;
-                    items_.push_back(rc);
-                }
-                // "★ Favorites" folder: games favourited on THIS console.
                 bool hasFav = false;
                 for (const FavoriteItem& f : FavoritesStore::list())
                     if (!f.path.isEmpty() && f.system == system) { hasFav = true; break; }
-                if (hasFav)
-                {
-                    MediaItem fv;
-                    fv.id = QStringLiteral("_favorites");
-                    fv.type = QStringLiteral("_favorites");
-                    fv.title = tr("★ Favorites");
-                    fv.expandable = true;
-                    fv.mime = QStringLiteral("favorites:") + system;
-                    items_.push_back(fv);
-                }
-                // "Downloaded" folder: the fully-downloaded games for THIS console.
-                bool has = false;
+                bool hasDown = false;
                 for (const DownloadedItem& d : DownloadsStore::list())
-                    if (d.kind == kind && d.system == system) { has = true; break; }
-                if (has)
-                {
-                    MediaItem dl;
-                    dl.id = QStringLiteral("_downloads");
-                    dl.type = QStringLiteral("_downloads");
-                    dl.title = tr("Downloaded");
-                    dl.expandable = true;
-                    dl.mime = QStringLiteral("downloads:") + kind + QLatin1Char('|') + system;
-                    items_.push_back(dl);
-                }
+                    if (d.kind == kind && d.system == system) { hasDown = true; break; }
+                pushFolders({
+                    { QLatin1String("_recents"),   tr("Recent"),      QStringLiteral("recents:") + kind + QLatin1Char('|') + system,   hasRec },
+                    { QLatin1String("_favorites"), tr("★ Favorites"), QStringLiteral("favorites:") + system,                            hasFav },
+                    { QLatin1String("_downloads"), tr("Downloaded"),  QStringLiteral("downloads:") + kind + QLatin1Char('|') + system, hasDown },
+                });
             }
         }
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
