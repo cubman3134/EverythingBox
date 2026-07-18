@@ -298,3 +298,49 @@ Non-blocking items surfaced *during* the polish track but deliberately left outs
   reclassified the busy/guard rejections as error-class, following J22's MainWindow:1671 precedent)
   now use `kFeedbackLong`; 2617 (progress-with-timeout) and 3033 (informational reassurance) were
   triaged non-error and left, as recorded in J23's triage.
+
+## After (close-out re-run — 2026-07-17)
+
+Final `polishsweep.py` re-run against the committed HEAD build (every fix, incl. J23), plus the full
+headless probe suite. Delta observations against the Task-1 sweep the inventory was ranked from.
+
+**Flow sweep — clean.** 21 stills, 24 transition pairs, **0 skipped** (`.superpowers/polish-audit/
+after-final/notes.md`). End-to-end walk with no crash or stall: XMB root → all 6 categories → Games ▸
+Recent drill → per-game NavMenu → Video ▸ Movies detail → Playlists ▸ Weekend Picks (read-only) →
+search OSK → esc menu → RetroView launch **and** exit back to home. Backend was UP this run (movies
+populated: Obsession / Moana / Toy Story / Weekend Picks ▸ Disclosure Day) — so detail panels and the
+action chooser rendered with real metadata.
+
+**J02 — chooser BESIDE the panel, verified live.** `after-final/step-26-movie-detail.png` (and the
+`after-sweep/` run): the Play / Favorited / Add-to-playlist / Download chooser sits over the item
+column while the **Obsession** detail panel — title, `Released 2026-05-13 · Runtime 109 min · Rating
+8.3/10 · Genres Horror, Thriller`, and the full synopsis — is entirely readable and un-clipped. This
+is the direct inversion of the original occlusion (`evidence/J02-before.png` clipped the title/facts).
+
+**J05 — category/drill motion is landing.** In the Task-1 audit the category-swap `-a`/`-b` frames
+were pixel-identical (the basis for "no intermediate"). Now they differ **only in the column region**:
+category swaps `trans-02` 4.6 % and `trans-04` 2.0 % of pixels change between the at-keypress and
++200 ms frames, and the Games ▸ Recent **drill** `trans-12` 1.6 % — every diff bbox starts at the
+column top (y≈399 / 302), i.e. the slide + opacity settle of `col` is in flight at capture. A single
+crisp mid-slide still is timing-dependent to catch inside a sweep; the canonical +51 px mid-frame
+remains `evidence/J05-after.png` (Task 5).
+
+**Feedback durations (J06–J23) — not re-timed live, by design.** The sweep route deliberately triggers
+no download / error / success toast (doing so would pull user content or need a deliberately-broken
+provider), so the migrated durations aren't observable in these frames. They are now compile-time
+`kFeedback*` constants: the clean Release build + a full re-grep confirm **no raw non-zero feedback
+duration remains outside the named `showToast`/`notify` calls** in either sweep file (HomeView.cpp,
+MainWindow.cpp). The 2143 dual-outcome split (`kFeedbackShort`/`kFeedbackLong`) is in HEAD.
+
+**Suite — 11/14 PASS.** `run-headless-probes.sh`: netplay relay/both×2, meta cache, media-art schema,
+gamelist, game-meta aggregator, m3u, playback, browse, perf all PASS. The 3 non-passes — nav kit, mpv
+preview, notifier — are GUI probes that need a real display and hang / rc=127 headless in this session
+(a known harness limitation; the memory note records the same for probe_mpvpreview). **None link
+`HomeView.cpp` or `MainWindow.cpp`**, so they are untouched by the polish changes; the feedback
+migration is covered at compile time (main app built clean) and by the passing `probe_browse` /
+`probe_playback`.
+
+**Harness capture limits (honest).** The continuously-animating XMB home, every category rail, and the
+movie detail + action chooser captured perfectly (all 45 shots produced, 0 skipped). The static browse
+**results grid** still risks a black grab under occluded capture (per J13's note) — it is not taken as
+a still in this route, so it was not re-exercised here. No evidence of any rendering defect.

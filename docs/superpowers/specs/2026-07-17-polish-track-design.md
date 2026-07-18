@@ -1,7 +1,7 @@
 # Phase 2, Polish Track — Design
 
 **Date:** 2026-07-17
-**Status:** Approved design, pending implementation plan
+**Status:** Polish track complete: 19 fixed, 4 skipped by user; feedback policy landed. Phase 2 complete.
 **Builds on:** `2026-07-17-perf-track-design.md` (perf track complete), `2026-07-16-foundation-refactor-design.md` (phase 1 complete)
 
 ## Problem
