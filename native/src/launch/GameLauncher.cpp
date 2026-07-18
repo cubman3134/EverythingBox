@@ -201,7 +201,8 @@ void GameLauncher::ensureCoreThen(const CorePlan& plan, QObject* context,
             {
                 glLog(QStringLiteral("game: core '%1' unavailable: %2")
                           .arg(plan.core, error.isEmpty() ? QStringLiteral("download failed") : error));
-                emit notifyUser(error.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(plan.core) : error, 6000);
+                emit notifyUser(error.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(plan.core) : error,
+                                kFeedbackLong);
                 return;
             }
             glLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
