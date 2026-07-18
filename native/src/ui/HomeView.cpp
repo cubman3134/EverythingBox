@@ -1350,7 +1350,11 @@ QVariantList HomeView::browseItems()
             continue;
         }
         QVariantMap m{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
-                       { QStringLiteral("image"), it.thumbnailUrl }, { QStringLiteral("type"), it.type },
+                       // Offline-first: serve the locally cached copy of the tile art when we have one, so
+                       // rows whose remote thumbnail is dead/unreachable (console SVGs especially) still
+                       // show the art we have instead of falling back to the accent rectangle.
+                       { QStringLiteral("image"), MetaCache::displayImage(MetaCache::keyFor(it), it.thumbnailUrl) },
+                       { QStringLiteral("type"), it.type },
                        { QStringLiteral("accent"), typeColor(it.type).name() },
                        { QStringLiteral("expandable"), it.expandable } };
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
@@ -2783,11 +2787,18 @@ void HomeView::requestThemedMeta(int idx)
     themedMetaIndex_ = idx;
     // A skeleton from what the catalog row already carries, shown at once; the addon /meta enriches it below.
     QVariantMap base;
+    const QString metaKey = MetaCache::keyFor(it);
     base.insert(QStringLiteral("index"), idx);
     base.insert(QStringLiteral("title"), it.title);
     base.insert(QStringLiteral("subtitle"), it.subtitle);
-    base.insert(QStringLiteral("image"), it.thumbnailUrl);
+    // Offline-first, and persist-on-hover: the meta panel's hero falls back to this image for items with no
+    // richer art (consoles), so serve the cached local copy when present — and quietly cache it the first
+    // time it's seen (async, idempotent, no-op for non-http), so a console's art keeps rendering after its
+    // remote URL dies instead of leaving the hero black.
+    MetaCache::cacheImage(metaKey, QStringLiteral("thumb"), it.thumbnailUrl);
+    base.insert(QStringLiteral("image"), MetaCache::displayImage(metaKey, it.thumbnailUrl));
     base.insert(QStringLiteral("type"), it.type);
+    base.insert(QStringLiteral("accent"), typeColor(it.type).name()); // hero fallback tint when no art loads
     base.insert(QStringLiteral("expandable"), it.expandable);
     base.insert(QStringLiteral("favorite"), FavoritesStore::isFavorite(it.id));
     // Resolve the rich art + facts for the panel in PRIORITY ORDER, so scrolling never re-does work and the
@@ -2796,7 +2807,6 @@ void HomeView::requestThemedMeta(int idx)
     //   2) the ROM system's gamelist.xml (EmulationStation / RetroBat data sitting in the ROMs folder)
     //   3) our own scrape cache (MetaCache)
     // Only if none of those have it do we scrape online (the aggregator, below) — gated on `resolvedRich`.
-    const QString metaKey = MetaCache::keyFor(it);
     bool resolvedRich = false;
     const auto cachedRich = themedArtCache_.constFind(metaKey);
     if (cachedRich != themedArtCache_.constEnd())

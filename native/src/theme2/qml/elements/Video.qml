@@ -19,29 +19,44 @@ Item {
 
     readonly property var videos: T.mediaList(ctx, "videos")
     readonly property bool hasVideo: videos.length > 0
-    function firstPlayable() {
+    // Direct-file candidates only (YouTube ids aren't directly playable). Tried in order: a url that mpv
+    // reports dead (404, unsupported, dropped stream) advances clipIdx to the next; when they're all dead
+    // the element falls back to plain artwork with no play badge.
+    readonly property var playables: {
+        var out = []
         for (var i = 0; i < videos.length; i++) {
             var u = String(videos[i])
-            if (u.indexOf("youtube") < 0 && u.indexOf("youtu.be") < 0) return u // needs a direct file, not YT
+            if (u.indexOf("youtube") < 0 && u.indexOf("youtu.be") < 0) out.push(u)
         }
-        return ""
+        return out
     }
-    readonly property string playUrl: (el.preview === false) ? "" : firstPlayable()
+    property int clipIdx: 0
+    onVideosChanged: clipIdx = 0 // new item -> start over with its first candidate
+    readonly property string playUrl: (el.preview === false || clipIdx >= playables.length)
+                                      ? "" : String(playables[clipIdx])
 
-    // Best still to animate: an explicit binding/role, else a video-ish still (hero/screenshot/fanart) when a
-    // clip exists, else the poster/box. Always something to show behind a not-yet-playing clip.
-    readonly property string still: {
+    // Stills to animate, best-first: an explicit binding/role, then every art role in preference order. A
+    // candidate LIST (not just the best) so a url that fails to load (404, dead host, undecodable) falls
+    // through to the next role we do have, instead of leaving the frame black.
+    readonly property var stillCandidates: {
+        var out = []
         var s = host ? host.resolve(T.imageSource(el, ctx)) : ""
-        if (s) return s
+        if (s) out.push(s)
         // Box/poster art is preferred as the still; screenshots are the LAST resort (video is the priority).
         var order = hasVideo ? ["hero", "poster", "box", "fanart", "background", "thumb", "image", "screenshot"]
                              : ["poster", "box", "hero", "fanart", "thumb", "image", "screenshot"]
         for (var i = 0; i < order.length; i++) {
             var u = T.artUrl(ctx, order[i])
-            if (u) return host ? host.resolve(u) : u
+            if (u) {
+                var r = host ? host.resolve(u) : u
+                if (out.indexOf(r) < 0) out.push(r)
+            }
         }
-        return ""
+        return out
     }
+    property int stillIdx: 0
+    onStillCandidatesChanged: stillIdx = 0 // new item -> back to its best still
+    readonly property string still: stillIdx < stillCandidates.length ? String(stillCandidates[stillIdx]) : ""
 
     property bool playing: false   // a real clip is on screen (hides the Ken Burns still)
     property var player: null      // the MpvPreview, created lazily/guarded
@@ -53,11 +68,37 @@ Item {
         color: "#0C0E12"
         clip: true // keep the zoomed/panned image (or video) inside the rounded frame
 
+        // No loadable still and no clip on screen: a soft accent panel with the item's title, instead of the
+        // bare near-black frame (the "black screen" a console with a dead thumbnail used to get).
+        Rectangle {
+            anchors.fill: parent
+            visible: !root.playing && (root.still === "" || poster.status === Image.Error)
+            gradient: Gradient {
+                GradientStop { position: 0.0; color: "#1A2030" }
+                GradientStop {
+                    position: 1.0
+                    color: (root.ctx && root.ctx.selected && root.ctx.selected.accent)
+                           ? Qt.darker(String(root.ctx.selected.accent), 1.6) : "#232A3C"
+                }
+            }
+            Text {
+                anchors.centerIn: parent; width: parent.width * 0.8
+                text: (root.ctx && root.ctx.selected && root.ctx.selected.title) ? root.ctx.selected.title : ""
+                color: Qt.rgba(1, 1, 1, 0.85); font.bold: true
+                font.pixelSize: Math.max(13, parent.height * 0.14)
+                horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap
+                maximumLineCount: 2; elide: Text.ElideRight
+            }
+        }
+
         Image {
             id: poster
             anchors.fill: parent
             source: root.still
             fillMode: Image.PreserveAspectCrop
+            // A failed candidate advances to the next role we have; when they're all dead `still` collapses
+            // to "" and the accent panel above takes over. Ready frames render exactly as before.
+            onStatusChanged: if (status === Image.Error) root.stillIdx++
             visible: status === Image.Ready && !root.playing
             opacity: 0.9
             transformOrigin: Item.Center
@@ -107,6 +148,9 @@ Item {
             player = Qt.createQmlObject(
                 'import QtQuick; import MMV 1.0; MpvPreview { anchors.fill: parent }', frame, "mpvPreview")
             player.playingChanged.connect(function() { root.playing = player.playing })
+            // A dead clip (mpv error before any frame): move on to the next candidate — or, none left,
+            // playUrl collapses to "" and the ▶ badge disappears (plain artwork, no dead play button).
+            player.failedChanged.connect(function() { if (player.failed) root.clipIdx++ })
         } catch (e) { player = null } // no module / not registered -> stay on the still
     }
     // A short hover-stable delay before streaming, so scrolling quickly past items doesn't load a clip each.

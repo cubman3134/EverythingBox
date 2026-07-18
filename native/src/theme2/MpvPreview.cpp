@@ -48,6 +48,7 @@ void MpvPreview::setSource(const QString& s)
     source_ = s;
     emit sourceChanged();
     setPlaying(false);
+    setFailed(false);
     frame_ = QImage();
     update();
     if (!mpv_) return;
@@ -121,7 +122,14 @@ void MpvPreview::drainEvents()
     {
         mpv_event* e = mpv_wait_event(mpv_, 0);
         if (e->event_id == MPV_EVENT_NONE) break;
-        // loop-file keeps it going; nothing else to do — just keep the queue from filling.
+        // loop-file keeps a good clip going, so END_FILE here is the failure path: a url that 404s, an
+        // unsupported codec, or a dead stream ends with an error before any frame rendered. Surface it so
+        // the QML side can drop its "trailer loading" cue instead of showing a play badge forever.
+        if (e->event_id == MPV_EVENT_END_FILE && !source_.isEmpty() && !playing_)
+        {
+            const auto* ef = static_cast<mpv_event_end_file*>(e->data);
+            if (ef && ef->reason == MPV_END_FILE_REASON_ERROR) setFailed(true);
+        }
     }
 }
 
@@ -139,4 +147,11 @@ void MpvPreview::setPlaying(bool v)
     if (playing_ == v) return;
     playing_ = v;
     emit playingChanged();
+}
+
+void MpvPreview::setFailed(bool v)
+{
+    if (failed_ == v) return;
+    failed_ = v;
+    emit failedChanged();
 }

@@ -22,6 +22,7 @@ class MpvPreview : public QQuickPaintedItem
     Q_OBJECT
     Q_PROPERTY(QString source READ source WRITE setSource NOTIFY sourceChanged)
     Q_PROPERTY(bool playing READ playing NOTIFY playingChanged) // true once real frames are on screen
+    Q_PROPERTY(bool failed READ failed NOTIFY failedChanged)    // the current source ended in error before any frame
 public:
     explicit MpvPreview(QQuickItem* parent = nullptr);
     ~MpvPreview() override;
@@ -29,12 +30,14 @@ public:
     QString source() const { return source_; }
     void setSource(const QString& s);
     bool playing() const { return playing_; }
+    bool failed() const { return failed_; }
 
     void paint(QPainter* p) override;
 
 signals:
     void sourceChanged();
     void playingChanged();
+    void failedChanged();
 
 private slots:
     void renderFrame(); // pull the current frame from mpv into frame_ (GUI thread)
@@ -44,10 +47,12 @@ private:
     static void onMpvRedraw(void* ctx); // mpv render thread -> queue renderFrame()
     static void onMpvWakeup(void* ctx); // mpv thread -> queue drainEvents()
     void setPlaying(bool p);
+    void setFailed(bool f);
 
     mpv_handle* mpv_ = nullptr;
     mpv_render_context* rctx_ = nullptr;
     QImage frame_;
     QString source_;
     bool playing_ = false;
+    bool failed_ = false;
 };

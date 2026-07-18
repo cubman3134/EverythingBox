@@ -87,7 +87,32 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    std::printf("MPV-PREVIEW-OK (%dx%d frame decoded + software-rendered; clear-source stays blank)\n",
-                grab.width(), grab.height());
+    // A source mpv cannot open must surface `failed` (END_FILE with an error before any frame) — that's what
+    // lets the themed ▶ badge disappear instead of promising a trailer forever — and must NOT flip `playing`.
+    root->setProperty("source", QStringLiteral("Z:/definitely/not/a/real/clip.mp4"));
+    QElapsedTimer ft; ft.start();
+    bool sawFailed = false;
+    while (ft.elapsed() < 8000)
+    {
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+        if (root->property("failed").toBool()) { sawFailed = true; break; }
+    }
+    if (!sawFailed || root->property("playing").toBool())
+    {
+        std::fprintf(stderr, "MPV-PREVIEW-FAIL dead source not reported (failed=%d playing=%d)\n",
+                     int(sawFailed), int(root->property("playing").toBool()));
+        return 1;
+    }
+    // And a new source after a failure starts clean: `failed` resets with the retry.
+    root->setProperty("source", QStringLiteral("av://lavfi:testsrc=size=320x240:rate=25"));
+    QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+    if (root->property("failed").toBool())
+    {
+        std::fprintf(stderr, "MPV-PREVIEW-FAIL failed flag not reset on new source\n");
+        return 1;
+    }
+
+    std::printf("MPV-PREVIEW-OK (%dx%d frame decoded + software-rendered; clear-source stays blank; "
+                "dead source reports failed)\n", grab.width(), grab.height());
     return 0;
 }
