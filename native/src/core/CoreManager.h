@@ -16,9 +16,21 @@ namespace CoreManager
 
     // Returns the core's .dll path, downloading + extracting it if absent. Empty on failure; when it fails
     // *error (if given) holds a message for the caller to show inline. onProgress(percent) is called during
-    // the download so the caller can render an inline progress indicator (no popup).
+    // the download so the caller can render an inline progress indicator (no popup). Synchronous (blocks on
+    // a local event loop) — launch paths use ensureCoreAsync instead; this stays for user-driven panels
+    // (Settings ▸ Games' per-system core picker).
     QString ensureCore(const QString& coreName, QString* error = nullptr,
                        const std::function<void(int percent)>& onProgress = {});
+
+    // Async ensureCore: the same buildbot download + extract, chained on QNetworkAccessManager signals
+    // instead of a nested event loop, so a stalled buildbot connection can never hang the caller (a transfer
+    // timeout fails the download instead). onDone(corePath, error) always fires — immediately (synchronously)
+    // when the core is already installed, else after the download settles; corePath empty => failed, with
+    // `error` saying why — unless `context` is destroyed first, which aborts the download and drops both
+    // callbacks. Callbacks run on `context`'s thread.
+    void ensureCoreAsync(const QString& coreName, QObject* context,
+                         const std::function<void(int percent)>& onProgress,
+                         const std::function<void(const QString& corePath, const QString& error)>& onDone);
 
     // <data>/system : the libretro "system" folder, where cores look for BIOS / firmware. Passed to each
     // core via RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY (see RetroView / LibretroCore).
@@ -27,8 +39,8 @@ namespace CoreManager
     // Download any BIOS files `systemId` needs (BiosCatalog) into destDir, skipping ones already present.
     // Best-effort and synchronous (blocks on a local event loop, like ensureCore); a failed file is left
     // missing so the core/emulator reports it as it would have anyway. onStatus(text) reports progress.
-    // Launch paths use ensureBiosAsync instead — this stays for flows that already run off a user-driven
-    // panel/manager (Settings ▸ BIOS repair, EmulatorManager's install pipeline).
+    // Launch paths use ensureBiosAsync instead — this stays for user-driven repair flows
+    // (Settings ▸ BIOS check).
     void ensureBios(const QString& systemId, const QString& destDir,
                     const std::function<void(const QString& text)>& onStatus = {});
 
