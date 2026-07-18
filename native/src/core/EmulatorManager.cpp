@@ -467,27 +467,10 @@ void EmulatorManager::finishInstall()
     else busy_ = false;
 }
 
-// Put a BIOS where a standalone emulator expects it before we boot a game. Which emulators need one (and
-// the system whose BIOS to fetch) comes from BiosCatalog, so the emulator registry stays untouched. For
-// PCSX2: a portable.ini marker beside the exe makes it keep config + bios under our folder; the BIOS image
-// goes in "<dir>/bios"; and a best-effort PCSX2.ini pre-selects that BIOS and skips the first-run wizard so
-// -batch boots cleanly. Everything is best-effort and idempotent — present files are left untouched, and
-// config is only written when absent so we never clobber the user's own settings.
-void EmulatorManager::prepareBios(const QString& binDir)
+// The config half of prepareBios, run after the BIOS files have settled: point PCSX2's ini at the fetched
+// image so -batch boots without its first-run wizard.
+static void wireBiosConfig(const BiosCatalog::ExternalBios& b, const QString& binDir)
 {
-    const BiosCatalog::ExternalBios b = BiosCatalog::forExternalEmulator(em_.id);
-    if (b.systemId.isEmpty())
-        return; // this emulator ships everything it needs
-
-    if (b.portable)
-    {
-        const QString marker = binDir + QStringLiteral("/portable.ini");
-        if (!QFile::exists(marker)) { QFile m(marker); if (m.open(QIODevice::WriteOnly)) m.close(); }
-    }
-
-    CoreManager::ensureBios(b.systemId, binDir + QStringLiteral("/bios"),
-                            [this](const QString& s) { emit status(s, -1); });
-
     const QList<BiosFile>& bios = BiosCatalog::forSystem(b.systemId);
     if (b.portable && !bios.isEmpty())
     {
@@ -508,6 +491,35 @@ void EmulatorManager::prepareBios(const QString& binDir)
             }
         }
     }
+}
+
+// Put a BIOS where a standalone emulator expects it before we boot a game. Which emulators need one (and
+// the system whose BIOS to fetch) comes from BiosCatalog, so the emulator registry stays untouched. For
+// PCSX2: a portable.ini marker beside the exe makes it keep config + bios under our folder; the BIOS image
+// goes in "<dir>/bios"; and a best-effort PCSX2.ini pre-selects that BIOS and skips the first-run wizard so
+// -batch boots cleanly. Everything is best-effort and idempotent — present files are left untouched, and
+// config is only written when absent so we never clobber the user's own settings.
+// The fetch is asynchronous (no nested event loop): onDone runs once the files land — immediately when
+// nothing needs downloading — with progress on the status signal (which feeds the launch wait page). The
+// chain is parented to launchCtx_, so a torn-down launch cancels it and onDone never runs.
+void EmulatorManager::prepareBios(const QString& binDir, const std::function<void()>& onDone)
+{
+    const BiosCatalog::ExternalBios b = BiosCatalog::forExternalEmulator(em_.id);
+    if (b.systemId.isEmpty())
+    {
+        onDone(); // this emulator ships everything it needs
+        return;
+    }
+
+    if (b.portable)
+    {
+        const QString marker = binDir + QStringLiteral("/portable.ini");
+        if (!QFile::exists(marker)) { QFile m(marker); if (m.open(QIODevice::WriteOnly)) m.close(); }
+    }
+
+    CoreManager::ensureBiosAsync(b.systemId, binDir + QStringLiteral("/bios"), launchCtx_,
+                                 [this](const QString& s) { emit status(s, -1); },
+                                 [b, binDir, onDone] { wireBiosConfig(b, binDir); onDone(); });
 }
 
 // True if keys.txt at `path` actually contains keys (a 32-hex-char line) rather than being absent or just the
@@ -1122,21 +1134,38 @@ void EmulatorManager::launch(const QString& binary)
     }
 #endif
 
-    // Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're
-    // in place next to the binary before launching. Best-effort and only on local installs we control on disk.
-    if (!isFlatpak)
+    const QString binDir = QFileInfo(binary).absolutePath();
+    if (isFlatpak)
     {
-        prepareBios(QFileInfo(binary).absolutePath());
-        prepareFirstRunConfig(QFileInfo(binary).absolutePath());
-        prepareCemuConfig(QFileInfo(binary).absolutePath());
-        prepareControllerConfig(QFileInfo(binary).absolutePath()); // after the above wrote the base inis to append to
-        prepareAchievements(QFileInfo(binary).absolutePath());     // sync MMV's RetroAchievements login into the emulator
-        prepareCemuKeys(QFileInfo(binary).absolutePath());
-        prepareCemuDiscKey(QFileInfo(binary).absolutePath());
-        restoreSaves(QFileInfo(binary).absolutePath()); // seed saves from the central backup if this install has none
+        startGameProcess(program, args, binDir, true);
+        return;
     }
 
-    const QString binDir = QFileInfo(binary).absolutePath();
+    // Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're
+    // in place next to the binary before launching. Best-effort and only on local installs we control on disk.
+    // The BIOS fetch is asynchronous, so the GUI thread never waits on the network: the rest of the pre-launch
+    // prep and the process start run as its continuation — the launch still happens only once the BIOS has
+    // settled. The chain is parented to a per-launch context object, recreated here, so a torn-down manager
+    // (or a launch superseded before its download finished) cancels it and the process never starts.
+    delete launchCtx_;
+    launchCtx_ = new QObject(this);
+    prepareBios(binDir, [this, program, args, binDir] {
+        prepareFirstRunConfig(binDir);
+        prepareCemuConfig(binDir);
+        prepareControllerConfig(binDir); // after the above wrote the base inis to append to
+        prepareAchievements(binDir);     // sync MMV's RetroAchievements login into the emulator
+        prepareCemuKeys(binDir);
+        prepareCemuDiscKey(binDir);
+        restoreSaves(binDir); // seed saves from the central backup if this install has none
+        startGameProcess(program, args, binDir, false);
+    });
+}
+
+// The process half of launch(): spawn + monitor the emulator. Split out so it can run as the continuation
+// of the async BIOS fetch above (and directly for Flatpak, which skips the on-disk prep).
+void EmulatorManager::startGameProcess(const QString& program, const QStringList& args,
+                                       const QString& binDir, bool isFlatpak)
+{
     game_ = new QProcess(this);
     if (!isFlatpak) game_->setWorkingDirectory(binDir);
     connect(game_, &QProcess::started, this, [this] { emit launched(em_.displayName); });

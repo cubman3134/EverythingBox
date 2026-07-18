@@ -169,24 +169,46 @@ GameLauncher::CorePlan GameLauncher::prepareCore(const QString& rom, const QStri
         core = sys->cores.value(0); // catalog default
     glLog(QStringLiteral("game: core '%1' for system %2 (configured=%3)")
               .arg(core, sys->id, Settings::coreFor(sys->id).isEmpty() ? QStringLiteral("no, default") : QStringLiteral("yes")));
-
-    // No prompt: use the configured core, downloading it from the buildbot if it isn't installed. Progress
-    // shows inline in the status bar; failures report there too.
-    QString dlErr;
-    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
-        emit statusMessage(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 0);
-    });
-    if (corePath.isEmpty())
+    if (core.isEmpty())
     {
-        glLog(QStringLiteral("game: core '%1' unavailable: %2").arg(core, dlErr.isEmpty() ? QStringLiteral("download failed") : dlErr));
-        plan.error = dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr;
+        plan.error = tr("No core is available for %1.").arg(sys->name);
         return plan;
     }
-    glLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
 
+    // Resolution only: a missing core is NOT an error here — corePath stays empty with `core` set, and the
+    // caller downloads it asynchronously (ensureCoreAsync) so the GUI thread never waits on the buildbot.
     plan.core = core;
-    plan.corePath = corePath;
+    if (CoreManager::isInstalled(core))
+        plan.corePath = CoreManager::corePath(core);
     return plan;
+}
+
+// Resolve plan.corePath — immediately when the core is installed, else via an async buildbot download with
+// progress on the Notifier toast (the status bar is hidden app-wide) — then hand the completed plan to
+// onReady. On failure onReady never runs; the error surfaces on the toast. Parented to `context` like the
+// BIOS fetch: a superseded/dead launch cancels the download and drops the continuation.
+void GameLauncher::ensureCoreThen(const CorePlan& plan, QObject* context,
+                                  const std::function<void(const CorePlan&)>& onReady)
+{
+    CoreManager::ensureCoreAsync(plan.core, context,
+        [this, core = plan.core](int pct) {
+            const QString s = tr("Downloading core ‘%1’… %2%").arg(core).arg(pct);
+            emit statusMessage(s, 0);
+            emit notifyUser(s, 8000); // bounded, renewed per update: clears itself shortly after the launch proceeds
+        },
+        [this, plan, onReady](const QString& corePath, const QString& error) {
+            if (corePath.isEmpty())
+            {
+                glLog(QStringLiteral("game: core '%1' unavailable: %2")
+                          .arg(plan.core, error.isEmpty() ? QStringLiteral("download failed") : error));
+                emit notifyUser(error.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(plan.core) : error, 6000);
+                return;
+            }
+            glLog(QStringLiteral("game: core ready at %1").arg(QFileInfo(corePath).fileName()));
+            CorePlan ready = plan;
+            ready.corePath = corePath;
+            onReady(ready);
+        });
 }
 
 void GameLauncher::open(const QString& rom, const QString& title, const QString& thumb, const QString& key,
@@ -216,18 +238,41 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
         return;
     }
 
-    if (plan.corePath.isEmpty())
+    if (!plan.error.isEmpty())
     {
-        emit notifyUser(plan.error.isEmpty() ? tr("Can't run game.") : plan.error, plan.errorMs);
+        emit notifyUser(plan.error, plan.errorMs);
         return;
     }
 
-    // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder. Fetch any that
-    // are missing before the core loads — best-effort, so a failure just falls back to the core's own
-    // "BIOS not found" message rather than blocking the launch.
-    CoreManager::ensureBios(plan.systemId, CoreManager::systemDir(),
-                            [this](const QString& s) { emit statusMessage(s, 0); });
+    // Download the core (if missing), then any BIOS the system needs, then run the launch tail. Both
+    // fetches are asynchronous (no nested event loop, so nothing on the GUI thread waits on the network):
+    // open() returns, progress shows on the Notifier toast, and finishLibretroLaunch runs once the files
+    // land. With everything already on disk the whole chain completes synchronously right here — a warm
+    // launch is unchanged. The chain is parented to a per-launch context, so a newer open() supersedes
+    // (cancels) a still-downloading one instead of both booting when their downloads finish.
+    delete launchCtx_;
+    launchCtx_ = new QObject(this);
+    ensureCoreThen(plan, launchCtx_, [this, launchRom, recentTitle, thumb, key](const CorePlan& ready) {
+        // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder. Fetch any
+        // that are missing before the core loads — best-effort, so a failure just falls back to the
+        // core's own "BIOS not found" message rather than blocking the launch.
+        CoreManager::ensureBiosAsync(ready.systemId, CoreManager::systemDir(), launchCtx_,
+            [this](const QString& s) {
+                emit statusMessage(s, 0);
+                // The main window's status bar is hidden app-wide, so surface the wait visibly: the Notifier
+                // toast is the app's download-progress channel. Each file's message renews it; the bounded
+                // duration lets it clear itself shortly after the launch proceeds.
+                emit notifyUser(s, 8000);
+            },
+            [this, ready, launchRom, recentTitle, thumb, key] {
+                finishLibretroLaunch(ready, launchRom, recentTitle, thumb, key);
+            });
+    });
+}
 
+void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                                        const QString& thumb, const QString& key)
+{
     emit aboutToLaunch();
     QString err;
     if (retro_->openGame(plan.corePath, launchRom, plan.core, &err))

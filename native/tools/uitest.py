@@ -17,7 +17,9 @@ import os
 import sys
 import time
 
-NAME = "MyMediaVault-uitest"
+# MMV_UITEST_PIPE picks a non-default channel, matching the server-side override in UiTestServer — lets a
+# test build be driven while a normally-running instance owns the default pipe.
+NAME = os.environ.get("MMV_UITEST_PIPE", "MyMediaVault-uitest")
 
 
 def _send(cmd: str) -> str:

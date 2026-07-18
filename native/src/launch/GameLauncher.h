@@ -10,6 +10,7 @@
 #include <QString>
 #include <QElapsedTimer>
 #include "../ui/FeedbackPolicy.h"   // kFeedbackLong — error-class notice duration
+#include <functional>
 
 class RetroView;
 class EmulatorManager;
@@ -29,13 +30,21 @@ public:
     void open(const QString& rom, const QString& title = QString(), const QString& thumb = QString(),
               const QString& key = QString(), const QString& systemHint = QString());
 
-    // The pipeline's resolution half (system + disc descriptor + core ensure), reused by MainWindow's split-pane
-    // branch to run a ROM in the focused pane's own emulator. corePath empty => couldn't resolve; `error` says why.
+    // The pipeline's resolution half (system + disc descriptor + core lookup), reused by MainWindow's split-pane
+    // branch to run a ROM in the focused pane's own emulator. Resolution only — no network: `error` non-empty =>
+    // couldn't resolve; corePath empty with `core` set => the core isn't installed yet, and the caller downloads
+    // it via ensureCoreThen before launching.
     struct CorePlan { QString corePath; QString core; QString launchRom; QString systemId; QString error;
                       int errorMs = kFeedbackLong;        // error-class toast duration (J06 policy: all errors kFeedbackLong)
                       const GameSystem* sys = nullptr;    // the resolved system (borrowed; SystemCatalog entries are static)
                       QString externalEmulatorId; }; // non-empty => a standalone-emulator system (no libretro core)
     CorePlan prepareCore(const QString& rom, const QString& systemHint);
+
+    // Fill plan.corePath — immediately when installed, else via an async buildbot download (progress on the
+    // Notifier toast) — then run onReady with the completed plan. On failure onReady never runs; the error
+    // shows on the toast. Parented to `context`: destroying it cancels the download and the continuation.
+    void ensureCoreThen(const CorePlan& plan, QObject* context,
+                        const std::function<void(const CorePlan&)>& onReady);
 
     // Run a standalone emulator: stop our playback, show the wait page, minimise, and launch (auto-installing if
     // needed). rom empty => open the emulator's own UI (e.g. TeknoParrot, or another emulator for setup).
@@ -57,6 +66,11 @@ signals:
     void notifyUser(const QString& text, int ms);    // user-facing notice (→ Notifier)
 
 private:
+    // The libretro launch tail — stop playback, load the core into RetroView, record the Recent entry and
+    // play session. Split out of open() so a missing BIOS can download asynchronously (UI responsive,
+    // progress in the status bar) with this tail running as the continuation once the files land.
+    void finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                              const QString& thumb, const QString& key);
     void ensureEmu();            // lazily create EmulatorManager + wire its signals
     // Systems flagged as external (GameCube/Wii via Dolphin) run in a standalone emulator launched as a child
     // process: ensure it's installed (auto-download), boot the ROM, and show a wait page until it exits.
@@ -73,6 +87,9 @@ private:
 
     RetroView* retro_ = nullptr;
     EmulatorManager* emu_ = nullptr;
+    // Per-launch context the async core + BIOS fetches are parented to: recreated on every open(), so a newer
+    // launch supersedes (cancels) a still-downloading one instead of both booting when their downloads finish.
+    QObject* launchCtx_ = nullptr;
     QString pendingEmuRom_, pendingEmuTitle_, pendingEmuThumb_, pendingEmuKey_, pendingEmuSystem_; // Recent entry, added on launch
     // While a standalone emulator (melonDS, Dolphin…) owns the screen, watch for a global exit hotkey — Start+Select
     // on a pad, or Esc on the keyboard — and close it back to the app. Runs only between the emulator's launched
