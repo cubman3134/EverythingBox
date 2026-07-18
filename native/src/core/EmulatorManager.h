@@ -66,7 +66,10 @@ private:
     // Per-emulator save-data locations to back up: {absolute source dir, stable label under the central folder}.
     static QList<QPair<QString, QString>> emulatorSaveDirs(const QString& id, const QString& binDir);
     void prepareCemuConfig(const QString& binDir); // pre-seed settings.xml so Cemu skips its first-run wizard
-    void prepareCemuKeys(const QString& binDir); // fetch Cemu's keys.txt into its folder if absent (Wii U)
+    // Fetch Cemu's keys.txt into its folder(s) if absent (Wii U). Asynchronous like prepareBios: onDone runs
+    // once the fetch settles (immediately when keys are present or the emulator isn't Cemu), parented to
+    // launchCtx_ for cancellation.
+    void prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone);
     void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
     void launch(const QString& binary);
     // The process half of launch(): spawn + monitor the emulator, run as the async BIOS fetch's continuation.

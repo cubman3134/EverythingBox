@@ -12,7 +12,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
-#include <QEventLoop>
 #include <cctype>
 #include <QProcess>
 #include <QTimer>
@@ -924,9 +923,11 @@ void EmulatorManager::prepareCemuConfig(const QString& binDir)
 // where a non-portable Cemu 2.x looks) — the same best-effort model as prepareBios. Kept out of the app repo
 // (copyrighted keys); pulled from a maintained gist when Cemu is set up. Skips paths that already have real
 // keys, and overwrites Cemu's blank placeholder.
-void EmulatorManager::prepareCemuKeys(const QString& binDir)
+// Asynchronous like prepareBios: onDone runs once the fetch settles — immediately when nothing needs
+// fetching — with the reply parented to launchCtx_, so a torn-down launch aborts it and onDone never runs.
+void EmulatorManager::prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone)
 {
-    if (em_.id != QStringLiteral("cemu")) return;
+    if (em_.id != QStringLiteral("cemu")) { onDone(); return; }
 
     QStringList targets;
     targets << binDir + QStringLiteral("/keys.txt");
@@ -939,7 +940,7 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
 
     QStringList todo;
     for (const QString& t : targets) if (!cemuKeysPresent(t)) todo << t;
-    if (todo.isEmpty()) return; // real keys already in place wherever Cemu looks
+    if (todo.isEmpty()) { onDone(); return; } // real keys already in place wherever Cemu looks
 
     emit status(tr("Fetching Cemu keys…"), -1);
     QNetworkRequest rq((QUrl(QStringLiteral(
@@ -948,21 +949,22 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
     QNetworkReply* reply = nam_->get(rq);
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    if (reply->error() == QNetworkReply::NoError)
-    {
-        const QByteArray body = reply->readAll();
-        if (!body.isEmpty())
-            for (const QString& t : todo)
-            {
-                QDir().mkpath(QFileInfo(t).absolutePath());
-                QFile f(t); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
-            }
-    }
-    // On failure, leave it: Cemu will prompt for keys itself, exactly as before.
-    reply->deleteLater();
+    reply->setParent(launchCtx_); // superseded/torn-down launch deletes (aborts) the in-flight fetch
+    connect(reply, &QNetworkReply::finished, launchCtx_, [reply, todo, onDone] {
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            const QByteArray body = reply->readAll();
+            if (!body.isEmpty())
+                for (const QString& t : todo)
+                {
+                    QDir().mkpath(QFileInfo(t).absolutePath());
+                    QFile f(t); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
+                }
+        }
+        // On failure, leave it: Cemu will prompt for keys itself, exactly as before.
+        reply->deleteLater();
+        onDone();
+    });
 }
 
 // A Wii U retail disc image (.wux/.wud) is encrypted with a unique per-disc title key. Scene/No-Intro archives
@@ -1143,10 +1145,11 @@ void EmulatorManager::launch(const QString& binary)
 
     // Emulators that can't boot without a copyrighted BIOS (PCSX2) / decryption keys (Cemu): make sure they're
     // in place next to the binary before launching. Best-effort and only on local installs we control on disk.
-    // The BIOS fetch is asynchronous, so the GUI thread never waits on the network: the rest of the pre-launch
-    // prep and the process start run as its continuation — the launch still happens only once the BIOS has
-    // settled. The chain is parented to a per-launch context object, recreated here, so a torn-down manager
-    // (or a launch superseded before its download finished) cancels it and the process never starts.
+    // The BIOS and Cemu-keys fetches are asynchronous, so the GUI thread never waits on the network: the rest
+    // of the pre-launch prep and the process start run as their continuations — the launch still happens only
+    // once the files have settled. The chain is parented to a per-launch context object, recreated here, so a
+    // torn-down manager (or a launch superseded before its download finished) cancels it and the process
+    // never starts.
     delete launchCtx_;
     launchCtx_ = new QObject(this);
     prepareBios(binDir, [this, program, args, binDir] {
@@ -1154,10 +1157,11 @@ void EmulatorManager::launch(const QString& binary)
         prepareCemuConfig(binDir);
         prepareControllerConfig(binDir); // after the above wrote the base inis to append to
         prepareAchievements(binDir);     // sync MMV's RetroAchievements login into the emulator
-        prepareCemuKeys(binDir);
-        prepareCemuDiscKey(binDir);
-        restoreSaves(binDir); // seed saves from the central backup if this install has none
-        startGameProcess(program, args, binDir, false);
+        prepareCemuKeys(binDir, [this, program, args, binDir] {
+            prepareCemuDiscKey(binDir); // after the keys fetch — it appends to the keys.txt that fetch wrote
+            restoreSaves(binDir); // seed saves from the central backup if this install has none
+            startGameProcess(program, args, binDir, false);
+        });
     });
 }
 
