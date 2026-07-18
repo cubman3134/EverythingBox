@@ -236,6 +236,23 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Cost:** small
 **Triage:** FIXED (this commit) — `dlNext()` result toast split by outcome: `dlQueued_ > 0 ? kFeedbackShort : kFeedbackLong` (success confirmation vs must-read error); all nine error-class literals above → `kFeedbackLong`. Deliberately untouched (honest classification, non-error): 3033 ("“%1” is already saved.", 4000 — informational reassurance, the item IS saved; nearest class is Standard, left for a policy call like J22's update-available notice), 2617 ("Loading “%1”…", 20000 — progress with a safety timeout, not sticky-0 by design: the resolve callback may never fire), every sticky `0` progress literal (2083/2132/2666/2739/2764/3019/3050), and the `showToast` definition's `4500` default arg (it IS `kFeedbackStandard`'s value — the policy default). HomeView.cpp now has no raw non-zero feedback duration outside those named calls.
 
+### J24: cross-file duration/channel stragglers (GameLauncher + RetroView GL error)
+**Category:** feedback
+**Evidence:** The final whole-branch review found the last error/success-class feedback sites still carrying raw millisecond literals after the J06–J23 policy migration — four in `native/src/launch/GameLauncher.cpp` (all on the `statusMessage` channel) plus one channel-misrouted fatal launch error in `native/src/emu/RetroView.cpp`.
+**Proposed fix:** classify the four GameLauncher literals honestly (success confirmation → `kFeedbackShort`, errors/busy-rejection → `kFeedbackLong`, via FeedbackPolicy.h — already visible transitively through `GameLauncher.h`, and already compiling at 116/244) and route the RetroView GL-init fatal error off ambient `statusMessage` onto the `coreError` signal (added by J10) that its two sibling core-crash sites already use.
+**Cost:** small
+**Triage:** FIXED (see report table) — per-site classifications:
+
+| File:line | String | Was | Now | Class / precedent |
+|-----------|--------|-----|-----|-------------------|
+| GameLauncher.cpp:308 | "%1 is installed." | `5000` | `kFeedbackShort` | success confirmation (install complete) — J07 success band |
+| GameLauncher.cpp:313 | emulator-`failed` msg | `9000` | `kFeedbackLong` | error (must read) |
+| GameLauncher.cpp:384 | "No emulator is configured for %1." | `6000` | `kFeedbackLong` | error — matches J11's identical-class MainWindow site |
+| GameLauncher.cpp:396 | "An emulator is already running." | `4000` | `kFeedbackLong` | busy rejection — J23 busy-rejection precedent (was error-class) |
+| RetroView.cpp:1244 | "This core needs OpenGL, which couldn't be initialised here." | ambient `statusMessage` (3000ms) | `coreError` signal | fatal launch error — mirrors the two J10 `coreError` crash sites (805/991); duration now owned by the error channel, not a raw literal |
+
+Deliberately untouched: no include added to GameLauncher.cpp (the symbols resolve through `GameLauncher.h`'s `../ui/FeedbackPolicy.h` and already compile); RetroView's save/load-state strings and all other feedback left alone (out of scope — this item is durations/channel only).
+
 ---
 
 ## Verified non-issues (recorded, not items)

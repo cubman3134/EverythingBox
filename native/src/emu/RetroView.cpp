@@ -1241,7 +1241,7 @@ void RetroView::setupHwRender()
     if (!glCtx_->create() || !glCtx_->makeCurrent(glSurface_))
     {
         teardownHwRender();
-        emit statusMessage(tr("This core needs OpenGL, which couldn't be initialised here."));
+        emit coreError(tr("This core needs OpenGL, which couldn't be initialised here."));
         return;
     }
 

@@ -305,12 +305,12 @@ void GameLauncher::ensureEmu()
         emuRunClock_.invalidate();
     });
     connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {
-        emit statusMessage(tr("%1 is installed.").arg(name), 5000);
+        emit statusMessage(tr("%1 is installed.").arg(name), kFeedbackShort);
     });
     connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
         glLog(QStringLiteral("emu: failed: %1").arg(msg));
         stopEmuHotkeyWatch();
-        emit statusMessage(msg, 9000);
+        emit statusMessage(msg, kFeedbackLong);
         emit waitPageDone();
     });
 }
@@ -381,7 +381,7 @@ void GameLauncher::launchExternalGame(const GameSystem* sys, const QString& rom,
     if (!em)
     {
         glLog(QStringLiteral("game: external emulator '%1' not registered").arg(sys->externalEmulator));
-        emit statusMessage(tr("No emulator is configured for %1.").arg(sys->name), 6000);
+        emit statusMessage(tr("No emulator is configured for %1.").arg(sys->name), kFeedbackLong);
         return;
     }
     runEmulator(*em, rom, title, thumb, key, sys->id);
@@ -393,7 +393,7 @@ void GameLauncher::runEmulator(const ExternalEmulator& em, const QString& rom, c
     ensureEmu();
     if (emu_->busy())
     {
-        emit statusMessage(tr("An emulator is already running."), 4000);
+        emit statusMessage(tr("An emulator is already running."), kFeedbackLong);
         return;
     }
     // Hand the screen + audio to the external emulator: stop our own playback first.
