@@ -5,8 +5,10 @@
 #pragma once
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QList>
 #include <QPair>
+#include <functional>
 #include "EmulatorRegistry.h"
 
 class QNetworkAccessManager;
@@ -53,7 +55,9 @@ private:
     void installAppImage();     // Linux .AppImage (move + chmod +x)
     void installFlatpak();      // Linux .flatpak (flatpak install --user)
     void finishInstall();       // common tail: locate the binary, then launch or report "installed"
-    void prepareBios(const QString& binDir); // fetch + wire up a BIOS for emulators that need one (PCSX2)
+    // Fetch + wire up a BIOS for emulators that need one (PCSX2/DuckStation). Asynchronous: onDone runs once
+    // the files have settled (immediately when nothing is missing), parented to launchCtx_ for cancellation.
+    void prepareBios(const QString& binDir, const std::function<void()>& onDone);
     void prepareFirstRunConfig(const QString& binDir); // pre-seed configs so emulators skip their first-run prompts
     void prepareControllerConfig(const QString& binDir); // auto-map a standard pad as Player 1 in each emulator
     void prepareAchievements(const QString& binDir); // sync MMV's RetroAchievements login into the emulator's own RA client
@@ -62,14 +66,21 @@ private:
     // Per-emulator save-data locations to back up: {absolute source dir, stable label under the central folder}.
     static QList<QPair<QString, QString>> emulatorSaveDirs(const QString& id, const QString& binDir);
     void prepareCemuConfig(const QString& binDir); // pre-seed settings.xml so Cemu skips its first-run wizard
-    void prepareCemuKeys(const QString& binDir); // fetch Cemu's keys.txt into its folder if absent (Wii U)
+    // Fetch Cemu's keys.txt into its folder(s) if absent (Wii U). Asynchronous: onDone runs once the file
+    // has settled (immediately for non-Cemu emulators or when keys are present), parented to launchCtx_.
+    void prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone);
     void prepareCemuDiscKey(const QString& binDir); // add a disc image's per-disc key to keys.txt (Wii U .wux/.wud)
     void launch(const QString& binary);
+    // The process half of launch(): spawn + monitor the emulator, run as the async BIOS fetch's continuation.
+    void startGameProcess(const QString& program, const QStringList& args, const QString& binDir, bool isFlatpak);
     QString platformArtifact() const;
     QString platformUpdateUrl() const; // per-OS update/release URL (override), else updateJsonUrl
 
     QNetworkAccessManager* nam_ = nullptr;
     QProcess* game_ = nullptr;
+    // Per-launch context the async pre-launch BIOS fetch is parented to: recreated on every launch(), so a
+    // dying manager or a superseded launch cancels a still-downloading chain and the process never starts.
+    QObject* launchCtx_ = nullptr;
     ExternalEmulator em_;
     QString rom_;
     QString archivePath_;

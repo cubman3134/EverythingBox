@@ -287,3 +287,83 @@ void CoreManager::ensureBiosAsync(const QString& systemId, const QString& destDi
     QDir().mkpath(destDir);
     new BiosFetcher(missing, destDir, context, onStatus, onDone); // deletes itself when the chain settles
 }
+
+namespace {
+
+// One async core download: fetches the buildbot zip, extracts the shared library, reports the result, and
+// deletes itself. Parented to the caller's context object, so a caller that goes away mid-download aborts
+// the transfer and the callbacks never fire (same lifetime model as BiosFetcher above).
+class CoreFetcher : public QObject
+{
+public:
+    CoreFetcher(const QString& coreName, const QString& url, QObject* context,
+                std::function<void(int)> onProgress,
+                std::function<void(const QString&, const QString&)> onDone)
+        : QObject(context), coreName_(coreName),
+          onProgress_(std::move(onProgress)), onDone_(std::move(onDone))
+    {
+        nam_ = new QNetworkAccessManager(this);
+        // An inactivity timeout: a stalled buildbot connection fails the launch with a message instead of
+        // hanging it forever. Bytes still flowing (however slowly) keep resetting it, so a slow link on a
+        // 10-40 MB core is fine.
+        nam_->setTransferTimeout(60000);
+
+        QNetworkRequest req((QUrl(url)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        QNetworkReply* reply = nam_->get(req);
+        if (onProgress_) onProgress_(0);
+        connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {
+            if (t <= 0 || !onProgress_) return;
+            const int pct = static_cast<int>(r * 100 / t);
+            if (pct != lastPct_) { lastPct_ = pct; onProgress_(pct); } // report only on change (each update repaints a toast)
+        });
+        connect(reply, &QNetworkReply::finished, this, [this, reply] {
+            if (reply->error() != QNetworkReply::NoError)
+            {
+                finish(QString(), QObject::tr("Couldn't download core ‘%1’: %2").arg(coreName_, reply->errorString()));
+            }
+            else
+            {
+                const QByteArray data = reply->readAll();
+                QString dll;
+                if (!unzipLibFromMemory(data, CoreManager::coresDir(), libExt(), &dll))
+                    finish(QString(), QObject::tr("Downloaded ‘%1’ but couldn't extract the core.").arg(coreName_));
+                else
+                    finish(CoreManager::isInstalled(coreName_) ? CoreManager::corePath(coreName_) : dll, QString());
+            }
+            reply->deleteLater();
+        });
+    }
+
+private:
+    void finish(const QString& path, const QString& error)
+    {
+        if (onDone_) onDone_(path, error);
+        deleteLater();
+    }
+
+    QString coreName_;
+    std::function<void(int)> onProgress_;
+    std::function<void(const QString&, const QString&)> onDone_;
+    QNetworkAccessManager* nam_ = nullptr;
+    int lastPct_ = -1;
+};
+
+} // namespace
+
+void CoreManager::ensureCoreAsync(const QString& coreName, QObject* context,
+                                  const std::function<void(int)>& onProgress,
+                                  const std::function<void(const QString&, const QString&)>& onDone)
+{
+    // The common case — core already installed — completes synchronously, so a warm launch is byte-for-byte
+    // the old flow with no queued round-trip.
+    if (isInstalled(coreName))
+    {
+        if (onDone) onDone(corePath(coreName), QString());
+        return;
+    }
+
+    const QString url = QStringLiteral("https://buildbot.libretro.com/nightly/")
+                        + buildbotSubpath() + coreFileName(coreName) + QStringLiteral(".zip");
+    new CoreFetcher(coreName, url, context, onProgress, onDone); // deletes itself when the download settles
+}
