@@ -12,7 +12,6 @@
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
-#include <QEventLoop>
 #include <cctype>
 #include <QProcess>
 #include <QTimer>
