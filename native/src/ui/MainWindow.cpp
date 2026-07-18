@@ -1595,13 +1595,25 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
         }
         // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder — fetch any that are
         // missing before the pane's core loads (best-effort; a failure falls back to the core's own message).
-        CoreManager::ensureBios(plan.systemId, CoreManager::systemDir(),
-                                [this](const QString& s) { statusBar()->showMessage(s); });
+        // The fetch is asynchronous, so the GUI thread never waits on the network: we return to the split view
+        // right away with progress in the status bar, and the pane's core loads once the files land (immediately,
+        // when nothing is missing). The fetch context is parented to the pane — a pane closed mid-download
+        // cancels the load — and recreated per open so a newer game supersedes a still-downloading one.
         const QString recentTitle = title.isEmpty() ? QFileInfo(plan.launchRom).completeBaseName() : title;
-        mwLog(QStringLiteral("game: launching in split pane"));
-        splitTarget_->openGame(plan.corePath, plan.launchRom, plan.core);
-        RecentStore::add({ plan.launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
-        PlayStats::markPlayed(PlayStats::identity(key, plan.launchRom)); // split panes aren't session-timed
+        MediaPane* pane = splitTarget_;
+        delete splitBiosCtx_;
+        splitBiosCtx_ = new QObject(pane);
+        CoreManager::ensureBiosAsync(plan.systemId, CoreManager::systemDir(), splitBiosCtx_,
+            [this](const QString& s) {
+                statusBar()->showMessage(s);
+                notifier_->notify(s, 8000); // the status bar is hidden app-wide; the toast is the visible channel
+            },
+            [this, pane, plan, recentTitle, thumb, key] {
+                mwLog(QStringLiteral("game: launching in split pane"));
+                pane->openGame(plan.corePath, plan.launchRom, plan.core);
+                RecentStore::add({ plan.launchRom, recentTitle, QStringLiteral("game"), thumb, key, plan.systemId });
+                PlayStats::markPlayed(PlayStats::identity(key, plan.launchRom)); // split panes aren't session-timed
+            });
         finishSplitOpen();
         return;
     }

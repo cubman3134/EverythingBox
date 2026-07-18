@@ -277,6 +277,9 @@ private:
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)
     class MediaPane* splitTarget_ = nullptr; // the pane the next opened item loads into (split "Open here")
+    // Context the split branch's async BIOS fetch is parented to: child of the target pane (a closed pane
+    // cancels the pending load), QPointer so deleting a stale one is safe, recreated per split game open.
+    QPointer<QObject> splitBiosCtx_;
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;

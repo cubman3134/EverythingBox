@@ -202,3 +202,88 @@ void CoreManager::ensureBios(const QString& systemId, const QString& destDir,
         reply->deleteLater();
     }
 }
+
+namespace {
+
+// One async BIOS fetch: downloads the missing files for a system one at a time, chained on each reply's
+// finished() signal — no nested event loop — then reports done and deletes itself. Parented to the caller's
+// context object, so a caller that goes away mid-download tears the chain down and the callbacks never fire.
+class BiosFetcher : public QObject
+{
+public:
+    BiosFetcher(QList<BiosFile> files, const QString& destDir, QObject* context,
+                std::function<void(const QString&)> onStatus, std::function<void()> onDone)
+        : QObject(context), files_(std::move(files)), destDir_(destDir),
+          onStatus_(std::move(onStatus)), onDone_(std::move(onDone))
+    {
+        nam_ = new QNetworkAccessManager(this);
+        // A dead network must fail the file (leaving it missing, as the sync path does) rather than leave
+        // the waiting launch pending forever. Generous enough for the largest catalog file (~4 MB PS2 BIOS).
+        nam_->setTransferTimeout(60000);
+        next();
+    }
+
+private:
+    void next()
+    {
+        if (files_.isEmpty())
+        {
+            if (onDone_) onDone_();
+            deleteLater();
+            return;
+        }
+        const BiosFile bf = files_.takeFirst();
+        const QString out = destDir_ + QStringLiteral("/") + bf.fileName;
+        QDir().mkpath(QFileInfo(out).absolutePath()); // fileName may include a subfolder (e.g. hatari/tos/tos.img)
+
+        if (onStatus_) onStatus_(QObject::tr("Downloading BIOS %1…").arg(bf.fileName));
+        QNetworkRequest req((QUrl(bf.url)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = nam_->get(req);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, out] {
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const QByteArray data = reply->readAll();
+                QFile f(out);
+                if (f.open(QIODevice::WriteOnly))
+                {
+                    f.write(data);
+                    f.close();
+                }
+            }
+            // On error: leave the file missing — the core/emulator reports "BIOS not found" itself.
+            reply->deleteLater();
+            next();
+        });
+    }
+
+    QList<BiosFile> files_;
+    QString destDir_;
+    std::function<void(const QString&)> onStatus_;
+    std::function<void()> onDone_;
+    QNetworkAccessManager* nam_ = nullptr;
+};
+
+} // namespace
+
+void CoreManager::ensureBiosAsync(const QString& systemId, const QString& destDir, QObject* context,
+                                  const std::function<void(const QString&)>& onStatus,
+                                  const std::function<void()>& onDone)
+{
+    QList<BiosFile> missing;
+    for (const BiosFile& bf : BiosCatalog::forSystem(systemId))
+        if (!QFile::exists(destDir + QStringLiteral("/") + bf.fileName))
+            missing.append(bf);
+
+    // The common case — BIOS already on disk (or the system needs none) — completes synchronously, so a
+    // warm launch is byte-for-byte the old flow with no queued round-trip.
+    if (missing.isEmpty())
+    {
+        if (onDone) onDone();
+        return;
+    }
+
+    QDir().mkpath(destDir);
+    new BiosFetcher(missing, destDir, context, onStatus, onDone); // deletes itself when the chain settles
+}

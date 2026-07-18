@@ -6,6 +6,8 @@
 #include <QString>
 #include <functional>
 
+class QObject;
+
 namespace CoreManager
 {
     QString coresDir();                                  // <app>/cores (created if needed)
@@ -25,6 +27,17 @@ namespace CoreManager
     // Download any BIOS files `systemId` needs (BiosCatalog) into destDir, skipping ones already present.
     // Best-effort and synchronous (blocks on a local event loop, like ensureCore); a failed file is left
     // missing so the core/emulator reports it as it would have anyway. onStatus(text) reports progress.
+    // Launch paths use ensureBiosAsync instead — this stays for flows that already run off a user-driven
+    // panel/manager (Settings ▸ BIOS repair, EmulatorManager's install pipeline).
     void ensureBios(const QString& systemId, const QString& destDir,
                     const std::function<void(const QString& text)>& onStatus = {});
+
+    // Async ensureBios: the same best-effort download, chained on QNetworkAccessManager signals instead of
+    // a nested event loop, so a slow or dead network can never stall the caller (a transfer timeout fails a
+    // stuck file rather than hanging). onDone always fires — after the last file settles, or immediately
+    // (synchronously) when nothing is missing — unless `context` is destroyed first, which cancels the whole
+    // chain and drops both callbacks. Callbacks run on `context`'s thread.
+    void ensureBiosAsync(const QString& systemId, const QString& destDir, QObject* context,
+                         const std::function<void(const QString& text)>& onStatus = {},
+                         const std::function<void()>& onDone = {});
 }

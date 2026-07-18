@@ -224,10 +224,28 @@ void GameLauncher::open(const QString& rom, const QString& title, const QString&
 
     // Some systems (3DO, Saturn, PlayStation) need a BIOS in the libretro system folder. Fetch any that
     // are missing before the core loads — best-effort, so a failure just falls back to the core's own
-    // "BIOS not found" message rather than blocking the launch.
-    CoreManager::ensureBios(plan.systemId, CoreManager::systemDir(),
-                            [this](const QString& s) { emit statusMessage(s, 0); });
+    // "BIOS not found" message rather than blocking the launch. The fetch is asynchronous (no nested
+    // event loop, so nothing on the GUI thread waits on the network): open() returns, progress shows in
+    // the status bar, and the launch tail runs once the files land. With everything already on disk the
+    // tail runs synchronously right here — a warm launch is unchanged.
+    delete biosCtx_;
+    biosCtx_ = new QObject(this);
+    CoreManager::ensureBiosAsync(plan.systemId, CoreManager::systemDir(), biosCtx_,
+        [this](const QString& s) {
+            emit statusMessage(s, 0);
+            // The main window's status bar is hidden app-wide, so surface the wait visibly: the Notifier
+            // toast is the app's download-progress channel. Each file's message renews it; the bounded
+            // duration lets it clear itself shortly after the launch proceeds.
+            emit notifyUser(s, 8000);
+        },
+        [this, plan, launchRom, recentTitle, thumb, key] {
+            finishLibretroLaunch(plan, launchRom, recentTitle, thumb, key);
+        });
+}
 
+void GameLauncher::finishLibretroLaunch(const CorePlan& plan, const QString& launchRom, const QString& recentTitle,
+                                        const QString& thumb, const QString& key)
+{
     emit aboutToLaunch();
     QString err;
     if (retro_->openGame(plan.corePath, launchRom, plan.core, &err))

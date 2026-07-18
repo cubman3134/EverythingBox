@@ -31,7 +31,13 @@ public:
     static bool wanted();                                 // MMV_UITEST=1 or --uitest present
     explicit UiTestServer(const Hooks& hooks, QObject* parent = nullptr);
 
-    static QString serverName() { return QStringLiteral("MyMediaVault-uitest"); }
+    // MMV_UITEST_PIPE overrides the channel name so a test build can be driven alongside a normally-running
+    // instance (which already owns the default pipe). uitest.py honours the same variable.
+    static QString serverName()
+    {
+        const QByteArray n = qgetenv("MMV_UITEST_PIPE");
+        return n.isEmpty() ? QStringLiteral("MyMediaVault-uitest") : QString::fromUtf8(n);
+    }
 
 private:
     QString handle(const QString& line);                  // one command -> one response line
