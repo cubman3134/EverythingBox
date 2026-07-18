@@ -924,9 +924,13 @@ void EmulatorManager::prepareCemuConfig(const QString& binDir)
 // where a non-portable Cemu 2.x looks) — the same best-effort model as prepareBios. Kept out of the app repo
 // (copyrighted keys); pulled from a maintained gist when Cemu is set up. Skips paths that already have real
 // keys, and overwrites Cemu's blank placeholder.
-void EmulatorManager::prepareCemuKeys(const QString& binDir)
+// Asynchronous like prepareBios: onDone runs once keys.txt has settled — immediately for non-Cemu emulators
+// or when real keys are already everywhere Cemu looks. The fetch's manager is parented to launchCtx_, so a
+// torn-down launch aborts it and onDone never runs. Must complete before prepareCemuDiscKey (a fetched
+// keys.txt overwrites its targets, which would drop an already-appended disc key).
+void EmulatorManager::prepareCemuKeys(const QString& binDir, const std::function<void()>& onDone)
 {
-    if (em_.id != QStringLiteral("cemu")) return;
+    if (em_.id != QStringLiteral("cemu")) { onDone(); return; }
 
     QStringList targets;
     targets << binDir + QStringLiteral("/keys.txt");
@@ -939,7 +943,7 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
 
     QStringList todo;
     for (const QString& t : targets) if (!cemuKeysPresent(t)) todo << t;
-    if (todo.isEmpty()) return; // real keys already in place wherever Cemu looks
+    if (todo.isEmpty()) { onDone(); return; } // real keys already in place wherever Cemu looks
 
     emit status(tr("Fetching Cemu keys…"), -1);
     QNetworkRequest rq((QUrl(QStringLiteral(
@@ -947,22 +951,24 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir)
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
-    QNetworkReply* reply = nam_->get(rq);
-    QEventLoop loop;
-    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    loop.exec();
-    if (reply->error() == QNetworkReply::NoError)
-    {
-        const QByteArray body = reply->readAll();
-        if (!body.isEmpty())
-            for (const QString& t : todo)
-            {
-                QDir().mkpath(QFileInfo(t).absolutePath());
-                QFile f(t); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
-            }
-    }
-    // On failure, leave it: Cemu will prompt for keys itself, exactly as before.
-    reply->deleteLater();
+    auto* nam = new QNetworkAccessManager(launchCtx_); // dies with the launch context, aborting the transfer
+    QNetworkReply* reply = nam->get(rq);
+    connect(reply, &QNetworkReply::finished, launchCtx_, [nam, reply, todo, onDone] {
+        if (reply->error() == QNetworkReply::NoError)
+        {
+            const QByteArray body = reply->readAll();
+            if (!body.isEmpty())
+                for (const QString& t : todo)
+                {
+                    QDir().mkpath(QFileInfo(t).absolutePath());
+                    QFile f(t); if (f.open(QIODevice::WriteOnly)) { f.write(body); f.close(); }
+                }
+        }
+        // On failure, leave it: Cemu will prompt for keys itself, exactly as before.
+        reply->deleteLater();
+        nam->deleteLater();
+        onDone();
+    });
 }
 
 // A Wii U retail disc image (.wux/.wud) is encrypted with a unique per-disc title key. Scene/No-Intro archives
@@ -1154,10 +1160,11 @@ void EmulatorManager::launch(const QString& binary)
         prepareCemuConfig(binDir);
         prepareControllerConfig(binDir); // after the above wrote the base inis to append to
         prepareAchievements(binDir);     // sync MMV's RetroAchievements login into the emulator
-        prepareCemuKeys(binDir);
-        prepareCemuDiscKey(binDir);
-        restoreSaves(binDir); // seed saves from the central backup if this install has none
-        startGameProcess(program, args, binDir, false);
+        prepareCemuKeys(binDir, [this, program, args, binDir] { // async too (gist fetch, Cemu only)
+            prepareCemuDiscKey(binDir); // appends to the keys.txt the fetch may have just (over)written
+            restoreSaves(binDir); // seed saves from the central backup if this install has none
+            startGameProcess(program, args, binDir, false);
+        });
     });
 }
 
