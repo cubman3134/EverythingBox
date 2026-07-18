@@ -60,7 +60,7 @@ namespace BiosCatalog
         // Sega Saturn (Beetle Saturn / Kronos): JP + US/EU BIOS, both named as the cores expect.
         static const QList<BiosFile> saturn = {
             { QStringLiteral("sega_101.bin"),  retrobios(QStringLiteral("Sega/Saturn/sega_101.bin")),  QStringLiteral("85ec9ca47d8f6807718151cbcca8b964") },  // JP
-            { QStringLiteral("mpr-17933.bin"), retrobios(QStringLiteral("Sega/Saturn/mpr-17933.bin")), QStringLiteral("3240872c70984b6cbfda1586cab68dba") }, // US/EU
+            { QStringLiteral("mpr-17933.bin"), retrobios(QStringLiteral("Sega/Saturn/mpr-17933.bin")), QStringLiteral("3240872c70984b6cbfda1586cab68dbe") }, // US/EU
         };
 
         // Panasonic 3DO (Opera): the FZ-1 BIOS is the common default.
