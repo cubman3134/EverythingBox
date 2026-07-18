@@ -108,7 +108,7 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** `notes.md` trans-02/04/06/08/10 (category swaps) and trans-12 (drill into Recent) — the `a` (at-keypress) and `b` (+200 ms) frames are identical, i.e. the page has fully changed by the keypress frame; no slide/fade between categories.
 **Proposed fix:** short horizontal slide/fade on category change and a subtle push on drill-in, matching the XMB idiom.
 **Cost:** medium
-**Triage:** FIX — user-approved motion pass (short horizontal slide on category change, subtle push on drill).
+**Triage:** FIXED (see report table) — the XMB column now lives in a motion container (`col` in `Xmb.qml`): a category change slides it in from the direction of travel (0.05·width) and a drill in/out pushes it subtly from the right (0.02·width), both with an opacity settle. ONE shared duration: `kUiFadeMs = 150` added to `native/src/ui/FeedbackPolicy.h` (the canonical value), bridged to QML as the ThemeView root's `uiMotionMs` (host-set by MainWindow at XMB build; QML falls back to the same 150). The swap itself stays instant — the new content is in place when the settle starts — and each swap RESTARTS the animation, so rapid key repeats never queue: live rapid-input check (20 category flips in 0.42 s, 20 up/downs at 4.3 ms/key send, state round-trip 0.2–15 ms after the storm, end state exact) shows no added input latency. Paging appends are exempt (first-row identity check) so infinite-scroll doesn't twitch. Evidence: `evidence/J05-before.png` (audit trans pair — a/b frames identical, no intermediate) / `evidence/J05-after.png` (t≈30 ms mid-slide frame beside the settled frame).
 
 ### J06: Error-toast durations are scattered (5000–12000 ms)
 **Category:** feedback

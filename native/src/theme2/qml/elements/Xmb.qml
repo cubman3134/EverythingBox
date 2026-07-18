@@ -40,6 +40,7 @@ Item {
     property real itemScroll: itemIndex
     onCatIndexChanged: catScroll = catIndex
     onItemIndexChanged: itemScroll = itemIndex
+    onItemsChanged: col.kick() // J05: slide/push the column when its content swaps (category change / drill)
     Behavior on catScroll  { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
     Behavior on itemScroll { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
 
@@ -159,6 +160,38 @@ Item {
     }
 
     // ---- vertical column (the bucket's catalogs, or a catalog's items), descending from below the cross ----
+    // The column lives in one full-size container so a content swap can move it as a unit (J05 motion pass):
+    // a short horizontal slide toward the direction of travel on a category change, and a subtler push on a
+    // drill in/out. The swap itself stays instant (the new content is already in place when the animation
+    // starts) and each new swap RESTARTS the settle, so rapid key repeats never queue or add input latency.
+    Item {
+        id: col
+        // Explicit size, NOT anchors.fill: anchors would pin x and silently defeat the slide animation.
+        width: parent.width; height: parent.height
+        // Shared motion duration: host-fed from kUiFadeMs in native/src/ui/FeedbackPolicy.h (the canonical
+        // value, bridged via ThemeView's uiMotionMs); the fallback covers hosts that don't set it.
+        readonly property int motionMs: (xmb.host && xmb.host.uiMotionMs > 0) ? xmb.host.uiMotionMs : 150
+        property int lastCat: xmb.catIndex
+        property string lastKey: ""   // identity of the column's first row: unchanged on paging appends
+        function firstKey() {
+            var f = (xmb.items && xmb.items.length) ? xmb.items[0] : null
+            return f ? ((f.title ? f.title : "") + "|" + (f.navKey ? f.navKey : "")) : ""
+        }
+        function kick() { // called on every items swap (see onItemsChanged on the root)
+            var dir = 0
+            if (xmb.catIndex !== lastCat) { dir = xmb.catIndex > lastCat ? 1 : -1; lastCat = xmb.catIndex }
+            if (!xmb.items || !xmb.items.length) { lastKey = ""; return } // empty while loading: nothing to move
+            var key = firstKey()
+            if (dir === 0 && key === lastKey) return // a paging append (or no real swap): don't disturb it
+            lastKey = key
+            x = dir !== 0 ? dir * xmb.width * 0.05 : xmb.width * 0.02
+            opacity = 0.4
+            slideX.restart(); slideO.restart()
+        }
+        NumberAnimation { id: slideX; target: col; property: "x"; to: 0
+                          duration: col.motionMs; easing.type: Easing.OutCubic }
+        NumberAnimation { id: slideO; target: col; property: "opacity"; to: 1; duration: col.motionMs }
+
     Repeater {
         model: xmb.items
         delegate: Item {
@@ -233,6 +266,7 @@ Item {
             }
         }
     }
+    } // col (the J05 motion container; the Repeater above keeps its pre-wrapper indentation)
 
     // ---- metadata panel for the selected leaf (Triple theme: "all the info beside the item") --------------
     // Fed live by the host (host.selectedMeta) as the column selection moves: a skeleton from the catalog row

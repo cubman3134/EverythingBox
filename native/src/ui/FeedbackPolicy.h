@@ -25,3 +25,8 @@ constexpr int kFeedbackShort    = 2500;  // brief success confirmations (was 250
 constexpr int kFeedbackStandard = 4500;  // default info/confirmation (already the toast default)
 constexpr int kFeedbackLong     = 7000;  // errors that must be read (was 5000–12000)
 constexpr int kFeedbackSticky   = 0;     // in-flight progress; cleared when the op resolves
+
+// UI transition/motion length (fades, slides, pushes) — the Polish Track's single shared duration for
+// visual transitions (Task 5 rule 1). The themed QML shell reads it through the theme host bridge
+// (MainWindow feeds it to the ThemeView root as `uiMotionMs`); this header owns the canonical value.
+constexpr int kUiFadeMs = 150;

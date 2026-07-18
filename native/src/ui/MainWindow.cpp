@@ -2240,6 +2240,7 @@ void MainWindow::showThemedXmb()
     {
         r->setProperty("categories", cats);
         r->setProperty("catIndex", startCat);
+        r->setProperty("uiMotionMs", kUiFadeMs); // J05: XMB motion duration — FeedbackPolicy.h owns the value
     }
     QWidget* old = themedHome_;
     themedHome_ = w;
