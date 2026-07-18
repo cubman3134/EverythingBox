@@ -379,7 +379,11 @@ Item {
         Behavior on opacity { NumberAnimation { duration: 130 } }
         z: 50
         width: xmb.width * 0.26; height: xmb.height * 0.36
-        x: xmb.crossX + xmb.width * 0.11 // a clear gap from the item column instead of hugging it
+        // Anchored BESIDE the metadata panel (right edge = the panel's left edge minus the panel's own 0.02
+        // gap idiom), so it sits over the item-column area and never occludes the panel's title/facts/synopsis
+        // (J02). Every term is a theme/size fraction (meta is pinned at 0.58*width), so the chooser stays
+        // clear of the panel — and fully on-screen (x = 0.30*width) — at any resolution or crossX value.
+        x: meta.x - width - xmb.width * 0.02
         y: xmb.colTop - xmb.itemGap * 0.5
         radius: 12; color: "#EE0E141E"; border.color: "#3A6FB0"; border.width: 2
 
