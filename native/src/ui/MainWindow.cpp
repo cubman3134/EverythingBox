@@ -201,7 +201,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     castMgr_ = new CastManager(this);
     connect(castMgr_, &CastManager::castStarted, this, [this](const QString& name) {
         notify(tr("Casting to %1.").arg(name), 4000); });
-    connect(castMgr_, &CastManager::castError, this, [this](const QString& msg) { notify(msg, 6000); });
+    connect(castMgr_, &CastManager::castError, this, [this](const QString& msg) { notify(msg, kFeedbackLong); });
     connect(castMgr_, &CastManager::castStopped, this, [this] { notify(tr("Stopped casting."), 3000); });
 
     subFetcher_ = new SubtitleFetcher(this);
@@ -384,7 +384,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         notify(tr("My Media Vault %1 is available — Settings ▸ General ▸ Updates to install.").arg(ver), 12000);
     });
     connect(updater_, &AppUpdater::progress, this, [this](const QString& t, int) { notify(t, 0); });
-    connect(updater_, &AppUpdater::applyFailed, this, [this](const QString& why) { notify(why, 8000); });
+    connect(updater_, &AppUpdater::applyFailed, this, [this](const QString& why) { notify(why, kFeedbackLong); });
     if (Settings::checkUpdatesOnStartup())
         QTimer::singleShot(4000, updater_, [this] { updater_->checkForUpdate(); });
 
@@ -1410,7 +1410,7 @@ void MainWindow::showNextSourceFeedback(const QString& msg)
     // Over the player while playing (the status bar may be hidden in full screen); otherwise the status bar
     // (the book/PDF readers keep it visible).
     if (stack_->currentWidget() == playerPage_) notifier_->playerNotice(msg);
-    else                                        statusBar()->showMessage(msg, 6000);
+    else                                        statusBar()->showMessage(msg, kFeedbackLong);
 }
 
 void MainWindow::openFile()
@@ -1522,7 +1522,7 @@ void MainWindow::tryPlayNextEpisode()
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
             [this, nextSeason](const QString& url2, const QString& mime2) {
             if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
-            else { notifier_->hidePlayerNotice(); notify(tr("No next episode found — that looks like the finale."), 6000); }
+            else { notifier_->hidePlayerNotice(); notify(tr("No next episode found — that looks like the finale."), kFeedbackLong); }
         });
     });
 }
@@ -1668,7 +1668,7 @@ void MainWindow::openEmulatorManager()
             auto* dl = new QPushButton(bin.isEmpty() ? tr("Download %1").arg(em.displayName)
                                                      : tr("Re-download / Update %1").arg(em.displayName));
             connect(dl, &QPushButton::clicked, this, [this, emCopy] {
-                if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), 4000); return; }
+                if (launcher_->emulatorBusy()) { statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
                 statusBar()->showMessage(tr("Downloading %1…").arg(emCopy.displayName));
                 launcher_->install(emCopy);
             });
@@ -1796,21 +1796,21 @@ void MainWindow::openDocumentPath(const QString& f)
 
     if (ext == QStringLiteral("pdf"))
     {
-        if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), 6000); return; }
+        if (!pdf_->openPdf(f, &err)) { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(pdf_);
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else if (ext == QStringLiteral("cbz"))
     {
-        if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
+        if (!comic_->openComic(f, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     else // treat everything else as an EPUB (the reader validates and reports if it isn't one)
     {
-        if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
+        if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(book_);
         PerfTrace::end(QStringLiteral("open.reader"), ext);
@@ -2460,7 +2460,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
     const bool isUrl = path.contains(QStringLiteral("://"));
     if (!isUrl && !QFileInfo::exists(path))
     {
-        statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), 5000);
+        statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), kFeedbackLong);
         return;
     }
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
@@ -2491,7 +2491,7 @@ bool MainWindow::parentalUnlock(const QString& reason)
     const QString pin = Osk::getText(reason, QString(), QLineEdit::Password, this); // in-window PIN pad
     if (pin.isNull()) return false; // backed out
     if (Settings::checkParentalPin(pin)) return true;
-    notify(tr("Incorrect PIN."), 3000);
+    notify(tr("Incorrect PIN."), kFeedbackLong);
     return false;
 }
 
@@ -2730,7 +2730,7 @@ void MainWindow::openPcGame(const MediaItem& item)
     auto part = std::make_shared<QFile>(partPath);
     if (!part->open(QIODevice::WriteOnly))
     {
-        notify(tr("Couldn't start downloading “%1”.").arg(item.title), 6000);
+        notify(tr("Couldn't start downloading “%1”.").arg(item.title), kFeedbackLong);
         return;
     }
 
@@ -2779,8 +2779,8 @@ void MainWindow::openPcGame(const MediaItem& item)
         {
             mwLog(QStringLiteral("pcgame: download failed \"%1\": %2").arg(item.title, reply->errorString()));
             const QString e = tr("Couldn't download “%1”: %2").arg(item.title, reply->errorString());
-            statusBar()->showMessage(e, 8000);
-            notify(e, 8000);
+            statusBar()->showMessage(e, kFeedbackLong);
+            notify(e, kFeedbackLong);
             part->remove();
             return;
         }
@@ -2790,8 +2790,8 @@ void MainWindow::openPcGame(const MediaItem& item)
         QFile::remove(dest);
         if (!QFile::rename(partPath, dest))
         {
-            statusBar()->showMessage(tr("Couldn't save “%1”.").arg(item.title), 6000);
-            notify(tr("Couldn't save “%1”.").arg(item.title), 6000);
+            statusBar()->showMessage(tr("Couldn't save “%1”.").arg(item.title), kFeedbackLong);
+            notify(tr("Couldn't save “%1”.").arg(item.title), kFeedbackLong);
             QFile::remove(partPath);
             return;
         }
@@ -2809,8 +2809,8 @@ void MainWindow::openPcGame(const MediaItem& item)
             {
                 mwLog(QStringLiteral("pcgame: extract failed: %1").arg(aerr));
                 const QString e = tr("Couldn't extract “%1”: %2").arg(item.title, aerr);
-                statusBar()->showMessage(e, 8000);
-                notify(e, 8000);
+                statusBar()->showMessage(e, kFeedbackLong);
+                notify(e, kFeedbackLong);
                 RecentStore::add({ dest, item.title, QStringLiteral("game"), item.thumbnailUrl, item.id });
                 QDesktopServices::openUrl(QUrl::fromLocalFile(dir)); // reveal the archive so the user can act
                 return;
@@ -3209,7 +3209,7 @@ void MainWindow::promptLocatePcExe(const QString& id, const QString& title, cons
     if (exe.isEmpty())
     {
         forgetPcGame(id, title);
-        notify(tr("Cancelled — “%1” was removed. Open it again to download and install it.").arg(title), 7000);
+        notify(tr("Cancelled — “%1” was removed. Open it again to download and install it.").arg(title), kFeedbackLong);
         return;
     }
     PcGameStore::setExe(id, exe);
@@ -3222,7 +3222,7 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
 {
     if (tryLaunchInstalledPcGame(id, title, thumb)) return;
     if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath)) { launchPcExe(recordedPath, id, title, thumb); return; }
-    notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), 7000);
+    notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), kFeedbackLong);
 }
 
 void MainWindow::startScrobble(const QString& imdbStreamId)
@@ -3569,7 +3569,7 @@ void MainWindow::showSubtitleMenu()
             subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
                                [this](const QString& srt) {
                 if (!srt.isEmpty()) { player_->addSubtitle(srt); notify(tr("Subtitle added."), 3000); }
-                else notify(tr("No matching subtitle found on OpenSubtitles."), 5000);
+                else notify(tr("No matching subtitle found on OpenSubtitles."), kFeedbackLong);
             });
         });
         rightCol->addWidget(dlBtn);
@@ -3598,7 +3598,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (item.url.isEmpty())
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
-        statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), 4000);
+        statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), kFeedbackLong);
         return;
     }
     // A Steam game: hand it to the Steam client to launch (it handles install/run).
@@ -3697,7 +3697,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
 
     if (type == QStringLiteral("ebook") || lower.endsWith(QStringLiteral(".epub")))
     {
-        if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), 6000); return; }
+        if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
         stack_->setCurrentWidget(book_);
@@ -3721,11 +3721,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             stack_->setCurrentWidget(pdf_);
             recordDocument();
         }
-        else { notify(tr("Can't open PDF: %1").arg(err), 6000); }
+        else { notify(tr("Can't open PDF: %1").arg(err), kFeedbackLong); }
     }
     else if (lower.endsWith(QStringLiteral(".cbz"))) // a downloaded/associated comic archive
     {
-        if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), 6000); return; }
+        if (!comic_->openComic(url, &err)) { notify(tr("Can't open comic: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
         recordDocument();
@@ -3833,21 +3833,21 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
                 QFile::remove(partPath);
                 mwLog(QStringLiteral("download(curl): FAILED \"%1\" (curl exit %2)").arg(title).arg(code));
                 const QString e = tr("Couldn't download “%1” (the source may be down).").arg(title);
-                statusBar()->showMessage(e, 6000); notify(e, 6000);
+                statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
                 return;
             }
             if (QFileInfo(partPath).size() == 0)
             {
                 QFile::remove(partPath);
                 mwLog(QStringLiteral("download(curl): empty (0 bytes) for \"%1\"").arg(title));
-                notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
+                notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
                 return;
             }
             QFile::remove(localPath);
             if (!QFile::rename(partPath, localPath))
             {
                 mwLog(QStringLiteral("download(curl): finalise (rename) failed for \"%1\"").arg(title));
-                notify(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+                notify(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
                 return;
             }
             mwLog(QStringLiteral("download(curl): complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
@@ -3859,7 +3859,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             progress->stop(); p->deleteLater();
             mwLog(QStringLiteral("download(curl): curl failed to start for \"%1\"").arg(title));
             const QString msg = tr("Couldn't download “%1”: curl isn't available.").arg(title);
-            statusBar()->showMessage(msg, 6000); notify(msg, 6000);
+            statusBar()->showMessage(msg, kFeedbackLong); notify(msg, kFeedbackLong);
         });
         p->start(curlExe, { QStringLiteral("-sL"), QStringLiteral("-A"), kUa, QStringLiteral("-e"), referer,
                             QStringLiteral("--fail"), QStringLiteral("-o"), partPath, item.url });
@@ -3882,7 +3882,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     {
         mwLog(QStringLiteral("download: can't open cache file for \"%1\": %2").arg(item.title, part->errorString()));
         const QString e = tr("Couldn't save “%1” to cache.").arg(item.title);
-        statusBar()->showMessage(e, 6000); notify(e, 6000);
+        statusBar()->showMessage(e, kFeedbackLong); notify(e, kFeedbackLong);
         return;
     }
 
@@ -3933,8 +3933,8 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             QFile::remove(partPath);
             mwLog(QStringLiteral("download: FAILED \"%1\": %2").arg(title, reply->errorString()));
             const QString e = tr("Couldn't download “%1”: %2").arg(title, reply->errorString());
-            statusBar()->showMessage(e, 6000);
-            notify(e, 6000);
+            statusBar()->showMessage(e, kFeedbackLong);
+            notify(e, kFeedbackLong);
             return;
         }
         // A transport-level success isn't the whole story: an HTTP 404/403/5xx arrives with NoError but the body
@@ -3945,8 +3945,8 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             QFile::remove(partPath);
             mwLog(QStringLiteral("download: HTTP %1 for \"%2\"").arg(http).arg(title));
             const QString e = tr("Couldn't get “%1” — the source returned HTTP %2 (there may be no copy).").arg(title).arg(http);
-            statusBar()->showMessage(e, 8000);
-            notify(e, 8000);
+            statusBar()->showMessage(e, kFeedbackLong);
+            notify(e, kFeedbackLong);
             return;
         }
         // A dropped connection can finish "cleanly" mid-file. If the server told us the length up front, reject a
@@ -3957,31 +3957,31 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
             QFile::remove(partPath);
             mwLog(QStringLiteral("download: truncated \"%1\" (%2/%3 bytes)").arg(title).arg(QFileInfo(partPath).size()).arg(expected));
             const QString e = tr("The download for “%1” stopped before it finished — please try again.").arg(title);
-            statusBar()->showMessage(e, 8000);
-            notify(e, 8000);
+            statusBar()->showMessage(e, kFeedbackLong);
+            notify(e, kFeedbackLong);
             return;
         }
         if (!writeOk)
         {
             QFile::remove(partPath);
             mwLog(QStringLiteral("download: save failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), 6000);
-            notify(tr("Couldn't save “%1” to cache.").arg(title), 6000);
+            statusBar()->showMessage(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
+            notify(tr("Couldn't save “%1” to cache.").arg(title), kFeedbackLong);
             return;
         }
         if (QFileInfo(partPath).size() == 0) // the source returned nothing (no copy / a dead link) - opening it would just fail
         {
             QFile::remove(partPath);
             mwLog(QStringLiteral("download: empty (0 bytes) for \"%1\"").arg(title));
-            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), 8000);
+            notify(tr("Couldn't get “%1” — the source returned no data (there may be no copy).").arg(title), kFeedbackLong);
             return;
         }
         QFile::remove(localPath);
         if (!QFile::rename(partPath, localPath))
         {
             mwLog(QStringLiteral("download: finalise (rename) failed for \"%1\"").arg(title));
-            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
-            notify(tr("Couldn't finalise the download for “%1”.").arg(title), 6000);
+            statusBar()->showMessage(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
+            notify(tr("Couldn't finalise the download for “%1”.").arg(title), kFeedbackLong);
             return;
         }
         mwLog(QStringLiteral("download: complete \"%1\" (%2 bytes) — opening").arg(title).arg(QFileInfo(localPath).size()));
@@ -4071,7 +4071,7 @@ void MainWindow::enqueueDownload(const MediaItem& item)
 void MainWindow::openImagePages(const QString& title, const QString& key, const QStringList& pageUrls)
 {
     mwLog(QStringLiteral("openImagePages: \"%1\" %2 page url(s)").arg(title).arg(pageUrls.size()));
-    if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), 5000); return; }
+    if (pageUrls.isEmpty()) { statusBar()->showMessage(tr("No pages to read for “%1”.").arg(title), kFeedbackLong); return; }
 
     // Cache the assembled chapter as a CBZ keyed by the chapter id, so re-opening it is instant and the
     // comic reader's path-based resume remembers your page.
@@ -4083,7 +4083,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     auto openCbz = [this, cbzPath, title] {
         QString err;
         if (!comic_->openComic(cbzPath, &err))
-        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), 6000); return; }
+        { mwLog(QStringLiteral("openImagePages: openComic failed: %1").arg(err)); notify(tr("Can't open “%1”: %2").arg(title, err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); book_->persist(); pdf_->persist(); session_->clearQueue();
         stack_->setCurrentWidget(comic_);
         mwLog(QStringLiteral("openImagePages: reader shown"));
@@ -4116,7 +4116,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
             QFile::remove(partPath);
             mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
             if (!mz_zip_writer_init_file(&zip, partPath.toUtf8().constData(), 0))
-            { notify(tr("Couldn't assemble “%1”.").arg(title), 6000); return; }
+            { notify(tr("Couldn't assemble “%1”.").arg(title), kFeedbackLong); return; }
 
             int added = 0;
             for (int p = 0; p < pages->size(); ++p)
@@ -4136,10 +4136,10 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
 
             mwLog(QStringLiteral("openImagePages: packed %1 page(s) into cbz").arg(added));
             if (added == 0)
-            { QFile::remove(partPath); notify(tr("Couldn't download any pages for “%1”.").arg(title), 6000); return; }
+            { QFile::remove(partPath); notify(tr("Couldn't download any pages for “%1”.").arg(title), kFeedbackLong); return; }
             QFile::remove(cbzPath);
             if (!QFile::rename(partPath, cbzPath))
-            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); notify(tr("Couldn't save “%1”.").arg(title), 6000); return; }
+            { mwLog(QStringLiteral("openImagePages: rename to cbz failed")); notify(tr("Couldn't save “%1”.").arg(title), kFeedbackLong); return; }
             statusBar()->clearMessage();
             mwLog(QStringLiteral("openImagePages: opening reader"));
             openCbz();
@@ -4332,7 +4332,7 @@ void MainWindow::performUninstall()
                                 .filePath(QStringLiteral("mmv-uninstall.cmd"));
     QFile cf(cmdPath);
     if (!cf.open(QIODevice::WriteOnly | QIODevice::Text))
-    { notify(tr("Couldn't start the uninstaller."), 6000); return; }
+    { notify(tr("Couldn't start the uninstaller."), kFeedbackLong); return; }
     cf.write(del.toLocal8Bit());
     cf.close();
 
@@ -5099,7 +5099,7 @@ void MainWindow::cloudSyncNow()
     if (!cloud_ || !cloud_->isSignedIn()) return;
     statusBar()->showMessage(tr("Saving to Google Drive…"));
     cloud_->pushLocal([this](bool ok, const QString& m) {
-        statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, 5000);
+        statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
     });
 }
 

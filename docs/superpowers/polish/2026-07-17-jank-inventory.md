@@ -222,6 +222,13 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Cost:** trivial
 **Triage:** FIXED (4574ea3) — after the escape-normalize loop, `run_route` now checks `_state()`: a `themedCategory != "Games"` (or a non-Recent `themedSelection`) appends an "end-state drift" note to `skipped`, which the report surfaces as a loud SKIPPED line. Syntax-checked (`ast.parse`); can't run live here (needs the deployed app + UI drive), verified by inspection.
 
+### J22: Residual raw error-duration sweep in MainWindow.cpp
+**Category:** feedback
+**Evidence:** Task 4's reviewer: error-class feedback sites in `native/src/ui/MainWindow.cpp` still carried raw millisecond literals after the J06–J11 policy migration — `castError` (204, 6000), `applyFailed` (387, 8000), and the dual `showMessage`+`notify` error sites in the download/extract paths (2782/2812/3836/3862/3885/3936/3948/3960, 6000/8000), among others surfaced by an exhaustive `showMessage|notify(` duration grep of the file.
+**Proposed fix:** classify every raw-duration site in MainWindow.cpp honestly and route the error-class ones through `kFeedbackLong` (FeedbackPolicy.h, already included); leave sticky/progress literals and non-error sites alone.
+**Cost:** small
+**Triage:** FIXED (see report table) — all 46 error-class sites (50 literals) now use `kFeedbackLong`: cast/update-apply errors (204/387), next-source failure feedback (1413 — mixed channel: it also carries the "Finding another source…" progress line, but the must-read failure class sets the duration), "no next episode" (1525), emulator-busy rejection (1671), reader/document open failures (1799/1806/1813/3700/3724/3728/4086), missing file (2463), incorrect PIN (2494), download/save/extract failure sites incl. every dual showMessage+notify pair (2733/2782–2813/3836–3984), PC-game cancel/relaunch failures (3212/3225 — were already 7000, now named), no-subtitle-found (3572), no-playable-file (3601), manga assembly/download/save failures (4074/4119/4139/4142), uninstaller start failure (4335). One mixed site split by outcome: Google Drive push result (5102) → `ok ? kFeedbackShort : kFeedbackLong` (success confirmation vs error). Deliberately untouched (honest classification, non-error): success confirmations (203/205/262/2843/3339/3571/4065/4861/5039/5271), progress/launch notices (2860/2924/3070/3608 + all sticky `0` literals), ambient status (630/753), the update-available info notice (384, 12000 — informational must-read, not an error; left for a future policy call), and `plan.errorMs` (1562, already policy-fed via CorePlan since J06).
+
 ---
 
 ## Verified non-issues (recorded, not items)
