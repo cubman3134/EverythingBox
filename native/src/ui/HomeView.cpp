@@ -3815,7 +3815,7 @@ void HomeView::pumpThumbnails()
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;
-        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl, url, cacheKey] {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, w, gen, itemUrl, cacheKey] {
             reply->deleteLater();
             --thumbActive_;
             if (thumbQueue_.isEmpty() && thumbActive_ == 0)
@@ -3829,7 +3829,8 @@ void HomeView::pumpThumbnails()
                     // Persist this poster so displayImage() serves it locally next visit (no re-fetch on
                     // Back / relaunch). Cheap + idempotent; a no-op once the role is cached. Cached even if
                     // we've navigated away — the bytes are valid for this key regardless of the live view.
-                    MetaCache::storeImage(cacheKey, QStringLiteral("thumb"), url,
+                    // Post-redirect url so the extension guess sees the real file name (same as cacheImage).
+                    MetaCache::storeImage(cacheKey, QStringLiteral("thumb"), reply->url().toString(),
                                           reply->header(QNetworkRequest::ContentTypeHeader).toString(), data);
                     if (gen == generation_) // still the same view: paint it (else just kept for the cache)
                         w->setIcon(iconWithProgress(pm.scaled(kPoster, Qt::KeepAspectRatio, Qt::SmoothTransformation),
