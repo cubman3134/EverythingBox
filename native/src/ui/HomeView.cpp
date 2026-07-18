@@ -1450,7 +1450,7 @@ void HomeView::startSearch(const QString& query)
     PerfTrace::begin(QStringLiteral("search.drain"));
     loading_ = agg_->active();
     populate(agg_->accumulated(), /*append*/ false); // clears the grid, shows the (empty) searching state
-    if (!agg_->active()) showToast(tr("No add-ons to search."), 4000);
+    if (!agg_->active()) showToast(tr("No add-ons to search."), kFeedbackLong);
     updateStatus();
 }
 
@@ -1557,7 +1557,7 @@ void HomeView::createPlaylistInteractive(const QString& catalogKey)
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
-    if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), 3500); return; }
+    if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
     const QString key = currentCatalogKey();
     QVector<Playlist> pls = PlaylistStore::forCatalog(key);
     QStringList opts;
@@ -2118,7 +2118,7 @@ void HomeView::requestNextSource()
 void HomeView::startDownload()
 {
     if (stack_.isEmpty() || !stack_.last().detail) return;
-    if (dlBusy_) { showToast(tr("A download is already being prepared…"), 4000); return; }
+    if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
     const Level& top = stack_.last();
     DlNode root;
     root.addon = top.addon;
@@ -2139,8 +2139,11 @@ void HomeView::dlNext()
     if (dlQueue_.isEmpty())
     {
         dlBusy_ = false;
+        // Mixed outcome: a success confirmation vs. an error. Classify by outcome (mirrors J22's
+        // Google-Drive split): the crawl-came-up-empty branch is error-class and must be read.
         showToast(dlQueued_ > 0 ? tr("Queued %1 item(s) to download — they’ll appear in Recent.").arg(dlQueued_)
-                                : tr("Nothing here could be downloaded."), 6000);
+                                : tr("Nothing here could be downloaded."),
+                  dlQueued_ > 0 ? kFeedbackShort : kFeedbackLong);
         return;
     }
     const DlNode node = dlQueue_.takeFirst();
@@ -2423,7 +2426,7 @@ void HomeView::openFavorite(const MediaItem& favItem)
         if (s->manifest.id == addonId) { addon = s; break; }
     if (!addon)
     {
-        showToast(tr("That favourite's source addon isn't available."), 6000);
+        showToast(tr("That favourite's source addon isn't available."), kFeedbackLong);
         return;
     }
 
@@ -2618,7 +2621,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (playBtn_) playBtn_->setEnabled(true);
             if (pages.isEmpty())
                 showToast(tr("No readable pages for “%1”. Licensed/official English chapters "
-                             "aren't hosted here — try another chapter or title.").arg(title), 7000);
+                             "aren't hosted here — try another chapter or title.").arg(title), kFeedbackLong);
             else { hideToast(); emit openImagePages(title, key, pages); }
         });
         return;
@@ -2703,7 +2706,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     if (playBtn_) playBtn_->setEnabled(true);
                     showToast(tr("“%1” isn't ready yet — the file provider may still be caching it (large or "
                                  "less-common titles take a while). Try again in a few minutes; if it never "
-                                 "appears, there may be no copy.").arg(title), 10000);
+                                 "appears, there may be no copy.").arg(title), kFeedbackLong);
                     return;
                 }
                 // this name was a plain "no match" — fall through to the next-ranked name
@@ -2747,7 +2750,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                     showToast(notice, kFeedbackLong);
                 else if (fileProvider)
                     showToast(tr("“%1” isn't ready yet — the source may still be caching. Try again in a few "
-                                 "minutes; if it never appears, there may be no copy.").arg(it.title), 10000);
+                                 "minutes; if it never appears, there may be no copy.").arg(it.title), kFeedbackLong);
                 else
                     showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), kFeedbackLong);
             }
@@ -2764,11 +2767,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (playBtn_) playBtn_->setEnabled(true);
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
-                              "(check that Allarr is configured and returning results).").arg(it.title), 7000);
+                              "(check that Allarr is configured and returning results).").arg(it.title), kFeedbackLong);
         });
         return;
     }
-    showToast(tr("Nothing to play for “%1”.").arg(it.title), 5000);
+    showToast(tr("Nothing to play for “%1”.").arg(it.title), kFeedbackLong);
 }
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
@@ -3028,7 +3031,7 @@ void HomeView::downloadThemedLeaf(int idx)
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
     const MediaItem it = items_[browseRowMap_[idx]];
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("“%1” is already saved.").arg(it.title), 4000); return; }
-    if (dlBusy_) { showToast(tr("A download is already being prepared…"), 4000); return; }
+    if (dlBusy_) { showToast(tr("A download is already being prepared…"), kFeedbackLong); return; }
 
     DlNode node;
     node.addon = stack_.last().addon;

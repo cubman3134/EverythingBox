@@ -227,7 +227,14 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 **Evidence:** Task 4's reviewer: error-class feedback sites in `native/src/ui/MainWindow.cpp` still carried raw millisecond literals after the J06–J11 policy migration — `castError` (204, 6000), `applyFailed` (387, 8000), and the dual `showMessage`+`notify` error sites in the download/extract paths (2782/2812/3836/3862/3885/3936/3948/3960, 6000/8000), among others surfaced by an exhaustive `showMessage|notify(` duration grep of the file.
 **Proposed fix:** classify every raw-duration site in MainWindow.cpp honestly and route the error-class ones through `kFeedbackLong` (FeedbackPolicy.h, already included); leave sticky/progress literals and non-error sites alone.
 **Cost:** small
-**Triage:** FIXED (see report table) — all 46 error-class sites (50 literals) now use `kFeedbackLong`: cast/update-apply errors (204/387), next-source failure feedback (1413 — mixed channel: it also carries the "Finding another source…" progress line, but the must-read failure class sets the duration), "no next episode" (1525), emulator-busy rejection (1671), reader/document open failures (1799/1806/1813/3700/3724/3728/4086), missing file (2463), incorrect PIN (2494), download/save/extract failure sites incl. every dual showMessage+notify pair (2733/2782–2813/3836–3984), PC-game cancel/relaunch failures (3212/3225 — were already 7000, now named), no-subtitle-found (3572), no-playable-file (3601), manga assembly/download/save failures (4074/4119/4139/4142), uninstaller start failure (4335). One mixed site split by outcome: Google Drive push result (5102) → `ok ? kFeedbackShort : kFeedbackLong` (success confirmation vs error). Deliberately untouched (honest classification, non-error): success confirmations (203/205/262/2843/3339/3571/4065/4861/5039/5271), progress/launch notices (2860/2924/3070/3608 + all sticky `0` literals), ambient status (630/753), the update-available info notice (384, 12000 — informational must-read, not an error; left for a future policy call), and `plan.errorMs` (1562, already policy-fed via CorePlan since J06).
+**Triage:** FIXED (see report table) — all 46 error-class sites (50 literals) now use `kFeedbackLong`: cast/update-apply errors (204/387), next-source failure feedback (1413 — mixed channel: it also carries the "Finding another source…" progress line, but the must-read failure class sets the duration), "no next episode" (1525), emulator-busy rejection (1671), reader/document open failures (1799/1806/1813/3700/3724/3728/4086), missing file (2463), incorrect PIN (2494), download/save/extract failure sites incl. every dual showMessage+notify pair (2733/2782–2813/3836–3984), PC-game cancel/relaunch failures (3212/3225 — were already 7000, now named), no-subtitle-found (3572), no-playable-file (3601), manga assembly/download/save failures (4074/4119/4139/4142), uninstaller start failure (4335). One mixed site split by outcome: Google Drive push result (5102) → `ok ? kFeedbackShort : kFeedbackLong` (success confirmation vs error). Deliberately untouched (honest classification, non-error): success confirmations (203/205/262/2843/3339/3571/4065/4861/5039/5271), progress/launch notices (2860/2924/3070/3608 + all sticky `0` literals), ambient status (630/753), the update-available info notice (384, 12000 — informational must-read, not an error; left for a future policy call), and `plan.errorMs` (1562, already policy-fed via CorePlan since J06). **Residual closed in the close-out commit:** the one literal outside MainWindow.cpp that this sweep's reviewer chain surfaced — `HomeView.cpp:2143`, the dual-outcome `dlNext()` result toast — carried a raw `6000` J06 missed. Classified by outcome (mirrors the 5102 Google-Drive split): success "Queued N item(s)…" → `kFeedbackShort`, error "Nothing here could be downloaded." → `kFeedbackLong`. Honest scope note: a close-out re-grep of HomeView.cpp found three *further* error-class raw literals J06's HomeView sweep also missed (2429 `6000`, 2770 `7000`, 2774 `5000`) — outside loose-end #1's flagged line, recorded as a Follow-up candidate rather than folded in silently. That follow-up is now closed by **J23** (the exhaustive HomeView re-sweep).
+
+### J23: Residual raw error-duration sweep in HomeView.cpp (dlNext dual toast + full re-grep)
+**Category:** feedback
+**Evidence:** `HomeView.cpp:2143` — the dual-outcome `dlNext()` completion toast still carried a raw `6000` for BOTH outcomes ("Queued N item(s)…" success vs "Nothing here could be downloaded." error) after the J06/J22 sweeps. A full re-grep of HomeView.cpp (including continuation-line durations, which single-line greps miss) surfaced nine more error-class raw literals: 1453 ("No add-ons to search.", 4000), 1560 (wrong-level playlist rejection, 3500), 2121/3034 ("A download is already being prepared…" busy rejections, 4000 — J22's MainWindow:1671 emulator-busy precedent classifies busy rejections as error-class), 2429 ("favourite's source addon isn't available", 6000), 2624 ("No readable pages…", 7000 — right value, unnamed), 2709/2753 (the two "isn't ready yet — still caching" play failures, 10000), 2770 ("No sources found…", 7000), 2774 ("Nothing to play…", 5000).
+**Proposed fix:** split the dual site by outcome (mirrors J22's Google-Drive 5102 split) and route every error-class literal through `kFeedbackLong` (FeedbackPolicy.h, already included); leave sticky/progress literals and non-error sites alone.
+**Cost:** small
+**Triage:** FIXED (this commit) — `dlNext()` result toast split by outcome: `dlQueued_ > 0 ? kFeedbackShort : kFeedbackLong` (success confirmation vs must-read error); all nine error-class literals above → `kFeedbackLong`. Deliberately untouched (honest classification, non-error): 3033 ("“%1” is already saved.", 4000 — informational reassurance, the item IS saved; nearest class is Standard, left for a policy call like J22's update-available notice), 2617 ("Loading “%1”…", 20000 — progress with a safety timeout, not sticky-0 by design: the resolve callback may never fire), every sticky `0` progress literal (2083/2132/2666/2739/2764/3019/3050), and the `showToast` definition's `4500` default arg (it IS `kFeedbackStandard`'s value — the policy default). HomeView.cpp now has no raw non-zero feedback duration outside those named calls.
 
 ---
 
@@ -252,3 +259,42 @@ its class become the `feedback` items below (J06–J08, J10, J11).
 - `empty-playlists-only-newrow.png` — J14
 
 Full 79-shot set + `notes.md` remain scratch under `.superpowers/polish-audit/` (not committed).
+
+## Follow-up candidates
+
+Non-blocking items surfaced *during* the polish track but deliberately left outside its scope
+(each would be its own small task; none gate "phase 2 complete"). Recorded here so they aren't lost.
+
+- **(a) NavMenu overlap on the installed-game leaf detail.** J02 fixed the themed XMB *inline
+  action chooser* (QML, `Xmb.qml`). But an **installed** game leaf (e.g. Kirby / Jurassic Park
+  reached via Recent) opens the C++ nav-kit **`NavMenu`** instead, which *also* overlaps the detail
+  panel (`.superpowers/polish-audit/j02-before-raw.png`). J02's triage explicitly named only the QML
+  chooser, so the NavMenu case is untouched. Fix lives in the C++ nav kit (`src/ui/nav/NavMenu`),
+  not `Xmb.qml` — different element, out of J02's QML scope.
+- **(b) Async-loaded categories take the drill-push, not the directional slide.** In `Xmb.qml`'s
+  `col.kick()` (J05 motion), a category change sets `dir` from `catIndex vs lastCat`. But when a
+  category's items load **asynchronously**, the first `onItemsChanged` fires while `xmb.items` is
+  empty — the early-return at the empty-guard (`if (!xmb.items.length) { lastKey=""; return }`) runs
+  *after* `lastCat` was already advanced, so when the real items arrive `catIndex === lastCat` →
+  `dir = 0` → the item takes the subtle drill push (`0.02·width`) instead of the directional category
+  slide (`0.05·width`). Purely cosmetic (motion flavor on slow-loading rails); the swap itself is
+  correct. Fix would carry a "pending direction" across the empty-load early-return.
+- **(c) UiTestServer sibling UAF hazard (harness-only).** The crash fix (`9109d7c`) guards the
+  suspended readyRead frame against a freed **client socket** (`QPointer<QLocalSocket>`). The
+  narrower sibling — `UiTestServer` (`this`/`hooks_`) itself being destroyed (Settings ▸ Debug
+  toggle) while a command is suspended in a blocking OSK prompt — is untouched; it would need a
+  `QPointer` on `this` too. Harness-only, and the channel's design already precludes a human toggling
+  Settings mid-automation, so it was left. See `polish-crash-report.md` Concerns.
+- **(d) In-inventory `FIXED (<hash>)` refs are not exactly traceable.** Each item's inventory flip was
+  written into the *same* commit as its fix, so the in-file short hash points at the pre-amend commit
+  object (self-reference can't be exact), and the three final-batch items read `FIXED (see report
+  table)` rather than a hash. The **authoritative** hashes live in the task reports:
+  `polish-task-4-report.md` (J06–J21 table), `polish-task-5-report.md` (J02 `2cac77a` / J22 `1ac1e84`
+  / J05 `cb975a1`), `polish-crash-report.md` (J01 `9109d7c`). A future pass could rewrite the in-file
+  refs to the settled branch hashes.
+- **(e) HomeView error-class literals J06's sweep missed (beyond loose-end #1's 2143).** CLOSED by
+  **J23** — the full HomeView re-sweep this entry called for. The three flagged literals (2429/2770/
+  2774) plus six more error-class sites (1453/1560/2121/2624/2709/2753/3034 — per-class triage
+  reclassified the busy/guard rejections as error-class, following J22's MainWindow:1671 precedent)
+  now use `kFeedbackLong`; 2617 (progress-with-timeout) and 3033 (informational reassurance) were
+  triaged non-error and left, as recorded in J23's triage.
