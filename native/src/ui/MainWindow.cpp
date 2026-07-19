@@ -1132,15 +1132,21 @@ void MainWindow::updateUiTestServer()
 
     // Black-frame watchdog (debug-gated, same conditions as the UI-test channel): catch + self-heal the
     // intermittent all-black app state and name where it came from.
-    //   sampler — MainWindow::grab() scaled to 64x36. grab() drives the widgets through the software backend,
-    //             so it renders the true frame even when the window is occluded (the uitest screenshot trick).
+    //   sampler — the CURRENT THEMED PAGE's grab() scaled to 64x36. QWidget::grab() drives the widget through
+    //             the software backend, so it renders the true frame even when the window is occluded (the
+    //             uitest screenshot trick). Sampling only the themed QQuickWidget — the ONE surface that
+    //             actually goes black — instead of rendering the whole ~1.8MP widget tree keeps the 1 Hz cost
+    //             trivial (the Settings ▸ Debug toggle makes this a long-term telemetry path). Off the themed
+    //             pages (classic panels etc.) fall back to the full-window grab.
     //   skip    — the contexts where an (all-)black grab is EXPECTED and must not trip the watchdog:
     //             * inContent_  — a game / video / e-reader / the emulator wait-page (see the currentChanged
     //               handler; emuPage_ + retro_ are the launch-handoff pages, so inContent_ IS that window);
     //             * minimised   — handed off to a standalone emulator (window down, nothing of ours to render);
     //             * escMenu     — the pause overlay is opening/animating over content.
     auto sampler = [this]() -> QImage {
-        return grab().scaled(64, 36, Qt::IgnoreAspectRatio, Qt::FastTransformation).toImage();
+        QWidget* cur = stack_ ? stack_->currentWidget() : nullptr;
+        QWidget* src = (cur && (cur == themedHome_ || cur == themedBrowse_)) ? cur : this;
+        return src->grab().scaled(64, 36, Qt::IgnoreAspectRatio, Qt::FastTransformation).toImage();
     };
     auto skip = [this]() -> bool {
         return inContent_ || isMinimized() || escMenuVisible();
