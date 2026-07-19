@@ -35,7 +35,12 @@ Rejected: fix-list (patches can't deliver "never"); pure-QML FocusScope rewrite
   back stack for its screen scope.
 - QML elements register via an attached/declared `NavItem` (navId, geometry or
   row/column, onActivate, flags such as `editable`); registration is REQUIRED — an
-  interactive element that isn't registered is a CI failure (the harness walks the
+  interactive element that isn't registered is a CI failure. (Shipped adaptation, per
+  the Status line: subsystem A registers ZONES — Repeater-driven rows are zone members —
+  and the per-element `NavItem` attached API plus the scene-walking harness land with
+  subsystem B, whose surfaces are persistent elements. B's QML-vs-C++ registration rule:
+  QML self-registers leaf zones only (registerZoneQml); graph SHAPES — axis, edges,
+  default zone — are C++ builders per the NavThemeGraph.h pattern.) (the harness walks the
   scene; B's migration rule enforces it per-surface).
 - **Invariant 1 (selection never lost):** `selectedId` always names a live registered
   element. On removal/rebuild of the selected element, selection deterministically
