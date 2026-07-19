@@ -283,11 +283,21 @@ if(MYMEDIAVAULT_BUILD_APP)
 
     # Headless test for NavGraph (the pure selection model + back stack — no QML, no widgets). Proves the
     # "selection is never null" churn invariants, divider snapping, spatial move() reachability, and the
-    # LIFO back stack under the offscreen QPA.
+    # LIFO back stack under the offscreen QPA. When QML is available it ALSO instantiates the themed input
+    # components (ThemedTextField/ThemedChoice) in an offscreen QQuickWidget with a REAL NavGraph as the `nav`
+    # context property, and asserts the two-state contract (register / select / edit / commit / cancel).
     add_executable(probe_navqml tools/probe_navqml.cpp
         src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h)
-    target_include_directories(probe_navqml PRIVATE src src/ui)
+    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
+    if(MMV_HAVE_QML)
+        # Compile theme2.qrc explicitly for this probe too (a target_sources-added .qrc silently no-ops — see
+        # the app target's note above), so qrc:/theme2/elements/ThemedTextField.qml is embedded and loadable.
+        qt_add_resources(MMV_THEME2_RCC_NAVQML resources/theme2.qrc)
+        target_sources(probe_navqml PRIVATE ${MMV_THEME2_RCC_NAVQML})
+        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
+        target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
+    endif()
 
     # Headless test for the Notifier overlay (the single user-feedback channel).
     add_executable(probe_notifier tools/probe_notifier.cpp

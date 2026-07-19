@@ -33,6 +33,11 @@ void NavGraph::registerZone(const QString& id, int count, int row, int col, Qt::
     }
 }
 
+void NavGraph::registerZoneQml(const QString& id, int count, int row, int col)
+{
+    registerZone(id, count, row, col, Qt::Horizontal, false);
+}
+
 void NavGraph::setZoneCount(const QString& id, int count)
 {
     auto it = m_zones.find(id);

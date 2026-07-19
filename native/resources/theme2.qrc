@@ -19,5 +19,7 @@
     <file alias="elements/Channels.qml">../src/theme2/qml/elements/Channels.qml</file>
     <file alias="elements/Clock.qml">../src/theme2/qml/elements/Clock.qml</file>
     <file alias="elements/NowPlaying.qml">../src/theme2/qml/elements/NowPlaying.qml</file>
+    <file alias="elements/ThemedTextField.qml">../src/theme2/qml/elements/ThemedTextField.qml</file>
+    <file alias="elements/ThemedChoice.qml">../src/theme2/qml/elements/ThemedChoice.qml</file>
   </qresource>
 </RCC>

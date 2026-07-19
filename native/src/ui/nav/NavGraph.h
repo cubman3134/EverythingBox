@@ -60,6 +60,10 @@ public:
     // `axis` is the direction the strip's index runs (Vertical = an XMB item column).
     void registerZone(const QString& id, int count, int row, int col,
                       Qt::Orientation axis = Qt::Horizontal, bool wraps = false);
+    // QML-facing overload: Qt::Orientation doesn't marshal cleanly from QML, so the themed elements call this
+    // (axis defaults to Horizontal — a 1-count input field has no meaningful strip axis). The C++ registerZone
+    // above is untouched. This is the registration path the QML input components use on Component.onCompleted.
+    Q_INVOKABLE void registerZoneQml(const QString& id, int count, int row, int col);
     Q_INVOKABLE void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
     void removeZone(const QString& id);                // refusing no-op on the last remaining zone
     void setDefaultZone(const QString& id);

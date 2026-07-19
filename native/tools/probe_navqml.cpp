@@ -15,15 +15,35 @@
 //     pushLevel() and a popLevel() issued from inside an onPop callback (no re-push/cascade loops).
 //
 // Prints NAVQML-OK on success; any failure prints NAVQML-FAIL <what> and exits non-zero.
+//
+// When the QML theme engine is present (MMV_HAVE_QML) this ALSO proves the two-state themed input contract:
+// it instantiates the real ThemedTextField / ThemedChoice components (loaded from the theme2 qrc) in an
+// offscreen QQuickWidget with a REAL NavGraph exposed as the `nav` context property — exactly the wiring
+// subsystem B will use — and asserts register / select / edit / commit / cancel and the "arrows stay in the
+// field while editing" invariant, driving real key events through the QML focus system.
 #include "nav/NavGraph.h"
 
-#include <QGuiApplication>
 #include <QSet>
 #include <cstdio>
 #include <deque>
 #include <random>
 #include <set>
 #include <vector>
+
+#ifdef MMV_HAVE_QML
+#include <QApplication>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickItem>
+#include <QQuickWidget>
+#include <QQuickWindow>
+#include <QKeyEvent>
+#include <QQmlError>
+#include <QSGRendererInterface>
+#else
+#include <QGuiApplication>
+#endif
 
 static int failures = 0;
 #define CHECK(cond, what) do { \
@@ -32,10 +52,158 @@ static int failures = 0;
 
 static void pump() { if (QCoreApplication::instance()) { QCoreApplication::processEvents(); } }
 
+#ifdef MMV_HAVE_QML
+// Deliver a real key press+release to the QQuickWidget's offscreen window; it routes to the active-focus QML
+// item (the host's Keys handler when nothing is editing, or the TextInput/FocusScope while a field is edited).
+static void sendKey(QQuickWindow* win, int key)
+{
+    QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+    QKeyEvent release(QEvent::KeyRelease, key, Qt::NoModifier);
+    QCoreApplication::sendEvent(win, &press);
+    QCoreApplication::sendEvent(win, &release);
+    QCoreApplication::processEvents();
+}
+
+// The two-state themed-input contract, proven end to end against a real NavGraph + the qrc-embedded components.
+static void runThemedInputAsserts()
+{
+    // A host FocusScope that mimics subsystem B's key router: arrows -> nav.move, Enter -> nav.activate. The
+    // themed inputs sit inside it and self-register their zones; when one is EDITING it holds focus and
+    // swallows the arrows, so the host's router never sees them (the invariant we assert below).
+    const char* qml =
+        "import QtQuick\n"
+        "import \"elements\" as El\n"
+        "FocusScope {\n"
+        "    id: host\n"
+        "    focus: true; width: 400; height: 300\n"
+        "    property string lastCommit: \"\"\n"
+        "    property int commitCount: 0\n"
+        "    property int editReqCount: 0\n"
+        "    property int chosenIndex: -1\n"
+        "    property int chosenCount: 0\n"
+        "    Keys.onPressed: (event) => {\n"
+        "        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right\n"
+        "            || event.key === Qt.Key_Up || event.key === Qt.Key_Down) { nav.move(event.key); event.accepted = true }\n"
+        "        else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) { nav.activate(); event.accepted = true }\n"
+        "    }\n"
+        "    Column {\n"
+        "        anchors.fill: parent\n"
+        "        El.ThemedTextField { objectName: \"tf\"; navZone: \"field1\"; navRow: 0; navCol: 0; placeholder: \"name\"\n"
+        "            onCommitted: (t) => { host.lastCommit = t; host.commitCount++ }\n"
+        "            onEditRequested: (z) => host.editReqCount++ }\n"
+        "        El.ThemedChoice { objectName: \"tc\"; navZone: \"choice1\"; navRow: 1; navCol: 0; options: [\"Alpha\", \"Beta\", \"Gamma\"]\n"
+        "            onChosen: (i) => { host.chosenIndex = i; host.chosenCount++ } }\n"
+        "    }\n"
+        "}\n";
+
+    NavGraph graph;   // the REAL selection model, exposed as `nav` (exactly ThemeEngine's context-property path)
+    QQuickWidget qw;
+    qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+    qw.rootContext()->setContextProperty(QStringLiteral("nav"), &graph);
+
+    QQmlComponent comp(qw.engine());
+    comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/theme2/probe_host.qml")));
+    if (comp.isError()) {
+        for (const QQmlError& e : comp.errors()) std::fprintf(stderr, "NAVQML-FAIL host QML: %s\n", e.toString().toUtf8().constData());
+        ++failures; return;
+    }
+    QObject* rootObj = comp.create(qw.rootContext());
+    QQuickItem* host = qobject_cast<QQuickItem*>(rootObj);
+    CHECK(host != nullptr, "the host QML instantiates (components resolved from the qrc)");
+    if (!host) return;
+    qw.setContent(QUrl(QStringLiteral("qrc:/theme2/probe_host.qml")), &comp, host);
+    qw.resize(400, 300);
+    qw.show();
+    pump();
+
+    QQuickWindow* win = qw.quickWindow();
+    QQuickItem* tf = host->findChild<QQuickItem*>(QStringLiteral("tf"));
+    QQuickItem* tc = host->findChild<QQuickItem*>(QStringLiteral("tc"));
+    CHECK(tf && tc, "both themed inputs are present in the scene");
+    if (!tf || !tc) return;
+    QQuickItem* input = tf->findChild<QQuickItem*>(QStringLiteral("tfInput"));
+    CHECK(input != nullptr, "the text field's inline TextInput exists");
+
+    // ---- 1. each component self-registered its zone on completion ----
+    // (A selection already exists — completion adopted the first zone — so the model is never null. select()
+    // refuses an UNregistered zone, so landing on each id proves that id was registered on Component.onCompleted.)
+    CHECK(!graph.zone().isEmpty(), "completion registered a zone (the selection is never null)");
+    graph.select(QStringLiteral("field1"), 0);
+    CHECK(graph.zone() == QStringLiteral("field1"), "field1 registered on completion (select lands on it)");
+    graph.select(QStringLiteral("choice1"), 0);
+    CHECK(graph.zone() == QStringLiteral("choice1"), "choice1 registered on completion (select lands on it)");
+    graph.select(QStringLiteral("field1"), 0);
+
+    // ---- 2. positive control: an arrow moves the selection (proves key routing to the host works) ----
+    host->forceActiveFocus();
+    pump();
+    sendKey(win, Qt::Key_Down);
+    CHECK(graph.zone() == QStringLiteral("choice1"), "Down moves the selection field1 -> choice1 (host router runs)");
+    graph.select(QStringLiteral("field1"), 0);
+    pump();
+
+    // ---- 3. activate enters editing (the host answers Enter with nav.activate) ----
+    CHECK(!tf->property("editing").toBool(), "the field is not editing before activation");
+    graph.activate();
+    pump();
+    CHECK(tf->property("editing").toBool(), "activating the field's zone enters the editing state");
+    CHECK(host->property("editReqCount").toInt() == 1, "entering editing emits editRequested(navZone) once (host may divert to OSK)");
+    CHECK(input && input->property("activeFocus").toBool(), "the inline TextInput grabbed focus (keys now land in the field)");
+
+    // ---- 4. while editing, arrows do NOT move the selection (they stay in the field) ----
+    sendKey(win, Qt::Key_Down);
+    CHECK(graph.zone() == QStringLiteral("field1"), "Down while editing does NOT move the selection (field swallows it)");
+    sendKey(win, Qt::Key_Left);
+    CHECK(graph.zone() == QStringLiteral("field1"), "Left while editing does NOT move the selection either");
+
+    // ---- 5. Escape returns to selected WITHOUT committing ----
+    const int commitsBeforeEsc = host->property("commitCount").toInt();
+    sendKey(win, Qt::Key_Escape);
+    CHECK(!tf->property("editing").toBool(), "Escape leaves the editing state");
+    CHECK(host->property("commitCount").toInt() == commitsBeforeEsc, "Escape commits nothing");
+    CHECK(graph.zone() == QStringLiteral("field1"), "Escape returns to the selected field");
+
+    // ---- 6. Enter commits exactly once with the entered value ----
+    graph.select(QStringLiteral("field1"), 0);
+    graph.activate();                                    // re-enter editing
+    pump();
+    CHECK(tf->property("editing").toBool(), "re-activation re-enters editing");
+    if (input) input->setProperty("text", QStringLiteral("Zelda"));   // "type" a value into the field
+    const int commitsBeforeEnter = host->property("commitCount").toInt();
+    sendKey(win, Qt::Key_Return);
+    CHECK(!tf->property("editing").toBool(), "Enter leaves the editing state");
+    CHECK(host->property("commitCount").toInt() == commitsBeforeEnter + 1, "Enter commits EXACTLY once");
+    CHECK(host->property("lastCommit").toString() == QStringLiteral("Zelda"), "the commit carries the entered value");
+    CHECK(tf->property("text").toString() == QStringLiteral("Zelda"), "the committed value is written back to the field's text");
+    CHECK(graph.zone() == QStringLiteral("field1"), "committing returns to the selected field");
+
+    // ---- 7. ThemedChoice: activate -> edit, arrow moves the pending option, Enter chooses once ----
+    graph.select(QStringLiteral("choice1"), 0);
+    graph.activate();
+    pump();
+    CHECK(tc->property("editing").toBool(), "activating the choice's zone opens its option list (editing)");
+    CHECK(tc->property("pending").toInt() == tc->property("currentOption").toInt(), "the pending highlight starts on the current option");
+    sendKey(win, Qt::Key_Down);
+    CHECK(tc->property("pending").toInt() == 1, "Down moves the PENDING option, not the nav selection");
+    CHECK(graph.zone() == QStringLiteral("choice1"), "…and the nav selection stays on the choice while editing");
+    sendKey(win, Qt::Key_Return);
+    CHECK(!tc->property("editing").toBool(), "Enter closes the choice list");
+    CHECK(host->property("chosenCount").toInt() == 1, "Enter fires chosen() exactly once");
+    CHECK(host->property("chosenIndex").toInt() == 1, "chosen() carries the picked option index");
+    CHECK(tc->property("currentOption").toInt() == 1, "the picked option becomes current");
+}
+#endif // MMV_HAVE_QML
+
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");   // the runner loop invokes us without a -platform arg
+#ifdef MMV_HAVE_QML
+    qputenv("QT_QUICK_BACKEND", "software");    // no GPU under the offscreen QPA — match the app's software backend
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    QApplication app(argc, argv);               // QQuickWidget needs the widget app
+#else
     QGuiApplication app(argc, argv);
+#endif
 
     // ---------------------------------------------------------------- 1. selection valid on first zone
     {
@@ -510,6 +678,12 @@ int main(int argc, char** argv)
         CHECK(g.levelDepth() == 0, "the re-entrant popLevelSilent inside onPop was ignored (guarded)");
         CHECK(!g.isPopping(), "isPopping() is false once the pop completes");
     }
+
+#ifdef MMV_HAVE_QML
+    // ---------------------------------------------------------------- 14. two-state themed inputs (the real
+    // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).
+    runThemedInputAsserts();
+#endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAVQML-OK\n");
