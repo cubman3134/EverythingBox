@@ -85,7 +85,8 @@ void ReaderBridge::activateSetting(int index)
     case 3: if (kind_ == ReaderKind::Comic) reader_->setTwoUp(!reader_->twoUp()); break;
     default: return;
     }
-    refresh();
+    // No explicit refresh(): each of these reader commands emits pageInfoChanged(), which onReaderPageInfo()
+    // already turns into a bridge refresh — an extra refresh() here would just double the changed() emit.
 }
 
 // Left/Right while the cursor is on the settings zone: cycle the primary setting both ways (the settings zone's
@@ -100,8 +101,7 @@ void ReaderBridge::cycleSetting(int dir)
     }
     else
     {
-        reader_->zoomDelta(dir > 0 ? +1 : -1);
-        refresh();
+        reader_->zoomDelta(dir > 0 ? +1 : -1); // emits pageInfoChanged() -> onReaderPageInfo() refreshes; no double
     }
 }
 

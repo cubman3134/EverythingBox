@@ -100,7 +100,6 @@ void PdfView::zoomDelta(int steps)
 {
     for (int i = 0; i < steps; ++i)  zoomIn();
     for (int i = 0; i > steps; --i)  zoomOut();
-    if (steps == 0) return;
 }
 
 bool PdfView::openPdf(const QString& path, QString* error)

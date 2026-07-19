@@ -1,7 +1,7 @@
 # Phase 3, Subsystem B — Themed Content Surfaces Design
 
 **Date:** 2026-07-19
-**Status:** Approved design, pending implementation plan (B1)
+**Status:** B1 complete: detail + 4 readers themed on the contract; classic retired from themed flows. B2 (settings + hardening) next.
 **Builds on:** `2026-07-18-nav-contract-design.md` (subsystem A complete: NavGraph contract,
 declared edges, two-state inputs, one Back router, watchdog)
 
@@ -99,6 +99,33 @@ whole-branch review before each merge.
 
 Subsystem D: TV + mobile adaptivity (Android input model, form-factor layouts,
 player UI) — its own spec.
+
+### B1 close-out follow-ups (recorded at Task 6; triaged fine-as-follow-up)
+
+Deferred review minors and observations from the B1 live walks. None block B1; carry into B2
+or a dedicated polish pass.
+
+- **Reader exit returns to the classic `HomeView` in themed mode.** `returnFromReader`
+  (`MainWindow.cpp`) unconditionally does `stack_->setCurrentWidget(home_)` to preserve the
+  content-list position you came from — so backing out of any themed reader lands on the classic
+  `home_` widget, not the themed XMB. Pre-existing across all of B1 (unchanged since Task 3); the
+  home-surface retirement is B2 scope (`themedHome/enabled` defaults ON + broader classic removal).
+  Decide the themed reader-return surface there.
+- **Comic spread page-label range.** In two-up mode the bottom strip shows a single page number
+  ("1 / 33") for a two-page spread rather than a "1–2 / 33" range.
+- **PDF/comic 38px top-strip overlay while chrome visible.** The opaque top strip reserves/overlays
+  ~38px of the reader viewport while chrome is up (book reserves via `topChromeReserve`; pdf/comic
+  overlay). Cosmetic; revisit the reserve-vs-overlay choice for the fixed-page readers.
+- **Font-cycle UX (reader settings zone).** On the settings zone, Left/Right are repurposed for
+  bidirectional cycle (font for book, zoom for pdf/comic) by reusing the zone's SELF-pinned cross-axis
+  no-ops; reaching the other settings buttons (Fit, Two-Up) is non-obvious. Reconsider the settings-zone
+  interaction model.
+- **`Image.qml` font fallback.** Confirm the reader-chrome QML's font fallback chain renders on a
+  machine without the theme's preferred font.
+- **Drag-passthrough live demo.** The Variant-B translucent-layer drag/scroll passthrough is proven in
+  the spike but never demoed in a shipped reader; capture a live demo if B enhancement lands.
+- **`Xmb.qml`/`Video.qml` "still" binding-loop warning.** Themed XMB logs `QML Video: Binding loop
+  detected for property "still"` on the metadata panel; pre-existing (not touched by B1), noisy in logs.
 
 ## Composition decision (Task 1 outcome)
 

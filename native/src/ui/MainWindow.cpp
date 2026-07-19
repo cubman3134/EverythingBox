@@ -1137,17 +1137,11 @@ void MainWindow::updateNavForPage()
     }
     else
     {
+        // The themed reader host (book / pdf / comic) has no ring, so routeKey never consults a back action for
+        // it (Nav.cpp checks backAction_ only inside `if (activeRing_)`); its Back arrives through the host's own
+        // event filter (ReaderChromeHost::arbitrateKey -> handleBack). Nothing to register here.
         navCtx_->setActiveRing(nullptr);
         navCtx_->setBackAction(nullptr);
-#ifdef MMV_HAVE_QML
-        // The themed reader host (book / pdf / comic): no ring (its chrome strips own selection via the graph);
-        // pad Back routes to its Back rule (chrome visible -> hide; hidden -> pop the reader level).
-        ReaderChromeHost* rh = (readerHost_ && cur == readerHost_) ? readerHost_
-                             : (pdfHost_    && cur == pdfHost_)    ? pdfHost_
-                             : (comicHost_  && cur == comicHost_)  ? comicHost_ : nullptr;
-        if (rh && rh->themed())
-            navCtx_->setBackAction([rh] { rh->handleBack(); });
-#endif
     }
 
 #ifdef MMV_HAVE_QML
