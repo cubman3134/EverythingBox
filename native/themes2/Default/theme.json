@@ -1,6 +1,7 @@
 {
   "name": "Default",
   "author": "My Media Vault",
+  "settingsPanel": { "background": "#0F1216", "panel": "#161A20", "row": "#1A1F27", "rowSelected": "#243244", "accent": "#E07A2E", "text": "#FFFFFF", "dim": "#AEB4C2", "separator": "#7C8794", "warning": "#E0524E" },
   "views": {
     "home": {
       "background": { "color": "#0F1216", "image": "", "dim": 0 },

@@ -1220,6 +1220,83 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---------------------------------------------------------------- 18. the REAL themed PANEL graph (Task B2.1)
+    {
+        // A themed settings panel (ThemedPanelHost) is its OWN standalone NavGraph — panelRows (the row list) +
+        // panelBack (the header Back affordance) — built by the SAME shared builder the app's host runs
+        // (buildPanelNavGraph, NavThemeGraph.h), the ONE definition this shape-test asserts so the CI assertion
+        // can never drift from the shipped graph. The panel is the whole surface (no home zones underneath), so
+        // a directed BFS must reach EXACTLY the two panel zones and validate() must hold.
+
+        // (a) validate: a hub-sized panel (14 rows) forms a connected graph.
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            QString why;
+            CHECK(g.validate(&why), "panel: the themed panel graph validates (panelRows + panelBack)");
+        }
+
+        // (b) the back-zone edge + geometry: Down off the header enters the row list; Up off the FIRST row
+        //     crosses back up to the header; Up off a deeper row steps within the list (not to the header).
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            g.select(QStringLiteral("panelBack"), 0);
+            g.move(Qt::Key_Down);
+            CHECK(g.zone() == QStringLiteral("panelRows"),
+                  "panel: Down off the header Back enters the row list");
+            g.select(QStringLiteral("panelRows"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("panelBack"),
+                  "panel: Up off the first row crosses to the header Back");
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("panelRows") && g.index() == 6,
+                  "panel: Down steps within the row list");
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.move(Qt::Key_Up) && g.zone() == QStringLiteral("panelRows") && g.index() == 4,
+                  "panel: Up off a deeper row steps within the list (does not jump to the header)");
+        }
+
+        // (c) containment: no arrow off the header escapes (a 1-count strip pinned on Up/Left/Right); a directed
+        //     BFS from the row list reaches EXACTLY panelRows + panelBack.
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            g.select(QStringLiteral("panelBack"), 0);
+            CHECK(!g.move(Qt::Key_Up) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Up off the header Back is a contained no-op");
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Left off the header Back is a contained no-op");
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Right off the header Back is a contained no-op");
+            // The row list's cross-axis Left/Right are SELF-pinned no-ops (a Vertical list has no sideways move).
+            g.select(QStringLiteral("panelRows"), 3);
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("panelRows") && g.index() == 3,
+                  "panel: Left on the row list is a contained no-op");
+
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("panelRows"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key parr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : parr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("panelRows")) && reached.count(QStringLiteral("panelBack"))
+                  && reached.size() == 2,
+                  "panel: the contained walk reaches exactly the row list + header Back");
+        }
+    }
+
 #ifdef MMV_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).

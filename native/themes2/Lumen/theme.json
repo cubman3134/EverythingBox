@@ -1,6 +1,7 @@
 {
   "name": "Lumen",
   "author": "My Media Vault",
+  "settingsPanel": { "background": "#F5F6F8", "panel": "#FFFFFF", "row": "#FFFFFF", "rowSelected": "#DCE7FB", "accent": "#2D6CDF", "text": "#15171C", "dim": "#5A5E66", "separator": "#8A8F99", "warning": "#D8544B" },
   "views": {
     "home": {
       "background": { "color": "#F5F6F8" },

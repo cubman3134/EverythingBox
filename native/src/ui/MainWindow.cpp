@@ -121,6 +121,8 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ReaderChromeHost.h"
+#include "../theme2/ThemedPanelHost.h"
+#include "../theme2/PanelModel.h"
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
@@ -334,6 +336,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stack_->addWidget(comicHost_); // index 6 - comic (CBZ) reader (via host)
 #else
     stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
+#endif
+#ifdef MMV_HAVE_QML
+    // The themed settings-panel surface (B2): a persistent stack page rendering PanelRow lists through the Nav
+    // Contract, used in themed mode instead of the classic showPanel widget panel. Classic mode never shows it.
+    themedPanelHost_ = new ThemedPanelHost(this);
+    themedPanelHost_->setObjectName(QStringLiteral("themedPanelHost"));
+    stack_->addWidget(themedPanelHost_);
 #endif
 
     // Inline settings panel page (Settings / Theme / Cloud Sync / General live here instead of popups).
@@ -974,6 +983,11 @@ void MainWindow::sendNavKey(int key)
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
+#ifdef MMV_HAVE_QML
+    // 4.2. The themed settings-panel host is a QQuickWidget too — hand it the key; SettingsPanel.qml's Keys
+    //      handler drives its NavGraph (arrows / Enter) AND its own Back (nav.back() pops one panel level).
+    if (themedPanelHost_ && cur == themedPanelHost_) { deliver(themedPanelHost_->quickWidget(), key); return; }
+#endif
     // 4.5. The themed reader hosts: hand the key to the wrapped reader widget — its installed chrome event
     //      filter arbitrates (drive the graph while the chrome is visible, reveal on Up, else let the reader
     //      page/zoom). Back is caught by that same filter, so this covers the reader's Back rule too.
@@ -1042,6 +1056,9 @@ void MainWindow::goBack()
     // The themed reader host owns its own Back rule (chrome visible -> hide; hidden -> pop the reader level,
     // which returns us home). Route to it before the plain reader case below.
 #ifdef MMV_HAVE_QML
+    // The themed settings-panel host owns its own Back (pop one panel level; at the root, its onBack leaves to
+    // the home screen). Route to it before the plain-reader/other cases below.
+    if (themedPanelHost_ && cur == themedPanelHost_) { themedPanelHost_->handleBack(); return; }
     if (readerHost_ && cur == readerHost_) { readerHost_->handleBack(); return; }
     if (pdfHost_    && cur == pdfHost_)    { pdfHost_->handleBack();    return; }
     if (comicHost_  && cur == comicHost_)  { comicHost_->handleBack();  return; }
@@ -1154,6 +1171,10 @@ void MainWindow::updateNavForPage()
                               : (comicHost_  && cur == comicHost_)  ? comicHost_ : nullptr;
     if (!pageGraph && curHost && curHost->themed())
         pageGraph = curHost->navGraph();
+    // The themed settings-panel host owns its own selection surface too — register its graph so the kit marks
+    // the page navigable (its Back arrives via sendNavKey delivering to the QQuickWidget, so no back action here).
+    if (!pageGraph && themedPanelHost_ && cur == themedPanelHost_)
+        pageGraph = themedPanelHost_->navGraph();
     navCtx_->setActiveGraph(pageGraph);
 #endif
 }
@@ -1277,6 +1298,19 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("readerPageCount"), rh->readerPageCount());
             if (rh->kind() == ReaderKind::Book) o.insert(QStringLiteral("readerFont"), book_->fontPt());
             if (rh->kind() == ReaderKind::Comic) o.insert(QStringLiteral("readerTwoUp"), rh->readerTwoUp());
+        }
+        // The themed settings-panel host: its QQuickWidget focus is opaque, so surface the graph selection +
+        // panel title + the focused row's label so panel automation is as precise as the Qt panels.
+        if (themedPanelHost_ && cur == themedPanelHost_)
+        {
+            o.insert(QStringLiteral("panelTitle"), themedPanelHost_->panelTitle());
+            o.insert(QStringLiteral("panelDepth"), themedPanelHost_->levelDepth());
+            if (NavGraph* pg = themedPanelHost_->navGraph())
+            {
+                o.insert(QStringLiteral("panelZone"), pg->zone());
+                o.insert(QStringLiteral("panelIndex"), pg->index());
+            }
+            o.insert(QStringLiteral("panelFocus"), themedPanelHost_->focusedRowLabel());
         }
 #endif
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
@@ -4845,7 +4879,8 @@ void MainWindow::updateBackgroundMusic()
 {
     if (!bgm_) return;
     QWidget* w = stack_->currentWidget();
-    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
+    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_
+                       || w == themedPanelHost_);
     bgm_->setActive(menu);
 }
 
@@ -4875,11 +4910,94 @@ void MainWindow::updateThemedNowPlaying()
 #endif
 }
 
+// The active theme's `settingsPanel` styling block (colors/accent) for the themed panels. Resolved from the same
+// theme the themed home uses; missing keys fall back HARD in SettingsPanel.qml, so an empty map still renders.
+QVariantMap MainWindow::settingsPanelStyle() const
+{
+    QVariantMap out;
+#ifdef MMV_HAVE_QML
+    const QStringList themes = ThemeEngine::availableThemes();
+    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName
+                            + QStringLiteral("/theme.json");
+    QFile f(themeFile);
+    if (f.open(QIODevice::ReadOnly))
+        out = QJsonDocument::fromJson(f.readAll()).object()
+                  .value(QStringLiteral("settingsPanel")).toObject().toVariantMap();
+#endif
+    return out;
+}
+
 void MainWindow::openSettingsHub()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to open Settings."))) return;
-    // Entering the settings area from a real page: remember it so the top-level Back returns there.
-    if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
+    // Entering the settings area from a real page: remember it so the top-level Back returns there. (Coming back
+    // from a child panel — classic panelPage_ or the themed host — must NOT clobber the remembered return page.)
+    if (stack_->currentWidget() != panelPage_
+        && stack_->currentWidget() != static_cast<QWidget*>(themedPanelHost_))
+        panelReturnTo_ = stack_->currentWidget();
+
+#ifdef MMV_HAVE_QML
+    // Themed mode: render the hub on the Nav Contract (ThemedPanelHost) instead of the classic widget panel. The
+    // SAME rows, as Action descriptors, dispatch to the SAME open* methods (which route themed/classic per mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->reset();                       // fresh root presentation — drop any stale panel levels
+        themedPanelHost_->setStyle(settingsPanelStyle()); // the active theme's settingsPanel block (hard fallbacks)
+
+        QVector<PanelRow> rows;
+        auto act = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r;
+        };
+        act(QStringLiteral("general"),      tr("General"));
+        act(QStringLiteral("appearance"),   tr("Appearance"));
+        act(QStringLiteral("addons"),       tr("Add-ons"));
+        act(QStringLiteral("downloads"),    tr("Downloads"));
+        act(QStringLiteral("cloud"),        tr("Cloud Sync"));
+        act(QStringLiteral("split"),        tr("Split Screen"));
+        act(QStringLiteral("retroach"),     tr("RetroAchievements"));
+#if !defined(Q_OS_ANDROID)
+        act(QStringLiteral("standalone"),   tr("Stand Alone Emulators Settings"));
+#endif
+        act(QStringLiteral("libretro"),     tr("Libretro Emulator Settings"));
+        act(QStringLiteral("bios"),         tr("BIOS Check"));
+        act(QStringLiteral("input"),        tr("Input Mapping…"));
+        act(QStringLiteral("debug"),        tr("Debug"));
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("uninstall");
+          r.label = tr("Uninstall My Media Vault…"); r.destructive = true; rows << r; }
+
+        themedPanelHost_->present(tr("Settings"), rows,
+            [this](const QString& id, const QString&) {
+                // Dispatch to the SAME handlers the classic hub connects (each routes themed/classic per mode).
+                if      (id == QStringLiteral("general"))    openGeneralSettings();
+                else if (id == QStringLiteral("appearance")) openAppearance();
+                else if (id == QStringLiteral("addons"))     openLibrary();
+                else if (id == QStringLiteral("downloads"))  openDownloadManager();
+                else if (id == QStringLiteral("cloud"))      openCloudSync();
+                else if (id == QStringLiteral("split"))      enterSplitScreen();
+                else if (id == QStringLiteral("retroach"))   openRetroAchievements();
+                else if (id == QStringLiteral("standalone")) openEmulatorManager();
+                else if (id == QStringLiteral("libretro"))   openEmulatorSettings();
+                else if (id == QStringLiteral("bios"))       openBiosCheck();
+                else if (id == QStringLiteral("input"))      openInputMapping();
+                else if (id == QStringLiteral("debug"))      openDebug();
+                else if (id == QStringLiteral("uninstall"))  confirmUninstall();
+            },
+            [this] {
+                // The last panel dismissed (Back at the hub root): return to the home screen (rebuilt so an
+                // Appearance/theme change applies), exactly like the classic hub's onBack.
+                if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
+                else if (panelReturnTo_) stack_->setCurrentWidget(panelReturnTo_);
+                else showHomeScreen();
+            });
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+
     showPanel(tr("Settings"), [this](QVBoxLayout* v) {
         auto add = [this, v](const QString& label, std::function<void()> fn) {
             auto* b = panelRow(label);

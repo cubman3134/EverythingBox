@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QHash>
+#include <QVariantMap>
 #include <QColor>
 #include <QPointer>
 #include <QElapsedTimer>
@@ -15,6 +16,7 @@ class MpvWidget;
 class RetroView;
 class EbookView;
 class ReaderChromeHost;
+class ThemedPanelHost;
 class PdfView;
 class ComicView;
 class LibraryView;
@@ -84,6 +86,7 @@ private slots:
     // then hand it to the comic reader (which gives natural page order + resume for free).
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    QVariantMap settingsPanelStyle() const; // the active theme's `settingsPanel` block (themed panels; B2)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
@@ -258,6 +261,7 @@ private:
     ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
+    ThemedPanelHost* themedPanelHost_ = nullptr; // themed settings-panel surface (B2); null without QML
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view
