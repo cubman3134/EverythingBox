@@ -44,7 +44,10 @@ public:
 
     // Zone registry. `count` may change any time via setZoneCount (Repeater data swaps).
     // `row`/`col` place the zone on a coarse grid for spatial arrow resolution (Invariant 3).
-    void registerZone(const QString& id, int count, int row, int col, bool wraps = false);
+    // axis: which arrows step the index WITHIN the zone (Horizontal = Left/Right, Vertical =
+    // Up/Down); the other axis crosses zones. XMB: categories = Horizontal, items = Vertical.
+    void registerZone(const QString& id, int count, int row, int col,
+                      Qt::Orientation axis = Qt::Horizontal, bool wraps = false);
     void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
     void removeZone(const QString& id);
     void setDefaultZone(const QString& id);
