@@ -162,6 +162,13 @@ private:
         int childRow = -1;       // items_ index last drilled into from this level (restored on Back)
     };
 
+    // The classic detail page's action gates for an item at the CURRENT drill level (stack_.last().addon is
+    // the resolving addon): which of Play(/Read) and Download the item offers, and whether "play" means Read.
+    // ONE definition — requestMeta (the classic page's buttons) and themedDetailData (the themed action row's
+    // verbs) both call this, so the themed row can never drift from the classic visibility rules.
+    struct ActionGates { bool play = false; bool download = false; bool readable = false; };
+    ActionGates classicActionGates(const MediaItem& item) const;
+
     void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
     void showCarousel();             // show the media-type carousel landing (carousel layout)
     void showXmb();                  // show the PS3 XMB layout (categories + item column)

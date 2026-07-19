@@ -61,17 +61,35 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
     // in-page children list (a series/season quick-open). ALWAYS registered so the QML can count them up/down
     // (setZoneCount) when the detail view opens/closes — count-gated exactly like `actions`: 0 when the detail
     // view is closed makes their edges inert and keeps them off the home surface's arrow paths (a hidden zone
-    // is never a move target). They sit in their own grid column below the home zones so the union graph stays
-    // connected (buttons -> detailActions geometrically) without ever bleeding into home navigation. The
-    // declared edges wire the vertical stack: detailActions <-> detailBody <-> detailChildren.
+    // is never a move target).
+    //
+    // CONTAINMENT: the detail view is MODAL — while it is open, no arrow may escape onto the covered home
+    // zones (items/categories/buttons), even on a theme whose button bar is live. The zones sit in their own
+    // grid column (col 8) below the home rows, and every arrow that the vertical-stack edges don't route is
+    // pinned by a declared SELF edge (the containment no-op — see NavGraph::addEdge): Up on the action row
+    // (top of the page), and the cross-axis Left/Right on the body/children. The remaining vectors are
+    // contained structurally: the action row's Left/Right wrap in-strip, Down past the children list finds
+    // no zone below row 12, and Down from the body with the children hidden is blocked by the hidden zone
+    // being the nearest target. Connectivity for validate(): the detailActions--Esc-->items edge (the Back
+    // dismissal, executed by the host's "detail" level pop) links the detail stack to the home surface in
+    // the undirected union, exactly like the `actions` overlay's Esc edge — no reliance on geometry.
     const int aCount = detail.active ? detail.actionCount : 0;
     const int bCount = detail.active ? 1 : 0;                        // the scroll body is a single focus target
     const int cCount = detail.active ? detail.childCount : 0;
-    g.registerZone(QStringLiteral("detailActions"), aCount, 10, 0, Qt::Horizontal, /*wraps=*/true);
-    g.registerZone(QStringLiteral("detailBody"), bCount, 11, 0, Qt::Vertical);
-    g.registerZone(QStringLiteral("detailChildren"), cCount, 12, 0, Qt::Vertical);
+    g.registerZone(QStringLiteral("detailActions"), aCount, 10, 8, Qt::Horizontal, /*wraps=*/true);
+    g.registerZone(QStringLiteral("detailBody"), bCount, 11, 8, Qt::Vertical);
+    g.registerZone(QStringLiteral("detailChildren"), cCount, 12, 8, Qt::Vertical);
     g.addEdge(QStringLiteral("detailActions"), Qt::Key_Down, QStringLiteral("detailBody"));
     g.addEdge(QStringLiteral("detailBody"), Qt::Key_Up, QStringLiteral("detailActions"));
     g.addEdge(QStringLiteral("detailBody"), Qt::Key_Down, QStringLiteral("detailChildren"));
     g.addEdge(QStringLiteral("detailChildren"), Qt::Key_Up, QStringLiteral("detailBody"));
+    // Containment pins (self edges = consume, no geometric escape).
+    g.addEdge(QStringLiteral("detailActions"), Qt::Key_Up, QStringLiteral("detailActions"));
+    g.addEdge(QStringLiteral("detailBody"), Qt::Key_Left,  QStringLiteral("detailBody"));
+    g.addEdge(QStringLiteral("detailBody"), Qt::Key_Right, QStringLiteral("detailBody"));
+    g.addEdge(QStringLiteral("detailChildren"), Qt::Key_Left,  QStringLiteral("detailChildren"));
+    g.addEdge(QStringLiteral("detailChildren"), Qt::Key_Right, QStringLiteral("detailChildren"));
+    // The Back dismissal leg (host-executed via the "detail" level pop) — declared so the connectivity walk
+    // sees the modal stack linked to the surface it covers, mirroring the `actions` overlay's Esc edge.
+    g.addEdge(QStringLiteral("detailActions"), Qt::Key_Escape, QStringLiteral("items"));
 }

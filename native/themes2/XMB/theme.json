@@ -21,7 +21,29 @@
 
         { "type": "helpsystem", "id": "help", "pos": [0.5, 0.96], "size": [1, 0.05], "origin": [0.5, 0.5],
           "color": "#E8EEF8", "fontSize": 0.022,
-          "entries": [ { "button": "←→", "label": "Category" }, { "button": "↑↓", "label": "Items" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "←→", "label": "Category" }, { "button": "↑↓", "label": "Items" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "color": "#0A1326" },
+      "elements": [
+        { "type": "wave", "id": "dWave", "pos": [0, 0.30], "size": [1, 0.70], "origin": [0, 0], "zIndex": 0,
+          "color": "#3E6FB8", "bands": 3, "segments": 44, "amplitude": 0.05, "speed": 1.0 },
+
+        { "type": "image",  "id": "poster",   "pos": [0.06, 0.5],  "size": [0.30, 0.74], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.image", "role": "box", "fallback": "poster", "fillMode": "contain", "radius": 12 },
+        { "type": "text",   "id": "dTitle",   "pos": [0.42, 0.16], "size": [0.52, 0.1],  "origin": [0, 0.5], "zIndex": 2, "binding": "selected.title",    "color": "#FFFFFF", "fontSize": 0.056, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text",   "id": "dSub",     "pos": [0.42, 0.27], "size": [0.52, 0.05], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.subtitle", "color": "#C6CEDC", "fontSize": 0.03 },
+        { "type": "rating", "id": "dStars",   "pos": [0.42, 0.335],"size": [0.18, 0.04], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.rating", "color": "#3E6FB8" },
+
+        { "type": "actionrow", "id": "dActions", "pos": [0.42, 0.44], "size": [0.55, 0.08], "origin": [0, 0.5], "zIndex": 2, "fontSize": 0.026 },
+
+        { "type": "text",   "id": "dFacts",   "pos": [0.42, 0.54], "size": [0.52, 0.10], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.factsText", "color": "#9AA8C4", "fontSize": 0.024, "wrap": true, "lines": 4 },
+        { "type": "text",   "id": "dOverview","pos": [0.42, 0.78], "size": [0.52, 0.34], "origin": [0, 0.5], "zIndex": 2, "binding": "selected.overview", "color": "#E8EEF8", "fontSize": 0.026, "wrap": true, "lines": 10 },
+
+        { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.96], "size": [1, 0.05], "origin": [0.5, 0.5], "zIndex": 2,
+          "color": "#E8EEF8", "fontSize": 0.022,
+          "entries": [ { "button": "←→", "label": "Action" }, { "button": "Enter", "label": "Select" }, { "button": "Esc", "label": "Back" } ] }
       ]
     }
   }

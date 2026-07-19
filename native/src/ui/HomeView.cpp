@@ -3056,17 +3056,27 @@ QVariantMap HomeView::themedDetailData(int idx)
         }
         const MediaArt scraped = MetaCache::loadArt(metaKey);
         if (!scraped.isEmpty()) art.mergeLowerPriority(scraped);
-        const MediaDetail cd = MetaCache::cachedDetail(metaKey);   // our own previous scrape (overview + facts)
+        art.writeInto(out);
+        if (!facts.isEmpty()) out.insert(QStringLiteral("facts"), facts);
+    }
+
+    // EITHER path: our own scrape cache (MetaCache) backfills the overview/facts the quick sources didn't
+    // carry. The session art cache (the branch above) is filled by requestThemedMeta with whatever resolved
+    // LOCALLY on hover — for a game with no gamelist entry that's art only — so without this backfill a
+    // hovered-then-opened item would show less than a cold-opened one (the XMB hover path hit exactly that).
+    {
+        const MediaDetail cd = MetaCache::cachedDetail(metaKey);
         if (cd.valid)
         {
             if (!out.contains(QStringLiteral("overview")) && !cd.overview.isEmpty())
                 out.insert(QStringLiteral("overview"), cd.overview);
             if (facts.isEmpty())
+            {
                 for (const MediaFact& f : cd.facts)
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+                if (!facts.isEmpty()) out.insert(QStringLiteral("facts"), facts);
+            }
         }
-        art.writeInto(out);
-        if (!facts.isEmpty()) out.insert(QStringLiteral("facts"), facts);
     }
 
     // A single joined "Label: value  •  …" string for the detail view's facts text element.
@@ -3081,22 +3091,24 @@ QVariantMap HomeView::themedDetailData(int idx)
     }
     if (!fl.isEmpty()) out.insert(QStringLiteral("factsText"), fl.join(QStringLiteral("     •     ")));
 
-    // The action-row verbs (mirror the classic play/download/favorite visibility; favourite + playlist always,
-    // matching the XMB inline chooser). A file already on disk (a local game / Recents / Downloads row) isn't
-    // downloadable; an expandable series/comic is (its children crawl).
+    // The action-row verbs: Play/Read and Download come from classicActionGates — the SAME predicate the
+    // classic detail page's buttons use (one definition, no drift). Favourite + playlist are always offered,
+    // matching the XMB inline chooser. Two themed-only adjustments the classic page never had to make:
+    //   * direct-open leaves (a console ROM row, a Recents/Downloaded row — local files the themed surface
+    //     plays via playThemedLeaf/openRecent) get "play" even though the classic gates, built for
+    //     remote/bridged catalog leaves, don't claim them (those rows never showed the classic info page);
+    //   * a file already on disk (that same set) is never offered "download" (it's already saved —
+    //     downloadThemedLeaf would just toast).
+    const ActionGates gates = classicActionGates(it);
     const bool localSaved = isLocalGameLeaf(it) || atRecentsLevel() || atDownloadsLevel();
+    const bool directOpen = !it.expandable && (localSaved || it.type == QStringLiteral("game"));
     QStringList verbs;
-    if (!it.expandable) verbs << QStringLiteral("play");
+    if (gates.play || directOpen) verbs << QStringLiteral("play");
     verbs << QStringLiteral("favorite");
-    if (!it.expandable && !localSaved) verbs << QStringLiteral("download");
-    else if (it.expandable && (it.type == QStringLiteral("series") || it.type == QStringLiteral("tv")
-                            || it.type == QStringLiteral("season") || it.type == QStringLiteral("comic")))
-        verbs << QStringLiteral("download");
+    if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
     out.insert(QStringLiteral("actions"), verbs);
-    out.insert(QStringLiteral("readable"), isReadableChapter(it.type)
-               || it.type == QStringLiteral("book") || it.type == QStringLiteral("comic")
-               || it.type == QStringLiteral("manga") || it.type == QStringLiteral("comic_issue"));
+    out.insert(QStringLiteral("readable"), gates.readable);
     return out;
 }
 
@@ -3160,6 +3172,50 @@ void HomeView::downloadThemedLeaf(int idx)
     dlNext();
 }
 
+// The classic detail page's action-visibility rules, extracted verbatim from requestMeta so the themed detail
+// action row shares the ONE definition. `item` is resolved against the CURRENT drill level's addon
+// (stack_.last().addon) — the same context both callers evaluate in.
+HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
+{
+    ActionGates g;
+    const bool isSteam = (item.mime == QStringLiteral("steamgame"));
+    const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
+        && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
+    const bool isRemotePlayable = remoteLeaf
+        && (stack_.last().addon->stremio
+            || item.type == QStringLiteral("movie") || item.type == QStringLiteral("series")
+            || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode")
+            || item.type == QStringLiteral("audiobook"));
+    const bool isRemoteReadable = remoteLeaf && !stack_.last().addon->stremio
+        && (item.type == QStringLiteral("comic") || item.type == QStringLiteral("manga")
+            || item.type == QStringLiteral("book"));
+    // A comic issue browsed from AIO Catalog (Comic Vine, metadata-only): readable if a file provider
+    // (Allarr) is available to supply the actual CBZ, found by bridging the title to its search.
+    // A metadata-only leaf browsed from a LOCAL catalog (AIO Catalog) whose actual file the file provider
+    // (Allarr) can supply by title: a comic issue or book is read; an audiobook is played. (Comic Vine /
+    // Google Books carry no file themselves, so without a provider these would offer nothing.)
+    const bool localLeaf = !item.expandable && !stack_.isEmpty() && stack_.last().addon
+        && stack_.last().addon->transport != LoadedAddon::RemoteHttp;
+    const bool canBridge = localLeaf && mgr_->hasFileProvider();
+    const bool isBridgedReadable = canBridge
+        && (item.type == QStringLiteral("comic_issue") || item.type == QStringLiteral("book"));
+    const bool isBridgedAudio = canBridge && item.type == QStringLiteral("audiobook");
+    // A game browsed from AIO Catalog (IGDB, metadata-only): playable if the provider (Allarr) can supply the
+    // ROM, found by bridging "<game> <console>" to its retro-games search. The console is the parent platform.
+    const bool isBridgedGame = canBridge && item.type == QStringLiteral("game");
+    g.readable = isReadableChapter(item.type) || isRemoteReadable || isBridgedReadable;
+    g.play = isSteam || isRemotePlayable || g.readable || isBridgedAudio || isBridgedGame;
+    // Downloadable: a resolvable leaf (anything but a Steam launch or a page-based manga chapter), or a
+    // container we can crawl (a series/season -> episodes, a comic volume -> issues).
+    const bool dlLeaf = !item.expandable
+        && (isRemotePlayable || isRemoteReadable || isBridgedReadable || isBridgedAudio || isBridgedGame);
+    const bool dlContainer = item.expandable
+        && (item.type == QStringLiteral("series") || item.type == QStringLiteral("tv")
+            || item.type == QStringLiteral("season") || item.type == QStringLiteral("comic"));
+    g.download = dlLeaf || dlContainer;
+    return g;
+}
+
 void HomeView::requestMeta(const MediaItem& item)
 {
     metaItem_ = item;             // remembered for the meta fallback in onMetaReady
@@ -3203,49 +3259,16 @@ void HomeView::requestMeta(const MediaItem& item)
     // Show an action button for launchable leaves from a remote addon (Stremio, or a library like Allarr):
     // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
     // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
+    // The gates themselves live in classicActionGates() — shared with the themed detail action row.
     const bool isSteam = (item.mime == QStringLiteral("steamgame"));
-    const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
-        && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
-    const bool isRemotePlayable = remoteLeaf
-        && (stack_.last().addon->stremio
-            || item.type == QStringLiteral("movie") || item.type == QStringLiteral("series")
-            || item.type == QStringLiteral("tv")    || item.type == QStringLiteral("episode")
-            || item.type == QStringLiteral("audiobook"));
-    const bool isRemoteReadable = remoteLeaf && !stack_.last().addon->stremio
-        && (item.type == QStringLiteral("comic") || item.type == QStringLiteral("manga")
-            || item.type == QStringLiteral("book"));
-    // A comic issue browsed from AIO Catalog (Comic Vine, metadata-only): readable if a file provider
-    // (Allarr) is available to supply the actual CBZ, found by bridging the title to its search.
-    // A metadata-only leaf browsed from a LOCAL catalog (AIO Catalog) whose actual file the file provider
-    // (Allarr) can supply by title: a comic issue or book is read; an audiobook is played. (Comic Vine /
-    // Google Books carry no file themselves, so without a provider these would offer nothing.)
-    const bool localLeaf = !item.expandable && !stack_.isEmpty() && stack_.last().addon
-        && stack_.last().addon->transport != LoadedAddon::RemoteHttp;
-    const bool canBridge = localLeaf && mgr_->hasFileProvider();
-    const bool isBridgedReadable = canBridge
-        && (item.type == QStringLiteral("comic_issue") || item.type == QStringLiteral("book"));
-    const bool isBridgedAudio = canBridge && item.type == QStringLiteral("audiobook");
-    // A game browsed from AIO Catalog (IGDB, metadata-only): playable if the provider (Allarr) can supply the
-    // ROM, found by bridging "<game> <console>" to its retro-games search. The console is the parent platform.
-    const bool isBridgedGame = canBridge && item.type == QStringLiteral("game");
-    const bool isReadable = isReadableChapter(item.type) || isRemoteReadable || isBridgedReadable;
+    const ActionGates gates = classicActionGates(item);
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
     {
-        playBtn_->setText(isReadable ? tr("📖  Read") : tr("▶  Play"));
-        playBtn_->setVisible(isSteam || isRemotePlayable || isReadable || isBridgedAudio || isBridgedGame);
+        playBtn_->setText(gates.readable ? tr("📖  Read") : tr("▶  Play"));
+        playBtn_->setVisible(gates.play);
     }
-    if (downloadBtn_)
-    {
-        // Downloadable: a resolvable leaf (anything but a Steam launch or a page-based manga chapter), or a
-        // container we can crawl (a series/season -> episodes, a comic volume -> issues).
-        const bool dlLeaf = !item.expandable
-            && (isRemotePlayable || isRemoteReadable || isBridgedReadable || isBridgedAudio || isBridgedGame);
-        const bool dlContainer = item.expandable
-            && (item.type == QStringLiteral("series") || item.type == QStringLiteral("tv")
-                || item.type == QStringLiteral("season") || item.type == QStringLiteral("comic"));
-        downloadBtn_->setVisible(dlLeaf || dlContainer);
-    }
+    if (downloadBtn_) downloadBtn_->setVisible(gates.download);
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme

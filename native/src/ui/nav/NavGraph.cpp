@@ -89,7 +89,10 @@ void NavGraph::setDividers(const QString& zone, const QVariantList& indices)
 void NavGraph::addEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone)
 {
     auto it = m_zones.find(fromZone);
-    if (it == m_zones.end() || toZone.isEmpty() || fromZone == toZone) return;
+    if (it == m_zones.end() || toZone.isEmpty()) return;
+    // A SELF edge (fromZone == toZone) is a declared CONTAINMENT no-op: move() consumes the key without
+    // moving and without falling through to geometric crossing. It lets a modal surface (the themed detail
+    // view) pin an arrow that would otherwise geometrically escape onto the home zones it covers.
     for (const auto& e : it->edges)
         if (e.first == int(arrow) && e.second == toZone) return;   // idempotent
     it->edges.push_back({ int(arrow), toZone });
@@ -240,13 +243,15 @@ bool NavGraph::move(int arrow)
 
     // 1. Declared edges first (exact from-zone + key match). A hidden target (count 0) makes the edge
     //    inert — resolution falls through to the axis/geometric logic, so e.g. the grid themes' Down-to-
-    //    buttons edge simply doesn't exist on an XMB theme whose button bar is empty.
+    //    buttons edge simply doesn't exist on an XMB theme whose button bar is empty. A SELF edge is the
+    //    declared containment no-op: the key is consumed here (no move, no geometric fallback) — see addEdge.
     {
         const Zone& z = m_zones[m_zone];
         for (const auto& e : z.edges) {
             if (e.first != arrow) continue;
             auto tit = m_zones.constFind(e.second);
             if (tit == m_zones.constEnd() || tit->count <= 0) continue;
+            if (e.second == m_zone) return false;   // contained: consume without moving
             return crossByEdge(e.second, dRow, dCol);
         }
     }

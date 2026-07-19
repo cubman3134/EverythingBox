@@ -12,7 +12,6 @@ Item {
     // --- injected from C++ / the host -----------------------------------------------------------------
     property var theme: ({})       // the whole theme: { name, views: { home:{...}, browse:{...}, detail:{...} } }
     property string currentView: "home"
-    property string detailReturn: "home" // where Esc returns to after the detail view
     property var items: []         // the catalog rows for this view
     property var system: ({})      // view-level info (name, counts, ...)
     property int currentIndex: 0   // the selected row
@@ -290,8 +289,13 @@ Item {
         if (currentView === "detail") {
             if (e.key === Qt.Key_Left)       { if (nav.move(Qt.Key_Left))  navigate() }
             else if (e.key === Qt.Key_Right) { if (nav.move(Qt.Key_Right)) navigate() }
-            else if (e.key === Qt.Key_Up)    { nav.move(Qt.Key_Up);   navigate() }
-            else if (e.key === Qt.Key_Down)  { nav.move(Qt.Key_Down); navigate() }
+            // Up/Down: "no visible move, no sound" — a contained no-op (the model's self-edge pins, e.g. Up on
+            // the top action row) is silent, but a zone-crossing edge that lands on index 0 returns false too,
+            // so also sound when the ZONE changed.
+            else if (e.key === Qt.Key_Up || e.key === Qt.Key_Down) {
+                var _dz = nav.zone
+                if (nav.move(e.key) || nav.zone !== _dz) navigate()
+            }
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                              { detailActivate() }
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { nav.back() }

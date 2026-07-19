@@ -51,10 +51,14 @@
         { "type": "text",   "id": "dTitle",   "pos": [0.44, 0.20], "size": [0.50, 0.1],  "origin": [0, 0.5], "binding": "selected.title",    "color": "#28323F", "fontSize": 0.06, "bold": true, "wrap": true, "lines": 2 },
         { "type": "text",   "id": "dSub",     "pos": [0.44, 0.32], "size": [0.50, 0.05], "origin": [0, 0.5], "binding": "selected.subtitle", "color": "#5A6B84", "fontSize": 0.03 },
         { "type": "rating", "id": "dStars",   "pos": [0.44, 0.39], "size": [0.18, 0.04], "origin": [0, 0.5], "binding": "selected.rating", "color": "#2FA1E6" },
-        { "type": "text",   "id": "dOverview","pos": [0.44, 0.64], "size": [0.50, 0.42], "origin": [0, 0.5], "binding": "selected.overview", "color": "#3A4657", "fontSize": 0.026, "wrap": true, "lines": 12 },
+
+        { "type": "actionrow", "id": "dActions", "pos": [0.44, 0.47], "size": [0.52, 0.08], "origin": [0, 0.5], "fontSize": 0.026 },
+        { "type": "text",   "id": "dFacts", "pos": [0.44, 0.565], "size": [0.50, 0.08], "origin": [0, 0.5], "binding": "selected.factsText", "color": "#5A6B84", "fontSize": 0.024, "wrap": true, "lines": 3 },
+
+        { "type": "text",   "id": "dOverview","pos": [0.44, 0.775], "size": [0.50, 0.30], "origin": [0, 0.5], "binding": "selected.overview", "color": "#3A4657", "fontSize": 0.026, "wrap": true, "lines": 8 },
 
         { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.965], "size": [1, 0.05], "origin": [0.5, 0.5], "color": "#5A6B84", "fontSize": 0.024,
-          "entries": [ { "button": "Enter", "label": "Open" }, { "button": "Esc", "label": "Back" } ] }
+          "entries": [ { "button": "←→", "label": "Action" }, { "button": "Enter", "label": "Select" }, { "button": "Esc", "label": "Back" } ] }
       ]
     }
   }

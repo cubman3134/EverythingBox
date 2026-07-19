@@ -883,6 +883,50 @@ int main(int argc, char** argv)
                   && reached.count(QStringLiteral("detailChildren")),
                   "detail-active(series): arrows alone reach the action row, body, and children list");
         }
+
+        // (d) CONTAINMENT: the detail view is modal. With detail ACTIVE and the covered home zones LIVE
+        //     (a non-empty button bar + categories — the worst case a theme can present), no sequence of
+        //     arrows from the detail surface may escape onto items/categories/buttons. Up from the action
+        //     row (which used to geometrically cross into the button bar) must be a contained no-op.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12, DetailState{ /*active=*/true, /*actionCount=*/4, /*childCount=*/5 });
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);          // live button bar under the detail view
+            QString why;
+            CHECK(g.validate(&why), "detail-containment: validates with detail active over live home zones");
+
+            // Up from the action row: consumed by the declared self edge — no move, no zone change.
+            g.select(QStringLiteral("detailActions"), 1);
+            CHECK(!g.move(Qt::Key_Up) && g.zone() == QStringLiteral("detailActions") && g.index() == 1,
+                  "detail-containment: Up from the action row is a contained no-op (no escape to buttons)");
+
+            // Directed BFS over every arrow from the detail surface: items/categories/buttons unreachable.
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("detailActions"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key carr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : carr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(!reached.count(QStringLiteral("items")) && !reached.count(QStringLiteral("categories"))
+                  && !reached.count(QStringLiteral("buttons")),
+                  "detail-containment: no arrow sequence escapes the detail surface onto items/categories/buttons");
+            // …and the same walk still covers the whole detail surface.
+            CHECK(reached.count(QStringLiteral("detailActions")) && reached.count(QStringLiteral("detailBody"))
+                  && reached.count(QStringLiteral("detailChildren")),
+                  "detail-containment: the contained walk still reaches every detail zone");
+        }
     }
 
 #ifdef MMV_HAVE_QML

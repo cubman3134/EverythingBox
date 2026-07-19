@@ -83,6 +83,9 @@ public:
     // target may be registered later (the edge simply stays inert until it exists). validate() walks these
     // edges (undirected, both endpoints registered) unioned with the geometric neighbors, so a two-cursor
     // screen whose zones are co-located still forms a connected graph.
+    // A SELF edge (toZone == fromZone) declares a CONTAINMENT no-op: move() consumes that key on that zone —
+    // no move, no geometric fallthrough. Used by modal surfaces (the themed detail view) to pin arrows that
+    // would otherwise geometrically escape onto the zones they cover.
     void addEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone);
 
     QString zone() const;   int index() const;

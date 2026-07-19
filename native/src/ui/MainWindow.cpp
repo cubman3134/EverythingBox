@@ -2162,9 +2162,13 @@ void MainWindow::openThemedDetail(int browseIndex)
     if (cur != themedHome_ && cur != themedBrowse_) return;
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r) return;
-    // The theme must define a `detail` view (XMB/Triple don't yet — "I" is simply inert there, as before).
+    // The theme must define a `detail` view ("I" is simply inert on a theme without one).
     if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("detail")))
         return;
+    // On the XMB home the column is only browse rows while drilled INTO a catalog; on the catalog list /
+    // Profiles / Settings columns currentIndex indexes a different list entirely (browseRowMap_ would be
+    // stale), so "I" is inert there.
+    if (cur == themedHome_ && themedHomeIsXmb_ && !themedXmbInCatalog_) return;
     const int bi = (browseIndex >= 0) ? browseIndex : r->property("currentIndex").toInt();
     const QVariantMap data = home_->themedDetailData(bi);
     if (data.isEmpty()) return; // a divider / synthetic / non-media row: nothing to detail
@@ -2175,7 +2179,6 @@ void MainWindow::openThemedDetail(int browseIndex)
     r->setProperty("detailChildIndex", 0);
     r->setProperty("detailZone", QStringLiteral("actions"));
     const QString ret = r->property("currentView").toString();
-    r->setProperty("detailReturn", ret);
     r->setProperty("currentView", QStringLiteral("detail")); // -> ThemeBridge::syncDetailZone counts the detail zones up
     if (NavGraph* g = ThemeEngine::navGraph(cur))
         g->pushLevel(QStringLiteral("detail"), [this, cur, ret] {
@@ -2235,6 +2238,11 @@ void MainWindow::syncThemedLevels()
     NavGraph* g = (cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::navGraph(cur) : nullptr;
     if (!g || g->isPopping()) return;
     if (NavOverlay::topmost()) return;   // an overlay owns the top of the stack — reconcile after it closes
+    // The themed DETAIL view's level is NOT part of the catalog/browse mirror this reconciler manages, and
+    // popLevelSilent drops the TOPMOST level regardless of name — so while a "detail" level is up (an async
+    // browseItemsChanged can land mid-detail), stand off entirely: reconciling here could silently swallow
+    // the detail level and orphan the view. The next navigation change after the detail pop re-syncs.
+    if (g->countLevels(QStringLiteral("detail")) > 0) return;
 
     bool wantCatalog = false;
     int  wantBrowse  = 0;
