@@ -131,7 +131,12 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
 
     // The strips mirror page/font/zoom (incl. raw-key paging done by the reader itself). Connected via the
     // string-based SIGNAL so ONE host drives any reader kind (each implementer declares pageInfoChanged()).
-    connect(rw, SIGNAL(pageInfoChanged()), this, SLOT(onReaderPageInfo()));
+    // String connects fail SILENTLY on signature drift — assert so a renamed signal can't desync the chrome.
+    const bool pageInfoWired = connect(rw, SIGNAL(pageInfoChanged()), this, SLOT(onReaderPageInfo()));
+    Q_ASSERT(pageInfoWired);
+    if (!pageInfoWired)
+        qWarning("ReaderChromeHost: pageInfoChanged() connect FAILED — reader %s lacks the HostedReader signal",
+                 rw->metaObject()->className());
     connect(graph_, &NavGraph::activated, this, &ReaderChromeHost::onGraphActivated);
     connect(graph_, &NavGraph::selectionChanged, this, &ReaderChromeHost::onSelectionChanged);
 
