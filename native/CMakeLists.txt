@@ -100,6 +100,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/CarouselView.cpp   src/ui/CarouselView.h
         src/ui/XmbView.cpp        src/ui/XmbView.h
         src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
+        src/ui/nav/NavGraph.cpp   src/ui/nav/NavGraph.h
         src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
         src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
         src/input/Gamepad.cpp     src/input/Gamepad.h
@@ -277,6 +278,14 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/nav/Osk.cpp src/ui/nav/Osk.h)
     target_include_directories(probe_nav PRIVATE src src/ui)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
+
+    # Headless test for NavGraph (the pure selection model + back stack — no QML, no widgets). Proves the
+    # "selection is never null" churn invariants, divider snapping, spatial move() reachability, and the
+    # LIFO back stack under the offscreen QPA.
+    add_executable(probe_navqml tools/probe_navqml.cpp
+        src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h)
+    target_include_directories(probe_navqml PRIVATE src src/ui)
+    target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
 
     # Headless test for the Notifier overlay (the single user-feedback channel).
     add_executable(probe_notifier tools/probe_notifier.cpp
