@@ -99,3 +99,61 @@ whole-branch review before each merge.
 
 Subsystem D: TV + mobile adaptivity (Android input model, form-factor layouts,
 player UI) — its own spec.
+
+## Composition decision (Task 1 outcome)
+
+**Question settled:** how themed reader chrome composes over the RASTER readers, given the
+app runs Qt Quick on the forced SOFTWARE backend (`main.cpp`:
+`QQuickWindow::setGraphicsApi(Software)`) and `ThemeEngine` forces its `QQuickWidget`
+opaque. Settled with a windowed spike (`native/tools/spike_readerchrome.cpp`, since
+deleted) that drove every (reader × chrome) state and captured BOTH `QWidget::grab()`
+(software composite) and `QScreen::grabWindow()` (real compositor). Evidence dumps:
+`.superpowers/spike/` (`02-page-A-strips-*`, `04-scroll-A-strips-*`, `05-page-B-layer-*`,
+`06-scroll-B-layer-*`, `findings.txt`).
+
+**Decision — per reader class:**
+
+- **EPUB/MOBI/PDF-text reader (`EbookView` / `BookPageWidget`, `WA_OpaquePaintEvent`
+  paginated painter):** **Variant A — opaque `QQuickWidget` strip overlays.** Top and
+  bottom themed bars are small OPAQUE child `QQuickWidget`s raised over the reader. This
+  is exactly what `EbookView` already does with its raster `QFrame` menu (reserves
+  `topMargin_`/`kMenuHeight` up top, auto-hide = `hide()/show()`); we swap the `QFrame`
+  for a themed strip. Lowest risk — all-opaque, no new translucency dependency, matches
+  ThemeEngine's opaque `clearColor` contract.
+- **Comic reader (`ComicView`, `QScrollArea`):** **Variant A — opaque strip overlays.**
+  Proven to render above the scroll viewport identically (`04-scroll-A-strips`).
+- **Audiobook player (`MpvWidget`/GL):** **No compositing — framed/sibling chrome (C).**
+  Unchanged by design; GL surface, not tested, no overlay.
+
+**Variant B is VALIDATED and available as an enhancement (not merely the fallback).**
+Contrary to the "ThemeEngine forces opaque, no precedent" expectation, a full-size
+TRANSLUCENT child `QQuickWidget` (`clearColor(transparent)` + `WA_TranslucentBackground`)
+DOES composite correctly over both raster readers in the software backend: the reader
+shows through the transparent regions AND under semi-transparent QML (verified in the real
+compositor, not just `grab()` — see `05-page-B-layer-screen.png`, page text visibly bleeds
+through the chip). Use B when chrome must float translucently over live reader content
+(scrims, rounded floating controls). **B is valid over raster readers ONLY — never over
+`MpvWidget`/GL.** Variant C (reader shrinks into a content rect, chrome as siblings) is the
+trivial always-works fallback; not needed for any raster reader.
+
+**Constraints Tasks 3–4 must honor:**
+
+1. **Input routing.** Overlay strips/layers MUST be `setFocusPolicy(Qt::NoFocus)`. With
+   NoFocus the reader keeps keyboard focus and receives ALL keys while chrome is visible
+   (spike: page got 5/5 keys with strips up). A strips keep mouse enabled (their buttons
+   need clicks); a full B layer that should not eat clicks also sets
+   `WA_TransparentForMouseEvents`. Never give an overlay StrongFocus — it would steal the
+   arrow keys that page the reader.
+2. **Flicker / z-order.** In the software backend a `QQuickWidget` child composites through
+   the widget backing store in normal child z-order. `raise()` the strips ONCE after each
+   (re)layout; a page-turn `update()`/`repaint()` storm on the reader does NOT paint over a
+   raised strip (spike: 400 repaints, strip stayed on top, no per-frame raise needed). No
+   `WA_AlwaysStackOnTop` needed for raster (that flag is only for native/GL children).
+3. **Resize.** Strips are geometry-managed in the reader's `resizeEvent` (top bar
+   full-width at y=0; bottom bar full-width pinned to bottom); `SizeRootObjectToView`
+   drives the QML side; re-`raise()` after setting geometry.
+4. **grab() is trustworthy here.** For both A and B, `QWidget::grab()` matched
+   `QScreen::grabWindow()` exactly in the software backend — future reader-chrome tests may
+   rely on `grab()` (it only diverges for GL/native surfaces).
+5. **Idle cost.** An embedded, non-animating `QQuickWidget` strip showed zero measurable
+   idle cost (60 idle event-loop spins → 0 ms).
