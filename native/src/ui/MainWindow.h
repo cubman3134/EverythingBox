@@ -209,6 +209,11 @@ private:
     // Settings ▸ Debug toggle), torn down when the toggle turns it off. updateUiTestServer() reconciles.
     class UiTestServer* uiTest_ = nullptr;
     void updateUiTestServer();
+    // Debug-gated black-frame watchdog (src/ui/BlackFrameWatchdog): under the SAME gate as uiTest_, it samples a
+    // downscaled window grab once a second and self-heals the intermittent all-black app state. Created/torn down
+    // alongside uiTest_ in updateUiTestServer(); zero instances in a normal run.
+    class BlackFrameWatchdog* blackWatchdog_ = nullptr;
+    void kickThemedRepaint();         // watchdog recovery: force the themed QML scene(s) to re-render
     void addThemedSelection(class QJsonObject& o, QWidget* page); // themed-home selection -> UI-test state
 
     class NavContext* navCtx_ = nullptr;

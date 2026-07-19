@@ -141,6 +141,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
         src/ui/MainWindow.cpp     src/ui/MainWindow.h
+        src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h
         src/ui/Notifier.cpp       src/ui/Notifier.h
         src/media/StreamResolver.cpp src/media/StreamResolver.h
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
@@ -287,7 +288,8 @@ if(MYMEDIAVAULT_BUILD_APP)
     # components (ThemedTextField/ThemedChoice) in an offscreen QQuickWidget with a REAL NavGraph as the `nav`
     # context property, and asserts the two-state contract (register / select / edit / commit / cancel).
     add_executable(probe_navqml tools/probe_navqml.cpp
-        src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h)
+        src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
+        src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h)
     target_include_directories(probe_navqml PRIVATE src src/ui src/theme2)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
     if(MMV_HAVE_QML)

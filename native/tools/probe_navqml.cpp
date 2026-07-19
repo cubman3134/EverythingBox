@@ -22,7 +22,9 @@
 // subsystem B will use — and asserts register / select / edit / commit / cancel and the "arrows stay in the
 // field while editing" invariant, driving real key events through the QML focus system.
 #include "nav/NavGraph.h"
+#include "BlackFrameWatchdog.h"
 
+#include <QImage>
 #include <QSet>
 #include <cstdio>
 #include <deque>
@@ -305,6 +307,47 @@ int main(int argc, char** argv)
 #else
     QGuiApplication app(argc, argv);
 #endif
+
+    // ---------------------------------------------------------------- 0. black-frame classifier (Task 5)
+    // BlackFrameWatchdog::isBlack is a pure luma classifier: ≥99% of pixels below luma 16 = a black frame.
+    // It backs the debug-gated self-heal for the intermittent all-black app state, so its judgment — and
+    // crucially its REFUSAL to call a failed grab (null image) black — must be pinned exactly.
+    {
+        // A gray value g renders to Rec.601 luma == g (the 77+150+29 weights sum to 256), so we build test
+        // frames by gray level: 0 = black (luma 0), 40 = dark-but-not-black, 255 = bright.
+        auto solid = [](int w, int h, int gray) {
+            QImage im(w, h, QImage::Format_ARGB32);
+            im.fill(qRgb(gray, gray, gray));
+            return im;
+        };
+
+        // (a) an all-black 64×36 grab -> true.
+        CHECK(BlackFrameWatchdog::isBlack(solid(64, 36, 0)), "an all-black 64x36 frame classifies as black");
+
+        // (b) one bright row in an otherwise black frame -> NOT black (64/2304 ≈ 2.8% bright, well under 1%).
+        {
+            QImage im = solid(64, 36, 0);
+            for (int x = 0; x < im.width(); ++x) im.setPixel(x, 0, qRgb(255, 255, 255));
+            CHECK(!BlackFrameWatchdog::isBlack(im), "one bright row keeps the frame out of 'black'");
+        }
+
+        // (c) a uniformly dark-but-not-black frame (luma 40) -> NOT black (nothing is below luma 16).
+        CHECK(!BlackFrameWatchdog::isBlack(solid(64, 36, 40)), "a uniform luma-40 frame is dark, not black");
+
+        // (d) threshold edge on a 100×100 (10000 px) frame: exactly 99% black + 1% bright.
+        //     dark == 9900, threshold*total == 0.99*10000 == 9900 -> the inclusive >= classifies it BLACK.
+        {
+            QImage im = solid(100, 100, 0);
+            for (int x = 0; x < 100; ++x) im.setPixel(x, 0, qRgb(255, 255, 255)); // exactly 100 bright (1%)
+            CHECK(BlackFrameWatchdog::isBlack(im), "exactly 99% black sits ON the threshold and reads as black (>=)");
+            im.setPixel(0, 1, qRgb(255, 255, 255)); // one more bright -> 9899 dark, 98.99% < 99%
+            CHECK(!BlackFrameWatchdog::isBlack(im), "one pixel past the edge (98.99% black) reads as NOT black");
+        }
+
+        // (e) a null / empty grab -> NEVER black (a FAILED grab must not trip the watchdog).
+        CHECK(!BlackFrameWatchdog::isBlack(QImage()), "a null image is never classified black (failed grab guard)");
+        CHECK(!BlackFrameWatchdog::isBlack(QImage(0, 0, QImage::Format_ARGB32)), "an empty image is never black");
+    }
 
     // ---------------------------------------------------------------- 1. selection valid on first zone
     {

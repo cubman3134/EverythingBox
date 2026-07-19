@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "Notifier.h"
+#include "BlackFrameWatchdog.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J08/J10/J11)
 #include "../media/StreamResolver.h"
 #include "../media/PlaybackSession.h"
@@ -120,6 +121,8 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include <QQuickItem>
+#include <QQuickWidget>
+#include <QQuickWindow>
 #include <QDialog>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -1082,9 +1085,10 @@ void MainWindow::updateUiTestServer()
     if (!UiTestServer::wanted())
     {
         if (uiTest_) { delete uiTest_; uiTest_ = nullptr; mwLog(QStringLiteral("uitest: control channel stopped")); }
+        if (blackWatchdog_) { delete blackWatchdog_; blackWatchdog_ = nullptr; }
         return;
     }
-    if (uiTest_) return; // already listening
+    if (uiTest_) return; // already listening (the black-frame watchdog is created alongside it, below)
     UiTestServer::Hooks h;
     h.sendKey = [this](int k) {
         // Qt-INTERNAL activation only (no OS foreground change): focus events + :focus styling then
@@ -1125,6 +1129,58 @@ void MainWindow::updateUiTestServer()
     h.screenshot = [this](const QString& path) { return grab().save(path); };
     uiTest_ = new UiTestServer(h, this);
     mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
+
+    // Black-frame watchdog (debug-gated, same conditions as the UI-test channel): catch + self-heal the
+    // intermittent all-black app state and name where it came from.
+    //   sampler — MainWindow::grab() scaled to 64x36. grab() drives the widgets through the software backend,
+    //             so it renders the true frame even when the window is occluded (the uitest screenshot trick).
+    //   skip    — the contexts where an (all-)black grab is EXPECTED and must not trip the watchdog:
+    //             * inContent_  — a game / video / e-reader / the emulator wait-page (see the currentChanged
+    //               handler; emuPage_ + retro_ are the launch-handoff pages, so inContent_ IS that window);
+    //             * minimised   — handed off to a standalone emulator (window down, nothing of ours to render);
+    //             * escMenu     — the pause overlay is opening/animating over content.
+    auto sampler = [this]() -> QImage {
+        return grab().scaled(64, 36, Qt::IgnoreAspectRatio, Qt::FastTransformation).toImage();
+    };
+    auto skip = [this]() -> bool {
+        return inContent_ || isMinimized() || escMenuVisible();
+    };
+    blackWatchdog_ = new BlackFrameWatchdog(sampler, skip, this);
+    connect(blackWatchdog_, &BlackFrameWatchdog::blackFrameDetected, this, [this](int consecutive) {
+        // Telemetry on EVERY detection: name the screen + window state so a captured log says where the
+        // blackout came from (the uitest `state` idiom, compacted to the load-bearing fields).
+        QWidget* cur = stack_ ? stack_->currentWidget() : nullptr;
+        const QString summary = QStringLiteral("page=%1 name=%2 esc=%3 min=%4 active=%5 fs=%6 size=%7x%8")
+            .arg(cur ? QString::fromLatin1(cur->metaObject()->className()) : QStringLiteral("<null>"),
+                 cur ? cur->objectName() : QString())
+            .arg(escMenuVisible()).arg(isMinimized()).arg(isActiveWindow()).arg(isFullScreen())
+            .arg(width()).arg(height());
+        mwLog(QStringLiteral("watchdog: BLACK frame x%1 — %2").arg(consecutive).arg(summary));
+        // The host fires the recovery kick on the SECOND consecutive black frame (a single stray black sample
+        // is ignored — a mid-transition frame shouldn't force a repaint).
+        if (consecutive == 2) kickThemedRepaint();
+    });
+    blackWatchdog_->start();
+}
+
+// Recovery kick for the black-frame watchdog: force the themed QML scene(s) to re-render. On the Qt 6.8
+// SOFTWARE backend there is no GL context to lose, so the failure is a stale backing image / a scene the
+// render loop thinks is clean — not a dropped graphics context. We therefore use the light, flicker-free
+// invalidation path rather than QQuickWindow::releaseResources() (which drops scene-graph node caches and is
+// aimed at GL context loss): a widget-level update(), a QQuickWindow scene update(), and a root polish() —
+// together they re-run layout + repaint the scene into the widget's backing image. No-op off the themed home.
+void MainWindow::kickThemedRepaint()
+{
+#ifdef MMV_HAVE_QML
+    for (QWidget* w : { themedHome_, themedBrowse_ })
+    {
+        if (!w) continue;
+        w->update();
+        if (auto* qw = qobject_cast<QQuickWidget*>(w))
+            if (QQuickWindow* win = qw->quickWindow()) win->update();
+        if (QQuickItem* r = ThemeEngine::rootItem(w)) r->polish();
+    }
+#endif
 }
 
 void MainWindow::pollMenuPad()
@@ -1364,6 +1420,10 @@ void MainWindow::changeEvent(QEvent* event)
             if (w && (w == themedHome_ || w == themedBrowse_))
             {
                 w->setFocus(Qt::ActiveWindowFocusReason);
+                // Restoring from a minimise (show() after showMinimized) can leave the themed QQuickWidget's
+                // backing image stale until something invalidates it — the software backend won't repaint a
+                // scene it thinks is clean. Schedule an explicit repaint so the home never comes back blank.
+                w->update();
 #ifdef MMV_HAVE_QML
                 if (auto* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
 #endif
