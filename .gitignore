@@ -20,6 +20,9 @@ node_modules/
 # Misc
 *.log
 
+# Superpowers scratch (audit screenshots, spike dumps, SDD working files)
+.superpowers/
+
 # Theme/addon registries are published as their own GitHub repos (nested .git);
 # don't embed them in this repo.
 /native/registry/
