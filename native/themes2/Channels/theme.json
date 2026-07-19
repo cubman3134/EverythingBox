@@ -27,6 +27,14 @@
       ]
     },
 
+    "nowplayingAudio": {
+      "background": { "gradient": ["#F1F5FB", "#C4D2E4"] },
+      "elements": [
+        { "type": "nowplayingaudio", "id": "np", "pos": [0, 0], "size": [1, 1], "origin": [0, 0],
+          "accent": "#2FA1E6", "color": "#28323F", "dimColor": "#5A6B84", "panelColor": "#FFFFFF" }
+      ]
+    },
+
     "browse": {
       "background": { "gradient": ["#EFF3F8", "#C4D2E4"] },
       "elements": [

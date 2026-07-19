@@ -21,6 +21,14 @@
       ]
     },
 
+    "nowplayingAudio": {
+      "background": { "color": "#0E1015" },
+      "elements": [
+        { "type": "nowplayingaudio", "id": "np", "pos": [0, 0], "size": [1, 1], "origin": [0, 0],
+          "accent": "#5B7FE0", "color": "#FFFFFF", "dimColor": "#AEB4C2", "panelColor": "#171A22" }
+      ]
+    },
+
     "browse": {
       "background": { "color": "#12141A" },
       "elements": [

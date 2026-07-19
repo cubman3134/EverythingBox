@@ -97,6 +97,46 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
     g.addEdge(QStringLiteral("detailActions"), Qt::Key_Escape, QStringLiteral("items"));
 }
 
+// ---- Audiobook now-playing surface (Plan B1, Task 5): the themed page that REPLACES the player page for audio.
+//
+// Audio has no video, so there is nothing to composite — the themed page IS the surface and mpv keeps playing
+// invisibly behind it (the player page is simply never shown). Following the DETAIL view's mechanism exactly,
+// the page is a theme.json VIEW named `nowplayingAudio`; its two nav zones are registered up-front on the SAME
+// graph as the themed home (like the detail zones) and count-gated — held at 0 until the page opens (currentView
+// flips to "nowplayingAudio"), so their edges stay inert and they are never a move target off the home surface.
+//
+// Zones:
+//   * transport (row 20, col 0, Horizontal, wraps=false) — the transport strip: prev-track / prev-chapter /
+//     seek-back / play-pause / seek-fwd / next-chapter / next-track / speed. The default/entered zone.
+//   * queue (row 21, col 0, Vertical) — the session queue titles; activating a row is session_->playIndex(row).
+//
+// Declared edges: transport <-> queue (Down enters the queue, Up returns to the transport strip). Containment
+// (this page is MODAL over the home surface, whose items/categories/buttons stay LIVE underneath): every arrow
+// the stack edges don't route is pinned by a declared SELF edge (the no-op — see NavGraph::addEdge), mirroring
+// the detail view's containment. The strip lives at col 0 so a boundary Left (wraps=false ⇒ the along-axis step
+// falls through to geometry at the ends) finds no zone at col<0 and is contained; a boundary Right finds only
+// the (hidden, count-0) detail zones at col 8 and so is contained too. Vertical escapes (Up off the strip, Down
+// off the queue) and the queue's cross-axis Left/Right are pinned by SELF edges. The transport→items Esc edge is
+// the dismissal leg (host-executed via the "nowplaying" level pop) — declared only so validate()'s undirected
+// walk sees the modal stack linked to the home surface it covers, exactly like the detail/actions Esc edges.
+inline void buildAudioPageNavGraph(NavGraph& g)
+{
+    g.registerZone(QStringLiteral("transport"), 0, 20, 0, Qt::Horizontal, /*wraps=*/false);
+    g.registerZone(QStringLiteral("queue"), 0, 21, 0, Qt::Vertical);
+    g.addEdge(QStringLiteral("transport"), Qt::Key_Down, QStringLiteral("queue"));
+    g.addEdge(QStringLiteral("queue"), Qt::Key_Up, QStringLiteral("transport"));
+    // Containment pins (SELF edges = consume, no geometric escape onto the live home zones underneath).
+    g.addEdge(QStringLiteral("transport"), Qt::Key_Up, QStringLiteral("transport"));   // nothing above the strip
+    g.addEdge(QStringLiteral("queue"), Qt::Key_Left,  QStringLiteral("queue"));        // cross-axis on a V list
+    g.addEdge(QStringLiteral("queue"), Qt::Key_Right, QStringLiteral("queue"));
+    // NB the queue's Down (its own Vertical along-axis) is deliberately NOT declared: a declared edge is
+    // consulted before axis stepping, so pinning Down would freeze the list. Down steps within the list and, at
+    // the last row (wraps=false), the along-axis step finds no next row and geometry finds no zone below row 21
+    // — a contained no-op either way. (Same discipline as the reader's readerToc list.)
+    // The dismissal leg (host-executed via the "nowplaying" level pop) — declared for the connectivity walk.
+    g.addEdge(QStringLiteral("transport"), Qt::Key_Escape, QStringLiteral("items"));
+}
+
 // ---- Reader surfaces (Plan B1, Tasks 3-5): the themed chrome over the hosted RASTER readers -----------------
 //
 // A reader (EbookView / PdfView / ComicView in "hosted" mode) owns its OWN NavGraph — there is no home

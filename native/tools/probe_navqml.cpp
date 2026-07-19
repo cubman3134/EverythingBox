@@ -1098,6 +1098,126 @@ int main(int argc, char** argv)
         checkReaderKind(ReaderKind::Comic, 4, "reader(comic): validates (4 rows incl. two-up, no ToC)");
     }
 
+    // ---------------------------------------------------------------- 17. the REAL audio now-playing graph (Task 5)
+    {
+        // The audio now-playing page's zones (transport strip + queue list) are built by the SAME shared builder
+        // the app runs on the home graph (buildAudioPageNavGraph after buildThemedNavGraph — exactly what
+        // ThemeEngine::buildView does), count-gated like the detail zones: 0 while the page is closed, live
+        // counts when it opens. The inactive case must validate; when active, the two zones must be arrow-
+        // reachable from each other AND no arrow may escape onto the LIVE home zones underneath (it is modal).
+
+        // (a) inactive: the audio zones are registered but hidden (count 0) — the home graph still validates.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);
+            QString why;
+            CHECK(g.validate(&why), "audio-inactive: the themed graph validates with the audio zones hidden");
+        }
+
+        // (b) active: transport strip (8 verbs) + queue list (5 tracks). validate holds; the two zones cross by
+        //     arrows (Down enters the queue, Up returns to the strip) and each steps internally.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);           // live home zones under the (modal) audio page
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+            QString why;
+            CHECK(g.validate(&why), "audio-active: validates with transport+queue over live home zones");
+
+            g.select(QStringLiteral("transport"), 0);
+            g.move(Qt::Key_Down);
+            CHECK(g.zone() == QStringLiteral("queue"), "audio-active: Down from the transport strip enters the queue");
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("transport"), "audio-active: Up from the queue returns to the transport strip");
+
+            // The transport strip is Horizontal: Left/Right step within it (wraps=false).
+            g.select(QStringLiteral("transport"), 2);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("transport") && g.index() == 3,
+                  "audio-active: Right steps within the transport strip");
+            CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("transport") && g.index() == 2,
+                  "audio-active: Left steps within the transport strip");
+            // wraps=false: past either end is a contained no-op (no wrap, no geometric escape).
+            g.select(QStringLiteral("transport"), 0);
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("transport") && g.index() == 0,
+                  "audio-active: Left off the strip's first button is contained (no wrap, no escape)");
+            g.select(QStringLiteral("transport"), 7);
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("transport") && g.index() == 7,
+                  "audio-active: Right off the strip's last button is contained (no wrap, no escape)");
+            // The queue is Vertical: Down steps within it; past the last row is contained (SELF pin).
+            g.select(QStringLiteral("queue"), 0);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("queue") && g.index() == 1,
+                  "audio-active: Down steps within the queue list");
+            g.select(QStringLiteral("queue"), 4);
+            CHECK(!g.move(Qt::Key_Down) && g.zone() == QStringLiteral("queue") && g.index() == 4,
+                  "audio-active: Down off the queue's last row is a contained no-op");
+        }
+
+        // (c) CONTAINMENT: with the audio page active over LIVE home zones, no arrow sequence from the audio
+        //     surface may escape onto items/categories/buttons (the page is modal). Up off the transport strip
+        //     is a contained no-op; a directed BFS reaches ONLY transport + queue.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+
+            g.select(QStringLiteral("transport"), 3);
+            CHECK(!g.move(Qt::Key_Up) && g.zone() == QStringLiteral("transport") && g.index() == 3,
+                  "audio-containment: Up off the transport strip is a contained no-op (no escape to buttons)");
+
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("transport"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key aarr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : aarr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(!reached.count(QStringLiteral("items")) && !reached.count(QStringLiteral("categories"))
+                  && !reached.count(QStringLiteral("buttons")),
+                  "audio-containment: no arrow sequence escapes the audio surface onto items/categories/buttons");
+            CHECK(reached.count(QStringLiteral("transport")) && reached.count(QStringLiteral("queue"))
+                  && reached.size() == 2,
+                  "audio-containment: the contained walk reaches exactly the transport strip + queue");
+        }
+
+        // (d) DISMISSAL LEG: the transport→items Esc edge lands back on the home cursor where it was, mirroring
+        //     the detail/actions dismissal checks. In the app the host's "nowplaying" level pop performs the
+        //     real dismissal; this asserts the declared edge's STRUCTURE resolves (validate()'s undirected walk
+        //     relies on it to see the modal stack connected to the home surface).
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12);
+            buildAudioPageNavGraph(g);
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("transport"), 8);
+            g.setZoneCount(QStringLiteral("queue"), 5);
+            g.select(QStringLiteral("items"), 9);          // the home cursor before opening the audio page
+            g.select(QStringLiteral("transport"), 4);      // …then the audio page holds the cursor (items memory:=9)
+            g.move(Qt::Key_Escape);                        // the declared dismissal edge (transport→items)
+            CHECK(g.zone() == QStringLiteral("items") && g.index() == 9,
+                  "audio-dismiss: the transport→items Esc edge restores the remembered items cursor (9)");
+        }
+    }
+
 #ifdef MMV_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).

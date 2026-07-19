@@ -301,6 +301,23 @@ private:
     bool openThemedDetailForInfoLeaf(int browseIndex); // true if it opened detail (a movie/book/… leaf), else drill
     void runThemedDetailAction(const QString& verb);   // play/download/favorite/playlist on themedDetailIndex_
     int themedDetailIndex_ = -1;             // the browse index the themed detail view is currently showing
+
+    // The themed AUDIO now-playing view (Task 5): in themed mode, audio opens (openAudioPath/openAudioStream/
+    // audio queue) route HERE instead of the classic player page — mpv plays invisibly while this QML page is
+    // the surface. Following the detail mechanism: a `nowplayingAudio` currentView on the current themed
+    // surface, with a pushed "nowplaying" nav level. See MainWindow.cpp for the transport-verb bridge.
+    void showThemedAudioPage();                        // switch the current themed surface to the audio page
+    void leaveThemedAudioPage(QWidget* surface, const QString& returnView); // the "nowplaying" level's onPop
+    QWidget* themedAudioHost() const;                  // the current themed surface (home/browse), or null
+    void runThemedAudioTransport(const QString& verb); // play/pause/seek/chapter/track/speed on the live player
+    void updateThemedAudioProgress();                  // push the throttled position/duration into the QML props
+    void pushThemedAudioQueue();                       // push the session queue titles + current row into the QML
+    bool themedAudioSession_ = false;   // the current queue is a themed-mode AUDIO session (route to the page)
+    bool themedAudioPaused_ = false;    // our tracked play/pause state for the transport button (reset on a new file)
+    QVariantMap themedAudioData_ = {};  // the now-playing item's `selected`-shaped data (art/title/subtitle)
+    QStringList themedAudioQueue_ = {}; // the session queue titles (mirrored into the page's queue list)
+    int themedAudioCurrent_ = 0;        // the playing row in the queue
+    int themedAudioPushSec_ = -1;       // last whole-second position pushed to the page (progress-bar throttle)
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

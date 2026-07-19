@@ -38,6 +38,32 @@ Item {
     signal actionRequested(string name) // a `button` element was clicked -> host runs the named action
     signal detailsRequested()          // "I" / Info: the host populates detailData, switches to the detail view + pushes its level
     signal detailActionRequested(string verb) // the detail action row fired a verb ("play"/"download"/"favorite"/"playlist")
+    signal audioTransportRequested(string verb) // the audio page's transport strip fired a verb (playPause/seekFwd/...)
+    signal audioQueueActivateRequested(int row)  // a queue row was activated -> the host runs session.playIndex(row)
+
+    // --- themed AUDIO now-playing view state (Task 5) --------------------------------------------------
+    // The `nowplayingAudio` view (a currentView like "detail") REPLACES the classic player page for themed
+    // audio: mpv plays invisibly and this scene is the whole surface. The host pushes the now-playing item's
+    // rich data into audioData (its `selected`-shaped art/title/subtitle) and feeds the live playback props
+    // (audioPosition/audioDuration throttled to ~1 Hz, audioPaused, audioSpeed) plus the queue (audioQueue
+    // titles + audioQueueCurrent = the playing row). audioZone / audioTransportIndex / audioQueueIndex are
+    // written by the nav bridge as the cursor moves within the two zones (see syncAudioPageZone). The transport
+    // strip's canonical left-to-right verb order lives HERE (one definition the element draws and audioActivate
+    // reads); audioTransportCount feeds the `transport` zone count.
+    property var audioData: ({})
+    property real audioPosition: 0
+    property real audioDuration: 0
+    property bool audioPaused: false
+    property real audioSpeed: 1.0
+    property var audioQueue: []
+    property int audioQueueCurrent: 0
+    property int audioTransportIndex: 0
+    property int audioQueueIndex: 0
+    property string audioZone: "transport"   // which audio zone holds the cursor: "transport" / "queue"
+    readonly property var audioTransportList:
+        ["prevTrack", "prevChapter", "seekBack", "playPause", "seekFwd", "nextChapter", "nextTrack", "speed"]
+    readonly property int audioTransportCount: audioTransportList.length
+    readonly property int audioQueueCount: audioQueue ? audioQueue.length : 0
 
     // --- themed DETAIL view state -----------------------------------------------------------------------
     // The host populates detailData with the selected item's rich MediaDetail (title/subtitle/overview/facts/
@@ -302,6 +328,24 @@ Item {
             e.accepted = true
             return
         }
+        // The audio now-playing view owns the keys while it's open (currentView === "nowplayingAudio"). The
+        // model's selection is parked in the transport strip / queue list zones (wired by declared edges).
+        // Left/Right step the transport strip; Up/Down cross between the strip and the queue (and step the
+        // queue); Enter fires the focused transport verb or activates the queue row; Back leaves via the nav
+        // router — the pushed "nowplaying" level's onPop restores the previous view (the host owns the exit).
+        if (currentView === "nowplayingAudio") {
+            if (e.key === Qt.Key_Left)       { if (nav.move(Qt.Key_Left))  navigate() }
+            else if (e.key === Qt.Key_Right) { if (nav.move(Qt.Key_Right)) navigate() }
+            else if (e.key === Qt.Key_Up || e.key === Qt.Key_Down) {
+                var _az = nav.zone
+                if (nav.move(e.key) || nav.zone !== _az) navigate()
+            }
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
+                                             { audioActivate() }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { nav.back() }
+            e.accepted = true
+            return
+        }
         // The bottom button bar has focus (the model's selection sits in the `buttons` zone): Left/Right step
         // it, Up leaves via the declared buttons->items edge (the grid cursor comes back from zone memory),
         // Enter fires the focused button, Esc leaves like Up (silently — no move sound on a cancel).
@@ -362,6 +406,19 @@ Item {
             detailActionRequested(v[detailActionIndex])
     }
 
+    // Enter in the audio now-playing view: fire the focused transport verb (audioTransportIndex is bridge-
+    // written), or activate the focused queue row. Mirrors detailActivate — the verb/row is read from the QML
+    // state and emitted, so the host stays the one place that maps a verb to a player/session call.
+    function audioActivate() {
+        if (audioZone === "transport") {
+            if (audioTransportIndex >= 0 && audioTransportIndex < audioTransportList.length)
+                audioTransportRequested(audioTransportList[audioTransportIndex])
+        } else if (audioZone === "queue") {
+            if (audioQueueIndex >= 0 && audioQueueIndex < audioQueueCount)
+                audioQueueActivateRequested(audioQueueIndex)
+        }
+    }
+
     // The data context bindings resolve against. Recomputed when the selection changes. In the detail view the
     // `selected` slot is the host-populated detailData (the rich MediaDetail + art), so the detail elements
     // (poster/title/overview/facts/action row) bind it exactly as the home/browse elements bind the live row.
@@ -372,6 +429,8 @@ Item {
         "count": items ? items.length : 0,
         "selected": (currentView === "detail")
                     ? detailData
+                    : (currentView === "nowplayingAudio")
+                    ? audioData
                     : ((items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({})),
         "focusZone": focusZone // 1 = focus has left the grid for the bottom buttons (grid drops its selection)
     })
@@ -382,7 +441,7 @@ Item {
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
         "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying",
-        "gallery": "Gallery", "actionrow": "ActionRow"
+        "gallery": "Gallery", "actionrow": "ActionRow", "nowplayingaudio": "NowPlayingAudio"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
@@ -459,5 +518,11 @@ Item {
     // `items` zone through the model (the bridge writes focusZone=0) instead of poking the prop directly.
     // Leaving detail -> restore the grid/column cursor; entering detail -> the nav bridge's syncDetailZone owns
     // the selection (it parks it in the detailActions row), so don't yank it back onto `items` here.
-    onCurrentViewChanged: { if (currentView !== "detail") nav.select("items", currentIndex); fade.restart() }
+    // Leaving detail / the audio page -> restore the grid/column cursor; ENTERING either -> the nav bridge
+    // (syncDetailZone / syncAudioPageZone) owns the selection (it parks the cursor in that view's first zone),
+    // so don't yank it back onto `items` here — mirror the detail guard for the audio now-playing view too.
+    onCurrentViewChanged: {
+        if (currentView !== "detail" && currentView !== "nowplayingAudio") nav.select("items", currentIndex)
+        fade.restart()
+    }
 }

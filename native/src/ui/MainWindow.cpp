@@ -228,6 +228,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
+        // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
+        if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
         if (!subCtx_.active) return;
         subCtx_.active = false; // one-shot per open
         if (hasSub || !isVideo) return;
@@ -647,6 +649,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                    const QString& src, const QString& title) {
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
         currentNextSourceCapable_ = false;
+        themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         session_->setQueue(urls, 0, titles);
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
@@ -660,6 +663,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& p) { player_->play(p); });
     connect(session_, &PlaybackSession::queueChanged, this,
             [this](const QStringList& titles, int current) {
+        themedAudioQueue_ = titles;
+        themedAudioCurrent_ = current;
+        // Themed-mode audio: the QML now-playing page is the surface (mpv plays invisibly) — never show the
+        // classic player page. VIDEO queues (IPTV) and classic-mode audio keep the playlist_ + player page.
+        if (themedAudioSession_) { showThemedAudioPage(); pushThemedAudioQueue(); return; }
         playlist_->clear();
         for (const QString& t : titles) playlist_->addItem(t);
         playlist_->setCurrentRow(current);
@@ -670,6 +678,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(session_, &PlaybackSession::trackChanged, this,
             [this](int i, int n, const QString&) {
         playlist_->setCurrentRow(i);
+        themedAudioCurrent_ = i;
+        themedAudioPaused_ = false;                    // a new track auto-plays
+        if (themedAudioSession_) pushThemedAudioQueue(); // move the highlighted queue row on the themed page
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
     });
     connect(session_, &PlaybackSession::queueCleared, this,
@@ -1174,8 +1185,32 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
     o.insert(QStringLiteral("themedSelection"), sel);
     const QString cat = r->property("uitestCategory").toString();
     if (!cat.isEmpty()) o.insert(QStringLiteral("themedCategory"), cat);
+    // The audio now-playing page: surface its zone/cursor + live playback so audio automation is as precise as
+    // the Qt panels (the QQuickWidget focus is opaque). themedFocus names what Enter would fire right now.
+    if (r->property("currentView").toString() == QStringLiteral("nowplayingAudio"))
+    {
+        const QString zone = r->property("audioZone").toString();
+        const int tIdx = r->property("audioTransportIndex").toInt();
+        const int qIdx = r->property("audioQueueIndex").toInt();
+        o.insert(QStringLiteral("audioZone"), zone);
+        o.insert(QStringLiteral("audioTransportIndex"), tIdx);
+        o.insert(QStringLiteral("audioQueueIndex"), qIdx);
+        o.insert(QStringLiteral("audioQueueCurrent"), r->property("audioQueueCurrent").toInt());
+        o.insert(QStringLiteral("audioQueueCount"), r->property("audioQueueCount").toInt());
+        o.insert(QStringLiteral("audioPosition"), r->property("audioPosition").toDouble());
+        o.insert(QStringLiteral("audioDuration"), r->property("audioDuration").toDouble());
+        o.insert(QStringLiteral("audioPaused"), r->property("audioPaused").toBool());
+        o.insert(QStringLiteral("audioSpeed"), r->property("audioSpeed").toDouble());
+        const QVariantList verbs = r->property("audioTransportList").toList();
+        QString focus;
+        if (zone == QStringLiteral("transport") && tIdx >= 0 && tIdx < verbs.size())
+            focus = QStringLiteral("transport:") + verbs[tIdx].toString();
+        else if (zone == QStringLiteral("queue"))
+            focus = QStringLiteral("queue:") + QString::number(qIdx);
+        o.insert(QStringLiteral("themedFocus"), focus);
+    }
     // What Enter would act on right now: a corner button, the inline action chooser, or the tile above.
-    if (r->property("focusZone").toInt() == 1)
+    else if (r->property("focusZone").toInt() == 1)
         o.insert(QStringLiteral("themedFocus"), r->property("focusedButtonAction").toString());
     else if (r->property("actionsOpen").toBool())
         o.insert(QStringLiteral("themedFocus"),
@@ -1653,6 +1688,7 @@ void MainWindow::openVideoPath(const QString& path)
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
     subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
+    themedAudioSession_ = false;       // openVideoPath is VIDEO — keep the classic player page
     retro_->stop();
     book_->persist();
     pdf_->persist();
@@ -1663,6 +1699,39 @@ void MainWindow::openVideoPath(const QString& path)
     player_->play(path);
     revealMediaControls();
     RecentStore::add({ path, QFileInfo(path).completeBaseName(), QStringLiteral("video"), QString() });
+}
+
+// Find a sibling cover image for a local audio file (cover.*/folder.*/front.*/albumart.* in the same folder),
+// as a file URL — so a local audiobook shows real art on the themed now-playing page. "" when there is none.
+static QString localCoverFor(const QFileInfo& fi)
+{
+    static const QStringList stems = { QStringLiteral("cover"), QStringLiteral("folder"),
+                                       QStringLiteral("front"), QStringLiteral("albumart") };
+    static const QStringList exts  = { QStringLiteral("jpg"), QStringLiteral("jpeg"),
+                                       QStringLiteral("png"), QStringLiteral("webp") };
+    const QDir dir = fi.absoluteDir();
+    for (const QString& s : stems)
+        for (const QString& e : exts)
+        {
+            const QString p = dir.absoluteFilePath(s + QLatin1Char('.') + e);
+            if (QFile::exists(p)) return QUrl::fromLocalFile(p).toString();
+        }
+    return QString();
+}
+
+// Build the `selected`-shaped data the themed now-playing page binds (title/subtitle + a `poster` art role so
+// the cover art resolves through the same MediaArt chain the detail poster uses, with a graceful placeholder).
+static QVariantMap makeThemedAudioData(const QString& title, const QString& subtitle, const QString& image)
+{
+    QVariantMap m;
+    m.insert(QStringLiteral("title"), title);
+    if (!subtitle.isEmpty()) m.insert(QStringLiteral("subtitle"), subtitle);
+    if (!image.isEmpty())
+    {
+        m.insert(QStringLiteral("poster"), image);   // the primary art role the page reads
+        m.insert(QStringLiteral("image"), image);
+    }
+    return m;
 }
 
 void MainWindow::openAudio()
@@ -1681,9 +1750,12 @@ void MainWindow::openAudio()
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    session_->setQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
     const QString first = sel.first();
-    RecentStore::add({ first, QFileInfo(first).completeBaseName(), QStringLiteral("audio"), QString() });
+    const QFileInfo firstFi(first);
+    themedAudioSession_ = themedHomeEnabled();
+    themedAudioData_ = makeThemedAudioData(firstFi.completeBaseName(), QString(), localCoverFor(firstFi));
+    session_->setQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
+    RecentStore::add({ first, firstFi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
 void MainWindow::openAudioPath(const QString& path)
@@ -1714,6 +1786,10 @@ void MainWindow::openAudioPath(const QString& path)
     book_->persist();
     pdf_->persist();
     comic_->persist();
+    // Themed mode: this audio session shows the QML now-playing page (mpv plays invisibly). Seed its data from
+    // what we hold locally — the file's base name, and a sibling cover image if the folder carries one.
+    themedAudioSession_ = themedHomeEnabled();
+    themedAudioData_ = makeThemedAudioData(fi.completeBaseName(), QString(), localCoverFor(fi));
     session_->setQueue(queue, start);
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
@@ -1966,6 +2042,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
 {
     PerfTrace::begin(QStringLiteral("open.video"));
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
+    themedAudioSession_ = false;       // playStream is VIDEO — keep the classic player page
     stopScrobble();                    // leaving whatever was playing
     castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
@@ -2000,6 +2077,9 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
+    // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
+    themedAudioSession_ = themedHomeEnabled();
+    themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
     session_->setQueue({ url }, 0, { t }, rkey);
@@ -2223,7 +2303,9 @@ void MainWindow::showThemedHome()
                                         items, system, this, onActivated, onBack, onCycle, onSearch,
                                         {}, {}, {}, {}, {}, onButton,
                                         [this] { openThemedDetail(-1); },
-                                        [this](const QString& v) { runThemedDetailAction(v); });
+                                        [this](const QString& v) { runThemedDetailAction(v); },
+                                        [this](const QString& v) { runThemedAudioTransport(v); },
+                                        [this](int row) { if (session_) session_->playIndex(row); });
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
     if (QQuickItem* r = ThemeEngine::rootItem(w))
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
@@ -2358,6 +2440,140 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     }
 }
 
+// ---- Themed AUDIO now-playing page (Task 5) ---------------------------------------------------------------
+// The current themed surface (home/browse) that hosts the audio page, or null if we're not on one.
+QWidget* MainWindow::themedAudioHost() const
+{
+    QWidget* cur = stack_->currentWidget();
+    return (cur == themedHome_ || cur == themedBrowse_) ? cur : nullptr;
+}
+
+// Switch the current themed surface to the `nowplayingAudio` view (mpv keeps playing invisibly — the classic
+// player page is never shown), pushing a "nowplaying" nav level whose Back leaves the page. Follows the detail
+// mechanism: populate the page data FIRST (no empty flash), flip currentView, then push the level. A theme
+// without the view (older/user themes) falls back to the classic player page so audio always has a surface.
+void MainWindow::showThemedAudioPage()
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur)
+    {
+        // Playback started while not on a themed surface (a classic transient under themed mode): bring the
+        // themed home forward so the page has a home to live on.
+        if (!themedHome_) { themedAudioSession_ = false; stack_->setCurrentWidget(playerPage_); revealMediaControls(); return; }
+        stack_->setCurrentWidget(themedHome_);
+        cur = themedHome_;
+    }
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("nowplayingAudio")))
+    {
+        // The theme has no audio page — keep the classic player page for this session.
+        themedAudioSession_ = false;
+        playlist_->clear();
+        for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
+        playlist_->setCurrentRow(themedAudioCurrent_);
+        playlist_->setVisible(true);
+        stack_->setCurrentWidget(playerPage_);
+        revealMediaControls();
+        return;
+    }
+    // Push the live data before flipping the view (so the page never paints empty).
+    r->setProperty("audioData", themedAudioData_);
+    r->setProperty("audioPaused", themedAudioPaused_);
+    r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
+    pushThemedAudioQueue();
+    themedAudioPushSec_ = -1;
+    updateThemedAudioProgress();
+    cur->setFocus();
+    if (r->property("currentView").toString() == QStringLiteral("nowplayingAudio")) return; // already open (re-fired)
+    r->setProperty("audioTransportIndex", 0);
+    r->setProperty("audioQueueIndex", 0);
+    r->setProperty("audioZone", QStringLiteral("transport"));
+    const QString ret = r->property("currentView").toString();
+    r->setProperty("currentView", QStringLiteral("nowplayingAudio")); // -> ThemeBridge::syncAudioPageZone counts zones up
+    if (NavGraph* g = ThemeEngine::navGraph(cur))
+        g->pushLevel(QStringLiteral("nowplaying"), [this, cur, ret] { leaveThemedAudioPage(cur, ret); });
+}
+
+// Leave the audio page (the "nowplaying" level's onPop). PRESERVES today's classic behaviour EXACTLY: on the
+// classic player page, a Back gesture runs goBack()'s content-page branch — player stop + clear the queue +
+// return to the previous screen (verified: leaving audio STOPS playback, it does not keep playing). So here we
+// stop mpv, clear the session queue, and restore the themed surface's previous view (home/browse).
+void MainWindow::leaveThemedAudioPage(QWidget* surface, const QString& returnView)
+{
+    themedAudioSession_ = false;
+    themedAudioPushSec_ = -1;
+    player_->stop();
+    session_->clearQueue();
+    if (QQuickItem* rr = ThemeEngine::rootItem(surface))
+        rr->setProperty("currentView", returnView); // -> audio zones hidden, home cursor restored
+}
+
+// Map a transport-strip verb to the live player/session call, reusing the SAME MpvWidget / PlaybackSession API
+// the classic transport row uses (no new player API). Then reflect the play/pause + speed state on the page.
+void MainWindow::runThemedAudioTransport(const QString& verb)
+{
+    if (!player_) return;
+    if (verb == QStringLiteral("playPause"))        { player_->togglePause(); themedAudioPaused_ = !themedAudioPaused_; }
+    else if (verb == QStringLiteral("seekBack"))    player_->seekRelative(-15.0);
+    else if (verb == QStringLiteral("seekFwd"))     player_->seekRelative(15.0);
+    else if (verb == QStringLiteral("prevChapter")) player_->prevChapter();
+    else if (verb == QStringLiteral("nextChapter")) player_->nextChapter();
+    else if (verb == QStringLiteral("prevTrack"))   { if (session_) session_->prev(); }
+    else if (verb == QStringLiteral("nextTrack"))   { if (session_) session_->next(); }
+    else if (verb == QStringLiteral("speed"))
+    {
+        // Cycle the playback rate (the Task-3/4 ThemedChoice cycle idiom, applied to the transport button).
+        static const double steps[] = { 1.0, 1.25, 1.5, 1.75, 2.0 };
+        const int n = int(sizeof(steps) / sizeof(steps[0]));
+        const double cur = player_->speed();
+        int i = 0; double best = 1e9;
+        for (int k = 0; k < n; ++k) { const double d = qAbs(steps[k] - cur); if (d < best) { best = d; i = k; } }
+        player_->setSpeed(steps[(i + 1) % n]);
+    }
+    if (QWidget* cur = themedAudioHost())
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+        {
+            r->setProperty("audioPaused", themedAudioPaused_);
+            r->setProperty("audioSpeed", player_->speed());
+        }
+}
+
+// Push the throttled position/duration (and the live paused/speed) into the page's QML props. Called from
+// onPosition at ~1 Hz (whole-second changes only — not mpv's event rate), so the progress bar steps once a
+// second instead of re-rendering continuously.
+void MainWindow::updateThemedAudioProgress()
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur) return;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r || r->property("currentView").toString() != QStringLiteral("nowplayingAudio")) return;
+    r->setProperty("audioPosition", session_ ? session_->position() : 0.0);
+    r->setProperty("audioDuration", duration_);
+    r->setProperty("audioPaused", themedAudioPaused_);
+    r->setProperty("audioSpeed", player_ ? player_->speed() : 1.0);
+}
+
+// Push the session queue titles + the current row into the page's QML props (the queue-list zone). Also
+// reflects the current track's title as the now-playing title (a folder queue advances per track; a single
+// audiobook keeps its one title), preserving the cover art already in audioData.
+void MainWindow::pushThemedAudioQueue()
+{
+    QWidget* cur = themedAudioHost();
+    if (!cur) return;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+    QVariantList q;
+    for (const QString& t : themedAudioQueue_) q << t;
+    r->setProperty("audioQueue", q);
+    r->setProperty("audioQueueCurrent", themedAudioCurrent_);
+    if (themedAudioCurrent_ >= 0 && themedAudioCurrent_ < themedAudioQueue_.size())
+    {
+        themedAudioData_.insert(QStringLiteral("title"), themedAudioQueue_[themedAudioCurrent_]);
+        r->setProperty("audioData", themedAudioData_);
+    }
+}
+
 // Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
 // single nav.back()/goBack() pops exactly one real level and bottoms out (rootBack) at the screen root. The
 // desired stack, bottom -> top, is: an optional "catalog" level (XMB, only inside a MULTI-catalog bucket, its
@@ -2376,6 +2592,9 @@ void MainWindow::syncThemedLevels()
     // browseItemsChanged can land mid-detail), stand off entirely: reconciling here could silently swallow
     // the detail level and orphan the view. The next navigation change after the detail pop re-syncs.
     if (g->countLevels(QStringLiteral("detail")) > 0) return;
+    // The audio now-playing page's level is likewise not part of the catalog/browse mirror — stand off while
+    // it is up so an async browseItemsChanged can't popLevelSilent it and orphan the page (mirrors "detail").
+    if (g->countLevels(QStringLiteral("nowplaying")) > 0) return;
 
     bool wantCatalog = false;
     int  wantBrowse  = 0;
@@ -2621,7 +2840,9 @@ void MainWindow::showThemedXmb()
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
                                         onSelect, onAction, onPlaylistAdd, /*onButton=*/{},
                                         [this] { openThemedDetail(-1); },
-                                        [this](const QString& v) { runThemedDetailAction(v); });
+                                        [this](const QString& v) { runThemedDetailAction(v); },
+                                        [this](const QString& v) { runThemedAudioTransport(v); },
+                                        [this](int row) { if (session_) session_->playIndex(row); });
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("categories", cats);
@@ -2695,7 +2916,9 @@ void MainWindow::showThemedBrowse()
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
                                         onSearch, onNearEnd, {}, {}, {}, {}, {},
                                         [this] { openThemedDetail(-1); },
-                                        [this](const QString& v) { runThemedDetailAction(v); });
+                                        [this](const QString& v) { runThemedDetailAction(v); },
+                                        [this](const QString& v) { runThemedAudioTransport(v); },
+                                        [this](int row) { if (session_) session_->playIndex(row); });
     if (QQuickItem* r = ThemeEngine::rootItem(w)) r->setProperty("currentView", QStringLiteral("browse"));
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;
@@ -5788,6 +6011,7 @@ void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
     session_->setDuration(seconds);
+    if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
     // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
     // is essentially the end (treat a near-finished file as "watched" and start it fresh).
     const double at = session_->takeResumeSeek(); // one-shot
@@ -5802,6 +6026,14 @@ void MainWindow::onPosition(double seconds)
     time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
+
+    // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
+    // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.
+    if (themedAudioSession_)
+    {
+        const int sec = int(seconds);
+        if (sec != themedAudioPushSec_) { themedAudioPushSec_ = sec; updateThemedAudioProgress(); }
+    }
 }
 
 void MainWindow::onSeekReleased()

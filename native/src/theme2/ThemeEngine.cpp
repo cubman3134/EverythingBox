@@ -86,6 +86,8 @@ void ThemeBridge::playlistAdd() { if (onPlaylistAdd) onPlaylistAdd(); }
 void ThemeBridge::button(const QString& name) { playEffect(sndSelect); if (onButton) onButton(name); }
 void ThemeBridge::detailsOpen() { if (onDetails) onDetails(); }
 void ThemeBridge::detailAction(const QString& verb) { playEffect(sndSelect); if (onDetailAction) onDetailAction(verb); }
+void ThemeBridge::audioTransport(const QString& verb) { playEffect(sndSelect); if (onAudioTransport) onAudioTransport(verb); }
+void ThemeBridge::audioQueue(int row) { playEffect(sndSelect); if (onAudioQueue) onAudioQueue(row); }
 
 // ---- NavGraph bridge --------------------------------------------------------------------------------------
 // The selection moved: write the render prop for the SELECTED zone (and derive focusZone). setProperty to an
@@ -113,6 +115,12 @@ void ThemeBridge::onNavSelection(const QString& zone, int index)
         { root->setProperty("detailZone", QStringLiteral("body")); }
     else if (zone == QStringLiteral("detailChildren"))
         { root->setProperty("detailChildIndex", index); root->setProperty("detailZone", QStringLiteral("children")); }
+    // Audio now-playing zones: mirror the cursor into the props the audio page reads (the transport strip /
+    // queue list draw their focus ring from these), and record which zone holds the cursor.
+    else if (zone == QStringLiteral("transport"))
+        { root->setProperty("audioTransportIndex", index); root->setProperty("audioZone", QStringLiteral("transport")); }
+    else if (zone == QStringLiteral("queue"))
+        { root->setProperty("audioQueueIndex", index); root->setProperty("audioZone", QStringLiteral("queue")); }
 }
 
 // Enter/click on the selection: route to the same fan-out the QML signals used to drive directly.
@@ -174,6 +182,38 @@ void ThemeBridge::syncDetailZone()
     }
 }
 
+// The audio now-playing view opened/closed (currentView flipped to/from "nowplayingAudio"). The transport /
+// queue zones are registered up-front (hidden); opening counts them up (the transport strip has a fixed verb
+// count; the queue is the session queue length) and parks the cursor on the transport strip, closing hides
+// them (their edges go inert). Connected to currentViewChanged ALONGSIDE syncDetailZone — each slot owns its
+// own view's zones and only ever restores the home `items` cursor when leaving ITS view (audioWasOpen_ gates
+// that), so entering the detail view (which syncDetailZone parks on detailActions) is never clobbered here.
+void ThemeBridge::syncAudioPageZone()
+{
+    if (!graph || !root) return;
+    const bool nowAudio = root->property("currentView").toString() == QStringLiteral("nowplayingAudio");
+    if (nowAudio)
+    {
+        graph->setZoneCount(QStringLiteral("transport"), root->property("audioTransportCount").toInt());
+        graph->setZoneCount(QStringLiteral("queue"), root->property("audioQueueCount").toInt());
+        graph->select(QStringLiteral("transport"), 0); // land the cursor on the first transport button
+        audioWasOpen_ = true;
+    }
+    else
+    {
+        graph->setZoneCount(QStringLiteral("transport"), 0);
+        graph->setZoneCount(QStringLiteral("queue"), 0);
+        // Restore the home cursor ONLY when leaving the audio page for a home/browse view; when leaving for the
+        // detail view, syncDetailZone (which ran first) already parked the cursor on detailActions — don't undo it.
+        if (audioWasOpen_)
+        {
+            audioWasOpen_ = false;
+            if (root->property("currentView").toString() != QStringLiteral("detail"))
+                graph->select(QStringLiteral("items"), root->property("currentIndex").toInt());
+        }
+    }
+}
+
 namespace ThemeEngine
 {
 
@@ -220,7 +260,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
                    std::function<void()> onCategory, std::function<void(int)> onSelect,
                    std::function<void(int)> onAction, std::function<void()> onPlaylistAdd,
                    std::function<void(QString)> onButton, std::function<void()> onDetails,
-                   std::function<void(QString)> onDetailAction)
+                   std::function<void(QString)> onDetailAction,
+                   std::function<void(QString)> onAudioTransport, std::function<void(int)> onAudioQueue)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -247,6 +288,11 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // themes (no categories) share this one wiring. (See NavThemeGraph.h for the per-zone rationale.)
     auto* graph = new NavGraph(qv);
     buildThemedNavGraph(*graph, int(items.size()));
+    // The audio now-playing surface's zones (transport strip + queue list) live on the SAME graph as the home,
+    // registered hidden (count 0) and count-gated by syncAudioPageZone when the "nowplayingAudio" view opens —
+    // exactly like the detail zones. Built by the shared buildAudioPageNavGraph (NavThemeGraph.h), the ONE
+    // definition probe_navqml shape-tests, so the CI assertion can never drift from this shipped graph.
+    buildAudioPageNavGraph(*graph);
     // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected. Under MMV_UITEST
     // (the probe/UI-test build) a failure is FATAL, not a warning: the graph shape is CI-asserted by
     // probe_navqml against the same builder, so a validate() failure here means a real structural break that
@@ -290,6 +336,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onButton = std::move(onButton);
         bridge->onDetails = std::move(onDetails);
         bridge->onDetailAction = std::move(onDetailAction);
+        bridge->onAudioTransport = std::move(onAudioTransport);
+        bridge->onAudioQueue = std::move(onAudioQueue);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -321,6 +369,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(actionRequested(QString)), bridge, SLOT(button(QString)));
         QObject::connect(root, SIGNAL(detailsRequested()), bridge, SLOT(detailsOpen()));
         QObject::connect(root, SIGNAL(detailActionRequested(QString)), bridge, SLOT(detailAction(QString)));
+        QObject::connect(root, SIGNAL(audioTransportRequested(QString)), bridge, SLOT(audioTransport(QString)));
+        QObject::connect(root, SIGNAL(audioQueueActivateRequested(int)), bridge, SLOT(audioQueue(int)));
 
         // The NavGraph selection model -> the render props + the activate/back fan-out. The QML routes all
         // key/mouse/wheel navigation through `nav`; these connections mirror the resulting selection into the
@@ -337,6 +387,10 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         // The detail view's zones follow currentView: opening (-> "detail") counts them up + parks the cursor
         // in the action row, closing hides them + restores the item cursor.
         QObject::connect(root, SIGNAL(currentViewChanged()), bridge, SLOT(syncDetailZone()));
+        // The audio now-playing view's zones follow currentView too (-> "nowplayingAudio"). Connected AFTER
+        // syncDetailZone so, on a detail<->audio transition, the detail slot parks its cursor first and the
+        // audio slot's leave-restore stands off (see syncAudioPageZone).
+        QObject::connect(root, SIGNAL(currentViewChanged()), bridge, SLOT(syncAudioPageZone()));
     }
 
     qv->setFocusPolicy(Qt::StrongFocus);

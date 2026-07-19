@@ -36,6 +36,8 @@ public:
     std::function<void(QString)> onButton; // a `button` element fired its named action (e.g. settings/profile)
     std::function<void()> onDetails;       // "I"/Info: open the themed detail view for the current selection
     std::function<void(QString)> onDetailAction; // the detail action row fired a verb (play/download/favorite/playlist)
+    std::function<void(QString)> onAudioTransport; // the audio now-playing transport strip fired a verb
+    std::function<void(int)> onAudioQueue;         // a queue row was activated -> the host runs playIndex(row)
 
     // Optional per-theme UI sounds (owned by this bridge; null when the theme defines none for that action).
     QSoundEffect* sndNavigate = nullptr; // selection moved
@@ -58,6 +60,8 @@ public slots:
     void button(const QString& name); // a `button` element fired its named action
     void detailsOpen();               // "I"/Info -> the host opens the themed detail view
     void detailAction(const QString& verb); // the detail action row fired a verb -> the host runs it
+    void audioTransport(const QString& verb); // the audio transport strip fired a verb -> the host runs it
+    void audioQueue(int row);               // a queue row was activated -> the host runs session_->playIndex(row)
 
     // ---- NavGraph bridge: the selection model (`nav` in QML) drives these; they write the SAME QML props
     //      every element binds today, so all the existing animations/handlers keep working untouched. -------
@@ -70,6 +74,10 @@ public slots:
     void onNavRootBack();      // nav.back() bottomed out -> the existing themed back() path (pause menu, drill)
     void syncActionsZone();    // actionsOpen flipped: (de)register the inline-chooser zone + park the selection
     void syncDetailZone();     // currentView flipped: (de)register the detail-view zones + park the selection
+    void syncAudioPageZone();  // currentView flipped: (de)register the audio now-playing zones + park the selection
+
+private:
+    bool audioWasOpen_ = false; // true while the audio now-playing view holds the cursor (leave-restore guard)
 };
 
 namespace ThemeEngine
@@ -90,7 +98,9 @@ namespace ThemeEngine
                        std::function<void()> onPlaylistAdd = {},
                        std::function<void(QString)> onButton = {},
                        std::function<void()> onDetails = {},
-                       std::function<void(QString)> onDetailAction = {});
+                       std::function<void(QString)> onDetailAction = {},
+                       std::function<void(QString)> onAudioTransport = {},
+                       std::function<void(int)> onAudioQueue = {});
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);

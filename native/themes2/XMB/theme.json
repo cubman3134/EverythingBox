@@ -45,6 +45,16 @@
           "color": "#E8EEF8", "fontSize": 0.022,
           "entries": [ { "button": "←→", "label": "Action" }, { "button": "Enter", "label": "Select" }, { "button": "Esc", "label": "Back" } ] }
       ]
+    },
+
+    "nowplayingAudio": {
+      "background": { "color": "#0A1326" },
+      "elements": [
+        { "type": "wave", "id": "npWave", "pos": [0, 0.30], "size": [1, 0.70], "origin": [0, 0], "zIndex": 0,
+          "color": "#3E6FB8", "bands": 3, "segments": 44, "amplitude": 0.05, "speed": 1.0 },
+        { "type": "nowplayingaudio", "id": "np", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 2,
+          "accent": "#3E6FB8", "color": "#E8EEF8", "dimColor": "#AFC0DE", "panelColor": "#12203B" }
+      ]
     }
   }
 }
