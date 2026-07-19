@@ -175,10 +175,13 @@ int main(int argc, char** argv)
 
         // Pinned reassignment target: remove the selected g11 — all four orthogonal neighbors are at grid
         // distance 1, so the documented tie-break (registration order) picks g01 (registered before g10/g12/g21).
-        g.select(QStringLiteral("g11"), 1);
+        // Reassignment restores the successor's REMEMBERED index (recorded when it was last left), never the
+        // dead zone's carried index — pin g01's memory explicitly, then verify it is what comes back.
+        g.select(QStringLiteral("g01"), 2);   // park g01 at 2…
+        g.select(QStringLiteral("g11"), 1);   // …and leave it (records g01.memory = 2)
         g.removeZone(QStringLiteral("g11"));
         CHECK(g.zone() == QStringLiteral("g01"), "removing the selected g11 reassigns to g01 (nearest, reg-order tie-break)");
-        CHECK(g.index() == 1, "reassignment carries the index");
+        CHECK(g.index() == 2, "reassignment restores g01's remembered index, not the carried index");
         CHECK(g.validate(nullptr), "the grid still validates after the pinned removal");
     }
 
@@ -283,6 +286,130 @@ int main(int argc, char** argv)
         CHECK(g.back(), "back pops the top level");
         CHECK(g.levelDepth() == 1, "a pop from inside onPop is ignored — the level below survives");
         CHECK(!lowerRan, "the surviving level's onPop did not run");
+    }
+
+    // ---------------------------------------------------------------- 7. declared edges + per-zone memory
+    {
+        NavGraph g;
+        // A two-cursor surface, exactly the themed XMB shape: a Vertical item column + a Horizontal
+        // category axis CO-LOCATED in one grid cell, with declared cursor-switching edges.
+        g.registerZone(QStringLiteral("col"), 5, 0, 0, Qt::Vertical);
+        g.registerZone(QStringLiteral("bar"), 4, 0, 0);
+        g.addEdge(QStringLiteral("col"), Qt::Key_Left,  QStringLiteral("bar"));
+        g.addEdge(QStringLiteral("col"), Qt::Key_Right, QStringLiteral("bar"));
+        g.addEdge(QStringLiteral("bar"), Qt::Key_Down,  QStringLiteral("col"));
+        g.addEdge(QStringLiteral("bar"), Qt::Key_Up,    QStringLiteral("col"));
+        g.select(QStringLiteral("col"), 2);
+        CHECK(g.move(Qt::Key_Right), "Right from the column crosses via the declared edge (visible change)");
+        CHECK(g.zone() == QStringLiteral("bar"), "the declared edge wins over axis/geometric resolution");
+        CHECK(g.index() == 1, "co-located entry = remembered index (0) + the fused step (+1) in ONE press");
+        CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("col") && g.index() == 3,
+              "Down re-enters the column at its remembered index (2) + fused step = 3 (memory recorded on leave)");
+        // A fused step that clamps is a pure cursor flip: returns false (no visible index change), but the
+        // zone still switches so the next along-axis arrow steps the other cursor.
+        g.select(QStringLiteral("bar"), 3);   // park the bar at its end…
+        g.select(QStringLiteral("col"), 1);   // …and leave it (records bar.memory = 3)
+        CHECK(!g.move(Qt::Key_Right), "Right into a bar whose fused step clamps returns false (no visible move)");
+        CHECK(g.zone() == QStringLiteral("bar") && g.index() == 3, "…yet the cursor DID switch (zone flipped, index at memory)");
+
+        // A non-co-located edge is a focus handoff: enters at the remembered index WITHOUT the fused step.
+        g.registerZone(QStringLiteral("btns"), 2, 1, 0);   // a real bottom bar, spatially below
+        g.addEdge(QStringLiteral("col"), Qt::Key_Down, QStringLiteral("btns"));
+        g.addEdge(QStringLiteral("btns"), Qt::Key_Up,  QStringLiteral("col"));
+        g.select(QStringLiteral("btns"), 1);
+        g.select(QStringLiteral("col"), 0);   // leave btns (records btns.memory = 1)
+        CHECK(!g.move(Qt::Key_Down), "the handoff edge fires mid-strip (edges beat the axis step) with no index change");
+        CHECK(g.zone() == QStringLiteral("btns") && g.index() == 1, "handoff enters at the remembered button, unstepped");
+        CHECK(!g.move(Qt::Key_Up), "leaving back up restores the column exactly (no visible index change)");
+        CHECK(g.zone() == QStringLiteral("col") && g.index() == 0, "…at the index it was left on (memory, not carry)");
+
+        // A hidden target makes the edge inert: resolution falls through to the axis step.
+        g.setZoneCount(QStringLiteral("btns"), 0);
+        g.select(QStringLiteral("col"), 1);
+        CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("col") && g.index() == 2,
+              "an edge to a hidden zone is inert -> the axis step proceeds");
+    }
+
+    // ---------------------------------------------------------------- 8. co-located reassign restores memory
+    {
+        // The live-caught regression, now gated: three co-located zones (the themed home), the transient
+        // chooser zone hides itself — the selection must land on the ITEM cursor's remembered index, never
+        // the chooser's carried actionIndex.
+        NavGraph g;
+        g.registerZone(QStringLiteral("items"), 12, 0, 0, Qt::Vertical);
+        g.registerZone(QStringLiteral("categories"), 6, 0, 0);
+        g.registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
+        g.addEdge(QStringLiteral("items"), Qt::Key_Left, QStringLiteral("categories"));   // connectivity
+        g.addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
+        g.select(QStringLiteral("items"), 7);
+        g.setZoneCount(QStringLiteral("actions"), 4);        // chooser opens
+        g.select(QStringLiteral("actions"), 3);              // user moves to the 4th action row
+        g.setZoneCount(QStringLiteral("actions"), 0);        // chooser closes (zone hides)
+        CHECK(g.zone() == QStringLiteral("items"), "hiding the chooser reassigns to the co-located items zone");
+        CHECK(g.index() == 7, "…at the item cursor's REMEMBERED index (7), not the carried actionIndex (3)");
+        CHECK(g.validate(nullptr), "the co-located registry still validates");
+    }
+
+    // ---------------------------------------------------------------- 9. the REAL themed graph shape
+    {
+        // Replicates ThemeEngine::buildView's registration + edge set literally (keep in sync with it).
+        // The shipped themed graph must pass its own validator and reach every arrow-navigable zone.
+        NavGraph g;
+        g.registerZone(QStringLiteral("items"), 12, 0, 0, Qt::Vertical);
+        g.registerZone(QStringLiteral("categories"), 6, 0, 0);
+        g.registerZone(QStringLiteral("buttons"), 2, 1, 0);
+        g.registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
+        g.setDefaultZone(QStringLiteral("items"));
+        g.addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
+        g.addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
+        g.addEdge(QStringLiteral("items"), Qt::Key_Down, QStringLiteral("buttons"));
+        g.addEdge(QStringLiteral("buttons"), Qt::Key_Up, QStringLiteral("items"));
+        g.addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
+        QString why;
+        CHECK(g.validate(&why), "the REAL themed graph passes validate() with the chooser closed");
+        g.setZoneCount(QStringLiteral("actions"), 4);
+        CHECK(g.validate(&why), "…and with the chooser open");
+        g.setZoneCount(QStringLiteral("actions"), 0);
+
+        // Every arrow-navigable zone is reachable from the default via move() alone (the overlay `actions`
+        // zone is entered by activation, not an arrow — its declared Esc edge is its return leg, below).
+        std::set<QString> reached;
+        std::set<std::pair<QString,int>> seen;
+        std::deque<std::pair<QString,int>> q;
+        g.select(QStringLiteral("items"), 0);
+        q.push_back({g.zone(), g.index()});
+        seen.insert({g.zone(), g.index()});
+        reached.insert(g.zone());
+        static const Qt::Key arr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+        while (!q.empty()) {
+            auto [z, i] = q.front(); q.pop_front();
+            for (Qt::Key k : arr) {
+                g.select(z, i);
+                g.move(k);
+                auto st = std::make_pair(g.zone(), g.index());
+                if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+            }
+        }
+        CHECK(reached.count(QStringLiteral("items")) && reached.count(QStringLiteral("categories"))
+              && reached.count(QStringLiteral("buttons")),
+              "arrows alone reach items+categories+buttons from the default");
+
+        // Two-cursor parity pin: from the column, one Right switches AND steps the category axis.
+        g.select(QStringLiteral("categories"), 2);
+        g.select(QStringLiteral("items"), 4);                // leave categories (memory = 2)
+        CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("categories") && g.index() == 3,
+              "one Right from the column = category cursor 2 -> 3 (edge entry at memory + fused step)");
+
+        // The chooser's declared Esc edge returns to the item cursor (the leg syncActionsZone executes).
+        // Esc is a non-arrow key: it resolves ONLY via the declared edge (no fused step, no geometry).
+        g.select(QStringLiteral("items"), 5);
+        g.setZoneCount(QStringLiteral("actions"), 4);
+        g.select(QStringLiteral("actions"), 2);
+        g.move(Qt::Key_Escape);
+        CHECK(g.zone() == QStringLiteral("items") && g.index() == 5,
+              "the chooser's declared Esc edge lands back on the remembered item cursor");
     }
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

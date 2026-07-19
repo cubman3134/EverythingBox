@@ -39,10 +39,24 @@ Rejected: fix-list (patches can't deliver "never"); pure-QML FocusScope rewrite
   reassigns: nearest registered neighbor by geometry, else the screen's declared
   default. Null selection is unrepresentable in the API.
 - **Invariant 2 (full reachability):** the movement graph from the default element
-  reaches every registered element (spatial resolution by registered geometry). The
-  harness fails a screen whose graph is partitioned.
-- **Invariant 3 (movement is spatial):** arrows resolve by geometry (row/column or
-  coordinates), one shared resolver — not per-screen key handling.
+  reaches every registered element — resolved over the UNION of spatial geometry and
+  the screen's declared edges (below), walked by `NavGraph::validate()`. The harness
+  fails a screen whose union graph is partitioned.
+- **Invariant 3 (movement is one resolver):** arrows resolve in the shared resolver —
+  declared edges first (exact from-zone + key match), then spatial geometry
+  (row/column or coordinates) — never per-screen key handling.
+- **Declared-edge screen class (two-cursor surfaces):** pure geometry cannot express a
+  surface with two independent, always-visible cursors (the XMB category axis + its
+  item column, co-located in one grid cell) — spatial crossing moves ONE selection and
+  carries its index, but a cursor switch must land on the OTHER cursor's position and,
+  for arrow parity, step it in the same press. Such screens declare their transitions
+  as edges (`NavGraph::addEdge`): an edge crossing enters the target at its per-zone
+  REMEMBERED index (the `NavRing::rememberSelection` concept applied per zone; also
+  used by reassignment), and a co-located target whose axis matches the arrow gets the
+  fused step. Focus handoffs to spatially real zones (a bottom button bar) are also
+  declared edges — entry at memory, no fused step. Both kinds are part of the
+  Invariant 2 union, so reachability is still validated, not assumed from key-map
+  wiring.
 
 ### Two-state themed inputs
 

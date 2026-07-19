@@ -117,22 +117,21 @@ void ThemeBridge::onNavActivated(const QString& zone, int index)
 
 void ThemeBridge::onNavRootBack() { back(); } // nav.back() with an empty level stack -> the themed back() path
 
-// The inline action chooser opened/closed. It is a transient 4-row vertical zone that only exists while
-// actionsOpen is true; entering it parks the selection there, leaving it restores the item cursor (the
-// leaf the chooser was opened over, still held in currentIndex).
+// The inline action chooser opened/closed. The `actions` zone is registered up-front (hidden); opening the
+// chooser shows it (count 4) and parks the selection there, closing hides it and restores the item cursor —
+// this executes the declared actions--Esc-->items edge (see buildView). Even without the explicit restore,
+// the model's reassignment now lands on the ITEM zone's remembered index (never the carried actionIndex);
+// the explicit select keeps the restore in lockstep with the currentIndex prop the host may have updated.
 void ThemeBridge::syncActionsZone()
 {
     if (!graph || !root) return;
     if (root->property("actionsOpen").toBool())
     {
-        graph->registerZone(QStringLiteral("actions"), 4, 0, 0, Qt::Vertical, /*wraps=*/true);
+        graph->setZoneCount(QStringLiteral("actions"), 4);
         graph->select(QStringLiteral("actions"), root->property("actionIndex").toInt());
     }
     else
     {
-        // Restore the item cursor to the leaf the chooser was opened over FIRST (currentIndex still holds it),
-        // THEN hide the now-unselected zone. Doing it in this order avoids setZoneCount reassigning the
-        // selection out of `actions` and carrying the (unrelated) actionIndex into the item column.
         graph->select(QStringLiteral("items"), root->property("currentIndex").toInt());
         graph->setZoneCount(QStringLiteral("actions"), 0);
     }
@@ -202,16 +201,41 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
 
     // The selection model for this view. Created + exposed as the `nav` context property BEFORE setSource
     // (context properties must precede the QML load). It is parented to the widget, so it dies with the view.
-    // Every themed zone sits in the SAME coarse grid cell (0,0): the resolver only ever STEPS within the
-    // pre-positioned zone (clamp / wrap at the edges) and never spatially crosses — the themed screens have
-    // two independent cursors (XMB category + item) and a geometric grid that don't map onto NavGraph's
-    // spatial crossing, so every zone transition is an explicit nav.select from the QML instead. `items` is
-    // Vertical (the XMB Up/Down column); counts + divider sets are fed live from the QML (see ThemeView.qml).
+    //
+    // Zone layout: `items` (the XMB column / the grid, Vertical) and `categories` (the XMB horizontal axis)
+    // are CO-LOCATED at (0,0) — they are the two always-visible cursors of ONE surface, which pure spatial
+    // crossing cannot express, so their transitions are DECLARED edges with the fused co-located step (one
+    // press switches cursor AND moves it — see NavGraph.h). `actions` (the inline chooser overlay) is
+    // co-located too; it is entered by activation (the host flips actionsOpen), and its declared Esc edge
+    // documents the dismissal transition so validate() sees it connected. `buttons` (the bottom button bar)
+    // is spatially real at row 1; its transitions restore the neighbor's cursor from per-zone memory.
+    // Counts + divider sets are fed live from the QML (see ThemeView.qml); a hidden zone (count 0) makes
+    // its edges inert, so XMB themes (no buttons) and grid themes (no categories) share this one wiring.
     auto* graph = new NavGraph(qv);
     graph->registerZone(QStringLiteral("items"), int(items.size()), 0, 0, Qt::Vertical);
     graph->registerZone(QStringLiteral("categories"), 0, 0, 0, Qt::Horizontal);
-    graph->registerZone(QStringLiteral("buttons"), 0, 0, 0, Qt::Horizontal);
+    graph->registerZone(QStringLiteral("buttons"), 0, 1, 0, Qt::Horizontal);
+    graph->registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
     graph->setDefaultZone(QStringLiteral("items"));
+    // Two-cursor XMB surface: Left/Right switch to + step the category axis; Up/Down from the category
+    // axis switch to + step the item column (fused step = old stepCat/step parity, no eaten press).
+    graph->addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
+    graph->addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
+    graph->addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
+    graph->addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
+    // The bottom button bar: entered from the grid's bottom row (the QML gates WHEN — it owns the gridCols
+    // geometry), left back upward with the grid cursor restored from zone memory.
+    graph->addEdge(QStringLiteral("items"), Qt::Key_Down, QStringLiteral("buttons"));
+    graph->addEdge(QStringLiteral("buttons"), Qt::Key_Up, QStringLiteral("items"));
+    // The chooser's dismissal transition (Esc -> back onto the leaf), executed by syncActionsZone below;
+    // declared so the connectivity walk sees the overlay zone linked to the surface it covers.
+    graph->addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
+    // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected.
+    {
+        QString why;
+        if (!graph->validate(&why))
+            qWarning("theme2: nav graph failed validate(): %s", qPrintable(why));
+    }
     qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph);
     qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()
 

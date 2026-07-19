@@ -18,7 +18,8 @@ void NavGraph::registerZone(const QString& id, int count, int row, int col, Qt::
     z.wraps = wraps;
     const bool isNew = !m_zones.contains(id);
     if (isNew) { z.order = m_order.size(); m_order.push_back(id); }
-    else       { z.order = m_zones[id].order; z.unsel = m_zones[id].unsel; }
+    else       { const Zone& old = m_zones[id];   // a rebuild re-registers: keep identity + wiring + memory
+                 z.order = old.order; z.unsel = old.unsel; z.memory = old.memory; z.edges = old.edges; }
     m_zones[id] = z;
 
     if (m_defaultZone.isEmpty()) m_defaultZone = id;
@@ -55,7 +56,8 @@ void NavGraph::removeZone(const QString& id)
     if (m_defaultZone == id) m_defaultZone = m_order.front();
     if (wasSelected) {
         if (target.isEmpty()) target = m_zones.contains(m_defaultZone) ? m_defaultZone : m_order.front();
-        setSelection(target, snapIndex(target, m_index));
+        // Restore the successor's REMEMBERED index (never the dead zone's carried index) — see header.
+        setSelection(target, snapIndex(target, m_zones[target].memory));
     }
 }
 
@@ -77,6 +79,15 @@ void NavGraph::setDividers(const QString& zone, const QVariantList& indices)
     QSet<int> s;
     for (const QVariant& v : indices) s.insert(v.toInt());
     setUnselectable(zone, s);
+}
+
+void NavGraph::addEdge(const QString& fromZone, Qt::Key arrow, const QString& toZone)
+{
+    auto it = m_zones.find(fromZone);
+    if (it == m_zones.end() || toZone.isEmpty() || fromZone == toZone) return;
+    for (const auto& e : it->edges)
+        if (e.first == int(arrow) && e.second == toZone) return;   // idempotent
+    it->edges.push_back({ int(arrow), toZone });
 }
 
 // ---------------------------------------------------------------------------------------- accessors
@@ -164,18 +175,51 @@ void NavGraph::reassignFrom(const QString& deadId)
     if (target.isEmpty() && m_zones.contains(m_defaultZone)) target = m_defaultZone;
     if (target.isEmpty() && !m_order.isEmpty()) target = m_order.front();
     if (target.isEmpty()) { m_zone.clear(); m_index = 0; emit selectionChanged(m_zone, m_index); return; }
-    setSelection(target, snapIndex(target, m_index));
+    // Restore the target's REMEMBERED index, never the dead zone's carried index — so a transient overlay
+    // zone (the inline action chooser) hiding itself lands the selection back where its neighbor left off.
+    setSelection(target, snapIndex(target, m_zones[target].memory));
 }
 
 void NavGraph::setSelection(const QString& zone, int idx)
 {
     if (m_zone == zone && m_index == idx) return;
+    // Record the departed zone's last index (NavRing::rememberSelection per zone): declared-edge crossings
+    // and reassignment restore it.
+    if (m_zone != zone) {
+        auto it = m_zones.find(m_zone);
+        if (it != m_zones.end()) it->memory = m_index;
+    }
     m_zone = zone;
     m_index = idx;
     emit selectionChanged(m_zone, m_index);
 }
 
 // ---------------------------------------------------------------------------------------- movement
+
+// A declared-edge crossing: enter `target` at its REMEMBERED index; if the target is co-located with the
+// source (the two-cursor case) and the arrow runs along the target's axis, continue with one step from
+// that index (divider-skipped; wrap if the target wraps) — one press = switch cursor AND move it.
+// Returns whether the target's DISPLAYED index changed (a pure cursor flip returns false); the selection
+// (zone) changes either way, emitting selectionChanged for the host bridge.
+bool NavGraph::crossByEdge(const QString& target, int dRow, int dCol)
+{
+    const Zone& from = m_zones[m_zone];
+    const Zone& t = m_zones[target];
+    const int displayed = t.memory;                       // what the host last showed for this zone
+    int final_ = snapIndex(target, t.memory);
+    const bool coLocated = (from.row == t.row && from.col == t.col);
+    const int along = (t.axis == Qt::Horizontal) ? dCol : dRow;
+    if (coLocated && along != 0) {
+        int ni = stepSelectable(target, final_, along);
+        if (ni >= 0) final_ = ni;
+        else if (t.wraps && t.count > 0) {
+            int wrap = (along > 0) ? snapIndex(target, 0) : snapIndex(target, t.count - 1);
+            final_ = wrap;
+        }
+    }
+    setSelection(target, final_);
+    return final_ != displayed;
+}
 
 bool NavGraph::move(int arrow)
 {
@@ -186,10 +230,24 @@ bool NavGraph::move(int arrow)
         case Qt::Key_Down:  dRow =  1; break;
         case Qt::Key_Left:  dCol = -1; break;
         case Qt::Key_Right: dCol =  1; break;
-        default: return false;
+        default: break;   // non-arrow keys resolve ONLY via declared edges below
     }
 
-    // An arrow along the SELECTED zone's axis first steps the index within the strip (Horizontal:
+    // 1. Declared edges first (exact from-zone + key match). A hidden target (count 0) makes the edge
+    //    inert — resolution falls through to the axis/geometric logic, so e.g. the grid themes' Down-to-
+    //    buttons edge simply doesn't exist on an XMB theme whose button bar is empty.
+    {
+        const Zone& z = m_zones[m_zone];
+        for (const auto& e : z.edges) {
+            if (e.first != arrow) continue;
+            auto tit = m_zones.constFind(e.second);
+            if (tit == m_zones.constEnd() || tit->count <= 0) continue;
+            return crossByEdge(e.second, dRow, dCol);
+        }
+    }
+    if (dRow == 0 && dCol == 0) return false;   // a non-arrow key with no matching edge
+
+    // 2. An arrow along the SELECTED zone's axis steps the index within the strip (Horizontal:
     // Left/Right; Vertical: Up/Down); it only crosses zones at an edge. The cross-axis arrow always
     // crosses zones.
     const Zone& z = m_zones[m_zone];
@@ -203,8 +261,10 @@ bool NavGraph::move(int arrow)
         }
     }
 
+    // 3. Geometric crossing (carries the index). Hidden zones are not navigable targets.
     QString nz = nearestZone(m_zone, dRow, dCol);
     if (nz.isEmpty()) return false;
+    if (m_zones[nz].count <= 0) return false;
     int ni = snapIndex(nz, m_index);
     if (nz == m_zone && ni == m_index) return false;
     setSelection(nz, ni);
@@ -213,7 +273,8 @@ bool NavGraph::move(int arrow)
 
 void NavGraph::select(const QString& zone, int index)
 {
-    if (!m_zones.contains(zone)) return;
+    auto it = m_zones.constFind(zone);
+    if (it == m_zones.constEnd() || it->count <= 0) return;   // can't steer onto a missing/hidden zone
     setSelection(zone, snapIndex(zone, index));
 }
 
@@ -276,7 +337,15 @@ bool NavGraph::validate(QString* whyNot) const
             return fail(QStringLiteral("index sits on a divider in ") + m_zone);
     }
 
-    // Connectivity: BFS from the default zone over undirected nearest-neighbor edges (4 directions).
+    // Connectivity: BFS from the default zone over the UNION of geometric nearest-neighbor edges
+    // (4 directions) and declared edges. Both edge kinds count as undirected here — connectivity is a
+    // structural property (a declared A->B transition proves the pair is one navigable surface even when
+    // the reverse leg is an activation/dismissal rather than an arrow, e.g. the inline action chooser).
+    QHash<QString, QSet<QString>> declared;   // undirected declared adjacency (both endpoints registered)
+    for (auto it = m_zones.constBegin(); it != m_zones.constEnd(); ++it)
+        for (const auto& e : it->edges)
+            if (m_zones.contains(e.second)) { declared[it.key()].insert(e.second); declared[e.second].insert(it.key()); }
+
     QString start = m_zones.contains(m_defaultZone) ? m_defaultZone : m_order.front();
     QSet<QString> seen{start};
     QVector<QString> q{start};
@@ -287,6 +356,8 @@ bool NavGraph::validate(QString* whyNot) const
             QString nb = nearestZone(cur, d[0], d[1]);
             if (!nb.isEmpty() && !seen.contains(nb)) { seen.insert(nb); q.push_back(nb); }
         }
+        for (const QString& nb : declared.value(cur))
+            if (!seen.contains(nb)) { seen.insert(nb); q.push_back(nb); }
     }
     if (seen.size() != m_zones.size())
         return fail(QStringLiteral("zone graph is not connected"));
