@@ -101,6 +101,14 @@ QStringList availableThemes()
     return out;
 }
 
+bool hasInstalledTheme()
+{
+    const QFileInfoList subs = QDir(themesRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+    for (const QFileInfo& d : subs)
+        if (QFile::exists(d.absoluteFilePath() + QStringLiteral("/theme.json"))) return true;
+    return false;
+}
+
 QString themeDisplayName(const QString& folder)
 {
     QFile f(themesRoot() + QStringLiteral("/") + folder + QStringLiteral("/theme.json"));

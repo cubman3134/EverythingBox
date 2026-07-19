@@ -1883,7 +1883,19 @@ void MainWindow::showHomeScreen()
 #ifdef MMV_HAVE_QML
     // Rebuild a fresh themed view on return so it reflects the current theme/catalogs. The themed pages are
     // QQuickWidgets (plain widgets, no native child window), so this is safe: no compositing tricks needed.
-    if (themedHomeEnabled()) { showThemedHome(); return; }
+    if (themedHomeEnabled())
+    {
+        if (ThemeEngine::hasInstalledTheme()) { showThemedHome(); return; }
+        // Themed home is on but no theme exists on disk (wiped/broken themes2): building the empty theme
+        // renders an all-black home whose navigation still works invisibly. Fall back to the classic home
+        // (setting untouched — restoring the themes folder restores the themed home) and say why, once.
+        if (!warnedNoThemes_)
+        {
+            warnedNoThemes_ = true;
+            notifier_->notify(tr("No themes found in %1 — using the classic home screen.")
+                                  .arg(QDir::toNativeSeparators(ThemeEngine::themesRoot())), kFeedbackLong);
+        }
+    }
 #endif
     stack_->setCurrentWidget(home_);
 }

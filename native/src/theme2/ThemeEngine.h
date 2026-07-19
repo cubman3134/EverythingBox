@@ -84,5 +84,9 @@ namespace ThemeEngine
 
     QString themesRoot();              // <app>/themes2
     QStringList availableThemes();     // subdirectories of themesRoot that contain a theme.json
+    // True when at least one real theme (a theme.json on disk) is installed. availableThemes() pads its empty
+    // result with a "Default" placeholder for the picker, so callers that need an actually-loadable theme
+    // (the themed home) check this instead — an empty theme renders an all-black, invisibly-navigable view.
+    bool hasInstalledTheme();
     QString themeDisplayName(const QString& folder); // theme.json "name [— author]", else the folder name
 }

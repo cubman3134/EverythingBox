@@ -263,6 +263,7 @@ private:
     QWidget* themedBrowse_ = nullptr;
     int themedHomeIndex_ = 0; // remember the highlighted system, so returning from a catalog lands back on it
     bool themedHomeIsXmb_ = false; // the themed home is an XMB cross (its column mirrors HomeView live)
+    bool warnedNoThemes_ = false;  // "no themes installed" fallback notice shown once per run
     QStringList themedXmbCatKeys_;  // XMB: category index -> bucket key ("video"/.../"settings")
     QVariantList themedXmbCatalogs_; // XMB: the current bucket's catalog list (the column when not drilled in)
     bool themedXmbInCatalog_ = false; // XMB: column shows a catalog's live items (true) vs the catalog list (false)
