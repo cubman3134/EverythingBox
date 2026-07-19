@@ -66,6 +66,13 @@ background (the inversion of the proven XMB-over-widget layering).
   a themed equivalent of the `showPanel` in-window panel system built from the
   two-state components, one settings screen per plan-task, including the Esc menu
   styling and profile picker.
+- A uniform themed row-list surface (ThemedPanelHost) models its rows as ONE Vertical
+  panelRows zone with per-row indices — not per-row self-registering
+  ThemedChoice/ThemedTextField zones, which suit Repeater/Loader surfaces of
+  heterogeneous fields. Row interaction (Toggle flip / Choice cycle / TextField OSK
+  edit) is dispatched host-side in onGraphActivated, honoring the externalEdit
+  contract — select → activate → edit-via-Osk::getText → commit-exactly-once, cancel
+  commits nothing — at the row level. Delegates are pure render.
 
 ## Phasing
 

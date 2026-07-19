@@ -1295,6 +1295,28 @@ int main(int argc, char** argv)
                   && reached.size() == 2,
                   "panel: the contained walk reaches exactly the row list + header Back");
         }
+
+        // (d) POP-RESTORE: a nested panel returning to its parent restores the parent's cursor (the user's
+        //     place), not row 0. The REMEMBERING lives host-side (ThemedPanelHost records the top entry's
+        //     panelRows index off selectionChanged; renderTop(restore=true) re-selects it on pop) — beyond the
+        //     pure graph, so this asserts the graph-level leg by driving the host's EXACT call sequence on the
+        //     shared builder: re-count + re-select after a nested panel's smaller count must land EXACTLY on
+        //     the remembered row (select() clamps + divider-snaps, which also covers a shrunk parent list).
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);                          // parent panel (the hub)
+            g.select(QStringLiteral("panelRows"), 5);           // the user's place on the parent
+            CHECK(g.index() == 5, "panel-restore: the parent cursor sits on row 5");
+            // Nested present(): the child re-counts the zone and lands on ITS first row.
+            g.setZoneCount(QStringLiteral("panelRows"), 6);     // child panel (fewer rows)
+            g.select(QStringLiteral("panelRows"), 0);
+            CHECK(g.index() == 0, "panel-restore: the nested child lands on its first row");
+            // Pop: the host re-renders the parent — re-count + re-select the remembered index (Entry.lastIndex).
+            g.setZoneCount(QStringLiteral("panelRows"), 14);
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.zone() == QStringLiteral("panelRows") && g.index() == 5,
+                  "panel-restore: pop re-selects the parent's remembered row (5), not row 0");
+        }
     }
 
 #ifdef MMV_HAVE_QML

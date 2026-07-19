@@ -65,6 +65,21 @@ ThemedPanelHost::ThemedPanelHost(QWidget* parent) : QWidget(parent)
     v->addWidget(view_);
 
     connect(graph_, &NavGraph::activated, this, &ThemedPanelHost::onGraphActivated);
+    connect(graph_, &NavGraph::selectionChanged, this, &ThemedPanelHost::onSelectionChanged);
+    // Defensive: back() on an empty level stack emits rootBack(). The graph levels and stack_ move in lockstep,
+    // so rootBack means NO panel is presented — there is nothing to pop and no onBack to run; the correct
+    // behaviour is a silent no-op (MainWindow only routes Back here while a panel is up, so this guards misuse
+    // rather than a real flow — without it a stray Back at depth 0 would just fall on the floor anyway, but the
+    // explicit connect documents that the host, not the caller, owns that decision).
+    connect(graph_, &NavGraph::rootBack, this, [] { /* depth 0: nothing to pop — deliberate no-op */ });
+}
+
+// Record the live panelRows cursor into the TOP entry, so a nested present()'s pop can restore the user's place
+// (renderTop(restore=true)). A panelBack excursion doesn't overwrite it — only a real row selection does.
+void ThemedPanelHost::onSelectionChanged(const QString& zone, int index)
+{
+    if (zone == QStringLiteral("panelRows") && !stack_.isEmpty())
+        stack_.last().lastIndex = index;
 }
 
 void ThemedPanelHost::buildView()
@@ -124,7 +139,7 @@ void ThemedPanelHost::present(const QString& title, const QVector<PanelRow>& row
     if (view_) view_->setFocus();
 }
 
-void ThemedPanelHost::renderTop()
+void ThemedPanelHost::renderTop(bool restore)
 {
     if (stack_.isEmpty()) return;
     const Entry& e = stack_.last();
@@ -137,16 +152,22 @@ void ThemedPanelHost::renderTop()
     graph_->setZoneCount(QStringLiteral("panelRows"), e.rows.size());
     graph_->setUnselectable(QStringLiteral("panelRows"), dividers);
     bridge_->setTitle(e.title);
-    graph_->select(QStringLiteral("panelRows"), firstSelectableRow(e.rows));
+    // Fresh present(): land on the first selectable row. Pop-restore: land on the entry's REMEMBERED row (the
+    // user's place before the nested drill) — select() clamps + divider-snaps it, so a shrunk row list is safe.
+    graph_->select(QStringLiteral("panelRows"),
+                   restore ? e.lastIndex : firstSelectableRow(e.rows));
 }
 
 void ThemedPanelHost::updateRow(const QString& rowId, const PanelRow& row)
 {
-    // Patch the model in place (no reset) AND the backing entry, so a later re-render keeps the new value.
-    model_->patchRow(rowId, row);
-    if (!stack_.isEmpty())
-        for (PanelRow& r : stack_.last().rows)
+    // Patch EVERY stack entry that carries this row id — a BACKGROUNDED panel (a parent under a nested child)
+    // must keep receiving live updates (Downloads progress ticks while a child dialog is up), so its pop-restore
+    // renders fresh data. The model_ only mirrors the TOP entry, so it is patched (in place, no reset) exactly
+    // when the top holds the row; a backgrounded patch reaches the screen at renderTop on pop.
+    for (Entry& e : stack_)
+        for (PanelRow& r : e.rows)
             if (r.id == rowId) { r = row; break; }
+    model_->patchRow(rowId, row);   // no-op (false) when the row isn't in the top panel's model
 }
 
 void ThemedPanelHost::reset()
@@ -167,7 +188,7 @@ void ThemedPanelHost::onLevelPopped()
     if (stack_.isEmpty()) return;
     const Entry gone = stack_.takeLast();
     if (!stack_.isEmpty())
-        renderTop();               // back to the parent panel — stay on the host, no navigation
+        renderTop(/*restore=*/true);   // back to the parent panel, cursor on the row the user left it at
     else if (gone.onBack)
         gone.onBack();             // the last panel was dismissed — the root onBack leaves the host
 }

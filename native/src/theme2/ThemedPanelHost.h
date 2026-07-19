@@ -111,12 +111,16 @@ public:
     QString focusedRowLabel() const;   // the label Enter would act on right now ("‹ Back" on the header zone)
 
 private:
-    struct Entry { QString title; QVector<PanelRow> rows; ActivateFn onActivate; BackFn onBack; };
+    struct Entry { QString title; QVector<PanelRow> rows; ActivateFn onActivate; BackFn onBack;
+                   int lastIndex = 0; };   // the panelRows cursor while this panel was live (pop-restore)
 
     void buildView();
-    void renderTop();                 // (re)populate the model/title/zone-count from the top entry + land cursor
+    // (re)populate the model/title/zone-count from the top entry + land the cursor: the first selectable row on
+    // a fresh present(), the entry's REMEMBERED row on a pop-restore (the user's place survives a nested drill).
+    void renderTop(bool restore = false);
     void onLevelPopped();             // a "panel:" level was popped: re-render the parent, or leave at the root
     void onGraphActivated(const QString& zone, int index);
+    void onSelectionChanged(const QString& zone, int index);   // record the top entry's panelRows cursor
     static bool selectable(const PanelRow& r);   // Separator/Info/Progress are dividers the cursor skips
     int firstSelectableRow(const QVector<PanelRow>& rows) const;
 
