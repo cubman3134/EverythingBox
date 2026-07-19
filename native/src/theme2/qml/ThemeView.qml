@@ -100,23 +100,66 @@ Item {
                 if (view.elements[i].type === "xmb") return true
         return false
     }
-    function stepCat(d) {
-        var n = categories ? categories.length : 0
+    // Navigation is arbitrated by the NavGraph selection model exposed as the `nav` context object. Arrow
+    // keys, the wheel and mouse clicks all become REQUESTS to `nav`; the C++ bridge writes the resolved
+    // selection back into catIndex / currentIndex / buttonIndex / actionIndex (and focusZone) — the props
+    // every element binds. This file never assigns those selection props directly: the model owns the
+    // clamp + divider-skip arbitration, so one resolver is the single source of truth.
+    //
+    // The themed screens carry TWO independent cursors (the XMB category axis + the item column) and, in the
+    // grid themes, a 2-D geometric grid — neither maps onto the model's spatial zone-crossing, so each arrow
+    // explicitly targets the right zone: `nav.select(zone, base)` positions the cursor, then `nav.move(key)`
+    // steps it (edge-clamped / divider-skipped) or the grid geometry is computed here and handed to
+    // `nav.select`. Every zone transition is an explicit select; the model never spatially crosses.
+
+    // Horizontal move (Left/Right). XMB: step the category axis (the host reloads the column). Grid/carousel:
+    // step one item along the row. `d` is +1 (right) / -1 (left).
+    function navHorizontal(d) {
+        if (xmbMode) {
+            nav.select("categories", catIndex)                 // position the model on the category cursor
+            if (nav.move(d > 0 ? Qt.Key_Right : Qt.Key_Left)) { navigate(); categoryChanged() }
+        } else {
+            gridSelect(currentIndex + d, d)                    // one item along the strip
+        }
+    }
+    // Vertical move (Up/Down key, wheel). XMB: step the item column (divider-skipping lives in the model).
+    // Grid: jump a full row; carousel: one item. `d` is +1 (down) / -1 (up).
+    function navVertical(d) {
+        if (xmbMode) {
+            nav.select("items", currentIndex)                  // position the model on the item cursor
+            if (nav.move(d > 0 ? Qt.Key_Down : Qt.Key_Up)) navigate()
+        } else {
+            gridSelect(currentIndex + d * gridCols, d)
+        }
+    }
+    // Grid/carousel step: seek to the nearest selectable at/after `target` travelling `dir` (skipping
+    // dividers, continuing the travel direction), then ask `nav` to select it (the model no-op-snaps the
+    // already-selectable index). Only a real move plays the navigation sound.
+    function gridSelect(target, dir) {
+        var n = items ? items.length : 0
         if (n <= 0) return
-        var ni = Math.max(0, Math.min(n - 1, catIndex + d))
-        if (ni !== catIndex) { catIndex = ni; navigate(); categoryChanged() }
+        var t = Math.max(0, Math.min(n - 1, target))
+        var ni = seekSelectable(t, dir >= 0 ? 1 : -1)
+        if (ni < 0) ni = seekSelectable(currentIndex, dir >= 0 ? -1 : 1)
+        if (ni >= 0 && ni !== currentIndex) { nav.select("items", ni); navigate() }
+    }
+    // The divider (header:true) rows as an index list, fed to the model as `items`'s unselectable set.
+    function headerIndices() {
+        var out = []
+        if (items) for (var i = 0; i < items.length; i++) if (isHeader(i)) out.push(i)
+        return out
     }
 
     // Mouse parity for the elements: clicking an item navigates to it; clicking the already-selected item
     // activates it (the "click to move, click again to press" model). Clicking also gives the scene keyboard
-    // focus so the arrow keys work afterwards.
+    // focus so the arrow keys work afterwards. Selection goes through `nav`; the bridge writes the props.
     function gotoItem(i) {
         forceActiveFocus()
         if (actionsOpen) return                            // the chooser is up; clicks go to its buttons
         var n = items ? items.length : 0
         if (i < 0 || i >= n || isHeader(i)) return         // dividers aren't clickable
-        if (i === currentIndex) activated(i)               // click the focused item -> press it
-        else { currentIndex = i; navigate() }              // click another -> move the selection there
+        if (i === currentIndex) { nav.select("items", i); nav.activate() } // click the focused item -> press it
+        else { nav.select("items", i); navigate() }        // click another -> move the selection there
     }
     function buttonAction(name) { forceActiveFocus(); actionRequested(name) } // a `button` element was pressed
     function gotoCat(i) {                                   // XMB: click a category to switch to it
@@ -125,22 +168,35 @@ Item {
         var n = categories ? categories.length : 0
         if (i < 0 || i >= n) return
         if (i === catIndex) {                              // clicking the already-selected category...
-            if (!items || items.length === 0) activated(currentIndex) // ...with no column (Settings) -> open it
+            if (!items || items.length === 0) { nav.select("items", currentIndex); nav.activate() } // no column -> open it
             return
         }
-        catIndex = i; navigate(); categoryChanged()
+        nav.select("categories", i); navigate(); categoryChanged()
     }
 
     // Fire nearEnd() once the selection gets close to the end, so the host can pull the next page before the
     // user hits the bottom. Debounced by lastNearEnd so we don't spam the host while paging in.
     property int lastNearEnd: -1
-    onItemsChanged: { lastNearEnd = -1; actionsOpen = false; focusZone = 0 } // new set: re-arm, drop chooser + button focus
+    // New item set: re-arm near-end paging and drop the chooser (a QML render-state reset; the bridge's
+    // actionsOpenChanged handler drops the model's `actions` zone). Focus returns to the grid via the model:
+    // resizing the `items` zone (and the host re-selecting into it) writes focusZone=0. The divider auto-hop
+    // that used to live in onCurrentIndexChanged is gone — the model owns it via the unselectable set below.
+    onItemsChanged: {
+        lastNearEnd = -1; actionsOpen = false
+        nav.setZoneCount("items", items ? items.length : 0)  // resize the item zone (the model reassigns/snaps)
+        nav.setDividers("items", headerIndices())            // section dividers are non-selectable in the model
+    }
+    // Keep the model's zone counts in step with the data the theme renders (single-sourced from the QML, so
+    // every producer of these arrays stays in sync without per-call-site pairing).
+    onCategoriesChanged: nav.setZoneCount("categories", categories ? categories.length : 0)
+    onButtonListChanged: nav.setZoneCount("buttons", buttonList.length)
+    Component.onCompleted: {
+        nav.setZoneCount("items", items ? items.length : 0)
+        nav.setDividers("items", headerIndices())
+        nav.setZoneCount("categories", categories ? categories.length : 0)
+        nav.setZoneCount("buttons", buttonList.length)
+    }
     onCurrentIndexChanged: {
-        if (isHeader(currentIndex)) { // host landed us on a divider -> hop to the nearest real item
-            var s = seekSelectable(currentIndex, 1); if (s < 0) s = seekSelectable(currentIndex, -1)
-            if (s >= 0 && s !== currentIndex) currentIndex = s // re-enters here with a selectable index
-            return
-        }
         var n = items ? items.length : 0
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
         selectionMoved() // host fetches the newly-selected item's metadata for the live panel (XMB)
@@ -161,40 +217,31 @@ Item {
         for (var i = from; i >= 0 && i < n; i += dir) if (!isHeader(i)) return i
         return -1
     }
-    function step(d) {
-        var n = items ? items.length : 0
-        if (n <= 0) return
-        var dir = d >= 0 ? 1 : -1
-        var target = Math.max(0, Math.min(n - 1, currentIndex + d))
-        var ni = seekSelectable(target, dir)                 // skip dividers, continuing the travel direction
-        if (ni < 0) ni = seekSelectable(currentIndex, -dir)  // at the far edge -> fall back the other way
-        if (ni >= 0 && ni !== currentIndex) { currentIndex = ni; navigate() } // only on a real move -> nav sound
-    }
-    // The vertical move (what Down/Up and the mouse wheel do): one item in the XMB column, one grid row else.
-    function vstep(dir) { if (xmbMode) step(dir); else step(dir * gridCols) }
+    // (step/vstep/stepCat were folded into navVertical/navHorizontal/gridSelect above — all selection now
+    //  flows through `nav`, so there are no direct index mutations left here.)
 
     // Mouse wheel navigates the vertical selection anywhere in the view (down = next, up = previous). Deltas
-    // accumulate so one mouse notch = one step and a trackpad doesn't over-scroll.
+    // accumulate so one mouse notch = one step and a trackpad doesn't over-scroll. Scrolling returns focus to
+    // the grid via the model (navVertical selects the `items` zone, and the bridge writes focusZone=0).
     property real wheelAccum: 0
     WheelHandler {
         onWheel: function(e) {
             if (root.actionsOpen) { e.accepted = true; return } // freeze the column while the chooser is up
-            root.focusZone = 0 // scrolling returns focus to the grid
             root.wheelAccum += e.angleDelta.y
-            while (root.wheelAccum >= 120)  { root.vstep(-1); root.wheelAccum -= 120 } // wheel up -> previous
-            while (root.wheelAccum <= -120) { root.vstep(1);  root.wheelAccum += 120 } // wheel down -> next
+            while (root.wheelAccum >= 120)  { root.navVertical(-1); root.wheelAccum -= 120 } // wheel up -> previous
+            while (root.wheelAccum <= -120) { root.navVertical(1);  root.wheelAccum += 120 } // wheel down -> next
             e.accepted = true
         }
     }
     Keys.onPressed: function(e) {
-        // The XMB inline action chooser (Play / Favorite) owns the keys while it's open: Up/Down toggle the
-        // two options, Enter fires the chosen one, Esc dismisses. Everything else is swallowed so the cross
-        // behind it stays put.
+        // The XMB inline action chooser (Play / Favorite / …) owns the keys while it's open: the model's
+        // selection is parked in the wrapping `actions` zone, so Up/Down step it, Enter fires it, Esc dismisses
+        // (which flips actionsOpen — the bridge then drops the zone and restores the item cursor).
         if (actionsOpen) {
-            if (e.key === Qt.Key_Down)      { actionIndex = (actionIndex + 1) % 4; navigate() }
-            else if (e.key === Qt.Key_Up)   { actionIndex = (actionIndex + 3) % 4; navigate() }
+            if (e.key === Qt.Key_Down)      { nav.select("actions", actionIndex); if (nav.move(Qt.Key_Down)) navigate() }
+            else if (e.key === Qt.Key_Up)   { nav.select("actions", actionIndex); if (nav.move(Qt.Key_Up))   navigate() }
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
-                                            { actionChosen(actionIndex) }
+                                            { nav.activate() }
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { actionsOpen = false }
             e.accepted = true
             return
@@ -202,45 +249,44 @@ Item {
         // The bottom button bar has focus (entered with Down at the bottom of the grid): Left/Right move between
         // buttons, Up returns to the grid, Enter fires the focused button, Esc also returns to the grid.
         if (focusZone === 1) {
-            if (e.key === Qt.Key_Left)       { if (buttonIndex > 0) { buttonIndex -= 1; navigate() } }
-            else if (e.key === Qt.Key_Right) { if (buttonIndex < buttonList.length - 1) { buttonIndex += 1; navigate() } }
-            else if (e.key === Qt.Key_Up)    { focusZone = 0; navigate() }
+            if (e.key === Qt.Key_Left)       { nav.select("buttons", buttonIndex); if (nav.move(Qt.Key_Left))  navigate() }
+            else if (e.key === Qt.Key_Right) { nav.select("buttons", buttonIndex); if (nav.move(Qt.Key_Right)) navigate() }
+            else if (e.key === Qt.Key_Up)    { nav.select("items", currentIndex); navigate() }   // back to the grid
             else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
-                                             { if (focusedButtonAction !== "") actionRequested(focusedButtonAction) }
-            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { focusZone = 0 }
+                                             { nav.activate() }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { nav.select("items", currentIndex) }
             e.accepted = true
             return
         }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
-            stepCat(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
+            navHorizontal(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
         }
         else if (xmbMode && (e.key === Qt.Key_Down || e.key === Qt.Key_Up)) {
-            step(e.key === Qt.Key_Down ? 1 : -1); e.accepted = true
+            navVertical(e.key === Qt.Key_Down ? 1 : -1); e.accepted = true
         }
-        else if (e.key === Qt.Key_Right)                        { step(1);          e.accepted = true }
-        else if (e.key === Qt.Key_Left)                         { step(-1);         e.accepted = true }
+        else if (e.key === Qt.Key_Right)                        { navHorizontal(1);  e.accepted = true }
+        else if (e.key === Qt.Key_Left)                         { navHorizontal(-1); e.accepted = true }
         else if (e.key === Qt.Key_Down) {
             // Move to the row below if there is one; at the bottom row, drop focus to the bottom buttons.
             var n = items ? items.length : 0
-            if (currentIndex + gridCols < n) step(gridCols)
+            if (currentIndex + gridCols < n) navVertical(1)
             else if (buttonList.length > 0) {
-                focusZone = 1
-                buttonIndex = ((currentIndex % gridCols) >= gridCols / 2) ? buttonList.length - 1 : 0
+                nav.select("buttons", ((currentIndex % gridCols) >= gridCols / 2) ? buttonList.length - 1 : 0)
                 navigate()
             }
             e.accepted = true
         }
-        else if (e.key === Qt.Key_Up)                           { step(-gridCols);  e.accepted = true }
+        else if (e.key === Qt.Key_Up)                           { navVertical(-1);   e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
-                                                                { if (!isHeader(currentIndex)) activated(currentIndex); e.accepted = true }
+                                                                { nav.select("items", currentIndex); if (!isHeader(currentIndex)) nav.activate(); e.accepted = true }
         // Info opens the theme's detail view for the focused item; Esc backs out of it to wherever it came
         // from (home or browse). Esc in home/browse asks the host to go back (it owns the home<->browse step).
         else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView !== "detail")
                                                                 { detailReturn = currentView; currentView = "detail"; details(); e.accepted = true }
         else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
             if (currentView === "detail") currentView = detailReturn
-            else back()
+            else nav.back()   // empty level stack -> rootBack -> the host's themed back() (drill up / pause menu)
             e.accepted = true
         }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
@@ -340,5 +386,7 @@ Item {
     }
 
     // Re-run the fade when the active view changes (e.g. opening/closing the detail view).
-    onCurrentViewChanged: { focusZone = 0; fade.restart() }
+    // A view switch (home<->browse<->detail) drops any bottom-button focus back to the content: re-select the
+    // `items` zone through the model (the bridge writes focusZone=0) instead of poking the prop directly.
+    onCurrentViewChanged: { nav.select("items", currentIndex); fade.restart() }
 }

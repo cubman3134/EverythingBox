@@ -1029,6 +1029,13 @@ void MainWindow::updateNavForPage()
         navCtx_->setActiveRing(nullptr);
         navCtx_->setBackAction(nullptr);
     }
+
+#ifdef MMV_HAVE_QML
+    // A themed (QML) page owns its own focus (no ring), but it DOES have a real selection surface — register
+    // its NavGraph so the kit knows the page is navigable (presence), instead of the null-ring "nothing here".
+    // Any other page clears it. (Set after the ring choice above so it applies on every page.)
+    navCtx_->setActiveGraph((cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::navGraph(cur) : nullptr);
+#endif
 }
 
 // Create or tear down the UI-test channel (core/UiTestServer) to match its enablement: MMV_UITEST=1,

@@ -24,6 +24,7 @@
 #include <QSet>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include <QVector>
 #include <functional>
 
@@ -40,25 +41,29 @@ public:
     // `axis` is the direction the strip's index runs (Vertical = an XMB item column).
     void registerZone(const QString& id, int count, int row, int col,
                       Qt::Orientation axis = Qt::Horizontal, bool wraps = false);
-    void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
+    Q_INVOKABLE void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
     void removeZone(const QString& id);                // refusing no-op on the last remaining zone
     void setDefaultZone(const QString& id);
 
     // Non-selectable indices (dividers): the resolver skips them; a set index snaps to the
     // nearest selectable — the model owns what QML's seekSelectable did.
     void setUnselectable(const QString& zone, const QSet<int>& indices);
+    // QML-friendly divider setter: a JS array of int indices (marshaled as a QVariantList) -> setUnselectable.
+    Q_INVOKABLE void setDividers(const QString& zone, const QVariantList& indices);
 
     QString zone() const;   int index() const;
-    bool move(Qt::Key arrow);                 // spatial step; returns false if nothing changed
-    void select(const QString& zone, int index); // request (clamped + divider-snapped)
-    void activate();                          // emits activated(zone, index)
+    // arrow is a Qt::Key (int for QML): spatial step; returns false if nothing changed. Kept int-typed so the
+    // themed QML can call nav.move(Qt.Key_Down) directly; C++ callers pass Qt::Key values as before.
+    Q_INVOKABLE bool move(int arrow);
+    Q_INVOKABLE void select(const QString& zone, int index); // request (clamped + divider-snapped)
+    Q_INVOKABLE void activate();              // emits activated(zone, index)
 
     // Back stack (Invariant 4). Root behavior: back() at empty stack emits rootBack()
     // (host opens the exit menu). Levels: screens, drills, overlays (esc menu, NavMenu, OSK).
     void pushLevel(const QString& name, std::function<void()> onPop);
     void popLevel();                          // runs onPop
     int  levelDepth() const;
-    bool back();                              // pops one level, or emits rootBack(); always true
+    Q_INVOKABLE bool back();                   // pops one level, or emits rootBack(); always true
 
     bool validate(QString* whyNot = nullptr) const; // Invariant 2: zone graph connected, counts sane
 

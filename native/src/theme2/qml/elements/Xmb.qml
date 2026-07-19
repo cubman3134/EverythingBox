@@ -439,7 +439,9 @@ Item {
                     }
                     MouseArea {
                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                        onClicked: if (xmb.host) { xmb.host.actionIndex = modelData.k; xmb.host.actionChosen(modelData.k) }
+                        // Route through the model: select the chosen action row, then activate it (the bridge
+                        // writes actionIndex and dispatches to onAction) — no direct selection-prop write here.
+                        onClicked: { nav.select("actions", modelData.k); nav.activate() }
                     }
                 }
             }

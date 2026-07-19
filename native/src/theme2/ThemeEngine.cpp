@@ -1,5 +1,6 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
+#include "../ui/nav/NavGraph.h"
 
 #include <QQuickWidget>
 #include <QQuickItem>
@@ -83,6 +84,60 @@ void ThemeBridge::action(int which) { if (onAction) onAction(which); }
 void ThemeBridge::playlistAdd() { if (onPlaylistAdd) onPlaylistAdd(); }
 void ThemeBridge::button(const QString& name) { playEffect(sndSelect); if (onButton) onButton(name); }
 
+// ---- NavGraph bridge --------------------------------------------------------------------------------------
+// The selection moved: write the render prop for the SELECTED zone (and derive focusZone). setProperty to an
+// unchanged value is a no-op in QML (no xChanged), so a no-op "pre-position" select from the QML costs
+// nothing and fires no handler. Every side effect (nav sound / column reload / metadata fetch / near-end
+// paging) still originates from the QML signals (navigate/categoryChanged) and the existing
+// onCurrentIndexChanged handler that the currentIndex write re-triggers — this slot only mirrors the model
+// into the props the theme binds.
+void ThemeBridge::onNavSelection(const QString& zone, int index)
+{
+    if (!root) return;
+    if (zone == QStringLiteral("items"))
+        { root->setProperty("currentIndex", index); root->setProperty("focusZone", 0); }
+    else if (zone == QStringLiteral("categories"))
+        { root->setProperty("catIndex", index);     root->setProperty("focusZone", 0); }
+    else if (zone == QStringLiteral("buttons"))
+        { root->setProperty("buttonIndex", index);  root->setProperty("focusZone", 1); }
+    else if (zone == QStringLiteral("actions"))
+        { root->setProperty("actionIndex", index); } // the chooser is an overlay: focusZone is untouched
+}
+
+// Enter/click on the selection: route to the same fan-out the QML signals used to drive directly.
+void ThemeBridge::onNavActivated(const QString& zone, int index)
+{
+    if (zone == QStringLiteral("buttons"))
+        button(root ? root->property("focusedButtonAction").toString() : QString());
+    else if (zone == QStringLiteral("actions"))
+        action(index);
+    else
+        activated(); // items/categories -> onActivated(currentIndex), exactly as the old activated(int) signal
+}
+
+void ThemeBridge::onNavRootBack() { back(); } // nav.back() with an empty level stack -> the themed back() path
+
+// The inline action chooser opened/closed. It is a transient 4-row vertical zone that only exists while
+// actionsOpen is true; entering it parks the selection there, leaving it restores the item cursor (the
+// leaf the chooser was opened over, still held in currentIndex).
+void ThemeBridge::syncActionsZone()
+{
+    if (!graph || !root) return;
+    if (root->property("actionsOpen").toBool())
+    {
+        graph->registerZone(QStringLiteral("actions"), 4, 0, 0, Qt::Vertical, /*wraps=*/true);
+        graph->select(QStringLiteral("actions"), root->property("actionIndex").toInt());
+    }
+    else
+    {
+        // Restore the item cursor to the leaf the chooser was opened over FIRST (currentIndex still holds it),
+        // THEN hide the now-unselected zone. Doing it in this order avoids setZoneCount reassigning the
+        // selection out of `actions` and carrying the (unrelated) actionIndex into the item column.
+        graph->select(QStringLiteral("items"), root->property("currentIndex").toInt());
+        graph->setZoneCount(QStringLiteral("actions"), 0);
+    }
+}
+
 namespace ThemeEngine
 {
 
@@ -144,6 +199,22 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     auto* qv = new QQuickWidget(parent);
     qv->setResizeMode(QQuickWidget::SizeRootObjectToView);
     qv->setClearColor(QColor(QStringLiteral("#0F1216")));
+
+    // The selection model for this view. Created + exposed as the `nav` context property BEFORE setSource
+    // (context properties must precede the QML load). It is parented to the widget, so it dies with the view.
+    // Every themed zone sits in the SAME coarse grid cell (0,0): the resolver only ever STEPS within the
+    // pre-positioned zone (clamp / wrap at the edges) and never spatially crosses — the themed screens have
+    // two independent cursors (XMB category + item) and a geometric grid that don't map onto NavGraph's
+    // spatial crossing, so every zone transition is an explicit nav.select from the QML instead. `items` is
+    // Vertical (the XMB Up/Down column); counts + divider sets are fed live from the QML (see ThemeView.qml).
+    auto* graph = new NavGraph(qv);
+    graph->registerZone(QStringLiteral("items"), int(items.size()), 0, 0, Qt::Vertical);
+    graph->registerZone(QStringLiteral("categories"), 0, 0, 0, Qt::Horizontal);
+    graph->registerZone(QStringLiteral("buttons"), 0, 0, 0, Qt::Horizontal);
+    graph->setDefaultZone(QStringLiteral("items"));
+    qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph);
+    qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()
+
     qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
 
     if (QQuickItem* root = qv->rootObject())
@@ -157,6 +228,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
 
         auto* bridge = new ThemeBridge(qv);
         bridge->root = root;
+        bridge->graph = graph;
         bridge->onActivated = std::move(onActivated);
         bridge->onBack = std::move(onBack);
         bridge->onCycle = std::move(onCycle);
@@ -196,6 +268,16 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(actionChosen(int)), bridge, SLOT(action(int)));
         QObject::connect(root, SIGNAL(addToPlaylistRequested()), bridge, SLOT(playlistAdd()));
         QObject::connect(root, SIGNAL(actionRequested(QString)), bridge, SLOT(button(QString)));
+
+        // The NavGraph selection model -> the render props + the activate/back fan-out. The QML routes all
+        // key/mouse/wheel navigation through `nav`; these connections mirror the resulting selection into the
+        // properties the theme binds and dispatch activation/back to the existing callbacks.
+        QObject::connect(graph, &NavGraph::selectionChanged, bridge, &ThemeBridge::onNavSelection);
+        QObject::connect(graph, &NavGraph::activated,        bridge, &ThemeBridge::onNavActivated);
+        QObject::connect(graph, &NavGraph::rootBack,         bridge, &ThemeBridge::onNavRootBack);
+        // The inline action chooser is a transient zone; (de)register it whenever actionsOpen flips (from the
+        // host opening a leaf, the host acting on a choice, or the QML dismissing it with Esc).
+        QObject::connect(root, SIGNAL(actionsOpenChanged()), bridge, SLOT(syncActionsZone()));
     }
 
     qv->setFocusPolicy(Qt::StrongFocus);
@@ -212,6 +294,14 @@ QQuickItem* rootItem(QWidget* view)
     if (!view) return nullptr;
     auto* qw = qobject_cast<QQuickWidget*>(view->property("mmvQuickView").value<QObject*>());
     return qw ? qw->rootObject() : nullptr;
+}
+
+NavGraph* navGraph(QWidget* view)
+{
+    if (!view) return nullptr;
+    auto* qw = qobject_cast<QQuickWidget*>(view->property("mmvQuickView").value<QObject*>());
+    if (!qw) return nullptr;
+    return qobject_cast<NavGraph*>(qw->property("mmvNavGraph").value<QObject*>());
 }
 
 bool homeIsXmb(const QString& themeDir)

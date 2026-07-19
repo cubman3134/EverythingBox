@@ -72,6 +72,13 @@ void NavGraph::setUnselectable(const QString& zone, const QSet<int>& indices)
     if (zone == m_zone) setSelection(zone, snapIndex(zone, m_index)); // current index may now be a divider
 }
 
+void NavGraph::setDividers(const QString& zone, const QVariantList& indices)
+{
+    QSet<int> s;
+    for (const QVariant& v : indices) s.insert(v.toInt());
+    setUnselectable(zone, s);
+}
+
 // ---------------------------------------------------------------------------------------- accessors
 
 QString NavGraph::zone() const { return m_zone; }
@@ -170,7 +177,7 @@ void NavGraph::setSelection(const QString& zone, int idx)
 
 // ---------------------------------------------------------------------------------------- movement
 
-bool NavGraph::move(Qt::Key arrow)
+bool NavGraph::move(int arrow)
 {
     if (m_zone.isEmpty()) return false;
     int dRow = 0, dCol = 0;

@@ -20,6 +20,7 @@
 
 class QLineEdit;
 class QComboBox;
+class NavGraph;
 
 // Two-state behaviour for a dropdown reached by navigation (the QComboBox analogue of NavTextField):
 // arrowing onto a combo SELECTS it (a focus outline; arrows navigate away; the value does NOT change; a
@@ -136,6 +137,13 @@ public:
     void setActiveRing(NavRing* ring);
     NavRing* activeRing() const { return activeRing_; }
 
+    // The active themed screen's selection model. A themed (QML) page owns its own focus so it registers no
+    // ring, but it DOES have a real selection surface — registering its NavGraph lets the kit know the page is
+    // navigable (rather than the null-ring "no selection here"), which later nav-contract tasks route through.
+    // Pass null on any page without a graph. This is a presence marker only; it does not change routing today.
+    void setActiveGraph(NavGraph* graph) { activeGraph_ = graph; }
+    NavGraph* activeGraph() const { return activeGraph_; }
+
     // True while a synthetic (controller-origin) key is being delivered — lets widgets tell a pad "Back"
     // press (navigate) apart from a physical Backspace (delete a character in a line edit).
     static bool syntheticKey() { return syntheticKey_; }
@@ -154,5 +162,7 @@ private:
     static bool syntheticKey_;
     QPointer<QWidget> window_;
     QPointer<NavRing> activeRing_;
+    NavGraph* activeGraph_ = nullptr;  // the themed page's selection model, if any (presence marker; refreshed
+                                       // on every page change via updateNavForPage, so it never outlives a view)
     std::function<void()> backAction_;
 };

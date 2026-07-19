@@ -12,6 +12,7 @@
 class QWidget;
 class QQuickItem;
 class QSoundEffect;
+class NavGraph;
 
 // Relays the QML view's signals (navigation activate / back / cycle-theme) to plain C++ callbacks. The
 // activate signal carries no argument; we read the current selection off the root item.
@@ -22,6 +23,7 @@ public:
     using QObject::QObject;
     ~ThemeBridge() override;
     QQuickItem* root = nullptr;
+    NavGraph* graph = nullptr;   // the selection model for this view (owned by the QQuickWidget)
     std::function<void(int)> onActivated;
     std::function<void()> onBack;
     std::function<void()> onCycle;
@@ -52,6 +54,17 @@ public slots:
     void action(int which); // XMB: chose an inline Play/Favorite/Add-to-playlist action
     void playlistAdd();     // XMB: "P" - add the highlighted item to a playlist
     void button(const QString& name); // a `button` element fired its named action
+
+    // ---- NavGraph bridge: the selection model (`nav` in QML) drives these; they write the SAME QML props
+    //      every element binds today, so all the existing animations/handlers keep working untouched. -------
+    // The selection moved (arrow/mouse/programmatic): write the render prop for the selected zone. Side
+    // effects (nav sound, column reload, metadata fetch, near-end paging) still flow through the QML signals
+    // (navigate/categoryChanged/onCurrentIndexChanged), so nothing about the render pipeline changes here.
+    void onNavSelection(const QString& zone, int index);
+    // Enter/click activated the selection: dispatch to the existing fan-out for the selected zone.
+    void onNavActivated(const QString& zone, int index);
+    void onNavRootBack();      // nav.back() bottomed out -> the existing themed back() path (pause menu, drill)
+    void syncActionsZone();    // actionsOpen flipped: (de)register the inline-chooser zone + park the selection
 };
 
 namespace ThemeEngine
@@ -74,6 +87,10 @@ namespace ThemeEngine
 
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);
+
+    // The selection model (`nav`) behind a widget returned by buildView(), for the host/NavContext to register
+    // its presence and drive selection. Mirrors rootItem(); null for a non-themed widget.
+    NavGraph* navGraph(QWidget* view);
 
     // True if the theme's `home` view contains an `xmb` element (so the host drives it as an XMB cross).
     bool homeIsXmb(const QString& themeDir);
