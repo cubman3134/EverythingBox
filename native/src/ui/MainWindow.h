@@ -175,7 +175,7 @@ private:
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                          const QString& thumbnailUrl = QString());
-    void openDocumentPath(const QString& path); // .epub / .pdf by extension
+    bool openDocumentPath(const QString& path); // .epub / .pdf / .cbz by extension; true if it opened
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
 
@@ -222,6 +222,8 @@ private:
     class NavRing* libraryRing_ = nullptr; // covers the Library view (lists + buttons + search)
     void updateNavForPage();
     void presentBook(); // show book_ themed (wrapped in readerHost_) or classic (direct), per themedHomeEnabled
+    void presentPdf();   // show pdf_ themed (wrapped in pdfHost_) or classic, per themedHomeEnabled (Task 4)
+    void presentComic(); // show comic_ themed (wrapped in comicHost_) or classic, per themedHomeEnabled (Task 4)
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
@@ -253,7 +255,9 @@ private:
     EbookView* book_ = nullptr;
     ReaderChromeHost* readerHost_ = nullptr; // themed chrome wrapping book_ (themed mode); null without QML
     PdfView* pdf_ = nullptr;
+    ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
+    ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view

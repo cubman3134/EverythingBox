@@ -9,6 +9,8 @@
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QResizeEvent>
+#include <QShowEvent>
+#include <QTimer>
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -56,7 +58,9 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     imageLabel_->setStyleSheet(QStringLiteral("background:#15171c;"));
     scroll_->setWidget(imageLabel_);
 
-    auto* bar = new QHBoxLayout();
+    bar_ = new QWidget(this);
+    auto* bar = new QHBoxLayout(bar_);
+    bar->setContentsMargins(0, 0, 0, 0);
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
     auto* homeBtn = new QPushButton(tr("Home"), this);
     auto* prev = new QPushButton(tr("‹ Prev"), this);
@@ -88,9 +92,34 @@ ComicView::ComicView(QWidget* parent) : QWidget(parent)
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(scroll_, 1);
-    v->addLayout(bar);
+    v->addWidget(bar_);
 
     setFocusPolicy(Qt::StrongFocus);
+}
+
+// Hosted mode: the themed ReaderChromeHost owns all chrome, so hide our own bottom control bar (the themed
+// bottom strip replaces it); classic mode restores it. No render/scroll change — the wrappers drive exactly
+// what the bar's buttons already called.
+void ComicView::setHostedChrome(bool on)
+{
+    hosted_ = on;
+    if (bar_) bar_->setVisible(!on);
+}
+
+void ComicView::zoomDelta(int steps)
+{
+    for (int i = 0; i < steps; ++i)  zoomIn();
+    for (int i = 0; i > steps; --i)  zoomOut();
+}
+
+// User two-up toggle: gate the (otherwise automatic) spread on this preference. Default on preserves the prior
+// behaviour exactly; turning it off forces single-page even on a wide viewport.
+void ComicView::setTwoUp(bool on)
+{
+    if (twoUpEnabled_ == on) return;
+    twoUpEnabled_ = on;
+    if (!image_.isNull()) { rescale(); updateLabel(); }
+    emit pageInfoChanged();
 }
 
 bool ComicView::isComicFile(const QString& path)
@@ -171,6 +200,7 @@ void ComicView::showPage(int index)
     rescale();
     updateLabel();
     scroll_->verticalScrollBar()->setValue(0); // start each page at the top
+    emit pageInfoChanged();                     // mirror the page move into the themed chrome
 }
 
 // Show two pages at once (like an open book) when it makes sense: only in fit-width mode, for portrait
@@ -187,7 +217,7 @@ void ComicView::rescale()
     const int vw = qMax(64, scroll_->viewport()->width() - 4); // fill the viewport width (scale up or down)
     const int vh = qMax(64, scroll_->viewport()->height());
 
-    twoUp_ = fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
+    twoUp_ = twoUpEnabled_ && fit_ && image_.height() > image_.width() && vw > vh && vw >= 800;
 
     if (twoUp_ && current_ + 1 < pages_.size())
     {
@@ -247,9 +277,9 @@ void ComicView::prevPage()
     showPage(qMax(current_ - ((fit_ && twoUp_) ? 2 : 1), 0));
 }
 
-void ComicView::zoomIn()  { fit_ = false; zoom_ = qMin(5.0, zoom_ * 1.2); rescale(); }
-void ComicView::zoomOut() { fit_ = false; zoom_ = qMax(0.2, zoom_ / 1.2); rescale(); }
-void ComicView::fitWidth() { fit_ = true; rescale(); }
+void ComicView::zoomIn()  { fit_ = false; zoom_ = qMin(5.0, zoom_ * 1.2); rescale(); emit pageInfoChanged(); }
+void ComicView::zoomOut() { fit_ = false; zoom_ = qMax(0.2, zoom_ / 1.2); rescale(); emit pageInfoChanged(); }
+void ComicView::fitWidth() { fit_ = true; rescale(); updateLabel(); emit pageInfoChanged(); }
 
 void ComicView::keyPressEvent(QKeyEvent* e)
 {
@@ -268,4 +298,15 @@ void ComicView::resizeEvent(QResizeEvent* e)
 {
     QWidget::resizeEvent(e);
     if (fit_ && !image_.isNull()) { rescale(); updateLabel(); } // refit to the new width (may toggle the spread)
+}
+
+void ComicView::showEvent(QShowEvent* e)
+{
+    QWidget::showEvent(e);
+    // When the reader is wrapped in the themed ReaderChromeHost, its scroll viewport only reaches full size
+    // after it is shown (the host lays the widget out on show), so the rescale done at openComic() time saw a
+    // stale/small width. Refit on the next event-loop turn once the geometry has settled, so the opening page
+    // fits width and the two-up spread is evaluated against the real viewport. Idempotent (classic mode too).
+    if (!image_.isNull())
+        QTimer::singleShot(0, this, [this] { rescale(); updateLabel(); });
 }

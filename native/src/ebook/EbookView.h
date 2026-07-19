@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <memory>
 #include "EbookSource.h"
+#include "../theme2/HostedReader.h"
 
 class QListWidget;
 class QLabel;
@@ -92,7 +93,7 @@ private:
     QString footer_;
 };
 
-class EbookView : public QWidget
+class EbookView : public QWidget, public HostedReader
 {
     Q_OBJECT
 public:
@@ -102,27 +103,31 @@ public:
     void persist(); // save reading position (called when navigating away)
     void setStreamIssueVisible(bool on); // show the "Issue with Streaming" button (remote/Allarr books only)
 
+    // HostedReader (themed chrome host, Plan B1): the book is the reader widget; font + toc are its settings.
+    QWidget* asWidget() override { return this; }
+    int chromeTopReserve() const override { return kMenuHeight; }
+
     // ---- Hosted mode (themed reader chrome, Plan B1 Task 3) ----------------------------------------------
     // In hosted mode the reader renders page text ONLY: its own auto-hiding widget menu (menu_), contents
     // panel (tocList_) and stream-issue button are suppressed, and revealMenu() is a no-op — the surrounding
     // themed chrome (ReaderChromeHost) drives everything through the thin wrappers below. Pagination logic is
     // untouched: these wrappers just expose what the widget menu's buttons already call.
-    void setHostedChrome(bool on);
+    void setHostedChrome(bool on) override;
     bool isHostedChrome() const { return hosted_; }
 
-    int  currentPage() const;   // 1-based page within the whole book at the current spot (globalPage)
-    int  pageCount()  const;    // book-wide page total (falls back to the current chapter's count)
-    QStringList tocTitles() const;   // chapter/section titles, in spine order (for the themed toc zone)
-    int  fontPt() const { return fontPt_; }
+    int  currentPage() const override;   // 1-based page within the whole book at the current spot (globalPage)
+    int  pageCount()  const override;    // book-wide page total (falls back to the current chapter's count)
+    QStringList tocTitles() const override;   // chapter/section titles, in spine order (for the themed toc zone)
+    int  fontPt() const override { return fontPt_; }
     // The height (px) the page reserves up top for chrome — the reader inset the widget menu used, which the
     // themed top strip must match so page text sits below it, not under it (spike constraint reconfirmation).
     static int topChromeReserve() { return kMenuHeight; }
 
 public slots:
-    void nextPage();            // advance one page (crossing into the next chapter at a chapter end)
-    void prevPage();            // retreat one page (crossing into the previous chapter at a chapter start)
-    void fontDelta(int dPt);    // change the reading font by dPt points (clamped 8..40), keeping the reading spot
-    void gotoTocIndex(int i);   // jump to the i-th toc entry's chapter
+    void nextPage() override;   // advance one page (crossing into the next chapter at a chapter end)
+    void prevPage() override;   // retreat one page (crossing into the previous chapter at a chapter start)
+    void fontDelta(int dPt) override; // change the reading font by dPt points (8..40), keeping the reading spot
+    void gotoTocIndex(int i) override;   // jump to the i-th toc entry's chapter
 
 signals:
     void homeRequested();

@@ -1035,6 +1035,67 @@ int main(int argc, char** argv)
             CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerToc") && g.index() == 2,
                   "reader: Left across the chapter list is a contained no-op (cross-axis SELF pin)");
         }
+
+        // (d) Pdf/Comic (Task 4): the SAME shared builder, no ToC (readerToc stays 0) and a settings row of
+        //     zoom/fit buttons (Pdf 3, Comic 4 with the two-up toggle). The host feeds those counts; the shape
+        //     must still validate, step Up nav→settings, keep the settings list stepping internally, and stay
+        //     contained on just the two live zones (readerToc gated off ⇒ no chapter list to reach).
+        auto checkReaderKind = [](ReaderKind kind, int settingsRows, const char* label) {
+            NavGraph g;
+            buildReaderNavGraph(g, kind);
+            g.setZoneCount(QStringLiteral("readerSettings"), settingsRows);
+            g.setZoneCount(QStringLiteral("readerToc"), 0);        // pdf/comic have no ToC
+            QString why;
+            CHECK(g.validate(&why), label);                        // (the label names the kind)
+            CHECK(g.zone() == QStringLiteral("readerNav"), "reader(pdf/comic): default zone is the nav bar");
+
+            // Up from the nav bar reaches the settings row; Up again cannot cross to the gated (hidden) ToC.
+            g.select(QStringLiteral("readerNav"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("readerSettings"),
+                  "reader(pdf/comic): Up from the nav bar lands on the zoom/fit settings row");
+            g.select(QStringLiteral("readerSettings"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("readerSettings"),
+                  "reader(pdf/comic): Up with the ToC gated cannot leave the settings row");
+
+            // The settings row is a real Vertical list: Down steps within it (not consumed by a cross-zone edge).
+            if (settingsRows >= 2) {
+                g.select(QStringLiteral("readerSettings"), 0);
+                CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("readerSettings") && g.index() == 1,
+                      "reader(pdf/comic): Down steps within the settings row");
+            }
+
+            // Directed BFS: only the nav bar + settings row are reachable (ToC is gated off — 2 zones, no more).
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("readerNav"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key rarr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : rarr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("readerNav")) && reached.count(QStringLiteral("readerSettings")),
+                  "reader(pdf/comic): arrows reach the nav bar and the settings row");
+            CHECK(reached.size() == 2,
+                  "reader(pdf/comic): the walk stays on the two live zones (no ToC reachable)");
+
+            // Containment: Left across the settings list is a cross-axis SELF-pin no-op.
+            g.select(QStringLiteral("readerSettings"), 0);
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerSettings") && g.index() == 0,
+                  "reader(pdf/comic): Left across the settings row is a contained no-op");
+        };
+        checkReaderKind(ReaderKind::Pdf,   3, "reader(pdf): validates (3 zoom/fit rows, no ToC)");
+        checkReaderKind(ReaderKind::Comic, 4, "reader(comic): validates (4 rows incl. two-up, no ToC)");
     }
 
 #ifdef MMV_HAVE_QML

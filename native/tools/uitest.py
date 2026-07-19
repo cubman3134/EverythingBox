@@ -8,6 +8,8 @@ Usage:
   uitest.py keys "down down enter"         inject a sequence (50ms apart)
   uitest.py shot C:/tmp/screen.png         save a screenshot of the window (works while occluded)
   uitest.py walk N [key]                   press a key N times (default: down), printing state each step
+  uitest.py open C:/path/to/doc.pdf        open a document/book/comic by path (reader tests)
+  uitest.py send "open C:/x.cbz"           raw passthrough of any server command
 
 No third-party deps. Windows: named pipe \\\\.\\pipe\\MyMediaVault-uitest; elsewhere: the QLocalServer
 unix socket (typically /tmp/MyMediaVault-uitest).
@@ -67,6 +69,12 @@ def main() -> int:
         print("ok")
     elif cmd == "shot":
         print(_send(f"shot {os.path.abspath(sys.argv[2])}"))
+    elif cmd == "open":
+        # Open a document/book by path through the reader-test hook (src/core/UiTestServer -> openDocumentPath).
+        print(_send(f"open {os.path.abspath(sys.argv[2])}"))
+    elif cmd == "send":
+        # Raw passthrough of any server command (e.g. `send "open C:/x.pdf"`), for ad-hoc reader driving.
+        print(_send(sys.argv[2]))
     elif cmd == "walk":
         n = int(sys.argv[2])
         key = sys.argv[3] if len(sys.argv) > 3 else "down"

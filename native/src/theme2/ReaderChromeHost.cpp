@@ -1,5 +1,4 @@
 #include "ReaderChromeHost.h"
-#include "../ebook/EbookView.h"
 #include "../ui/nav/NavGraph.h"
 
 #include <QQuickWidget>
@@ -15,12 +14,24 @@
 
 // ---- ReaderBridge -------------------------------------------------------------------------------------------
 
-ReaderBridge::ReaderBridge(EbookView* reader, QObject* parent) : QObject(parent), reader_(reader) {}
+ReaderBridge::ReaderBridge(HostedReader* reader, ReaderKind kind, QObject* parent)
+    : QObject(parent), reader_(reader), kind_(kind) {}
 
-QString ReaderBridge::title() const { return reader_ ? QString() : QString(); } // reserved; label built in QML
+QString ReaderBridge::readerType() const
+{
+    switch (kind_)
+    {
+    case ReaderKind::Pdf:   return QStringLiteral("pdf");
+    case ReaderKind::Comic: return QStringLiteral("comic");
+    case ReaderKind::Book:  default: return QStringLiteral("book");
+    }
+}
+
+QString ReaderBridge::title() const { return QString(); } // reserved; label built in QML
 int  ReaderBridge::page() const      { return reader_ ? reader_->currentPage() : 0; }
 int  ReaderBridge::pageCount() const { return reader_ ? reader_->pageCount() : 0; }
 int  ReaderBridge::fontSize() const  { return reader_ ? reader_->fontPt() : 14; }
+bool ReaderBridge::twoUp() const     { return reader_ && reader_->twoUp(); }
 
 QVariantList ReaderBridge::fontOptions() const
 {
@@ -45,6 +56,7 @@ int ReaderBridge::fontIndex() const
 }
 
 QStringList ReaderBridge::toc() const { return reader_ ? reader_->tocTitles() : QStringList(); }
+int ReaderBridge::tocCount() const { return reader_ ? reader_->tocTitles().size() : 0; }
 
 void ReaderBridge::refresh()    { emit changed(); }
 void ReaderBridge::refreshToc() { emit tocChanged(); emit changed(); }
@@ -61,20 +73,53 @@ void ReaderBridge::chooseFont(int optionIndex)
 
 void ReaderBridge::gotoToc(int i) { if (reader_) reader_->gotoTocIndex(i); }
 
+// pdf/comic settings rows: 0 = zoom out, 1 = zoom in, 2 = fit width, 3 = two-up (comic only).
+void ReaderBridge::activateSetting(int index)
+{
+    if (!reader_) return;
+    switch (index)
+    {
+    case 0: reader_->zoomDelta(-1); break;
+    case 1: reader_->zoomDelta(+1); break;
+    case 2: reader_->fitWidth();    break;
+    case 3: if (kind_ == ReaderKind::Comic) reader_->setTwoUp(!reader_->twoUp()); break;
+    default: return;
+    }
+    refresh();
+}
+
+// Left/Right while the cursor is on the settings zone: cycle the primary setting both ways (the settings zone's
+// own cross-axis Left/Right are SELF-pinned no-ops, so this reuses them for a bidirectional control cheaply).
+void ReaderBridge::cycleSetting(int dir)
+{
+    if (!reader_ || dir == 0) return;
+    if (kind_ == ReaderKind::Book)
+    {
+        const int n = fontOptions().size();
+        if (n > 0) chooseFont(((fontIndex() + dir) % n + n) % n); // wrap both ways
+    }
+    else
+    {
+        reader_->zoomDelta(dir > 0 ? +1 : -1);
+        refresh();
+    }
+}
+
 // ---- ReaderChromeHost ---------------------------------------------------------------------------------------
 
-ReaderChromeHost::ReaderChromeHost(EbookView* reader, QWidget* parent)
-    : QWidget(parent), reader_(reader)
+ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidget* parent)
+    : QWidget(parent), reader_(reader), kind_(kind)
 {
     // The reader fills the host; the strips are raised over it (created lazily on the first themed present).
-    reader_->setParent(this);
+    QWidget* rw = reader_->asWidget();
+    rw->setParent(this);
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
-    v->addWidget(reader_);
+    v->addWidget(rw);
 
     graph_ = new NavGraph(this);
-    buildReaderNavGraph(*graph_, ReaderKind::Book);
-    bridge_ = new ReaderBridge(reader_, this);
+    buildReaderNavGraph(*graph_, kind_);
+    bridge_ = new ReaderBridge(reader_, kind_, this);
 
     hideTimer_ = new QTimer(this);
     hideTimer_->setSingleShot(true);
@@ -84,14 +129,21 @@ ReaderChromeHost::ReaderChromeHost(EbookView* reader, QWidget* parent)
         hideChrome();
     });
 
-    // The strips mirror page/chapter/font (incl. raw-arrow paging done by the reader itself).
-    connect(reader_, &EbookView::pageInfoChanged, this, [this] { bridge_->refresh(); });
+    // The strips mirror page/font/zoom (incl. raw-key paging done by the reader itself). Connected via the
+    // string-based SIGNAL so ONE host drives any reader kind (each implementer declares pageInfoChanged()).
+    connect(rw, SIGNAL(pageInfoChanged()), this, SLOT(onReaderPageInfo()));
     connect(graph_, &NavGraph::activated, this, &ReaderChromeHost::onGraphActivated);
     connect(graph_, &NavGraph::selectionChanged, this, &ReaderChromeHost::onSelectionChanged);
 
     // Physical AND synthetic (controller) keys arrive at the focused reader; the host arbitrates them.
-    reader_->installEventFilter(this);
+    rw->installEventFilter(this);
 }
+
+void ReaderChromeHost::onReaderPageInfo() { bridge_->refresh(); }
+
+int  ReaderChromeHost::readerPage() const      { return reader_ ? reader_->currentPage() : 0; }
+int  ReaderChromeHost::readerPageCount() const { return reader_ ? reader_->pageCount() : 0; }
+bool ReaderChromeHost::readerTwoUp() const     { return reader_ && reader_->twoUp(); }
 
 void ReaderChromeHost::buildStrips()
 {
@@ -109,7 +161,7 @@ void ReaderChromeHost::buildStrips()
         // and its onDestruction would removeZone("readerSettings") out from under the real one.)
         qv->rootContext()->setContextProperty(QStringLiteral("chromeRegion"), region);
         qv->rootContext()->setContextProperty(QStringLiteral("chromeBarHeight"),
-                                              EbookView::topChromeReserve());
+                                              reader_->chromeTopReserve());
         qv->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/ReaderChrome.qml")));
         qv->hide();
         return qv;
@@ -122,7 +174,7 @@ void ReaderChromeHost::layoutStrips()
 {
     if (!topStrip_) return;
     const int w = width(), h = height();
-    const int barH = EbookView::topChromeReserve();          // the reserved top inset — align the strip to it
+    const int barH = reader_->chromeTopReserve();            // the reserved top inset — align the strip to it
     const int botH = qMax(barH, 46);
     const int tocH = tocOpen_ ? qBound(120, h * 2 / 5, h - barH - botH - 8) : 0;
     topStrip_->setGeometry(0, 0, w, barH + tocH);
@@ -144,11 +196,14 @@ void ReaderChromeHost::present(bool themed)
 
     buildStrips();
     bridge_->refreshToc();
-    // The host owns the chrome zone counts (like the detail view's syncDetailZone), so navigation never
-    // depends on QML self-registration timing: Book has one settings row (the font ThemedChoice) and a toc
-    // sized to the book's chapters.
-    graph_->setZoneCount(QStringLiteral("readerSettings"), 1);
-    graph_->setZoneCount(QStringLiteral("readerToc"), bridge_->toc().size());
+    // The host owns the chrome zone counts (like the detail view's syncDetailZone), so navigation never depends
+    // on QML self-registration timing. Settings rows per kind: Book = 1 (the font ThemedChoice); Pdf = 3 (zoom
+    // out / in / fit); Comic = 4 (+ two-up toggle). Toc = the book's chapters (0 for pdf/comic — no ToC).
+    const int settingsRows = (kind_ == ReaderKind::Book)  ? 1
+                           : (kind_ == ReaderKind::Comic) ? 4
+                                                          : 3;
+    graph_->setZoneCount(QStringLiteral("readerSettings"), settingsRows);
+    graph_->setZoneCount(QStringLiteral("readerToc"), bridge_->tocCount());
     // The Back router owns the reader level: exactly one, pushed on themed open; its onPop returns us to
     // where the reader was opened (chrome-hidden Back pops it — see handleBack()).
     if (!levelPushed_)
@@ -188,7 +243,7 @@ void ReaderChromeHost::hideChrome()
     if (topStrip_) topStrip_->hide();
     if (bottomStrip_) bottomStrip_->hide();
     if (hideTimer_) hideTimer_->stop();
-    reader_->setFocus();
+    reader_->asWidget()->setFocus();
 }
 
 void ReaderChromeHost::armAutoHide() { if (themed_ && chromeVisible_) hideTimer_->start(4200); }
@@ -215,14 +270,19 @@ void ReaderChromeHost::onGraphActivated(const QString& zone, int index)
         bridge_->gotoToc(index);
         hideChrome();   // jumping to a chapter dismisses the chrome, mirroring the classic toc click
     }
-    // readerSettings activation is owned by the ThemedChoice in the QML (it opens its own inline picker).
+    else if (zone == QStringLiteral("readerSettings"))
+    {
+        // Book: activation is owned by the font ThemedChoice in the QML (its externalEdit cycles the size).
+        // Pdf/Comic: there is no ThemedChoice — the host fires the indexed zoom/fit/two-up command directly.
+        if (kind_ != ReaderKind::Book) { bridge_->activateSetting(index); armAutoHide(); }
+    }
 }
 
 bool ReaderChromeHost::handleNavKey(int key) { return arbitrateKey(key); }
 
 bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
 {
-    if (o == reader_ && e->type() == QEvent::KeyPress)
+    if (o == reader_->asWidget() && e->type() == QEvent::KeyPress)
     {
         auto* ke = static_cast<QKeyEvent*>(e);
         if (arbitrateKey(ke->key())) return true; // consumed: the reader does not also page/back
@@ -239,6 +299,15 @@ bool ReaderChromeHost::arbitrateKey(int key)
     if (chromeVisible_)
     {
         // The chrome zones take the keys (spike: "chrome zones activate only when chrome is VISIBLE").
+        // On the settings zone, Left/Right cycle the primary setting both ways (font for a book, zoom for a
+        // pdf/comic) — the zone's cross-axis Left/Right are SELF-pinned no-ops, so this reuses them cheaply.
+        if ((key == Qt::Key_Left || key == Qt::Key_Right)
+            && graph_->zone() == QStringLiteral("readerSettings"))
+        {
+            bridge_->cycleSetting(key == Qt::Key_Right ? +1 : -1);
+            armAutoHide();
+            return true;
+        }
         switch (key)
         {
         case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:

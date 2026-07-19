@@ -148,5 +148,9 @@ inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
     g.addEdge(QStringLiteral("readerToc"), Qt::Key_Left,  QStringLiteral("readerToc"));
     g.addEdge(QStringLiteral("readerToc"), Qt::Key_Right, QStringLiteral("readerToc"));
 
-    (void)kind; // Book is the only shape this task builds; Pdf/Comic add rows in Tasks 4-5 (same names/host).
+    // All three kinds share this exact zone STRUCTURE + edge set; only the live counts differ and are fed
+    // externally by the host/probe via setZoneCount (Book: readerSettings=1 font row, readerToc=chapters;
+    // Pdf: readerSettings=3 zoom/fit rows, readerToc=0; Comic: readerSettings=4 (+two-up), readerToc=0). So
+    // kind is not consulted here — keeping the shape identical is exactly what lets ONE builder back all three.
+    (void)kind;
 }

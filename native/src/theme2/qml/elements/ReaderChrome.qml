@@ -27,6 +27,7 @@ Rectangle {
     color: "#0E1218"                     // OPAQUE — Variant A (no translucency dependency)
     readonly property var br: (typeof readerBridge !== "undefined") ? readerBridge : null
     readonly property var g:  (typeof nav !== "undefined") ? nav : null
+    readonly property string readerType: br ? br.readerType : "book"   // "book" | "pdf" | "comic"
 
     Loader {
         anchors.fill: parent
@@ -53,31 +54,80 @@ Rectangle {
                     color: "#9AA6B2"; font.pixelSize: 13
                     text: chrome.br ? ("Page " + chrome.br.page + " / " + chrome.br.pageCount) : ""
                 }
+                // The reader-settings zone. Book: a font-size ThemedChoice. Pdf/Comic: a row of plain buttons
+                // (zoom out / in / fit, + two-up for a comic) the host activates by index. Each variant is behind
+                // a Loader gated on the reader kind so the OTHER kind's items — crucially the font ThemedChoice,
+                // whose onDestruction removes the shared readerSettings zone — are never instantiated here.
                 Row {
                     anchors.right: parent.right; anchors.rightMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
                     spacing: 10
-                    Text {
+
+                    // ---- Book: font size ----
+                    Loader {
                         anchors.verticalCenter: parent.verticalCenter
-                        color: "#9AA6B2"; font.pixelSize: 13; text: "Font"
+                        active: chrome.readerType === "book"
+                        sourceComponent: Row {
+                            spacing: 10
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                color: "#9AA6B2"; font.pixelSize: 13; text: "Font"
+                            }
+                            // externalEdit -> activation cycles to the next size via the host bridge (no inline
+                            // focus grab; the strip is NoFocus). The host also feeds the zone's count, so
+                            // navigation to it never depends on this component's registration timing.
+                            ThemedChoice {
+                                id: fontChoice
+                                anchors.verticalCenter: parent.verticalCenter
+                                navZone: "readerSettings"; navRow: 1; navCol: 0
+                                externalEdit: true
+                                accent: chrome.accent
+                                width: 108; height: Math.min(chrome.barHeight - 6, 34)
+                                options: chrome.br ? chrome.br.fontOptions : []
+                                currentOption: chrome.br ? chrome.br.fontIndex : 0
+                                onEditRequested: (zone) => {
+                                    if (!chrome.br) { finishEdit(false); return }
+                                    var n = chrome.br.fontOptions.length
+                                    if (n > 0) chrome.br.chooseFont((chrome.br.fontIndex + 1) % n) // next size
+                                    finishEdit(false)   // applied via the bridge; don't double-fire chosen()
+                                }
+                            }
+                        }
                     }
-                    // The reader-settings zone: font size. externalEdit -> activation cycles to the next size
-                    // via the host bridge (no inline focus grab; the strip is NoFocus). The host also feeds the
-                    // zone's count, so navigation to it never depends on this component's registration timing.
-                    ThemedChoice {
-                        id: fontChoice
+
+                    // ---- Pdf/Comic: zoom out(0) / zoom in(1) / fit(2) [/ two-up(3) for a comic] ----
+                    Loader {
                         anchors.verticalCenter: parent.verticalCenter
-                        navZone: "readerSettings"; navRow: 1; navCol: 0
-                        externalEdit: true
-                        accent: chrome.accent
-                        width: 108; height: Math.min(chrome.barHeight - 6, 34)
-                        options: chrome.br ? chrome.br.fontOptions : []
-                        currentOption: chrome.br ? chrome.br.fontIndex : 0
-                        onEditRequested: (zone) => {
-                            if (!chrome.br) { finishEdit(false); return }
-                            var n = chrome.br.fontOptions.length
-                            if (n > 0) chrome.br.chooseFont((chrome.br.fontIndex + 1) % n) // cycle to next size
-                            finishEdit(false)   // applied directly via the bridge; don't double-fire chosen()
+                        active: chrome.readerType !== "book"
+                        sourceComponent: Row {
+                            spacing: 8
+                            Repeater {
+                                model: chrome.readerType === "comic"
+                                       ? [{t: "−", i: 0}, {t: "+", i: 1}, {t: "Fit", i: 2}, {t: "Two-Up", i: 3}]
+                                       : [{t: "−", i: 0}, {t: "+", i: 1}, {t: "Fit", i: 2}]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    // highlighted when the nav cursor is on this settings row
+                                    readonly property bool sel: chrome.g && chrome.g.zone === "readerSettings"
+                                                                && chrome.g.index === modelData.i
+                                    // the two-up toggle also shows its ON state (pressed look) from the bridge
+                                    readonly property bool active2: modelData.i === 3 && chrome.br && chrome.br.twoUp
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    width: Math.max(34, btnTxt.implicitWidth + 18)
+                                    height: Math.min(chrome.barHeight - 6, 30); radius: 6
+                                    color: sel ? chrome.accent : (active2 ? "#243A57" : "#1E2632")
+                                    border.width: sel ? 2 : 1
+                                    border.color: sel ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
+                                    Text {
+                                        id: btnTxt; anchors.centerIn: parent
+                                        text: modelData.t; color: "#E6ECF3"; font.pixelSize: 13
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+                                        onClicked: { if (chrome.g) { chrome.g.select("readerSettings", modelData.i); chrome.g.activate() } }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

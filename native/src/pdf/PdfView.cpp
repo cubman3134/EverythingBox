@@ -37,7 +37,9 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     view_->setPageMode(QPdfView::PageMode::SinglePage); // one page at a time, like the old reader
     view_->setZoomMode(QPdfView::ZoomMode::FitInView);
 
-    auto* bar = new QHBoxLayout();
+    bar_ = new QWidget(this);
+    auto* bar = new QHBoxLayout(bar_);
+    bar->setContentsMargins(0, 0, 0, 0);
     auto* backBtn = new QPushButton(tr("‹ Back"), this);
     streamIssueBtn_ = new QPushButton(tr("⚠ Issue with Streaming"), this);
     streamIssueBtn_->setToolTip(tr("Bad or wrong file? Try the next available source."));
@@ -76,9 +78,29 @@ PdfView::PdfView(QWidget* parent) : QWidget(parent)
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
     v->addWidget(view_, 1);
-    v->addLayout(bar);
+    v->addWidget(bar_);
 
     setFocusPolicy(Qt::StrongFocus);
+}
+
+// Hosted mode: the themed ReaderChromeHost owns all chrome, so hide our own bottom control bar (the themed
+// bottom strip replaces it) and stop surfacing the stream-issue button; classic mode restores it. No render or
+// page-navigation logic changes — the wrappers below drive exactly what the bar's buttons already called.
+void PdfView::setHostedChrome(bool on)
+{
+    hosted_ = on;
+    if (bar_) bar_->setVisible(!on);
+    if (streamIssueBtn_) streamIssueBtn_->setVisible(on ? false : streamVisible_);
+}
+
+int PdfView::currentPage() const { return view_->pageNavigator()->currentPage() + 1; } // 1-based
+int PdfView::pageCount()  const { return qMax(1, doc_->pageCount()); }
+
+void PdfView::zoomDelta(int steps)
+{
+    for (int i = 0; i < steps; ++i)  zoomIn();
+    for (int i = 0; i > steps; --i)  zoomOut();
+    if (steps == 0) return;
 }
 
 bool PdfView::openPdf(const QString& path, QString* error)
@@ -105,7 +127,11 @@ bool PdfView::openPdf(const QString& path, QString* error)
     return true;
 }
 
-void PdfView::setStreamIssueVisible(bool on) { if (streamIssueBtn_) streamIssueBtn_->setVisible(on); }
+void PdfView::setStreamIssueVisible(bool on)
+{
+    streamVisible_ = on; // remembered so leaving hosted mode restores it
+    if (streamIssueBtn_) streamIssueBtn_->setVisible(on && !hosted_); // hosted chrome suppresses the raster button
+}
 
 void PdfView::persist()
 {
@@ -133,6 +159,7 @@ void PdfView::zoomIn()
     zoom_ = qMin(5.0, zoom_ * 1.2);
     view_->setZoomMode(QPdfView::ZoomMode::Custom);
     view_->setZoomFactor(zoom_);
+    emit pageInfoChanged();
 }
 
 void PdfView::zoomOut()
@@ -140,11 +167,13 @@ void PdfView::zoomOut()
     zoom_ = qMax(0.2, zoom_ / 1.2);
     view_->setZoomMode(QPdfView::ZoomMode::Custom);
     view_->setZoomFactor(zoom_);
+    emit pageInfoChanged();
 }
 
 void PdfView::fitWidth()
 {
     view_->setZoomMode(QPdfView::ZoomMode::FitToWidth);
+    emit pageInfoChanged();
 }
 
 void PdfView::updateLabel()
@@ -154,6 +183,7 @@ void PdfView::updateLabel()
                             .arg(QFileInfo(path_).fileName())
                             .arg(view_->pageNavigator()->currentPage() + 1)
                             .arg(doc_->pageCount()));
+    emit pageInfoChanged(); // mirror page moves (buttons + raw keys) into the themed chrome
 }
 
 void PdfView::keyPressEvent(QKeyEvent* e)
@@ -195,6 +225,10 @@ bool PdfView::openPdf(const QString&, QString* error)
 
 void PdfView::persist() {}
 void PdfView::setStreamIssueVisible(bool) {}
+void PdfView::setHostedChrome(bool on) { hosted_ = on; } // no bar to hide in the stub
+int  PdfView::currentPage() const { return 1; }
+int  PdfView::pageCount()  const { return 1; }
+void PdfView::zoomDelta(int) {}
 void PdfView::nextPage() {}
 void PdfView::prevPage() {}
 void PdfView::zoomIn() {}
