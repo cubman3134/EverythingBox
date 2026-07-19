@@ -1351,9 +1351,10 @@ void MainWindow::showEvent(QShowEvent* event)
     });
 }
 
-// When the window is re-activated (alt-tab back, restore from minimised, the Esc menu closing), the themed
-// QQuickWidget doesn't automatically restore its QML scene's active focus, leaving arrow keys dead until a
-// click. Re-focus it AND force focus onto the QML root so navigation keeps working.
+// When the window is re-activated (alt-tab back, restore from minimised), the themed QQuickWidget doesn't
+// automatically restore its QML scene's active focus, leaving arrow keys dead until a click. Re-focus it AND
+// force focus onto the QML root so navigation keeps working. (The Esc menu is an in-window NavMenu overlay
+// nowadays — closing it produces no ActivationChange; its revival runs in NavOverlay::dismiss instead.)
 void MainWindow::changeEvent(QEvent* event)
 {
     QMainWindow::changeEvent(event);
@@ -2294,7 +2295,9 @@ void MainWindow::showThemedXmb()
         if (themedXmbInCatalog_)
         {
             const QString q = promptThemedSearch(home_->browseTitle());
-            if (!q.isNull()) home_->searchInBrowse(q);
+            // A non-console search resets HomeView's drill stack to the base level (doSearch): sync the graph
+            // levels NOW, not just on the async browseItemsChanged, so a fast Back can't pop a stale level.
+            if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
         }
         else
         {
@@ -2396,7 +2399,9 @@ void MainWindow::showThemedBrowse()
     // "/" searches within the current catalog/console; the result refreshes via browseItemsChanged.
     auto onSearch = [this] {
         const QString q = promptThemedSearch(home_->browseTitle());
-        if (!q.isNull()) home_->searchInBrowse(q);
+        // Sync the graph levels NOW: a non-console search collapses the drill stack (doSearch), and a Back in
+        // the async window before browseItemsChanged must not pop a stale browse level.
+        if (!q.isNull()) { home_->searchInBrowse(q); syncThemedLevels(); }
     };
     // Selection neared the end -> pull the next page (if any). browseItemsChanged appends + keeps selection.
     auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };

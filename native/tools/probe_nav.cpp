@@ -4,6 +4,7 @@
 // keyboard types/deletes/commits. Runs under the offscreen QPA in CI (see run-headless-probes.sh).
 // Prints NAV-OK on success; any failure prints NAV-FAIL <what> and exits non-zero.
 #include "nav/Nav.h"
+#include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 
@@ -19,6 +20,7 @@
 #include <QScrollArea>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <cstdio>
@@ -697,6 +699,81 @@ int main(int argc, char** argv)
         CHECK(sceneRoot.kicks == 2, "unwinding the last overlay revives the scene again");
         delete page;
         pump();
+    }
+
+    // ------------------------------------------- 19. overlay-mirror levels on a NavGraph (one Back router)
+    {
+        // An overlay opened over a themed screen mirrors itself as a level on that screen's NavGraph
+        // (setNavGraph): show pushes exactly one level, and EVERY close path — accept, Back/cancel, an
+        // explicit double dismiss, the graph's own back() unwinding, and the OSK's nested QEventLoop —
+        // pops it exactly once (the dismissed_ latch + the m_popping guard make dismiss and popLevel
+        // compose without a double-pop or a double-dismiss).
+        NavGraph graph;
+        graph.registerZone(QStringLiteral("items"), 5, 0, 0);
+        int pops = 0, depthNow = 0;
+        QObject::connect(&graph, &NavGraph::levelsChanged,
+                         [&](int d) { if (d < depthNow) ++pops; depthNow = d; });
+        bool browsePopped = false;
+        graph.pushLevel(QStringLiteral("browse"), [&] { browsePopped = true; }); // a drill beneath the overlays
+        CHECK(graph.levelDepth() == 1, "baseline: one browse level on the stack");
+
+        // a) accept path: choosing a row dismisses with a result — one pop, back to baseline.
+        auto* menu = new NavMenu(QStringLiteral("Actions"), { QStringLiteral("Play"), QStringLiteral("Fav") },
+                                 nullptr, &win);
+        menu->setNavGraph(&graph);
+        pump();
+        CHECK(graph.levelDepth() == 2, "setNavGraph pushes the overlay's mirror level");
+        ctx.routeKey(Qt::Key_Return); // choose row 0 -> dismiss(0)
+        pump();
+        CHECK(NavOverlay::topmost() == nullptr, "the menu closed on accept");
+        CHECK(graph.levelDepth() == 1, "the accept path pops the mirror level back to baseline");
+        CHECK(pops == 1, "…with exactly ONE pop");
+
+        // b) Back/cancel path: a fresh overlay, closed by the Back key — one pop, back to baseline.
+        auto* menu2 = new NavMenu(QStringLiteral("Actions"), { QStringLiteral("a"), QStringLiteral("b") },
+                                  nullptr, &win);
+        menu2->setNavGraph(&graph);
+        pump();
+        CHECK(graph.levelDepth() == 2, "the second overlay pushes its mirror level");
+        ctx.routeKey(Qt::Key_Backspace); // the overlay's own Back handling -> dismiss(-1)
+        pump();
+        CHECK(NavOverlay::topmost() == nullptr, "the menu closed on Back");
+        CHECK(graph.levelDepth() == 1 && pops == 2, "the Back/cancel path pops exactly once");
+
+        // c) re-entrant dismiss guard: calling dismiss twice is ONE close and ONE pop.
+        auto* menu3 = new NavMenu(QStringLiteral("Actions"), { QStringLiteral("x") }, nullptr, &win);
+        menu3->setNavGraph(&graph);
+        pump();
+        CHECK(graph.levelDepth() == 2, "the third overlay pushes its mirror level");
+        menu3->dismiss(-1);
+        menu3->dismiss(-1);   // second call must be a latched no-op (deleteLater hasn't collected it yet)
+        pump();
+        CHECK(graph.levelDepth() == 1 && pops == 3, "a double dismiss pops the mirror level exactly once");
+
+        // d) graph-side unwind: graph.back() pops the mirror level, whose onPop dismisses the overlay —
+        //    and dismiss's own pop is a guarded no-op mid-onPop (no double-pop, no cascade into "browse").
+        auto* menu4 = new NavMenu(QStringLiteral("Actions"), { QStringLiteral("y") }, nullptr, &win);
+        menu4->setNavGraph(&graph);
+        pump();
+        CHECK(graph.levelDepth() == 2, "the fourth overlay pushes its mirror level");
+        graph.back();
+        pump();
+        CHECK(NavOverlay::topmost() == nullptr, "graph.back() dismisses the mirrored overlay");
+        CHECK(graph.levelDepth() == 1 && pops == 4, "…and pops exactly once (dismiss's re-entrant pop is guarded)");
+        CHECK(!browsePopped, "the browse level beneath survives every overlay close untouched");
+
+        // e) OSK nested-loop composition: getText(&graph) blocks in a nested QEventLoop; a Back injected
+        //    inside that loop cancels the OSK — the loop quits AND the mirror level pops exactly once.
+        QTimer::singleShot(0, [&] { ctx.routeKey(Qt::Key_Backspace); }); // fires inside the nested loop
+        const QString r = Osk::getText(QStringLiteral("Search"), QString(), QLineEdit::Normal, &win, &graph);
+        pump();
+        CHECK(r.isNull(), "the nested-loop OSK backed out (null result)");
+        CHECK(NavOverlay::topmost() == nullptr, "the OSK closed through the nested loop");
+        CHECK(graph.levelDepth() == 1 && pops == 5, "the OSK's mirror level popped exactly once through the nested loop");
+
+        // The drill level beneath is still fully live: one real Back pops it and runs its onPop.
+        graph.back();
+        CHECK(browsePopped && graph.levelDepth() == 0, "the surviving browse level pops normally afterwards");
     }
 
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
