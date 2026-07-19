@@ -7,13 +7,14 @@ NavGraph::NavGraph(QObject* parent) : QObject(parent) {}
 
 // ---------------------------------------------------------------------------------------- registry
 
-void NavGraph::registerZone(const QString& id, int count, int row, int col, bool wraps)
+void NavGraph::registerZone(const QString& id, int count, int row, int col, Qt::Orientation axis, bool wraps)
 {
     if (id.isEmpty()) return;
     Zone z;
     z.count = std::max(0, count);
     z.row = row;
     z.col = col;
+    z.axis = axis;
     z.wraps = wraps;
     const bool isNew = !m_zones.contains(id);
     if (isNew) { z.order = m_order.size(); m_order.push_back(id); }
@@ -22,7 +23,13 @@ void NavGraph::registerZone(const QString& id, int count, int row, int col, bool
 
     if (m_defaultZone.isEmpty()) m_defaultZone = id;
     // First zone ever, or the current selection is empty: adopt this one.
-    if (m_zone.isEmpty()) setSelection(id, 0);
+    if (m_zone.isEmpty()) { setSelection(id, 0); return; }
+    // Re-registering the CURRENTLY SELECTED zone: the count may have shrunk (or dropped to 0) —
+    // re-snap the held index, or reassign away if the zone just hid itself.
+    if (id == m_zone) {
+        if (z.count == 0) reassignFrom(id);
+        else setSelection(id, snapIndex(id, m_index));
+    }
 }
 
 void NavGraph::setZoneCount(const QString& id, int count)
@@ -39,12 +46,16 @@ void NavGraph::setZoneCount(const QString& id, int count)
 void NavGraph::removeZone(const QString& id)
 {
     if (!m_zones.contains(id)) return;
+    if (m_zones.size() == 1) return;   // refusing no-op: the last zone can never be removed (no null state)
+    // Compute the successor BEFORE erasing: nearestPositiveZone needs the dead zone's grid coords.
+    const bool wasSelected = (m_zone == id);
+    QString target = wasSelected ? nearestPositiveZone(id) : QString();
     m_zones.remove(id);
     m_order.removeAll(id);
-    if (m_defaultZone == id) m_defaultZone = m_order.isEmpty() ? QString() : m_order.front();
-    if (m_zone == id) {
-        if (m_zones.isEmpty()) { m_zone.clear(); m_index = 0; emit selectionChanged(m_zone, m_index); }
-        else reassignFrom(id);
+    if (m_defaultZone == id) m_defaultZone = m_order.front();
+    if (wasSelected) {
+        if (target.isEmpty()) target = m_zones.contains(m_defaultZone) ? m_defaultZone : m_order.front();
+        setSelection(target, snapIndex(target, m_index));
     }
 }
 
@@ -171,13 +182,16 @@ bool NavGraph::move(Qt::Key arrow)
         default: return false;
     }
 
-    // Left/Right first step the index within the strip; only cross zones at an edge.
-    if (dCol != 0) {
-        const Zone& z = m_zones[m_zone];
-        int ni = stepSelectable(m_zone, m_index, dCol);
+    // An arrow along the SELECTED zone's axis first steps the index within the strip (Horizontal:
+    // Left/Right; Vertical: Up/Down); it only crosses zones at an edge. The cross-axis arrow always
+    // crosses zones.
+    const Zone& z = m_zones[m_zone];
+    const int along = (z.axis == Qt::Horizontal) ? dCol : dRow;
+    if (along != 0) {
+        int ni = stepSelectable(m_zone, m_index, along);
         if (ni >= 0) { setSelection(m_zone, ni); return true; }
         if (z.wraps && z.count > 0) {
-            int wrap = (dCol > 0) ? snapIndex(m_zone, 0) : snapIndex(m_zone, z.count - 1);
+            int wrap = (along > 0) ? snapIndex(m_zone, 0) : snapIndex(m_zone, z.count - 1);
             if (wrap != m_index) { setSelection(m_zone, wrap); return true; }
         }
     }
@@ -212,6 +226,7 @@ void NavGraph::pushLevel(const QString& name, std::function<void()> onPop)
 
 void NavGraph::popLevel()
 {
+    if (m_popping) return;                 // a reentrant pop from inside an onPop is a no-op (symmetry)
     if (m_stack.isEmpty()) return;
     Level lvl = m_stack.back();
     m_stack.pop_back();

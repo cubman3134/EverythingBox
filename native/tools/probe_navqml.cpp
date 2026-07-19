@@ -6,9 +6,13 @@
 //   * a churn storm (grow / shrink / zero / remove zones, 1000 randomized mutations with a FIXED seed)
 //     never yields an invalid selection, and validate() holds after every mutation;
 //   * a set index snaps off "divider" (unselectable) entries and the snap always terminates;
-//   * move() walks the zone grid spatially and reaches every registered zone from the default (Invariant 2);
-//   * the back stack pops LIFO, runs onPop in order, bottoms out on rootBack(), and IGNORES a pushLevel()
-//     issued from inside an onPop callback (no re-push loops).
+//   * move() walks the zone grid spatially and reaches every registered zone from the default (Invariant 2),
+//     with pinned directional picks on a 3x3 grid and a pinned reassignment successor;
+//   * a Vertical zone (XMB item column) steps its index on Up/Down and crosses zones on Left/Right;
+//   * removeZone on the last remaining zone refuses (no representable null), and re-registering the
+//     currently selected zone re-snaps the held index;
+//   * the back stack pops LIFO, runs onPop in order, bottoms out on rootBack(), and IGNORES both a
+//     pushLevel() and a popLevel() issued from inside an onPop callback (no re-push/cascade loops).
 //
 // Prints NAVQML-OK on success; any failure prints NAVQML-FAIL <what> and exits non-zero.
 #include "nav/NavGraph.h"
@@ -150,6 +154,87 @@ int main(int argc, char** argv)
             }
         }
         CHECK(reached == registry, "arrows reach every zone from the default (spatial connectivity)");
+
+        // Pinned directional resolution (the storm can't catch valid-but-WRONG picks): from g11 the
+        // cross-axis arrows go to the orthogonal neighbors, and the along-axis arrows cross only at edges.
+        g.select(QStringLiteral("g11"), 1);
+        g.move(Qt::Key_Down);
+        CHECK(g.zone() == QStringLiteral("g21") && g.index() == 1, "g11 + Down = g21 (index carried)");
+        g.select(QStringLiteral("g11"), 1);
+        g.move(Qt::Key_Up);
+        CHECK(g.zone() == QStringLiteral("g01") && g.index() == 1, "g11 + Up = g01 (index carried)");
+        g.select(QStringLiteral("g11"), 0);
+        g.move(Qt::Key_Right);
+        CHECK(g.zone() == QStringLiteral("g11") && g.index() == 1, "Right mid-strip steps the index, stays in g11");
+        g.select(QStringLiteral("g11"), 2);
+        g.move(Qt::Key_Right);
+        CHECK(g.zone() == QStringLiteral("g12") && g.index() == 2, "g11 + Right at the strip edge = g12");
+        g.select(QStringLiteral("g11"), 0);
+        g.move(Qt::Key_Left);
+        CHECK(g.zone() == QStringLiteral("g10") && g.index() == 0, "g11 + Left at index 0 = g10");
+
+        // Pinned reassignment target: remove the selected g11 — all four orthogonal neighbors are at grid
+        // distance 1, so the documented tie-break (registration order) picks g01 (registered before g10/g12/g21).
+        g.select(QStringLiteral("g11"), 1);
+        g.removeZone(QStringLiteral("g11"));
+        CHECK(g.zone() == QStringLiteral("g01"), "removing the selected g11 reassigns to g01 (nearest, reg-order tie-break)");
+        CHECK(g.index() == 1, "reassignment carries the index");
+        CHECK(g.validate(nullptr), "the grid still validates after the pinned removal");
+    }
+
+    // ---------------------------------------------------------------- 4b. vertical-axis zone (XMB column)
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("menu"), 4, 0, 0, Qt::Vertical);    // the XMB item column
+        g.registerZone(QStringLiteral("side"), 3, 0, 1);                  // a horizontal strip to its right
+        g.select(QStringLiteral("menu"), 0);
+        CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("menu") && g.index() == 1,
+              "Down steps a Vertical zone's index (stays in the zone)");
+        CHECK(g.move(Qt::Key_Down) && g.index() == 2, "Down steps again");
+        CHECK(g.move(Qt::Key_Up) && g.index() == 1, "Up steps back");
+        CHECK(!g.move(Qt::Key_Left), "Left off a Vertical zone with nothing there is a no-op (returns false)");
+        CHECK(g.zone() == QStringLiteral("menu"), "the failed cross leaves the selection put");
+        CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("side"),
+              "Right crosses OUT of a Vertical zone (cross-axis arrow)");
+        CHECK(g.index() == 1, "the cross carries the index into the strip");
+        CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("side") && g.index() == 0,
+              "Left inside the Horizontal strip steps its index first");
+        CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("menu"),
+              "Left at the strip's edge crosses back into the Vertical zone");
+        // Divider snap still works along the vertical axis.
+        g.setUnselectable(QStringLiteral("menu"), QSet<int>{1});
+        g.select(QStringLiteral("menu"), 0);
+        CHECK(g.move(Qt::Key_Down) && g.index() == 2, "Down skips a divider in a Vertical zone");
+        g.select(QStringLiteral("menu"), 1);
+        CHECK(g.index() != 1, "select snaps off a Vertical zone's divider");
+    }
+
+    // ---------------------------------------------------------------- 4c. last-zone removal is a no-op
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("only"), 3, 0, 0);
+        g.select(QStringLiteral("only"), 2);
+        g.removeZone(QStringLiteral("only"));   // must refuse — no representable null state
+        CHECK(g.zone() == QStringLiteral("only"), "removeZone on the last zone is a refusing no-op");
+        CHECK(g.index() == 2, "the selection is untouched by the refused removal");
+        CHECK(g.validate(nullptr), "the registry still validates");
+        g.select(QStringLiteral("only"), 1);
+        CHECK(g.index() == 1, "the refused zone is still fully live (select works)");
+    }
+
+    // ---------------------------------------------------------------- 4d. re-registering the selected zone re-snaps
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("list"), 10, 0, 0);
+        g.registerZone(QStringLiteral("other"), 2, 1, 0);
+        g.select(QStringLiteral("list"), 9);
+        g.registerZone(QStringLiteral("list"), 3, 0, 0);   // a Repeater rebuild shrank the zone
+        CHECK(g.zone() == QStringLiteral("list"), "re-registering the selected zone keeps it selected");
+        CHECK(g.index() == 2, "the held index re-snaps into the smaller count");
+        CHECK(g.validate(nullptr), "validate passes after the re-register snap");
+        g.registerZone(QStringLiteral("list"), 0, 0, 0);   // rebuild emptied it entirely
+        CHECK(g.zone() == QStringLiteral("other"), "re-registering the selected zone at count 0 reassigns away");
+        CHECK(g.validate(nullptr), "validate passes after the count-0 re-register");
     }
 
     // ---------------------------------------------------------------- 5. back stack: LIFO + rootBack
@@ -189,6 +274,15 @@ int main(int argc, char** argv)
         CHECK(g.back(), "back pops the level");
         CHECK(ran, "the onPop callback ran");
         CHECK(g.levelDepth() == 0, "a push from inside onPop is ignored — no re-push loop");
+
+        // Symmetry: a reentrant popLevel() from inside an onPop is equally a no-op — the level below
+        // survives and its onPop does not run.
+        bool lowerRan = false;
+        g.pushLevel(QStringLiteral("low"), [&]{ lowerRan = true; });
+        g.pushLevel(QStringLiteral("top"), [&]{ g.popLevel(); });   // must NOT cascade into "low"
+        CHECK(g.back(), "back pops the top level");
+        CHECK(g.levelDepth() == 1, "a pop from inside onPop is ignored — the level below survives");
+        CHECK(!lowerRan, "the surviving level's onPop did not run");
     }
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

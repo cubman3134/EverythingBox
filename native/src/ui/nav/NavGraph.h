@@ -3,18 +3,22 @@
 // so it is unit-testable headlessly; see tools/probe_navqml.cpp). Selection is a (zone, index) pair and can
 // NEVER be null once a zone is registered: every mutation reassigns deterministically instead of clearing.
 //
-// Spatial model: each zone sits in a coarse grid cell (row, col). A zone is a horizontal strip of `count`
-// items. Left/Right step the index within the strip and, at an edge (unless the zone wraps), cross to the
-// nearest zone in that column direction. Up/Down always cross to the nearest zone in that row direction,
-// carrying the index (clamped + divider-snapped). "Nearest" = smallest primary-axis grid distance in the
-// arrow's direction, then smallest secondary-axis distance, then registration order.
+// Spatial model: each zone sits in a coarse grid cell (row, col). A zone is a strip of `count` items laid
+// along its `axis`. Horizontal (the default): Left/Right step the index within the strip and, at an edge
+// (unless the zone wraps), cross to the nearest zone in that column direction; Up/Down always cross by row.
+// Vertical (an XMB item column): Up/Down step the index and cross by row only at an edge; Left/Right always
+// cross by column. Zone crossing carries the index (clamped + divider-snapped). "Nearest" = smallest
+// primary-axis grid distance in the arrow's direction, then smallest secondary-axis distance, then
+// registration order.
 //
 // Reassignment order (when the SELECTED zone is removed or its count drops to 0):
 //   1. the nearest OTHER zone that still has count > 0, by grid distance to the dead zone (ties: reg order);
 //   2. else the default zone (even if hidden);
 //   3. else the first-registered zone.
 //   Then the carried index is clamped into the new zone's count and snapped off any unselectable (divider)
-//   entry to the nearest selectable one. There is no API that can produce a null selection.
+//   entry to the nearest selectable one. There is no API that can produce a null selection: removeZone on
+//   the LAST remaining zone is a refusing no-op, and a registry whose every zone is hidden (all counts 0)
+//   intentionally parks the selection at (zone, 0) — that is the terminal state, not a null.
 #include <QHash>
 #include <QObject>
 #include <QSet>
@@ -33,9 +37,11 @@ public:
 
     // Zone registry. `count` may change any time via setZoneCount (Repeater data swaps).
     // `row`/`col` place the zone on a coarse grid for spatial arrow resolution (Invariant 3).
-    void registerZone(const QString& id, int count, int row, int col, bool wraps = false);
+    // `axis` is the direction the strip's index runs (Vertical = an XMB item column).
+    void registerZone(const QString& id, int count, int row, int col,
+                      Qt::Orientation axis = Qt::Horizontal, bool wraps = false);
     void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
-    void removeZone(const QString& id);
+    void removeZone(const QString& id);                // refusing no-op on the last remaining zone
     void setDefaultZone(const QString& id);
 
     // Non-selectable indices (dividers): the resolver skips them; a set index snaps to the
@@ -63,7 +69,8 @@ signals:
     void levelsChanged(int depth);
 
 private:
-    struct Zone { int count = 0; int row = 0; int col = 0; bool wraps = false; int order = 0; QSet<int> unsel; };
+    struct Zone { int count = 0; int row = 0; int col = 0; Qt::Orientation axis = Qt::Horizontal;
+                  bool wraps = false; int order = 0; QSet<int> unsel; };
     struct Level { QString name; std::function<void()> onPop; };
 
     // Grid resolution helpers.
@@ -81,5 +88,5 @@ private:
     int m_index = 0;
 
     QVector<Level> m_stack;
-    bool m_popping = false;       // guards against pushLevel() re-entrancy from inside an onPop
+    bool m_popping = false;       // onPop re-entrancy guard: push AND pop from inside an onPop are no-ops
 };
