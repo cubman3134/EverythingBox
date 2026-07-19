@@ -1,6 +1,7 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
 #include "../ui/nav/NavGraph.h"
+#include "../ui/nav/NavThemeGraph.h"
 
 #include <QQuickWidget>
 #include <QQuickItem>
@@ -205,39 +206,26 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // The selection model for this view. Created + exposed as the `nav` context property BEFORE setSource
     // (context properties must precede the QML load). It is parented to the widget, so it dies with the view.
     //
-    // Zone layout: `items` (the XMB column / the grid, Vertical) and `categories` (the XMB horizontal axis)
-    // are CO-LOCATED at (0,0) — they are the two always-visible cursors of ONE surface, which pure spatial
-    // crossing cannot express, so their transitions are DECLARED edges with the fused co-located step (one
-    // press switches cursor AND moves it — see NavGraph.h). `actions` (the inline chooser overlay) is
-    // co-located too; it is entered by activation (the host flips actionsOpen), and its declared Esc edge
-    // documents the dismissal transition so validate() sees it connected. `buttons` (the bottom button bar)
-    // is spatially real at row 1; its transitions restore the neighbor's cursor from per-zone memory.
-    // Counts + divider sets are fed live from the QML (see ThemeView.qml); a hidden zone (count 0) makes
-    // its edges inert, so XMB themes (no buttons) and grid themes (no categories) share this one wiring.
+    // The zone layout + declared edges are built by buildThemedNavGraph (NavThemeGraph.h) — the ONE
+    // definition of the themed surface's graph shape, shared verbatim with probe_navqml section 9 so the CI
+    // assertion can never drift from the shipped graph. Counts + divider sets are then fed live from the QML
+    // (see ThemeView.qml); a hidden zone (count 0) makes its edges inert, so XMB themes (no buttons) and grid
+    // themes (no categories) share this one wiring. (See NavThemeGraph.h for the per-zone rationale.)
     auto* graph = new NavGraph(qv);
-    graph->registerZone(QStringLiteral("items"), int(items.size()), 0, 0, Qt::Vertical);
-    graph->registerZone(QStringLiteral("categories"), 0, 0, 0, Qt::Horizontal);
-    graph->registerZone(QStringLiteral("buttons"), 0, 1, 0, Qt::Horizontal);
-    graph->registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
-    graph->setDefaultZone(QStringLiteral("items"));
-    // Two-cursor XMB surface: Left/Right switch to + step the category axis; Up/Down from the category
-    // axis switch to + step the item column (fused step = old stepCat/step parity, no eaten press).
-    graph->addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
-    graph->addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
-    graph->addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
-    graph->addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
-    // The bottom button bar: entered from the grid's bottom row (the QML gates WHEN — it owns the gridCols
-    // geometry), left back upward with the grid cursor restored from zone memory.
-    graph->addEdge(QStringLiteral("items"), Qt::Key_Down, QStringLiteral("buttons"));
-    graph->addEdge(QStringLiteral("buttons"), Qt::Key_Up, QStringLiteral("items"));
-    // The chooser's dismissal transition (Esc -> back onto the leaf), executed by syncActionsZone below;
-    // declared so the connectivity walk sees the overlay zone linked to the surface it covers.
-    graph->addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
-    // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected.
+    buildThemedNavGraph(*graph, int(items.size()));
+    // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected. Under MMV_UITEST
+    // (the probe/UI-test build) a failure is FATAL, not a warning: the graph shape is CI-asserted by
+    // probe_navqml against the same builder, so a validate() failure here means a real structural break that
+    // must halt the test run loudly rather than log-and-continue into undefined navigation.
     {
         QString why;
         if (!graph->validate(&why))
-            qWarning("theme2: nav graph failed validate(): %s", qPrintable(why));
+        {
+            if (qEnvironmentVariableIntValue("MMV_UITEST") == 1)
+                qFatal("theme2: nav graph failed validate(): %s", qPrintable(why)); // fail loudly in test/probe runs
+            else
+                qWarning("theme2: nav graph failed validate(): %s", qPrintable(why));
+        }
     }
     qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph);
     qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()

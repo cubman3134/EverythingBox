@@ -1,7 +1,10 @@
 # Phase 3, Subsystem A — Themed Nav Contract Design
 
 **Date:** 2026-07-18
-**Status:** Approved design, pending implementation plan
+**Status:** Subsystem A complete: NavGraph invariants CI-gated (probe_navqml, 100+ CHECKs),
+declared-edge screen class, one Back router, two-state components ready for B, watchdog live
+(telemetry since 2026-07-19). NavItem per-element registration deferred to B (zone registration
+shipped — documented adaptation).
 **Builds on:** phase 1 (foundation refactor), phase 2 (perf + polish tracks) — all complete
 **Part of:** the phase-3 UI refactor. Decomposition (user-approved): **A** this spec (nav
 integrity foundation) → **B** themed-everything, phased: content surfaces (readers:
@@ -45,6 +48,15 @@ Rejected: fix-list (patches can't deliver "never"); pure-QML FocusScope rewrite
 - **Invariant 3 (movement is one resolver):** arrows resolve in the shared resolver —
   declared edges first (exact from-zone + key match), then spatial geometry
   (row/column or coordinates) — never per-screen key handling.
+  - **Grid intra-zone exception:** the model's strips are 1-D, but a grid/carousel
+    surface is a 2-D wrap of one `items` zone. Its intra-zone target index (row-jump =
+    ±`gridCols`, ±1 along a row, divider-skip continuing the travel direction) is
+    computed QML-side from the grid's own column geometry and handed to the model as a
+    `nav.select("items", target)` REQUEST — the model still owns the arbitration
+    (clamp into count, snap off dividers), so the QML proposes and the model disposes;
+    it never assigns a selection prop directly. This is the one place a surface computes
+    geometry the 1-D model can't: transitions BETWEEN zones (grid ↔ buttons, the XMB
+    two-cursor switch) remain declared edges resolved wholly inside the model.
 - **Declared-edge screen class (two-cursor surfaces):** pure geometry cannot express a
   surface with two independent, always-visible cursors (the XMB category axis + its
   item column, co-located in one grid cell) — spatial crossing moves ONE selection and
@@ -57,6 +69,18 @@ Rejected: fix-list (patches can't deliver "never"); pure-QML FocusScope rewrite
   declared edges — entry at memory, no fused step. Both kinds are part of the
   Invariant 2 union, so reachability is still validated, not assumed from key-map
   wiring.
+- **Undirected legs vs. directed proof:** `validate()`'s connectivity walk treats every
+  declared edge as UNDIRECTED (both endpoints registered), unioned with the geometric
+  neighbors — it proves the graph is not partitioned, not that any particular key reaches
+  any particular zone. Directed reachability (a specific arrow actually landing on a zone
+  from the default) is proven separately by each surface's move-BFS probe: a directed
+  breadth-first walk that applies the four real arrows through `move()` and asserts the
+  reached set (probe_navqml §9 for the shipped themed shape — the "probe-9" pattern). The
+  distinction matters for activation-entered zones: the inline action-chooser (`actions`)
+  is reached by ACTIVATION, not an arrow, so it is deliberately excluded from the directed
+  arrow-BFS reached set — its connectivity is carried by its declared Esc return edge in
+  the undirected `validate()` union, and its entry/return is pinned by explicit asserts,
+  not the arrow walk.
 
 ### Two-state themed inputs
 
@@ -125,8 +149,55 @@ closed by construction (regression-probed); watchdog live with at least one week
 or one confirmed catch — of black-state telemetry; nav.select median unchanged
 within 2 ms.
 
+All met at close-out EXCEPT the watchdog telemetry soak, which is time-based by design:
+**telemetry started 2026-07-19** (watchdog armed + deployed). The remaining exit criterion
+is a week of black-state telemetry OR one confirmed catch — whichever comes first. This is
+the one open item; **subsystem B may start in parallel** (it does not depend on the soak
+concluding), and a confirmed catch during B closes it early.
+
 ## After this spec
 
 Subsystem B spec: themed content surfaces (readers, detail pages) on the contract,
 then settings; subsystem D spec: TV + mobile adaptivity (Android input model,
 form-factor layouts, player UI).
+
+### Carried into B (follow-ups noted at A close-out)
+
+These are known, non-blocking items surfaced during A's reviews — recorded here so B (or a
+hardening pass) picks them up rather than rediscovering them:
+
+- **`NavGraph::move()` `QHash::operator[]` → `constFind` hardening.** The movement path
+  (`move()` / `crossByEdge`) looks up zones with `m_zones[...]` (operator[]), which
+  DEFAULT-INSERTS an empty `Zone{count 0}` on a missing key. It is safe today — `m_zone`
+  is always a live zone by invariant, edge targets are `constFind`-guarded before the
+  crossing, and `nearestZone` only returns real keys — but operator[] on a lookup is a
+  latent hazard: a future caller passing a stale/absent id would silently corrupt the
+  registry (a phantom hidden zone) instead of being caught. Switch these read-only
+  lookups to `constFind` + an explicit guard.
+- **Watchdog false-positive / over-skip caveats.** The black-frame watchdog skips
+  `inContent_ || isMinimized() || escMenuVisible()`. Two known edges: (1) a legitimately
+  DARK background video played through to a near-black stretch on a themed surface that is
+  NOT in a skip context could momentarily sit in the FP window — the 0.99 threshold + the
+  2-consecutive-frame gate make this unlikely, but it is why the recovery kick is
+  invalidation-only (flicker-free) rather than destructive. (2) `emuPage_` (the
+  launch/install wait page) is inside `inContent_`, so the watchdog is fully OFF during a
+  launch handoff — a genuine blackout that begins ON the wait page would be OVER-SKIPPED
+  and not caught until the surface leaves the content context. Both are acceptable given
+  the telemetry-first goal, but B should revisit if a real catch lands in that window.
+- **Last-zone / single-input degenerate case.** A registry reduced to ONE zone parks the
+  selection there permanently (`removeZone` on the last zone is a refusing no-op), and a
+  registry whose every zone is hidden (all counts 0) parks at `(zone, 0)` — the terminal
+  state, deliberately not a null. A themed surface that is a SINGLE input field is
+  therefore always self-consistent but has no arrow to move to; B's per-element
+  registration must ensure such a surface still has a declared default and a Back leg
+  (there is nothing for `validate()`'s connectivity walk to partition, so it passes
+  vacuously — the guarantee there is "never null", not "reachable from a sibling").
+- **`externalEdit` host-owes-`finishEdit` contract.** In the TV/OSK route
+  (`externalEdit: true`), activating a `ThemedTextField`/`ThemedChoice` only emits
+  `editRequested(navZone)` and goes `externalPending` — it grabs NO focus and opens NO
+  inline editor. The HOST then owes exactly one `finishEdit(true|false)` to close the loop
+  (`true` commits the host-written value, `false` abandons); until it does, the field
+  stays pending (arrows still move the selection away — the pending state does not trap
+  navigation). B's surfaces that opt into `externalEdit` MUST honor this contract: a host
+  that runs its OSK but never calls `finishEdit` leaves the field permanently pending. The
+  contract is probe-pinned (probe_navqml §9/§9b), but the host side is B's responsibility.

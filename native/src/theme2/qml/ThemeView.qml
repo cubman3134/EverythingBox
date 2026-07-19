@@ -65,6 +65,13 @@ Item {
     // navigation: pressing Down at the bottom of the grid moves focus into this "button zone". buttonList is
     // the view's `button` actions left-to-right; buttonIndex is the cursor; focusedButtonAction is what a
     // `button` element checks to draw its focus ring (empty string = the grid still has focus).
+    //
+    // buttons is a GRID-only zone: in XMB mode Down steps the item column, so the model's declared
+    // items->Down->buttons edge must stay inert. We keep that edge inert the design's own way — by holding
+    // the `buttons` zone count at 0 whenever xmbMode is true (a hidden zone makes its edges inert). So even a
+    // theme that mixes an `xmb` element with `button` elements never hijacks column navigation. The count is
+    // fed as `xmbMode ? 0 : buttonList.length` at every site, kept in lockstep by onButtonListChanged AND
+    // onXmbModeChanged.
     property int focusZone: 0   // 0 = main content (grid/carousel), 1 = the bottom buttons
     property int buttonIndex: 0
     readonly property var buttonList: {
@@ -193,12 +200,15 @@ Item {
     // Keep the model's zone counts in step with the data the theme renders (single-sourced from the QML, so
     // every producer of these arrays stays in sync without per-call-site pairing).
     onCategoriesChanged: nav.setZoneCount("categories", categories ? categories.length : 0)
-    onButtonListChanged: nav.setZoneCount("buttons", buttonList.length)
+    // buttons is inert in XMB mode (Down steps the column there) — hold the count at 0 so its declared edge
+    // stays inert; keep it in lockstep with BOTH the button list and the mode.
+    onButtonListChanged: nav.setZoneCount("buttons", xmbMode ? 0 : buttonList.length)
+    onXmbModeChanged: nav.setZoneCount("buttons", xmbMode ? 0 : buttonList.length)
     Component.onCompleted: {
         nav.setZoneCount("items", items ? items.length : 0)
         nav.setDividers("items", headerIndices())
         nav.setZoneCount("categories", categories ? categories.length : 0)
-        nav.setZoneCount("buttons", buttonList.length)
+        nav.setZoneCount("buttons", xmbMode ? 0 : buttonList.length)
     }
     onCurrentIndexChanged: {
         // Prop -> model sync: the HOST writes currentIndex directly (column reload, browse restore); mirror

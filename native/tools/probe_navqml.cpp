@@ -22,6 +22,7 @@
 // subsystem B will use — and asserts register / select / edit / commit / cancel and the "arrows stay in the
 // field while editing" invariant, driving real key events through the QML focus system.
 #include "nav/NavGraph.h"
+#include "nav/NavThemeGraph.h"
 #include "BlackFrameWatchdog.h"
 
 #include <QImage>
@@ -664,21 +665,15 @@ int main(int argc, char** argv)
 
     // ---------------------------------------------------------------- 9. the REAL themed graph shape
     {
-        // Replicates ThemeEngine::buildView's registration + edge set literally (keep in sync with it).
-        // The shipped themed graph must pass its own validator and reach every arrow-navigable zone.
+        // The graph shape is built by the SAME function the app runs (buildThemedNavGraph, NavThemeGraph.h) —
+        // not a hand-copied replica — so this assertion can never drift from ThemeEngine::buildView's shipped
+        // graph. buildView starts categories/buttons/actions at 0 and the QML feeds live counts; here we
+        // supply fixed test counts after building. The shipped themed graph must pass its own validator and
+        // reach every arrow-navigable zone.
         NavGraph g;
-        g.registerZone(QStringLiteral("items"), 12, 0, 0, Qt::Vertical);
-        g.registerZone(QStringLiteral("categories"), 6, 0, 0);
-        g.registerZone(QStringLiteral("buttons"), 2, 1, 0);
-        g.registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
-        g.setDefaultZone(QStringLiteral("items"));
-        g.addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
-        g.addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
-        g.addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
-        g.addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
-        g.addEdge(QStringLiteral("items"), Qt::Key_Down, QStringLiteral("buttons"));
-        g.addEdge(QStringLiteral("buttons"), Qt::Key_Up, QStringLiteral("items"));
-        g.addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
+        buildThemedNavGraph(g, 12);                    // items=12; categories/buttons/actions start hidden
+        g.setZoneCount(QStringLiteral("categories"), 6);
+        g.setZoneCount(QStringLiteral("buttons"), 2);
         QString why;
         CHECK(g.validate(&why), "the REAL themed graph passes validate() with the chooser closed");
         g.setZoneCount(QStringLiteral("actions"), 4);
