@@ -46,6 +46,7 @@
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
 #include "nav/Nav.h"
+#include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 #include <QSettings>
@@ -412,6 +413,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // pages. On a page append keep the selection where it is (the user scrolled to trigger it); on a fresh
         // set reset to the top.
         connect(home_, &HomeView::browseItemsChanged, this, [this](bool appended) {
+            syncThemedLevels(); // a load / drill / drill-up / page moved HomeView's stack — mirror it onto the graph
             QWidget* tgt = nullptr;
             if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
             // The XMB column mirrors HomeView only while drilled into a catalog (not on the catalog-list level).
@@ -847,23 +849,24 @@ void MainWindow::showEscMenu()
                              [this](int row) { if (row == 1) close(); }, // close() runs the Drive-push exit
                              this);
     escMenuOverlay_ = menu;
-    connect(menu, &NavOverlay::closed, this, [this](int) {
-#ifdef MMV_HAVE_QML
-        // A QQuickWidget forwards focus to its QML scene, but after a keyboard grab the scene's active-focus
-        // item may need a kick so its Keys handler (and the selection) resume exactly where they were.
-        QWidget* cur = stack_->currentWidget();
-        if (cur == themedHome_ || cur == themedBrowse_)
-        {
-            cur->setFocus(Qt::OtherFocusReason);
-            if (auto* r = ThemeEngine::rootItem(cur)) r->forceActiveFocus();
-        }
-#endif
-    });
+    // Over a themed screen the menu mirrors itself as a level on that screen's NavGraph so the graph depth
+    // tracks reality. Closing it revives the QML scene's focus through NavOverlay::dismiss's single kick — the
+    // old duplicate closed-handler focus kick here is gone.
+    menu->setNavGraph(currentThemedGraph());
 }
 
 void MainWindow::hideEscMenu()
 {
     if (auto* overlay = qobject_cast<NavOverlay*>(escMenuOverlay_.data())) overlay->dismiss(-1);
+}
+
+NavGraph* MainWindow::currentThemedGraph() const
+{
+#ifdef MMV_HAVE_QML
+    QWidget* cur = stack_->currentWidget();
+    if (cur == themedHome_ || cur == themedBrowse_) return ThemeEngine::navGraph(cur);
+#endif
+    return nullptr;
 }
 
 // ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------
@@ -968,9 +971,11 @@ void MainWindow::goBack()
 
     QWidget* cur = stack_->currentWidget();
 
-    // Themed (QML) home/browse: it owns a multi-level back (drill up a catalog, then the pause menu at its
-    // root) — run the same handler its own back() signal uses.
-    if ((cur == themedHome_ || cur == themedBrowse_) && themedOnBack_) { themedOnBack_(); return; }
+    // Themed (QML) home/browse: drive its NavGraph back stack, exactly as the QML's own nav.back() does. The
+    // graph's levels (catalog + browse drills) unwind one at a time; its rootBack (empty stack) fires the
+    // screen's root action (the pause menu on the home, the themed home from a browse view).
+    if (cur == themedHome_ || cur == themedBrowse_)
+        if (NavGraph* g = ThemeEngine::navGraph(cur)) { g->back(); return; }
     // Classic home: pop a drill level, or (at the root) emit backRequested -> the pause menu.
     if (cur == home_) { home_->goBack(); return; }
     // Settings / dialog panels: their header Back = the previous panel or the screen we came from.
@@ -1934,7 +1939,9 @@ bool MainWindow::themedHomeEnabled() const
 QString MainWindow::promptThemedSearch(const QString& scope)
 {
     const QString label = scope.isEmpty() ? tr("Search") : tr("Search %1").arg(scope);
-    const QString q = Osk::getText(label, QString(), QLineEdit::Normal, this);
+    // Over a themed screen: mirror the OSK as a level on that screen's back stack, so Back inside the OSK closes
+    // the OSK only and its close revives the themed scene focus (the second-search-focus / OSK-close-focus fix).
+    const QString q = Osk::getText(label, QString(), QLineEdit::Normal, this, currentThemedGraph());
     return q.isNull() ? QString() : q.trimmed();
 }
 
@@ -1983,8 +1990,9 @@ void MainWindow::showThemedHome()
     // bring up the app pause menu (Resume / Exit), exactly like the XMB home. (This used to jump to the
     // Appearance settings as "a reliable way back out", which read as Esc randomly opening settings.
     // Appearance stays reachable via Settings ▸ Appearance and a theme's own settings/appearance buttons.)
+    // rootBack for the grid home: the theme is the BOTTOM of the stack (a flat grid — no drill levels), so
+    // nav.back()'s empty-stack rootBack lands here and brings up the app pause menu.
     auto onBack  = [this] { showEscMenu(); };
-    themedOnBack_ = onBack; // the base window's goBack() shares this themed back
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -2074,6 +2082,52 @@ void MainWindow::refreshThemedMeta(int idx)
     // (online scrape + achievements) is debounced below, so fast scrolling doesn't hit the network per row.
     home_->requestThemedMeta(idx);
     if (themedMetaTimer_) themedMetaTimer_->start();
+}
+
+// Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
+// single nav.back()/goBack() pops exactly one real level and bottoms out (rootBack) at the screen root. The
+// desired stack, bottom -> top, is: an optional "catalog" level (XMB, only inside a MULTI-catalog bucket, its
+// onPop re-shows the catalog list) then one "browse" level per HomeView drill beyond the catalog root (onPop =
+// home_->browseBack()). Reconciled WITHOUT running any onPop (the underlying navigation already moved) — pushes
+// add, popLevelSilent drops. A no-op off a themed screen, while an overlay owns the stack, or mid-onPop (the
+// back() in progress already did the one real pop; the later async browseItemsChanged re-syncs).
+void MainWindow::syncThemedLevels()
+{
+    QWidget* cur = stack_->currentWidget();
+    NavGraph* g = (cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::navGraph(cur) : nullptr;
+    if (!g || g->isPopping()) return;
+    if (NavOverlay::topmost()) return;   // an overlay owns the top of the stack — reconcile after it closes
+
+    bool wantCatalog = false;
+    int  wantBrowse  = 0;
+    if (cur == themedHome_ && themedHomeIsXmb_)
+    {
+        if (themedXmbInCatalog_)
+        {
+            wantBrowse  = qMax(0, home_->browseDepth() - 1);
+            wantCatalog = !themedXmbAutoOpened_; // a single auto-opened catalog IS the root: no catalog level
+        }
+    }
+    else if (cur == themedBrowse_)
+        wantBrowse = qMax(0, home_->browseDepth() - 1);
+
+    // Browse levels sit on TOP of the catalog level, so always reconcile them from the top. Catalog presence
+    // only ever flips while the browse depth is 0 (entering / leaving a bucket), so it is safe to add/remove
+    // the catalog level once the browse levels are cleared.
+    const bool hasCatalog = g->countLevels(QStringLiteral("catalog")) > 0;
+    if (hasCatalog && !wantCatalog)
+    {
+        while (g->countLevels(QStringLiteral("browse")) > 0) g->popLevelSilent();
+        g->popLevelSilent(); // the catalog level (now on top)
+    }
+    else if (!hasCatalog && wantCatalog)
+    {
+        while (g->countLevels(QStringLiteral("browse")) > 0) g->popLevelSilent();
+        g->pushLevel(QStringLiteral("catalog"), themedCatalogPop_);
+    }
+    int curBrowse = g->countLevels(QStringLiteral("browse"));
+    while (curBrowse > wantBrowse) { g->popLevelSilent(); --curBrowse; }
+    while (curBrowse < wantBrowse) { g->pushLevel(QStringLiteral("browse"), [this] { home_->browseBack(); }); ++curBrowse; }
 }
 
 void MainWindow::showThemedXmb()
@@ -2194,6 +2248,7 @@ void MainWindow::showThemedXmb()
             themedXmbInCatalog_ = true;
             if (r) { r->setProperty("currentIndex", 0); r->setProperty("catLoading", true); } // spinner while it loads
             home_->activateNav(navKey); // its items land via browseItemsChanged (which now targets this column)
+            syncThemedLevels(); // entered a catalog: push its "catalog" level now (before the async items land)
         }
         else if (home_->atRecentsLevel() || home_->atDownloadsLevel())
             home_->browseActivate(itemIdx); // a Recent/Downloaded row -> re-open the local file at its spot
@@ -2205,7 +2260,7 @@ void MainWindow::showThemedXmb()
             const bool synthetic = m.value(QStringLiteral("type")).toString().startsWith(QLatin1Char('_'));
             // A container (series/console/volume) or a synthetic row (Playlists folder, a playlist, New) drills
             // / acts via the normal path; a real leaf opens the inline Play / Favorite / Add-to-playlist chooser.
-            if (expandable || synthetic) home_->browseActivate(itemIdx);
+            if (expandable || synthetic) { home_->browseActivate(itemIdx); syncThemedLevels(); } // drilled -> a browse level
             else if (r)
             {
                 r->setProperty("actionItem", itemIdx);
@@ -2215,19 +2270,19 @@ void MainWindow::showThemedXmb()
             }
         }
     };
-    auto onBack = [this, showCatalogs] {
+    // The themed XMB back is now the NavGraph's level stack (kept in lockstep by syncThemedLevels): a deeper
+    // browse drill is a "browse" level (onPop = home_->browseBack()); being inside a MULTI-catalog bucket is a
+    // "catalog" level (onPop = themedCatalogPop_ below, re-showing the catalog list). When those are all
+    // unwound, nav.back()'s rootBack lands HERE and brings up the app pause menu. A single-catalog bucket whose
+    // contents ARE the root has no "catalog" level, so it too bottoms out straight to the pause menu.
+    auto onBack = [this] { showEscMenu(); };
+    // Pop of the "catalog" level: back out of the opened catalog, re-selecting it in the bucket's list (reads
+    // the live category cursor, exactly as the old closure branch did).
+    themedCatalogPop_ = [this, showCatalogs] {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int cat = r ? r->property("catIndex").toInt() : 0;
-        if (themedXmbInCatalog_)
-        {
-            if (home_->browseBack()) return;          // popped a deeper level; browseItemsChanged refreshes the column
-            if (!themedXmbAutoOpened_)                // multi-catalog bucket: back out, re-select the catalog we opened
-            { showCatalogs(cat, themedXmbCatalogIndex_); return; }
-            // single-catalog bucket: its contents ARE the root -> fall through to the app menu
-        }
-        showEscMenu(); // at the top of the themed home: bring up the app pause menu (Resume / Exit)
+        showCatalogs(cat, themedXmbCatalogIndex_);
     };
-    themedOnBack_ = onBack;
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -2254,6 +2309,7 @@ void MainWindow::showThemedXmb()
         themedHomeIndex_ = r->property("catIndex").toInt();
         themedXmbCatalogIndex_ = 0;                  // a different bucket starts at the top of its catalog list
         showCatalogs(themedHomeIndex_, 0); // switching bucket resets the column to its catalog list
+        syncThemedLevels(); // bucket switch clears the old catalog/browse levels (or adds the new auto-opened one)
     };
     // The column selection moved: refresh the live metadata panel for the new row (only while in a catalog).
     auto onSelect = [this](int idx) { if (themedXmbInCatalog_) refreshThemedMeta(idx); };
@@ -2300,6 +2356,7 @@ void MainWindow::showThemedXmb()
     nudgeThemedHome(); // repaint the rebuilt themed home
 
     showCatalogs(startCat, themedXmbCatalogIndex_); // populate the starting bucket's catalog list (restore on rebuild)
+    syncThemedLevels(); // establish the initial level stack (an auto-opened single catalog restores its drill depth)
 
     if (!themeWatcher_)
     {
@@ -2326,9 +2383,10 @@ void MainWindow::showThemedBrowse()
     if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
 
     QVariantMap system; system.insert(QStringLiteral("name"), home_->browseTitle());
-    auto onActivated = [this](int idx) { home_->browseActivate(idx); }; // opens media, or drills (-> refresh)
-    auto onBack = [this] { if (!home_->browseBack()) showThemedHome(); }; // up a level, or back to the system view
-    themedOnBack_ = onBack;
+    auto onActivated = [this](int idx) { home_->browseActivate(idx); syncThemedLevels(); }; // opens media / drills (-> a browse level)
+    // rootBack for the browse view: every deeper drill is a "browse" level (onPop = home_->browseBack()); when
+    // they are all unwound nav.back()'s rootBack lands here and returns to the themed (system) home.
+    auto onBack = [this] { showThemedHome(); };
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
@@ -2353,6 +2411,7 @@ void MainWindow::showThemedBrowse()
     stack_->setCurrentWidget(w);
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
+    syncThemedLevels(); // seed this view's browse-drill levels from HomeView's current stack depth
 }
 
 // The home theme picker, as a full-screen panel page in the main window (like the other settings screens).
@@ -2448,6 +2507,7 @@ void MainWindow::openAppearance()
 #else
 void MainWindow::showThemedHome() {}
 void MainWindow::openAppearance() {}
+void MainWindow::syncThemedLevels() {}
 #endif
 
 void MainWindow::enterSplitScreen()

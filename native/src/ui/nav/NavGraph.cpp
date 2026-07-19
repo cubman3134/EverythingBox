@@ -307,10 +307,28 @@ void NavGraph::popLevel()
     emit levelsChanged(m_stack.size());
 }
 
+void NavGraph::popLevelSilent()
+{
+    if (m_popping) return;                 // symmetry with pop/push: no mirror churn from inside an onPop
+    if (m_stack.isEmpty()) return;
+    m_stack.pop_back();                    // drop it WITHOUT running onPop (navigation already moved)
+    emit levelsChanged(m_stack.size());
+}
+
 int NavGraph::levelDepth() const { return m_stack.size(); }
+
+int NavGraph::countLevels(const QString& name) const
+{
+    int n = 0;
+    for (const Level& l : m_stack) if (l.name == name) ++n;
+    return n;
+}
+
+bool NavGraph::isPopping() const { return m_popping; }
 
 bool NavGraph::back()
 {
+    emit backInvoked();                    // fires for BOTH a level pop and a rootBack (the host's back sound)
     if (!m_stack.isEmpty()) popLevel();
     else emit rootBack();
     return true;

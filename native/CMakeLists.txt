@@ -275,6 +275,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Runs under the offscreen QPA in CI so every push proves the "selection can never be lost" invariants.
     add_executable(probe_nav tools/probe_nav.cpp
         src/ui/nav/Nav.cpp src/ui/nav/Nav.h
+        src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
         src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
         src/ui/nav/Osk.cpp src/ui/nav/Osk.h)
     target_include_directories(probe_nav PRIVATE src src/ui)

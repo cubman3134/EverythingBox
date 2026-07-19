@@ -63,6 +63,7 @@ public:
     QString browseTitle() const;             // the current level's title
     void browseActivate(int index);          // open/drill the item at this (filtered) index
     bool browseBack();                       // go up a level; false if already at the catalog root
+    int  browseDepth() const { return stack_.size(); } // breadcrumb depth (1 = catalog root, >1 = drilled in)
     void goBack();                           // classic-home Back: pop a drill level, or emit backRequested at root
     bool browseHasMore() const;              // the current level has another page to pull
     void browseLoadMore();                   // pull the next page (no-op if none / already loading)

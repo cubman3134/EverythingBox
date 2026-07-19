@@ -186,11 +186,21 @@ private:
     bool escMenuVisible() const;
     // The one Back rule, shared by Escape, Backspace and the controller's Back: close the topmost overlay /
     // pause menu, else go to the previous screen for whatever page is showing, and at the home root open the
-    // app pause menu. Lives in the base window so every screen behaves identically. themedOnBack_ carries the
-    // themed (QML) home's own multi-level back (drill up, then the menu), set when that home is built.
+    // app pause menu. Lives in the base window so every screen behaves identically. On a themed (QML) screen it
+    // simply drives that screen's NavGraph back stack (nav.back()) — the graph's levels (catalog / browse
+    // drills) and its rootBack (pause menu / themed home) ARE the themed multi-level back; there is no separate
+    // themed-back closure any more.
     void goBack();
-    std::function<void()> themedOnBack_;
     QPointer<class NavOverlay> escMenuOverlay_; // alive while the pause menu is open
+    // The themed screen currently on the stack has its own NavGraph selection model + back stack; this returns
+    // it (null on classic screens). Overlays opened over a themed screen mirror themselves as levels on it.
+    class NavGraph* currentThemedGraph() const;
+    // Reconcile the current themed screen's NavGraph level stack with the app's real navigation state (the
+    // XMB catalog level + the HomeView browse-drill depth), so nav.back() pops exactly one real level at a time
+    // and bottoms out (rootBack) at the screen root. Idempotent; a no-op off a themed screen or while an
+    // overlay owns the stack. Driven by browseItemsChanged and the themed state-entry sites.
+    void syncThemedLevels();
+    std::function<void()> themedCatalogPop_; // XMB: pop the "catalog" level -> re-show the catalog list (set in showThemedXmb)
 
     // The controller-navigation kit (src/ui/nav): overlay routing, the panel's selection ring, and the
     // per-screen Back action. updateNavForPage() re-registers both whenever the stack page changes, so

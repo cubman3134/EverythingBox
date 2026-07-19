@@ -92,7 +92,13 @@ public:
     // (host opens the exit menu). Levels: screens, drills, overlays (esc menu, NavMenu, OSK).
     void pushLevel(const QString& name, std::function<void()> onPop);
     void popLevel();                          // runs onPop
+    // Drop the topmost level WITHOUT running its onPop — for the host to keep the graph's level mirror in
+    // lockstep with navigation that has ALREADY moved out-of-band (a search/category switch that reset the
+    // underlying stack). Guarded by the same re-entrancy latch as pop/push (a no-op mid-onPop).
+    void popLevelSilent();
     int  levelDepth() const;
+    int  countLevels(const QString& name) const;   // how many live levels carry this name (mirror bookkeeping)
+    bool isPopping() const;                          // true while an onPop runs (mirror reconcile must stand off)
     Q_INVOKABLE bool back();                   // pops one level, or emits rootBack(); always true
 
     // Invariant 2: the zone graph — the UNION of geometric neighbors and declared edges (undirected) —
@@ -103,6 +109,7 @@ signals:
     void selectionChanged(const QString& zone, int index);
     void activated(const QString& zone, int index);
     void rootBack();
+    void backInvoked();               // every back() gesture (pop OR rootBack) — the host plays the back sound here
     void levelsChanged(int depth);
 
 private:

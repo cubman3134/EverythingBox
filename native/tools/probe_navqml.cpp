@@ -412,6 +412,105 @@ int main(int argc, char** argv)
               "the chooser's declared Esc edge lands back on the remembered item cursor");
     }
 
+    // ---------------------------------------------------------------- 10. themed screen back router (Task 3)
+    {
+        // Scripted mimic of the real themed screens: an XMB root drills into a catalog, then browse ×3, then
+        // opens a detail page — each ENTRY pushing a level whose onPop is exactly what the host does on Back.
+        // Back×N must then unwind them in order and, at the root, emit rootBack (the host's pause menu).
+        NavGraph g;
+        g.registerZone(QStringLiteral("items"), 8, 0, 0, Qt::Vertical);
+        std::vector<QString> popped;   // records the SEMANTIC action each onPop stands for, in fire order
+        int rootBacks = 0, backInvokes = 0;
+        QObject::connect(&g, &NavGraph::rootBack, [&] { ++rootBacks; });
+        QObject::connect(&g, &NavGraph::backInvoked, [&] { ++backInvokes; });
+
+        g.pushLevel(QStringLiteral("catalog"), [&] { popped.push_back(QStringLiteral("catalog")); }); // enter a multi-catalog bucket
+        g.pushLevel(QStringLiteral("browse"),  [&] { popped.push_back(QStringLiteral("browse1")); });  // drill 1
+        g.pushLevel(QStringLiteral("browse"),  [&] { popped.push_back(QStringLiteral("browse2")); });  // drill 2
+        g.pushLevel(QStringLiteral("browse"),  [&] { popped.push_back(QStringLiteral("browse3")); });  // drill 3
+        g.pushLevel(QStringLiteral("detail"),  [&] { popped.push_back(QStringLiteral("detail")); });   // Info -> detail page
+        CHECK(g.levelDepth() == 5, "five themed levels pushed (catalog + browse x3 + detail)");
+        CHECK(g.countLevels(QStringLiteral("browse")) == 3, "countLevels tallies the three browse levels");
+        CHECK(g.countLevels(QStringLiteral("catalog")) == 1, "countLevels tallies the one catalog level");
+
+        g.back(); // detail
+        g.back(); // browse3
+        g.back(); // browse2
+        g.back(); // browse1
+        g.back(); // catalog
+        std::vector<QString> expect = { QStringLiteral("detail"), QStringLiteral("browse3"),
+                                        QStringLiteral("browse2"), QStringLiteral("browse1"),
+                                        QStringLiteral("catalog") };
+        CHECK(popped == expect, "Back unwinds detail -> browse3 -> browse2 -> browse1 -> catalog, in order");
+        CHECK(g.levelDepth() == 0, "the themed level stack is empty after five Backs");
+        CHECK(rootBacks == 0, "no rootBack while levels remained");
+        CHECK(backInvokes == 5, "backInvoked fired once per Back (the host's back sound hook)");
+
+        g.back(); // at the root now -> the pause menu / themed home
+        CHECK(rootBacks == 1, "the sixth Back at the empty stack emits rootBack exactly once");
+        CHECK(backInvokes == 6, "backInvoked also fires on the rootBack gesture");
+    }
+
+    // ---------------------------------------------------------------- 11. overlay pushes a level; Back closes it first
+    {
+        // An overlay (esc menu / OSK) opened over a themed screen mirrors itself as a level: Back closes the
+        // overlay BEFORE it unwinds the screen's own drills. Here the overlay is the topmost level, so the
+        // first Back runs its onPop (dismiss), leaving the browse level beneath untouched.
+        NavGraph g;
+        g.registerZone(QStringLiteral("items"), 4, 0, 0);
+        bool overlayDismissed = false, browseBacked = false;
+        g.pushLevel(QStringLiteral("browse"),  [&] { browseBacked = true; });
+        g.pushLevel(QStringLiteral("overlay"), [&] { overlayDismissed = true; });
+        CHECK(g.levelDepth() == 2, "browse + overlay on the stack");
+        g.back();
+        CHECK(overlayDismissed && !browseBacked, "Back closes the topmost overlay first, not the drill beneath it");
+        CHECK(g.levelDepth() == 1 && g.countLevels(QStringLiteral("browse")) == 1, "the browse level survives the overlay close");
+    }
+
+    // ---------------------------------------------------------------- 12. out-of-band clear (mimic selectType)
+    {
+        // A search / category switch resets the underlying browse stack out of band. The host mirrors that by
+        // dropping the graph's themed levels WITHOUT running their onPop (popLevelSilent) — so a subsequent
+        // Back does NOT fire stale drill-up actions; it goes straight to rootBack.
+        NavGraph g;
+        g.registerZone(QStringLiteral("items"), 6, 0, 0);
+        int stalePops = 0, rootBacks = 0;
+        QObject::connect(&g, &NavGraph::rootBack, [&] { ++rootBacks; });
+        g.pushLevel(QStringLiteral("catalog"), [&] { ++stalePops; });
+        g.pushLevel(QStringLiteral("browse"),  [&] { ++stalePops; });
+        g.pushLevel(QStringLiteral("browse"),  [&] { ++stalePops; });
+        CHECK(g.levelDepth() == 3, "catalog + two browse levels before the out-of-band reset");
+
+        // syncThemedLevels' reconcile to an empty themed stack: silently drop browse (on top) then catalog.
+        while (g.countLevels(QStringLiteral("browse")) > 0) g.popLevelSilent();
+        g.popLevelSilent(); // the catalog level
+        CHECK(g.levelDepth() == 0, "popLevelSilent cleared every themed level");
+        CHECK(stalePops == 0, "no onPop ran during the silent out-of-band clear");
+
+        g.back();
+        CHECK(rootBacks == 1 && stalePops == 0, "Back after the reset goes straight to rootBack — no stale drill pops");
+    }
+
+    // ---------------------------------------------------------------- 13. popLevelSilent / isPopping guards
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("z"), 3, 0, 0);
+        bool sawPoppingTrue = false;
+        g.pushLevel(QStringLiteral("outer"), [&] {
+            // Inside an onPop the graph is "popping": a mirror reconcile must stand off (no-op).
+            sawPoppingTrue = g.isPopping();
+            g.popLevelSilent();                 // must be ignored mid-onPop (re-entrancy guard)
+        });
+        g.pushLevel(QStringLiteral("keep"), []{});
+        CHECK(g.levelDepth() == 2, "two levels pushed");
+        g.popLevel();                           // pops "keep" (top, no side effects)
+        CHECK(g.levelDepth() == 1, "top level popped");
+        g.popLevel();                           // pops "outer" -> its onPop runs, sees isPopping(), tries a re-entrant silent pop
+        CHECK(sawPoppingTrue, "isPopping() reports true inside an onPop");
+        CHECK(g.levelDepth() == 0, "the re-entrant popLevelSilent inside onPop was ignored (guarded)");
+        CHECK(!g.isPopping(), "isPopping() is false once the pop completes");
+    }
+
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("NAVQML-OK\n");
     return 0;

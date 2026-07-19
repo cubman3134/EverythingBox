@@ -1,5 +1,6 @@
 #include "NavOverlay.h"
 #include "Nav.h"
+#include "NavGraph.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -71,6 +72,18 @@ bool NavOverlay::routeTopmost(int key)
     return true; // an open overlay consumes every nav key — nothing may leak to the page behind
 }
 
+void NavOverlay::setNavGraph(NavGraph* graph)
+{
+    if (dismissed_ || levelPushed_) return;
+    graph_ = graph;
+    if (!graph_) return;
+    // Mirror this overlay as a level. onPop dismisses us — but dismiss() itself pops the level (below), and
+    // the dismissed_ latch makes that re-entrant onPop a no-op, so a Back that unwinds us through the graph
+    // and a Back the overlay handles itself both close us exactly once (no double-dismiss).
+    graph_->pushLevel(QStringLiteral("overlay"), [this] { dismiss(-1); });
+    levelPushed_ = true;
+}
+
 void NavOverlay::dismiss(int result)
 {
     if (dismissed_) return;
@@ -86,14 +99,20 @@ void NavOverlay::dismiss(int result)
     {
         prevFocus_->setFocus(Qt::OtherFocusReason); // restore the selection from before we opened
         // A themed (QML) page: widget focus alone doesn't revive a QQuickWidget scene's active-focus item
-        // after our keyboard grab, leaving every QML Keys handler (arrow nav) deaf until something kicks
-        // it. ThemeEngine::buildView exposes the scene root through this property; invoke by name so the
-        // nav kit stays QtQuick-free (QQuickItem::forceActiveFocus is Q_INVOKABLE).
+        // after our keyboard grab, leaving every QML Keys handler (arrow nav) deaf until something kicks it.
+        // This is the ONE focus-revival site for every overlay (esc menu / OSK / menus, themed or classic) —
+        // topmost() above means we only reach it when no overlay remains beneath us, so it fires exactly once
+        // per unwound stack. (The old duplicate esc-menu closed handler is gone.) ThemeEngine::buildView
+        // exposes the scene root through this property; invoke by name so the nav kit stays QtQuick-free.
         if (QObject* sceneRoot = prevFocus_->property("mmvQuickRoot").value<QObject*>())
             QMetaObject::invokeMethod(sceneRoot, "forceActiveFocus");
     }
     else if (NavContext::instance())
         NavContext::instance()->ensureFocus();      // its widget died: land somewhere valid
+    // Pop our mirror level so the graph's depth tracks reality (the overlay is no longer "on top"), keeping
+    // syncThemedLevels' bookkeeping clean. Safe under re-entrancy — popLevel no-ops mid-onPop, and the onPop
+    // (dismiss) short-circuits on the dismissed_ latch, so no double-dismiss.
+    if (levelPushed_ && graph_) { levelPushed_ = false; graph_->popLevel(); }
     emit closed(result_);
     deleteLater();
 }

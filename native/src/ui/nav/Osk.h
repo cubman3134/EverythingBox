@@ -19,9 +19,12 @@ public:
         QWidget* window = nullptr);
 
     // Blocking prompt: returns the entered text, or a null QString() when cancelled (an accepted empty
-    // string returns "" which is non-null — same contract as promptThemedSearch relies on).
+    // string returns "" which is non-null — same contract as promptThemedSearch relies on). When `graph` is
+    // given (a themed screen's back stack), the OSK mirrors itself as a level on it: Back inside the OSK
+    // closes the OSK only, and its close revives the themed scene's focus through the graph's ONE handler.
     static QString getText(const QString& title, const QString& initial = QString(),
-                           QLineEdit::EchoMode echo = QLineEdit::Normal, QWidget* window = nullptr);
+                           QLineEdit::EchoMode echo = QLineEdit::Normal, QWidget* window = nullptr,
+                           class NavGraph* graph = nullptr);
 
     QString text() const { return preview_->text(); }
 

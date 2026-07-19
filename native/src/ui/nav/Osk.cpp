@@ -163,12 +163,14 @@ void Osk::keyPressEvent(QKeyEvent* e)
     NavOverlay::keyPressEvent(e); // arrows etc.
 }
 
-QString Osk::getText(const QString& title, const QString& initial, QLineEdit::EchoMode echo, QWidget* window)
+QString Osk::getText(const QString& title, const QString& initial, QLineEdit::EchoMode echo, QWidget* window,
+                     NavGraph* graph)
 {
     QString result;   // null = cancelled
     QEventLoop loop;
     auto* osk = new Osk(title, initial, echo,
                         [&](const QString& t, bool ok) { if (ok) result = t; }, window);
+    osk->setNavGraph(graph); // mirror as a level on a themed screen's back stack (null = classic behaviour)
     QObject::connect(osk, &NavOverlay::closed, &loop, [&loop](int) { loop.quit(); });
     loop.exec();
     return result;

@@ -14,6 +14,7 @@
 #include <QWidget>
 #include <functional>
 
+class NavGraph;
 class NavRing;
 class QLabel;
 class QLineEdit;
@@ -44,6 +45,14 @@ public:
     // human-readable offenders; empty = all good.
     QStringList clippedTexts() const;
 
+    // Mirror this overlay as a level on a themed screen's NavGraph: show() (the ctor) has already run, so the
+    // level is pushed here and its onPop dismisses this overlay (a no-op if it is already dismissing — the
+    // guard makes the graph pop and the overlay's own Back compose without a double-dismiss). dismiss() pops
+    // the level so the graph's depth tracks reality (keeping syncThemedLevels' bookkeeping clean). Focus
+    // revival on close is handled uniformly by dismiss() itself (the mmvQuickRoot kick), wired or not; passing
+    // nullptr (or never calling this) simply skips the level mirroring. Call once, right after construction.
+    void setNavGraph(NavGraph* graph);
+
     // Close, restoring input to whatever was focused before the overlay opened. `result` reaches the
     // closed() signal (and the sync helpers): -1 = backed out.
     void dismiss(int result = -1);
@@ -72,6 +81,8 @@ private:
     QFrame* panel_ = nullptr;
     NavRing* ring_ = nullptr;
     QPointer<QWidget> prevFocus_;   // restored on dismiss
+    QPointer<NavGraph> graph_;      // themed screen's back stack this overlay mirrors as a level (null = classic)
+    bool levelPushed_ = false;      // we pushed our mirror level onto graph_ (pop exactly once on dismiss)
     int result_ = -1;
     bool dismissed_ = false;
     static QVector<QPointer<NavOverlay>> s_stack;

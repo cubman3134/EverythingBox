@@ -115,7 +115,10 @@ void ThemeBridge::onNavActivated(const QString& zone, int index)
         activated(); // items/categories -> onActivated(currentIndex), exactly as the old activated(int) signal
 }
 
-void ThemeBridge::onNavRootBack() { back(); } // nav.back() with an empty level stack -> the themed back() path
+// nav.back() bottomed out (empty level stack): run the host's ROOT back action (the pause menu on the XMB /
+// grid home, or the themed home from a browse view). The back SOUND is played once by the backInvoked hook
+// (wired in buildView) for EVERY back gesture — pop or root — so it is deliberately not replayed here.
+void ThemeBridge::onNavRootBack() { if (onBack) onBack(); }
 
 // The inline action chooser opened/closed. The `actions` zone is registered up-front (hidden); opening the
 // chooser shows it (count 4) and parks the selection there, closing hides it and restores the item cursor —
@@ -299,6 +302,9 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(graph, &NavGraph::selectionChanged, bridge, &ThemeBridge::onNavSelection);
         QObject::connect(graph, &NavGraph::activated,        bridge, &ThemeBridge::onNavActivated);
         QObject::connect(graph, &NavGraph::rootBack,         bridge, &ThemeBridge::onNavRootBack);
+        // The ONE back sound: every back gesture (a level pop — drill-up / catalog-list / overlay-close — OR a
+        // rootBack) emits backInvoked, so the sound plays exactly once per Back regardless of what it unwinds.
+        QObject::connect(graph, &NavGraph::backInvoked, bridge, [bridge] { playEffect(bridge->sndBack); });
         // The inline action chooser is a transient zone; (de)register it whenever actionsOpen flips (from the
         // host opening a leaf, the host acting on a choice, or the QML dismissing it with Esc).
         QObject::connect(root, SIGNAL(actionsOpenChanged()), bridge, SLOT(syncActionsZone()));
