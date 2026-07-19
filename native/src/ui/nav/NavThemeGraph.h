@@ -16,10 +16,21 @@
 // STRUCTURE (ids, row/col, axis, wraps), the default zone, and the declared edge set.
 #include "NavGraph.h"
 
+// The themed DETAIL view's live shape, fed to the shared builder so the ONE definition also owns the detail
+// surface's zones/edges. `active` gates whether the detail zones carry live counts (they are ALWAYS
+// registered — like the inline `actions` overlay — so the QML can count them up/down via setZoneCount when
+// the detail view opens/closes; a hidden zone's edges are inert and it is never a move target). `actionCount`
+// is the number of buttons in the action row (Play/Download/Favorite/Add-to-playlist, per-item filtered);
+// `childCount` is the current container's children (a series/season in-page quick-open list) — 0 for a flat
+// movie/game/book, so the `detailChildren` zone stays inert there.
+struct DetailState { bool active = false; int actionCount = 0; int childCount = 0; };
+
 // Register the themed surface's zones + declared edges on a fresh NavGraph. `itemCount` is the item column's
 // starting count (buildView: items.size(); the probe: a fixed test count). categories/buttons/actions start
 // hidden (count 0) — their live counts arrive later via setZoneCount, keeping their edges inert until then.
-inline void buildThemedNavGraph(NavGraph& g, int itemCount)
+// `detail` seeds the detail-view zones' counts (the app builds with a default {inactive} and the QML feeds
+// live counts when the detail view opens; the probe supplies fixed counts to shape-test the detail surface).
+inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail = {})
 {
     // Zone layout: `items` (the XMB column / the grid, Vertical) and `categories` (the XMB horizontal axis)
     // are CO-LOCATED at (0,0) — the two always-visible cursors of ONE surface, which pure spatial crossing
@@ -45,4 +56,22 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount)
     // The chooser's dismissal transition (Esc -> back onto the leaf), executed by syncActionsZone; declared
     // so the connectivity walk sees the overlay zone linked to the surface it covers.
     g.addEdge(QStringLiteral("actions"), Qt::Key_Escape, QStringLiteral("items"));
+
+    // The DETAIL view's zones: an action row (Horizontal, wraps) over a scrollable body, plus an optional
+    // in-page children list (a series/season quick-open). ALWAYS registered so the QML can count them up/down
+    // (setZoneCount) when the detail view opens/closes — count-gated exactly like `actions`: 0 when the detail
+    // view is closed makes their edges inert and keeps them off the home surface's arrow paths (a hidden zone
+    // is never a move target). They sit in their own grid column below the home zones so the union graph stays
+    // connected (buttons -> detailActions geometrically) without ever bleeding into home navigation. The
+    // declared edges wire the vertical stack: detailActions <-> detailBody <-> detailChildren.
+    const int aCount = detail.active ? detail.actionCount : 0;
+    const int bCount = detail.active ? 1 : 0;                        // the scroll body is a single focus target
+    const int cCount = detail.active ? detail.childCount : 0;
+    g.registerZone(QStringLiteral("detailActions"), aCount, 10, 0, Qt::Horizontal, /*wraps=*/true);
+    g.registerZone(QStringLiteral("detailBody"), bCount, 11, 0, Qt::Vertical);
+    g.registerZone(QStringLiteral("detailChildren"), cCount, 12, 0, Qt::Vertical);
+    g.addEdge(QStringLiteral("detailActions"), Qt::Key_Down, QStringLiteral("detailBody"));
+    g.addEdge(QStringLiteral("detailBody"), Qt::Key_Up, QStringLiteral("detailActions"));
+    g.addEdge(QStringLiteral("detailBody"), Qt::Key_Down, QStringLiteral("detailChildren"));
+    g.addEdge(QStringLiteral("detailChildren"), Qt::Key_Up, QStringLiteral("detailBody"));
 }

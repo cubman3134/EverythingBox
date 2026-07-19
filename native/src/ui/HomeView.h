@@ -79,6 +79,13 @@ public:
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;
     void addBrowseItemToPlaylist(int browseIndex); // pick/create a playlist + add the browse-item (themed + key)
+    // The themed DETAIL view's data for the browse-item at `browseIndex`: the rich MediaDetail (title/subtitle/
+    // overview/facts + art via MediaArt::writeInto) resolved from the same local sources requestThemedMeta uses
+    // (session cache / gamelist.xml / MetaCache), plus a joined `factsText`, an `actions` verb list (play/
+    // favorite/download/playlist, filtered per-item), a `favorite` flag and a `readable` flag. Empty map for a
+    // divider/synthetic row (not a media item). This is what the themed detail view binds through selected.*.
+    QVariantMap themedDetailData(int browseIndex);
+    bool isThemedInfoLeaf(int browseIndex) const;  // a non-expandable info-page leaf (movie/book/…): opens detail
 
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.

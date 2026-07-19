@@ -84,6 +84,8 @@ void ThemeBridge::selection() { if (onSelect && root) onSelect(root->property("c
 void ThemeBridge::action(int which) { if (onAction) onAction(which); }
 void ThemeBridge::playlistAdd() { if (onPlaylistAdd) onPlaylistAdd(); }
 void ThemeBridge::button(const QString& name) { playEffect(sndSelect); if (onButton) onButton(name); }
+void ThemeBridge::detailsOpen() { if (onDetails) onDetails(); }
+void ThemeBridge::detailAction(const QString& verb) { playEffect(sndSelect); if (onDetailAction) onDetailAction(verb); }
 
 // ---- NavGraph bridge --------------------------------------------------------------------------------------
 // The selection moved: write the render prop for the SELECTED zone (and derive focusZone). setProperty to an
@@ -103,6 +105,14 @@ void ThemeBridge::onNavSelection(const QString& zone, int index)
         { root->setProperty("buttonIndex", index);  root->setProperty("focusZone", 1); }
     else if (zone == QStringLiteral("actions"))
         { root->setProperty("actionIndex", index); } // the chooser is an overlay: focusZone is untouched
+    // Detail-view zones: mirror the cursor into the props the detail elements read (the action row draws its
+    // focus ring from detailActionIndex + detailZone), and record which detail zone holds the cursor.
+    else if (zone == QStringLiteral("detailActions"))
+        { root->setProperty("detailActionIndex", index); root->setProperty("detailZone", QStringLiteral("actions")); }
+    else if (zone == QStringLiteral("detailBody"))
+        { root->setProperty("detailZone", QStringLiteral("body")); }
+    else if (zone == QStringLiteral("detailChildren"))
+        { root->setProperty("detailChildIndex", index); root->setProperty("detailZone", QStringLiteral("children")); }
 }
 
 // Enter/click on the selection: route to the same fan-out the QML signals used to drive directly.
@@ -138,6 +148,29 @@ void ThemeBridge::syncActionsZone()
     {
         graph->select(QStringLiteral("items"), root->property("currentIndex").toInt());
         graph->setZoneCount(QStringLiteral("actions"), 0);
+    }
+}
+
+// The detail view opened/closed (currentView flipped to/from "detail"). The detail zones are registered
+// up-front (hidden); opening counts them up from the QML-computed detailActionCount / detailChildCount and
+// parks the cursor in the action row, closing hides them (their edges go inert) and restores the item cursor.
+// Mirrors syncActionsZone for the transient inline chooser.
+void ThemeBridge::syncDetailZone()
+{
+    if (!graph || !root) return;
+    if (root->property("currentView").toString() == QStringLiteral("detail"))
+    {
+        graph->setZoneCount(QStringLiteral("detailActions"), root->property("detailActionCount").toInt());
+        graph->setZoneCount(QStringLiteral("detailBody"), 1);
+        graph->setZoneCount(QStringLiteral("detailChildren"), root->property("detailChildCount").toInt());
+        graph->select(QStringLiteral("detailActions"), 0); // land the cursor on the first action
+    }
+    else
+    {
+        graph->setZoneCount(QStringLiteral("detailActions"), 0);
+        graph->setZoneCount(QStringLiteral("detailBody"), 0);
+        graph->setZoneCount(QStringLiteral("detailChildren"), 0);
+        graph->select(QStringLiteral("items"), root->property("currentIndex").toInt());
     }
 }
 
@@ -186,7 +219,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
                    std::function<void()> onSearch, std::function<void()> onNearEnd,
                    std::function<void()> onCategory, std::function<void(int)> onSelect,
                    std::function<void(int)> onAction, std::function<void()> onPlaylistAdd,
-                   std::function<void(QString)> onButton)
+                   std::function<void(QString)> onButton, std::function<void()> onDetails,
+                   std::function<void(QString)> onDetailAction)
 {
     // The whole theme on disk (all views). An empty map renders just a background.
     QVariantMap theme;
@@ -254,6 +288,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         bridge->onAction = std::move(onAction);
         bridge->onPlaylistAdd = std::move(onPlaylistAdd);
         bridge->onButton = std::move(onButton);
+        bridge->onDetails = std::move(onDetails);
+        bridge->onDetailAction = std::move(onDetailAction);
 
         // Optional per-theme UI sounds: theme.json "sounds": { "navigate":"move.wav", "select":"ok.wav",
         // "back":"back.wav", "details":"info.wav", "theme":"swap.wav", "volume":0.6 } (paths relative to the
@@ -283,6 +319,8 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QObject::connect(root, SIGNAL(actionChosen(int)), bridge, SLOT(action(int)));
         QObject::connect(root, SIGNAL(addToPlaylistRequested()), bridge, SLOT(playlistAdd()));
         QObject::connect(root, SIGNAL(actionRequested(QString)), bridge, SLOT(button(QString)));
+        QObject::connect(root, SIGNAL(detailsRequested()), bridge, SLOT(detailsOpen()));
+        QObject::connect(root, SIGNAL(detailActionRequested(QString)), bridge, SLOT(detailAction(QString)));
 
         // The NavGraph selection model -> the render props + the activate/back fan-out. The QML routes all
         // key/mouse/wheel navigation through `nav`; these connections mirror the resulting selection into the
@@ -296,6 +334,9 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         // The inline action chooser is a transient zone; (de)register it whenever actionsOpen flips (from the
         // host opening a leaf, the host acting on a choice, or the QML dismissing it with Esc).
         QObject::connect(root, SIGNAL(actionsOpenChanged()), bridge, SLOT(syncActionsZone()));
+        // The detail view's zones follow currentView: opening (-> "detail") counts them up + parks the cursor
+        // in the action row, closing hides them + restores the item cursor.
+        QObject::connect(root, SIGNAL(currentViewChanged()), bridge, SLOT(syncDetailZone()));
     }
 
     qv->setFocusPolicy(Qt::StrongFocus);

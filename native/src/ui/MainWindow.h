@@ -287,8 +287,13 @@ private:
     QTimer* themedMetaTimer_ = nullptr; // XMB: debounce the live-metadata addon fetch to the settled row
     int themedMetaWant_ = -1;           // XMB: the browse index that pending fetch is for
     void refreshThemedMeta(int browseIndex); // XMB: set the panel's skeleton for a row + queue the addon enrich
-    bool themedReturnAfterDetail_ = false; // showing the classic info page over a themed home; return on back
-    QWidget* themedDetailFrom_ = nullptr;  // the themed widget to return to after the info page
+    // The themed DETAIL view (on the Nav Contract, replacing the retired classic info page): open it for the
+    // current selection (browseIndex < 0 = the themed root's currentIndex), run one of its action-row verbs on
+    // the item it was opened for, and (grid browse) open it for an info-page leaf on Enter.
+    void openThemedDetail(int browseIndex);
+    bool openThemedDetailForInfoLeaf(int browseIndex); // true if it opened detail (a movie/book/… leaf), else drill
+    void runThemedDetailAction(const QString& verb);   // play/download/favorite/playlist on themedDetailIndex_
+    int themedDetailIndex_ = -1;             // the browse index the themed detail view is currently showing
     class QFileSystemWatcher* themeWatcher_ = nullptr; // hot-reload: rebuild the themed home on theme.json edits
 
     class SplitView* splitView_ = nullptr;   // two-pane split screen (its own engines per pane)

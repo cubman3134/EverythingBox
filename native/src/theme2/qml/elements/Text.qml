@@ -8,7 +8,10 @@ Text {
     property var host
     text: T.textOf(el, ctx)
     color: T.val(el, "color", "#FFFFFF")
-    font.family: T.val(el, "fontFamily", "")
+    // An empty fontFamily must fall back to the working application default, NOT to Qt's "" -> "MS Sans Serif"
+    // resolution: that legacy bitmap face fails DirectWrite (CreateFontFaceFromHDC) on many Windows systems, so
+    // the whole Text paints nothing. Item-rooted elements (HelpSystem/Carousel) never set family and render fine.
+    font.family: T.val(el, "fontFamily", Qt.application.font.family)
     font.pixelSize: Math.max(1, Number(T.val(el, "fontSize", 0.03)) * (host ? host.height : 720))
     font.bold: el.bold === true
     horizontalAlignment: T.val(el, "align", "left") === "center" ? Text.AlignHCenter

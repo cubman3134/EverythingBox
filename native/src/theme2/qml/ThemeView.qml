@@ -37,6 +37,21 @@ Item {
     signal actionChosen(int which) // XMB: chose an inline action (0 = Play, 1 = Favorite, 2 = Add to playlist, 3 = Download)
     signal addToPlaylistRequested() // XMB: "P" on the highlighted item -> host adds it to a playlist
     signal actionRequested(string name) // a `button` element was clicked -> host runs the named action
+    signal detailsRequested()          // "I" / Info: the host populates detailData, switches to the detail view + pushes its level
+    signal detailActionRequested(string verb) // the detail action row fired a verb ("play"/"download"/"favorite"/"playlist")
+
+    // --- themed DETAIL view state -----------------------------------------------------------------------
+    // The host populates detailData with the selected item's rich MediaDetail (title/subtitle/overview/facts/
+    // rating + art via MediaArt::writeInto) plus an `actions` verb list and `favorite` flag; the detail view's
+    // elements bind it through dataCtx.selected (below). detailActionIndex / detailChildIndex / detailZone are
+    // written by the nav bridge as the cursor moves within the detail zones; the action row draws its focus
+    // ring from them. detailActionCount / detailChildCount feed the nav zone counts (see syncDetailZone).
+    property var detailData: ({})
+    property int detailActionIndex: 0
+    property int detailChildIndex: 0
+    property string detailZone: "actions"   // which detail zone holds the cursor: "actions" / "body" / "children"
+    readonly property int detailActionCount: (detailData && detailData.actions) ? detailData.actions.length : 0
+    readonly property int detailChildCount: (detailData && detailData.children) ? detailData.children.length : 0
 
     // XMB (cross) state. categories = the horizontal axis; items = the active category's column; catIndex /
     // currentIndex are the two cursors. xmbMode is on when the active view contains an `xmb` element, which
@@ -267,6 +282,22 @@ Item {
             e.accepted = true
             return
         }
+        // The detail view owns the keys while it's open: the model's selection is parked in the detail zones
+        // (detailActions row / detailBody scroll / detailChildren list), wired by declared edges. Left/Right
+        // step the action row (it wraps); Up/Down cross between the row, the scroll body and the children list;
+        // Enter fires the focused action; Back leaves via the nav router — the pushed "detail" level's onPop
+        // restores the previous view + selection (no QML-local view swap anymore, the Back router owns it).
+        if (currentView === "detail") {
+            if (e.key === Qt.Key_Left)       { if (nav.move(Qt.Key_Left))  navigate() }
+            else if (e.key === Qt.Key_Right) { if (nav.move(Qt.Key_Right)) navigate() }
+            else if (e.key === Qt.Key_Up)    { nav.move(Qt.Key_Up);   navigate() }
+            else if (e.key === Qt.Key_Down)  { nav.move(Qt.Key_Down); navigate() }
+            else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
+                                             { detailActivate() }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) { nav.back() }
+            e.accepted = true
+            return
+        }
         // The bottom button bar has focus (the model's selection sits in the `buttons` zone): Left/Right step
         // it, Up leaves via the declared buttons->items edge (the grid cursor comes back from zone memory),
         // Enter fires the focused button, Esc leaves like Up (silently — no move sound on a cancel).
@@ -301,13 +332,13 @@ Item {
         else if (e.key === Qt.Key_Up)                           { navVertical(-1);   e.accepted = true }
         else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter || e.key === Qt.Key_Select || e.key === Qt.Key_Space)
                                                                 { if (!isHeader(currentIndex)) nav.activate(); e.accepted = true }
-        // Info opens the theme's detail view for the focused item; Esc backs out of it to wherever it came
-        // from (home or browse). Esc in home/browse asks the host to go back (it owns the home<->browse step).
+        // "I" / Info asks the HOST to open the detail view: it fetches the item's rich metadata into detailData,
+        // switches currentView to "detail", and pushes the "detail" nav level (so the Back router owns the exit).
+        // The QML no longer swaps the view itself — populating data first avoids a flash of an empty detail page.
         else if ((e.key === Qt.Key_I || e.key === Qt.Key_Info) && hasView("detail") && currentView !== "detail")
-                                                                { detailReturn = currentView; currentView = "detail"; details(); e.accepted = true }
+                                                                { details(); detailsRequested(); e.accepted = true }
         else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
-            if (currentView === "detail") currentView = detailReturn
-            else nav.back()   // empty level stack -> rootBack -> the host's themed back() (drill up / pause menu)
+            nav.back()   // empty level stack -> rootBack -> the host's themed back() (drill up / pause menu)
             e.accepted = true
         }
         else if (e.key === Qt.Key_T)                            { cycleTheme();     e.accepted = true }
@@ -318,13 +349,26 @@ Item {
                                                                 { searchRequested(); e.accepted = true }
     }
 
-    // The data context bindings resolve against. Recomputed when the selection changes.
+    // Enter in the detail view fires the focused action-row verb (detailActionIndex is bridge-written). The
+    // children list (detailChildren) is a future quick-open surface; it stays inert (count 0) until the host
+    // supplies detailData.children, so there is no child-activation path to route here yet.
+    function detailActivate() {
+        var v = (detailData && detailData.actions) ? detailData.actions : []
+        if (detailZone === "actions" && detailActionIndex >= 0 && detailActionIndex < v.length)
+            detailActionRequested(v[detailActionIndex])
+    }
+
+    // The data context bindings resolve against. Recomputed when the selection changes. In the detail view the
+    // `selected` slot is the host-populated detailData (the rich MediaDetail + art), so the detail elements
+    // (poster/title/overview/facts/action row) bind it exactly as the home/browse elements bind the live row.
     readonly property var dataCtx: ({
         "system": system,
         "items": items,
         "index": currentIndex,
         "count": items ? items.length : 0,
-        "selected": (items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({}),
+        "selected": (currentView === "detail")
+                    ? detailData
+                    : ((items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({})),
         "focusZone": focusZone // 1 = focus has left the grid for the bottom buttons (grid drops its selection)
     })
 
@@ -334,7 +378,7 @@ Item {
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
         "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying",
-        "gallery": "Gallery"
+        "gallery": "Gallery", "actionrow": "ActionRow"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
@@ -409,5 +453,7 @@ Item {
     // Re-run the fade when the active view changes (e.g. opening/closing the detail view).
     // A view switch (home<->browse<->detail) drops any bottom-button focus back to the content: re-select the
     // `items` zone through the model (the bridge writes focusZone=0) instead of poking the prop directly.
-    onCurrentViewChanged: { nav.select("items", currentIndex); fade.restart() }
+    // Leaving detail -> restore the grid/column cursor; entering detail -> the nav bridge's syncDetailZone owns
+    // the selection (it parks it in the detailActions row), so don't yank it back onto `items` here.
+    onCurrentViewChanged: { if (currentView !== "detail") nav.select("items", currentIndex); fade.restart() }
 }

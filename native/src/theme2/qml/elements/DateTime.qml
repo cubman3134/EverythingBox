@@ -13,7 +13,8 @@ Text {
     FontLoader { id: fl; source: (el && el.fontFile && host) ? host.resolve(el.fontFile) : "" }
     text: Qt.formatDateTime(now, T.val(el, "format", "hh:mm"))
     color: T.val(el, "color", "#FFFFFF")
-    font.family: (fl.status === FontLoader.Ready) ? fl.name : T.val(el, "fontFamily", "")
+    // Empty fontFamily -> the app default (NOT Qt's "" -> "MS Sans Serif", which fails DirectWrite and paints nothing).
+    font.family: (fl.status === FontLoader.Ready) ? fl.name : T.val(el, "fontFamily", Qt.application.font.family)
     font.pixelSize: Math.max(1, Number(T.val(el, "fontSize", 0.03)) * (host ? host.height : 720))
     font.bold: el.bold === true
     horizontalAlignment: T.val(el, "align", "left") === "center" ? Text.AlignHCenter

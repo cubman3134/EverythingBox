@@ -63,6 +63,10 @@ QString UiTestServer::handle(const QString& line)
             { QStringLiteral("left"), Qt::Key_Left },   { QStringLiteral("right"), Qt::Key_Right },
             { QStringLiteral("enter"), Qt::Key_Return },{ QStringLiteral("back"), Qt::Key_Backspace },
             { QStringLiteral("escape"), Qt::Key_Escape },
+            // Themed-surface shortcuts: "I"/Info opens the detail view, "P" adds to a playlist, "/" searches.
+            { QStringLiteral("info"), Qt::Key_I },      { QStringLiteral("i"), Qt::Key_I },
+            { QStringLiteral("playlist"), Qt::Key_P },  { QStringLiteral("p"), Qt::Key_P },
+            { QStringLiteral("search"), Qt::Key_Slash },{ QStringLiteral("slash"), Qt::Key_Slash },
         };
         int k = keys.value(arg.toLower(), 0);
         if (!k) k = arg.toInt();                       // raw Qt::Key value for anything exotic

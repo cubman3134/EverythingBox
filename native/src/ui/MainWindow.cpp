@@ -439,29 +439,28 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                 refreshThemedMeta(r->property("currentIndex").toInt());
         });
 
-        // Opening a movie/book/… from the themed home shows the classic info page (it renders on HomeView, which
-        // the themed home hides). Surface it; the themed column is left untouched (this switch makes its guard
-        // above false), so backing out returns to exactly where we were.
-        connect(home_, &HomeView::infoPageRequested, this, [this] {
-            QWidget* cur = stack_->currentWidget();
-            if (!themedHomeEnabled() || (cur != themedHome_ && cur != themedBrowse_)) return;
-            themedDetailFrom_ = cur;
-            themedReturnAfterDetail_ = true;
-            stack_->setCurrentWidget(home_);
-            home_->focusContent();
-        });
-        // When the user backs out of that info page (HomeView leaves the detail level), return to the themed
-        // home/browse we came from - still showing the same column at the same item.
-        connect(home_, &HomeView::browseItemsChanged, this, [this](bool) {
-            if (!themedReturnAfterDetail_ || stack_->currentWidget() != home_ || home_->atDetailLevel()) return;
-            themedReturnAfterDetail_ = false;
-            QWidget* back = themedDetailFrom_ ? themedDetailFrom_ : themedHome_;
-            if (back) { stack_->setCurrentWidget(back); back->setFocus(Qt::OtherFocusReason); }
-        });
+        // (The classic info-page-over-themed-home swap was retired: opening info on a themed surface now stays
+        // on the Nav Contract via the themed DETAIL view — see openThemedDetail()/showThemedXmb/showThemedBrowse.
+        // HomeView's infoPageRequested is left for the CLASSIC (non-themed) home only; the themed path never
+        // handles it — a themed grid-browse info leaf routes to the detail view before browseActivate is called.)
 
         // Triple/XMB: the live metadata for a browse-item arrived (a skeleton, then synopsis + facts). Merge
         // it into the cross's metadata panel - but only if it's still the selected row of the open catalog.
         connect(home_, &HomeView::themedMetaReady, this, [this](int index, const QVariantMap& meta) {
+            // While the themed DETAIL view for this row is open, merge the (async) enrichment into detailData too
+            // so a synopsis/facts/art that lands after the page opened fills in live (any themed surface).
+            {
+                QWidget* cw = stack_->currentWidget();
+                if ((cw == themedHome_ || cw == themedBrowse_) && themedDetailIndex_ == index)
+                    if (QQuickItem* dr = ThemeEngine::rootItem(cw))
+                        if (dr->property("currentView").toString() == QStringLiteral("detail"))
+                        {
+                            QVariantMap d = dr->property("detailData").toMap();
+                            for (auto it = meta.constBegin(); it != meta.constEnd(); ++it)
+                                if (it.key() != QStringLiteral("index")) d.insert(it.key(), it.value());
+                            dr->setProperty("detailData", d);
+                        }
+            }
             if (!themedHomeIsXmb_ || !themedXmbInCatalog_ || stack_->currentWidget() != themedHome_) return;
             QQuickItem* r = ThemeEngine::rootItem(themedHome_);
             if (!r || r->property("currentIndex").toInt() != index) return; // moved on -> stale, ignore
@@ -2089,7 +2088,9 @@ void MainWindow::showThemedHome()
 
     QWidget* w = ThemeEngine::buildView(themeDir,
                                         items, system, this, onActivated, onBack, onCycle, onSearch,
-                                        {}, {}, {}, {}, {}, onButton);
+                                        {}, {}, {}, {}, {}, onButton,
+                                        [this] { openThemedDetail(-1); },
+                                        [this](const QString& v) { runThemedDetailAction(v); });
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
     if (QQuickItem* r = ThemeEngine::rootItem(w))
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
@@ -2149,6 +2150,76 @@ void MainWindow::refreshThemedMeta(int idx)
     // (online scrape + achievements) is debounced below, so fast scrolling doesn't hit the network per row.
     home_->requestThemedMeta(idx);
     if (themedMetaTimer_) themedMetaTimer_->start();
+}
+
+// Open the themed DETAIL view (on the Nav Contract) for the current selection — the replacement for the
+// retired classic info page. Populates the detail data FIRST (so the page never flashes empty), switches the
+// view, then pushes a "detail" nav level whose onPop restores the previous view: the Back router owns the exit.
+// A no-op off a themed surface, on a theme with no `detail` view, or on a non-media row (returns empty data).
+void MainWindow::openThemedDetail(int browseIndex)
+{
+    QWidget* cur = stack_->currentWidget();
+    if (cur != themedHome_ && cur != themedBrowse_) return;
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return;
+    // The theme must define a `detail` view (XMB/Triple don't yet — "I" is simply inert there, as before).
+    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("detail")))
+        return;
+    const int bi = (browseIndex >= 0) ? browseIndex : r->property("currentIndex").toInt();
+    const QVariantMap data = home_->themedDetailData(bi);
+    if (data.isEmpty()) return; // a divider / synthetic / non-media row: nothing to detail
+
+    themedDetailIndex_ = bi;
+    r->setProperty("detailData", data);
+    r->setProperty("detailActionIndex", 0);
+    r->setProperty("detailChildIndex", 0);
+    r->setProperty("detailZone", QStringLiteral("actions"));
+    const QString ret = r->property("currentView").toString();
+    r->setProperty("detailReturn", ret);
+    r->setProperty("currentView", QStringLiteral("detail")); // -> ThemeBridge::syncDetailZone counts the detail zones up
+    if (NavGraph* g = ThemeEngine::navGraph(cur))
+        g->pushLevel(QStringLiteral("detail"), [this, cur, ret] {
+            themedDetailIndex_ = -1;
+            if (QQuickItem* rr = ThemeEngine::rootItem(cur)) rr->setProperty("currentView", ret); // -> detail zones hidden
+        });
+}
+
+// The themed grid browse opens an info-page leaf (movie/series/book/comic/…) in the detail view instead of the
+// old classic-page drill. Returns true when it did; false for a container (drill) or a direct-open leaf
+// (game/track), or when the theme has no detail view — the caller then falls back to browseActivate().
+bool MainWindow::openThemedDetailForInfoLeaf(int browseIndex)
+{
+    QWidget* cur = stack_->currentWidget();
+    QQuickItem* r = ThemeEngine::rootItem(cur);
+    if (!r) return false;
+    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("detail")))
+        return false;
+    if (!home_->isThemedInfoLeaf(browseIndex)) return false;
+    openThemedDetail(browseIndex);
+    return true;
+}
+
+// Run an action-row verb on the item the detail view is showing — reusing the SAME HomeView methods the XMB
+// inline chooser uses, so play/download/favourite/playlist behave identically. Favourite stays on the page and
+// nudges the row's heart; the others (play launches, playlist opens the NavMenu, download queues) act in place.
+void MainWindow::runThemedDetailAction(const QString& verb)
+{
+    const int idx = themedDetailIndex_;
+    if (idx < 0) return;
+    if (verb == QStringLiteral("play"))          home_->playThemedLeaf(idx);
+    else if (verb == QStringLiteral("download")) home_->downloadThemedLeaf(idx);
+    else if (verb == QStringLiteral("playlist")) home_->addBrowseItemToPlaylist(idx);
+    else if (verb == QStringLiteral("favorite"))
+    {
+        home_->favoriteThemedLeaf(idx);
+        QWidget* cur = stack_->currentWidget();
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+        {
+            QVariantMap d = r->property("detailData").toMap();
+            d.insert(QStringLiteral("favorite"), home_->isThemedLeafFavorite(idx));
+            r->setProperty("detailData", d); // the action row re-reads selected.favorite -> ★/☆ flips in place
+        }
+    }
 }
 
 // Keep the current themed screen's NavGraph level stack in lockstep with the app's real navigation state, so a
@@ -2407,7 +2478,9 @@ void MainWindow::showThemedXmb()
 
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
-                                        onSelect, onAction, onPlaylistAdd);
+                                        onSelect, onAction, onPlaylistAdd, /*onButton=*/{},
+                                        [this] { openThemedDetail(-1); },
+                                        [this](const QString& v) { runThemedDetailAction(v); });
     if (QQuickItem* r = ThemeEngine::rootItem(w))
     {
         r->setProperty("categories", cats);
@@ -2452,7 +2525,12 @@ void MainWindow::showThemedBrowse()
     if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
 
     QVariantMap system; system.insert(QStringLiteral("name"), home_->browseTitle());
-    auto onActivated = [this](int idx) { home_->browseActivate(idx); syncThemedLevels(); }; // opens media / drills (-> a browse level)
+    // An info-page leaf (movie/series/book/comic/…) opens the themed DETAIL view (the retired classic page's
+    // replacement); a container drills and a direct-open leaf (game/track) opens — both via browseActivate.
+    auto onActivated = [this](int idx) {
+        if (openThemedDetailForInfoLeaf(idx)) return;
+        home_->browseActivate(idx); syncThemedLevels();
+    };
     // rootBack for the browse view: every deeper drill is a "browse" level (onPop = home_->browseBack()); when
     // they are all unwound nav.back()'s rootBack lands here and returns to the themed (system) home.
     auto onBack = [this] { showThemedHome(); };
@@ -2474,7 +2552,9 @@ void MainWindow::showThemedBrowse()
 
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd);
+                                        onSearch, onNearEnd, {}, {}, {}, {}, {},
+                                        [this] { openThemedDetail(-1); },
+                                        [this](const QString& v) { runThemedDetailAction(v); });
     if (QQuickItem* r = ThemeEngine::rootItem(w)) r->setProperty("currentView", QStringLiteral("browse"));
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;

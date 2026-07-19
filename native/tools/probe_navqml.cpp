@@ -818,6 +818,73 @@ int main(int argc, char** argv)
         CHECK(!g.isPopping(), "isPopping() is false once the pop completes");
     }
 
+    // ---------------------------------------------------------------- 15. the REAL themed DETAIL graph (Task 2)
+    {
+        // The detail view's zones (a detailActions row over a scrollable detailBody, plus an optional
+        // detailChildren list for series/seasons) are built by the SAME shared builder the app runs
+        // (buildThemedNavGraph with a DetailState), count-gated exactly like the inline `actions` overlay: 0
+        // when the detail view is closed, live counts when it opens. Both childCount cases plus the inactive
+        // case must pass validate(); when active, the detail zones must be arrow-reachable from the action row.
+
+        // (a) inactive: the detail zones are registered but hidden (count 0) — the home graph still validates.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12, DetailState{ /*active=*/false, 0, 0 });
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.setZoneCount(QStringLiteral("buttons"), 2);
+            QString why;
+            CHECK(g.validate(&why), "detail-inactive: the themed graph validates with the detail zones hidden");
+        }
+
+        // (b) active, NO children (a flat movie/game/book): action row + scroll body, detailChildren inert.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12, DetailState{ /*active=*/true, /*actionCount=*/4, /*childCount=*/0 });
+            QString why;
+            CHECK(g.validate(&why), "detail-active(flat): validates with actions+body, children hidden");
+            // (move() reports whether the DISPLAYED INDEX changed; a non-co-located edge crossing that lands on
+            //  index 0 returns false while still switching the zone — so assert on the zone, not the return.)
+            g.select(QStringLiteral("detailActions"), 0);
+            g.move(Qt::Key_Down);
+            CHECK(g.zone() == QStringLiteral("detailBody"),
+                  "detail-active(flat): Down from the action row lands on the scroll body");
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("detailActions"),
+                  "detail-active(flat): Up from the body returns to the action row");
+            g.select(QStringLiteral("detailActions"), 3);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("detailActions") && g.index() == 0,
+                  "detail-active(flat): the action row wraps Right past the last button");
+        }
+
+        // (c) active WITH children (a series/season): actions <-> body <-> children all arrow-reachable.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12, DetailState{ /*active=*/true, /*actionCount=*/3, /*childCount=*/5 });
+            QString why;
+            CHECK(g.validate(&why), "detail-active(series): validates with actions+body+children");
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("detailActions"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key darr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : darr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("detailActions")) && reached.count(QStringLiteral("detailBody"))
+                  && reached.count(QStringLiteral("detailChildren")),
+                  "detail-active(series): arrows alone reach the action row, body, and children list");
+        }
+    }
+
 #ifdef MMV_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).

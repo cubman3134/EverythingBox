@@ -3002,6 +3002,104 @@ void HomeView::favoriteThemedLeaf(int idx)
     emit themedMetaReady(idx, m);
 }
 
+// A non-expandable info-page leaf (movie/series/book/comic/…): the themed grid browse opens the themed detail
+// view for it (replacing the classic info page) instead of drilling. Games/tracks are direct-open, not this.
+bool HomeView::isThemedInfoLeaf(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return false;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    return isInfoPageType(it.type) && !it.expandable;
+}
+
+// The themed detail view's data for the browse-item at `idx`: rich art + facts resolved from the SAME local
+// sources requestThemedMeta uses (this session's page cache, the ROMs-folder gamelist.xml, then MetaCache) so
+// opening detail never re-does work, plus a joined factsText and the action-row verb list. The detail elements
+// bind this through dataCtx.selected. Returns an empty map for a divider/synthetic row (not a media item).
+QVariantMap HomeView::themedDetailData(int idx)
+{
+    QVariantMap out;
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return out;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    if (it.type == QStringLiteral("rechdr") || it.type.startsWith(QLatin1Char('_'))) return out;
+
+    const QString metaKey = MetaCache::keyFor(it);
+    out.insert(QStringLiteral("title"), it.title);
+    out.insert(QStringLiteral("subtitle"), it.subtitle);
+    out.insert(QStringLiteral("type"), it.type);
+    out.insert(QStringLiteral("accent"), typeColor(it.type).name());
+    out.insert(QStringLiteral("expandable"), it.expandable);
+    MetaCache::cacheImage(metaKey, QStringLiteral("thumb"), it.thumbnailUrl);
+    out.insert(QStringLiteral("image"), MetaCache::displayImage(metaKey, it.thumbnailUrl));
+    out.insert(QStringLiteral("favorite"), isThemedLeafFavorite(idx));
+
+    QVariantList facts;
+    const auto cachedRich = themedArtCache_.constFind(metaKey);
+    if (cachedRich != themedArtCache_.constEnd())
+    {
+        for (auto kv = cachedRich->constBegin(); kv != cachedRich->constEnd(); ++kv) out.insert(kv.key(), kv.value());
+        facts = out.value(QStringLiteral("facts")).toList();
+    }
+    else
+    {
+        MediaArt art = it.art;
+        if (it.type == QStringLiteral("game"))
+        {
+            const MediaDetail gl = GamelistStore::lookup(it.url);
+            if (gl.valid)
+            {
+                art.mergeLowerPriority(gl.art);
+                if (!gl.overview.isEmpty()) out.insert(QStringLiteral("overview"), gl.overview);
+                if (!gl.subtitle.isEmpty()) out.insert(QStringLiteral("subtitle"), gl.subtitle);
+                for (const MediaFact& f : gl.facts)
+                    facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+            }
+        }
+        const MediaArt scraped = MetaCache::loadArt(metaKey);
+        if (!scraped.isEmpty()) art.mergeLowerPriority(scraped);
+        const MediaDetail cd = MetaCache::cachedDetail(metaKey);   // our own previous scrape (overview + facts)
+        if (cd.valid)
+        {
+            if (!out.contains(QStringLiteral("overview")) && !cd.overview.isEmpty())
+                out.insert(QStringLiteral("overview"), cd.overview);
+            if (facts.isEmpty())
+                for (const MediaFact& f : cd.facts)
+                    facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
+        }
+        art.writeInto(out);
+        if (!facts.isEmpty()) out.insert(QStringLiteral("facts"), facts);
+    }
+
+    // A single joined "Label: value  •  …" string for the detail view's facts text element.
+    if (facts.isEmpty()) facts = out.value(QStringLiteral("facts")).toList();
+    QStringList fl;
+    for (const QVariant& fv : facts)
+    {
+        const QVariantMap fm = fv.toMap();
+        const QString l = fm.value(QStringLiteral("label")).toString();
+        const QString v = fm.value(QStringLiteral("value")).toString();
+        if (!v.isEmpty()) fl << (l.isEmpty() ? v : (l + QStringLiteral(": ") + v));
+    }
+    if (!fl.isEmpty()) out.insert(QStringLiteral("factsText"), fl.join(QStringLiteral("     •     ")));
+
+    // The action-row verbs (mirror the classic play/download/favorite visibility; favourite + playlist always,
+    // matching the XMB inline chooser). A file already on disk (a local game / Recents / Downloads row) isn't
+    // downloadable; an expandable series/comic is (its children crawl).
+    const bool localSaved = isLocalGameLeaf(it) || atRecentsLevel() || atDownloadsLevel();
+    QStringList verbs;
+    if (!it.expandable) verbs << QStringLiteral("play");
+    verbs << QStringLiteral("favorite");
+    if (!it.expandable && !localSaved) verbs << QStringLiteral("download");
+    else if (it.expandable && (it.type == QStringLiteral("series") || it.type == QStringLiteral("tv")
+                            || it.type == QStringLiteral("season") || it.type == QStringLiteral("comic")))
+        verbs << QStringLiteral("download");
+    verbs << QStringLiteral("playlist");
+    out.insert(QStringLiteral("actions"), verbs);
+    out.insert(QStringLiteral("readable"), isReadableChapter(it.type)
+               || it.type == QStringLiteral("book") || it.type == QStringLiteral("comic")
+               || it.type == QStringLiteral("manga") || it.type == QStringLiteral("comic_issue"));
+    return out;
+}
+
 void HomeView::playThemedLeaf(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
