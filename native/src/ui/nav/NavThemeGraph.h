@@ -91,5 +91,62 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
     g.addEdge(QStringLiteral("detailChildren"), Qt::Key_Right, QStringLiteral("detailChildren"));
     // The Back dismissal leg (host-executed via the "detail" level pop) — declared so the connectivity walk
     // sees the modal stack linked to the surface it covers, mirroring the `actions` overlay's Esc edge.
+    // NB this edge is never walked by move(): Esc on the detail view is caught by the host's Back router,
+    // which pops the "detail" level (onPop restores the home surface) — that pop is the real dismissal leg;
+    // the edge exists only so validate()'s undirected walk sees the modal stack connected to `items`.
     g.addEdge(QStringLiteral("detailActions"), Qt::Key_Escape, QStringLiteral("items"));
+}
+
+// ---- Reader surfaces (Plan B1, Tasks 3-5): the themed chrome over the hosted RASTER readers -----------------
+//
+// A reader (EbookView / PdfView / ComicView in "hosted" mode) owns its OWN NavGraph — there is no home
+// surface co-resident in the same graph, so the whole reader graph IS the modal surface. Its zones sit in one
+// grid column and the Back router (ReaderChromeHost) owns the reader LEVEL: with chrome hidden, Back pops that
+// level (return to where the reader was opened); with chrome visible, Back just hides the chrome (no pop). See
+// the composition decision (docs/superpowers/specs/2026-07-19-themed-surfaces-design.md, VARIANT A) — the
+// chrome is opaque strip QQuickWidgets raised over the reader; this graph is the selection model behind them.
+enum class ReaderKind { Book, Pdf, Comic };
+
+// Register the reader surface's zones + declared edges on a fresh NavGraph. Shared verbatim between the app
+// (ReaderChromeHost) and probe_navqml's reader shape-test — the NavThemeGraph.h discipline, so the CI
+// assertion can never drift from the shipped graph.
+//
+// Zones (Book — the only kind this task builds; Pdf/Comic reuse the NAMES and extend the settings/nav rows):
+//   * readerNav (row 2, Horizontal, wraps) — the bottom strip: prev / progress / next. ALWAYS visible
+//     (count 3); the default zone the chrome reveals onto.
+//   * readerSettings (row 1, Vertical) — a column of `ThemedChoice` rows (Book: just font size). Count-gated
+//     (0 until the chrome feeds live counts), exactly like `categories`/`actions` on the themed home.
+//   * readerToc (row 0, Vertical) — the chapter list, count = toc size. Count-gated (fed from tocTitles()).
+//
+// Declared edges: readerNav <-> readerSettings <-> readerToc, chosen so none blocks a zone's ALONG-axis
+// internal stepping (a declared edge is consulted before axis stepping, so declaring Up/Down on a Vertical
+// list zone would freeze its scrolling). The cross-axis / reverse legs are declared; the Vertical zones' own
+// down-into-the-next-zone leg is left to geometry (they are stacked in col 0). Containment SELF edges pin the
+// arrows that would otherwise run off the surface into nothing (mirrors the detail view's SELF-edge pins).
+inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
+{
+    g.registerZone(QStringLiteral("readerNav"), 3, 2, 0, Qt::Horizontal, /*wraps=*/true); // prev/progress/next
+    g.registerZone(QStringLiteral("readerSettings"), 0, 1, 0, Qt::Vertical);              // font-size rows (gated)
+    g.registerZone(QStringLiteral("readerToc"), 0, 0, 0, Qt::Vertical);                   // chapter list (gated)
+    g.setDefaultZone(QStringLiteral("readerNav"));
+
+    // The chrome chain (declared where geometry can't be trusted / to keep the shape explicit, like the home's
+    // items<->categories edges). readerNav's Up/Down are cross-axis (it is Horizontal) so declaring them is
+    // safe; readerSettings' Up→readerToc is cross... no — readerSettings is Vertical, so ONLY its cross-axis
+    // (Left/Right) may be declared. readerNav↔readerSettings uses readerNav's cross-axis Up plus readerSettings'
+    // cross-axis... its Down IS along-axis. So: declare readerNav→readerSettings (Up, cross-axis on readerNav);
+    // the reverse + the readerSettings↔readerToc legs are geometric (col-0 stack) and thus never freeze a list.
+    g.addEdge(QStringLiteral("readerNav"), Qt::Key_Up, QStringLiteral("readerSettings"));
+
+    // Containment (SELF edges = consume, no geometric escape). readerNav wraps Left/Right in-strip and pins its
+    // Down (nothing below the bottom bar). readerSettings/readerToc are Vertical lists: pin their cross-axis
+    // Left/Right so a stray horizontal arrow can't fall through; their along-axis Up/Down keep stepping the
+    // list, crossing to the neighbour zone by geometry only at the list's edge.
+    g.addEdge(QStringLiteral("readerNav"), Qt::Key_Down, QStringLiteral("readerNav"));
+    g.addEdge(QStringLiteral("readerSettings"), Qt::Key_Left,  QStringLiteral("readerSettings"));
+    g.addEdge(QStringLiteral("readerSettings"), Qt::Key_Right, QStringLiteral("readerSettings"));
+    g.addEdge(QStringLiteral("readerToc"), Qt::Key_Left,  QStringLiteral("readerToc"));
+    g.addEdge(QStringLiteral("readerToc"), Qt::Key_Right, QStringLiteral("readerToc"));
+
+    (void)kind; // Book is the only shape this task builds; Pdf/Comic add rows in Tasks 4-5 (same names/host).
 }

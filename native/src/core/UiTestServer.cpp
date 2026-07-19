@@ -82,5 +82,11 @@ QString UiTestServer::handle(const QString& line)
         return hooks_.screenshot(arg) ? QStringLiteral("ok ") + arg
                                       : QStringLiteral("err couldn't save %1").arg(arg);
     }
-    return QStringLiteral("err unknown command '%1' (key/state/shot)").arg(cmd);
+    if (cmd == QStringLiteral("open"))
+    {
+        if (arg.isEmpty() || !hooks_.openDoc) return QStringLiteral("err usage: open <path>");
+        return hooks_.openDoc(arg) ? QStringLiteral("ok ") + arg
+                                   : QStringLiteral("err couldn't open %1").arg(arg);
+    }
+    return QStringLiteral("err unknown command '%1' (key/state/shot/open)").arg(cmd);
 }

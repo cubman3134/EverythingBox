@@ -927,6 +927,114 @@ int main(int argc, char** argv)
                   && reached.count(QStringLiteral("detailChildren")),
                   "detail-containment: the contained walk still reaches every detail zone");
         }
+
+        // (e) DISMISSAL LEG: the detailActions→items Esc edge lands back on the home cursor where it was,
+        //     exactly mirroring §9's actions-overlay dismissal check (which does the same with `actions`). In
+        //     the app the host's "detail" level pop performs the dismissal (see the NavThemeGraph.h note — the
+        //     edge is never walked by move() there); this asserts the edge's STRUCTURE resolves correctly, so
+        //     validate()'s undirected walk that relies on it is anchored to real, tested behaviour.
+        {
+            NavGraph g;
+            buildThemedNavGraph(g, 12, DetailState{ /*active=*/true, /*actionCount=*/4, /*childCount=*/0 });
+            g.setZoneCount(QStringLiteral("categories"), 6);
+            g.select(QStringLiteral("items"), 7);          // the home cursor before opening the detail view
+            g.select(QStringLiteral("detailActions"), 2);  // …then the detail view holds the cursor (memory:=7)
+            g.move(Qt::Key_Escape);                        // the declared dismissal edge (detailActions→items)
+            CHECK(g.zone() == QStringLiteral("items") && g.index() == 7,
+                  "detail-dismiss: the detailActions→items Esc edge restores the remembered items cursor (7)");
+        }
+    }
+
+    // ---------------------------------------------------------------- 16. the REAL reader graph shape (Task 3)
+    {
+        // The reader surface's zones (readerNav bottom bar + readerSettings font rows + readerToc chapter list)
+        // are built by the SAME shared builder the app's ReaderChromeHost runs (buildReaderNavGraph, kind Book).
+        // readerSettings/readerToc are count-gated (0 until the chrome feeds live counts, like the home's
+        // categories/actions); the shipped reader graph must pass its own validator and, once populated, reach
+        // every chrome zone by arrows alone — while no arrow escapes the (standalone, modal) reader surface.
+
+        // (a) gated: settings + toc hidden — the reader graph still validates (declared/geometric union links
+        //     all three even at count 0), and only readerNav is arrow-navigable.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Book);
+            QString why;
+            CHECK(g.validate(&why), "reader: the graph validates with settings + toc gated (hidden)");
+            CHECK(g.zone() == QStringLiteral("readerNav"), "reader: the default zone is the nav bar");
+            g.select(QStringLiteral("readerNav"), 0);
+            CHECK(!g.move(Qt::Key_Up) || g.zone() == QStringLiteral("readerNav"),
+                  "reader: Up with settings hidden cannot leave the nav bar (gated edge is inert)");
+        }
+
+        // (b) populated: font-size row (1) + a chapter list (5). validate holds; a directed BFS from the nav
+        //     bar reaches all three chrome zones AND never escapes onto anything else.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Book);
+            g.setZoneCount(QStringLiteral("readerSettings"), 1);   // Book: one ThemedChoice (font size)
+            g.setZoneCount(QStringLiteral("readerToc"), 5);        // five chapters
+            QString why;
+            CHECK(g.validate(&why), "reader: validates with settings + toc populated");
+
+            // readerNav wraps its strip (prev/progress/next).
+            g.select(QStringLiteral("readerNav"), 2);
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("readerNav") && g.index() == 0,
+                  "reader: the nav bar wraps Right past the last button");
+
+            // Up from the nav bar reaches settings; Up again (a Vertical list at its top edge) crosses to the
+            // toc by geometry — the whole chrome is reachable.
+            g.select(QStringLiteral("readerNav"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("readerSettings"),
+                  "reader: Up from the nav bar lands on the settings row");
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("readerToc"),
+                  "reader: Up from the settings row crosses to the chapter list");
+
+            // The toc is a real list: Down steps WITHIN it (a declared edge would have frozen this), only
+            // crossing back to settings at the list's bottom edge.
+            g.select(QStringLiteral("readerToc"), 0);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("readerToc") && g.index() == 1,
+                  "reader: Down steps within the chapter list (not consumed by a cross-zone edge)");
+
+            // Directed BFS: every chrome zone reachable; nothing else exists to escape to (standalone graph).
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("readerNav"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key rarr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : rarr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("readerNav")) && reached.count(QStringLiteral("readerSettings"))
+                  && reached.count(QStringLiteral("readerToc")),
+                  "reader: arrows alone reach the nav bar, settings row, and chapter list");
+            CHECK(reached.size() == 3,
+                  "reader: the walk stays on the three reader zones (a standalone, contained surface)");
+        }
+
+        // (c) containment pins: the SELF edges consume cross-axis / off-surface arrows without moving.
+        {
+            NavGraph g;
+            buildReaderNavGraph(g, ReaderKind::Book);
+            g.setZoneCount(QStringLiteral("readerSettings"), 1);
+            g.setZoneCount(QStringLiteral("readerToc"), 5);
+            g.select(QStringLiteral("readerNav"), 1);
+            CHECK(!g.move(Qt::Key_Down) && g.zone() == QStringLiteral("readerNav") && g.index() == 1,
+                  "reader: Down off the bottom nav bar is a contained no-op");
+            g.select(QStringLiteral("readerToc"), 2);
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("readerToc") && g.index() == 2,
+                  "reader: Left across the chapter list is a contained no-op (cross-axis SELF pin)");
+        }
     }
 
 #ifdef MMV_HAVE_QML

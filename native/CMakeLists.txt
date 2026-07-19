@@ -165,6 +165,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         target_sources(mymediavault PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
+            src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)

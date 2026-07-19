@@ -22,5 +22,6 @@
     <file alias="elements/NowPlaying.qml">../src/theme2/qml/elements/NowPlaying.qml</file>
     <file alias="elements/ThemedTextField.qml">../src/theme2/qml/elements/ThemedTextField.qml</file>
     <file alias="elements/ThemedChoice.qml">../src/theme2/qml/elements/ThemedChoice.qml</file>
+    <file alias="elements/ReaderChrome.qml">../src/theme2/qml/elements/ReaderChrome.qml</file>
   </qresource>
 </RCC>

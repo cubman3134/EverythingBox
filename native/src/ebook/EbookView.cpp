@@ -531,7 +531,7 @@ bool EbookView::openBook(const QString& path, QString* error)
 void EbookView::setStreamIssueVisible(bool on)
 {
     streamVisible_ = on;
-    if (streamIssueBtn_) streamIssueBtn_->setVisible(on);
+    if (streamIssueBtn_) streamIssueBtn_->setVisible(on && !hosted_); // hosted chrome surfaces this itself
 }
 
 void EbookView::restoreState()
@@ -603,10 +603,19 @@ void EbookView::prevPage()
     persist();
 }
 
-void EbookView::biggerFont()
+void EbookView::biggerFont()  { fontDelta(+2); }
+void EbookView::smallerFont() { fontDelta(-2); }
+
+// Change the reading font by dPt points, clamped to 8..40, keeping the reading position across the reflow.
+// The whole book repaginates, so the book-wide "page x / y" total is re-tallied. (This is exactly what the
+// old biggerFont/smallerFont did in ±2 steps — no pagination-logic change, just a parameterised delta.)
+void EbookView::fontDelta(int dPt)
 {
+    if (dPt == 0) return;
     const int pos = page_->topTextPosition();
-    fontPt_ = qMin(40, fontPt_ + 2);
+    const int prev = fontPt_;
+    fontPt_ = qBound(8, fontPt_ + dPt, 40);
+    if (fontPt_ == prev) return;      // already at the clamp — nothing repaginated
     page_->setFontPointSize(fontPt_);
     page_->scrollToTextPosition(pos); // stay on the same text after the reflow
     recomputeBookPages();             // the whole book just repaginated
@@ -614,15 +623,46 @@ void EbookView::biggerFont()
     persist();
 }
 
-void EbookView::smallerFont()
+int EbookView::currentPage() const { return globalPage(); }
+
+int EbookView::pageCount() const
 {
-    const int pos = page_->topTextPosition();
-    fontPt_ = qMax(8, fontPt_ - 2);
-    page_->setFontPointSize(fontPt_);
-    page_->scrollToTextPosition(pos);
-    recomputeBookPages();
-    updatePageLabel();
-    persist();
+    return totalPages_ > 0 ? totalPages_ : (page_ ? page_->pageCount() : 1);
+}
+
+QStringList EbookView::tocTitles() const
+{
+    QStringList out;
+    if (book_) for (const EpubTocEntry& e : book_->toc()) out << e.title;
+    return out;
+}
+
+void EbookView::gotoTocIndex(int i)
+{
+    if (!book_ || !book_->isOpen()) return;
+    const QVector<EpubTocEntry> toc = book_->toc();
+    if (i < 0 || i >= toc.size()) return;
+    const int idx = book_->chapterIndexForHref(toc[i].href);
+    if (idx >= 0) loadChapter(idx);
+}
+
+// Hosted mode: the themed ReaderChromeHost owns all chrome, so suppress our own widget menu, contents panel
+// and stream-issue button, and stop the auto-hide timer. revealMenu() short-circuits while hosted so mouse
+// movement / a top-band click never flashes the raster menu over the themed strips.
+void EbookView::setHostedChrome(bool on)
+{
+    hosted_ = on;
+    if (on)
+    {
+        if (menuTimer_) menuTimer_->stop();
+        if (menu_)      menu_->setVisible(false);
+        if (tocList_)   tocList_->setVisible(false);
+        if (streamIssueBtn_) streamIssueBtn_->setVisible(false);
+    }
+    else if (streamIssueBtn_)
+    {
+        streamIssueBtn_->setVisible(streamVisible_); // classic mode: restore its remembered visibility
+    }
 }
 
 void EbookView::toggleContents()
@@ -652,6 +692,7 @@ void EbookView::onAnchorClicked(const QString& href)
 
 void EbookView::revealMenu()
 {
+    if (hosted_) return; // the themed chrome owns reveal/hide; never flash the raster menu while hosted
     layoutOverlays();
     menu_->setVisible(true);
     menu_->raise();
@@ -724,6 +765,8 @@ void EbookView::updatePageLabel()
     pageLabel_->setText(tr("%1  —  Ch %2/%3")
                             .arg(book_->title())
                             .arg(chapter_ + 1).arg(book_->chapterFiles().size()));
+
+    emit pageInfoChanged(); // hosted chrome mirrors page/chapter/font — refresh it on every label update
 }
 
 void EbookView::keyPressEvent(QKeyEvent* e)

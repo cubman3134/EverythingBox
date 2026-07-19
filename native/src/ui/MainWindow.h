@@ -14,6 +14,7 @@
 class MpvWidget;
 class RetroView;
 class EbookView;
+class ReaderChromeHost;
 class PdfView;
 class ComicView;
 class LibraryView;
@@ -220,6 +221,7 @@ private:
     class NavRing* panelRing_ = nullptr;   // covers panelPage_ (header Back button + the built rows)
     class NavRing* libraryRing_ = nullptr; // covers the Library view (lists + buttons + search)
     void updateNavForPage();
+    void presentBook(); // show book_ themed (wrapped in readerHost_) or classic (direct), per themedHomeEnabled
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
@@ -249,6 +251,7 @@ private:
     MpvWidget* player_ = nullptr;
     RetroView* retro_ = nullptr;
     EbookView* book_ = nullptr;
+    ReaderChromeHost* readerHost_ = nullptr; // themed chrome wrapping book_ (themed mode); null without QML
     PdfView* pdf_ = nullptr;
     ComicView* comic_ = nullptr;
     LibraryView* library_ = nullptr;

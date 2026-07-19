@@ -120,6 +120,7 @@
 
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
+#include "../theme2/ReaderChromeHost.h"
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
@@ -307,7 +308,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stack_ = new QStackedWidget(this);
     stack_->addWidget(playerPage); // index 0 - video / audio
     stack_->addWidget(retro_);     // index 1 - games
+#ifdef MMV_HAVE_QML
+    // The ebook reader is wrapped in the themed chrome host: it reparents book_ inside itself and adds themed
+    // strips over it in themed mode; in classic mode it's a transparent passthrough (book_ shows its own
+    // chrome). The stack page is the host, not book_ directly (index 2 - ebooks).
+    readerHost_ = new ReaderChromeHost(book_, this);
+    stack_->addWidget(readerHost_);
+#else
     stack_->addWidget(book_);      // index 2 - ebooks
+#endif
     stack_->addWidget(pdf_);       // index 3 - pdf
     stack_->addWidget(library_);   // index 4 - addon library
     stack_->addWidget(home_);      // index 5 - home / catalog landing
@@ -734,6 +743,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
+#ifdef MMV_HAVE_QML
+        if (readerHost_) readerHost_->onLeaving(); // drop any themed reader level + hide chrome, idempotent
+#endif
         book_->persist(); pdf_->persist(); comic_->persist();
         stack_->setCurrentWidget(home_);
         home_->focusContent();
@@ -741,6 +753,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
+#ifdef MMV_HAVE_QML
+    // The themed reader host's Back router pops the "reader" level with the chrome hidden -> leave the reader.
+    if (readerHost_) connect(readerHost_, &ReaderChromeHost::exitRequested, this, returnFromReader);
+#endif
     // Reader "Issue with Streaming": ask the file provider for the next source and re-open the new file.
     connect(book_, &EbookView::streamIssueRequested, this, [this] {
         showNextSourceFeedback(tr("Finding another source…")); home_->requestNextSource(); });
@@ -925,6 +941,10 @@ void MainWindow::sendNavKey(int key)
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
+    // 4.5. The themed reader host: hand the key to the reader widget — its installed chrome event filter
+    //      arbitrates (drive the graph while the chrome is visible, reveal on Up, else let the reader page).
+    //      Back is caught by that same filter, so this covers the reader's Back rule too.
+    if (readerHost_ && cur == readerHost_) { deliver(book_, key); return; }
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
     //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
     //    home root. (Overlays/popups/modals above already consumed their own Back.)
@@ -984,6 +1004,11 @@ void MainWindow::goBack()
     if (cur == panelPage_) { if (panelBack_) panelBack_->click(); return; }
     // Library: unwind a pushed sub-page (registry/addon settings), else back to the Settings hub.
     if (cur == library_) { if (!library_->navBack()) openSettingsHub(); return; }
+    // The themed reader host owns its own Back rule (chrome visible -> hide; hidden -> pop the reader level,
+    // which returns us home). Route to it before the plain reader case below.
+#ifdef MMV_HAVE_QML
+    if (readerHost_ && cur == readerHost_) { readerHost_->handleBack(); return; }
+#endif
     // Readers: back to the home they were opened from (persist positions first).
     if (cur == book_ || cur == pdf_ || cur == comic_)
     { book_->persist(); pdf_->persist(); comic_->persist(); stack_->setCurrentWidget(home_); home_->focusContent(); return; }
@@ -1003,6 +1028,22 @@ void MainWindow::goBack()
 // what the pad's Back does there. Screens with their own complete internal navigation (home, themed QML,
 // readers — which already map Backspace to back — and the emulator) register neither, so their key
 // handling is untouched; overlays still route above them.
+// Show the just-opened book: themed mode wraps it in the chrome host (themed strips on the Nav Contract),
+// classic mode shows it with its own widget chrome. The host is a persistent stack page that already holds
+// book_; present() only toggles which chrome is live, so there's no reparenting churn per open.
+void MainWindow::presentBook()
+{
+#ifdef MMV_HAVE_QML
+    if (readerHost_)
+    {
+        readerHost_->present(themedHomeEnabled());
+        stack_->setCurrentWidget(readerHost_);
+        return;
+    }
+#endif
+    stack_->setCurrentWidget(book_);
+}
+
 void MainWindow::updateNavForPage()
 {
     if (!navCtx_) return;
@@ -1035,13 +1076,22 @@ void MainWindow::updateNavForPage()
     {
         navCtx_->setActiveRing(nullptr);
         navCtx_->setBackAction(nullptr);
+#ifdef MMV_HAVE_QML
+        // The themed reader host: no ring (its chrome strips own selection via the graph); pad Back routes to
+        // its Back rule (chrome visible -> hide; hidden -> pop the reader level).
+        if (readerHost_ && cur == readerHost_ && readerHost_->themed())
+            navCtx_->setBackAction([this] { readerHost_->handleBack(); });
+#endif
     }
 
 #ifdef MMV_HAVE_QML
     // A themed (QML) page owns its own focus (no ring), but it DOES have a real selection surface — register
     // its NavGraph so the kit knows the page is navigable (presence), instead of the null-ring "nothing here".
     // Any other page clears it. (Set after the ring choice above so it applies on every page.)
-    navCtx_->setActiveGraph((cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::navGraph(cur) : nullptr);
+    NavGraph* pageGraph = (cur == themedHome_ || cur == themedBrowse_) ? ThemeEngine::navGraph(cur) : nullptr;
+    if (!pageGraph && readerHost_ && cur == readerHost_ && readerHost_->themed())
+        pageGraph = readerHost_->navGraph();
+    navCtx_->setActiveGraph(pageGraph);
 #endif
 }
 
@@ -1119,6 +1169,23 @@ void MainWindow::updateUiTestServer()
         // selection state — the highlighted tile's title, the view, and (XMB) the category / (button
         // zone) the focused corner button — so QML-side automation is as precise as the Qt panels.
         addThemedSelection(o, cur);
+#ifdef MMV_HAVE_QML
+        // Themed reader host: the chrome strips are opaque QQuickWidgets, so surface the graph selection +
+        // chrome visibility + page info for reader-chrome automation.
+        if (readerHost_ && cur == readerHost_)
+        {
+            o.insert(QStringLiteral("readerThemed"), readerHost_->themed());
+            o.insert(QStringLiteral("readerChrome"), readerHost_->chromeVisible());
+            if (NavGraph* rg = readerHost_->navGraph())
+            {
+                o.insert(QStringLiteral("readerZone"), rg->zone());
+                o.insert(QStringLiteral("readerIndex"), rg->index());
+            }
+            o.insert(QStringLiteral("readerPage"), book_->currentPage());
+            o.insert(QStringLiteral("readerPageCount"), book_->pageCount());
+            o.insert(QStringLiteral("readerFont"), book_->fontPt());
+        }
+#endif
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
         o.insert(QStringLiteral("fullscreen"), isFullScreen());
         o.insert(QStringLiteral("active"), isActiveWindow());
@@ -1126,6 +1193,7 @@ void MainWindow::updateUiTestServer()
         return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
     };
     h.screenshot = [this](const QString& path) { return grab().save(path); };
+    h.openDoc = [this](const QString& path) { openDocumentPath(path); return true; }; // reader tests: open by path
     uiTest_ = new UiTestServer(h, this);
     mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
 
@@ -1918,7 +1986,7 @@ void MainWindow::openDocumentPath(const QString& f)
     {
         if (!book_->openBook(f, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
-        stack_->setCurrentWidget(book_);
+        presentBook();
         PerfTrace::end(QStringLiteral("open.reader"), ext);
     }
     RecentStore::add({ f, QFileInfo(f).completeBaseName(), QStringLiteral("document"), QString() });
@@ -3967,7 +4035,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         if (!book_->openBook(url, &err)) { notify(tr("Can't open book: %1").arg(err), kFeedbackLong); return; }
         player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         book_->setStreamIssueVisible(currentNextSourceCapable_); // remote (Allarr) books can swap source
-        stack_->setCurrentWidget(book_);
+        presentBook();
         recordDocument();
     }
     else if (type == QStringLiteral("pdf") || lower.endsWith(QStringLiteral(".pdf")))
@@ -3978,7 +4046,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         {
             player_->stop(); retro_->stop(); pdf_->persist(); comic_->persist(); session_->clearQueue();
             book_->setStreamIssueVisible(currentNextSourceCapable_);
-            stack_->setCurrentWidget(book_);
+            presentBook();
             recordDocument();
         }
         else if (pdf_->openPdf(url, &err))

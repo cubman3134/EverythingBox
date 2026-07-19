@@ -26,6 +26,7 @@ public:
         std::function<void(int)> sendKey;                 // deliver a synthetic nav key (Qt::Key_*)
         std::function<QString()> state;                   // compact JSON snapshot of the UI state
         std::function<bool(const QString&)> screenshot;   // render the window to a PNG path
+        std::function<bool(const QString&)> openDoc;      // open a document/book by path (reader tests)
     };
 
     static bool wanted();                                 // MMV_UITEST=1 or --uitest present

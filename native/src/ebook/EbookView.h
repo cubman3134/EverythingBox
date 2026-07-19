@@ -102,18 +102,39 @@ public:
     void persist(); // save reading position (called when navigating away)
     void setStreamIssueVisible(bool on); // show the "Issue with Streaming" button (remote/Allarr books only)
 
+    // ---- Hosted mode (themed reader chrome, Plan B1 Task 3) ----------------------------------------------
+    // In hosted mode the reader renders page text ONLY: its own auto-hiding widget menu (menu_), contents
+    // panel (tocList_) and stream-issue button are suppressed, and revealMenu() is a no-op — the surrounding
+    // themed chrome (ReaderChromeHost) drives everything through the thin wrappers below. Pagination logic is
+    // untouched: these wrappers just expose what the widget menu's buttons already call.
+    void setHostedChrome(bool on);
+    bool isHostedChrome() const { return hosted_; }
+
+    int  currentPage() const;   // 1-based page within the whole book at the current spot (globalPage)
+    int  pageCount()  const;    // book-wide page total (falls back to the current chapter's count)
+    QStringList tocTitles() const;   // chapter/section titles, in spine order (for the themed toc zone)
+    int  fontPt() const { return fontPt_; }
+    // The height (px) the page reserves up top for chrome — the reader inset the widget menu used, which the
+    // themed top strip must match so page text sits below it, not under it (spike constraint reconfirmation).
+    static int topChromeReserve() { return kMenuHeight; }
+
+public slots:
+    void nextPage();            // advance one page (crossing into the next chapter at a chapter end)
+    void prevPage();            // retreat one page (crossing into the previous chapter at a chapter start)
+    void fontDelta(int dPt);    // change the reading font by dPt points (clamped 8..40), keeping the reading spot
+    void gotoTocIndex(int i);   // jump to the i-th toc entry's chapter
+
 signals:
     void homeRequested();
     void backRequested(); // return to the previous screen (the catalog/list) without resetting Home
     void streamIssueRequested(); // user reports a bad file -> ask the provider for the next source
+    void pageInfoChanged(); // page/chapter/font changed (paged, repaginated, resumed) — hosted chrome refresh
 
 protected:
     void keyPressEvent(QKeyEvent*) override;
     void resizeEvent(QResizeEvent*) override;
 
 private slots:
-    void nextPage();
-    void prevPage();
     void biggerFont();
     void smallerFont();
     void toggleContents();
@@ -145,5 +166,6 @@ private:
     bool streamVisible_ = false;
     int    restorePos_ = -1;       // document offset to resume at once the chapter is laid out (-1 = none)
     double restoreFrac_ = -1.0;    // legacy fallback: page fraction from older saves (-1 = none)
+    bool   hosted_ = false;        // hosted mode: themed chrome drives us; suppress our own menu/toc/reveal
     static constexpr int kMenuHeight = 38; // overlay menu height; the page reserves this much up top
 };
