@@ -65,7 +65,10 @@ public:
     // above is untouched. This is the registration path the QML input components use on Component.onCompleted.
     Q_INVOKABLE void registerZoneQml(const QString& id, int count, int row, int col);
     Q_INVOKABLE void setZoneCount(const QString& id, int count);   // 0 hides the zone (selection reassigns away)
-    void removeZone(const QString& id);                // refusing no-op on the last remaining zone
+    // Q_INVOKABLE so the themed QML inputs deregister on Component.onDestruction (a Loader unload / Repeater
+    // shrink must never leave a phantom zone move()/reassignment could land on). Semantics unchanged:
+    // refusing no-op on the last remaining zone; reassignment if the removed zone held the selection.
+    Q_INVOKABLE void removeZone(const QString& id);
     void setDefaultZone(const QString& id);
 
     // Non-selectable indices (dividers): the resolver skips them; a set index snaps to the

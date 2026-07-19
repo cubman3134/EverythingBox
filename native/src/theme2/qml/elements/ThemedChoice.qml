@@ -2,14 +2,19 @@
 // (TV / controller) surfaces. Same shared-NavGraph contract:
 //
 //   * SELECTED — nav.zone === navZone: the theme accent outline + slight scale (a highlighted row).
-//   * EDITING  — the option list is "open" inline. Entered when nav ACTIVATES our zone; we also emit
-//                editRequested(navZone) so a host could raise a richer picker. While open, Up/Left and
-//                Down/Right move a PENDING highlight over `options` (they DON'T move the nav selection — the
-//                FocusScope holds focus and swallows them), Enter commits (currentOption := pending, chosen),
-//                Escape reverts to the previous option without committing.
+//   * EDITING  — entered when nav ACTIVATES our zone. TWO modes, host-chosen:
+//       - externalEdit: false (default, inline): the option list is "open" in place. Up/Left and Down/Right
+//         move a PENDING highlight over `options` (they DON'T move the nav selection — the FocusScope holds
+//         focus and swallows them), Enter commits (currentOption := pending, chosen(index) once), Escape
+//         reverts without committing. editRequested is NOT emitted — the inline flow is self-contained.
+//       - externalEdit: true (TV / richer picker): activation emits editRequested(navZone) and goes PENDING
+//         only — no inline list, no focus grab, arrows still move the nav selection. The host runs its picker,
+//         writes `currentOption` back, then calls finishEdit(true) to emit chosen(currentOption) once (or
+//         finishEdit(false) to abandon). Either way the component returns to plain selected.
 //
-// Self-registers as a single-count nav zone on completion via nav.registerZoneQml — the same QML registration
-// path subsystem B reuses. Ships unused by production screens; B is the first consumer.
+// Self-registers as a single-count nav zone on Component.onCompleted via nav.registerZoneQml and DEregisters
+// on Component.onDestruction via nav.removeZone (no phantom zones after a Loader unload) — the same QML
+// zone-lifecycle path subsystem B reuses. Ships unused by production screens; B is the first consumer.
 import QtQuick
 
 FocusScope {
@@ -22,10 +27,14 @@ FocusScope {
     property var    options: []
     property int    currentOption: 0
     property color  accent: "#3A6FB0"
+    // true = the HOST owns the picker: activation only emits editRequested + goes pending; the host writes
+    // `currentOption` and calls finishEdit(committed). false = self-contained inline list (no editRequested).
+    property bool   externalEdit: false
 
     readonly property bool selected: (typeof nav !== "undefined") && nav && nav.zone === navZone
-    property bool editing: false
-    property int  pending: 0           // the highlighted option while the list is open
+    property bool editing: false          // the inline list is open (externalEdit: false path)
+    property bool externalPending: false  // an external pick is in flight (host owes a finishEdit call)
+    property int  pending: 0              // the highlighted option while the inline list is open
 
     signal chosen(int index)
     signal editRequested(string zone)
@@ -36,6 +45,8 @@ FocusScope {
     height: implicitHeight
 
     Component.onCompleted: if (typeof nav !== "undefined" && nav) nav.registerZoneQml(navZone, 1, navRow, navCol)
+    // Deregister so a dynamically unloaded choice never leaves a phantom zone (see the header note).
+    Component.onDestruction: if (typeof nav !== "undefined" && nav) nav.removeZone(navZone)
 
     Connections {
         target: (typeof nav !== "undefined") ? nav : null
@@ -43,10 +54,23 @@ FocusScope {
     }
 
     function beginEdit() {
+        if (externalEdit) {                 // the HOST picks — we only signal + go pending.
+            if (externalPending) return     // one outstanding request at a time
+            externalPending = true
+            editRequested(navZone)
+            return                          // no inline list, no focus grab: arrows keep moving the nav selection
+        }
         editing = true
         pending = currentOption
-        editRequested(navZone)
         forceActiveFocus()
+    }
+    // The host's return leg (external mode): it wrote `currentOption` (on commit) and tells us whether to
+    // fire chosen(). Also usable as a programmatic Enter/Escape for the inline list.
+    function finishEdit(commitOk) {
+        if (editing) { if (commitOk) commit(); else cancel(); return }
+        if (!externalPending) return
+        externalPending = false
+        if (commitOk) chosen(currentOption)
     }
     function commit() {
         if (!editing) return
@@ -82,8 +106,8 @@ FocusScope {
         anchors.fill: parent
         radius: 8
         color: "#141A22"
-        border.width: (tc.selected || tc.editing) ? 2 : 1
-        border.color: tc.editing ? Qt.lighter(tc.accent, 1.3)
+        border.width: (tc.selected || tc.editing || tc.externalPending) ? 2 : 1
+        border.color: (tc.editing || tc.externalPending) ? Qt.lighter(tc.accent, 1.3)
                     : tc.selected ? tc.accent
                     : "#2A2E36"
         scale: (tc.selected && !tc.editing) ? 1.03 : 1.0

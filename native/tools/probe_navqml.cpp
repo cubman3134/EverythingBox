@@ -81,6 +81,10 @@ static void runThemedInputAsserts()
         "    property int editReqCount: 0\n"
         "    property int chosenIndex: -1\n"
         "    property int chosenCount: 0\n"
+        "    property int chEditReq: 0\n"
+        "    property string xLastCommit: \"\"\n"
+        "    property int xCommitCount: 0\n"
+        "    property int xEditReq: 0\n"
         "    Keys.onPressed: (event) => {\n"
         "        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right\n"
         "            || event.key === Qt.Key_Up || event.key === Qt.Key_Down) { nav.move(event.key); event.accepted = true }\n"
@@ -92,7 +96,15 @@ static void runThemedInputAsserts()
         "            onCommitted: (t) => { host.lastCommit = t; host.commitCount++ }\n"
         "            onEditRequested: (z) => host.editReqCount++ }\n"
         "        El.ThemedChoice { objectName: \"tc\"; navZone: \"choice1\"; navRow: 1; navCol: 0; options: [\"Alpha\", \"Beta\", \"Gamma\"]\n"
-        "            onChosen: (i) => { host.chosenIndex = i; host.chosenCount++ } }\n"
+        "            onChosen: (i) => { host.chosenIndex = i; host.chosenCount++ }\n"
+        "            onEditRequested: (z) => host.chEditReq++ }\n"
+        "        Loader {\n"       // teardown vehicle: activating registers field2, deactivating must DEregister it
+        "            objectName: \"dynLoader\"; active: false\n"
+        "            sourceComponent: El.ThemedTextField { navZone: \"field2\"; navRow: 2; navCol: 0 }\n"
+        "        }\n"
+        "        El.ThemedTextField { objectName: \"tfx\"; navZone: \"fieldx\"; navRow: 3; navCol: 0; externalEdit: true\n"
+        "            onCommitted: (t) => { host.xLastCommit = t; host.xCommitCount++ }\n"
+        "            onEditRequested: (z) => { if (z === \"fieldx\") host.xEditReq++ } }\n"
         "    }\n"
         "}\n";
 
@@ -147,7 +159,7 @@ static void runThemedInputAsserts()
     graph.activate();
     pump();
     CHECK(tf->property("editing").toBool(), "activating the field's zone enters the editing state");
-    CHECK(host->property("editReqCount").toInt() == 1, "entering editing emits editRequested(navZone) once (host may divert to OSK)");
+    CHECK(host->property("editReqCount").toInt() == 0, "the INLINE flow does NOT emit editRequested (self-contained)");
     CHECK(input && input->property("activeFocus").toBool(), "the inline TextInput grabbed focus (keys now land in the field)");
 
     // ---- 4. while editing, arrows do NOT move the selection (they stay in the field) ----
@@ -191,6 +203,95 @@ static void runThemedInputAsserts()
     CHECK(host->property("chosenCount").toInt() == 1, "Enter fires chosen() exactly once");
     CHECK(host->property("chosenIndex").toInt() == 1, "chosen() carries the picked option index");
     CHECK(tc->property("currentOption").toInt() == 1, "the picked option becomes current");
+    CHECK(host->property("chEditReq").toInt() == 0, "the choice's INLINE flow does not emit editRequested either");
+
+    // ---- 8. post-commit routing: the very next arrow moves the selection again (focus fully handed back) ----
+    graph.select(QStringLiteral("field1"), 0);
+    pump();
+    sendKey(win, Qt::Key_Down);
+    CHECK(graph.zone() == QStringLiteral("choice1"), "one arrow AFTER a commit moves the selection (routing restored)");
+
+    // ---- 9. externalEdit (the TV / OSK route): activate only signals; the HOST edits + returns via finishEdit ----
+    QQuickItem* tfx = host->findChild<QQuickItem*>(QStringLiteral("tfx"));
+    CHECK(tfx != nullptr, "the externalEdit field is present");
+    if (tfx) {
+        QQuickItem* xinput = tfx->findChild<QQuickItem*>(QStringLiteral("tfInput"));
+        graph.select(QStringLiteral("fieldx"), 0);
+        pump();
+        graph.activate();
+        pump();
+        CHECK(host->property("xEditReq").toInt() == 1, "externalEdit activate emits editRequested(navZone) exactly once");
+        CHECK(!tfx->property("editing").toBool(), "externalEdit does NOT enter inline editing (no double editor)");
+        CHECK(tfx->property("externalPending").toBool(), "externalEdit goes pending (host owes finishEdit)");
+        CHECK(!(xinput && xinput->property("activeFocus").toBool()), "externalEdit grabs NO focus (the host's OSK owns input)");
+        sendKey(win, Qt::Key_Up);
+        CHECK(graph.zone() != QStringLiteral("fieldx"), "arrows STILL move the selection while an external edit is pending");
+        // The host ran its OSK, writes the result back, and closes the loop: commits exactly once.
+        tfx->setProperty("text", QStringLiteral("Link"));
+        QMetaObject::invokeMethod(tfx, "finishEdit", Q_ARG(QVariant, QVariant(true)));
+        pump();
+        CHECK(host->property("xCommitCount").toInt() == 1, "finishEdit(true) commits EXACTLY once");
+        CHECK(host->property("xLastCommit").toString() == QStringLiteral("Link"), "the external commit carries the host-written text");
+        CHECK(!tfx->property("externalPending").toBool(), "finishEdit clears the pending state (back to selected)");
+        // The abandon leg: a second request, answered with finishEdit(false), commits nothing.
+        graph.select(QStringLiteral("fieldx"), 0);
+        graph.activate();
+        pump();
+        CHECK(host->property("xEditReq").toInt() == 2, "a second activation re-requests the external editor");
+        QMetaObject::invokeMethod(tfx, "finishEdit", Q_ARG(QVariant, QVariant(false)));
+        pump();
+        CHECK(host->property("xCommitCount").toInt() == 1, "finishEdit(false) commits NOTHING");
+        CHECK(!tfx->property("externalPending").toBool(), "finishEdit(false) also returns to selected");
+    }
+
+    // ---- 9b. externalEdit on ThemedChoice: same suppression + finishEdit contract ----
+    tc->setProperty("externalEdit", true);
+    graph.select(QStringLiteral("choice1"), 0);
+    pump();
+    graph.activate();
+    pump();
+    CHECK(host->property("chEditReq").toInt() == 1, "external choice activate emits editRequested once");
+    CHECK(!tc->property("editing").toBool(), "external choice does NOT open the inline list");
+    CHECK(tc->property("externalPending").toBool(), "external choice goes pending");
+    tc->setProperty("currentOption", 2);                 // the host's picker chose Gamma…
+    QMetaObject::invokeMethod(tc, "finishEdit", Q_ARG(QVariant, QVariant(true)));
+    pump();
+    CHECK(host->property("chosenCount").toInt() == 2, "finishEdit(true) fires chosen() exactly once more");
+    CHECK(host->property("chosenIndex").toInt() == 2, "chosen() carries the host-written option");
+    CHECK(!tc->property("externalPending").toBool(), "the choice returns to selected");
+    tc->setProperty("externalEdit", false);
+
+    // ---- 10. teardown: destruction DEregisters the zone (no phantom zones after a Loader unload) ----
+    QQuickItem* dynLoader = host->findChild<QQuickItem*>(QStringLiteral("dynLoader"));
+    CHECK(dynLoader != nullptr, "the teardown Loader is present");
+    if (dynLoader) {
+        // (a) destroy while NOT selected: the zone simply vanishes from the graph.
+        dynLoader->setProperty("active", true);
+        pump();
+        graph.select(QStringLiteral("field2"), 0);
+        CHECK(graph.zone() == QStringLiteral("field2"), "the Loader-created field registered its zone");
+        CHECK(graph.validate(nullptr), "the graph validates with the dynamic zone present");
+        graph.select(QStringLiteral("field1"), 0);       // move off before the unload
+        dynLoader->setProperty("active", false);         // Loader unload -> Component.onDestruction -> removeZone
+        pump();
+        graph.select(QStringLiteral("field2"), 0);       // select() refuses an unregistered zone…
+        CHECK(graph.zone() != QStringLiteral("field2"), "the destroyed field's zone is GONE (select refuses it)");
+        CHECK(graph.validate(nullptr), "the graph validates after the teardown");
+        sendKey(win, Qt::Key_Down);                       // …and no arrow walk can land on the phantom either
+        sendKey(win, Qt::Key_Down);
+        CHECK(graph.zone() != QStringLiteral("field2"), "arrows cannot reach the deregistered zone");
+
+        // (b) destroy while SELECTED: the selection must reassign to a live zone, never dangle.
+        dynLoader->setProperty("active", true);
+        pump();
+        graph.select(QStringLiteral("field2"), 0);
+        CHECK(graph.zone() == QStringLiteral("field2"), "the re-created field re-registered (selected again)");
+        dynLoader->setProperty("active", false);         // destroyed out from under the selection
+        pump();
+        CHECK(graph.zone() != QStringLiteral("field2") && !graph.zone().isEmpty(),
+              "destroying the SELECTED field reassigns the selection to a live zone");
+        CHECK(graph.validate(nullptr), "the graph validates after the selected-zone teardown");
+    }
 }
 #endif // MMV_HAVE_QML
 
