@@ -1136,19 +1136,21 @@ int main(int argc, char** argv)
             g.move(Qt::Key_Up);
             CHECK(g.zone() == QStringLiteral("transport"), "audio-active: Up from the queue returns to the transport strip");
 
-            // The transport strip is Horizontal: Left/Right step within it (wraps=false).
+            // The transport strip is Horizontal: Left/Right step within it.
             g.select(QStringLiteral("transport"), 2);
             CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("transport") && g.index() == 3,
                   "audio-active: Right steps within the transport strip");
             CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("transport") && g.index() == 2,
                   "audio-active: Left steps within the transport strip");
-            // wraps=false: past either end is a contained no-op (no wrap, no geometric escape).
+            // The strip WRAPS in-strip at both ends (detailActions' solution): a boundary along-axis arrow
+            // wraps instead of ever falling through to geometric crossing — the horizontal containment is
+            // self-contained, independent of whatever sits (hidden or not) in neighbouring grid columns.
             g.select(QStringLiteral("transport"), 0);
-            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("transport") && g.index() == 0,
-                  "audio-active: Left off the strip's first button is contained (no wrap, no escape)");
+            CHECK(g.move(Qt::Key_Left) && g.zone() == QStringLiteral("transport") && g.index() == 7,
+                  "audio-active: Left off the strip's first button wraps to the last (no escape)");
             g.select(QStringLiteral("transport"), 7);
-            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("transport") && g.index() == 7,
-                  "audio-active: Right off the strip's last button is contained (no wrap, no escape)");
+            CHECK(g.move(Qt::Key_Right) && g.zone() == QStringLiteral("transport") && g.index() == 0,
+                  "audio-active: Right off the strip's last button wraps to the first (no escape)");
             // The queue is Vertical: Down steps within it; past the last row is contained (SELF pin).
             g.select(QStringLiteral("queue"), 0);
             CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("queue") && g.index() == 1,

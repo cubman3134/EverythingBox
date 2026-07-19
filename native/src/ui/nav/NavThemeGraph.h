@@ -106,22 +106,24 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
 // flips to "nowplayingAudio"), so their edges stay inert and they are never a move target off the home surface.
 //
 // Zones:
-//   * transport (row 20, col 0, Horizontal, wraps=false) — the transport strip: prev-track / prev-chapter /
+//   * transport (row 20, col 0, Horizontal, wraps) — the transport strip: prev-track / prev-chapter /
 //     seek-back / play-pause / seek-fwd / next-chapter / next-track / speed. The default/entered zone.
 //   * queue (row 21, col 0, Vertical) — the session queue titles; activating a row is session_->playIndex(row).
 //
 // Declared edges: transport <-> queue (Down enters the queue, Up returns to the transport strip). Containment
 // (this page is MODAL over the home surface, whose items/categories/buttons stay LIVE underneath): every arrow
 // the stack edges don't route is pinned by a declared SELF edge (the no-op — see NavGraph::addEdge), mirroring
-// the detail view's containment. The strip lives at col 0 so a boundary Left (wraps=false ⇒ the along-axis step
-// falls through to geometry at the ends) finds no zone at col<0 and is contained; a boundary Right finds only
-// the (hidden, count-0) detail zones at col 8 and so is contained too. Vertical escapes (Up off the strip, Down
-// off the queue) and the queue's cross-axis Left/Right are pinned by SELF edges. The transport→items Esc edge is
-// the dismissal leg (host-executed via the "nowplaying" level pop) — declared only so validate()'s undirected
-// walk sees the modal stack linked to the home surface it covers, exactly like the detail/actions Esc edges.
+// the detail view's containment. The strip WRAPS Left/Right in-strip (detailActions' solution): a boundary
+// along-axis arrow wraps instead of falling through to geometric crossing, so the horizontal containment is
+// SELF-CONTAINED — no reliance on what sits (hidden or not) in neighbouring grid columns. (SELF edges on the
+// strip's Left/Right would NOT work: a declared edge is consulted before axis stepping, so they would freeze
+// the strip's own stepping.) Vertical escapes (Up off the strip, Down off the queue) and the queue's cross-axis
+// Left/Right are pinned by SELF edges. The transport→items Esc edge is the dismissal leg (host-executed via the
+// "nowplaying" level pop) — declared only so validate()'s undirected walk sees the modal stack linked to the
+// home surface it covers, exactly like the detail/actions Esc edges.
 inline void buildAudioPageNavGraph(NavGraph& g)
 {
-    g.registerZone(QStringLiteral("transport"), 0, 20, 0, Qt::Horizontal, /*wraps=*/false);
+    g.registerZone(QStringLiteral("transport"), 0, 20, 0, Qt::Horizontal, /*wraps=*/true);
     g.registerZone(QStringLiteral("queue"), 0, 21, 0, Qt::Vertical);
     g.addEdge(QStringLiteral("transport"), Qt::Key_Down, QStringLiteral("queue"));
     g.addEdge(QStringLiteral("queue"), Qt::Key_Up, QStringLiteral("transport"));

@@ -65,7 +65,8 @@ Item {
         if (v === "seekFwd")     return "⏩"
         if (v === "nextChapter") return "»"
         if (v === "nextTrack")   return "⏭"
-        if (v === "speed")       return spd.toFixed(spd < 10 ? 2 : 1).replace(/0$/, "").replace(/\.$/, "") + "×"
+        // Strip ALL trailing zeros then a bare dot ("1.00"→"1", "1.50"→"1.5", "1.25" stays) — /0$/ only ate one.
+        if (v === "speed")       return spd.toFixed(spd < 10 ? 2 : 1).replace(/0+$/, "").replace(/\.$/, "") + "×"
         return v
     }
 

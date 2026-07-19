@@ -4361,10 +4361,11 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else if (type == QStringLiteral("audio"))
     {
-        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-        // J18: key resume by the stable catalog id, not the (re-resolved, ever-changing) stream URL — mirrors
-        // the audiobook branch, so Recent/resume survives a re-open.
-        session_->setQueue({ url }, 0, {}, item.id); // a single-track queue; libmpv also streams http(s) audio
+        // Delegate to the SAME entry point the audiobook branch uses: openAudioStream owns the themed-audio
+        // routing (themedAudioSession_ + the page's cover/title data) as well as the J18 stable-id resume key.
+        // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
+        // surface — a classic page in themed mode (or a themed page with the previous item's art).
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
