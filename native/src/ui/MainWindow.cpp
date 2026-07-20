@@ -832,13 +832,23 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QWidget* origin = readerOrigin_;
         readerOrigin_ = nullptr;
 #ifdef MMV_HAVE_QML
-        if (origin && (origin == themedHome_ || origin == themedBrowse_) && themedHomeEnabled())
+        if (themedHomeEnabled())
         {
-            stack_->setCurrentWidget(origin);
-            origin->setFocus();
+            if (origin && (origin == themedHome_ || origin == themedBrowse_))
+            {
+                stack_->setCurrentWidget(origin);
+                origin->setFocus();
+                return;
+            }
+            // Null/foreign origin in THEMED mode (e.g. a reader opened off the Library page or before any
+            // capture): route through showHomeScreen() — the themed home, or its LOGGED classic fallback —
+            // instead of silently landing on the raw classic home_ (B2 Task 6 fix round).
+            showHomeScreen();
             return;
         }
 #endif
+        // Classic mode: the original behaviour — the classic HomeView WITHOUT a refresh, so the chapter/catalog
+        // list you came from keeps its position.
         stack_->setCurrentWidget(home_);
         home_->focusContent();
     };
@@ -2395,6 +2405,10 @@ bool MainWindow::openDocumentPath(const QString& f)
 
 void MainWindow::openLibrary()
 {
+    // Deprecation signal (B2 Task 6 fix round): the Add-ons manager is still the classic LibraryView QWidget
+    // (with its own embedded dialog pages), reachable from the THEMED settings hub's "Add-ons" row. Theming it
+    // is out of Task 6's scope — this log line is the inventory marker the Task 7 walk greps.
+    if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: addons"));
     library_->refreshSources();
     stack_->setCurrentWidget(library_);
 }
@@ -3305,6 +3319,9 @@ void MainWindow::enterSplitScreen()
         connect(splitView_, &SplitView::exitRequested, this, &MainWindow::exitSplitScreen);
         connect(splitView_, &SplitView::openHereRequested, this, [this](MediaPane* pane) {
             splitTarget_ = pane;                 // the next opened item loads into this pane
+            // Deprecation signal (B2 Task 6 fix round): the split-screen pane-pick drops to the classic
+            // HomeView even in themed mode (the themed home has no split-target picking flow yet).
+            if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: split-pane-pick"));
             stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
             home_->focusContent();
         });
