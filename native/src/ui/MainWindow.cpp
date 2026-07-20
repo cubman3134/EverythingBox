@@ -2002,6 +2002,98 @@ void MainWindow::ensureEmuPage()
 
 void MainWindow::openEmulatorManager()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: folder Info row + Change… Action (native QFileDialog — the documented exception) + fullscreen
+    // Toggle (same setter) + per-emulator Separator (display name) + status Info row (installed path / "Not
+    // installed.") + Download/Update Action + Launch Action — the SAME launcher_->install()/runEmulator() calls
+    // as classic. Install progress: GameLauncher forwards EmulatorManager::status; we patch the installing
+    // emulator's status row in place (top-gated via panelPageConns_ per the lifetime model at openCloudSync's
+    // connect block), and completion/failure rebuilds so the status + button reflect the new state. Hub child ->
+    // nested present(), Back -> openSettingsHub. The classic builder below is UNTOUCHED (classic mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.folder"); r.label = tr("Folder");
+          r.value = EmulatorManager::emulatorsRoot(); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.changefolder");
+          r.label = tr("Change folder…"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("emu.fullscreen");
+          r.label = tr("Launch emulators full screen"); r.checked = EmulatorManager::launchFullscreen(); rows << r; }
+
+        for (const ExternalEmulator& em : EmulatorRegistry::all())
+        {
+            const QString bin = EmulatorManager::resolveBinary(em);
+            { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("emu.sep:") + em.id;
+              r.label = em.displayName; rows << r; }
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + em.id; r.label = tr("Status");
+              r.value = bin.isEmpty() ? tr("Not installed.") : bin; rows << r; }
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.install:") + em.id;
+              r.label = bin.isEmpty() ? tr("Download %1").arg(em.displayName)
+                                      : tr("Re-download / Update %1").arg(em.displayName); rows << r; }
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.launch:") + em.id;
+              r.label = tr("Launch %1").arg(em.displayName); rows << r; }
+        }
+
+        auto onAct = [this](const QString& id, const QString& val) {
+            if (id == QStringLiteral("emu.changefolder")) {
+                const QString d = QFileDialog::getExistingDirectory(this, tr("Emulators folder"),
+                                                                    EmulatorManager::emulatorsRoot());
+                if (!d.isEmpty()) { EmulatorManager::setEmulatorsRoot(d); openEmulatorManager(); }
+            }
+            else if (id == QStringLiteral("emu.fullscreen")) {
+                EmulatorManager::setLaunchFullscreen(val == QStringLiteral("1"));
+            }
+            else if (id.startsWith(QStringLiteral("emu.install:"))) {
+                const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);   // emulator ids carry no colon
+                const ExternalEmulator* em = EmulatorRegistry::byId(emId);
+                if (!em) return;
+                if (launcher_->emulatorBusy()) {
+                    statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
+                emInstallId_ = emId;
+                PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emId; r.label = tr("Status");
+                r.value = tr("Downloading…"); themedPanelHost_->updateRow(r.id, r);
+                statusBar()->showMessage(tr("Downloading %1…").arg(em->displayName));
+                launcher_->install(*em);
+            }
+            else if (id.startsWith(QStringLiteral("emu.launch:"))) {
+                const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);
+                if (const ExternalEmulator* em = EmulatorRegistry::byId(emId)) launcher_->runEmulator(*em);
+            }
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Emulators is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("Emulators"))
+            themedPanelHost_->replaceTop(tr("Emulators"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Emulators"), rows, onAct, onBack);
+
+        // Install stream (Settings ▸ Emulators). Progress ticks patch the installing emulator's status row in
+        // place; completion rebuilds (installed path + "Re-download" label); failure shows the error on the row.
+        // Top-gated per the lifetime model — a status tick from a game-launch install (panel not up) is dropped.
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallProgress, this,
+                                   [this](const QString& t, int pct) {
+            if (!themedPanelIsTop(tr("Emulators")) || emInstallId_.isEmpty()) return;
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emInstallId_;
+            r.label = MainWindow::tr("Status"); r.value = pct >= 0 ? MainWindow::tr("%1 — %2%").arg(t).arg(pct) : t;
+            themedPanelHost_->updateRow(r.id, r); });
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallFinished, this, [this](const QString&) {
+            emInstallId_.clear();
+            if (themedPanelIsTop(tr("Emulators"))) openEmulatorManager(); });   // rebuild: now-installed state
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallFailed, this, [this](const QString& msg) {
+            if (themedPanelIsTop(tr("Emulators")) && !emInstallId_.isEmpty()) {
+                PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emInstallId_;
+                r.label = MainWindow::tr("Status"); r.value = MainWindow::tr("Failed: %1").arg(msg);
+                themedPanelHost_->updateRow(r.id, r); }
+            emInstallId_.clear(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Emulators"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Standalone emulators are kept in their own folder and launched to play "
             "their systems (Dolphin runs GameCube/Wii). They open in their own window — close the emulator "

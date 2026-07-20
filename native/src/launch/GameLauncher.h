@@ -64,6 +64,11 @@ signals:
     void restoreRequested();     // host restores the saved window state (the emulator exited)
     void statusMessage(const QString& text, int ms); // status-bar message (ms 0 = no timeout)
     void notifyUser(const QString& text, int ms);    // user-facing notice (→ Notifier)
+    // Standalone-emulator install stream (Settings ▸ Emulators), forwarded from the private EmulatorManager so
+    // the themed panel can tick the emulator's status row in place. pct < 0 = indeterminate (extract phase).
+    void emulatorInstallProgress(const QString& text, int pct);
+    void emulatorInstallFinished(const QString& displayName); // install-only completed (the binary is now present)
+    void emulatorInstallFailed(const QString& message);       // download/extract failed
 
 private:
     // The libretro launch tail — stop playback, load the core into RetroView, record the Recent entry and

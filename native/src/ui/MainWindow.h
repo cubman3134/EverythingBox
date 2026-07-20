@@ -124,6 +124,10 @@ private:
     QHash<QString, class QProgressBar*> dlBars_;
     QHash<QString, class QLabel*> dlStatus_;
     bool dlPanelOpen_ = false;           // the Downloads panel is the current view (rebuild it on state changes)
+    // Themed Emulators: the emulator whose install we kicked from Settings ▸ Emulators, so GameLauncher's install
+    // status stream patches the RIGHT status row (EmulatorManager::status carries no id; only one installs at a
+    // time). Cleared on completion/failure.
+    QString emInstallId_;
 
     static QString fmt(double seconds);
     // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
