@@ -3581,6 +3581,7 @@ void HomeView::issueRequest(bool append)
         {
             PerfTrace::begin(QStringLiteral("catalog.load"));
             pendingReqId_ = -1;          // supersede any still-in-flight async reply so it can't clobber this view
+            loading_ = false;            // a parent request may have set it; a stale true would block loadMore()
             currentPage_ = page;
             hasMore_ = warm->hasMore;
             populate(*warm, append);     // synchronous; loading_ stays false, so the spinner never appears
@@ -3601,6 +3602,14 @@ void HomeView::issueRequest(bool append)
     // never match in onCatalogReady (the store is inert) — same as the long-standing null-source -1 return.
     pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters, top.query)
                                : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
+    if (pendingReqId_ < 0)   // disabled/absent source: no async reply will ever arrive — don't wedge on Loading…
+    {                        // (reachable: setEnabled emits only sourceEnabledChanged, which HomeView doesn't
+                             // rebuild on, so a disabled source's tab stays live; Back/filter/scroll lands here)
+        loading_ = false;
+        hasMore_ = false;
+        status_->setText(tr("This source is unavailable."));
+        PerfTrace::end(QStringLiteral("catalog.load"), QStringLiteral("unavailable"));
+    }
 }
 
 void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)
