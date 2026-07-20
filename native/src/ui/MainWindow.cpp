@@ -18,6 +18,7 @@
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
+#include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/BackgroundMusic.h"
@@ -152,6 +153,32 @@
   #include <QWinEventNotifier>
 #endif
 
+// Starts the catalog prefetcher only once the main window has actually painted its first frame. Paint-gated
+// (not a plain singleShot(0), which can fire before the native paint arrives) AND then deferred one more
+// event-loop pass, so the sweep's very first request always timestamps AFTER startup.firstpaint ends — under
+// MMV_PERF, main's FirstPaintProbe ends that span in the same Paint event, and posting the kick guarantees it
+// runs strictly after. Installed unconditionally on first show; removes itself and self-destructs once fired.
+class PrefetchPaintKick : public QObject
+{
+public:
+    PrefetchPaintKick(QWidget* win, CatalogPrefetcher* pf) : QObject(win), win_(win), pf_(pf) {}
+    bool eventFilter(QObject* o, QEvent* e) override
+    {
+        if (e->type() == QEvent::Paint)
+            if (auto* w = qobject_cast<QWidget*>(o); w && w->window() == win_ && pf_)
+            {
+                CatalogPrefetcher* pf = pf_;
+                QTimer::singleShot(0, pf, [pf] { pf->start(); }); // pf is the context object -> safe if it dies
+                qApp->removeEventFilter(this);
+                deleteLater();
+            }
+        return false;
+    }
+private:
+    QWidget* win_;
+    QPointer<CatalogPrefetcher> pf_;
+};
+
 // One-line append to <app>/stream_debug.log, shared with the addon stream/manga resolution tracing.
 static void mwLog(const QString& msg)
 {
@@ -273,6 +300,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // addon-consuming views wired up alongside it (cloud, library, downloads).
     PerfTrace::begin(QStringLiteral("startup.addons"));
     addons_ = std::make_unique<AddonManager>();
+    // Background catalog warmer: sweeps every enabled source × catalog (page 1) into AddonManager's cache so a
+    // menu opens instantly off the warm read path in HomeView::issueRequest. Constructed here (right after the
+    // manager it wraps) but not kicked until post-first-paint — see showEvent's PrefetchPaintKick — so the
+    // sweep's first request never competes with the first frame.
+    prefetcher_ = new CatalogPrefetcher(addons_.get(), this);
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
     library_ = new LibraryView(addons_.get(), this);
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
@@ -1596,6 +1628,9 @@ void MainWindow::showEvent(QShowEvent* event)
     QMainWindow::showEvent(event);
     if (focusedOnShow_) return;
     focusedOnShow_ = true;
+    // Kick the background catalog warm-up, but only after the window has painted its first frame (see
+    // PrefetchPaintKick) so the sweep's first request never delays the first paint.
+    if (prefetcher_) qApp->installEventFilter(new PrefetchPaintKick(this, prefetcher_));
     // Become the active window and drop keyboard focus into the home view so arrow keys work without a
     // click first. Deferred a tick so it runs after the window is actually on screen / activated.
     raise();

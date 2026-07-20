@@ -47,6 +47,16 @@ if(MYMEDIAVAULT_BUILD_APP)
     find_package(Qt6 REQUIRED COMPONENTS ${MMV_QT_COMPONENTS})
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
+    # Embedded provider dev credentials (FIRST configure_file in this repo). Reads the git-ignored
+    # native/secrets/screenscraper.secrets, obfuscates it, and generates BuiltinSecrets.h into the
+    # BUILD TREE only. Absent secrets file -> empty header + a loud STATUS line (addon falls back to
+    # user settings). The generated dir is added to the include path of every target that compiles
+    # AddonContext.cpp (the app + the addon probes).
+    set(MMV_SECRETS_FILE     "${CMAKE_CURRENT_SOURCE_DIR}/secrets/screenscraper.secrets")
+    set(MMV_SECRETS_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/src/addons/BuiltinSecrets.h.in")
+    set(MMV_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSecrets.cmake")
+
     # QML theme engine (declarative, fully themeable front end) - desktop-first. OPTIONAL so a Qt install
     # without qtdeclarative still builds the app (the theme engine just isn't compiled). Gate its targets on
     # TARGET Qt6::Quick. The Android build keeps the Qt-Widgets UI until QML is added to its provisioning.
@@ -87,6 +97,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
         src/addons/AddonManager.cpp src/addons/AddonManager.h
+        src/addons/CatalogPrefetcher.cpp src/addons/CatalogPrefetcher.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
@@ -150,7 +161,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
-    target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR})
+    target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
     if(NOT ANDROID)
@@ -345,9 +356,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Console harness for the addon JS engine (Duktape) + manager discovery/resolution.
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
-        src/addons/AddonManager.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
-    target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape)
+    target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
@@ -357,7 +368,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
         src/core/GamelistStore.cpp src/core/Settings.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
-    target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape)
+    target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_gameagg PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
     endif() # NOT ANDROID (console probes)

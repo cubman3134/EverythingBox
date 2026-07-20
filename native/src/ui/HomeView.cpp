@@ -3569,14 +3569,47 @@ void HomeView::issueRequest(bool append)
     if (stack_.isEmpty()) return;
     const Level& top = stack_.last();
     const int page = append ? currentPage_ + 1 : 1;
+
+    // Warm read path: if the prefetcher (or a prior visit) already parked this catalog page in AddonManager's
+    // cache, serve it synchronously — no "Loading…" spinner, no request round-trip, no pendingReqId_ consumed.
+    // Only the catalog path is peeked: detail results aren't prefetched and aren't keyed into the catalog cache
+    // (so a detail level always misses). cachedCatalog already enforces TTL + source-enabled, so a disabled or
+    // stale source misses here and falls through to today's async path below, byte-unchanged.
+    if (!top.detail)
+    {
+        if (const auto warm = mgr_->cachedCatalog(top.addon, top.catalogId, top.query, page, top.filters))
+        {
+            PerfTrace::begin(QStringLiteral("catalog.load"));
+            pendingReqId_ = -1;          // supersede any still-in-flight async reply so it can't clobber this view
+            loading_ = false;            // a parent request may have set it; a stale true would block loadMore()
+            currentPage_ = page;
+            hasMore_ = warm->hasMore;
+            populate(*warm, append);     // synchronous; loading_ stays false, so the spinner never appears
+            PerfTrace::end(QStringLiteral("catalog.load"),
+                           QStringLiteral("page=%1 n=%2 warm").arg(page).arg(warm->items.size()));
+            if (!append) rebuildFilterBar(warm->filters);
+            return;
+        }
+    }
+
     pendingAppend_ = append;
     pendingPage_ = page;
     loading_ = true;
     status_->setText(append ? tr("Loading more…") : tr("Loading…"));
 
     PerfTrace::begin(QStringLiteral("catalog.load"));
+    // requestCatalog now returns -1 for a disabled/absent source; reqIds are positive, so a -1 stored here can
+    // never match in onCatalogReady (the store is inert) — same as the long-standing null-source -1 return.
     pendingReqId_ = top.detail ? mgr_->requestDetail(top.addon, top.item, page, top.filters, top.query)
                                : mgr_->requestCatalog(top.addon, top.catalogId, top.query, page, top.filters);
+    if (pendingReqId_ < 0)   // disabled/absent source: no async reply will ever arrive — don't wedge on Loading…
+    {                        // (reachable: setEnabled emits only sourceEnabledChanged, which HomeView doesn't
+                             // rebuild on, so a disabled source's tab stays live; Back/filter/scroll lands here)
+        loading_ = false;
+        hasMore_ = false;
+        status_->setText(tr("This source is unavailable."));
+        PerfTrace::end(QStringLiteral("catalog.load"), QStringLiteral("unavailable"));
+    }
 }
 
 void HomeView::onCatalogReady(int requestId, const MediaCatalog& cat)

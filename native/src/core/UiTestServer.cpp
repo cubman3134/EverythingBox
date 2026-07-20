@@ -63,6 +63,9 @@ QString UiTestServer::handle(const QString& line)
             { QStringLiteral("left"), Qt::Key_Left },   { QStringLiteral("right"), Qt::Key_Right },
             { QStringLiteral("enter"), Qt::Key_Return },{ QStringLiteral("back"), Qt::Key_Backspace },
             { QStringLiteral("escape"), Qt::Key_Escape },
+            // Space: the nav ring passes it through (NavRing::handleKey default), so it reaches the focused
+            // widget natively — e.g. toggles a QListWidget checkbox (the Library's per-source enable box).
+            { QStringLiteral("space"), Qt::Key_Space },
             // Themed-surface shortcuts: "I"/Info opens the detail view, "P" adds to a playlist, "/" searches.
             { QStringLiteral("info"), Qt::Key_I },      { QStringLiteral("i"), Qt::Key_I },
             { QStringLiteral("playlist"), Qt::Key_P },  { QStringLiteral("p"), Qt::Key_P },

@@ -1,5 +1,6 @@
 #include "AddonContext.h"
 #include "../core/AppPaths.h"
+#include "BuiltinSecrets.h" // generated into the build tree by cmake/GenerateSecrets.cmake
 
 #include <QDir>
 #include <QFile>
@@ -48,6 +49,51 @@ void AddonContext::writeConfig(const QString& addonId, const QString& key, const
 QString AddonContext::getConfig(const QString& key) const
 {
     return readConfig(id_, key, configDefaults_.value(key));
+}
+
+QString AddonContext::builtinCredential(const QString& key) const
+{
+    // SCOPED to the owning addon: the JS global is bound into EVERY JsLocal addon, and third-party
+    // addons are installable from registries — an unscoped lookup would let any of them exfiltrate
+    // the embedded dev creds simply by calling builtinCredential("devid") (a far lower bar than
+    // reversing the binary). Only the bundled ScreenScraper addon (its manifest id) may read its two
+    // keys; any other addon id or key gets an empty string.
+    static const QHash<QString, QSet<QString>> kAllowlist = {
+        { QStringLiteral("com.mymediavault.screenscraper"),
+          { QStringLiteral("devid"), QStringLiteral("devpassword") } },
+    };
+    const auto allowed = kAllowlist.constFind(id_);
+    if (allowed == kAllowlist.constEnd() || !allowed->contains(key)) return QString();
+
+    // Best-effort obfuscation, NOT cryptography: join the two split obfuscated arrays, reverse the
+    // rolling XOR (this MUST mirror native/cmake/GenerateSecrets.cmake byte-for-byte), then slice the
+    // recovered plaintext blob into devid|devpassword by their stored lengths. The XOR only keeps the
+    // creds out of a `strings` scan — anyone with the binary can recover them.
+    using namespace mmv_secrets;
+    const int total = kScreenScraperALen + kScreenScraperBLen;
+    if (total <= 0) return QString(); // secrets file was absent at build → nothing embedded
+
+    static const unsigned char KEY[] = { 90, 195, 23, 158, 66, 189, 47, 113 };
+    const int keyLen = static_cast<int>(sizeof(KEY));
+
+    QByteArray blob;
+    blob.reserve(total);
+    for (int i = 0; i < total; ++i)
+    {
+        const unsigned char ob = (i < kScreenScraperALen)
+            ? kScreenScraperA[i]
+            : kScreenScraperB[i - kScreenScraperALen];
+        const unsigned char pb = static_cast<unsigned char>((ob ^ KEY[i % keyLen]) ^ (i & 0xFF));
+        blob.append(static_cast<char>(pb));
+    }
+
+    const int devidLen = kScreenScraperDevidLen;
+    const int devpwLen = kScreenScraperDevpasswordLen;
+    if (key == QStringLiteral("devid") && devidLen > 0 && devidLen <= blob.size())
+        return QString::fromUtf8(blob.constData(), devidLen);
+    if (key == QStringLiteral("devpassword") && devpwLen > 0 && devidLen + devpwLen <= blob.size())
+        return QString::fromUtf8(blob.constData() + devidLen, devpwLen);
+    return QString();
 }
 
 void AddonContext::log(const QString& message) const

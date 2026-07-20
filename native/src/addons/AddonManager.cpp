@@ -501,12 +501,35 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
         if (it == pendingCatalogKey_.constEnd()) return;
         const QString key = it.value();
         pendingCatalogKey_.erase(it);
-        if (!cat.items.isEmpty()) // don't cache an empty/failed fetch
+        // Arrival-time enabled check (symmetry with cachedCatalog/requestCatalog): if the source was disabled
+        // while this fetch was in flight, don't re-populate its cache — setEnabled already dropped its entries
+        // and requestCatalog fail-fasts a disabled source, so an in-flight reply is the only re-insert window.
+        // The cache key is "<manifestId>|…", so the prefix before the first '|' is the source id.
+        if (isEnabled(key.left(key.indexOf(QLatin1Char('|')))) && !cat.items.isEmpty()) // skip empty/failed too
             catalogCache_.insert(key, { QDateTime::currentMSecsSinceEpoch(), cat });
     });
 
+    // MMV_PREFETCH_TTL_S (seconds, >0) compresses the catalog-cache TTL for tests; it also scales the
+    // CatalogPrefetcher's resweep cadence (which reads catalogCacheTtlMs()). Unset -> the 30-minute default.
+    const int ttlOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_TTL_S");
+    if (ttlOverrideS > 0)
+    {
+        catalogCacheTtlMs_ = qint64(ttlOverrideS) * 1000;
+        static bool loggedOverride = false; // once per process, not per AddonManager
+        if (!loggedOverride)
+        {
+            loggedOverride = true;
+            streamLog(QStringLiteral("prefetch: MMV_PREFETCH_TTL_S override active - catalog cache TTL %1s")
+                          .arg(ttlOverrideS));
+        }
+    }
+
     nam_ = new QNetworkAccessManager(this);
-    root_ = AppPaths::dataDir() + QStringLiteral("/addons");
+    // MMV_ADDONS_ROOT lets a test (probe_addon) point discovery at an isolated fixture dir instead of the
+    // portable <app>/addons folder; unset in normal runs, so behaviour is unchanged.
+    root_ = qEnvironmentVariableIsSet("MMV_ADDONS_ROOT")
+                ? qEnvironmentVariable("MMV_ADDONS_ROOT")
+                : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
     seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
@@ -825,23 +848,60 @@ QString AddonManager::catalogCacheKey(LoadedAddon* src, const QString& catalogId
     return k;
 }
 
+std::optional<MediaCatalog> AddonManager::cachedCatalog(LoadedAddon* src, const QString& catalogId,
+                                                        const QString& query, int page,
+                                                        const QMap<QString, QString>& filters) const
+{
+    if (!src) return std::nullopt;
+    if (!isEnabled(src->manifest.id)) return std::nullopt; // stale-disabled: never serve a disabled source
+    const QString key = catalogCacheKey(src, catalogId, query, page, filters);
+    const auto it = catalogCache_.constFind(key);
+    if (it == catalogCache_.constEnd()) return std::nullopt;
+    if (QDateTime::currentMSecsSinceEpoch() - it->atMs >= catalogCacheTtlMs_) return std::nullopt; // expired
+    return it->cat;
+}
+
+bool AddonManager::hasCachedCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                                    const QMap<QString, QString>& filters) const
+{
+    if (!src) return false;
+    if (!isEnabled(src->manifest.id)) return false; // stale-disabled: a disabled source is never "warm"
+    const QString key = catalogCacheKey(src, catalogId, query, page, filters);
+    const auto it = catalogCache_.constFind(key);
+    if (it == catalogCache_.constEnd()) return false;
+    return QDateTime::currentMSecsSinceEpoch() - it->atMs < catalogCacheTtlMs_; // false if expired
+}
+
 int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                                  const QMap<QString, QString>& filters)
 {
     if (!src) return -1;
+    // Fail fast for a disabled source: don't serve its cache (the stale-disabled landmine) and don't fetch
+    // either — a fetch would silently re-populate the cache for a source the user just turned off. Callers
+    // only act on enabled sources (SearchAggregator/LibraryView gate on isEnabled explicitly; HomeView only
+    // browses enabled sources' tabs), so the -1 is inert for the UI, same as the existing null-src return.
+    if (!isEnabled(src->manifest.id)) return -1;
 
     // Serve a recent browse/landing result from cache (e.g. the console list, which rarely changes) instead
     // of re-fetching. Delivered on the next event-loop turn so the caller records its reqId first.
     const QString key = catalogCacheKey(src, catalogId, query, page, filters);
     const auto cached = catalogCache_.constFind(key);
     if (cached != catalogCache_.constEnd()
-        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < kCatalogCacheTtlMs)
+        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < catalogCacheTtlMs_)
     {
         const int reqId = ++reqCounter_;
         const MediaCatalog cat = cached->cat;
         QMetaObject::invokeMethod(this, [this, reqId, cat] { emit catalogReady(reqId, cat); }, Qt::QueuedConnection);
         return reqId;
     }
+
+    // Instrumentation (MMV_PREFETCH_LOG=1, off by default): reaching here is a cache MISS -> a REAL fetch (JS
+    // getCatalog or HTTP GET) is about to run. Zero of these lines during a menu walk is the warm-path proof;
+    // they should all cluster at prefetch-sweep time. Cache-served requests return above and never log.
+    static const bool kLogFetch = qEnvironmentVariableIntValue("MMV_PREFETCH_LOG") > 0;
+    if (kLogFetch) streamLog(QStringLiteral("catalog fetch %1|%2 page=%3%4")
+                                 .arg(src->manifest.id, catalogId).arg(page)
+                                 .arg(query.isEmpty() ? QString() : QStringLiteral(" q=") + query));
 
     const int reqId = (src->transport == LoadedAddon::RemoteHttp)
         ? dispatchRemoteCatalog(src, catalogId, query, page, filters)
@@ -885,6 +945,9 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
                                : remoteCatalogUrl(base, catalogId, query, page, filters));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
@@ -928,6 +991,9 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
                                : remoteDetailUrl(base, item.type, item.id, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
@@ -967,6 +1033,9 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id) : remoteMetaUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
@@ -1443,6 +1512,15 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
     mz_free(mfData);
     if (!ok) return fail(QStringLiteral("Package manifest is invalid."));
 
+    // Reserved-namespace guard: the bundled addons (com.mymediavault.*) ship inside the app and are
+    // NEVER installed through this path. Refuse a package that claims such an id so a downloaded /
+    // side-loaded package can't impersonate a bundled source or overwrite its folder under root_.
+    if (manifest.id.startsWith(QStringLiteral("com.mymediavault.")))
+    {
+        streamLog(QStringLiteral("addon install: refused reserved-namespace id %1").arg(manifest.id));
+        return fail(QStringLiteral("Refused: \"%1\" uses the reserved com.mymediavault.* namespace.").arg(manifest.id));
+    }
+
     const QString dest = root_ + QStringLiteral("/") + manifest.id;
     QDir(dest).removeRecursively();
     QDir().mkpath(dest);
@@ -1551,4 +1629,13 @@ void AddonManager::setEnabled(const QString& id, bool enabled)
 {
     store().setValue(QStringLiteral("addon.enabled.") + id, enabled);
     store().sync();
+    if (!enabled)
+    {
+        // Drop this source's cached catalogs so nothing stale can be served after it's turned off. Cache keys
+        // are "<manifestId>|catalog|query|page|…" (see catalogCacheKey), so the id + '|' prefix isolates them.
+        const QString prefix = id + QLatin1Char('|');
+        for (auto it = catalogCache_.begin(); it != catalogCache_.end(); )
+            it = it.key().startsWith(prefix) ? catalogCache_.erase(it) : std::next(it);
+    }
+    emit sourceEnabledChanged(id, enabled); // the prefetcher resweeps; the UI drops/serves accordingly
 }

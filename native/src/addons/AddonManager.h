@@ -15,6 +15,7 @@
 #include <QHash>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 class QNetworkAccessManager;
@@ -92,6 +93,23 @@ public:
     int requestSearch(LoadedAddon* src, const QString& query);
     int requestMeta(LoadedAddon* src, const MediaItem& item); // metaReady(reqId, MediaDetail) fires later
 
+    // Synchronous peek into the catalog result cache (see catalogCache_). Returns the cached MediaCatalog iff
+    // an entry exists for this exact request key, it's still within the cache TTL, AND the source is currently
+    // enabled — the last clause closes the stale-disabled landmine (a source turned off after its catalog was
+    // cached must never be served from that cache). Used by the CatalogPrefetcher to skip still-fresh entries
+    // and by the UI to serve a menu instantly without a request round-trip. nullopt on any miss.
+    std::optional<MediaCatalog> cachedCatalog(LoadedAddon* src, const QString& catalogId,
+                                              const QString& query, int page,
+                                              const QMap<QString, QString>& filters) const;
+    // Bool presence-peek with the same enabled + TTL semantics as cachedCatalog, but without copying the
+    // MediaCatalog out. The prefetcher's freshness check (per catalog, per sweep) only needs "is it warm?",
+    // so this avoids copying a full result payload just to discard it.
+    bool hasCachedCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                          const QMap<QString, QString>& filters) const;
+    // The active catalog-cache TTL in ms (30 min by default; MMV_PREFETCH_TTL_S scales it for testability).
+    // The prefetcher reads this to size its resweep cadence off the same clock the cache expires on.
+    qint64 catalogCacheTtlMs() const { return catalogCacheTtlMs_; }
+
     // Resolve a playable URL for a remote item via its /stream endpoint (async; the callback fires on the
     // GUI thread with the url+mime, or empty strings if there's no stream). JsLocal items already carry url.
     // attempt (?n=K) selects which source a file provider returns: 0 = best, 1 = next best, … - so the user
@@ -156,6 +174,7 @@ signals:
     void catalogReady(int requestId, const MediaCatalog& catalog);
     void metaReady(int requestId, const MediaDetail& detail);
     void sourcesChanged();                                  // the source list changed (UI should refresh)
+    void sourceEnabledChanged(const QString& id, bool enabled); // a source was enabled/disabled via setEnabled
     void remoteSourceResult(bool ok, const QString& message); // outcome of addRemoteSource()
 
 private:
@@ -195,5 +214,8 @@ private:
     struct CatalogCacheEntry { qint64 atMs = 0; MediaCatalog cat; };
     QHash<QString, CatalogCacheEntry> catalogCache_;
     QHash<int, QString> pendingCatalogKey_;     // in-flight reqId -> cache key, to store the result on arrival
-    static constexpr qint64 kCatalogCacheTtlMs = 30 * 60 * 1000; // 30 minutes
+    static constexpr qint64 kCatalogCacheTtlMs = 30 * 60 * 1000; // 30 minutes (default)
+    // Effective TTL: kCatalogCacheTtlMs, or MMV_PREFETCH_TTL_S seconds when that env var is set (>0). The
+    // override scales BOTH cache expiry (here) and the prefetcher's resweep cadence so tests can compress time.
+    qint64 catalogCacheTtlMs_ = kCatalogCacheTtlMs;
 };

@@ -23,6 +23,7 @@ class LibraryView;
 class BackgroundMusic;
 class HomeView;
 class AddonManager;
+class CatalogPrefetcher;
 class CloudSync;
 class QStackedWidget;
 class QSlider;
@@ -336,6 +337,7 @@ private:
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;
+    CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
     std::unique_ptr<CloudSync> cloud_;
     // "Continue watching" cloud sync: a small resume+recent JSON file, pulled+merged on startup and pushed
     // (debounced) when a position changes — separate from the heavy state bundle so it stays timely across devices.

@@ -4,12 +4,22 @@
 #include "AddonContext.h"
 #include "AddonModels.h"
 #include "AddonManager.h"
+#include "CatalogPrefetcher.h"
+#include "BuiltinSecrets.h" // generated (build tree): expected lengths for the credscope asserts
+#include "miniz.h"          // build a fixture .addon package for the reserved-namespace install guard
 
 #include <QCoreApplication>
 #include <QFile>
 #include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QHash>
+#include <functional>
 #include <memory>
 #include <cstdio>
+#include <cstring>
 
 // With "--manager": construct an AddonManager (scans <exe dir>/addons), list its sources and the first
 // source's catalog with resolved URLs - the full discovery + resolution path the app uses.
@@ -117,6 +127,37 @@ static int probeMetaOne(const QString& jsPath, const QString& catalogId)
     return d.valid ? 0 : 1;
 }
 
+// With "--getmeta <main.js> <title> [systemHint] [addonId]": call a metaFor provider's getMeta() directly
+// for a game title (no catalog needed) - used to exercise the ScreenScraper embedded-devcred path end to end.
+// addonId defaults to "probe"; pass the real addon id so getConfig() reads that addon's stored user account
+// (ssid/sspassword). Prints only the returned game metadata (never any credential).
+static int probeGetMeta(const QString& jsPath, const QString& title, const QString& systemHint, const QString& addonId)
+{
+    QFile f(jsPath);
+    if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
+    AddonManifest m;
+    m.id = addonId.isEmpty() ? QStringLiteral("probe") : addonId;
+    m.permissions << QStringLiteral("network");
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    QString err;
+    auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
+    if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
+    printf("has getMeta: %s   addonId: %s\n", addon->hasFunction(QStringLiteral("getMeta")) ? "yes" : "no",
+           m.id.toUtf8().constData());
+
+    QJsonObject arg{ { QStringLiteral("type"), QStringLiteral("game") }, { QStringLiteral("title"), title } };
+    if (!systemHint.isEmpty()) arg.insert(QStringLiteral("systemHint"), systemHint);
+    const QString argJson = QString::fromUtf8(QJsonDocument(arg).toJson(QJsonDocument::Compact));
+    const MediaDetail d = MediaDetail::fromJson(addon->invoke(QStringLiteral("getMeta"), argJson).toUtf8());
+    printf("getMeta(title=\"%s\", system=\"%s\") -> valid=%s  title=\"%s\"  facts=%d  image=%s  overview=%s\n",
+           title.toUtf8().constData(), systemHint.toUtf8().constData(), d.valid ? "yes" : "no",
+           d.title.toUtf8().constData(), int(d.facts.size()), d.imageUrl.isEmpty() ? "(none)" : "set",
+           d.overview.isEmpty() ? "(none)" : "set");
+    for (const MediaFact& fc : d.facts) printf("    %s: %s\n", fc.label.toUtf8().constData(), fc.value.toUtf8().constData());
+    printf("%s\n", d.valid ? "GETMETA WORKS" : "GETMETA: no metadata (check creds/network/title)");
+    return d.valid ? 0 : 1;
+}
+
 // With "--mangaflow <main.js>": exercise the keyless MangaDex path end to end - catalog -> manga meta ->
 // chapters (getDetail) -> chapter meta. Verifies the manga drill-down + both detail headers offline.
 static int probeMangaFlow(const QString& jsPath)
@@ -220,14 +261,359 @@ static int probeRemote(const QString& url, const QString& catalogId)
     return ok ? 0 : 1;
 }
 
+// --- prefetch / cache-peek / enable-disable harness (Feature-Track Task 1) --------------------------
+// Spins its own deterministic JsLocal fixtures in an isolated temp addons root (MMV_ADDONS_ROOT) and drives
+// the catalog cache peek + the CatalogPrefetcher entirely offline, asserting the Task-2 contract. No network.
+
+// Process the event loop for `ms`, delivering queued catalogReady/QtConcurrent completions.
+static void spin(int ms)
+{
+    QElapsedTimer t; t.start();
+    do { QCoreApplication::processEvents(QEventLoop::AllEvents, 10); } while (t.elapsed() < ms);
+}
+// Spin until `pred` holds or `timeoutMs` elapses; returns the final pred() value.
+static bool spinUntil(const std::function<bool()>& pred, int timeoutMs)
+{
+    QElapsedTimer t; t.start();
+    while (!pred() && t.elapsed() < timeoutMs)
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+    return pred();
+}
+
+static bool writeText(const QString& path, const QByteArray& text)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    return f.write(text) == text.size();
+}
+
+// Build a minimal .addon package (a zip with a top-level manifest.json + main.js) at pkgPath, carrying the
+// given manifest id — used to exercise AddonManager::installPackage's reserved-namespace guard.
+static bool makeAddonPackage(const QString& pkgPath, const QString& id)
+{
+    const QByteArray manifest =
+        "{\n  \"id\": \"" + id.toUtf8() + "\",\n  \"name\": \"Pkg Fixture\",\n  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n  \"entry\": \"main.js\",\n  \"permissions\": [],\n"
+        "  \"catalogs\": [ { \"id\": \"movies\", \"name\": \"Movies\", \"type\": \"movie\" } ]\n}\n";
+    static const char* JS = "function getCatalog(){return JSON.stringify({title:'x',items:[],hasMore:false});}\n";
+    mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_writer_init_file(&zip, pkgPath.toUtf8().constData(), 0)) return false;
+    bool ok = mz_zip_writer_add_mem(&zip, "manifest.json", manifest.constData(), size_t(manifest.size()), MZ_BEST_SPEED)
+           && mz_zip_writer_add_mem(&zip, "main.js", JS, std::strlen(JS), MZ_BEST_SPEED);
+    ok = mz_zip_writer_finalize_archive(&zip) && ok;
+    mz_zip_writer_end(&zip);
+    return ok;
+}
+
+// A minimal offline media-source: 2 catalogs, a getCatalog that serves a fixed 3-item page and embeds a
+// per-catalog invocation counter in the title (so a test can tell a FRESH run from a cache-served copy).
+static bool makeFixture(const QString& root, const QString& id)
+{
+    const QString dir = root + QStringLiteral("/") + id;
+    if (!QDir().mkpath(dir)) return false;
+    const QByteArray manifest =
+        "{\n"
+        "  \"id\": \"" + id.toUtf8() + "\",\n"
+        "  \"name\": \"Prefetch Fixture\",\n"
+        "  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n"
+        "  \"entry\": \"main.js\",\n"
+        "  \"permissions\": [],\n"
+        "  \"catalogs\": [\n"
+        "    { \"id\": \"movies\", \"name\": \"Movies\", \"type\": \"movie\" },\n"
+        "    { \"id\": \"shows\",  \"name\": \"Shows\",  \"type\": \"series\" }\n"
+        "  ]\n"
+        "}\n";
+    static const char* JS =
+        "function J(s){try{return JSON.parse(s);}catch(e){return null;}}\n"
+        "function getCatalog(argJson){\n"
+        "  var a=J(argJson)||{};var cat=a.catalog||'mixed';\n"
+        "  var n=parseInt(getStorage('gen_'+cat)||'0',10)+1;setStorage('gen_'+cat,String(n));\n"
+        "  var items=[];for(var i=1;i<=3;i++)items.push({id:cat+':item'+i,title:cat+' Item '+i,\n"
+        "    type:'movie',subtitle:'gen'+n,thumbnailUrl:'',url:''});\n"
+        "  return JSON.stringify({title:cat+' #'+n,items:items,hasMore:false});\n"
+        "}\n";
+    return writeText(dir + QStringLiteral("/manifest.json"), manifest)
+        && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
+}
+
+// A "lost reply" fixture for the liveness watchdog: 3 catalogs whose getCatalog busy-waits ~4s (inside the
+// 5s Duktape deadline) before answering — long past a 1s test watchdog, so from the prefetcher's view the
+// reply is missing. 3 catalogs = every in-flight slot wedges at once, the exact stall the watchdog fixes.
+static bool makeSlowFixture(const QString& root, const QString& id)
+{
+    const QString dir = root + QStringLiteral("/") + id;
+    if (!QDir().mkpath(dir)) return false;
+    const QByteArray manifest =
+        "{\n"
+        "  \"id\": \"" + id.toUtf8() + "\",\n"
+        "  \"name\": \"Slow Fixture\",\n"
+        "  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n"
+        "  \"entry\": \"main.js\",\n"
+        "  \"permissions\": [],\n"
+        "  \"catalogs\": [\n"
+        "    { \"id\": \"slow-a\", \"name\": \"Slow A\", \"type\": \"movie\" },\n"
+        "    { \"id\": \"slow-b\", \"name\": \"Slow B\", \"type\": \"movie\" },\n"
+        "    { \"id\": \"slow-c\", \"name\": \"Slow C\", \"type\": \"movie\" }\n"
+        "  ]\n"
+        "}\n";
+    static const char* JS =
+        "function getCatalog(argJson){\n"
+        "  var end=Date.now()+4000; while(Date.now()<end){}\n"
+        "  return JSON.stringify({title:'slow',items:[{id:'s1',title:'Slow 1',type:'movie',url:''}]});\n"
+        "}\n";
+    return writeText(dir + QStringLiteral("/manifest.json"), manifest)
+        && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
+}
+
+static int probePrefetch()
+{
+    int pass = 0, fail = 0;
+    auto check = [&](const char* name, bool ok) {
+        printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name); if (ok) ++pass; else ++fail;
+    };
+
+    // ---- builtinCredential scoping: the global is bound into EVERY JsLocal addon, so the C++ side
+    // allowlists by addon id — a third-party addon calling builtinCredential("devid") must get EMPTY,
+    // while the bundled ScreenScraper id passes through. Exercised via the REAL binding (fixture JS
+    // calls the global), asserted by LENGTH only — credential values are never printed. The allow-path
+    // expectation self-adjusts to the build: lengths match BuiltinSecrets.h (0 when no secrets file).
+    {
+        static const char* kCredJs =
+            "function credLens() { return JSON.stringify({"
+            " d: builtinCredential('devid').length, p: builtinCredential('devpassword').length }); }";
+        auto lensFor = [&](const QString& addonId, int* d, int* p) -> bool {
+            AddonManifest m; m.id = addonId;
+            auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mmv-credscope-probe"));
+            QString err;
+            auto a = JsAddon::load(QString::fromUtf8(kCredJs), std::move(ctx), &err);
+            if (!a) { printf("credscope fixture load failed: %s\n", err.toUtf8().constData()); return false; }
+            const QJsonObject o = QJsonDocument::fromJson(
+                a->invoke(QStringLiteral("credLens"), QStringLiteral("{}")).toUtf8()).object();
+            *d = o.value(QStringLiteral("d")).toInt(-1);
+            *p = o.value(QStringLiteral("p")).toInt(-1);
+            return true;
+        };
+        int d = -1, p = -1;
+        check("credscope: third-party addon id gets EMPTY builtinCredential",
+              lensFor(QStringLiteral("com.evil.thirdparty"), &d, &p) && d == 0 && p == 0);
+        int d2 = -1, p2 = -1;
+        check("credscope: screenscraper id passes the allowlist (lengths match the embedded header)",
+              lensFor(QStringLiteral("com.mymediavault.screenscraper"), &d2, &p2)
+              && d2 == mmv_secrets::kScreenScraperDevidLen
+              && p2 == mmv_secrets::kScreenScraperDevpasswordLen);
+    }
+
+    const QString root = QDir::tempPath() + QStringLiteral("/mmv-prefetch-fixture-")
+                       + QString::number(QCoreApplication::applicationPid());
+    QDir(root).removeRecursively();
+    const QStringList ids = { QStringLiteral("probe.fixture.0"), QStringLiteral("probe.fixture.1"),
+                              QStringLiteral("probe.fixture.2") };
+    for (const QString& id : ids) if (!makeFixture(root, id)) { printf("fixture write failed\n"); return 2; }
+    qputenv("MMV_ADDONS_ROOT", root.toUtf8());
+
+    // ---- Manager A: comfortably-long TTL for the peek/disable/signal steps ----
+    qputenv("MMV_PREFETCH_TTL_S", "30");
+    AddonManager mgr;
+    for (const QString& id : ids) mgr.setEnabled(id, true); // isEnabled persists in the shared ini across runs
+    check("discovered the 3 fixtures", mgr.sources().size() == 3);
+    LoadedAddon* s0 = mgr.sourceById(ids[0]);
+    if (!s0) { printf("fixture 0 not loaded\n"); return 2; }
+
+    // Capture every delivered catalog by reqId so we can inspect the async path's actual result.
+    QHash<int, MediaCatalog> got;
+    QObject::connect(&mgr, &AddonManager::catalogReady, &mgr,
+                     [&](int rid, const MediaCatalog& c) { got.insert(rid, c); });
+
+    // (1) peek miss before any fetch
+    check("cachedCatalog miss -> nullopt", !mgr.cachedCatalog(s0, QStringLiteral("movies"), QString(), 1, {}).has_value());
+
+    // (2) after a requestCatalog completes -> hit with the same 3 items
+    mgr.requestCatalog(s0, QStringLiteral("movies"), QString(), 1, {});
+    spinUntil([&] { return mgr.cachedCatalog(s0, QStringLiteral("movies"), QString(), 1, {}).has_value(); }, 5000);
+    const auto hit = mgr.cachedCatalog(s0, QStringLiteral("movies"), QString(), 1, {});
+    check("cachedCatalog hit after fetch", hit.has_value() && hit->items.size() == 3);
+    check("cached items match the served page",
+          hit && hit->items.size() == 3 && hit->items[0].id == QStringLiteral("movies:item1"));
+    const QString firstTitle = hit ? hit->title : QString();
+
+    // (3) disabled source -> nullopt even when cached, AND the async path fails fast: no cached serve AND no
+    // fetch either (a fetch would re-populate the cache for a source the user just turned off).
+    mgr.setEnabled(ids[0], false);
+    check("disabled source peek -> nullopt", !mgr.cachedCatalog(s0, QStringLiteral("movies"), QString(), 1, {}).has_value());
+    got.clear();
+    const int r2 = mgr.requestCatalog(s0, QStringLiteral("movies"), QString(), 1, {});
+    spin(300); // give a (wrong) queued cache re-emit or fetch the chance to deliver
+    check("async path fail-fasts a disabled source (-1, nothing delivered)",
+          r2 == -1 && got.isEmpty() && !firstTitle.isEmpty());
+    mgr.setEnabled(ids[0], true); // restore
+
+    // (4) setEnabled(false) emits sourceEnabledChanged(id, false)
+    QString sigId; bool sigVal = true, sigFired = false;
+    QObject::connect(&mgr, &AddonManager::sourceEnabledChanged, &mgr,
+                     [&](const QString& id, bool en) { sigFired = true; sigId = id; sigVal = en; });
+    mgr.setEnabled(ids[1], false);
+    check("sourceEnabledChanged emitted with (id,false)", sigFired && sigId == ids[1] && sigVal == false);
+    mgr.setEnabled(ids[1], true); // restore
+
+    // ---- Manager P: fresh empty cache so the prefetcher has all 6 (3 sources x 2 catalogs) jobs to do ----
+    AddonManager mgrP;
+    for (const QString& id : ids) mgrP.setEnabled(id, true);
+    CatalogPrefetcher pf(&mgrP, &mgrP);
+    pf.setPeriodicResweep(false);            // deterministic: only explicit sweeps, no wall-clock timer
+    pf.start();
+    // Deterministic in-flight-cap proof: start() dispatches synchronously and catalogReady is queued, so no
+    // job has completed yet — exactly kMaxInFlight are outstanding and the remainder are parked in the queue.
+    const int totalJobs = 3 * 2;
+    check("in-flight capped at kMaxInFlight right after start",
+          pf.inFlight() == CatalogPrefetcher::kMaxInFlight);
+    check("surplus jobs are queued, not dispatched",
+          pf.queued() == totalJobs - CatalogPrefetcher::kMaxInFlight);
+    int maxSeen = pf.inFlight();
+    bool everOver = false;
+    spinUntil([&] {
+        maxSeen = qMax(maxSeen, pf.inFlight());
+        if (pf.inFlight() > CatalogPrefetcher::kMaxInFlight) everOver = true;
+        return pf.idle();
+    }, 8000);
+    check("never exceeded the cap while draining", !everOver && maxSeen <= CatalogPrefetcher::kMaxInFlight);
+    check("cap was actually reached (throttle engaged)", maxSeen == CatalogPrefetcher::kMaxInFlight);
+    check("issued exactly one request per job", pf.issued() == totalJobs);
+    bool allCached = true;
+    for (const QString& id : ids) {
+        LoadedAddon* s = mgrP.sourceById(id);
+        for (const QString& c : { QStringLiteral("movies"), QStringLiteral("shows") })
+            if (!mgrP.cachedCatalog(s, c, QString(), 1, {}).has_value()) allCached = false;
+    }
+    check("every source x catalog landed in the cache", allCached);
+
+    // (5) resweep skips still-fresh entries -> no new requests are issued
+    const int before = pf.issued();
+    pf.resweep();
+    spin(200);
+    check("resweep skips fresh entries (request count unchanged)", pf.issued() == before && pf.idle());
+
+    // ---- Manager R: reload() mid-sweep (the use-after-free case). AddonManager::reload() (fired from a
+    // remote-manifest refresh ~0.5-3s after startup, install/remove, and self-update) destroys EVERY
+    // LoadedAddon and clears the cache, then emits sourcesChanged. With 3 jobs parked in the queue holding
+    // freed source pointers, the old raw-pointer Job dereferenced freed memory at the next pump. The fix:
+    // jobs hold source IDS (re-resolved at pump), and sourcesChanged flushes the queue + slot bookkeeping
+    // BEFORE the resweep re-enqueues fresh jobs against the rebuilt source set. 6 catalogs (>3) so the sweep
+    // is provably mid-flight (3 in flight, 3 queued) at the moment reload() lands. ----
+    AddonManager mgrR;
+    for (const QString& id : ids) mgrR.setEnabled(id, true);
+    CatalogPrefetcher pfR(&mgrR, &mgrR);
+    pfR.setPeriodicResweep(false);
+    pfR.start();
+    check("reload case: sweep is mid-flight before reload (3 in flight, 3 queued)",
+          pfR.inFlight() == CatalogPrefetcher::kMaxInFlight && pfR.queued() == 3);
+    // Force the exact hazard: free every LoadedAddon while jobs sit queued, then fire the signal reload()
+    // always pairs with. No event-loop turn happens between these two calls, so no stale-pointer pump can
+    // occur before flush() clears the queue. Reaching the asserts below at all = no crash / no UAF.
+    mgrR.reload();
+    QMetaObject::invokeMethod(&mgrR, "sourcesChanged", Qt::DirectConnection);
+    const bool drainedR = spinUntil([&] { return pfR.idle(); }, 8000);
+    check("reload mid-sweep: prefetcher drained without crash or wedge", drainedR);
+    bool allCachedR = true;
+    for (const QString& id : ids) {
+        LoadedAddon* s = mgrR.sourceById(id); // re-resolved against the REBUILT source set
+        for (const QString& c : { QStringLiteral("movies"), QStringLiteral("shows") })
+            if (!mgrR.hasCachedCatalog(s, c, QString(), 1, {})) allCachedR = false;
+    }
+    check("reload mid-sweep: resweep re-covered every dropped key (all catalogs cached)", allCachedR);
+
+    // ---- Manager S: 1-second TTL to exercise expiry ----
+    qputenv("MMV_PREFETCH_TTL_S", "1");
+    AddonManager mgrS;
+    mgrS.setEnabled(ids[0], true);
+    LoadedAddon* ss = mgrS.sourceById(ids[0]);
+    mgrS.requestCatalog(ss, QStringLiteral("movies"), QString(), 1, {});
+    spinUntil([&] { return mgrS.cachedCatalog(ss, QStringLiteral("movies"), QString(), 1, {}).has_value(); }, 5000);
+    check("peek hit within TTL", mgrS.cachedCatalog(ss, QStringLiteral("movies"), QString(), 1, {}).has_value());
+    spin(1300); // exceed the 1s TTL
+    check("peek miss after TTL expiry", !mgrS.cachedCatalog(ss, QStringLiteral("movies"), QString(), 1, {}).has_value());
+
+    // ---- Manager W: liveness watchdog. All 3 slots wedge on never-answering (4s) jobs; a 1s watchdog must
+    // reclaim them so the queued fast jobs still run — the pre-fix behavior was a queue stalled at cap. ----
+    const QString rootW = root + QStringLiteral("-wd");
+    QDir(rootW).removeRecursively();
+    const QString slowId = QStringLiteral("a.slow"), fastId = QStringLiteral("b.fast");
+    if (!makeSlowFixture(rootW, slowId) || !makeFixture(rootW, fastId)) { printf("wd fixture write failed\n"); return 2; }
+    qputenv("MMV_ADDONS_ROOT", rootW.toUtf8());
+    qputenv("MMV_PREFETCH_TTL_S", "30");      // roomy TTL: cache entries must outlive the asserts below
+    qputenv("MMV_PREFETCH_WATCHDOG_S", "1");  // expire a silent in-flight job after ~1s
+    AddonManager mgrW;
+    mgrW.setEnabled(slowId, true); mgrW.setEnabled(fastId, true);
+    LoadedAddon* fastSrc = mgrW.sourceById(fastId);
+    CatalogPrefetcher pfW(&mgrW, &mgrW);
+    pfW.setPeriodicResweep(false);
+    pfW.start(); // FIFO: a.slow loads first -> its 3 slow jobs take all 3 slots; b.fast's 2 jobs are queued
+    check("watchdog scenario: all slots wedged on silent jobs",
+          pfW.inFlight() == CatalogPrefetcher::kMaxInFlight && pfW.queued() == 2);
+    const bool drained = spinUntil([&] { return pfW.idle(); }, 6000);
+    check("watchdog reclaimed the wedged slots (queue not stalled at cap)", drained && pfW.expired() == 3);
+    check("queued jobs ran after reclamation",
+          pfW.issued() == 5
+          && mgrW.cachedCatalog(fastSrc, QStringLiteral("movies"), QString(), 1, {}).has_value()
+          && mgrW.cachedCatalog(fastSrc, QStringLiteral("shows"),  QString(), 1, {}).has_value());
+    // The slow replies DO arrive eventually (~4s): the manager may still cache them, but the prefetcher must
+    // ignore the late reqIds — no slot bookkeeping left to corrupt, no double-expiry, no phantom in-flight.
+    LoadedAddon* slowSrc = mgrW.sourceById(slowId);
+    spinUntil([&] { return mgrW.cachedCatalog(slowSrc, QStringLiteral("slow-a"), QString(), 1, {}).has_value(); }, 8000);
+    spin(300);
+    check("late replies ignored cleanly (prefetcher stays idle, counts unchanged)",
+          pfW.idle() && pfW.expired() == 3 && pfW.issued() == 5);
+    QDir(rootW).removeRecursively();
+    qunsetenv("MMV_PREFETCH_WATCHDOG_S");
+
+    // ---- Reserved-namespace install guard: a package claiming a com.mymediavault.* id must be REFUSED
+    // (bundled ids never arrive via installPackage; a side-loaded one could impersonate/overwrite one). ----
+    {
+        const QString rootI = root + QStringLiteral("-inst");
+        QDir(rootI).removeRecursively(); QDir().mkpath(rootI);
+        qputenv("MMV_ADDONS_ROOT", rootI.toUtf8());
+        AddonManager mgrI;
+        const QString reservedId = QStringLiteral("com.mymediavault.evil");
+        const QString okId = QStringLiteral("com.thirdparty.ok");
+        const QString pkgBad = rootI + QStringLiteral("/reserved.addon");
+        const QString pkgOk  = rootI + QStringLiteral("/ok.addon");
+        bool built = makeAddonPackage(pkgBad, reservedId) && makeAddonPackage(pkgOk, okId);
+        QString errBad, errOk;
+        const bool refused = built && !mgrI.installPackage(pkgBad, &errBad);
+        const bool folderAbsent = !QDir(rootI + QStringLiteral("/") + reservedId).exists();
+        check("install guard: reserved com.mymediavault.* package refused (not installed)",
+              refused && folderAbsent && !errBad.isEmpty());
+        // Control: a normal third-party id still installs through the same path (guard isn't over-broad).
+        const bool okInstalled = built && mgrI.installPackage(pkgOk, &errOk)
+                              && QDir(rootI + QStringLiteral("/") + okId).exists();
+        check("install guard: a normal third-party id still installs", okInstalled);
+        QDir(rootI).removeRecursively();
+    }
+
+    QDir(root).removeRecursively();
+    qunsetenv("MMV_ADDONS_ROOT");
+    qunsetenv("MMV_PREFETCH_TTL_S");
+
+    printf("prefetch: %d passed, %d failed\n", pass, fail);
+    printf("%s\n", fail == 0 ? "ADDON-OK" : "ADDON-FAIL");
+    return fail == 0 ? 0 : 1;
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
+    if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--prefetch"))
+        return probePrefetch();
     if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--remote"))
         return probeRemote(QString::fromLocal8Bit(argv[2]),
                            argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--mangaflow"))
         return probeMangaFlow(QString::fromLocal8Bit(argv[2]));
+    if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--getmeta"))
+        return probeGetMeta(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]),
+                            argc >= 5 ? QString::fromLocal8Bit(argv[4]) : QString(),
+                            argc >= 6 ? QString::fromLocal8Bit(argv[5]) : QString());
     if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--manager"))
         return probeManager(argc >= 3 ? QString::fromLocal8Bit(argv[2]) : QString(),
                             argc >= 4 ? QString::fromLocal8Bit(argv[3]).toInt() : 1);
