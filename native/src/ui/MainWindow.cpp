@@ -6165,6 +6165,59 @@ void MainWindow::openBiosCheck()
 // Inline form (no popup) to paste the Google OAuth client id/secret used for Drive sign-in.
 void MainWindow::openCloudClientSetup()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: two TextField rows (client id/secret via the OSK) + Save. Same write path (the cloud/clientId,
+    // cloud/clientSecret ini keys) and same follow-through (signOut + back to a refreshed Cloud panel). Values are
+    // held pending and only committed on Save — exactly like the classic form (Back discards). This is a nested
+    // present() on the Cloud panel; Save pops back to Cloud and rebuilds it (now configured) via replaceTop.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);   // drop Cloud's sign-in listeners
+        panelPageConns_.clear();                                                  // (signOut on Save must not re-present)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        QSettings s(iniPath, QSettings::IniFormat);
+        auto pending = std::make_shared<QPair<QString, QString>>(
+            s.value(QStringLiteral("cloud/clientId")).toString(),
+            s.value(QStringLiteral("cloud/clientSecret")).toString());
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.note"); r.label = tr("Client");
+          r.value = tr("Google Desktop-app OAuth"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cc.id"); r.label = tr("Client id");
+          r.value = pending->first; rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cc.secret"); r.label = tr("Client secret");
+          r.value = pending->second; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.err"); r.label = tr("Status"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("cc.save"); r.label = tr("Save"); rows << r; }
+
+        themedPanelHost_->present(tr("Sign-in client"), rows,
+            [this, pending, iniPath](const QString& id, const QString& val) {
+                if      (id == QStringLiteral("cc.id"))     pending->first = val;
+                else if (id == QStringLiteral("cc.secret")) pending->second = val;
+                else if (id == QStringLiteral("cc.save")) {
+                    if (pending->first.trimmed().isEmpty()) {
+                        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.err"); r.label = tr("Status");
+                        r.value = tr("Enter a client id."); themedPanelHost_->updateRow(QStringLiteral("cc.err"), r);
+                        return;
+                    }
+                    QSettings s(iniPath, QSettings::IniFormat);
+                    s.setValue(QStringLiteral("cloud/clientId"), pending->first.trimmed());
+                    s.setValue(QStringLiteral("cloud/clientSecret"), pending->second.trimmed());
+                    s.sync();
+                    cloud_->signOut();   // a new client invalidates the old sign-in (no listener armed now)
+                    // Pop back to Cloud and rebuild it (now configured) — deferred so this activate() unwinds first.
+                    QTimer::singleShot(0, this, [this] { themedPanelHost_->handleBack(); openCloudSync(); });
+                }
+            },
+            [this] { openCloudSync(); });   // defensive root onBack (nested: a pop just renders the Cloud parent)
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Sign-in client"), [this](QVBoxLayout* v) {
         QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         auto* intro = new QLabel(tr("Paste a Google <b>Desktop-app</b> OAuth client (from the Google Cloud "
