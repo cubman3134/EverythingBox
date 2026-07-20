@@ -329,8 +329,9 @@ private:
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
 
-    // Themed (QML) home, opt-in via "themedHome/enabled" (default off). showHomeScreen() routes Home to it
-    // or the classic HomeView. The themed-home methods are no-ops in builds without the QML engine.
+    // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
+    // explicit stored `false` still selects classic). showHomeScreen() routes Home to it or the classic
+    // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
     void showThemedHome();

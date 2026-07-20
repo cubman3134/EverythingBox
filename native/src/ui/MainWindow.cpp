@@ -2468,7 +2468,11 @@ void MainWindow::nudgeThemedHome() {}
 bool MainWindow::themedHomeEnabled() const
 {
 #ifdef MMV_HAVE_QML
-    return store().value(QStringLiteral("themedHome/enabled"), false).toBool();
+    // Default ON (B2 Task 6, item 3). The default only applies when the key is ABSENT: QSettings returns the
+    // stored value whenever the key exists, so a user who explicitly chose classic (wrote `false` via the
+    // Appearance toggle) is respected — only fresh installs and users who never touched the toggle now get the
+    // themed home. Semantics: absent -> true (themed wins), stored false -> false (classic), stored true -> true.
+    return store().value(QStringLiteral("themedHome/enabled"), true).toBool();
 #else
     return false;
 #endif
