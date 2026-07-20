@@ -18,6 +18,7 @@
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
+#include "../addons/AddonContext.h"
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
@@ -2405,13 +2406,488 @@ bool MainWindow::openDocumentPath(const QString& f)
 
 void MainWindow::openLibrary()
 {
-    // Deprecation signal (B2 Task 6 fix round): the Add-ons manager is still the classic LibraryView QWidget
-    // (with its own embedded dialog pages), reachable from the THEMED settings hub's "Add-ons" row. Theming it
-    // is out of Task 6's scope — this log line is the inventory marker the Task 7 walk greps.
-    if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: addons"));
+#ifdef MMV_HAVE_QML
+    // Themed mode (B2 Task 6.5): the Add-ons manager's SOURCE MANAGEMENT surface on the Nav Contract. Root rows =
+    // Browse/Install-from-file/Add-by-URL/Reload actions + a Separator + one Action per installed source (drill
+    // into presentAddonDetail). Catalog browsing / Local ROMs stay OUT of scope (the themed home covers content).
+    // Refresh is IMPERATIVE: installPackage/removeAddon/reload do NOT emit sourcesChanged (only remote add/remove
+    // + background updates do), so each mutating op re-presents the root (this is a hub child — panelTitle gates
+    // present vs replaceTop). The classic LibraryView below is UNTOUCHED (classic mode / no host).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // hub child present replaces the pool (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        QVector<PanelRow> rows;
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        action(QStringLiteral("lib.browse"),  tr("Browse Add-ons…"));
+        action(QStringLiteral("lib.install"), tr("Install from file…"));
+        action(QStringLiteral("lib.addurl"),  tr("Add by URL…"));
+        action(QStringLiteral("lib.reload"),  tr("Reload"));
+        { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("lib.sep"); r.label = tr("Sources"); rows << r; }
+
+        const QVector<LoadedAddon*>& srcs = addons_->sources();
+        if (srcs.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.none");
+            r.label = tr("No add-on sources installed yet."); rows << r;
+        }
+        else for (LoadedAddon* s : srcs)
+        {
+            QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+            if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + s->manifest.id;
+            r.label = name;
+            r.value = addons_->isEnabled(s->manifest.id) ? QString() : tr("disabled"); // enabled-state annotation
+            rows << r;
+        }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.status"); rows << r; } // add-by-URL / op results
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("lib.browse")) presentAddonRegistry();
+            else if (id == QStringLiteral("lib.install"))
+            {
+                // Native file picker is the documented exception (like Emulator Manager's Change folder…).
+                const QString f = QFileDialog::getOpenFileName(this, tr("Install add-on"), QString(),
+                    tr("Addon packages (*.addon *.zip);;All files (*.*)"));
+                if (f.isEmpty()) return;
+                QString err;
+                if (!addons_->installPackage(f, &err)) { setAddonsStatus(tr("Install failed: %1").arg(err)); return; }
+                openLibrary();                       // root is top -> replaceTop with the new source
+                setAddonsStatus(tr("Add-on installed."));
+            }
+            else if (id == QStringLiteral("lib.addurl")) presentAddByUrl();
+            else if (id == QStringLiteral("lib.reload"))
+            {
+                addons_->reload();
+                openLibrary();                       // rebuild the source list from the re-scanned root
+                setAddonsStatus(tr("Reloaded."));
+            }
+            else if (id.startsWith(QStringLiteral("lib.src:")))
+                presentAddonDetail(id.mid(id.indexOf(QLatin1Char(':')) + 1));
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Add-ons is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("Add-ons"))
+            themedPanelHost_->replaceTop(tr("Add-ons"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Add-ons"), rows, onAct, onBack);
+
+        // Remote source changes (a successful add-by-URL/registry-remote install, a background manifest refresh /
+        // self-update) that land while THIS root is the live top rebuild the list. When a child add-flow panel is
+        // top instead, this drops (its own top-gated handler owns the row/status); the child returns to a freshly
+        // rebuilt root on success. Armed in panelPageConns_ per the lifetime model (top-gated, replaced on re-present).
+        panelPageConns_ << connect(addons_.get(), &AddonManager::sourcesChanged, this, [this] {
+            if (themedPanelIsTop(tr("Add-ons"))) openLibrary(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
+    // Classic fallback: the Add-ons manager is the classic LibraryView QWidget. This log marks that the classic
+    // surface was ACTUALLY shown (the themed branch above returns first, so themed mode never logs it — the Task 7
+    // walk greps a themed run to prove zero classic surfaces). Classic mode reaches here and logs, as expected.
+    mwLog(QStringLiteral("deprecated-classic: addons"));
     library_->refreshSources();
     stack_->setCurrentWidget(library_);
 }
+
+#ifdef MMV_HAVE_QML
+// Patch the root "Add-ons" panel's status Info row in place (op results / add-by-URL outcomes). No-ops harmlessly
+// (updateRow returns false) when the root isn't the model's top panel.
+void MainWindow::setAddonsStatus(const QString& msg) { updatePanelInfo(QStringLiteral("lib.status"), msg); }
+
+// Patch ANY Info row's value in place by id (status lines on the add-by-URL / remove / registry panels). The row
+// keeps its (empty) label; updateRow patches every stack entry carrying the id, so a backgrounded panel stays fresh.
+void MainWindow::updatePanelInfo(const QString& id, const QString& value)
+{
+    PanelRow r; r.kind = PanelRow::Info; r.id = id; r.value = value;
+    themedPanelHost_->updateRow(id, r);
+}
+
+// Per-addon nested panel: Toggle Enabled + Configure… (or an Info when the manifest declares no settings) + a
+// destructive Remove + version/author/description Info rows. All data ops reuse AddonManager verbatim. Enable/
+// disable rides mgr_->setEnabled (which emits sourceEnabledChanged → the prefetcher resweeps) and patches the
+// backgrounded root's source row so its enabled-state annotation stays correct on pop-restore.
+void MainWindow::presentAddonDetail(const QString& sourceId)
+{
+    LoadedAddon* s = addons_->sourceById(sourceId);
+    if (!s) { openLibrary(); return; }   // vanished (e.g. removed underneath us) — back to the root
+    const AddonManifest m = s->manifest;
+    const bool remote = (s->transport == LoadedAddon::RemoteHttp);
+    const QString name = m.name.isEmpty() ? m.id : m.name;
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("ad.enabled"); r.label = tr("Enabled");
+      r.checked = addons_->isEnabled(m.id); rows << r; }
+    if (!m.settings.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.configure"); r.label = tr("Configure…"); rows << r; }
+    else
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.noconfig"); r.label = tr("Configure");
+      r.value = tr("No configurable settings."); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.remove");
+      r.label = remote ? tr("Remove source") : tr("Remove add-on"); r.destructive = true; rows << r; }
+    if (!m.version.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.version"); r.label = tr("Version"); r.value = m.version; rows << r; }
+    if (!m.author.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.author"); r.label = tr("Author"); r.value = m.author; rows << r; }
+    if (!m.description.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.about"); r.label = tr("About"); r.value = m.description; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.kind"); r.label = tr("Kind");
+      r.value = remote ? tr("Remote source — %1").arg(s->baseUrl) : tr("Local add-on"); rows << r; }
+
+    auto onAct = [this, sourceId, m, name, remote](const QString& id, const QString& val) {
+        if (id == QStringLiteral("ad.enabled"))
+        {
+            const bool on = (val == QStringLiteral("1"));
+            addons_->setEnabled(m.id, on);   // emits sourceEnabledChanged → prefetcher resweep (verified via log)
+            // Keep the backgrounded root's source-row annotation correct for the pop-restore.
+            QString label = m.name.isEmpty() ? m.id : m.name;
+            if (remote) label += tr("  (remote)");
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + m.id; r.label = label;
+            r.value = on ? QString() : tr("disabled");
+            themedPanelHost_->updateRow(r.id, r);
+        }
+        else if (id == QStringLiteral("ad.configure")) presentAddonConfig(m);
+        else if (id == QStringLiteral("ad.remove"))    confirmRemoveAddon(sourceId);
+    };
+    themedPanelHost_->present(name, rows, onAct, [this] { openLibrary(); }); // defensive root onBack
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+// Manifest-driven config form (nested on the addon detail): one row per AddonSetting — checkbox → Toggle,
+// password → masked TextField (OSK masks during editing too), number/text → TextField. Values load via
+// AddonContext::readConfig; each commit writes via AddonContext::writeConfig IMMEDIATELY (the themed-panel
+// convention — the addon's script picks the new value up on its next run, like classic's post-Save re-fetch). A
+// footer Info row carries the plaintext-storage note (the landmine). NO devid/devpassword special-casing — the
+// form is strictly manifest-driven (absent fields simply don't appear).
+void MainWindow::presentAddonConfig(const AddonManifest& manifest)
+{
+    const QString name = manifest.name.isEmpty() ? manifest.id : manifest.name;
+
+    QVector<PanelRow> rows;
+    if (manifest.settings.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.none");
+      r.label = tr("This add-on has no configurable settings."); rows << r; }
+    else for (const AddonSetting& sset : manifest.settings)
+    {
+        const QString stored = AddonContext::readConfig(manifest.id, sset.key, sset.defaultValue);
+        PanelRow r; r.id = QStringLiteral("cfg:") + sset.key; r.label = sset.label.isEmpty() ? sset.key : sset.label;
+        if (sset.type == QStringLiteral("checkbox"))
+        {
+            r.kind = PanelRow::Toggle;
+            r.checked = (stored.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 || stored == QStringLiteral("1"));
+        }
+        else
+        {
+            r.kind = PanelRow::TextField;
+            r.value = stored;
+            if (sset.type == QStringLiteral("password")) r.masked = true; // dots in the row AND in the OSK editor
+        }
+        rows << r;
+    }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.label = tr("Note");
+      r.value = tr("Credentials are stored on this device (plaintext in mymediavault.ini) and are only sent "
+                   "where the add-on's script chooses to use them."); rows << r; }
+
+    themedPanelHost_->present(tr("%1 — Settings").arg(name), rows,
+        [this, manifest](const QString& id, const QString& val) {
+            if (!id.startsWith(QStringLiteral("cfg:"))) return;
+            const QString key = id.mid(4);
+            QString value = val;
+            // Toggle delivers "1"/"0"; convert ONLY for a checkbox setting (a text/password field's literal
+            // "0"/"1" must be stored verbatim). Look the type up from the manifest to disambiguate.
+            for (const AddonSetting& sset : manifest.settings)
+                if (sset.key == key && sset.type == QStringLiteral("checkbox"))
+                { value = (val == QStringLiteral("1")) ? QStringLiteral("true") : QStringLiteral("false"); break; }
+            AddonContext::writeConfig(manifest.id, key, value);
+        },
+        [] { /* nested: Back pops to the addon detail */ });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+// Nested remove-confirm (Info message + a status Info row + a destructive Remove Action). Back CANCELS (never
+// removes — the confirm is a deliberate drill). On confirm: removeAddon (delete files) or removeRemoteSource
+// (drop the URL), then pop the confirm + detail back to a freshly rebuilt root (the removed source is gone).
+void MainWindow::confirmRemoveAddon(const QString& sourceId)
+{
+    LoadedAddon* s = addons_->sourceById(sourceId);
+    if (!s) { openLibrary(); return; }
+    const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+    const bool remote = (s->transport == LoadedAddon::RemoteHttp);
+    const QString addonId = s->manifest.id;
+    const QString baseUrl = s->baseUrl;
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.msg"); r.label = tr("Remove");
+      r.value = remote ? tr("Remove the remote source \"%1\"? Only the saved URL is removed.").arg(name)
+                       : tr("Remove \"%1\" and delete its files?").arg(name); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.status"); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("rm.confirm"); r.label = tr("Remove");
+      r.destructive = true; rows << r; }
+
+    themedPanelHost_->present(tr("Remove add-on"), rows,
+        [this, addonId, baseUrl, name, remote](const QString& id, const QString&) {
+            if (id != QStringLiteral("rm.confirm")) return;
+            const bool ok = remote ? addons_->removeRemoteSource(baseUrl) : addons_->removeAddon(addonId);
+            if (!ok) { updatePanelInfo(QStringLiteral("rm.status"), tr("Couldn't remove \"%1\".").arg(name)); return; }
+            // Removed: pop the confirm + the detail (deferred so this activate() unwinds first), landing on a
+            // rebuilt root. removeRemoteSource emits sourcesChanged synchronously, but "Remove add-on" is top
+            // at that instant so the root's top-gated handler drops it — this deferred rebuild is the refresh.
+            QTimer::singleShot(0, this, [this, name] {
+                themedPanelHost_->handleBack();   // pop the confirm -> the addon detail
+                themedPanelHost_->handleBack();   // pop the detail  -> the root ("Add-ons")
+                openLibrary();                    // root now top -> replaceTop with the source gone
+                setAddonsStatus(tr("Removed \"%1\".").arg(name));
+            });
+        },
+        [] { /* nested: Back cancels — the user's add-ons are never touched */ });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+// Add-by-URL nested panel: a URL TextField (via the OSK) + an Add Action → mgr_->addRemoteSource (ASYNC). The
+// result arrives on AddonManager::remoteSourceResult; a top-gated handler (armed here in panelPageConns_) shows
+// it on the status Info row — an invalid URL surfaces the error with no wedge. On success it pops back to a
+// freshly rebuilt root so the new source appears.
+void MainWindow::presentAddByUrl()
+{
+    auto pending = std::make_shared<QString>();
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.hint"); r.label = tr("Add-on URL");
+      r.value = tr("Its manifest.json or base URL"); rows << r; }
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = tr("URL");
+      r.value = *pending; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.status"); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("au.add"); r.label = tr("Add"); rows << r; }
+
+    themedPanelHost_->present(tr("Add by URL"), rows,
+        [this, pending](const QString& id, const QString& val) {
+            if (id == QStringLiteral("au.url")) *pending = val;
+            else if (id == QStringLiteral("au.add"))
+            {
+                const QString url = pending->trimmed();
+                if (url.isEmpty()) { updatePanelInfo(QStringLiteral("au.status"), tr("Enter an add-on URL.")); return; }
+                updatePanelInfo(QStringLiteral("au.status"), tr("Fetching add-on…"));
+                addons_->addRemoteSource(url);   // async → remoteSourceResult (handled below)
+            }
+        },
+        [] { /* nested: Back pops to the root */ });
+
+    // Result handler, top-gated on THIS panel (per the lifetime model). Failure surfaces on the status row and
+    // stays put (no wedge); success shows the message then returns to a rebuilt root so the new source is visible.
+    panelPageConns_ << connect(addons_.get(), &AddonManager::remoteSourceResult, this,
+        [this](bool ok, const QString& msg) {
+            if (!themedPanelIsTop(tr("Add by URL"))) return;   // a different add-flow (registry) is top — not ours
+            updatePanelInfo(QStringLiteral("au.status"), msg);
+            if (ok) QTimer::singleShot(700, this, [this] {
+                if (!themedPanelIsTop(tr("Add by URL"))) return;
+                themedPanelHost_->handleBack();   // pop to the root
+                openLibrary();                    // rebuild with the new source (sourcesChanged also fired, but
+            });                                   // the root wasn't top then, so this is the refresh)
+        });
+
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+namespace {
+// The built-in add-on registry (the always-present cubman3134 store index).
+QString addonsRegistryDefaultUrl()
+{ return QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-addons/main/index.json"); }
+// The directory an index URL lives in (its files are resolved relative to this).
+QString registryBaseUrl(const QString& indexUrl)
+{ const int slash = indexUrl.lastIndexOf(QLatin1Char('/')); return slash > 0 ? indexUrl.left(slash) : indexUrl; }
+// A registry entry with a "url" is a remote (HTTP) add-on: installing it just subscribes to the URL.
+bool registryEntryIsRemote(const QJsonObject& e) { return !e.value(QStringLiteral("url")).toString().isEmpty(); }
+QString registryNormalizeUrl(QString u)
+{
+    u = u.trimmed();
+    if (u.endsWith(QStringLiteral("/manifest.json"))) u.chop(int(qstrlen("/manifest.json")));
+    while (u.endsWith(QLatin1Char('/'))) u.chop(1);
+    return u;
+}
+// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
+bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+{
+    QNetworkRequest req((QUrl(url)));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam->get(req);
+    QEventLoop loop;
+    QTimer to; to.setSingleShot(true);
+    QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    to.start(20000);
+    loop.exec();
+    if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
+    {
+        if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
+        reply->abort(); reply->deleteLater();
+        return false;
+    }
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+    QFileInfo fi(destPath);
+    QDir().mkpath(fi.absolutePath());
+    QFile f(destPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { if (error) *error = QStringLiteral("can't write file"); return false; }
+    f.write(data);
+    return true;
+}
+} // namespace
+
+// The add-on registry "store" as a nested panel: fetch the configured registry index(es) (the built-in
+// cubman3134 add-on index + saved extras), render one Action row per entry ("Install" / "Installed ✓" disabled).
+// A remote entry subscribes via addRemoteSource (async → the top-gated remoteSourceResult rebuilds the rows); a
+// packaged entry downloads its files (blocking, classic parity) then reload()s. Reachable only when a registry is
+// reachable — an unreachable/empty fetch degrades to a graceful "unreachable" Info row (the brief's failure case).
+void MainWindow::presentAddonRegistry()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    registryInstallRowId_.clear();
+
+    // Present a loading placeholder immediately; the entries replace it once every index has been fetched.
+    QVector<PanelRow> loading;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+      r.value = tr("Loading…"); loading << r; }
+    themedPanelHost_->present(tr("Browse Add-ons"), loading, [](const QString&, const QString&) {}, [] {});
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+
+    // Configured registries: the built-in add-on index + any user-saved extras (kept in the ini by the classic
+    // browser). We render entries from them but omit the add/remove-registry management UI (source management only).
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    QStringList regs; regs << addonsRegistryDefaultUrl();
+    for (const QString& u : iniStore.value(QStringLiteral("registry/addonsExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+
+    struct RegFetch { int pending = 0; QVector<QPair<QJsonObject, QString>> entries; };
+    auto st = std::make_shared<RegFetch>();
+    st->pending = regs.size();
+
+    auto finish = [this, st] {
+        if (!themedPanelIsTop(tr("Browse Add-ons"))) return;   // navigated away while fetching — drop
+        QVector<PanelRow> rows;
+        if (st->entries.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+            r.value = tr("No add-ons found — the registry may be unreachable."); rows << r;
+        }
+        else
+        {
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+              r.value = tr("%n add-on(s) available.", "", int(st->entries.size())); rows << r; }
+            for (int i = 0; i < st->entries.size(); ++i)
+            {
+                const QJsonObject& e = st->entries[i].first;
+                const QString name = e.value(QStringLiteral("name")).toString();
+                const QString author = e.value(QStringLiteral("author")).toString();
+                bool installed = false;
+                if (registryEntryIsRemote(e))
+                    installed = addons_->remoteSourceUrls().contains(registryNormalizeUrl(e.value(QStringLiteral("url")).toString()));
+                else
+                {
+                    const QString eid = e.value(QStringLiteral("id")).toString();
+                    installed = !eid.isEmpty() && QFile::exists(addons_->addonsRoot() + QStringLiteral("/") + eid + QStringLiteral("/manifest.json"));
+                }
+                PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("reg:") + QString::number(i);
+                r.label = name.isEmpty() ? e.value(QStringLiteral("id")).toString() : name;
+                r.value = installed ? tr("Installed ✓") : (author.isEmpty() ? QString() : tr("by %1").arg(author));
+                r.enabled = !installed;
+                rows << r;
+            }
+        }
+        themedPanelHost_->replaceTop(tr("Browse Add-ons"), rows,
+            [this, st](const QString& id, const QString&) {
+                if (!id.startsWith(QStringLiteral("reg:"))) return;
+                const int i = id.mid(4).toInt();
+                if (i < 0 || i >= st->entries.size()) return;
+                installRegistryEntry(st->entries[i].first, st->entries[i].second, id);
+            },
+            [] {});
+    };
+
+    // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
+    QTimer::singleShot(15000, this, [st, finish] { if (st->pending > 0) { st->pending = 0; finish(); } });
+
+    for (const QString& indexUrl : regs)
+    {
+        QNetworkRequest req((QUrl(indexUrl)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
+            reply->deleteLater();
+            if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+                for (const QJsonValue& v : root.value(QStringLiteral("addons")).toArray())
+                    if (v.isObject()) st->entries << qMakePair(v.toObject(), indexUrl);
+            }
+            if (--st->pending <= 0) finish();
+        });
+    }
+
+    // A remote entry's addRemoteSource result (kicked from installRegistryEntry) rebuilds the rows so the installed
+    // entry flips to "Installed ✓"; the status line carries the message. Top-gated on THIS panel (lifetime model).
+    panelPageConns_ << connect(addons_.get(), &AddonManager::remoteSourceResult, this,
+        [this, finish](bool, const QString& msg) {
+            if (!themedPanelIsTop(tr("Browse Add-ons")) || registryInstallRowId_.isEmpty()) return;
+            registryInstallRowId_.clear();
+            finish();                                                 // rebuild (installed entry now shows ✓)
+            updatePanelInfo(QStringLiteral("reg.status"), msg);
+        });
+}
+
+// Install one registry entry: remote → addRemoteSource (async, the panel's remoteSourceResult handler rebuilds);
+// packaged → blocking download of its files into addons/<id>/ then reload(). The row shows "Installing…" while it runs.
+void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId)
+{
+    const QString name = entry.value(QStringLiteral("name")).toString();
+    { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installing…");
+      r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
+
+    if (registryEntryIsRemote(entry))
+    {
+        registryInstallRowId_ = rowId;                              // the remoteSourceResult handler patches this row
+        addons_->addRemoteSource(entry.value(QStringLiteral("url")).toString());
+        return;
+    }
+
+    const QString id = entry.value(QStringLiteral("id")).toString();
+    if (id.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Registry entry has no id.")); return; }
+    const QString destDir = addons_->addonsRoot() + QStringLiteral("/") + id;
+    const QString base = registryBaseUrl(indexUrl);
+    QStringList files;
+    for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
+    if (files.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Nothing to download for this entry.")); return; }
+
+    for (const QString& rel : files)
+    {
+        if (rel.isEmpty()) continue;
+        QString err;
+        if (!registryDownloadTo(docNam_, base + QStringLiteral("/") + rel,
+                                destDir + QStringLiteral("/") + QFileInfo(rel).fileName(), &err))
+        {
+            updatePanelInfo(QStringLiteral("reg.status"), tr("Download failed: %1").arg(err));
+            PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Retry");
+            r.enabled = true; themedPanelHost_->updateRow(rowId, r);
+            return;
+        }
+    }
+    addons_->reload();                                              // pick up the new add-on folder
+    { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installed ✓");
+      r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
+    updatePanelInfo(QStringLiteral("reg.status"), tr("Installed \"%1\".").arg(name));
+}
+#endif // MMV_HAVE_QML
 
 void MainWindow::openHome()
 {

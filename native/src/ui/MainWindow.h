@@ -275,6 +275,21 @@ private:
     void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
 
+    // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
+    // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
+    // source opens presentAddonDetail (Toggle Enabled / Configure / Remove + info). List refresh is imperative
+    // (install/remove/reload don't emit sourcesChanged) — mutating ops re-present the root. Catalog browsing /
+    // Local ROMs stay OUT of scope (the themed home covers content). ----
+    void presentAddonDetail(const QString& sourceId);            // per-addon nested panel (enable/configure/remove/info)
+    void presentAddonConfig(const AddonManifest& manifest);      // manifest-driven config form (nested on the detail)
+    void confirmRemoveAddon(const QString& sourceId);            // nested confirm (Info + destructive Action)
+    void presentAddByUrl();                                      // nested TextField + Add -> addRemoteSource (async)
+    void presentAddonRegistry();                                 // the add-on registry "store" as a nested panel
+    void installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId); // registry install
+    void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place
+    void updatePanelInfo(const QString& id, const QString& value); // patch an Info row's value in place (status lines)
+    QString registryInstallRowId_;                               // the registry entry row currently installing (async remote)
+
     // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
     // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows
     // "Press a key/button…", Esc cancels. Bindings apply+persist immediately (themed-panel convention). ----
