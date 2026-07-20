@@ -280,9 +280,12 @@ Rectangle {
                             color: root.cDim; font.pixelSize: del.kind === root.kProgress ? 14 : 16
                         }
 
-                        // Action: a chevron.
+                        // Action: a chevron. Ride-along (B2 Task 5): an activatable Progress row (a Downloads
+                        // job — Enter opens its action chooser) shows the same small chevron when enabled, so the
+                        // affordance reads as "openable" rather than a passive status bar.
                         Text {
                             visible: del.kind === root.kAction || del.kind === root.kLogView
+                                     || (del.kind === root.kProgress && del.rowData && del.rowData.enabled === true)
                             anchors.verticalCenter: parent.verticalCenter
                             text: "›"
                             color: root.cDim; font.pixelSize: 20

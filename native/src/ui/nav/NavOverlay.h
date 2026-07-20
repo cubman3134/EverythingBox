@@ -10,6 +10,7 @@
 #pragma once
 #include <QFrame>
 #include <QPointer>
+#include <QVariantMap>
 #include <QVector>
 #include <QWidget>
 #include <functional>
@@ -32,6 +33,13 @@ public:
     // Route a nav key to the topmost overlay. False when no overlay is open.
     static bool routeTopmost(int key);
     static NavOverlay* topmost();
+
+    // Themed styling (B2 Task 5): the active theme's `settingsPanel` color block (background/panel/row/
+    // rowSelected/accent/text/dim/separator/…) so the Esc menu / action choosers / confirms match the theme
+    // instead of hardcoded darks. MainWindow pushes it on theme apply; keys missing (or an empty map — classic
+    // mode) fall back HARD to the original palette, so overlays always render. Mechanics are untouched — colors
+    // only. Applies to EVERY NavOverlay subclass (NavMenu/NavConfirm) via the shared panel stylesheet.
+    static void setThemeColors(const QVariantMap& colors);
 
     // Arrow-select a QLineEdit and press Enter: open the on-screen keyboard on it (implemented in
     // Osk.cpp). After commit the edit gets its text plus a synthetic Return, so returnPressed flows run.
@@ -86,6 +94,7 @@ private:
     int result_ = -1;
     bool dismissed_ = false;
     static QVector<QPointer<NavOverlay>> s_stack;
+    static QVariantMap s_themeColors;   // active theme's settingsPanel block (empty -> hardcoded fallbacks)
 };
 
 // A vertical action menu (the game menu / esc menu / cast picker shape): a title and a list of rows.

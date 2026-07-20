@@ -18,6 +18,9 @@
 #include <QVBoxLayout>
 
 QVector<QPointer<NavOverlay>> NavOverlay::s_stack;
+QVariantMap NavOverlay::s_themeColors;
+
+void NavOverlay::setThemeColors(const QVariantMap& colors) { s_themeColors = colors; }
 
 // ---------------------------------------------------------------- NavOverlay
 
@@ -30,17 +33,31 @@ NavOverlay::NavOverlay(QWidget* window)
     setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(QStringLiteral("NavOverlay { background: rgba(8,10,16,150); }")); // dim the page behind
 
+    // Themed palette from the active theme's settingsPanel block (hard fallbacks = the original darks). The
+    // selection highlight uses `rowSelected` paired with `text` (both defined per theme so the selected row is
+    // legible on light AND dark themes — accent alone can be low-contrast under dark text on the light themes).
+    auto navCol = [](const char* key, const char* fallback) -> QString {
+        const QString v = s_themeColors.value(QString::fromLatin1(key)).toString();
+        return v.isEmpty() ? QString::fromLatin1(fallback) : v;
+    };
+    const QString panelBg = navCol("panel", "#14161d");
+    const QString border  = navCol("separator", "#2c2f3a");
+    const QString text    = navCol("text", "#e8eaf0");
+    const QString rowBg   = navCol("row", "#1d2029");
+    const QString accent  = navCol("accent", "#4a79e8");
+    const QString sel     = navCol("rowSelected", "#2f5fd0");
     panel_ = new QFrame(this);
     panel_->setObjectName(QStringLiteral("navOverlayPanel"));
     panel_->setStyleSheet(QStringLiteral(
-        "#navOverlayPanel { background: #14161d; border: 1px solid #2c2f3a; border-radius: 10px; }"
-        "QLabel { color: #e8eaf0; font-size: 14px; }"
-        "QPushButton { background: #1d2029; color: #e8eaf0; border: 1px solid #2c2f3a;"
+        "#navOverlayPanel { background: %1; border: 1px solid %2; border-radius: 10px; }"
+        "QLabel { color: %3; font-size: 14px; }"
+        "QPushButton { background: %4; color: %3; border: 1px solid %2;"
         "              border-radius: 6px; padding: 8px 18px; font-size: 14px; }"
-        "QPushButton:focus { background: #2f5fd0; border-color: #4a79e8; }"
-        "QListWidget { background: transparent; border: none; color: #e8eaf0; outline: none; font-size: 16px; }"
+        "QPushButton:focus { background: %6; border-color: %5; }"
+        "QListWidget { background: transparent; border: none; color: %3; outline: none; font-size: 16px; }"
         "QListWidget::item { padding: 9px 14px; border-radius: 6px; }"
-        "QListWidget::item:selected { background: #2f5fd0; }"));
+        "QListWidget::item:selected { background: %6; }")
+        .arg(panelBg, border, text, rowBg, accent, sel));
     ring_ = new NavRing(panel_, this);
 
     prevFocus_ = QApplication::focusWidget();

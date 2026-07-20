@@ -2388,6 +2388,11 @@ void MainWindow::openHome()
 void MainWindow::showHomeScreen()
 {
 #ifdef MMV_HAVE_QML
+    // Keep the in-window overlays (Esc pause menu, action choosers, confirms) matched to the active theme: push
+    // the current settingsPanel block on every return home (theme changes rebuild the home, so this re-runs after
+    // an Appearance switch). Classic mode -> empty map -> the overlays keep their original hardcoded darks.
+    NavOverlay::setThemeColors(themedHomeEnabled() ? settingsPanelStyle() : QVariantMap());
+
     // Rebuild a fresh themed view on return so it reflects the current theme/catalogs. The themed pages are
     // QQuickWidgets (plain widgets, no native child window), so this is safe: no compositing tricks needed.
     if (themedHomeEnabled())
@@ -3365,6 +3370,7 @@ void MainWindow::presentProfilePicker(bool mustChoose)
     clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
     themedPanelHost_->reset();        // fresh ROOT presentation (also drops any stale panel levels)
     themedPanelHost_->setStyle(settingsPanelStyle());
+    NavOverlay::setThemeColors(settingsPanelStyle());  // the picker's own menus/confirms (pre-home) match the theme
     presentProfileList(mustChoose, /*replace*/ false);
     stack_->setCurrentWidget(themedPanelHost_);
     updateNavForPage();
