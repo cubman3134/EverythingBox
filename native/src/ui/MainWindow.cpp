@@ -6088,6 +6088,86 @@ QString fileMd5(const QString& path)
 
 void MainWindow::openBiosCheck()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the RichText per-file MD5 report degrades to one Info row per system (name + a tick/cross/warn
+    // glyph summarising that system's files), under a summary Info row. Same MD5 verification (biosFilePath +
+    // fileMd5), same Download/Repair (drop wrong-hash files, then ensureBios) and Open Folder flows. Download
+    // rebuilds the panel in place (replaceTop) so the ticks refresh without stacking a level.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        int total = 0, good = 0, bad = 0, missing = 0;
+        QVector<PanelRow> sysRows;
+        for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+        {
+            const QList<BiosFile>& files = BiosCatalog::forSystem(bs.systemId);
+            if (files.isEmpty()) continue;
+            int sgood = 0, sbad = 0, smiss = 0;
+            for (const BiosFile& bf : files)
+            {
+                ++total;
+                const QString path = biosFilePath(bs.systemId, bf.fileName);
+                if (path.isEmpty()) { ++missing; ++smiss; }
+                else if (!bf.md5.isEmpty() && fileMd5(path).compare(bf.md5, Qt::CaseInsensitive) != 0) { ++bad; ++sbad; }
+                else { ++good; ++sgood; }
+            }
+            QString value;
+            if (smiss == 0 && sbad == 0)
+                value = tr("✓  %1/%2 present").arg(sgood).arg(files.size());
+            else if (sbad > 0)
+                value = smiss > 0 ? tr("⚠  %1 wrong MD5, %2 missing").arg(sbad).arg(smiss)
+                                  : tr("⚠  %1 wrong MD5").arg(sbad);
+            else
+                value = tr("✗  %1 of %2 missing").arg(smiss).arg(files.size());
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.sys:") + bs.systemId;
+            r.label = bs.name; r.value = value; sysRows << r;
+        }
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.summary"); r.label = tr("BIOS files");
+          r.value = bad > 0 ? tr("%1/%2 OK, %n failed", "", bad).arg(good).arg(total)
+                            : tr("%1 of %2 present").arg(good).arg(total); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Separator; r.label = tr("By system"); rows << r; }
+        rows += sysRows;
+
+        const bool needsDownload = (missing > 0 || bad > 0);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.download");
+          r.label = needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.open"); r.label = tr("Open BIOS Folder"); rows << r; }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("bios.download")) {
+                statusBar()->showMessage(tr("Checking BIOS…"));
+                for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+                {
+                    for (const BiosFile& bf : BiosCatalog::forSystem(bs.systemId))
+                    {
+                        if (bf.md5.isEmpty()) continue;
+                        const QString p = biosFilePath(bs.systemId, bf.fileName);
+                        if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
+                    }
+                    CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
+                                            [this](const QString& s) { statusBar()->showMessage(s); });
+                }
+                statusBar()->showMessage(tr("BIOS check complete."), 4000);
+                openBiosCheck();   // rebuild (replaceTop, we're the top panel) so the ticks refresh
+            }
+            else if (id == QStringLiteral("bios.open"))
+                QDesktopServices::openUrl(QUrl::fromLocalFile(CoreManager::systemDir()));
+        };
+        auto onBack = [this] { openSettingsHub(); };
+
+        if (themedPanelHost_->panelTitle() == tr("BIOS Check"))
+            themedPanelHost_->replaceTop(tr("BIOS Check"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("BIOS Check"), rows, onAct, onBack);
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("BIOS Check"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Required BIOS / firmware for each system, verified by MD5. Missing files "
             "are fetched automatically the first time you launch a game for that system — or download them all "
