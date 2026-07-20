@@ -52,7 +52,7 @@ Rectangle {
                     anchors.left: parent.left; anchors.leftMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
                     color: "#9AA6B2"; font.pixelSize: 13
-                    text: chrome.br ? ("Page " + chrome.br.page + " / " + chrome.br.pageCount) : ""
+                    text: chrome.br ? ("Page " + chrome.br.pageLabel) : ""  // range-aware (comic spread: "3–4 / 20")
                 }
                 // The reader-settings zone. Book: a font-size ThemedChoice. Pdf/Comic: a row of plain buttons
                 // (zoom out / in / fit, + two-up for a comic) the host activates by index. Each variant is behind
@@ -217,7 +217,7 @@ Rectangle {
                 }
                 Text {
                     anchors.centerIn: parent
-                    text: chrome.br ? (chrome.br.page + " / " + chrome.br.pageCount) : ""
+                    text: chrome.br ? chrome.br.pageLabel : ""  // range-aware (comic spread: "3–4 / 20")
                     color: "#C7D0DA"; font.pixelSize: 12
                 }
             }

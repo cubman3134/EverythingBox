@@ -1136,7 +1136,9 @@ void MainWindow::goBack()
     if (pdfHost_    && cur == pdfHost_)    { pdfHost_->handleBack();    return; }
     if (comicHost_  && cur == comicHost_)  { comicHost_->handleBack();  return; }
 #endif
-    // Readers: back to the home they were opened from (persist positions first).
+    // CLASSIC-mode readers only: in themed mode the reader is a ReaderChromeHost page (handled above), whose
+    // exit routes through returnFromReader with origin-restore. A raw book_/pdf_/comic_ page is reachable only
+    // in a non-QML build (or classic mode), where the classic HomeView is always the right destination.
     if (cur == book_ || cur == pdf_ || cur == comic_)
     { book_->persist(); pdf_->persist(); comic_->persist(); stack_->setCurrentWidget(home_); home_->focusContent(); return; }
     // Standalone-emulator wait page: close the emulator.

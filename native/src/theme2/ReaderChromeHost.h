@@ -39,6 +39,7 @@ class ReaderBridge : public QObject
     Q_PROPERTY(QString title READ title NOTIFY changed)
     Q_PROPERTY(int page READ page NOTIFY changed)
     Q_PROPERTY(int pageCount READ pageCount NOTIFY changed)
+    Q_PROPERTY(QString pageLabel READ pageLabel NOTIFY changed) // "N / M", or a comic spread RANGE "N–N+1 / M"
     Q_PROPERTY(int fontSize READ fontSize NOTIFY changed)
     Q_PROPERTY(QVariantList fontOptions READ fontOptions CONSTANT)
     Q_PROPERTY(int fontIndex READ fontIndex NOTIFY changed)
@@ -51,6 +52,7 @@ public:
     QString title() const;
     int  page() const;
     int  pageCount() const;
+    QString pageLabel() const;          // "N / M", or a comic two-up spread RANGE "N–N+1 / M" (classic-bar parity)
     int  fontSize() const;
     QVariantList fontOptions() const;   // the point sizes the font ThemedChoice offers (book)
     int  fontIndex() const;             // index into fontOptions() nearest the current size (for currentOption)

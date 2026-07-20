@@ -30,6 +30,18 @@ QString ReaderBridge::readerType() const
 QString ReaderBridge::title() const { return QString(); } // reserved; label built in QML
 int  ReaderBridge::page() const      { return reader_ ? reader_->currentPage() : 0; }
 int  ReaderBridge::pageCount() const { return reader_ ? reader_->pageCount() : 0; }
+
+// The page-of label the strips render. A comic showing a two-up spread reads a RANGE ("3–4 / 20"), matching
+// the classic ComicView bar (which the themed chrome previously didn't — it always said "Page N / M", hiding
+// that two pages were on screen). Every other reader (and a single-page comic) reads the plain "N / M".
+QString ReaderBridge::pageLabel() const
+{
+    if (!reader_) return QString();
+    const int p = reader_->currentPage(), pc = reader_->pageCount();
+    if (reader_->spreadActive() && p + 1 <= pc)
+        return QStringLiteral("%1–%2 / %3").arg(p).arg(p + 1).arg(pc); // N–N+1 / M (en dash, as the classic bar)
+    return QStringLiteral("%1 / %2").arg(p).arg(pc);
+}
 int  ReaderBridge::fontSize() const  { return reader_ ? reader_->fontPt() : 14; }
 bool ReaderBridge::twoUp() const     { return reader_ && reader_->twoUp(); }
 

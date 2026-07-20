@@ -43,7 +43,9 @@ Item {
             : (el.textBinding ? (T.dig(ctx, el.textBinding) || "")
             : (ctx && ctx.selected ? (ctx.selected.title || "") : ""))
         color: T.val(el, "textColor", "#FFFFFF")
-        font.family: T.val(el, "fontFamily", "")
+        // An empty fontFamily must fall back to the working application default, NOT to Qt's "" -> "MS Sans
+        // Serif" (matches Text.qml — the logo text fallback should read in the theme's font, not a legacy face).
+        font.family: T.val(el, "fontFamily", Qt.application.font.family)
         font.pixelSize: Math.max(1, Number(T.val(el, "fontSize", 0.045)) * (host ? host.height : 720))
         font.bold: el.bold !== false
         horizontalAlignment: T.val(el, "align", "center") === "left" ? Text.AlignLeft
