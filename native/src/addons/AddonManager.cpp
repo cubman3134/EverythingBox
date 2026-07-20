@@ -1497,6 +1497,15 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
     mz_free(mfData);
     if (!ok) return fail(QStringLiteral("Package manifest is invalid."));
 
+    // Reserved-namespace guard: the bundled addons (com.mymediavault.*) ship inside the app and are
+    // NEVER installed through this path. Refuse a package that claims such an id so a downloaded /
+    // side-loaded package can't impersonate a bundled source or overwrite its folder under root_.
+    if (manifest.id.startsWith(QStringLiteral("com.mymediavault.")))
+    {
+        streamLog(QStringLiteral("addon install: refused reserved-namespace id %1").arg(manifest.id));
+        return fail(QStringLiteral("Refused: \"%1\" uses the reserved com.mymediavault.* namespace.").arg(manifest.id));
+    }
+
     const QString dest = root_ + QStringLiteral("/") + manifest.id;
     QDir(dest).removeRecursively();
     QDir().mkpath(dest);

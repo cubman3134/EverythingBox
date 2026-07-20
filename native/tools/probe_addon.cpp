@@ -6,6 +6,7 @@
 #include "AddonManager.h"
 #include "CatalogPrefetcher.h"
 #include "BuiltinSecrets.h" // generated (build tree): expected lengths for the credscope asserts
+#include "miniz.h"          // build a fixture .addon package for the reserved-namespace install guard
 
 #include <QCoreApplication>
 #include <QFile>
@@ -18,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <cstdio>
+#include <cstring>
 
 // With "--manager": construct an AddonManager (scans <exe dir>/addons), list its sources and the first
 // source's catalog with resolved URLs - the full discovery + resolution path the app uses.
@@ -285,6 +287,24 @@ static bool writeText(const QString& path, const QByteArray& text)
     return f.write(text) == text.size();
 }
 
+// Build a minimal .addon package (a zip with a top-level manifest.json + main.js) at pkgPath, carrying the
+// given manifest id — used to exercise AddonManager::installPackage's reserved-namespace guard.
+static bool makeAddonPackage(const QString& pkgPath, const QString& id)
+{
+    const QByteArray manifest =
+        "{\n  \"id\": \"" + id.toUtf8() + "\",\n  \"name\": \"Pkg Fixture\",\n  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n  \"entry\": \"main.js\",\n  \"permissions\": [],\n"
+        "  \"catalogs\": [ { \"id\": \"movies\", \"name\": \"Movies\", \"type\": \"movie\" } ]\n}\n";
+    static const char* JS = "function getCatalog(){return JSON.stringify({title:'x',items:[],hasMore:false});}\n";
+    mz_zip_archive zip; std::memset(&zip, 0, sizeof(zip));
+    if (!mz_zip_writer_init_file(&zip, pkgPath.toUtf8().constData(), 0)) return false;
+    bool ok = mz_zip_writer_add_mem(&zip, "manifest.json", manifest.constData(), size_t(manifest.size()), MZ_BEST_SPEED)
+           && mz_zip_writer_add_mem(&zip, "main.js", JS, std::strlen(JS), MZ_BEST_SPEED);
+    ok = mz_zip_writer_finalize_archive(&zip) && ok;
+    mz_zip_writer_end(&zip);
+    return ok;
+}
+
 // A minimal offline media-source: 2 catalogs, a getCatalog that serves a fixed 3-item page and embeds a
 // per-catalog invocation counter in the title (so a test can tell a FRESH run from a cache-served copy).
 static bool makeFixture(const QString& root, const QString& id)
@@ -517,6 +537,30 @@ static int probePrefetch()
           pfW.idle() && pfW.expired() == 3 && pfW.issued() == 5);
     QDir(rootW).removeRecursively();
     qunsetenv("MMV_PREFETCH_WATCHDOG_S");
+
+    // ---- Reserved-namespace install guard: a package claiming a com.mymediavault.* id must be REFUSED
+    // (bundled ids never arrive via installPackage; a side-loaded one could impersonate/overwrite one). ----
+    {
+        const QString rootI = root + QStringLiteral("-inst");
+        QDir(rootI).removeRecursively(); QDir().mkpath(rootI);
+        qputenv("MMV_ADDONS_ROOT", rootI.toUtf8());
+        AddonManager mgrI;
+        const QString reservedId = QStringLiteral("com.mymediavault.evil");
+        const QString okId = QStringLiteral("com.thirdparty.ok");
+        const QString pkgBad = rootI + QStringLiteral("/reserved.addon");
+        const QString pkgOk  = rootI + QStringLiteral("/ok.addon");
+        bool built = makeAddonPackage(pkgBad, reservedId) && makeAddonPackage(pkgOk, okId);
+        QString errBad, errOk;
+        const bool refused = built && !mgrI.installPackage(pkgBad, &errBad);
+        const bool folderAbsent = !QDir(rootI + QStringLiteral("/") + reservedId).exists();
+        check("install guard: reserved com.mymediavault.* package refused (not installed)",
+              refused && folderAbsent && !errBad.isEmpty());
+        // Control: a normal third-party id still installs through the same path (guard isn't over-broad).
+        const bool okInstalled = built && mgrI.installPackage(pkgOk, &errOk)
+                              && QDir(rootI + QStringLiteral("/") + okId).exists();
+        check("install guard: a normal third-party id still installs", okInstalled);
+        QDir(rootI).removeRecursively();
+    }
 
     QDir(root).removeRecursively();
     qunsetenv("MMV_ADDONS_ROOT");
