@@ -100,10 +100,15 @@ function getMeta(argJson) {
     // account (ssid) alone is refused with HTTP 403 "Vérifier vos identifiants développeur". Get a devid from
     // screenscraper.fr (their forum grants them to apps), or just reuse RetroBat's already-scraped data by
     // pointing the ROMs folder at your RetroBat roms (it reads the gamelist.xml).
-    if (!devid && !devpassword) {
-        log("ScreenScraper: NOT scraping — no devid/devpassword set. ScreenScraper's API requires registered "
-            + "developer credentials (a user account alone is rejected). Set devid/devpassword in this addon's "
-            + "settings, or point the ROMs folder at your RetroBat roms to reuse its scraped gamelist.xml.");
+    // Bail if EITHER is missing (a partial pair would just be a silent 403 from the API). With the
+    // embedded builtins this only fires when nothing was embedded at build AND the legacy settings are
+    // absent/partial — the log names exactly which half is missing so a partial legacy config is loud.
+    if (!devid || !devpassword) {
+        var missing = (!devid && !devpassword) ? "no devid/devpassword" : (!devid ? "devid missing (devpassword set)" : "devpassword missing (devid set)");
+        log("ScreenScraper: NOT scraping — " + missing + ". ScreenScraper's API requires registered "
+            + "developer credentials (a user account alone is rejected). This app build embeds them; without "
+            + "that, set BOTH devid and devpassword (legacy settings), or point the ROMs folder at your "
+            + "RetroBat roms to reuse its scraped gamelist.xml.");
         return "{}";
     }
     if (!ssid) return "{}";

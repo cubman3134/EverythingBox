@@ -5,6 +5,7 @@
 #include "AddonModels.h"
 #include "AddonManager.h"
 #include "CatalogPrefetcher.h"
+#include "BuiltinSecrets.h" // generated (build tree): expected lengths for the credscope asserts
 
 #include <QCoreApplication>
 #include <QFile>
@@ -352,6 +353,37 @@ static int probePrefetch()
     auto check = [&](const char* name, bool ok) {
         printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name); if (ok) ++pass; else ++fail;
     };
+
+    // ---- builtinCredential scoping: the global is bound into EVERY JsLocal addon, so the C++ side
+    // allowlists by addon id — a third-party addon calling builtinCredential("devid") must get EMPTY,
+    // while the bundled ScreenScraper id passes through. Exercised via the REAL binding (fixture JS
+    // calls the global), asserted by LENGTH only — credential values are never printed. The allow-path
+    // expectation self-adjusts to the build: lengths match BuiltinSecrets.h (0 when no secrets file).
+    {
+        static const char* kCredJs =
+            "function credLens() { return JSON.stringify({"
+            " d: builtinCredential('devid').length, p: builtinCredential('devpassword').length }); }";
+        auto lensFor = [&](const QString& addonId, int* d, int* p) -> bool {
+            AddonManifest m; m.id = addonId;
+            auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mmv-credscope-probe"));
+            QString err;
+            auto a = JsAddon::load(QString::fromUtf8(kCredJs), std::move(ctx), &err);
+            if (!a) { printf("credscope fixture load failed: %s\n", err.toUtf8().constData()); return false; }
+            const QJsonObject o = QJsonDocument::fromJson(
+                a->invoke(QStringLiteral("credLens"), QStringLiteral("{}")).toUtf8()).object();
+            *d = o.value(QStringLiteral("d")).toInt(-1);
+            *p = o.value(QStringLiteral("p")).toInt(-1);
+            return true;
+        };
+        int d = -1, p = -1;
+        check("credscope: third-party addon id gets EMPTY builtinCredential",
+              lensFor(QStringLiteral("com.evil.thirdparty"), &d, &p) && d == 0 && p == 0);
+        int d2 = -1, p2 = -1;
+        check("credscope: screenscraper id passes the allowlist (lengths match the embedded header)",
+              lensFor(QStringLiteral("com.mymediavault.screenscraper"), &d2, &p2)
+              && d2 == mmv_secrets::kScreenScraperDevidLen
+              && p2 == mmv_secrets::kScreenScraperDevpasswordLen);
+    }
 
     const QString root = QDir::tempPath() + QStringLiteral("/mmv-prefetch-fixture-")
                        + QString::number(QCoreApplication::applicationPid());

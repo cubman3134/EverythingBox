@@ -53,6 +53,18 @@ QString AddonContext::getConfig(const QString& key) const
 
 QString AddonContext::builtinCredential(const QString& key) const
 {
+    // SCOPED to the owning addon: the JS global is bound into EVERY JsLocal addon, and third-party
+    // addons are installable from registries — an unscoped lookup would let any of them exfiltrate
+    // the embedded dev creds simply by calling builtinCredential("devid") (a far lower bar than
+    // reversing the binary). Only the bundled ScreenScraper addon (its manifest id) may read its two
+    // keys; any other addon id or key gets an empty string.
+    static const QHash<QString, QSet<QString>> kAllowlist = {
+        { QStringLiteral("com.mymediavault.screenscraper"),
+          { QStringLiteral("devid"), QStringLiteral("devpassword") } },
+    };
+    const auto allowed = kAllowlist.constFind(id_);
+    if (allowed == kAllowlist.constEnd() || !allowed->contains(key)) return QString();
+
     // Best-effort obfuscation, NOT cryptography: join the two split obfuscated arrays, reverse the
     // rolling XOR (this MUST mirror native/cmake/GenerateSecrets.cmake byte-for-byte), then slice the
     // recovered plaintext blob into devid|devpassword by their stored lengths. The XOR only keeps the

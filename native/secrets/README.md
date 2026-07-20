@@ -28,5 +28,10 @@ If this file is **absent**, the build still succeeds: the generated header holds
 empty arrays, CMake prints a loud `STATUS` line, and the addon silently falls
 back to whatever `devid`/`devpassword` the user set in the addon settings.
 
+**Note:** after adding a previously-**absent** secrets file, run a manual CMake
+re-configure (`cmake -S native -B build`). `CMAKE_CONFIGURE_DEPENDS` reliably
+re-runs generation when the file's mtime *changes*, but the absent→present
+transition is not guaranteed to trigger a re-configure on every generator.
+
 **Never commit real credential values** — not here, not in logs, not in the
 built binary as plaintext (the XOR obfuscation guarantees the latter).
