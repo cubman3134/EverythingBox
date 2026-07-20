@@ -14,8 +14,8 @@ static void pfLog(const QString& msg)
 {
     QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
     if (f.open(QIODevice::Append | QIODevice::Text))
-        f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  prefetch: ") + msg
-                 + QStringLiteral("\n")).toUtf8());
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODateWithMs) + QStringLiteral("  prefetch: ") + msg
+                 + QStringLiteral("\n")).toUtf8());  // ms precision so "sweep start" is provably after firstpaint
 }
 
 CatalogPrefetcher::CatalogPrefetcher(AddonManager* mgr, QObject* parent)
@@ -53,6 +53,10 @@ QString CatalogPrefetcher::jobKey(LoadedAddon* src, const QString& catalogId) co
 
 void CatalogPrefetcher::start()
 {
+    // Distinct sweep-start marker so the trace can prove the warm-up begins AFTER the first paint: app-startup
+    // catalog loads and prefetch loads both go through requestCatalog (both log "catalog fetch"), so only this
+    // line unambiguously timestamps "prefetch activity started". Kicked post-first-paint from MainWindow.
+    pfLog(QStringLiteral("sweep start"));
     enqueueSweep();
     pump();
     armTimer();

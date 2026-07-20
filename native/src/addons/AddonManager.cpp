@@ -880,6 +880,14 @@ int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, con
         return reqId;
     }
 
+    // Instrumentation (MMV_PREFETCH_LOG=1, off by default): reaching here is a cache MISS -> a REAL fetch (JS
+    // getCatalog or HTTP GET) is about to run. Zero of these lines during a menu walk is the warm-path proof;
+    // they should all cluster at prefetch-sweep time. Cache-served requests return above and never log.
+    static const bool kLogFetch = qEnvironmentVariableIntValue("MMV_PREFETCH_LOG") > 0;
+    if (kLogFetch) streamLog(QStringLiteral("catalog fetch %1|%2 page=%3%4")
+                                 .arg(src->manifest.id, catalogId).arg(page)
+                                 .arg(query.isEmpty() ? QString() : QStringLiteral(" q=") + query));
+
     const int reqId = (src->transport == LoadedAddon::RemoteHttp)
         ? dispatchRemoteCatalog(src, catalogId, query, page, filters)
         : dispatch(buildRequest(src, QStringLiteral("getCatalog"), catalogArg(catalogId, query, page, filters)));
