@@ -900,6 +900,18 @@ MainWindow::~MainWindow() = default; // AddonManager is complete in this transla
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
+#ifdef MMV_HAVE_QML
+    // Themed input-mapping CAPTURE: while active this is installed on qApp, so it sees keys before the themed
+    // QQuickWidget's QML nav. Swallow all key traffic (modal capture): Esc cancels, a keyboard key binds, the
+    // pad button arrives via the poll timer. (ShortcutOverride too, so a key can't trigger a shortcut instead.)
+    if (remap_.active)
+    {
+        const QEvent::Type t = event->type();
+        if (t == QEvent::KeyPress)   return inputCaptureKeyFilter(static_cast<QKeyEvent*>(event));
+        if (t == QEvent::KeyRelease || t == QEvent::ShortcutOverride) return true;
+    }
+#endif
+
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
         revealMediaControls();
@@ -7337,12 +7349,257 @@ void MainWindow::editCoreOptions(const QString& systemId)
 
 void MainWindow::openInputMapping()
 {
-    // Stop the game so the remap dialog has sole use of the controller (for "press a button" capture).
+    // Stop the game so the remap has sole use of the controller (for "press a button" capture).
     retro_->stop();
+#ifdef MMV_HAVE_QML
+    // Themed mode: a themed SHELL on the Nav Contract. player/scope/turbo Choices + per-button binding Action
+    // rows; activating a binding row enters CAPTURE (the ControllerRemapDialog's capture machinery — keyboard
+    // grab + pad poll — driven headlessly from the shell). Classic ControllerRemapDialog stays for classic mode.
+    if (themedHomeEnabled() && themedPanelHost_) { presentInputMapping(); return; }
+#endif
     auto* dlg = new ControllerRemapDialog(retro_->gamepad(), retro_->keymap(), this);
     showDialogPanel(tr("Input Mapping"), dlg, [this](int) { openSettingsHub(); },
                     [this] { openSettingsHub(); });
 }
+
+#ifdef MMV_HAVE_QML
+// The RetroPad buttons in editing order (mirrors ControllerRemapDialog::kRows — the stable
+// RETRO_DEVICE_ID_JOYPAD_* ABI numbers). Kept local to the themed shell.
+namespace {
+struct RemapBtn { int retroId; const char* label; };
+const RemapBtn kRemapRows[] = {
+    { 4, "D-Pad Up" }, { 5, "D-Pad Down" }, { 6, "D-Pad Left" }, { 7, "D-Pad Right" },
+    { 8, "A" },        { 0, "B" },          { 9, "X" },          { 1, "Y" },
+    { 10, "L" },       { 11, "R" },         { 12, "L2" },        { 13, "R2" },
+    { 14, "L3" },      { 15, "R3" },        { 2, "Select" },     { 3, "Start" },
+};
+}
+
+// Present/rebuild the themed input-mapping shell. Bindings apply+persist immediately (Gamepad::setBinding /
+// Keymap::setKey / Settings::setTurbo* all "update live + persist" to the CURRENT input scope) — the themed-panel
+// convention, so there's no working-copy/Save step. A hub child -> nested present(), Back -> openSettingsHub.
+void MainWindow::presentInputMapping()
+{
+    remapScope_ = Settings::inputScope();
+    remapPort_ = 0;
+    themedPanelHost_->setStyle(settingsPanelStyle());
+    buildInputMappingRows(/*replace*/ false);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+void MainWindow::buildInputMappingRows(bool replace)
+{
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+
+    // --- header Choices: player / profile-scope / turbo speed ---
+    QStringList players;
+    for (int p = 0; p < ControllerRemapDialog::kPlayers; ++p) players << tr("Player %1").arg(p + 1);
+
+    QStringList scopeNames; QString curScopeName = tr("All systems (default)");
+    scopeNames << tr("All systems (default)");
+    for (const GameSystem& s : SystemCatalog::systems())
+    {
+        scopeNames << s.name;
+        if (s.id == remapScope_) curScopeName = s.name;
+    }
+
+    QStringList turboNames; turboNames << tr("Slow") << tr("Medium") << tr("Fast") << tr("Ultra");
+    const int hp = Settings::turboHalfPeriod();
+    const QString curTurbo = hp >= 5 ? tr("Slow") : hp == 3 ? tr("Medium") : hp == 2 ? tr("Fast") : tr("Ultra");
+
+    // --- controller status Info (a snapshot; refreshed on rebuild) ---
+    QString status;
+    if (pad && pad->portConnected(remapPort_))
+    {
+        const std::string n = pad->name(remapPort_);
+        status = tr("Player %1 controller: %2").arg(remapPort_ + 1)
+                     .arg(n.empty() ? tr("connected") : QString::fromStdString(n));
+    }
+    else if (pad && pad->connected())
+        status = tr("No controller in this slot — capturing from any connected controller.");
+    else
+        status = tr("No controller detected — connect one to assign controller buttons.");
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("player"); r.label = tr("Editing player");
+      r.value = players.value(remapPort_); r.options = players; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("scope"); r.label = tr("Profile");
+      r.value = curScopeName; r.options = scopeNames; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("turbo"); r.label = tr("Turbo speed");
+      r.value = curTurbo; r.options = turboNames; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("status"); r.label = status; rows << r; }
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep"); s.label = tr("Buttons"); rows << s; }
+
+    // --- per-button: controller binding + keyboard binding Actions + a turbo Toggle ---
+    for (const RemapBtn& b : kRemapRows)
+    {
+        const QString bn = tr(b.label);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(b.retroId);
+          r.label = tr("%1 — Controller").arg(bn);
+          r.value = pad ? QString::fromStdString(Gamepad::labelFor(pad->binding(remapPort_, b.retroId)))
+                        : tr("—"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(b.retroId);
+          r.label = tr("%1 — Keyboard").arg(bn);
+          r.value = keys ? Keymap::labelFor(keys->key(remapPort_, b.retroId)) : tr("—"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("turbo:") + QString::number(b.retroId);
+          r.label = tr("%1 — Turbo (autofire)").arg(bn);
+          r.checked = Settings::turboButton(remapPort_, b.retroId); rows << r; }
+    }
+
+    auto onAct = [this](const QString& id, const QString& val) {
+        if (id == QStringLiteral("player"))
+        {
+            const int idx = qMax(0, val.section(' ', 1, 1).toInt() - 1);   // "Player N" -> N-1
+            remapPort_ = qBound(0, idx, ControllerRemapDialog::kPlayers - 1);
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("scope"))
+        {
+            QString newScope;   // "All systems (default)" -> "" (global)
+            for (const GameSystem& s : SystemCatalog::systems()) if (s.name == val) { newScope = s.id; break; }
+            remapScope_ = newScope;
+            Settings::setInputScope(newScope);
+            if (Gamepad* g = retro_ ? retro_->gamepad() : nullptr) g->reloadMapping();
+            if (Keymap*  k = retro_ ? retro_->keymap()  : nullptr) k->reload();
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("turbo"))
+        {
+            const int hp2 = val == tr("Slow") ? 5 : val == tr("Medium") ? 3 : val == tr("Fast") ? 2 : 1;
+            Settings::setTurboHalfPeriod(hp2);
+        }
+        else if (id.startsWith(QStringLiteral("turbo:")))
+        {
+            const int rid = id.mid(6).toInt();
+            Settings::setTurboButton(remapPort_, rid, val == QStringLiteral("1"));   // Toggle delivers "1"/"0"
+        }
+        else if (id.startsWith(QStringLiteral("pad:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ false);
+        else if (id.startsWith(QStringLiteral("key:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ true);
+    };
+    auto onBack = [this] { openSettingsHub(); };
+
+    if (replace && themedPanelIsTop(tr("Input Mapping")))
+        themedPanelHost_->replaceTop(tr("Input Mapping"), rows, onAct, onBack);
+    else
+        themedPanelHost_->present(tr("Input Mapping"), rows, onAct, onBack);
+}
+
+// Enter CAPTURE for one binding: patch the row to the "Press a …" prompt, then run the SAME capture machinery as
+// ControllerRemapDialog — a pad-poll timer for a controller input, an application-level key filter for a keyboard
+// key (installed on qApp so it sees the key BEFORE the QQuickWidget's QML nav consumes it). Esc cancels. Modal:
+// while active, every physical key is swallowed by inputCaptureKeyFilter.
+void MainWindow::beginInputCapture(int retroId, bool keyboard)
+{
+    if (remap_.active) endInputCapture(/*cancelled*/ true);
+    remap_ = { true, keyboard, remapPort_, retroId, false };
+
+    // Patch the target row to the capture prompt.
+    PanelRow r; r.kind = PanelRow::Action;
+    r.id = (keyboard ? QStringLiteral("key:") : QStringLiteral("pad:")) + QString::number(retroId);
+    const char* bn = "";
+    for (const RemapBtn& b : kRemapRows) if (b.retroId == retroId) { bn = b.label; break; }
+    r.label = keyboard ? tr("%1 — Keyboard").arg(tr(bn)) : tr("%1 — Controller").arg(tr(bn));
+    r.value = keyboard ? tr("Press a key…  (Esc cancels)") : tr("Press a button…  (Esc cancels)");
+    themedPanelHost_->updateRow(r.id, r);
+
+    qApp->installEventFilter(this);   // see physical keys before the QML scene (removed in endInputCapture)
+    if (!keyboard)
+    {
+        if (!remapPadTimer_)
+        {
+            remapPadTimer_ = new QTimer(this);
+            remapPadTimer_->setInterval(30);
+            connect(remapPadTimer_, &QTimer::timeout, this, &MainWindow::onInputCapturePadTick);
+        }
+        remapPadTimer_->start();
+    }
+}
+
+void MainWindow::onInputCapturePadTick()
+{
+    if (!remap_.active || remap_.keyboard) return;
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    if (!pad) return;
+    pad->poll();
+    const int code = pad->anyPressed(remap_.port);      // prefer this player's controller
+    if (!remap_.sawRelease) { if (code == Gamepad::kUnbound) remap_.sawRelease = true; return; }
+    if (code != Gamepad::kUnbound)
+    {
+        pad->setBinding(remap_.port, remap_.retroId, code);   // update live + persist
+        const int rid = remap_.retroId;
+        endInputCapture(/*cancelled*/ false);
+        // Refresh the bound row's label (cursor preserved — updateRow patches in place).
+        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(rid);
+        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
+        r.label = tr("%1 — Controller").arg(tr(bn));
+        r.value = QString::fromStdString(Gamepad::labelFor(pad->binding(remap_.port, rid)));
+        themedPanelHost_->updateRow(r.id, r);
+    }
+}
+
+// The app-level key filter while capturing: Esc cancels; in keyboard mode the next key binds; everything is
+// swallowed (modal). Returns true when the event is consumed.
+bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
+{
+    if (!remap_.active) return false;
+    if (e->key() == Qt::Key_Escape) { endInputCapture(/*cancelled*/ true); return true; }
+    if (remap_.keyboard)
+    {
+        Keymap* keys = retro_ ? retro_->keymap() : nullptr;
+        const int rid = remap_.retroId, port = remap_.port, k = e->key();
+        if (keys)
+        {
+            keys->setKey(port, rid, k);   // update live + persist
+            // A key drives one button within this profile; clear it from any other button (and refresh those rows).
+            for (const RemapBtn& b : kRemapRows)
+                if (b.retroId != rid && keys->key(port, b.retroId) == k)
+                {
+                    keys->setKey(port, b.retroId, Keymap::kUnbound);
+                    PanelRow cr; cr.kind = PanelRow::Action; cr.id = QStringLiteral("key:") + QString::number(b.retroId);
+                    cr.label = tr("%1 — Keyboard").arg(tr(b.label));
+                    cr.value = Keymap::labelFor(keys->key(port, b.retroId));
+                    themedPanelHost_->updateRow(cr.id, cr);
+                }
+        }
+        endInputCapture(/*cancelled*/ false);
+        // Refresh the bound row.
+        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(rid);
+        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
+        r.label = tr("%1 — Keyboard").arg(tr(bn));
+        r.value = keys ? Keymap::labelFor(keys->key(port, rid)) : tr("—");
+        themedPanelHost_->updateRow(r.id, r);
+    }
+    // pad mode: swallow non-Esc keys (stay in capture — the button arrives via the pad tick)
+    return true;
+}
+
+void MainWindow::endInputCapture(bool cancelled)
+{
+    if (!remap_.active) return;
+    const bool wasKeyboard = remap_.keyboard;
+    const int rid = remap_.retroId, port = remap_.port;
+    remap_.active = false;
+    if (remapPadTimer_) remapPadTimer_->stop();
+    qApp->removeEventFilter(this);
+
+    if (cancelled)
+    {
+        // Restore the row to its (unchanged) current binding label.
+        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
+        PanelRow r; r.kind = PanelRow::Action;
+        r.id = (wasKeyboard ? QStringLiteral("key:") : QStringLiteral("pad:")) + QString::number(rid);
+        r.label = wasKeyboard ? tr("%1 — Keyboard").arg(tr(bn)) : tr("%1 — Controller").arg(tr(bn));
+        if (wasKeyboard) { Keymap* k = retro_ ? retro_->keymap() : nullptr;
+                           r.value = k ? Keymap::labelFor(k->key(port, rid)) : tr("—"); }
+        else { Gamepad* g = retro_ ? retro_->gamepad() : nullptr;
+               r.value = g ? QString::fromStdString(Gamepad::labelFor(g->binding(port, rid))) : tr("—"); }
+        themedPanelHost_->updateRow(r.id, r);
+    }
+}
+#endif // MMV_HAVE_QML
 
 void MainWindow::onDuration(double seconds)
 {
