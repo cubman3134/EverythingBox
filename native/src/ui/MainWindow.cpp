@@ -2445,6 +2445,9 @@ void MainWindow::showHomeScreen()
             notifier_->notify(tr("No themes found in %1 — using the classic home screen.")
                                   .arg(QDir::toNativeSeparators(ThemeEngine::themesRoot())), kFeedbackLong);
         }
+        // Deprecation signal (B2 Task 6, item 2): themed home is on but we fell through to the classic HomeView
+        // (no themes on disk). The Task 7 walk greps this to prove no classic home in a normal themed run.
+        mwLog(QStringLiteral("deprecated-classic: home"));
     }
 #endif
     stack_->setCurrentWidget(home_);
@@ -2727,6 +2730,9 @@ void MainWindow::showThemedAudioPage()
     if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("nowplayingAudio")))
     {
         // The theme has no audio page — keep the classic player page for this session.
+        // Deprecation signal (B2 Task 6, item 2): a themed-mode audio session that falls back to the classic
+        // QSplitter player page. The Task 7 walk greps this; a themed theme WITH an audio view stays silent.
+        mwLog(QStringLiteral("deprecated-classic: audio-nowplaying"));
         themedAudioSession_ = false;
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
@@ -5213,6 +5219,11 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     // pointers to its progress bars; clear the "is-open" flag here so a stray download tick can never touch the
     // freed widgets of a panel we've navigated away from. openDownloadManager re-sets it once it has rebuilt.
     dlPanelOpen_ = false;
+    // Deprecation signal (B2 Task 6, item 2): showPanel is the single chokepoint for every classic QWidget
+    // settings panel + inline dialog (showDialogPanel routes through here). Reaching one WHILE the themed home
+    // is enabled means a classic surface leaked into themed mode — the Task 7 walk greps this line to prove
+    // zero such sightings. Classic mode (themed disabled) is silent; that's the sanctioned classic path.
+    if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: panel:%1").arg(title));
     panelTitle_->setText(title);
     panelOnBack_ = onBack;
     auto* content = new QWidget;
