@@ -1,7 +1,7 @@
 # Catalog Prefetch + Embedded Scraper Credentials — Design
 
 **Date:** 2026-07-20
-**Status:** Approved design (user-set scope), pending implementation plan
+**Status:** Complete: prefetch live (zero-request menus), ScreenScraper dev creds embedded. B2 resumes.
 **Relation:** Independent feature track requested mid-B2; runs on its own branch off main
 while B2 (themed settings) is paused at its Task-2/Task-3 boundary. B2 resumes after this
 merges (low overlap: this touches AddonManager/HomeView catalog machinery + the
