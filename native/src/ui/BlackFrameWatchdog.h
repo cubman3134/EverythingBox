@@ -34,14 +34,17 @@ public:
     // the threshold the (inclusive) >= classifies the frame as BLACK.
     static bool isBlack(const QImage& img, double threshold = 0.99);
 
+    // Run ONE sampling cycle synchronously (what the 1000 ms timer fires). Public so the headless probe can
+    // drive the consecutive-counter + skip-resets-the-run logic deterministically without spinning a real
+    // timer; production always reaches it through the timer. (B2 Task 6 hardening — tick() probe coverage.)
+    void tick();
+
 signals:
     // Emitted on EVERY detected black frame (not just the recovery one); `consecutive` is the run length so
     // the host can act on the 2nd. The host logs on every emission and fires the recovery kick on consec==2.
     void blackFrameDetected(int consecutive);
 
 private:
-    void tick();
-
     std::function<QImage()> sampler_;
     std::function<bool()>   skip_;
     QTimer* timer_ = nullptr;

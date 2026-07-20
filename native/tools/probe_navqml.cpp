@@ -89,6 +89,8 @@ static void runThemedInputAsserts()
         "    property string xLastCommit: \"\"\n"
         "    property int xCommitCount: 0\n"
         "    property int xEditReq: 0\n"
+        "    property int emptyChosen: 0\n"
+        "    property int emptyEditReq: 0\n"
         "    Keys.onPressed: (event) => {\n"
         "        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right\n"
         "            || event.key === Qt.Key_Up || event.key === Qt.Key_Down) { nav.move(event.key); event.accepted = true }\n"
@@ -102,6 +104,9 @@ static void runThemedInputAsserts()
         "        El.ThemedChoice { objectName: \"tc\"; navZone: \"choice1\"; navRow: 1; navCol: 0; options: [\"Alpha\", \"Beta\", \"Gamma\"]\n"
         "            onChosen: (i) => { host.chosenIndex = i; host.chosenCount++ }\n"
         "            onEditRequested: (z) => host.chEditReq++ }\n"
+        "        El.ThemedChoice { objectName: \"tcEmpty\"; navZone: \"choiceEmpty\"; navRow: 4; navCol: 0; options: []\n"  // empty-options guard subject
+        "            onChosen: (i) => { host.emptyChosen++ }\n"
+        "            onEditRequested: (z) => host.emptyEditReq++ }\n"
         "        Loader {\n"       // teardown vehicle: activating registers field2, deactivating must DEregister it
         "            objectName: \"dynLoader\"; active: false\n"
         "            sourceComponent: El.ThemedTextField { navZone: \"field2\"; navRow: 2; navCol: 0 }\n"
@@ -265,6 +270,42 @@ static void runThemedInputAsserts()
     CHECK(!tc->property("externalPending").toBool(), "the choice returns to selected");
     tc->setProperty("externalEdit", false);
 
+    // ---- 9c. ThemedChoice empty-options guard (B2 Task 6 hardening): a 0-option Choice must not open ----
+    // A Choice with no options has nothing to pick; activating it must be a total no-op — no inline list, no
+    // editRequested, no chosen(), and the selection stays put (a wedge here would strand the cursor mid-panel).
+    {
+        QQuickItem* tce = host->findChild<QQuickItem*>(QStringLiteral("tcEmpty"));
+        CHECK(tce != nullptr, "the empty-options choice is present");
+        if (tce)
+        {
+            const int chosenBefore = host->property("emptyChosen").toInt();
+            const int reqBefore     = host->property("emptyEditReq").toInt();
+            // (a) inline mode: activate does nothing (no editing state, selection stays on the empty choice).
+            graph.select(QStringLiteral("choiceEmpty"), 0);
+            pump();
+            CHECK(graph.zone() == QStringLiteral("choiceEmpty"), "the empty choice can still be SELECTED (zone count 1)");
+            graph.activate();
+            pump();
+            CHECK(!tce->property("editing").toBool(), "activating a 0-option choice does NOT enter editing");
+            CHECK(host->property("emptyChosen").toInt() == chosenBefore, "a 0-option choice fires no chosen()");
+            CHECK(graph.zone() == QStringLiteral("choiceEmpty"), "the selection stays put (no wedge/reassign)");
+            // (b) externalEdit mode: activate must not emit editRequested either (nothing for the host to pick).
+            tce->setProperty("externalEdit", true);
+            graph.activate();
+            pump();
+            CHECK(host->property("emptyEditReq").toInt() == reqBefore, "a 0-option external choice emits no editRequested");
+            CHECK(!tce->property("externalPending").toBool(), "a 0-option external choice never goes pending");
+            tce->setProperty("externalEdit", false);
+            // Sanity: giving it options re-enables the picker (the guard is options-driven, not a permanent off).
+            tce->setProperty("options", QVariantList{ QStringLiteral("One"), QStringLiteral("Two") });
+            pump();
+            graph.activate();
+            pump();
+            CHECK(tce->property("editing").toBool(), "populating options re-enables activation (guard lifts)");
+            sendKey(win, Qt::Key_Escape);
+        }
+    }
+
     // ---- 10. teardown: destruction DEregisters the zone (no phantom zones after a Loader unload) ----
     QQuickItem* dynLoader = host->findChild<QQuickItem*>(QStringLiteral("dynLoader"));
     CHECK(dynLoader != nullptr, "the teardown Loader is present");
@@ -415,6 +456,115 @@ static void runPanelHostReplaceTopAsserts()
               "panel-host(replaceTop): on an empty stack it degrades to a plain present (depth 1)");
     }
 }
+
+// §18(g) — ThemeView-level pins (B2 Task 6 hardening): the two behaviours that live in ThemeView.qml itself and
+// couldn't be tested from a bare NavGraph — (a) the XMB-buttons guard (a theme mixing an `xmb` element with
+// `button` elements must NOT let the cursor reach the bottom-button bar: the QML holds the `buttons` zone count
+// at 0 whenever xmbMode is true, so its declared items->buttons edge stays inert) and (b) grid-home rootBack
+// (Escape at a grid home with an empty level stack routes through nav.back() to rootBack — the pause-menu leg).
+// Loads the REAL ThemeView.qml from the qrc with a REAL NavGraph (built by the shared buildThemedNavGraph, so
+// this rides the shipped graph shape) exposed as `nav` — the §14 offscreen-QQuickWidget pattern.
+static void runThemeViewAsserts()
+{
+    auto probeItems = []() -> QVariantList {
+        QVariantList v;
+        for (int i = 0; i < 4; ++i)
+            v << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        return v;
+    };
+    const QVariantMap xmbEl{ { QStringLiteral("type"), QStringLiteral("xmb") },
+                             { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                             { QStringLiteral("size"), QVariantList{ 1, 1 } } };
+    const QVariantMap gridEl{ { QStringLiteral("type"), QStringLiteral("grid") },
+                              { QStringLiteral("columns"), 4 },
+                              { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                              { QStringLiteral("size"), QVariantList{ 1, 0.8 } } };
+    const QVariantMap btnEl{ { QStringLiteral("type"), QStringLiteral("button") },
+                             { QStringLiteral("action"), QStringLiteral("settings") },
+                             { QStringLiteral("pos"), QVariantList{ 0.9, 0.9 } },
+                             { QStringLiteral("size"), QVariantList{ 0.1, 0.06 } } };
+    auto themeWith = [](const QVariantList& elements) -> QVariantMap {
+        QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                          { QStringLiteral("elements"), elements } };
+        return QVariantMap{ { QStringLiteral("name"), QStringLiteral("Probe") },
+                            { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+    };
+
+    // ---- (a) XMB + a button: the `buttons` zone stays hidden, so the cursor can never enter the bar ----
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 4);
+        buildAudioPageNavGraph(g);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* root = qw.rootObject();
+        CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (xmb case)");
+        if (root)
+        {
+            root->setProperty("categories", QVariantList{ QStringLiteral("Video"), QStringLiteral("Games") });
+            root->setProperty("items", probeItems());
+            root->setProperty("currentIndex", 0);
+            root->setProperty("currentView", QStringLiteral("home"));
+            root->setProperty("theme", themeWith(QVariantList{ xmbEl, btnEl })); // set last
+            qw.resize(1280, 720);
+            qw.show();
+            pump(); pump();
+            CHECK(root->property("xmbMode").toBool(), "the xmb element puts the view in xmbMode");
+            CHECK(root->property("buttonList").toList().size() == 1, "the button element is present in buttonList");
+            // The guard: `buttons` is held hidden (count 0), so select() refuses to steer onto it…
+            g.select(QStringLiteral("items"), 0);
+            g.select(QStringLiteral("buttons"), 0);
+            CHECK(g.zone() == QStringLiteral("items"),
+                  "XMB-buttons guard: `buttons` hidden (count 0) — the cursor cannot enter the bar");
+            // …and its declared items->buttons Down edge is inert too (a hidden target makes the edge inert),
+            // so no arrow can cross into the bar from the column.
+            CHECK(!g.move(Qt::Key_Down) || g.zone() != QStringLiteral("buttons"),
+                  "XMB-buttons guard: the items->buttons edge is inert (Down never crosses into the bar)");
+        }
+    }
+
+    // ---- (b) grid home (no xmb): the button bar IS live (positive control), and Escape -> rootBack ----
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 4);
+        buildAudioPageNavGraph(g);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        bool rootBackFired = false;
+        QObject::connect(&g, &NavGraph::rootBack, [&rootBackFired] { rootBackFired = true; });
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* root = qw.rootObject();
+        CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (grid case)");
+        if (root)
+        {
+            root->setProperty("categories", QVariantList{});
+            root->setProperty("items", probeItems());
+            root->setProperty("currentIndex", 0);
+            root->setProperty("currentView", QStringLiteral("home"));
+            root->setProperty("theme", themeWith(QVariantList{ gridEl, btnEl })); // set last
+            qw.resize(1280, 720);
+            qw.show();
+            pump(); pump();
+            CHECK(!root->property("xmbMode").toBool(), "the grid home is NOT xmbMode");
+            // Positive control (the guard's RED leans on this): the SAME button, in grid mode, IS reachable —
+            // proving the xmbMode gate is what hides it above, not a missing button.
+            CHECK(root->property("buttonList").toList().size() == 1, "grid buttonList carries the button");
+            g.select(QStringLiteral("buttons"), 0);
+            CHECK(g.zone() == QStringLiteral("buttons"),
+                  "grid mode: the button-bar zone is live (count = buttonList.length) — the cursor can enter it");
+            // grid-home rootBack: Escape at the root (empty level stack) routes nav.back() -> rootBack.
+            g.select(QStringLiteral("items"), 0);
+            root->forceActiveFocus();
+            pump();
+            CHECK(!rootBackFired, "no rootBack before the Escape");
+            sendKey(qw.quickWindow(), Qt::Key_Escape);
+            CHECK(rootBackFired, "grid-home Escape with an empty level stack emits rootBack (the pause-menu leg)");
+        }
+    }
+}
 #endif // MMV_HAVE_QML
 
 int main(int argc, char** argv)
@@ -467,6 +617,69 @@ int main(int argc, char** argv)
         // (e) a null / empty grab -> NEVER black (a FAILED grab must not trip the watchdog).
         CHECK(!BlackFrameWatchdog::isBlack(QImage()), "a null image is never classified black (failed grab guard)");
         CHECK(!BlackFrameWatchdog::isBlack(QImage(0, 0, QImage::Format_ARGB32)), "an empty image is never black");
+    }
+
+    // ------------------------------------------------------------- 0b. watchdog tick() run logic (Task 6)
+    // isBlack (above) is the classifier; tick() is the STATE MACHINE around it: the consecutive-black counter
+    // that fires recovery on the 2nd frame, and the skip lambda that BOTH ignores an expected-black frame AND
+    // resets the run so a legit black view (a game/reader) never primes a false recovery on exit. Driven here
+    // with injected sampler/skip lambdas (tick() is synchronous — no real 1 s timer needed).
+    {
+        bool black = false, skip = false;
+        auto sampler = [&black]() -> QImage {
+            QImage im(8, 8, QImage::Format_ARGB32);
+            im.fill(black ? qRgb(0, 0, 0) : qRgb(200, 200, 200));
+            return im;
+        };
+        BlackFrameWatchdog wd(sampler, [&skip] { return skip; });
+        QVector<int> emissions;
+        QObject::connect(&wd, &BlackFrameWatchdog::blackFrameDetected, [&emissions](int c) { emissions.push_back(c); });
+
+        // (a) a non-black frame never fires and holds the run at 0.
+        black = false; skip = false; wd.tick();
+        CHECK(wd.consecutive() == 0 && emissions.isEmpty(), "a non-black frame leaves the run at 0, no emission");
+
+        // (b) consecutive black frames step the counter and emit each time (the host acts on consec==2).
+        black = true;  wd.tick();
+        CHECK(wd.consecutive() == 1 && emissions.size() == 1 && emissions.last() == 1, "1st black frame: consec 1, emitted");
+        wd.tick();
+        CHECK(wd.consecutive() == 2 && emissions.size() == 2 && emissions.last() == 2, "2nd consecutive black: consec 2 (recovery point)");
+
+        // (c) a non-black frame breaks the run back to 0 (recovery ran / the view repainted).
+        black = false; wd.tick();
+        CHECK(wd.consecutive() == 0, "a non-black frame resets the consecutive run");
+
+        // (d) a SKIPPED tick (expected-black context: game/video/reader) both no-ops AND resets the run, so a
+        //     legit black view can never accumulate toward a false recovery — even across black frames.
+        black = true; skip = false; wd.tick(); wd.tick();
+        CHECK(wd.consecutive() == 2, "two black frames primed the run to 2");
+        skip = true; wd.tick();
+        CHECK(wd.consecutive() == 0, "a skipped tick resets the run (expected-black view never primes recovery)");
+        const int emittedBeforeSkipRun = emissions.size();
+        black = true; skip = true; wd.tick(); wd.tick();
+        CHECK(wd.consecutive() == 0 && emissions.size() == emittedBeforeSkipRun,
+              "black frames while skipping never step the counter nor emit");
+    }
+
+    // -------------------------------------------------- 0c. NavGraph::activate() hidden-zone guard (Task 6)
+    // Activating a hidden/empty zone must be a safe no-op. The model parks the selection on the only zone even
+    // after it hides itself (there is nowhere else to go — no null state); activate there would hand the host a
+    // phantom row. The guard refuses to emit activated on a count-0 zone.
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("solo"), 3, 0, 0);
+        int fired = 0;
+        QObject::connect(&g, &NavGraph::activated, [&fired](const QString&, int) { ++fired; });
+        g.activate();
+        CHECK(fired == 1, "positive control: activate on a visible zone emits activated");
+        g.setZoneCount(QStringLiteral("solo"), 0);        // hides the only zone -> selection parks on it (hidden)
+        CHECK(g.zone() == QStringLiteral("solo"), "the only zone stays selected even when hidden (no null state)");
+        const int before = fired;
+        g.activate();
+        CHECK(fired == before, "activate on a HIDDEN zone is a no-op (no phantom activation)");
+        g.setZoneCount(QStringLiteral("solo"), 2);        // re-shown -> activation works again
+        g.activate();
+        CHECK(fired == before + 1, "re-showing the zone re-enables activation");
     }
 
     // ---------------------------------------------------------------- 1. selection valid on first zone
@@ -1448,6 +1661,8 @@ int main(int argc, char** argv)
     // §18(f): replaceTop's same-level contract (in-place rebuild never stacks a level) — the host leg of the
     // panel async-connection lifetime model (MainWindow's themedPanelIsTop-gated rebuild handlers).
     runPanelHostReplaceTopAsserts();
+    // §18(g): ThemeView-level pins — the XMB-buttons guard + grid-home rootBack (B2 Task 6 hardening).
+    runThemeViewAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

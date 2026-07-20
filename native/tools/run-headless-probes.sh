@@ -115,5 +115,31 @@ for p in "probe_navqml NAVQML-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK
   if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "(skip) $1 not built"; fi
 done
 
+# QML no-direct-selection-writes gate (B2 Task 6): NavGraph is the SINGLE source of truth for the themed
+# surface's selection — the QML routes every arrow/click through nav.move()/nav.select() and the C++ bridge
+# mirrors the RESOLVED selection back into the props the theme binds. A QML file that assigns one of those
+# selection-state props directly (`currentIndex = …`) bypasses the model's clamp/divider-snap arbitration and
+# desyncs the two, so any such write must FAIL the suite. Line-comments are stripped first (via sed) so prose
+# that merely MENTIONS a prop ("the bridge writes focusZone=0") never trips the gate. Scans the whole theme2
+# QML tree (ThemeView.qml + every element).
+echo "=== qml no-direct-selection-writes ==="
+QML_DIR="$HERE/../src/theme2/qml"
+SEL_PROPS='currentIndex|catIndex|buttonIndex|actionIndex|focusZone|detailActionIndex|detailChildIndex|audioTransportIndex|audioQueueIndex'
+qml_sel_hits=""
+if [ -d "$QML_DIR" ]; then
+  while IFS= read -r -d '' f; do
+    hit="$(sed -E 's://.*$::' "$f" | grep -nE "($SEL_PROPS)[[:space:]]*=[^=]" || true)"
+    [ -n "$hit" ] && qml_sel_hits="$qml_sel_hits"$'\n'"$f:"$'\n'"$hit"
+  done < <(find "$QML_DIR" -name '*.qml' -print0)
+fi
+if [ -n "$qml_sel_hits" ]; then
+  echo "$qml_sel_hits"
+  echo "FAIL: qml no-direct-selection-writes (a QML file assigns a NavGraph-owned selection prop directly)"
+  fail=1
+else
+  echo "PASS: qml no-direct-selection-writes"
+fi
+echo
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"

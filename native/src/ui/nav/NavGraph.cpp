@@ -290,7 +290,13 @@ void NavGraph::select(const QString& zone, int index)
 
 void NavGraph::activate()
 {
-    if (!m_zone.isEmpty()) emit activated(m_zone, m_index);
+    if (m_zone.isEmpty()) return;
+    // Never activate a hidden/empty zone (count 0). The model normally reassigns off a zone that hides itself,
+    // but when EVERY zone is hidden the selection has nowhere to go and parks on the (only) hidden zone — firing
+    // activated there would hand the host a phantom row it can't service. A safe no-op instead. (B2 Task 6 hardening.)
+    auto it = m_zones.constFind(m_zone);
+    if (it == m_zones.constEnd() || it->count <= 0) return;
+    emit activated(m_zone, m_index);
 }
 
 // ---------------------------------------------------------------------------------------- back stack

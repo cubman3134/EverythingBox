@@ -54,6 +54,10 @@ FocusScope {
     }
 
     function beginEdit() {
+        // Empty-options guard (B2 Task 6 hardening): a Choice row with no options has nothing to pick, so
+        // activation is a no-op — never open an empty inline list (pending would clamp to -1, arrows would
+        // wedge) nor emit an editRequested the host can't service. A late-populated `options` re-enables it.
+        if (!options || options.length === 0) return
         if (externalEdit) {                 // the HOST picks — we only signal + go pending.
             if (externalPending) return     // one outstanding request at a time
             externalPending = true
