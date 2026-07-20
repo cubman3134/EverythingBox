@@ -501,7 +501,11 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
         if (it == pendingCatalogKey_.constEnd()) return;
         const QString key = it.value();
         pendingCatalogKey_.erase(it);
-        if (!cat.items.isEmpty()) // don't cache an empty/failed fetch
+        // Arrival-time enabled check (symmetry with cachedCatalog/requestCatalog): if the source was disabled
+        // while this fetch was in flight, don't re-populate its cache — setEnabled already dropped its entries
+        // and requestCatalog fail-fasts a disabled source, so an in-flight reply is the only re-insert window.
+        // The cache key is "<manifestId>|…", so the prefix before the first '|' is the source id.
+        if (isEnabled(key.left(key.indexOf(QLatin1Char('|')))) && !cat.items.isEmpty()) // skip empty/failed too
             catalogCache_.insert(key, { QDateTime::currentMSecsSinceEpoch(), cat });
     });
 
@@ -855,6 +859,17 @@ std::optional<MediaCatalog> AddonManager::cachedCatalog(LoadedAddon* src, const 
     if (it == catalogCache_.constEnd()) return std::nullopt;
     if (QDateTime::currentMSecsSinceEpoch() - it->atMs >= catalogCacheTtlMs_) return std::nullopt; // expired
     return it->cat;
+}
+
+bool AddonManager::hasCachedCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                                    const QMap<QString, QString>& filters) const
+{
+    if (!src) return false;
+    if (!isEnabled(src->manifest.id)) return false; // stale-disabled: a disabled source is never "warm"
+    const QString key = catalogCacheKey(src, catalogId, query, page, filters);
+    const auto it = catalogCache_.constFind(key);
+    if (it == catalogCache_.constEnd()) return false;
+    return QDateTime::currentMSecsSinceEpoch() - it->atMs < catalogCacheTtlMs_; // false if expired
 }
 
 int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,

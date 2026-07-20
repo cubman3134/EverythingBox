@@ -42,7 +42,10 @@ public:
                                                        // (MMV_PREFETCH_WATCHDOG_S overrides, for tests)
 
 private:
-    struct Job { LoadedAddon* src = nullptr; QString catalogId; QString key; };
+    // A queued job holds only IDENTIFIERS, never a LoadedAddon* — AddonManager::reload() (fired ~0.5-3s after
+    // startup from refreshRemoteManifests, and on install/remove/self-update) destroys every LoadedAddon, so a
+    // pointer parked in the queue would dangle. The source is re-resolved by id at pump time (dropped if gone).
+    struct Job { QString sourceId; QString catalogId; QString key; };
     struct Pending { QString key; qint64 startedMs = 0; };
 
     void enqueueSweep();                       // append a job per enabled source × catalog, skipping fresh/dupes
@@ -50,7 +53,8 @@ private:
     void onCatalogReady(int reqId, bool ok);   // free the slot for one of OUR reqIds and pump the next
     void armTimer();                           // (re)arm the staggered resweep timer off the manager's TTL
     void reapStalled();                        // watchdog tick: reclaim slots whose reply never arrived
-    QString jobKey(LoadedAddon* src, const QString& catalogId) const;
+    void flush();                              // drop every queued/in-flight job (source set is being rebuilt)
+    QString jobKey(const QString& sourceId, const QString& catalogId) const;
 
     AddonManager* mgr_ = nullptr;
     QTimer* timer_ = nullptr;        // staggered resweep

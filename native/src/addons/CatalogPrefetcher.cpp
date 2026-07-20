@@ -41,14 +41,18 @@ CatalogPrefetcher::CatalogPrefetcher(AddonManager* mgr, QObject* parent)
     // A zero-item result is a failed/empty fetch (the manager's cache lambda skips those too) -> ok=false.
     connect(mgr_, &AddonManager::catalogReady, this,
             [this](int reqId, const MediaCatalog& c) { onCatalogReady(reqId, !c.items.isEmpty()); });
-    // The source list or a source's enabled state changed -> re-warm (a newly enabled source, a new catalog).
-    connect(mgr_, &AddonManager::sourcesChanged, this, &CatalogPrefetcher::resweep);
+    // The source list changed -> the manager ran reload(), destroying every LoadedAddon. Flush the queue and
+    // all slot bookkeeping FIRST (stale ids / abandoned reqIds), THEN resweep to re-enqueue fresh jobs for the
+    // rebuilt source set. Order matters: flushing after the resweep would wipe the jobs we just queued.
+    connect(mgr_, &AddonManager::sourcesChanged, this, [this] { flush(); resweep(); });
+    // A source's enabled state toggled (no reload — the LoadedAddon set is unchanged) -> re-warm a newly
+    // enabled source; a newly disabled one is simply skipped by enqueueSweep. No flush needed here.
     connect(mgr_, &AddonManager::sourceEnabledChanged, this, [this](const QString&, bool) { resweep(); });
 }
 
-QString CatalogPrefetcher::jobKey(LoadedAddon* src, const QString& catalogId) const
+QString CatalogPrefetcher::jobKey(const QString& sourceId, const QString& catalogId) const
 {
-    return src->manifest.id + QLatin1Char('|') + catalogId;
+    return sourceId + QLatin1Char('|') + catalogId;
 }
 
 void CatalogPrefetcher::start()
@@ -75,15 +79,17 @@ void CatalogPrefetcher::enqueueSweep()
     for (LoadedAddon* src : mgr_->sources())
     {
         if (!src || !mgr_->isEnabled(src->manifest.id)) continue; // disabled sources are never warmed
+        const QString sourceId = src->manifest.id;
         for (const AddonCatalog& cat : mgr_->catalogs(src))
         {
-            const QString key = jobKey(src, cat.id);
+            const QString key = jobKey(sourceId, cat.id);
             if (active_.contains(key)) continue; // already queued or in flight
             // Skip anything still comfortably within the cache TTL — a warm cache costs no requests. (The
-            // resweep cadence is < TTL, so last sweep's entries are still valid here and get skipped.)
-            if (mgr_->cachedCatalog(src, cat.id, QString(), 1, {}).has_value()) continue;
+            // resweep cadence is < TTL, so last sweep's entries are still valid here and get skipped.) A bool
+            // peek avoids copying a full MediaCatalog per catalog per sweep just to test for presence.
+            if (mgr_->hasCachedCatalog(src, cat.id, QString(), 1, {})) continue;
             active_.insert(key);
-            queue_.enqueue({ src, cat.id, key });
+            queue_.enqueue({ sourceId, cat.id, key });
         }
     }
 }
@@ -93,7 +99,17 @@ void CatalogPrefetcher::pump()
     while (inFlight_.size() < kMaxInFlight && !queue_.isEmpty())
     {
         const Job job = queue_.dequeue();
-        const int reqId = mgr_->requestCatalog(job.src, job.catalogId, QString(), 1, {});
+        // Re-resolve the source by id at dispatch time: a reload() (remote-manifest refresh, install/remove,
+        // self-update) between enqueue and pump destroys every LoadedAddon, so a pointer parked on the job
+        // would dangle. sourceById returns null if the source is gone — drop, log, and move on.
+        LoadedAddon* src = mgr_->sourceById(job.sourceId);
+        if (!src)
+        {
+            pfLog(QStringLiteral("dropped %1 (source gone at dispatch)").arg(job.key));
+            active_.remove(job.key);
+            continue;
+        }
+        const int reqId = mgr_->requestCatalog(src, job.catalogId, QString(), 1, {});
         if (reqId < 0)
         {
             // Couldn't dispatch (source went away or was disabled between sweep and pump) — drop, log, move on.
@@ -140,6 +156,20 @@ void CatalogPrefetcher::reapStalled()
             ++it;
     }
     if (reclaimed) pump(); // freed slots — keep the queue moving (pump also stops the watchdog when idle)
+}
+
+void CatalogPrefetcher::flush()
+{
+    // Called when the source SET is about to be rebuilt (AddonManager::reload via sourcesChanged). Every queued
+    // job's source id may no longer resolve, and — critically — an outstanding reqId's key must be forgotten:
+    // if we cleared active_ but kept inFlight_, a late reply for an old reqId would call active_.remove(key) and
+    // could evict the dedupe entry of a FRESH job the resweep just re-enqueued under the same key. So drop all
+    // three in lockstep; the abandoned in-flight replies are then ignored by onCatalogReady (reqId not found),
+    // and the resweep that follows re-enqueues fresh jobs for every still-present source × catalog.
+    queue_.clear();
+    inFlight_.clear();
+    active_.clear();
+    if (watchdog_->isActive()) watchdog_->stop(); // nothing in flight to reap
 }
 
 void CatalogPrefetcher::armTimer()

@@ -494,6 +494,35 @@ static int probePrefetch()
     spin(200);
     check("resweep skips fresh entries (request count unchanged)", pf.issued() == before && pf.idle());
 
+    // ---- Manager R: reload() mid-sweep (the use-after-free case). AddonManager::reload() (fired from a
+    // remote-manifest refresh ~0.5-3s after startup, install/remove, and self-update) destroys EVERY
+    // LoadedAddon and clears the cache, then emits sourcesChanged. With 3 jobs parked in the queue holding
+    // freed source pointers, the old raw-pointer Job dereferenced freed memory at the next pump. The fix:
+    // jobs hold source IDS (re-resolved at pump), and sourcesChanged flushes the queue + slot bookkeeping
+    // BEFORE the resweep re-enqueues fresh jobs against the rebuilt source set. 6 catalogs (>3) so the sweep
+    // is provably mid-flight (3 in flight, 3 queued) at the moment reload() lands. ----
+    AddonManager mgrR;
+    for (const QString& id : ids) mgrR.setEnabled(id, true);
+    CatalogPrefetcher pfR(&mgrR, &mgrR);
+    pfR.setPeriodicResweep(false);
+    pfR.start();
+    check("reload case: sweep is mid-flight before reload (3 in flight, 3 queued)",
+          pfR.inFlight() == CatalogPrefetcher::kMaxInFlight && pfR.queued() == 3);
+    // Force the exact hazard: free every LoadedAddon while jobs sit queued, then fire the signal reload()
+    // always pairs with. No event-loop turn happens between these two calls, so no stale-pointer pump can
+    // occur before flush() clears the queue. Reaching the asserts below at all = no crash / no UAF.
+    mgrR.reload();
+    QMetaObject::invokeMethod(&mgrR, "sourcesChanged", Qt::DirectConnection);
+    const bool drainedR = spinUntil([&] { return pfR.idle(); }, 8000);
+    check("reload mid-sweep: prefetcher drained without crash or wedge", drainedR);
+    bool allCachedR = true;
+    for (const QString& id : ids) {
+        LoadedAddon* s = mgrR.sourceById(id); // re-resolved against the REBUILT source set
+        for (const QString& c : { QStringLiteral("movies"), QStringLiteral("shows") })
+            if (!mgrR.hasCachedCatalog(s, c, QString(), 1, {})) allCachedR = false;
+    }
+    check("reload mid-sweep: resweep re-covered every dropped key (all catalogs cached)", allCachedR);
+
     // ---- Manager S: 1-second TTL to exercise expiry ----
     qputenv("MMV_PREFETCH_TTL_S", "1");
     AddonManager mgrS;

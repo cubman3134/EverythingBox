@@ -101,6 +101,11 @@ public:
     std::optional<MediaCatalog> cachedCatalog(LoadedAddon* src, const QString& catalogId,
                                               const QString& query, int page,
                                               const QMap<QString, QString>& filters) const;
+    // Bool presence-peek with the same enabled + TTL semantics as cachedCatalog, but without copying the
+    // MediaCatalog out. The prefetcher's freshness check (per catalog, per sweep) only needs "is it warm?",
+    // so this avoids copying a full result payload just to discard it.
+    bool hasCachedCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
+                          const QMap<QString, QString>& filters) const;
     // The active catalog-cache TTL in ms (30 min by default; MMV_PREFETCH_TTL_S scales it for testability).
     // The prefetcher reads this to size its resweep cadence off the same clock the cache expires on.
     qint64 catalogCacheTtlMs() const { return catalogCacheTtlMs_; }

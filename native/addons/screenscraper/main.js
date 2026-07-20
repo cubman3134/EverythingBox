@@ -90,11 +90,13 @@ function getMeta(argJson) {
 
     var ssid = getConfig("ssid");
     var sspassword = getConfig("sspassword");
-    // Dev creds resolve from the app's embedded (obfuscated) builtins first; a manually-configured
-    // devid/devpassword in the addon settings is the legacy fallback (the settings fields were removed
-    // from the manifest, but any value a user stored previously is still honoured via getConfig).
-    var devid = builtinCredential("devid") || getConfig("devid") || "";
-    var devpassword = builtinCredential("devpassword") || getConfig("devpassword") || "";
+    // Dev creds: a deliberately-stored devid/devpassword wins over the app's embedded (obfuscated) builtin.
+    // A stored value only exists when someone set it on purpose, so it must be able to override a baked-in
+    // default that has gone stale (e.g. the embedded dev password was rotated in a shipped binary, where the
+    // settings fields are removed from the UI) — otherwise stale builtins would permanently shadow the fix.
+    // Empty/unset config falls through to the embedded builtin, which is the normal out-of-the-box path.
+    var devid = getConfig("devid") || builtinCredential("devid") || "";
+    var devpassword = getConfig("devpassword") || builtinCredential("devpassword") || "";
 
     // ScreenScraper's API mandates REGISTERED DEVELOPER credentials (devid/devpassword) — a personal user
     // account (ssid) alone is refused with HTTP 403 "Vérifier vos identifiants développeur". Get a devid from
