@@ -87,6 +87,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/AddonContext.cpp src/addons/AddonContext.h
         src/addons/JsAddon.cpp      src/addons/JsAddon.h
         src/addons/AddonManager.cpp src/addons/AddonManager.h
+        src/addons/CatalogPrefetcher.cpp src/addons/CatalogPrefetcher.h
         src/addons/GameMetaAggregator.cpp src/addons/GameMetaAggregator.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/browse/SearchAggregator.cpp  src/browse/SearchAggregator.h
@@ -336,7 +337,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Console harness for the addon JS engine (Duktape) + manager discovery/resolution.
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
-        src/addons/AddonManager.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape)
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

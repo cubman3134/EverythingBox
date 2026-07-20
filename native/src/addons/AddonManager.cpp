@@ -505,8 +505,17 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
             catalogCache_.insert(key, { QDateTime::currentMSecsSinceEpoch(), cat });
     });
 
+    // MMV_PREFETCH_TTL_S (seconds, >0) compresses the catalog-cache TTL for tests; it also scales the
+    // CatalogPrefetcher's resweep cadence (which reads catalogCacheTtlMs()). Unset -> the 30-minute default.
+    const int ttlOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_TTL_S");
+    if (ttlOverrideS > 0) catalogCacheTtlMs_ = qint64(ttlOverrideS) * 1000;
+
     nam_ = new QNetworkAccessManager(this);
-    root_ = AppPaths::dataDir() + QStringLiteral("/addons");
+    // MMV_ADDONS_ROOT lets a test (probe_addon) point discovery at an isolated fixture dir instead of the
+    // portable <app>/addons folder; unset in normal runs, so behaviour is unchanged.
+    root_ = qEnvironmentVariableIsSet("MMV_ADDONS_ROOT")
+                ? qEnvironmentVariable("MMV_ADDONS_ROOT")
+                : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
     seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
@@ -825,6 +834,19 @@ QString AddonManager::catalogCacheKey(LoadedAddon* src, const QString& catalogId
     return k;
 }
 
+std::optional<MediaCatalog> AddonManager::cachedCatalog(LoadedAddon* src, const QString& catalogId,
+                                                        const QString& query, int page,
+                                                        const QMap<QString, QString>& filters) const
+{
+    if (!src) return std::nullopt;
+    if (!isEnabled(src->manifest.id)) return std::nullopt; // stale-disabled: never serve a disabled source
+    const QString key = catalogCacheKey(src, catalogId, query, page, filters);
+    const auto it = catalogCache_.constFind(key);
+    if (it == catalogCache_.constEnd()) return std::nullopt;
+    if (QDateTime::currentMSecsSinceEpoch() - it->atMs >= catalogCacheTtlMs_) return std::nullopt; // expired
+    return it->cat;
+}
+
 int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                                  const QMap<QString, QString>& filters)
 {
@@ -832,10 +854,13 @@ int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, con
 
     // Serve a recent browse/landing result from cache (e.g. the console list, which rarely changes) instead
     // of re-fetching. Delivered on the next event-loop turn so the caller records its reqId first.
+    // Never serve a cached catalog for a source the user has since disabled (the stale-disabled landmine):
+    // gate the hit on isEnabled, mirroring the synchronous cachedCatalog() peek.
     const QString key = catalogCacheKey(src, catalogId, query, page, filters);
     const auto cached = catalogCache_.constFind(key);
     if (cached != catalogCache_.constEnd()
-        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < kCatalogCacheTtlMs)
+        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < catalogCacheTtlMs_
+        && isEnabled(src->manifest.id))
     {
         const int reqId = ++reqCounter_;
         const MediaCatalog cat = cached->cat;
@@ -1551,4 +1576,13 @@ void AddonManager::setEnabled(const QString& id, bool enabled)
 {
     store().setValue(QStringLiteral("addon.enabled.") + id, enabled);
     store().sync();
+    if (!enabled)
+    {
+        // Drop this source's cached catalogs so nothing stale can be served after it's turned off. Cache keys
+        // are "<manifestId>|catalog|query|page|…" (see catalogCacheKey), so the id + '|' prefix isolates them.
+        const QString prefix = id + QLatin1Char('|');
+        for (auto it = catalogCache_.begin(); it != catalogCache_.end(); )
+            it = it.key().startsWith(prefix) ? catalogCache_.erase(it) : std::next(it);
+    }
+    emit sourceEnabledChanged(id, enabled); // the prefetcher resweeps; the UI drops/serves accordingly
 }
