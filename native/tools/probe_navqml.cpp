@@ -457,6 +457,78 @@ static void runPanelHostReplaceTopAsserts()
     }
 }
 
+// §18(h) — the Add-ons manager panel graph (B2 Task 6.5), pinned against the REAL ThemedPanelHost with row sets
+// mirroring the shipped shapes. Three legs the other §18 host asserts don't cover: (1) a mixed row set whose
+// leading rows include a Separator + Info dividers lands + snaps the cursor onto the first SELECTABLE row (the
+// §18(e)/(f) sets were all-Action, so divider-skipping on a fresh present was never pinned); (2) a THREE-level
+// drill (root → detail → confirm) whose remove flow pops TWO levels (handleBack ×2) and must restore the root's
+// remembered INTERIOR source row (the confirmRemoveAddon nav); (3) a masked config TextField patched in place
+// keeps its level (updateRow is in-place). All are headlessly pinnable (no MainWindow linkage needed).
+static void runAddonsPanelAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    ThemedPanelHost host;
+    NavGraph* g = host.navGraph();
+
+    // ---- Root "Add-ons": 4 action rows + a Separator + 3 source rows + a trailing Info status row.
+    QVector<PanelRow> root;
+    for (int i = 0; i < 4; ++i) { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("act%1").arg(i); r.label = r.id; root << r; }
+    { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("sep"); r.label = QStringLiteral("Sources"); root << r; }
+    for (int i = 0; i < 3; ++i) { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("src%1").arg(i); r.label = r.id; root << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("status"); root << r; }
+    host.present(QStringLiteral("Add-ons"), root, noop, onBack);
+    CHECK(host.levelDepth() == 1 && g->index() == 0, "addons: root lands on the first action row");
+    g->select(QStringLiteral("panelRows"), 6);                 // a source row (interior: index 6 of the 3 sources)
+    CHECK(g->index() == 6, "addons: cursor parked on an interior source row (6)");
+
+    // ---- Per-addon detail: Toggle + Configure Action + destructive Remove + 2 Info rows.
+    QVector<PanelRow> detail;
+    { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("ad.enabled"); r.label = QStringLiteral("Enabled"); r.checked = true; detail << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.configure"); r.label = QStringLiteral("Configure"); detail << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.remove"); r.label = QStringLiteral("Remove"); r.destructive = true; detail << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.version"); r.value = QStringLiteral("1.0"); detail << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.about"); r.value = QStringLiteral("desc"); detail << r; }
+    host.present(QStringLiteral("Addon"), detail, noop, onBack);
+    CHECK(host.levelDepth() == 2 && g->index() == 0, "addons: detail lands on the Enabled toggle (first selectable)");
+    g->select(QStringLiteral("panelRows"), 2);                 // the Remove row
+
+    // ---- Remove-confirm: two leading Info dividers + a destructive Action — the cursor SKIPS to index 2.
+    QVector<PanelRow> confirm;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.msg"); r.value = QStringLiteral("Remove?"); confirm << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.status"); confirm << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("rm.confirm"); r.label = QStringLiteral("Remove"); r.destructive = true; confirm << r; }
+    host.present(QStringLiteral("Remove add-on"), confirm, noop, onBack);
+    CHECK(host.levelDepth() == 3, "addons: remove-confirm presented (depth 3)");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 2,
+          "addons: confirm cursor SKIPS the two leading Info dividers to the destructive Action (index 2)");
+
+    // ---- The remove flow pops confirm + detail (handleBack ×2) to a rebuilt root; the interior source cursor (6)
+    //      must survive the double pop (confirmRemoveAddon's deferred handleBack ×2 then openLibrary rebuild).
+    host.handleBack();
+    CHECK(host.levelDepth() == 2 && g->index() == 2,
+          "addons: first Back reveals the detail, restoring its remembered Remove row (2)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1, "addons: second Back reveals the root");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 6,
+          "addons: the double-pop restores the root's remembered interior source row (6)");
+    CHECK(g->validate(nullptr), "addons: the graph validates after the two-level remove-flow pop");
+
+    // ---- Config masked-field round-trip: a masked TextField is the first selectable row; updateRow patches it
+    //      IN PLACE (level unchanged); Back restores the root cursor (6).
+    QVector<PanelRow> cfg;
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; cfg << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.value = QStringLiteral("plaintext note"); cfg << r; }
+    host.present(QStringLiteral("Config"), cfg, noop, onBack);
+    CHECK(host.levelDepth() == 2 && g->index() == 0, "addons: config lands on the masked TextField (first selectable)");
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; r.value = QStringLiteral("secret");
+      host.updateRow(QStringLiteral("cfg:sspassword"), r); }
+    CHECK(host.levelDepth() == 2, "addons: updateRow on the masked config field keeps the level (in place)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1 && g->index() == 6, "addons: Back from config restores the root cursor (6)");
+}
+
 // §18(g) — ThemeView-level pins (B2 Task 6 hardening): the two behaviours that live in ThemeView.qml itself and
 // couldn't be tested from a bare NavGraph — (a) the XMB-buttons guard (a theme mixing an `xmb` element with
 // `button` elements must NOT let the cursor reach the bottom-button bar: the QML holds the `buttons` zone count
@@ -1661,6 +1733,9 @@ int main(int argc, char** argv)
     // §18(f): replaceTop's same-level contract (in-place rebuild never stacks a level) — the host leg of the
     // panel async-connection lifetime model (MainWindow's themedPanelIsTop-gated rebuild handlers).
     runPanelHostReplaceTopAsserts();
+    // §18(h): the Add-ons manager panel graph (B2 Task 6.5) — divider-skip landing, the three-level remove-flow
+    // double-pop cursor restore, and the masked config field's in-place patch.
+    runAddonsPanelAsserts();
     // §18(g): ThemeView-level pins — the XMB-buttons guard + grid-home rootBack (B2 Task 6 hardening).
     runThemeViewAsserts();
 #endif
