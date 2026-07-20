@@ -155,7 +155,8 @@ void ThemedPanelHost::renderTop(bool restore)
     // §18(e) drives THIS host (larger child, interior remembered row) to pin exactly this capture-before-mutate
     // ordering — moving the capture below the setZoneCount/select block turns that assertion red.
     const int target = restore ? e.lastIndex : firstSelectableRow(e.rows);
-    // Divider set: the indices the cursor must skip (Separator/Info/Progress), so a set-index snaps to the
+    // Divider set: the indices the cursor must skip (Separator/Info — Progress rows are SELECTABLE since the
+    // Downloads panel activates them for the per-job menu; see selectable()), so a set-index snaps to the
     // nearest activatable row and along-axis stepping hops over them (NavGraph owns what QML's seekSelectable did).
     QSet<int> dividers;
     for (int i = 0; i < e.rows.size(); ++i)
