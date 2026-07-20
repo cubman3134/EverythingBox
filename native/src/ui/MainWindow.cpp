@@ -904,11 +904,20 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
     // Themed input-mapping CAPTURE: while active this is installed on qApp, so it sees keys before the themed
     // QQuickWidget's QML nav. Swallow all key traffic (modal capture): Esc cancels, a keyboard key binds, the
     // pad button arrives via the poll timer. (ShortcutOverride too, so a key can't trigger a shortcut instead.)
+    // MOUSE is modal too: SettingsPanel.qml's MouseAreas drive the graph directly (row clicks + the header
+    // "‹ Back"), so an unswallowed click would navigate/activate WITHOUT ending capture — leaking this filter
+    // (every keystroke app-wide swallowed), leaving the pad timer polling, and arming the NEXT key as a silent
+    // binding write for a row that may no longer be shown. A press CANCELS the capture and is consumed (the
+    // click does not also activate — the first click just cancels, like Esc); release/dblclick/wheel are
+    // consumed so no orphan half-click reaches the page behind.
     if (remap_.active)
     {
         const QEvent::Type t = event->type();
         if (t == QEvent::KeyPress)   return inputCaptureKeyFilter(static_cast<QKeyEvent*>(event));
         if (t == QEvent::KeyRelease || t == QEvent::ShortcutOverride) return true;
+        if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick)
+        { endInputCapture(/*cancelled*/ true); return true; }
+        if (t == QEvent::MouseButtonRelease || t == QEvent::Wheel) return true;
     }
 #endif
 
@@ -7455,8 +7464,29 @@ void MainWindow::buildInputMappingRows(bool replace)
           r.checked = Settings::turboButton(remapPort_, b.retroId); rows << r; }
     }
 
+    // Classic parity: Reset to Defaults for the currently-shown player (pad + keyboard + turbo), applied
+    // immediately (the themed convention — classic staged it until Save).
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep2"); rows << s; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("reset");
+      r.label = tr("Reset to Defaults (this player)"); rows << r; }
+
     auto onAct = [this](const QString& id, const QString& val) {
-        if (id == QStringLiteral("player"))
+        // Defensive: a graph activation must never arrive mid-capture (the qApp filter swallows keys AND mouse
+        // while remap_.active), but if one ever does, cancel first so the filter/pad-timer can't leak.
+        if (remap_.active) endInputCapture(/*cancelled*/ true);
+        if (id == QStringLiteral("reset"))
+        {
+            Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+            Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+            for (const RemapBtn& b : kRemapRows)
+            {
+                if (pad)  pad->setBinding(remapPort_, b.retroId, Gamepad::defaultBinding(b.retroId));
+                if (keys) keys->setKey(remapPort_, b.retroId, Keymap::defaultKey(remapPort_, b.retroId));
+                Settings::setTurboButton(remapPort_, b.retroId, false);
+            }
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("player"))
         {
             const int idx = qMax(0, val.section(' ', 1, 1).toInt() - 1);   // "Player N" -> N-1
             remapPort_ = qBound(0, idx, ControllerRemapDialog::kPlayers - 1);
@@ -7485,7 +7515,9 @@ void MainWindow::buildInputMappingRows(bool replace)
         else if (id.startsWith(QStringLiteral("pad:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ false);
         else if (id.startsWith(QStringLiteral("key:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ true);
     };
-    auto onBack = [this] { openSettingsHub(); };
+    // Leaving the panel mid-capture must tear the capture down with it (filter removed, pad timer stopped) —
+    // unreachable while the modal filter swallows keys+mouse, but the boundary owns its own cleanup regardless.
+    auto onBack = [this] { if (remap_.active) endInputCapture(/*cancelled*/ true); openSettingsHub(); };
 
     if (replace && themedPanelIsTop(tr("Input Mapping")))
         themedPanelHost_->replaceTop(tr("Input Mapping"), rows, onAct, onBack);
