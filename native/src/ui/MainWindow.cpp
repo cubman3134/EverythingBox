@@ -6672,6 +6672,59 @@ void MainWindow::openRetroAchievements()
 
 void MainWindow::openDebug()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the diagnostic log becomes a scrollable read-only LogView row (activate = scroll mode: Up/Down
+    // scroll the tail, Esc returns to row selection — NavTextField's read-only two-state semantics at the panel
+    // level) alongside Refresh / Clear / Open-location Actions and the UI-test Toggle. Same flows: the same log
+    // path + 500-line tail, the same Settings::setUiTestChannel + updateUiTestServer.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        const QString path = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
+
+        auto loadTail = [path]() -> QString {
+            QFile f(path);
+            QString text = f.open(QIODevice::ReadOnly | QIODevice::Text)
+                               ? QString::fromUtf8(f.readAll()) : MainWindow::tr("(no log entries yet)");
+            const QStringList lines = text.split(QLatin1Char('\n'));
+            constexpr int keep = 500;
+            return lines.size() > keep ? lines.mid(lines.size() - keep).join(QLatin1Char('\n')) : text;
+        };
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("debug.path"); r.label = tr("Log file");
+          r.value = path; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.refresh"); r.label = tr("Refresh"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.clear"); r.label = tr("Clear log"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.openloc"); r.label = tr("Open file location"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("debug.uitest");
+          r.label = tr("UI test channel (local automation pipe — no focus needed)");
+          r.checked = Settings::uiTestChannel(); rows << r; }
+        { PanelRow r; r.kind = PanelRow::LogView; r.id = QStringLiteral("debug.log"); r.label = tr("Log");
+          r.value = loadTail(); rows << r; }
+
+        auto setLog = [this](const QString& t) {
+            PanelRow r; r.kind = PanelRow::LogView; r.id = QStringLiteral("debug.log"); r.label = MainWindow::tr("Log");
+            r.value = t; themedPanelHost_->updateRow(QStringLiteral("debug.log"), r); };
+
+        themedPanelHost_->present(tr("Debug"), rows,
+            [this, path, loadTail, setLog](const QString& id, const QString& val) {
+                if      (id == QStringLiteral("debug.refresh")) setLog(loadTail());
+                else if (id == QStringLiteral("debug.clear"))   { QFile::remove(path); setLog(loadTail()); }
+                else if (id == QStringLiteral("debug.openloc"))
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+                else if (id == QStringLiteral("debug.uitest")) {
+                    Settings::setUiTestChannel(val == QStringLiteral("1"));
+                    updateUiTestServer();   // start/stop the pipe right away
+                }
+            },
+            [this] { openSettingsHub(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Debug"), [this](QVBoxLayout* v) {
         const QString path = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
 

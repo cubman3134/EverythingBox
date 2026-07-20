@@ -40,9 +40,37 @@ Rectangle {
 
     color: cBg
 
+    // LogView scroll-mode (Debug log): activating a LogView row enters a read-only scroll state where Up/Down
+    // scroll the text and Esc/Enter return to row selection — NavTextField's read-only two-state semantics lifted
+    // to the panel level. The single `panelRows` zone can't own per-row modes, so the state lives here and the
+    // active LogView delegate scrolls in response to `scrollLog`.
+    property bool logScroll: false
+    signal scrollLog(int delta)
+    // The currently-selected row's kind — the selected delegate (always realized: it's the ListView currentItem)
+    // publishes it, so the root can tell whether Enter should enter LogView scroll mode without reaching into the
+    // model by index.
+    property int selRowKind: -1
+    readonly property bool onLogRow: g && g.zone === "panelRows" && selRowKind === kLogView
+    // Leaving scroll mode whenever the selection moves off the log row keeps the state honest.
+    onOnLogRowChanged: if (!onLogRow) logScroll = false
+
     // Route every nav key through the shared graph (host-driven; no focus-grabbing per-row editors exist).
     Keys.onPressed: function(e) {
         if (!g) return
+        // Scroll mode: keys drive the log, not the cursor.
+        if (root.logScroll) {
+            if (e.key === Qt.Key_Up)         { root.scrollLog(-48); e.accepted = true }
+            else if (e.key === Qt.Key_Down)  { root.scrollLog(48);  e.accepted = true }
+            else if (e.key === Qt.Key_PageUp)   { root.scrollLog(-260); e.accepted = true }
+            else if (e.key === Qt.Key_PageDown) { root.scrollLog(260);  e.accepted = true }
+            else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace
+                     || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { root.logScroll = false; e.accepted = true }
+            return
+        }
+        // Enter on a LogView row enters scroll mode (host-side activation is a no-op for LogView).
+        if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && root.onLogRow) {
+            root.logScroll = true; e.accepted = true; return
+        }
         if (e.key === Qt.Key_Up)          { g.move(Qt.Key_Up);    e.accepted = true }
         else if (e.key === Qt.Key_Down)   { g.move(Qt.Key_Down);  e.accepted = true }
         else if (e.key === Qt.Key_Left)   { g.move(Qt.Key_Left);  e.accepted = true }
@@ -108,10 +136,16 @@ Rectangle {
             width: list.width
             readonly property int kind: rowData ? rowData.kind : root.kAction
             readonly property bool isSep: kind === root.kSeparator
+            readonly property bool isLog: kind === root.kLogView
             readonly property bool sel: root.g && root.g.zone === "panelRows" && root.g.index === index
             readonly property bool destructive: rowData && rowData.destructive === true
             readonly property bool dim: rowData && rowData.enabled === false
-            height: isSep ? 40 : 56
+            readonly property bool scrolling: isLog && sel && root.logScroll
+            height: isSep ? 40 : (isLog ? 320 : 56)
+
+            // Publish the selected row's kind to the root (only the sel==true delegate writes, so it's unambiguous).
+            onSelChanged: if (sel) root.selRowKind = kind
+            Component.onCompleted: if (sel) root.selRowKind = kind
 
             // Separator = a section header (no card; dim, spaced label).
             Text {
@@ -127,18 +161,54 @@ Rectangle {
                 anchors.fill: parent
                 radius: 10
                 color: del.sel ? root.cRowSel : root.cRow
-                border.width: del.sel ? 2 : 1
-                border.color: del.sel ? root.cAccent : Qt.darker(root.cRow, 1.25)
+                border.width: (del.sel || del.scrolling) ? 2 : 1
+                border.color: del.scrolling ? Qt.lighter(root.cAccent, 1.4)
+                                            : (del.sel ? root.cAccent : Qt.darker(root.cRow, 1.25))
                 opacity: del.dim ? 0.5 : 1.0
 
-                Text {   // left label
+                Text {   // left label (log rows anchor it to the top instead of centring)
                     id: lbl
                     anchors.left: parent.left; anchors.leftMargin: 18
                     anchors.right: rightSide.left; anchors.rightMargin: 12
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: del.rowData ? del.rowData.label : ""
-                    color: del.destructive ? root.cWarn : root.cText
-                    font.pixelSize: 17; elide: Text.ElideRight
+                    anchors.verticalCenter: del.isLog ? undefined : parent.verticalCenter
+                    anchors.top: del.isLog ? parent.top : undefined
+                    anchors.topMargin: del.isLog ? 12 : 0
+                    text: del.isLog
+                          ? (del.rowData ? del.rowData.label : "") + (del.scrolling ? "   — scrolling (Esc to exit)"
+                                                                                     : (del.sel ? "   — Enter to scroll" : ""))
+                          : (del.rowData ? del.rowData.label : "")
+                    color: del.destructive ? root.cWarn : (del.isLog ? root.cDim : root.cText)
+                    font.pixelSize: del.isLog ? 13 : 17
+                    font.bold: del.isLog; elide: Text.ElideRight
+                }
+
+                // LogView: a scrollable, read-only monospace tail of the log. Up/Down scroll it in scroll mode
+                // (root.scrollLog), and the wheel/drag scroll it directly.
+                Flickable {
+                    id: logFlick
+                    visible: del.isLog
+                    anchors.left: parent.left; anchors.right: parent.right
+                    anchors.top: lbl.bottom; anchors.bottom: parent.bottom
+                    anchors.leftMargin: 16; anchors.rightMargin: 12
+                    anchors.topMargin: 6; anchors.bottomMargin: 12
+                    clip: true
+                    contentWidth: logText.paintedWidth; contentHeight: logText.paintedHeight
+                    boundsBehavior: Flickable.StopAtBounds
+                    Connections {
+                        target: root
+                        enabled: del.scrolling
+                        function onScrollLog(delta) {
+                            var maxY = Math.max(0, logFlick.contentHeight - logFlick.height)
+                            logFlick.contentY = Math.max(0, Math.min(maxY, logFlick.contentY + delta))
+                        }
+                    }
+                    Text {
+                        id: logText
+                        text: del.rowData ? del.rowData.value : ""
+                        color: root.cText
+                        font.family: "Consolas, 'Courier New', monospace"; font.pixelSize: 12
+                        textFormat: Text.PlainText
+                    }
                 }
 
                 // Right-side affordance, by kind.
@@ -223,9 +293,11 @@ Rectangle {
                     }
                 }
 
+                // Row activation (not for LogView — its Flickable owns pointer input natively: wheel + drag scroll
+                // it regardless of keyboard scroll-mode, so it needs no activate MouseArea).
                 MouseArea {
                     anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                    enabled: !del.dim
+                    enabled: !del.dim && !del.isLog
                     onClicked: { if (root.g) { root.g.select("panelRows", del.index); root.g.activate() } }
                 }
             }
