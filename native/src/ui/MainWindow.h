@@ -258,6 +258,38 @@ private:
                          const std::function<void(int result)>& onFinished,
                          const std::function<void()>& onBack);
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
+
+    // ---- Themed Profiles picker (B2 Task 5): the ProfileDialog surface on the Nav Contract. mustChoose is the
+    // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
+    // (Back keeps the current profile). Both reuse ProfileStore data ops exactly. ----
+    void presentProfilePicker(bool mustChoose);                  // reset()+present() the root list (also for startup, pre-home)
+    void presentProfileList(bool mustChoose, bool replace);      // (re)build the profile list rows; replace = in place
+    void editProfilePanel(const QString& id, bool mustChoose);   // nested name(TextField)+icon(Choice) picker; id "" = create
+    void profileRowMenu(const QString& profileId, bool mustChoose); // Switch/Edit/Delete chooser for a profile row
+    void confirmDeleteProfile(const QString& profileId, bool mustChoose);
+    void chooseProfile(const QString& id);                       // setCurrent + openHome (the finish for both variants)
+    void quitConfirmFromStartup();                               // mustChoose Back: confirm quit, or re-present the list
+
+    // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----
+    void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
+    void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
+
+    // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
+    // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows
+    // "Press a key/button…", Esc cancels. Bindings apply+persist immediately (themed-panel convention). ----
+    void presentInputMapping();
+    void buildInputMappingRows(bool replace);                    // (re)build the shell rows for the current port/scope
+    void beginInputCapture(int retroId, bool keyboard);          // enter capture for one button binding
+    void endInputCapture(bool cancelled);                        // leave capture (bind was written, or cancelled)
+    void onInputCapturePadTick();                                // poll the pad while capturing a controller input
+    bool inputCaptureKeyFilter(class QKeyEvent* e);              // consume the next physical key while capturing a key
+    // Capture state for the themed input panel (mirrors ControllerRemapDialog's capture machinery, driven headlessly).
+    struct RemapCapture { bool active = false; bool keyboard = false; int port = 0; int retroId = -1; bool sawRelease = false; };
+    RemapCapture remap_;
+    class QTimer* remapPadTimer_ = nullptr;
+    QString remapScope_;   // system id currently being edited ("" = global default)
+    int     remapPort_ = 0; // player port whose profile is being edited
+
     QWidget* firstPanelRow() const;     // the first focusable row in the current panel content (or null)
     QVector<QWidget*> panelNavRing() const; // Back + the panel's focusable rows, top-to-bottom (arrow/Tab nav)
 

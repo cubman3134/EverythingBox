@@ -1678,6 +1678,12 @@ void MainWindow::changeEvent(QEvent* event)
 void MainWindow::promptStartupProfile()
 {
     startupChooseProfile_ = false;
+#ifdef MMV_HAVE_QML
+    // Themed mode: render the picker on the Nav Contract (ThemedPanelHost) instead of hosting the classic
+    // ProfileDialog. The host is a persistent stack page constructed in the ctor (independent of themedHome_,
+    // which openHome builds AFTER a profile is chosen) — so it can present pre-home. mustChoose = no Back escape.
+    if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
+#endif
     auto* dlg = new ProfileDialog(/*mustChoose*/ true, this);
     showDialogPanel(tr("Who's using My Media Vault?"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
@@ -3318,6 +3324,11 @@ bool MainWindow::parentalUnlock(const QString& reason)
 void MainWindow::onSwitchProfile()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to switch profiles."))) return;
+#ifdef MMV_HAVE_QML
+    // Themed mode: the switcher on the Nav Contract. Back keeps the current profile (openHome), matching the
+    // classic Cancel button (which mustChoose hides). The classic ProfileDialog path below stays for classic mode.
+    if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ false); return; }
+#endif
     auto* dlg = new ProfileDialog(/*mustChoose*/ false, this);
     showDialogPanel(tr("Profiles"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
@@ -3327,6 +3338,166 @@ void MainWindow::onSwitchProfile()
         openHome();
     }, [this] { openHome(); });
 }
+
+#ifdef MMV_HAVE_QML
+// ---- Themed Profiles picker (B2 Task 5) --------------------------------------------------------------------
+// The classic ProfileDialog (a QStackedWidget: list page + a name/icon picker page) becomes, in themed mode, a
+// ThemedPanelHost presentation: the list is the root panel (Action row per profile + "Create New Profile"); the
+// picker's second page is a nested panel level (name TextField via the OSK + icon Choice). Activating a profile
+// row opens a NavMenu chooser (Switch / Edit / Delete) — the themed analogue of the classic row's three buttons.
+// All data ops go through ProfileStore verbatim.
+
+void MainWindow::presentProfilePicker(bool mustChoose)
+{
+    clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
+    themedPanelHost_->reset();        // fresh ROOT presentation (also drops any stale panel levels)
+    themedPanelHost_->setStyle(settingsPanelStyle());
+    presentProfileList(mustChoose, /*replace*/ false);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+void MainWindow::presentProfileList(bool mustChoose, bool replace)
+{
+    const QString title = mustChoose ? tr("Who's using My Media Vault?") : tr("Profiles");
+
+    QVector<PanelRow> rows;
+    for (const Profile& p : ProfileStore::list())
+    {
+        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("profile:") + p.id;
+        r.label = (p.icon.isEmpty() ? QStringLiteral("🙂") : p.icon) + QStringLiteral("   ") + p.name;
+        rows << r;
+    }
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep"); rows << s; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("new");
+      r.label = tr("＋  Create New Profile"); rows << r; }
+
+    auto onAct = [this, mustChoose](const QString& id, const QString&) {
+        if (id == QStringLiteral("new"))            editProfilePanel(QString(), mustChoose); // nested picker
+        else if (id.startsWith(QStringLiteral("profile:"))) profileRowMenu(id.mid(8), mustChoose);
+    };
+    auto onBack = [this, mustChoose] {
+        if (mustChoose) quitConfirmFromStartup();  // startup: no escape — confirm quit (or re-present the list)
+        else            openHome();                // switcher: Back keeps the current profile
+    };
+
+    if (replace && themedPanelIsTop(title))
+        themedPanelHost_->replaceTop(title, rows, onAct, onBack);
+    else
+        themedPanelHost_->present(title, rows, onAct, onBack);
+}
+
+// The name/icon picker: New (id empty) or Edit an existing profile. A nested panel level (present) so Back pops
+// back to the list. name is a TextField (host runs the OSK); icon is a Choice cycling the shared glyph set.
+// Values held pending (shared_ptr) and committed only on Create/Save (classic parity — Back discards).
+void MainWindow::editProfilePanel(const QString& id, bool mustChoose)
+{
+    const bool isNew = id.isEmpty();
+    Profile target;
+    if (!isNew)
+        for (const Profile& p : ProfileStore::list())
+            if (p.id == id) { target = p; break; }
+
+    const QStringList icons = ProfileDialog::iconChoices();
+    auto name = std::make_shared<QString>(target.name);
+    auto icon = std::make_shared<QString>(target.icon.isEmpty() ? icons.value(0) : target.icon);
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("name"); r.label = tr("Name");
+      r.value = *name; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("icon"); r.label = tr("Icon");
+      r.value = *icon; r.options = icons; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("save");
+      r.label = isNew ? tr("Create Profile") : tr("Save"); rows << r; }
+
+    themedPanelHost_->present(isNew ? tr("New Profile") : tr("Edit Profile"), rows,
+        [this, id, isNew, name, icon, mustChoose](const QString& rid, const QString& val) {
+            if (rid == QStringLiteral("name"))      *name = val;
+            else if (rid == QStringLiteral("icon")) *icon = val;
+            else if (rid == QStringLiteral("save"))
+            {
+                const QString entered = name->trimmed();
+                if (entered.isEmpty()) { notify(tr("Please enter a name.")); return; }
+                if (isNew)
+                {
+                    const Profile p = ProfileStore::add(entered, *icon);   // add + auto-select (classic parity)
+                    chooseProfile(p.id);                                   // finish: setCurrent + openHome
+                }
+                else
+                {
+                    ProfileStore::update(id, entered, *icon);
+                    // Pop this picker level then refresh the list in place (deferred: we're inside the picker's
+                    // own onActivate, so let it unwind before mutating the panel stack).
+                    QTimer::singleShot(0, this, [this, mustChoose] {
+                        themedPanelHost_->handleBack();
+                        presentProfileList(mustChoose, /*replace*/ true);
+                    });
+                }
+            }
+        },
+        [] { /* nested: Back is a graph-level pop -> the host restores the list; nothing to run here */ });
+}
+
+void MainWindow::profileRowMenu(const QString& profileId, bool mustChoose)
+{
+    Profile target;
+    for (const Profile& p : ProfileStore::list())
+        if (p.id == profileId) { target = p; break; }
+    if (target.id.isEmpty()) return;
+
+    QStringList labels; QVector<int> acts;
+    enum { A_Switch, A_Edit, A_Delete };
+    labels << tr("Switch to %1").arg(target.name); acts << A_Switch;
+    labels << tr("Edit");                          acts << A_Edit;
+    if (ProfileStore::list().size() > 1) { labels << tr("Delete"); acts << A_Delete; } // never delete the last one
+
+    auto* menu = new NavMenu(target.name, labels, [this, profileId, acts, mustChoose](int row) {
+        if (row < 0 || row >= acts.size()) return;  // backed out
+        switch (acts[row])
+        {
+        case A_Switch: chooseProfile(profileId);                break;  // setCurrent + openHome
+        case A_Edit:   editProfilePanel(profileId, mustChoose); break;  // nested picker
+        case A_Delete: confirmDeleteProfile(profileId, mustChoose); break;
+        }
+    }, this);
+    menu->setNavGraph(themedPanelHost_ ? themedPanelHost_->navGraph() : nullptr);
+}
+
+void MainWindow::confirmDeleteProfile(const QString& profileId, bool mustChoose)
+{
+    Profile target;
+    for (const Profile& p : ProfileStore::list())
+        if (p.id == profileId) { target = p; break; }
+    if (target.id.isEmpty()) return;
+
+    const int choice = NavConfirm::ask(tr("Delete profile"),
+        tr("Delete “%1”? Their recent list will be removed. This can't be undone.").arg(target.name),
+        { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice == 1)
+    {
+        ProfileStore::remove(profileId);                 // if it was current, ProfileStore repoints current
+        presentProfileList(mustChoose, /*replace*/ true); // refresh the list in place
+    }
+}
+
+void MainWindow::chooseProfile(const QString& id)
+{
+    ProfileStore::setCurrent(id);
+    openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
+}
+
+// mustChoose Back: the classic must-choose dialog exited the app on close. Themed rendering: confirm the quit
+// (the "you must pick a profile" contract), or re-present the list if the user chooses to keep choosing.
+void MainWindow::quitConfirmFromStartup()
+{
+    const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
+        tr("You need to choose a profile to continue."),
+        { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice == 1) { QApplication::quit(); return; }
+    presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
+}
+#endif // MMV_HAVE_QML
 
 // A game whose platform is desktop Windows isn't an emulator ROM — we run it on the PC itself. The addon
 // tags these with the platform name it was opened from (e.g. "PC (Windows)").
