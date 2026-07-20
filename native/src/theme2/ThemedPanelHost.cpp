@@ -143,6 +143,14 @@ void ThemedPanelHost::renderTop(bool restore)
 {
     if (stack_.isEmpty()) return;
     const Entry& e = stack_.last();
+    // Capture the target cursor NOW, before any graph mutation. Critical for pop-restore: setZoneCount below
+    // SHRINKS the active zone when the popped child had more rows than this parent, which snaps the stale child
+    // index into the new count and emits selectionChanged — onSelectionChanged then writes that snapped value
+    // into THIS entry's lastIndex (the child is already gone, so stack_.last() is us). Reading e.lastIndex after
+    // that point would restore the clamped child cursor, not the row the user actually left the parent on. (The
+    // probe's 18(d) child was smaller than its parent, so the shrink never fired — this only surfaces live with
+    // a child panel longer than its parent, e.g. General(27 rows) popped back to the hub(13).)
+    const int target = restore ? e.lastIndex : firstSelectableRow(e.rows);
     // Divider set: the indices the cursor must skip (Separator/Info/Progress), so a set-index snaps to the
     // nearest activatable row and along-axis stepping hops over them (NavGraph owns what QML's seekSelectable did).
     QSet<int> dividers;
@@ -154,8 +162,7 @@ void ThemedPanelHost::renderTop(bool restore)
     bridge_->setTitle(e.title);
     // Fresh present(): land on the first selectable row. Pop-restore: land on the entry's REMEMBERED row (the
     // user's place before the nested drill) — select() clamps + divider-snaps it, so a shrunk row list is safe.
-    graph_->select(QStringLiteral("panelRows"),
-                   restore ? e.lastIndex : firstSelectableRow(e.rows));
+    graph_->select(QStringLiteral("panelRows"), target);
 }
 
 void ThemedPanelHost::updateRow(const QString& rowId, const PanelRow& row)

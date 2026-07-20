@@ -262,6 +262,10 @@ private:
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
     ThemedPanelHost* themedPanelHost_ = nullptr; // themed settings-panel surface (B2); null without QML
+    // Async signal hookups the themed General panel installs (Trakt live status). The host persists across
+    // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own
+    // these and disconnect them on each (re)present of General.
+    QVector<QMetaObject::Connection> genSettingsConns_;
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view

@@ -5238,6 +5238,289 @@ void MainWindow::updateDownloadRow(const QString& id)
 
 void MainWindow::openGeneralSettings()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: render General as a flat PanelRow descriptor list on the Nav Contract (ThemedPanelHost),
+    // instead of the classic QWidget builder. Every row writes the SAME Settings key via the SAME setter the
+    // classic handler used. This is a NESTED present() (the hub is already up at level 1) — NO reset(), so Back
+    // is a graph-level pop that renderTop(restore)s the hub to the row we entered from (the first live exercise
+    // of Task 1's pop-restore path). Section headers -> Separator rows; the subtitle-language combo -> a Choice;
+    // credentials + the ROMs path/actions -> TextField/Action rows; the parental PIN keeps Osk::getText nesting.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        // Drop any Trakt live-status hookups from a previous presentation (the host persists — classic's child
+        // labels auto-disconnected on teardown; we manage ours). Re-added after present() below.
+        for (const QMetaObject::Connection& c : genSettingsConns_) disconnect(c);
+        genSettingsConns_.clear();
+
+        if (bgm_) bgm_->reload();                          // rescan music, exactly as the classic builder does
+        themedPanelHost_->setStyle(settingsPanelStyle());  // active theme's settingsPanel block (hard fallbacks)
+
+        // Subtitle language table (display <-> code). The Choice cycles the display names; the handler maps the
+        // picked display back to its code via this same pair list (so a prior "(custom)" code round-trips exact).
+        const QList<QPair<QString, QString>> langs = {
+            { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
+            { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
+            { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
+            { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
+            { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
+            { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
+            { QStringLiteral("Arabic"), QStringLiteral("ara") },
+        };
+        const QString curLang = Settings::subtitleLanguage();
+        QList<QPair<QString, QString>> langOptPairs = langs;   // captured by the handler for display->code mapping
+        QString curLangDisp;
+        for (const auto& l : langs) if (l.second == curLang) { curLangDisp = l.first; break; }
+        if (curLangDisp.isEmpty() && !curLang.isEmpty()) {     // keep a previously-set code the list doesn't carry
+            curLangDisp = tr("%1 (custom)").arg(curLang);
+            langOptPairs << qMakePair(curLangDisp, curLang);
+        }
+        if (curLangDisp.isEmpty()) curLangDisp = langs.first().first;
+        QStringList langOpts;
+        for (const auto& p : langOptPairs) langOpts << p.first;
+
+        // Background-music volume: the contract has no Slider row, so the continuous 0..100 slider becomes a
+        // discrete Choice in 10% steps (documented gap — see report). Same write path (setBgmVolume/setVolume).
+        QStringList volOpts;
+        for (int p = 0; p <= 100; p += 10) volOpts << QStringLiteral("%1%").arg(p);
+        const QString curVolDisp = QStringLiteral("%1%").arg(int(qRound(Settings::bgmVolume() / 10.0) * 10));
+
+        QVector<PanelRow> rows;
+        auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto toggle = [&rows](const QString& id, const QString& label, bool on) {
+            PanelRow r; r.kind = PanelRow::Toggle; r.id = id; r.label = label; r.checked = on; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto textf  = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
+            PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
+
+        // --- Display ---
+        sep(tr("Display"));
+        toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
+        // --- Updates ---
+        sep(tr("Updates"));
+        info(QStringLiteral("update.version"), tr("Version"), AppUpdater::currentVersion());
+        toggle(QStringLiteral("update.autocheck"), tr("Check for updates on startup"), Settings::checkUpdatesOnStartup());
+        action(QStringLiteral("update.check"), tr("Check for updates now"));
+        action(QStringLiteral("update.install"), (updater_ && updater_->updatePending())
+                   ? tr("Install %1 and restart").arg(updater_->latestVersion()) : tr("Install update"));
+        info(QStringLiteral("update.status"), tr("Status"), QString());
+        // --- Game ROMs ---
+        sep(tr("Game ROMs"));
+        info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
+        action(QStringLiteral("roms.change"), tr("Change ROMs folder…"));
+        action(QStringLiteral("roms.open"), tr("Open ROMs folder"));
+        toggle(QStringLiteral("roms.keepscrape"), tr("Keep scraped data in the ROMs folder (gamelist.xml)"),
+               Settings::keepScrapedData());
+        // --- Playback ---
+        sep(tr("Playback"));
+        toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        toggle(QStringLiteral("pb.bezel"), tr("Show bezel / border art around games"), Settings::bezelEnabled());
+        action(QStringLiteral("pb.bezelopen"), tr("Open bezels folder"));
+        // --- Subtitles ---
+        sep(tr("Subtitles"));
+        toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
+        choice(QStringLiteral("subs.lang"), tr("Default language"), langOpts, curLangDisp);
+        // --- Auto-download from OpenSubtitles (credentials render plain this task; masking arrives with RA, Task 3) ---
+        sep(tr("Auto-download from OpenSubtitles"));
+        textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
+        textf(QStringLiteral("os.user"), tr("Username"), Settings::openSubUsername());
+        textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword());
+        // --- Trakt.tv ---
+        sep(tr("Trakt.tv"));
+        textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
+        textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret());
+        action(QStringLiteral("trakt.connect"), TraktClient::connected() ? tr("Disconnect from Trakt")
+                                                                          : tr("Connect to Trakt"));
+        info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
+                                                                                     : tr("Not connected"));
+        // --- Parental Controls (the PIN flows keep Osk::getText nesting exactly) ---
+        sep(tr("Parental Controls"));
+        info(QStringLiteral("parental.status"), tr("PIN"), Settings::hasParentalPin() ? tr("A PIN is set")
+                                                                                       : tr("No PIN set"));
+        action(QStringLiteral("parental.setpin"), Settings::hasParentalPin() ? tr("Change PIN") : tr("Set PIN"));
+        action(QStringLiteral("parental.clearpin"), tr("Remove PIN"));
+        info(QStringLiteral("parental.profileshdr"), tr("Restricted (kids) profiles"), QString());
+        for (const Profile& pr : ProfileStore::list())
+            toggle(QStringLiteral("profile:") + pr.id,
+                   (pr.icon.isEmpty() ? QString() : pr.icon + QStringLiteral("  ")) + pr.name, pr.restricted);
+        // --- Background Music ---
+        sep(tr("Background Music"));
+        toggle(QStringLiteral("bgm.on"), tr("Play background music"), Settings::bgmEnabled());
+        choice(QStringLiteral("bgm.vol"), tr("Volume"), volOpts, curVolDisp);
+        action(QStringLiteral("bgm.open"), tr("Open music folder"));
+        // --- PC Game Achievements (Steam) ---
+        sep(tr("PC Game Achievements (Steam)"));
+        textf(QStringLiteral("steam.key"), tr("Steam Web API key"),
+              store().value(QStringLiteral("steam/apikey")).toString());
+        // --- Streaming (Debrid) ---
+        sep(tr("Streaming (Debrid)"));
+        textf(QStringLiteral("debrid.torbox"), tr("TorBox API key"),
+              store().value(QStringLiteral("debrid/torbox/apikey")).toString());
+
+        // Small helpers to patch a status Info / an Action label in place (updateRow replaces the whole row).
+        auto setInfo = [this](const QString& id, const QString& caption, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = caption; r.value = value;
+            themedPanelHost_->updateRow(id, r); };
+        auto setAction = [this](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label;
+            themedPanelHost_->updateRow(id, r); };
+
+        themedPanelHost_->present(tr("General"), rows,
+            [this, langOptPairs, setInfo, setAction](const QString& id, const QString& val) {
+                const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
+                if (id == QStringLiteral("disp.fullscreen")) {
+                    Settings::setStartFullscreen(on);
+                    if (on) showFullScreen(); else if (isFullScreen()) leaveFullScreen();
+                }
+                else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
+                else if (id == QStringLiteral("update.check")) {
+                    if (!updater_) return;
+                    setInfo(QStringLiteral("update.status"), tr("Status"), tr("Checking…"));
+                    connect(updater_, &AppUpdater::updateAvailable, this,
+                        [this, setInfo, setAction](const QString& ver, const QString&) {
+                            setInfo(QStringLiteral("update.status"), tr("Status"), tr("Version %1 is available.").arg(ver));
+                            setAction(QStringLiteral("update.install"), tr("Install %1 and restart").arg(ver));
+                        }, Qt::SingleShotConnection);
+                    connect(updater_, &AppUpdater::upToDate, this, [this, setInfo] {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("You're already on the latest version."));
+                    }, Qt::SingleShotConnection);
+                    connect(updater_, &AppUpdater::checkFailed, this, [this, setInfo](const QString& why) {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("Couldn't check for updates: %1").arg(why));
+                    }, Qt::SingleShotConnection);
+                    updater_->checkForUpdate();
+                }
+                else if (id == QStringLiteral("update.install")) {
+                    if (updater_ && updater_->updatePending()) {
+                        setInfo(QStringLiteral("update.status"), tr("Status"),
+                                tr("Downloading and installing… the app will restart."));
+                        updater_->downloadAndApply();
+                    } else {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
+                    }
+                }
+                else if (id == QStringLiteral("roms.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the ROMs folder"),
+                                                                          Settings::romsFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setRomsFolder(dir);
+                    setInfo(QStringLiteral("roms.path"), dir, QString());
+                    RomLibrary::ensureStructure();
+                    const int added = RomLibrary::syncToDownloads();
+                    statusBar()->showMessage(added > 0
+                        ? tr("ROMs folder set to %1 — added %n game(s) to Downloaded.", "", added).arg(dir)
+                        : tr("ROMs folder set to %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("roms.open")) {
+                    RomLibrary::ensureStructure();
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
+                }
+                else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
+                else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("pb.bezel")) Settings::setBezelEnabled(on);
+                else if (id == QStringLiteral("pb.bezelopen")) {
+                    const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
+                    QDir().mkpath(d);
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+                }
+                else if (id == QStringLiteral("subs.on")) Settings::setSubtitlesOnByDefault(on);
+                else if (id == QStringLiteral("subs.lang")) {
+                    QString code = val;
+                    for (const auto& p : langOptPairs) if (p.first == val) { code = p.second; break; }
+                    Settings::setSubtitleLanguage(code);
+                }
+                else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
+                else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
+                else if (id == QStringLiteral("os.pass")) Settings::setOpenSubPassword(val);
+                else if (id == QStringLiteral("trakt.id"))     Settings::setTraktClientId(val);
+                else if (id == QStringLiteral("trakt.secret")) Settings::setTraktClientSecret(val);
+                else if (id == QStringLiteral("trakt.connect")) {
+                    if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
+                    if (!TraktClient::configured()) {
+                        setInfo(QStringLiteral("trakt.status"), tr("Status"),
+                                tr("Enter your Client ID and Secret first.")); return;
+                    }
+                    setInfo(QStringLiteral("trakt.status"), tr("Status"), tr("Requesting a code from Trakt…"));
+                    trakt_->connectAccount();
+                }
+                else if (id == QStringLiteral("parental.setpin")) {
+                    if (Settings::hasParentalPin()) {
+                        const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(),
+                                                         QLineEdit::Password, this, themedPanelHost_->navGraph());
+                        if (cur.isNull()) return;
+                        if (!Settings::checkParentalPin(cur)) {
+                            setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("Incorrect PIN.")); return; }
+                    }
+                    const QString a = Osk::getText(tr("New PIN:"), QString(), QLineEdit::Password, this,
+                                                   themedPanelHost_->navGraph());
+                    if (a.isNull() || a.isEmpty()) return;
+                    const QString b = Osk::getText(tr("Confirm PIN:"), QString(), QLineEdit::Password, this,
+                                                   themedPanelHost_->navGraph());
+                    if (b.isNull()) return;
+                    if (a != b) { setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("PINs didn't match.")); return; }
+                    Settings::setParentalPin(a);
+                    setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("A PIN is set"));
+                    setAction(QStringLiteral("parental.setpin"), tr("Change PIN"));
+                }
+                else if (id == QStringLiteral("parental.clearpin")) {
+                    if (!Settings::hasParentalPin()) {
+                        setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("No PIN set")); return; }
+                    const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(),
+                                                     QLineEdit::Password, this, themedPanelHost_->navGraph());
+                    if (cur.isNull()) return;
+                    if (!Settings::checkParentalPin(cur)) {
+                        setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("Incorrect PIN.")); return; }
+                    Settings::setParentalPin(QString());
+                    setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("No PIN set"));
+                    setAction(QStringLiteral("parental.setpin"), tr("Set PIN"));
+                }
+                else if (id.startsWith(QStringLiteral("profile:")))
+                    ProfileStore::setRestricted(id.mid(8), on);
+                else if (id == QStringLiteral("bgm.on")) {
+                    Settings::setBgmEnabled(on); if (bgm_) bgm_->setEnabled(on); updateBackgroundMusic();
+                }
+                else if (id == QStringLiteral("bgm.vol")) {
+                    const int p = val.left(val.size() - 1).toInt();   // strip the trailing "%"
+                    Settings::setBgmVolume(p); if (bgm_) bgm_->setVolume(p);
+                }
+                else if (id == QStringLiteral("bgm.open")) {
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(BackgroundMusic::musicDir()));
+                    if (bgm_) { bgm_->reload(); updateBackgroundMusic(); }
+                }
+                else if (id == QStringLiteral("steam.key")) {
+                    store().setValue(QStringLiteral("steam/apikey"), val.trimmed()); store().sync();
+                    statusBar()->showMessage(tr("Saved Steam Web API key."), 4000);
+                }
+                else if (id == QStringLiteral("debrid.torbox")) {
+                    store().setValue(QStringLiteral("debrid/torbox/apikey"), val.trimmed()); store().sync();
+                }
+            },
+            [this] { openSettingsHub(); });   // defensive root onBack: General is nested, so a pop re-renders the hub
+
+        // Live Trakt status (persist while the panel is up; dropped at the top of the next present via genSettingsConns_).
+        genSettingsConns_ << connect(trakt_, &TraktClient::deviceCode, this,
+            [setInfo](const QString& code, const QString& url) {
+                setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"),
+                        MainWindow::tr("Go to %1 and enter code: %2").arg(url, code)); });
+        genSettingsConns_ << connect(trakt_, &TraktClient::connectError, this,
+            [setInfo](const QString& m) { setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"), m); });
+        genSettingsConns_ << connect(trakt_, &TraktClient::connectedChanged, this,
+            [setInfo, setAction](bool conn) {
+                setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"),
+                        conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
+                setAction(QStringLiteral("trakt.connect"),
+                          conn ? MainWindow::tr("Disconnect from Trakt") : MainWindow::tr("Connect to Trakt")); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+
     showPanel(tr("General"), [this](QVBoxLayout* v) {
         // --- Display: open the app full screen on launch. ---
         auto* dispHeading = new QLabel(tr("Display"));
