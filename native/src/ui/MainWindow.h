@@ -235,6 +235,7 @@ private:
     void presentBook(); // show book_ themed (wrapped in readerHost_) or classic (direct), per themedHomeEnabled
     void presentPdf();   // show pdf_ themed (wrapped in pdfHost_) or classic, per themedHomeEnabled (Task 4)
     void presentComic(); // show comic_ themed (wrapped in comicHost_) or classic, per themedHomeEnabled (Task 4)
+    void captureReaderOrigin(); // record the launch surface into readerOrigin_ (skips a reader-to-reader re-open)
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
@@ -302,6 +303,11 @@ private:
     ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
+    // The surface a reader (book/pdf/comic) was launched FROM, captured at present* time. On reader exit
+    // themed mode returns HERE (the themed home/browse still showing its detail/browse view — the reader is a
+    // separate stack page, so that surface's currentView is untouched) instead of the classic HomeView. Null /
+    // a non-themed origin falls back to the classic home_ (the original behaviour). (B2 Task 6, item 1.)
+    QWidget* readerOrigin_ = nullptr;
     ThemedPanelHost* themedPanelHost_ = nullptr; // themed settings-panel surface (B2); null without QML
     // Async signal hookups the themed General panel installs (Trakt live status). The host persists across
     // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own

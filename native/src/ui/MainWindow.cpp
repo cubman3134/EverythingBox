@@ -824,6 +824,21 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (comicHost_)  comicHost_->onLeaving();
 #endif
         book_->persist(); pdf_->persist(); comic_->persist();
+        // Return to the surface the reader was opened FROM, not a hardcoded home (B2 Task 6, item 1). The reader
+        // is a separate stack page, so the themed home/browse it was launched off still holds its exact view
+        // (detail if opened from detail, browse otherwise) and cursor — just switch back to it. A classic-mode
+        // or unknown origin falls back to the classic HomeView (the original behaviour, which also preserves the
+        // list position by NOT rebuilding it).
+        QWidget* origin = readerOrigin_;
+        readerOrigin_ = nullptr;
+#ifdef MMV_HAVE_QML
+        if (origin && (origin == themedHome_ || origin == themedBrowse_) && themedHomeEnabled())
+        {
+            stack_->setCurrentWidget(origin);
+            origin->setFocus();
+            return;
+        }
+#endif
         stack_->setCurrentWidget(home_);
         home_->focusContent();
     };
@@ -1143,8 +1158,20 @@ void MainWindow::goBack()
 // Show the just-opened book: themed mode wraps it in the chrome host (themed strips on the Nav Contract),
 // classic mode shows it with its own widget chrome. The host is a persistent stack page that already holds
 // book_; present() only toggles which chrome is live, so there's no reparenting churn per open.
+// Remember which surface a reader is being opened from, so its exit can return there (B2 Task 6, item 1). Only
+// captured when we're NOT already inside a reader: a stream-issue re-open (next source) re-presents while a
+// reader host is current, and must keep the ORIGINAL origin, not overwrite it with the reader page itself.
+void MainWindow::captureReaderOrigin()
+{
+    QWidget* cur = stack_->currentWidget();
+    const bool inReader = (readerHost_ && cur == readerHost_) || (pdfHost_ && cur == pdfHost_)
+                       || (comicHost_ && cur == comicHost_) || cur == book_ || cur == pdf_ || cur == comic_;
+    if (!inReader) readerOrigin_ = cur;
+}
+
 void MainWindow::presentBook()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (readerHost_)
     {
@@ -1158,6 +1185,7 @@ void MainWindow::presentBook()
 
 void MainWindow::presentPdf()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (pdfHost_)
     {
@@ -1171,6 +1199,7 @@ void MainWindow::presentPdf()
 
 void MainWindow::presentComic()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (comicHost_)
     {
