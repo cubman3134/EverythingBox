@@ -2065,6 +2065,43 @@ void MainWindow::openEmulatorManager()
 // protocols (HLS, etc.) for both audio and video; audio-only streams show the "now playing" overlay.
 void MainWindow::openStreamPrompt()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: a URL TextField (via the OSK) + a Play Action that feeds openStreamUrl() exactly. This is a
+    // ROOT panel reached from the home flows (onRequestOpenFile "stream"), NOT a hub child — so it is a fresh
+    // reset()+present() with Back returning to home (its classic onBack).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->reset();                        // fresh root presentation from home
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        auto pending = std::make_shared<QString>();
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.hint");
+          r.label = tr("Paste a direct http(s), HLS or .m3u/.m3u8 link"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("stream.url"); r.label = tr("Link"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.err"); r.label = tr("Status"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("stream.play"); r.label = tr("▶  Play"); rows << r; }
+
+        themedPanelHost_->present(tr("Stream from a link"), rows,
+            [this, pending](const QString& id, const QString& val) {
+                if (id == QStringLiteral("stream.url")) *pending = val;
+                else if (id == QStringLiteral("stream.play")) {
+                    const QString link = pending->trimmed();
+                    if (!link.contains(QStringLiteral("://"))) {
+                        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.err"); r.label = tr("Status");
+                        r.value = tr("Enter a full http(s) link."); themedPanelHost_->updateRow(QStringLiteral("stream.err"), r);
+                        return;
+                    }
+                    openStreamUrl(link);   // leaves the host for the player page
+                }
+            },
+            [this] { openHome(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Stream from a link"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Paste a direct audio or video link (http/https, HLS, or an .m3u/.m3u8 "
                                     "playlist) to stream it."));
