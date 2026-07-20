@@ -134,6 +134,23 @@ or a dedicated polish pass.
 - **`Xmb.qml`/`Video.qml` "still" binding-loop warning.** Themed XMB logs `QML Video: Binding loop
   detected for property "still"` on the metadata panel; pre-existing (not touched by B1), noisy in logs.
 
+### B2 follow-ups (recorded during the settings-panel conversions; triaged fine-as-follow-up)
+
+Gaps surfaced converting the classic `showPanel` builders onto the `PanelRow` model (`PanelModel.h`) /
+`ThemedPanelHost`. None block B2; each is a widening of the row-model vocabulary, carried into a later
+panel-polish pass.
+
+- **Missing `Slider` `PanelRow` kind.** `PanelModel.h`'s `Kind` enum has no continuous-value row, so the
+  BGM volume control shipped as a `Choice` cycling 10% steps (0/10/…/100%) instead of a real slider. A
+  `Slider` kind (min/max/step + Left/Right to adjust in place, mirroring the reader settings zone's
+  bidirectional cross-axis cycle) would restore fine-grained control and generalize to brightness/volume
+  rows. Until then, `Choice`-as-coarse-slider is the stand-in.
+- **Dropped Trakt redirect-URI setup hint.** The classic Trakt/Cloud-Sync panel showed a multi-line setup
+  hint (the OAuth redirect URI to paste into the Trakt app registration). The single-line `PanelRow` model
+  (one `label` + one right-hand `value`) can't carry that guidance, so it was dropped from the themed panel.
+  Needs either a multi-line `Info`/help row kind or a dedicated help affordance before the Trakt setup flow
+  is fully reachable in themed mode.
+
 ## Composition decision (Task 1 outcome)
 
 **Question settled:** how themed reader chrome composes over the RASTER readers, given the

@@ -44,6 +44,7 @@
 #include <QKeyEvent>
 #include <QQmlError>
 #include <QSGRendererInterface>
+#include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #else
 #include <QGuiApplication>
 #endif
@@ -294,6 +295,80 @@ static void runThemedInputAsserts()
         CHECK(graph.zone() != QStringLiteral("field2") && !graph.zone().isEmpty(),
               "destroying the SELECTED field reassigns the selection to a live zone");
         CHECK(graph.validate(nullptr), "the graph validates after the selected-zone teardown");
+    }
+}
+
+// A run of Action rows (all selectable) with a tag-derived id/label — the panel content §18(e) drills.
+static QVector<PanelRow> panelActionRows(int n, const QString& tag)
+{
+    QVector<PanelRow> rows;
+    for (int i = 0; i < n; ++i)
+    {
+        PanelRow r;
+        r.kind  = PanelRow::Action;
+        r.id    = tag + QString::number(i);
+        r.label = tag + QStringLiteral(" ") + QString::number(i);
+        rows.push_back(r);
+    }
+    return rows;
+}
+
+// §18(e) — HOST-LEVEL pop-restore, the guard §18(d) structurally cannot be. §18(d) drives the BARE NavGraph
+// through the host's call *sequence*, so it can only prove the graph leg; it never runs ThemedPanelHost::
+// renderTop, where the real defect lived: renderTop read Entry.lastIndex AFTER setZoneCount had already shrunk
+// the panelRows zone. When the popped child had MORE rows than the parent, that shrink clamps the stale child
+// index into the smaller count and emits selectionChanged — onSelectionChanged then writes that clamped value
+// into the just-revealed parent entry (stack_.last() is now the parent), clobbering the remembered row before
+// renderTop reads it. The fix captures the target index BEFORE any graph mutation; this exercises the REAL host
+// (present → drive cursor → present larger child → drive it down → pop) to pin that ordering, in both clamp
+// directions. If this ever regresses (capture moved back after the mutations), assert (i) below goes red.
+static void runPanelHostPopRestoreAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    // ---- (i) child LARGER than parent: the pop SHRINKS panelRows, so the clamp fires — the exact bug shape.
+    //      The remembered parent row is INTERIOR (2 of 6), deliberately NOT the last row: the shrink clamps the
+    //      stale child index to count-1 (== 5), so a host that restored the clamped value would land on 5, not
+    //      2 — the two are distinct only because the remembered row is off the boundary. (A boundary remembered
+    //      row would coincide with the clamp target and mask the defect, which is why the pure-graph §18(d)
+    //      sequence, and any parent-at-last-row check, could never have gone red.)
+    {
+        ThemedPanelHost host;                                       // offscreen (QT_QPA_PLATFORM=offscreen)
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Parent"), panelActionRows(6, QStringLiteral("p")), noop, onBack);
+        CHECK(host.levelDepth() == 1, "panel-host: parent panel presented (depth 1)");
+        g->select(QStringLiteral("panelRows"), 2);                 // the user's place on the parent (interior)
+        CHECK(g->index() == 2, "panel-host: parent cursor parked on the interior row 2");
+
+        host.present(QStringLiteral("Child"), panelActionRows(12, QStringLiteral("c")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host: a LARGER child (12 rows) presented (depth 2)");
+        g->select(QStringLiteral("panelRows"), 11);                // drive the child cursor to its LAST row
+        CHECK(g->index() == 11, "panel-host: child cursor driven to its last row (11)");
+
+        host.handleBack();                                         // pop the child -> renderTop(restore=true)
+        CHECK(host.levelDepth() == 1, "panel-host: Back pops the child, revealing the parent (depth 1)");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 2,
+              "panel-host: pop restores the parent's remembered INTERIOR row (2), NOT the shrink-clamped child index (5)");
+        CHECK(g->validate(nullptr), "panel-host: the graph validates after the larger-child pop");
+    }
+
+    // ---- (ii) inverse — child SMALLER than parent: the pop GROWS panelRows, so NO clamp fires. This pins the
+    //      other direction (the §18(d) shape) at host level: the remembered parent row still returns exactly.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Parent"), panelActionRows(6, QStringLiteral("p")), noop, onBack);
+        g->select(QStringLiteral("panelRows"), 4);                 // interior parent row
+        CHECK(g->index() == 4, "panel-host(inverse): parent cursor parked on row 4");
+
+        host.present(QStringLiteral("Child"), panelActionRows(3, QStringLiteral("c")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host(inverse): a SMALLER child (3 rows) presented (depth 2)");
+        g->select(QStringLiteral("panelRows"), 2);                 // child cursor within its 3 rows
+        host.handleBack();
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 4,
+              "panel-host(inverse): pop grows the zone and restores the parent's remembered row (4)");
+        CHECK(g->validate(nullptr), "panel-host(inverse): the graph validates after the smaller-child pop");
     }
 }
 #endif // MMV_HAVE_QML
@@ -1323,6 +1398,9 @@ int main(int argc, char** argv)
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).
     runThemedInputAsserts();
+    // §18(e): the pop-restore clamp hazard, pinned against the REAL ThemedPanelHost (renderTop's capture-before-
+    // mutate ordering) — the host-level guard §18(d) above structurally cannot be. See the function's note.
+    runPanelHostPopRestoreAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
