@@ -63,6 +63,7 @@
 #include <QAbstractSpinBox>
 #include <QScrollBar>
 #include "SettingsDialog.h"
+#include "../libretro/LibretroCore.h"   // themed core-options editor reads CoreOption headlessly (B2 Task 5)
 
 #include <QWidget>
 #include <QStackedWidget>
@@ -7213,10 +7214,126 @@ void MainWindow::openEmulatorSettings()
     // The dialog loads cores headlessly to read their options; only one libretro core can be live at a
     // time (the C ABI routes through a global), so stop any running game first.
     retro_->stop();
+#ifdef MMV_HAVE_QML
+    // Themed mode: the per-system core picker on the Nav Contract (ThemedPanelHost) instead of the classic
+    // SettingsDialog. Same combo data (SystemCatalog + Settings::coreFor); the per-core options editor page
+    // becomes a nested panel level. A hub child -> nested present(), Back -> openSettingsHub.
+    if (themedHomeEnabled() && themedPanelHost_) { presentEmulatorCorePicker(); return; }
+#endif
     auto* dlg = new SettingsDialog(this);
     showDialogPanel(tr("Emulator Settings"), dlg, [this](int) { openSettingsHub(); },
                     [this] { openSettingsHub(); });
 }
+
+#ifdef MMV_HAVE_QML
+// Themed core picker: one Choice row per system (cycles the libretro core, applied+persisted immediately via
+// Settings::setCoreFor — the themed-panel convention, no separate Save) + an indented "Options…" Action per
+// system that drills into that core's options as a nested panel level. retro_->stop() (openEmulatorSettings)
+// keeps sole use of the single libretro slot before any headless core load in editCoreOptions.
+void MainWindow::presentEmulatorCorePicker()
+{
+    themedPanelHost_->setStyle(settingsPanelStyle());
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("intro");
+      r.label = tr("Libretro core per system"); r.value = tr("Auto-used on launch"); rows << r; }
+    for (const GameSystem& sys : SystemCatalog::systems())
+    {
+        if (!sys.externalEmulator.isEmpty()) continue;   // standalone emulators have no libretro core to pick
+        QString chosen = Settings::coreFor(sys.id);
+        if (chosen.isEmpty()) chosen = sys.cores.value(0);
+        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("core:") + sys.id; r.label = sys.name;
+          r.value = chosen; r.options = sys.cores; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("opts:") + sys.id;
+          r.label = QStringLiteral("      ") + tr("Options…"); rows << r; } // indented: belongs to the row above
+    }
+
+    auto onAct = [this](const QString& id, const QString& val) {
+        if (id.startsWith(QStringLiteral("core:")))
+            Settings::setCoreFor(id.mid(5), val);            // immediate apply (persists to ini)
+        else if (id.startsWith(QStringLiteral("opts:")))
+            editCoreOptions(id.mid(5));                       // nested per-core options page
+    };
+    auto onBack = [this] { openSettingsHub(); };             // core picker is a hub child
+
+    if (themedPanelIsTop(tr("Emulator Settings")))
+        themedPanelHost_->replaceTop(tr("Emulator Settings"), rows, onAct, onBack);
+    else
+        themedPanelHost_->present(tr("Emulator Settings"), rows, onAct, onBack);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+// The per-core options editor as a nested panel level: load the selected core headlessly (downloading first if
+// needed), read its CoreOptions, and render each as a Choice row. Values persist keyed by core name — the SAME
+// Settings::optionValue/setOptionValue the classic editor uses. Applied immediately on cycle (themed convention).
+void MainWindow::editCoreOptions(const QString& systemId)
+{
+    QString core;
+    for (const GameSystem& sys : SystemCatalog::systems())
+        if (sys.id == systemId) { core = Settings::coreFor(sys.id); if (core.isEmpty()) core = sys.cores.value(0); break; }
+    if (core.isEmpty()) { notify(tr("No core selected for this system.")); return; }
+
+    // Ensure the core is present (download on first use), then load it headlessly to read its options. Progress +
+    // failures surface as the themed notification toast (the panel isn't presented during the blocking load).
+    QString dlErr;
+    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
+        notify(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 2000);
+    });
+    if (corePath.isEmpty())
+    {
+        notify(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
+        return;
+    }
+
+    LibretroCore tmp;
+    std::string err;
+    if (!tmp.loadCore(corePath.toStdString(), &err))
+    {
+        notify(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
+        return;
+    }
+    const std::vector<CoreOption> opts = tmp.options();   // copy out before unloading
+    tmp.unload();
+
+    // Per Choice row: the options list shows LABELS (what the classic combo shows); map each label back to its
+    // value for setOptionValue. One label->value map per option key, captured for the activation handler.
+    auto label2value = std::make_shared<QHash<QString, QHash<QString, QString>>>();
+    QVector<PanelRow> rows;
+    if (opts.empty())
+    {
+        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("none");
+        r.label = tr("This core doesn't expose any configurable options."); rows << r;
+    }
+    else for (const CoreOption& o : opts)
+    {
+        const QString key = QString::fromStdString(o.key);
+        QStringList labels; QHash<QString, QString> l2v; QString curLabel;
+        QString curVal = Settings::optionValue(core, key);
+        if (curVal.isEmpty()) curVal = QString::fromStdString(o.defaultValue);
+        for (const auto& vp : o.values)
+        {
+            const QString value = QString::fromStdString(vp.first), lbl = QString::fromStdString(vp.second);
+            labels << lbl; l2v.insert(lbl, value);
+            if (value == curVal) curLabel = lbl;
+        }
+        if (curLabel.isEmpty()) curLabel = labels.value(0);
+        label2value->insert(key, l2v);
+        PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("opt:") + key;
+        r.label = QString::fromStdString(o.desc); r.value = curLabel; r.options = labels; rows << r;
+    }
+
+    themedPanelHost_->present(tr("%1 — Core Options").arg(core), rows,
+        [this, core, label2value](const QString& rid, const QString& val) {
+            if (!rid.startsWith(QStringLiteral("opt:"))) return;
+            const QString key = rid.mid(4);
+            const QString value = label2value->value(key).value(val, val);
+            Settings::setOptionValue(core, key, value);      // immediate apply (persists to ini)
+        },
+        [] { /* nested: Back pops back to the core list */ });
+}
+#endif // MMV_HAVE_QML
 
 void MainWindow::openInputMapping()
 {
