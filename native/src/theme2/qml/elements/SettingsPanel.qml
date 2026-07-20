@@ -270,9 +270,12 @@ Rectangle {
 
                         // Info / Progress: static right value (dim). For a Progress row (a Downloads job) this is
                         // the status line ("Downloading — 1.2 MB / 5 MB (24%)", "Paused", "Done") sitting above the
-                        // bar; the title label on the left elides to make room.
+                        // bar; the title label on the left elides to make room. An ACTION row with a non-empty
+                        // value renders it here too (dim, left of the chevron) — e.g. the Input Mapping binding
+                        // rows show their current binding ("Up", "Button A", "Press a key…") beside the › chevron.
                         Text {
                             visible: del.kind === root.kInfo || del.kind === root.kProgress
+                                     || (del.kind === root.kAction && del.rowData && del.rowData.value !== "")
                             anchors.verticalCenter: del.kind === root.kProgress ? undefined : parent.verticalCenter
                             anchors.top: del.kind === root.kProgress ? parent.top : undefined
                             anchors.topMargin: del.kind === root.kProgress ? 10 : 0

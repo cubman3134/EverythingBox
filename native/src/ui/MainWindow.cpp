@@ -7535,14 +7535,7 @@ void MainWindow::onInputCapturePadTick()
     if (code != Gamepad::kUnbound)
     {
         pad->setBinding(remap_.port, remap_.retroId, code);   // update live + persist
-        const int rid = remap_.retroId;
-        endInputCapture(/*cancelled*/ false);
-        // Refresh the bound row's label (cursor preserved — updateRow patches in place).
-        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(rid);
-        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
-        r.label = tr("%1 — Controller").arg(tr(bn));
-        r.value = QString::fromStdString(Gamepad::labelFor(pad->binding(remap_.port, rid)));
-        themedPanelHost_->updateRow(r.id, r);
+        endInputCapture(/*cancelled*/ false);                 // ends + schedules the deferred row refresh
     }
 }
 
@@ -7559,50 +7552,50 @@ bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
         if (keys)
         {
             keys->setKey(port, rid, k);   // update live + persist
-            // A key drives one button within this profile; clear it from any other button (and refresh those rows).
+            // A key drives one button within this profile; clear it from any other button (data only — the whole
+            // grid's labels are re-patched by the deferred refresh below, so every cleared row updates too).
             for (const RemapBtn& b : kRemapRows)
                 if (b.retroId != rid && keys->key(port, b.retroId) == k)
-                {
                     keys->setKey(port, b.retroId, Keymap::kUnbound);
-                    PanelRow cr; cr.kind = PanelRow::Action; cr.id = QStringLiteral("key:") + QString::number(b.retroId);
-                    cr.label = tr("%1 — Keyboard").arg(tr(b.label));
-                    cr.value = Keymap::labelFor(keys->key(port, b.retroId));
-                    themedPanelHost_->updateRow(cr.id, cr);
-                }
         }
         endInputCapture(/*cancelled*/ false);
-        // Refresh the bound row.
-        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(rid);
-        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
-        r.label = tr("%1 — Keyboard").arg(tr(bn));
-        r.value = keys ? Keymap::labelFor(keys->key(port, rid)) : tr("—");
-        themedPanelHost_->updateRow(r.id, r);
     }
     // pad mode: swallow non-Esc keys (stay in capture — the button arrives via the pad tick)
     return true;
 }
 
-void MainWindow::endInputCapture(bool cancelled)
+void MainWindow::endInputCapture(bool /*cancelled*/)
 {
     if (!remap_.active) return;
-    const bool wasKeyboard = remap_.keyboard;
-    const int rid = remap_.retroId, port = remap_.port;
     remap_.active = false;
     if (remapPadTimer_) remapPadTimer_->stop();
     qApp->removeEventFilter(this);
+    // Refresh the binding labels AFTER this event dispatch returns to the loop. Patching the model mid-dispatch
+    // (we're inside the qApp key filter, or a pad-timer tick) reliably repaints only the SELECTED delegate — a
+    // non-selected row cleared by the duplicate-key rule kept showing its stale binding. A singleShot(0) runs the
+    // updateRow patches from a clean context, so the bound row AND every cleared row refresh. Cursor is preserved
+    // (updateRow patches in place; both cancelled and committed captures re-read current state).
+    QTimer::singleShot(0, this, [this] { refreshInputButtonRows(); });
+}
 
-    if (cancelled)
+// Re-patch every button row's current binding label (controller + keyboard) in place — cursor untouched. Used
+// after a capture commits/cancels so the whole grid reflects current state (incl. duplicate-cleared rows).
+void MainWindow::refreshInputButtonRows()
+{
+    if (!themedPanelIsTop(tr("Input Mapping"))) return;
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+    for (const RemapBtn& b : kRemapRows)
     {
-        // Restore the row to its (unchanged) current binding label.
-        const char* bn = ""; for (const RemapBtn& b : kRemapRows) if (b.retroId == rid) { bn = b.label; break; }
-        PanelRow r; r.kind = PanelRow::Action;
-        r.id = (wasKeyboard ? QStringLiteral("key:") : QStringLiteral("pad:")) + QString::number(rid);
-        r.label = wasKeyboard ? tr("%1 — Keyboard").arg(tr(bn)) : tr("%1 — Controller").arg(tr(bn));
-        if (wasKeyboard) { Keymap* k = retro_ ? retro_->keymap() : nullptr;
-                           r.value = k ? Keymap::labelFor(k->key(port, rid)) : tr("—"); }
-        else { Gamepad* g = retro_ ? retro_->gamepad() : nullptr;
-               r.value = g ? QString::fromStdString(Gamepad::labelFor(g->binding(port, rid))) : tr("—"); }
-        themedPanelHost_->updateRow(r.id, r);
+        const QString bn = tr(b.label);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(b.retroId);
+          r.label = tr("%1 — Controller").arg(bn);
+          r.value = pad ? QString::fromStdString(Gamepad::labelFor(pad->binding(remapPort_, b.retroId))) : tr("—");
+          themedPanelHost_->updateRow(r.id, r); }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(b.retroId);
+          r.label = tr("%1 — Keyboard").arg(bn);
+          r.value = keys ? Keymap::labelFor(keys->key(remapPort_, b.retroId)) : tr("—");
+          themedPanelHost_->updateRow(r.id, r); }
     }
 }
 #endif // MMV_HAVE_QML

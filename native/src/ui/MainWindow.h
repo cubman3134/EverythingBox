@@ -281,6 +281,7 @@ private:
     void buildInputMappingRows(bool replace);                    // (re)build the shell rows for the current port/scope
     void beginInputCapture(int retroId, bool keyboard);          // enter capture for one button binding
     void endInputCapture(bool cancelled);                        // leave capture (bind was written, or cancelled)
+    void refreshInputButtonRows();                               // re-patch every button row's binding label (cursor kept)
     void onInputCapturePadTick();                                // poll the pad while capturing a controller input
     bool inputCaptureKeyFilter(class QKeyEvent* e);              // consume the next physical key while capturing a key
     // Capture state for the themed input panel (mirrors ControllerRemapDialog's capture machinery, driven headlessly).
