@@ -98,6 +98,14 @@ public:
                  std::function<void()> onBack);
     void updateRow(const QString& rowId, const PanelRow& row); // in-place (Progress/Info live updates)
 
+    // Swap the TOP panel's contents in place — same graph level, no push/pop — and re-render (lands on the first
+    // selectable row). For a state-gated panel whose row SET changes (not just a value): Cloud Sync omits/adds
+    // Action rows as sign-in state flips, so it must rebuild without stacking another level. Falls back to
+    // present() when the stack is empty.
+    void replaceTop(const QString& title, const QVector<PanelRow>& rows,
+                    std::function<void(const QString& rowId, const QString& newValue)> onActivate,
+                    std::function<void()> onBack);
+
     // Discard every stacked panel + graph level WITHOUT running any onBack — for the host's root entry point
     // (openSettingsHub) to start a fresh presentation, and for a hard leave (Home). Idempotent.
     void reset();

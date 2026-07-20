@@ -267,6 +267,9 @@ private:
     // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own
     // these and disconnect them on each (re)present of General.
     QVector<QMetaObject::Connection> genSettingsConns_;
+    // Same pattern for the other themed child panels that install async signal hookups (Cloud Sync sign-in state,
+    // RetroAchievements login result): dropped at the top of each (re)present since the host persists.
+    QVector<QMetaObject::Connection> panelPageConns_;
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view

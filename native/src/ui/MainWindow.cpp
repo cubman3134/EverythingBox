@@ -5942,6 +5942,65 @@ void MainWindow::openGeneralSettings()
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
+#ifdef MMV_HAVE_QML
+    // Themed mode: the four sign-in Actions become state-gated PanelRows (omitted, not just hidden, per the SAME
+    // isConfigured()/isSignedIn() checks the classic refresh() uses), over a status Info row. The row SET flips
+    // with sign-in state, so the async signals rebuild IN PLACE via replaceTop (reentry) — no stacked level. Same
+    // flows: signIn()/signOut()/cloudSyncNow()/openCloudClientSetup().
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
+        panelPageConns_.clear();
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const bool cfg = CloudSync::isConfigured();
+        const bool in  = cloud_->isSignedIn();
+        QString status;
+        if (!cfg)    status = tr("Google sign-in isn't set up yet — choose \"Set up sign-in…\" to paste a Desktop-app client.");
+        else if (in) status = tr("Signed in as %1.").arg(cloud_->accountEmail());
+        else         status = tr("Not signed in — choose \"Sign in with Google\".");
+
+        QVector<PanelRow> rows;
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        info(QStringLiteral("cloud.status"), tr("Status"), status);
+        if (cfg && !in) action(QStringLiteral("cloud.signin"), tr("Sign in with Google"));
+        if (in)         action(QStringLiteral("cloud.syncnow"), tr("Sync now"));
+        if (in)         action(QStringLiteral("cloud.signout"), tr("Sign out"));
+        action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+
+        auto setStatus = [this](const QString& s) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.status"); r.label = MainWindow::tr("Status");
+            r.value = s; themedPanelHost_->updateRow(QStringLiteral("cloud.status"), r); };
+
+        auto onAct = [this, setStatus](const QString& id, const QString&) {
+            if      (id == QStringLiteral("cloud.signin"))  { setStatus(tr("Opening your browser…")); cloud_->signIn(); }
+            else if (id == QStringLiteral("cloud.syncnow")) { setStatus(tr("Syncing…")); cloudSyncNow(); }
+            else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
+            else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Cloud is a hub child — Back pops to the hub
+
+        // Re-entry (an async sign-in state change while Cloud is the top panel) rebuilds the row SET in place;
+        // the first entry from the hub is a nested present().
+        if (themedPanelHost_->panelTitle() == tr("Cloud Sync"))
+            themedPanelHost_->replaceTop(tr("Cloud Sync"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Cloud Sync"), rows, onAct, onBack);
+
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+            openCloudSync(); raise(); activateWindow(); cloudSyncNow(); });   // rebuild (now signed-in) + first push
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signInFailed, this, [setStatus](const QString& e) {
+            setStatus(MainWindow::tr("Sign-in failed: %1").arg(e)); });
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedOut, this, [this] { openCloudSync(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Cloud Sync"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, "
             "settings and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."));

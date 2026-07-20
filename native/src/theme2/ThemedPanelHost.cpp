@@ -167,6 +167,21 @@ void ThemedPanelHost::renderTop(bool restore)
     graph_->select(QStringLiteral("panelRows"), target);
 }
 
+void ThemedPanelHost::replaceTop(const QString& title, const QVector<PanelRow>& rows,
+                                 std::function<void(const QString&, const QString&)> onActivate,
+                                 std::function<void()> onBack)
+{
+    if (stack_.isEmpty()) { present(title, rows, std::move(onActivate), std::move(onBack)); return; }
+    Entry& e = stack_.last();
+    e.title = title;
+    e.rows = rows;
+    e.onActivate = std::move(onActivate);
+    e.onBack = std::move(onBack);
+    e.lastIndex = 0;              // a rebuilt row set invalidates the remembered cursor
+    renderTop();                 // same level (no pushLevel) — lands on the first selectable row
+    if (view_) view_->setFocus();
+}
+
 void ThemedPanelHost::updateRow(const QString& rowId, const PanelRow& row)
 {
     // Patch EVERY stack entry that carries this row id — a BACKGROUNDED panel (a parent under a nested child)
