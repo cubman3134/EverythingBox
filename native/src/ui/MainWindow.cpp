@@ -5327,8 +5327,8 @@ void MainWindow::openGeneralSettings()
             PanelRow r; r.kind = PanelRow::Toggle; r.id = id; r.label = label; r.checked = on; rows << r; };
         auto action = [&rows](const QString& id, const QString& label) {
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
-        auto textf  = [&rows](const QString& id, const QString& label, const QString& value) {
-            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto textf  = [&rows](const QString& id, const QString& label, const QString& value, bool masked = false) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked; rows << r; };
         auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
             PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
 
@@ -5359,15 +5359,15 @@ void MainWindow::openGeneralSettings()
         sep(tr("Subtitles"));
         toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
         choice(QStringLiteral("subs.lang"), tr("Default language"), langOpts, curLangDisp);
-        // --- Auto-download from OpenSubtitles (credentials render plain this task; masking arrives with RA, Task 3) ---
+        // --- Auto-download from OpenSubtitles (the password is masked — dots in the row; the OSK is unchanged) ---
         sep(tr("Auto-download from OpenSubtitles"));
         textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
         textf(QStringLiteral("os.user"), tr("Username"), Settings::openSubUsername());
-        textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword());
+        textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword(), /*masked=*/true);
         // --- Trakt.tv ---
         sep(tr("Trakt.tv"));
         textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
-        textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret());
+        textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret(), /*masked=*/true);
         action(QStringLiteral("trakt.connect"), TraktClient::connected() ? tr("Disconnect from Trakt")
                                                                           : tr("Connect to Trakt"));
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
@@ -6403,6 +6403,88 @@ void MainWindow::closeEvent(QCloseEvent* e)
 
 void MainWindow::openRetroAchievements()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the login form (username/password TextFields) OR the signed-in state (web API key TextField +
+    // Sign Out) per the SAME ach_->isLoggedIn() branch. Password + API key rows are MASKED (dots in the value
+    // display; the OSK itself is unchanged). The row SET flips with login state, so the async loginResult / a
+    // logout rebuild IN PLACE via replaceTop (reentry). Same flow: loginWithPassword() / the ra/apikey ini key.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
+        panelPageConns_.clear();
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        const bool in = ach_ && ach_->isLoggedIn();
+
+        QVector<PanelRow> rows;
+        auto info = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto textf = [&rows](const QString& id, const QString& label, const QString& value, bool masked) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked; rows << r; };
+
+        // Held-pending edits (username/password when signed out; the api key when signed in).
+        auto pend = std::make_shared<QHash<QString, QString>>();
+
+        if (in)
+        {
+            QSettings raStore(iniPath, QSettings::IniFormat);
+            (*pend)[QStringLiteral("apikey")] = raStore.value(QStringLiteral("ra/apikey")).toString();
+            info(QStringLiteral("ra.status"), tr("Account"), tr("Signed in as %1.").arg(ach_->username()));
+            textf(QStringLiteral("ra.apikey"), tr("Web API key"), (*pend)[QStringLiteral("apikey")], /*masked=*/true);
+            action(QStringLiteral("ra.savekey"), tr("Save API Key"));
+            action(QStringLiteral("ra.signout"), tr("Sign Out"));
+        }
+        else
+        {
+            info(QStringLiteral("ra.status"), tr("Status"), tr("Sign in to earn achievements while you play."));
+            textf(QStringLiteral("ra.user"), tr("Username"), QString(), /*masked=*/false);
+            textf(QStringLiteral("ra.pass"), tr("Password"), QString(), /*masked=*/true);
+            action(QStringLiteral("ra.signin"), tr("Sign In"));
+        }
+
+        auto setStatus = [this](const QString& label, const QString& s) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ra.status"); r.label = label; r.value = s;
+            themedPanelHost_->updateRow(QStringLiteral("ra.status"), r); };
+
+        auto onAct = [this, pend, iniPath, setStatus](const QString& id, const QString& val) {
+            if      (id == QStringLiteral("ra.user"))   (*pend)[QStringLiteral("user")] = val;
+            else if (id == QStringLiteral("ra.pass"))   (*pend)[QStringLiteral("pass")] = val;
+            else if (id == QStringLiteral("ra.apikey")) (*pend)[QStringLiteral("apikey")] = val;
+            else if (id == QStringLiteral("ra.savekey")) {
+                QSettings s(iniPath, QSettings::IniFormat);
+                s.setValue(QStringLiteral("ra/apikey"), (*pend)[QStringLiteral("apikey")].trimmed()); s.sync();
+                statusBar()->showMessage(tr("Saved RetroAchievements web API key."), 4000);
+            }
+            else if (id == QStringLiteral("ra.signout")) { if (ach_) ach_->logout(); openRetroAchievements(); }
+            else if (id == QStringLiteral("ra.signin")) {
+                const QString u = (*pend)[QStringLiteral("user")].trimmed(), p = (*pend)[QStringLiteral("pass")];
+                if (!ach_ || u.isEmpty() || p.isEmpty()) { setStatus(tr("Status"), tr("Enter your username and password.")); return; }
+                setStatus(tr("Status"), tr("Signing in…"));
+                ach_->loginWithPassword(u, p);
+            }
+        };
+        auto onBack = [this] { openSettingsHub(); };   // RA is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("RetroAchievements"))
+            themedPanelHost_->replaceTop(tr("RetroAchievements"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("RetroAchievements"), rows, onAct, onBack);
+
+        // Async login result: success rebuilds into the signed-in state; failure updates the status row.
+        if (ach_)
+            panelPageConns_ << connect(ach_, &Achievements::loginResult, this, [this, setStatus](bool ok, const QString& msg) {
+                if (ok) openRetroAchievements();
+                else    setStatus(MainWindow::tr("Status"), MainWindow::tr("Sign-in failed: %1").arg(msg));
+            });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("RetroAchievements"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Sign in with your <b>RetroAchievements</b> account to earn achievements while "
             "playing. Your password is exchanged for a token (stored locally) and not kept. Softcore for now — "

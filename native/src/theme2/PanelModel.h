@@ -25,6 +25,7 @@ struct PanelRow {
     int  progress = -1;    // 0..100 for Progress rows
     bool enabled = true;
     bool destructive = false; // styled with the warning accent (Uninstall)
+    bool masked = false;      // TextField: render the value as dots (credentials) — the OSK editor is unchanged
 
     // The single-row map SettingsPanel.qml's ListView delegate binds. Kind is marshaled as an int the QML
     // switches on (see SettingsPanel.qml's kind* readonly ints); options become a JS array of strings.
@@ -40,6 +41,7 @@ struct PanelRow {
         m.insert(QStringLiteral("progress"), progress);
         m.insert(QStringLiteral("enabled"), enabled);
         m.insert(QStringLiteral("destructive"), destructive);
+        m.insert(QStringLiteral("masked"), masked);
         return m;
     }
 };

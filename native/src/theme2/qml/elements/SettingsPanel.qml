@@ -176,12 +176,16 @@ Rectangle {
                             color: root.cAccent; font.pixelSize: 16
                         }
 
-                        // TextField: current text, or a dim "—" when empty.
+                        // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
                         Text {
                             visible: del.kind === root.kTextField
                             anchors.verticalCenter: parent.verticalCenter
-                            text: (del.rowData && del.rowData.value !== "") ? del.rowData.value : "—"
-                            color: (del.rowData && del.rowData.value !== "") ? root.cText : root.cDim
+                            readonly property bool has: del.rowData && del.rowData.value !== ""
+                            readonly property bool masked: del.rowData && del.rowData.masked === true
+                            text: !has ? "—"
+                                       : (masked ? "•".repeat(Math.min(24, String(del.rowData.value).length))
+                                                 : del.rowData.value)
+                            color: has ? root.cText : root.cDim
                             font.pixelSize: 16; elide: Text.ElideRight
                         }
 
