@@ -11,8 +11,6 @@
   "catalogs": [],
   "settings": [
     { "key": "ssid", "label": "ScreenScraper username", "type": "text", "description": "Your screenscraper.fr account username. Register free at https://www.screenscraper.fr" },
-    { "key": "sspassword", "label": "ScreenScraper password", "type": "password", "description": "Your screenscraper.fr account password." },
-    { "key": "devid", "label": "ScreenScraper dev id (optional)", "type": "text", "description": "Optional developer id issued by ScreenScraper. Leave blank if you don't have one." },
-    { "key": "devpassword", "label": "ScreenScraper dev password (optional)", "type": "password", "description": "Optional developer password issued by ScreenScraper." }
+    { "key": "sspassword", "label": "ScreenScraper password", "type": "password", "description": "Your screenscraper.fr account password." }
   ]
 }

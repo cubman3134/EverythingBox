@@ -26,3 +26,9 @@ node_modules/
 # Theme/addon registries are published as their own GitHub repos (nested .git);
 # don't embed them in this repo.
 /native/registry/
+
+# Embedded provider dev credentials: the secrets files are build-time-only and
+# must never be committed. Keep the format/instructions README, drop everything else.
+/native/secrets/*
+!/native/secrets/README.md
+

@@ -20,6 +20,10 @@ public:
     QString getStorage(const QString& key) const;     // addon-writable scratch storage
     void setStorage(const QString& key, const QString& value) const;
     QString getConfig(const QString& key) const;      // user-set credential/option (or manifest default)
+    // Embedded provider dev credential, de-obfuscated on demand from the build-time BuiltinSecrets.h.
+    // Returns "" when nothing was embedded (secrets file absent at build) or the key is unknown. The
+    // obfuscation is best-effort only (NOT cryptography) — see AddonContext.cpp / native/secrets.
+    QString builtinCredential(const QString& key) const;
 
     const QString& id() const { return id_; }
 

@@ -9,6 +9,8 @@
 #include <QCoreApplication>
 #include <QFile>
 #include <QDir>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QHash>
@@ -119,6 +121,37 @@ static int probeMetaOne(const QString& jsPath, const QString& catalogId)
     for (const MediaFact& fc : d.facts) printf("    %s: %s\n", fc.label.toUtf8().constData(), fc.value.toUtf8().constData());
     if (!d.overview.isEmpty()) printf("    overview: %.90s...\n", d.overview.toUtf8().constData());
     printf("%s\n", d.valid ? "META ONE WORKS" : "META ONE: no metadata");
+    return d.valid ? 0 : 1;
+}
+
+// With "--getmeta <main.js> <title> [systemHint] [addonId]": call a metaFor provider's getMeta() directly
+// for a game title (no catalog needed) - used to exercise the ScreenScraper embedded-devcred path end to end.
+// addonId defaults to "probe"; pass the real addon id so getConfig() reads that addon's stored user account
+// (ssid/sspassword). Prints only the returned game metadata (never any credential).
+static int probeGetMeta(const QString& jsPath, const QString& title, const QString& systemHint, const QString& addonId)
+{
+    QFile f(jsPath);
+    if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
+    AddonManifest m;
+    m.id = addonId.isEmpty() ? QStringLiteral("probe") : addonId;
+    m.permissions << QStringLiteral("network");
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    QString err;
+    auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
+    if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
+    printf("has getMeta: %s   addonId: %s\n", addon->hasFunction(QStringLiteral("getMeta")) ? "yes" : "no",
+           m.id.toUtf8().constData());
+
+    QJsonObject arg{ { QStringLiteral("type"), QStringLiteral("game") }, { QStringLiteral("title"), title } };
+    if (!systemHint.isEmpty()) arg.insert(QStringLiteral("systemHint"), systemHint);
+    const QString argJson = QString::fromUtf8(QJsonDocument(arg).toJson(QJsonDocument::Compact));
+    const MediaDetail d = MediaDetail::fromJson(addon->invoke(QStringLiteral("getMeta"), argJson).toUtf8());
+    printf("getMeta(title=\"%s\", system=\"%s\") -> valid=%s  title=\"%s\"  facts=%d  image=%s  overview=%s\n",
+           title.toUtf8().constData(), systemHint.toUtf8().constData(), d.valid ? "yes" : "no",
+           d.title.toUtf8().constData(), int(d.facts.size()), d.imageUrl.isEmpty() ? "(none)" : "set",
+           d.overview.isEmpty() ? "(none)" : "set");
+    for (const MediaFact& fc : d.facts) printf("    %s: %s\n", fc.label.toUtf8().constData(), fc.value.toUtf8().constData());
+    printf("%s\n", d.valid ? "GETMETA WORKS" : "GETMETA: no metadata (check creds/network/title)");
     return d.valid ? 0 : 1;
 }
 
@@ -472,6 +505,10 @@ int main(int argc, char** argv)
                            argc >= 4 ? QString::fromLocal8Bit(argv[3]) : QString());
     if (argc >= 3 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--mangaflow"))
         return probeMangaFlow(QString::fromLocal8Bit(argv[2]));
+    if (argc >= 4 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--getmeta"))
+        return probeGetMeta(QString::fromLocal8Bit(argv[2]), QString::fromLocal8Bit(argv[3]),
+                            argc >= 5 ? QString::fromLocal8Bit(argv[4]) : QString(),
+                            argc >= 6 ? QString::fromLocal8Bit(argv[5]) : QString());
     if (argc >= 2 && QString::fromLocal8Bit(argv[1]) == QStringLiteral("--manager"))
         return probeManager(argc >= 3 ? QString::fromLocal8Bit(argv[2]) : QString(),
                             argc >= 4 ? QString::fromLocal8Bit(argv[3]).toInt() : 1);

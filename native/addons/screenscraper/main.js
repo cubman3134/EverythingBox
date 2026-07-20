@@ -90,14 +90,17 @@ function getMeta(argJson) {
 
     var ssid = getConfig("ssid");
     var sspassword = getConfig("sspassword");
-    var devid = getConfig("devid") || "";
-    var devpassword = getConfig("devpassword") || "";
+    // Dev creds resolve from the app's embedded (obfuscated) builtins first; a manually-configured
+    // devid/devpassword in the addon settings is the legacy fallback (the settings fields were removed
+    // from the manifest, but any value a user stored previously is still honoured via getConfig).
+    var devid = builtinCredential("devid") || getConfig("devid") || "";
+    var devpassword = builtinCredential("devpassword") || getConfig("devpassword") || "";
 
     // ScreenScraper's API mandates REGISTERED DEVELOPER credentials (devid/devpassword) — a personal user
     // account (ssid) alone is refused with HTTP 403 "Vérifier vos identifiants développeur". Get a devid from
     // screenscraper.fr (their forum grants them to apps), or just reuse RetroBat's already-scraped data by
     // pointing the ROMs folder at your RetroBat roms (it reads the gamelist.xml).
-    if (!devid || !devpassword) {
+    if (!devid && !devpassword) {
         log("ScreenScraper: NOT scraping — no devid/devpassword set. ScreenScraper's API requires registered "
             + "developer credentials (a user account alone is rejected). Set devid/devpassword in this addon's "
             + "settings, or point the ROMs folder at your RetroBat roms to reuse its scraped gamelist.xml.");
