@@ -283,6 +283,36 @@ static bool makeFixture(const QString& root, const QString& id)
         && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
 }
 
+// A "lost reply" fixture for the liveness watchdog: 3 catalogs whose getCatalog busy-waits ~4s (inside the
+// 5s Duktape deadline) before answering — long past a 1s test watchdog, so from the prefetcher's view the
+// reply is missing. 3 catalogs = every in-flight slot wedges at once, the exact stall the watchdog fixes.
+static bool makeSlowFixture(const QString& root, const QString& id)
+{
+    const QString dir = root + QStringLiteral("/") + id;
+    if (!QDir().mkpath(dir)) return false;
+    const QByteArray manifest =
+        "{\n"
+        "  \"id\": \"" + id.toUtf8() + "\",\n"
+        "  \"name\": \"Slow Fixture\",\n"
+        "  \"version\": \"1.0.0\",\n"
+        "  \"type\": \"media-source\",\n"
+        "  \"entry\": \"main.js\",\n"
+        "  \"permissions\": [],\n"
+        "  \"catalogs\": [\n"
+        "    { \"id\": \"slow-a\", \"name\": \"Slow A\", \"type\": \"movie\" },\n"
+        "    { \"id\": \"slow-b\", \"name\": \"Slow B\", \"type\": \"movie\" },\n"
+        "    { \"id\": \"slow-c\", \"name\": \"Slow C\", \"type\": \"movie\" }\n"
+        "  ]\n"
+        "}\n";
+    static const char* JS =
+        "function getCatalog(argJson){\n"
+        "  var end=Date.now()+4000; while(Date.now()<end){}\n"
+        "  return JSON.stringify({title:'slow',items:[{id:'s1',title:'Slow 1',type:'movie',url:''}]});\n"
+        "}\n";
+    return writeText(dir + QStringLiteral("/manifest.json"), manifest)
+        && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
+}
+
 static int probePrefetch()
 {
     int pass = 0, fail = 0;
@@ -323,14 +353,15 @@ static int probePrefetch()
           hit && hit->items.size() == 3 && hit->items[0].id == QStringLiteral("movies:item1"));
     const QString firstTitle = hit ? hit->title : QString();
 
-    // (3) disabled source -> nullopt even when cached, AND the async hit path refuses (fresh-fetches instead)
+    // (3) disabled source -> nullopt even when cached, AND the async path fails fast: no cached serve AND no
+    // fetch either (a fetch would re-populate the cache for a source the user just turned off).
     mgr.setEnabled(ids[0], false);
     check("disabled source peek -> nullopt", !mgr.cachedCatalog(s0, QStringLiteral("movies"), QString(), 1, {}).has_value());
     got.clear();
     const int r2 = mgr.requestCatalog(s0, QStringLiteral("movies"), QString(), 1, {});
-    spinUntil([&] { return got.contains(r2); }, 5000);
-    check("async cache-hit path refuses stale-disabled entry",
-          got.contains(r2) && !firstTitle.isEmpty() && got[r2].title != firstTitle);
+    spin(300); // give a (wrong) queued cache re-emit or fetch the chance to deliver
+    check("async path fail-fasts a disabled source (-1, nothing delivered)",
+          r2 == -1 && got.isEmpty() && !firstTitle.isEmpty());
     mgr.setEnabled(ids[0], true); // restore
 
     // (4) setEnabled(false) emits sourceEnabledChanged(id, false)
@@ -388,6 +419,39 @@ static int probePrefetch()
     check("peek hit within TTL", mgrS.cachedCatalog(ss, QStringLiteral("movies"), QString(), 1, {}).has_value());
     spin(1300); // exceed the 1s TTL
     check("peek miss after TTL expiry", !mgrS.cachedCatalog(ss, QStringLiteral("movies"), QString(), 1, {}).has_value());
+
+    // ---- Manager W: liveness watchdog. All 3 slots wedge on never-answering (4s) jobs; a 1s watchdog must
+    // reclaim them so the queued fast jobs still run — the pre-fix behavior was a queue stalled at cap. ----
+    const QString rootW = root + QStringLiteral("-wd");
+    QDir(rootW).removeRecursively();
+    const QString slowId = QStringLiteral("a.slow"), fastId = QStringLiteral("b.fast");
+    if (!makeSlowFixture(rootW, slowId) || !makeFixture(rootW, fastId)) { printf("wd fixture write failed\n"); return 2; }
+    qputenv("MMV_ADDONS_ROOT", rootW.toUtf8());
+    qputenv("MMV_PREFETCH_TTL_S", "30");      // roomy TTL: cache entries must outlive the asserts below
+    qputenv("MMV_PREFETCH_WATCHDOG_S", "1");  // expire a silent in-flight job after ~1s
+    AddonManager mgrW;
+    mgrW.setEnabled(slowId, true); mgrW.setEnabled(fastId, true);
+    LoadedAddon* fastSrc = mgrW.sourceById(fastId);
+    CatalogPrefetcher pfW(&mgrW, &mgrW);
+    pfW.setPeriodicResweep(false);
+    pfW.start(); // FIFO: a.slow loads first -> its 3 slow jobs take all 3 slots; b.fast's 2 jobs are queued
+    check("watchdog scenario: all slots wedged on silent jobs",
+          pfW.inFlight() == CatalogPrefetcher::kMaxInFlight && pfW.queued() == 2);
+    const bool drained = spinUntil([&] { return pfW.idle(); }, 6000);
+    check("watchdog reclaimed the wedged slots (queue not stalled at cap)", drained && pfW.expired() == 3);
+    check("queued jobs ran after reclamation",
+          pfW.issued() == 5
+          && mgrW.cachedCatalog(fastSrc, QStringLiteral("movies"), QString(), 1, {}).has_value()
+          && mgrW.cachedCatalog(fastSrc, QStringLiteral("shows"),  QString(), 1, {}).has_value());
+    // The slow replies DO arrive eventually (~4s): the manager may still cache them, but the prefetcher must
+    // ignore the late reqIds — no slot bookkeeping left to corrupt, no double-expiry, no phantom in-flight.
+    LoadedAddon* slowSrc = mgrW.sourceById(slowId);
+    spinUntil([&] { return mgrW.cachedCatalog(slowSrc, QStringLiteral("slow-a"), QString(), 1, {}).has_value(); }, 8000);
+    spin(300);
+    check("late replies ignored cleanly (prefetcher stays idle, counts unchanged)",
+          pfW.idle() && pfW.expired() == 3 && pfW.issued() == 5);
+    QDir(rootW).removeRecursively();
+    qunsetenv("MMV_PREFETCH_WATCHDOG_S");
 
     QDir(root).removeRecursively();
     qunsetenv("MMV_ADDONS_ROOT");

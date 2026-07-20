@@ -34,24 +34,32 @@ public:
     int  inFlight() const { return inFlight_.size(); } // requests currently outstanding (capped at kMaxInFlight)
     int  queued()   const { return queue_.size(); }    // jobs waiting for a slot
     int  issued()   const { return issued_; }          // cumulative requestCatalog calls this object has made
+    int  expired()  const { return expired_; }         // jobs the watchdog gave up on (slot reclaimed)
     bool idle()     const { return inFlight_.isEmpty() && queue_.isEmpty(); }
 
     static constexpr int kMaxInFlight = 3;
+    static constexpr qint64 kWatchdogMs = 60 * 1000;   // give up on an in-flight job after 60s
+                                                       // (MMV_PREFETCH_WATCHDOG_S overrides, for tests)
 
 private:
     struct Job { LoadedAddon* src = nullptr; QString catalogId; QString key; };
+    struct Pending { QString key; qint64 startedMs = 0; };
 
     void enqueueSweep();                       // append a job per enabled source × catalog, skipping fresh/dupes
     void pump();                               // start jobs until kMaxInFlight are in flight or the queue drains
-    void onCatalogReady(int reqId);            // free the slot for one of OUR reqIds and pump the next
+    void onCatalogReady(int reqId, bool ok);   // free the slot for one of OUR reqIds and pump the next
     void armTimer();                           // (re)arm the staggered resweep timer off the manager's TTL
+    void reapStalled();                        // watchdog tick: reclaim slots whose reply never arrived
     QString jobKey(LoadedAddon* src, const QString& catalogId) const;
 
     AddonManager* mgr_ = nullptr;
-    QTimer* timer_ = nullptr;
+    QTimer* timer_ = nullptr;        // staggered resweep
+    QTimer* watchdog_ = nullptr;     // liveness: a lost reply (catalogReady never fires) must not leak a slot
     QQueue<Job> queue_;
-    QHash<int, QString> inFlight_;   // our outstanding reqId -> job key
+    QHash<int, Pending> inFlight_;   // our outstanding reqId -> job key + dispatch time
     QSet<QString> active_;           // job keys currently queued or in flight (dedupe across resweeps)
+    qint64 watchdogMs_ = kWatchdogMs;
     int issued_ = 0;
+    int expired_ = 0;
     bool periodic_ = true;
 };

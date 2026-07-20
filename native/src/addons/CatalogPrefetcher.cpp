@@ -21,12 +21,26 @@ static void pfLog(const QString& msg)
 CatalogPrefetcher::CatalogPrefetcher(AddonManager* mgr, QObject* parent)
     : QObject(parent), mgr_(mgr)
 {
+    // MMV_PREFETCH_WATCHDOG_S (seconds, >0) shortens the in-flight watchdog for tests; default 60s.
+    const int wdOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_WATCHDOG_S");
+    if (wdOverrideS > 0) watchdogMs_ = qint64(wdOverrideS) * 1000;
+
     timer_ = new QTimer(this);
     timer_->setSingleShot(true);
     connect(timer_, &QTimer::timeout, this, &CatalogPrefetcher::resweep);
 
+    // Liveness watchdog: if a dispatched request's catalogReady never fires (a lost reply), the slot and the
+    // dedupe key would otherwise leak forever — three such and the queue is wedged at the cap until restart.
+    // A periodic reap expires jobs older than watchdogMs_ and pumps the queue onward; it only runs while
+    // something is in flight (started in pump, stopped when the last slot frees).
+    watchdog_ = new QTimer(this);
+    watchdog_->setInterval(int(qBound<qint64>(qint64(250), watchdogMs_ / 4, qint64(15000))));
+    connect(watchdog_, &QTimer::timeout, this, &CatalogPrefetcher::reapStalled);
+
     // Only OUR reqIds are acted on (see onCatalogReady) — user browsing shares the same signal but is ignored.
-    connect(mgr_, &AddonManager::catalogReady, this, [this](int reqId, const MediaCatalog&) { onCatalogReady(reqId); });
+    // A zero-item result is a failed/empty fetch (the manager's cache lambda skips those too) -> ok=false.
+    connect(mgr_, &AddonManager::catalogReady, this,
+            [this](int reqId, const MediaCatalog& c) { onCatalogReady(reqId, !c.items.isEmpty()); });
     // The source list or a source's enabled state changed -> re-warm (a newly enabled source, a new catalog).
     connect(mgr_, &AddonManager::sourcesChanged, this, &CatalogPrefetcher::resweep);
     connect(mgr_, &AddonManager::sourceEnabledChanged, this, [this](const QString&, bool) { resweep(); });
@@ -76,22 +90,52 @@ void CatalogPrefetcher::pump()
     {
         const Job job = queue_.dequeue();
         const int reqId = mgr_->requestCatalog(job.src, job.catalogId, QString(), 1, {});
-        if (reqId < 0) { active_.remove(job.key); continue; } // couldn't dispatch (null/invalid) - drop it
+        if (reqId < 0)
+        {
+            // Couldn't dispatch (source went away or was disabled between sweep and pump) — drop, log, move on.
+            pfLog(QStringLiteral("dropped %1 (request refused)").arg(job.key));
+            active_.remove(job.key);
+            continue;
+        }
         ++issued_;
-        inFlight_.insert(reqId, job.key);
+        inFlight_.insert(reqId, { job.key, QDateTime::currentMSecsSinceEpoch() });
     }
+    if (!inFlight_.isEmpty() && !watchdog_->isActive()) watchdog_->start();
+    if (inFlight_.isEmpty() && watchdog_->isActive()) watchdog_->stop();
 }
 
-void CatalogPrefetcher::onCatalogReady(int reqId)
+void CatalogPrefetcher::onCatalogReady(int reqId, bool ok)
 {
     const auto it = inFlight_.constFind(reqId);
-    if (it == inFlight_.constEnd()) return; // not one of ours (a user request, or already handled)
-    const QString key = it.value();
+    if (it == inFlight_.constEnd()) return; // not one of ours (a user request, or a job the watchdog reclaimed)
+    const QString key = it->key;
     inFlight_.erase(it);
     active_.remove(key);
-    // Whether it filled the cache or came back empty (a failed fetch isn't cached), the slot is now free.
-    // We don't inspect success here: failures are best-effort and simply get retried on the next resweep.
+    // A failed/empty fetch isn't cached and isn't retried within this sweep — note it once per job so a source
+    // that's down is diagnosable from the log; the next resweep gives it another chance.
+    if (!ok) pfLog(QStringLiteral("failed %1 (empty/failed result; will retry next sweep)").arg(key));
     pump();
+}
+
+void CatalogPrefetcher::reapStalled()
+{
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    bool reclaimed = false;
+    for (auto it = inFlight_.begin(); it != inFlight_.end(); )
+    {
+        if (now - it->startedMs >= watchdogMs_)
+        {
+            pfLog(QStringLiteral("watchdog expired %1 after %2ms (no reply; slot reclaimed)")
+                      .arg(it->key).arg(now - it->startedMs));
+            active_.remove(it->key);
+            it = inFlight_.erase(it);
+            ++expired_;
+            reclaimed = true;
+        }
+        else
+            ++it;
+    }
+    if (reclaimed) pump(); // freed slots — keep the queue moving (pump also stops the watchdog when idle)
 }
 
 void CatalogPrefetcher::armTimer()

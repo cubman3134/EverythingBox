@@ -508,7 +508,17 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     // MMV_PREFETCH_TTL_S (seconds, >0) compresses the catalog-cache TTL for tests; it also scales the
     // CatalogPrefetcher's resweep cadence (which reads catalogCacheTtlMs()). Unset -> the 30-minute default.
     const int ttlOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_TTL_S");
-    if (ttlOverrideS > 0) catalogCacheTtlMs_ = qint64(ttlOverrideS) * 1000;
+    if (ttlOverrideS > 0)
+    {
+        catalogCacheTtlMs_ = qint64(ttlOverrideS) * 1000;
+        static bool loggedOverride = false; // once per process, not per AddonManager
+        if (!loggedOverride)
+        {
+            loggedOverride = true;
+            streamLog(QStringLiteral("prefetch: MMV_PREFETCH_TTL_S override active - catalog cache TTL %1s")
+                          .arg(ttlOverrideS));
+        }
+    }
 
     nam_ = new QNetworkAccessManager(this);
     // MMV_ADDONS_ROOT lets a test (probe_addon) point discovery at an isolated fixture dir instead of the
@@ -851,16 +861,18 @@ int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, con
                                  const QMap<QString, QString>& filters)
 {
     if (!src) return -1;
+    // Fail fast for a disabled source: don't serve its cache (the stale-disabled landmine) and don't fetch
+    // either — a fetch would silently re-populate the cache for a source the user just turned off. Callers
+    // only act on enabled sources (SearchAggregator/LibraryView gate on isEnabled explicitly; HomeView only
+    // browses enabled sources' tabs), so the -1 is inert for the UI, same as the existing null-src return.
+    if (!isEnabled(src->manifest.id)) return -1;
 
     // Serve a recent browse/landing result from cache (e.g. the console list, which rarely changes) instead
     // of re-fetching. Delivered on the next event-loop turn so the caller records its reqId first.
-    // Never serve a cached catalog for a source the user has since disabled (the stale-disabled landmine):
-    // gate the hit on isEnabled, mirroring the synchronous cachedCatalog() peek.
     const QString key = catalogCacheKey(src, catalogId, query, page, filters);
     const auto cached = catalogCache_.constFind(key);
     if (cached != catalogCache_.constEnd()
-        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < catalogCacheTtlMs_
-        && isEnabled(src->manifest.id))
+        && QDateTime::currentMSecsSinceEpoch() - cached->atMs < catalogCacheTtlMs_)
     {
         const int reqId = ++reqCounter_;
         const MediaCatalog cat = cached->cat;
@@ -910,6 +922,9 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
                                : remoteCatalogUrl(base, catalogId, query, page, filters));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
@@ -953,6 +968,9 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
                                : remoteDetailUrl(base, item.type, item.id, page));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
@@ -992,6 +1010,9 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id) : remoteMetaUrl(base, item.type, item.id));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
+    // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
+    rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
