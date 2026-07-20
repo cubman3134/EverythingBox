@@ -57,14 +57,16 @@ Rectangle {
     // Route every nav key through the shared graph (host-driven; no focus-grabbing per-row editors exist).
     Keys.onPressed: function(e) {
         if (!g) return
-        // Scroll mode: keys drive the log, not the cursor.
+        // Scroll mode: keys drive the log, not the cursor. EVERY key is swallowed while scrolling (a read-only
+        // modal state) — an unhandled key must not leak past the mode and move the cursor or trigger the graph.
         if (root.logScroll) {
-            if (e.key === Qt.Key_Up)         { root.scrollLog(-48); e.accepted = true }
-            else if (e.key === Qt.Key_Down)  { root.scrollLog(48);  e.accepted = true }
-            else if (e.key === Qt.Key_PageUp)   { root.scrollLog(-260); e.accepted = true }
-            else if (e.key === Qt.Key_PageDown) { root.scrollLog(260);  e.accepted = true }
+            if (e.key === Qt.Key_Up)            root.scrollLog(-48)
+            else if (e.key === Qt.Key_Down)     root.scrollLog(48)
+            else if (e.key === Qt.Key_PageUp)   root.scrollLog(-260)
+            else if (e.key === Qt.Key_PageDown) root.scrollLog(260)
             else if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace
-                     || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) { root.logScroll = false; e.accepted = true }
+                     || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.logScroll = false
+            e.accepted = true
             return
         }
         // Enter on a LogView row enters scroll mode (host-side activation is a no-op for LogView).
@@ -183,7 +185,10 @@ Rectangle {
                 }
 
                 // LogView: a scrollable, read-only monospace tail of the log. Up/Down scroll it in scroll mode
-                // (root.scrollLog), and the wheel/drag scroll it directly.
+                // (root.scrollLog), and the wheel/drag scroll it directly. Tail-follow: it opens pinned at the
+                // NEWEST lines (the log is a tail — the bottom is the interesting end) and re-pins whenever the
+                // content height changes (a Refresh/Clear updateRow), exactly like the classic
+                // QPlainTextEdit's scroll-to-maximum.
                 Flickable {
                     id: logFlick
                     visible: del.isLog
@@ -194,6 +199,10 @@ Rectangle {
                     clip: true
                     contentWidth: logText.paintedWidth; contentHeight: logText.paintedHeight
                     boundsBehavior: Flickable.StopAtBounds
+                    function pinToTail() { contentY = Math.max(0, contentHeight - height) }
+                    onContentHeightChanged: pinToTail()
+                    onHeightChanged: pinToTail()
+                    Component.onCompleted: pinToTail()
                     Connections {
                         target: root
                         enabled: del.scrolling

@@ -371,6 +371,50 @@ static void runPanelHostPopRestoreAsserts()
         CHECK(g->validate(nullptr), "panel-host(inverse): the graph validates after the smaller-child pop");
     }
 }
+
+// §18(f) — replaceTop's SAME-LEVEL contract, the host leg the panel async-connection lifetime model rides on.
+// A state-gated panel (Cloud Sync sign-in state, RA login, BIOS re-check) rebuilds its row SET on async events;
+// MainWindow's handlers self-gate on the panel being top and then call the open* method, whose reentry path is
+// replaceTop. That is only safe because replaceTop swaps the TOP entry IN PLACE: the level depth must NOT grow
+// (a stray pushLevel would stack a duplicate panel the user Backs through twice — the exact "panel presented
+// over something else" failure the gate exists to prevent), the fresh row set must land on its first selectable
+// row (the old cursor is meaningless in a new set), and ONE Back afterwards must still pop straight to the
+// parent. The MainWindow-side gate itself (themedPanelIsTop) is not linkable here; this pins the host half.
+static void runPanelHostReplaceTopAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    // ---- (i) replaceTop on a presented stack: depth frozen, rows swapped, cursor re-homed, Back unaffected.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Hub"), panelActionRows(5, QStringLiteral("h")), noop, onBack);
+        host.present(QStringLiteral("Cloud"), panelActionRows(6, QStringLiteral("a")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host(replaceTop): panel presented over the hub (depth 2)");
+        g->select(QStringLiteral("panelRows"), 3);                 // the user's place in the OLD row set
+
+        host.replaceTop(QStringLiteral("Cloud"), panelActionRows(4, QStringLiteral("b")), noop, onBack);
+        CHECK(host.levelDepth() == 2,
+              "panel-host(replaceTop): an in-place rebuild does NOT stack a level (depth stays 2)");
+        CHECK(host.panelTitle() == QStringLiteral("Cloud"), "panel-host(replaceTop): the top title is the rebuilt panel");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+              "panel-host(replaceTop): the fresh row set lands on its first selectable row (the old cursor is void)");
+        CHECK(g->validate(nullptr), "panel-host(replaceTop): the graph validates after the in-place rebuild");
+
+        host.handleBack();                                         // ONE Back must reach the parent, not a duplicate
+        CHECK(host.levelDepth() == 1 && host.panelTitle() == QStringLiteral("Hub"),
+              "panel-host(replaceTop): one Back pops straight to the parent (no duplicate level to Back through)");
+    }
+
+    // ---- (ii) replaceTop on an EMPTY host degrades to present() (documented fallback).
+    {
+        ThemedPanelHost host;
+        host.replaceTop(QStringLiteral("Fresh"), panelActionRows(3, QStringLiteral("f")), noop, onBack);
+        CHECK(host.levelDepth() == 1 && host.panelTitle() == QStringLiteral("Fresh"),
+              "panel-host(replaceTop): on an empty stack it degrades to a plain present (depth 1)");
+    }
+}
 #endif // MMV_HAVE_QML
 
 int main(int argc, char** argv)
@@ -1401,6 +1445,9 @@ int main(int argc, char** argv)
     // §18(e): the pop-restore clamp hazard, pinned against the REAL ThemedPanelHost (renderTop's capture-before-
     // mutate ordering) — the host-level guard §18(d) above structurally cannot be. See the function's note.
     runPanelHostPopRestoreAsserts();
+    // §18(f): replaceTop's same-level contract (in-place rebuild never stacks a level) — the host leg of the
+    // panel async-connection lifetime model (MainWindow's themedPanelIsTop-gated rebuild handlers).
+    runPanelHostReplaceTopAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

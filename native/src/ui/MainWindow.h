@@ -267,9 +267,15 @@ private:
     // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own
     // these and disconnect them on each (re)present of General.
     QVector<QMetaObject::Connection> genSettingsConns_;
-    // Same pattern for the other themed child panels that install async signal hookups (Cloud Sync sign-in state,
-    // RetroAchievements login result): dropped at the top of each (re)present since the host persists.
+    // Async signal hookups for the OTHER themed child panels (Cloud Sync sign-in state, RetroAchievements login
+    // result). LIFETIME MODEL (the full statement lives at openCloudSync's connect block): armed at panel
+    // present; NOT cleared by nested children (a child's Back restores the parent without re-running open*, so
+    // the parent's listeners must survive the drill); replaced wholesale when any pool user re-presents; cleared
+    // at the settings-area boundaries (hub entry + leave-to-home); rebuild handlers self-gate on
+    // themedPanelIsTop so a late async event never presents a panel over an unrelated screen.
     QVector<QMetaObject::Connection> panelPageConns_;
+    void clearPanelPageConns();
+    bool themedPanelIsTop(const QString& title) const; // themed host is the CURRENT page AND `title` is its top panel
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view

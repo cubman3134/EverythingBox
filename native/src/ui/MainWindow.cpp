@@ -2071,6 +2071,7 @@ void MainWindow::openStreamPrompt()
     // reset()+present() with Back returning to home (its classic onBack).
     if (themedHomeEnabled() && themedPanelHost_)
     {
+        clearPanelPageConns();   // reset() below is a lifetime boundary too — no panel may keep async listeners
         themedPanelHost_->reset();                        // fresh root presentation from home
         themedPanelHost_->setStyle(settingsPanelStyle());
 
@@ -5015,6 +5016,8 @@ void MainWindow::openSettingsHub()
     // SAME rows, as Action descriptors, dispatch to the SAME open* methods (which route themed/classic per mode).
     if (themedHomeEnabled() && themedPanelHost_)
     {
+        clearPanelPageConns();   // settings-area BOUNDARY: every panel level is dropped below, so no stale
+                                 // Cloud/RA listener may outlive its panel (the lifetime model at openCloudSync)
         themedPanelHost_->reset();                       // fresh root presentation — drop any stale panel levels
         themedPanelHost_->setStyle(settingsPanelStyle()); // the active theme's settingsPanel block (hard fallbacks)
 
@@ -5058,7 +5061,9 @@ void MainWindow::openSettingsHub()
             },
             [this] {
                 // The last panel dismissed (Back at the hub root): return to the home screen (rebuilt so an
-                // Appearance/theme change applies), exactly like the classic hub's onBack.
+                // Appearance/theme change applies), exactly like the classic hub's onBack. Leaving the settings
+                // area is the other lifetime BOUNDARY: drop any armed panel listeners with it.
+                clearPanelPageConns();
                 if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
                 else if (panelReturnTo_) stack_->setCurrentWidget(panelReturnTo_);
                 else showHomeScreen();
@@ -5976,6 +5981,27 @@ void MainWindow::openGeneralSettings()
     }, [this] { openSettingsHub(); });
 }
 
+// The two legs of the panel async-connection lifetime model (full statement at openCloudSync's connect block).
+void MainWindow::clearPanelPageConns()
+{
+    for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
+    panelPageConns_.clear();
+}
+
+// True when the themed panel host is the CURRENT stack page AND `title` is its live top panel — the gate every
+// panelPageConns_ REBUILD handler runs before re-presenting: a late async event (an OAuth completing minutes
+// after the user navigated to Debug/home) must be dropped, never present a panel over an unrelated screen.
+bool MainWindow::themedPanelIsTop(const QString& title) const
+{
+#ifdef MMV_HAVE_QML
+    return themedPanelHost_ && stack_->currentWidget() == themedPanelHost_
+           && themedPanelHost_->panelTitle() == title;
+#else
+    Q_UNUSED(title);
+    return false;
+#endif
+}
+
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
@@ -5986,8 +6012,7 @@ void MainWindow::openCloudSync()
     // flows: signIn()/signOut()/cloudSyncNow()/openCloudClientSetup().
     if (themedHomeEnabled() && themedPanelHost_)
     {
-        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
-        panelPageConns_.clear();
+        clearPanelPageConns();   // this present replaces the pool (re-armed below)
         themedPanelHost_->setStyle(settingsPanelStyle());
 
         const bool cfg = CloudSync::isConfigured();
@@ -6027,11 +6052,27 @@ void MainWindow::openCloudSync()
         else
             themedPanelHost_->present(tr("Cloud Sync"), rows, onAct, onBack);
 
+        // CONNECTION-LIFETIME MODEL (panelPageConns_, shared by Cloud + RetroAchievements — THE statement):
+        //  * Armed when their panel PRESENTS (here). NOT cleared by nested children: a child's Back pop restores
+        //    this panel via renderTop WITHOUT re-running openCloudSync, so these listeners must survive the
+        //    drill — clearing them in openCloudClientSetup left "Sign in with Google" silently DEAD after
+        //    backing out of the setup form (the regression the review found).
+        //  * Replaced wholesale whenever ANY pool user re-presents (the clearPanelPageConns at the top).
+        //  * Cleared at the settings-area boundaries: openSettingsHub entry + the hub root's leave-to-home.
+        //  * REBUILD handlers self-gate on themedPanelIsTop and DROP otherwise — an OAuth completing after the
+        //    user navigated away must not present a Cloud panel over Debug/home (CloudSync persists the sign-in
+        //    state, so the next entry renders it; the gate also makes the Save-time signOut in
+        //    openCloudClientSetup safe, since "Sign-in client" is top at that moment).
+        //  * ROW-PATCH handlers (setStatus) need no gate: updateRow patches by row id and no-ops when no stacked
+        //    panel carries the row — a backgrounded Cloud (under the setup child) still receives the status.
         panelPageConns_ << connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+            if (!themedPanelIsTop(tr("Cloud Sync"))) return;   // navigated away — drop (state persists)
             openCloudSync(); raise(); activateWindow(); cloudSyncNow(); });   // rebuild (now signed-in) + first push
         panelPageConns_ << connect(cloud_.get(), &CloudSync::signInFailed, this, [setStatus](const QString& e) {
             setStatus(MainWindow::tr("Sign-in failed: %1").arg(e)); });
-        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedOut, this, [this] { openCloudSync(); });
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedOut, this, [this] {
+            if (!themedPanelIsTop(tr("Cloud Sync"))) return;   // e.g. Save-time signOut in the setup child — drop
+            openCloudSync(); });
 
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
@@ -6289,8 +6330,11 @@ void MainWindow::openCloudClientSetup()
     // present() on the Cloud panel; Save pops back to Cloud and rebuilds it (now configured) via replaceTop.
     if (themedHomeEnabled() && themedPanelHost_)
     {
-        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);   // drop Cloud's sign-in listeners
-        panelPageConns_.clear();                                                  // (signOut on Save must not re-present)
+        // Do NOT clear panelPageConns_ here: this is a nested child of Cloud, and Back restores the CACHED Cloud
+        // parent (renderTop) without re-running openCloudSync — the parent's sign-in listeners must stay armed or
+        // "Sign in with Google" goes silently dead after backing out (the lifetime model at openCloudSync's
+        // connect block). The Save-time signOut below is safe: the signedOut rebuild handler self-gates on Cloud
+        // being top, and "Sign-in client" is top at that moment.
         themedPanelHost_->setStyle(settingsPanelStyle());
 
         const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
@@ -6323,7 +6367,8 @@ void MainWindow::openCloudClientSetup()
                     s.setValue(QStringLiteral("cloud/clientId"), pending->first.trimmed());
                     s.setValue(QStringLiteral("cloud/clientSecret"), pending->second.trimmed());
                     s.sync();
-                    cloud_->signOut();   // a new client invalidates the old sign-in (no listener armed now)
+                    cloud_->signOut();   // a new client invalidates the old sign-in (the signedOut rebuild
+                                         // handler self-gates on Cloud being top — Setup is top here, so it drops)
                     // Pop back to Cloud and rebuild it (now configured) — deferred so this activate() unwinds first.
                     QTimer::singleShot(0, this, [this] { themedPanelHost_->handleBack(); openCloudSync(); });
                 }
@@ -6527,8 +6572,7 @@ void MainWindow::openRetroAchievements()
     // logout rebuild IN PLACE via replaceTop (reentry). Same flow: loginWithPassword() / the ra/apikey ini key.
     if (themedHomeEnabled() && themedPanelHost_)
     {
-        for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
-        panelPageConns_.clear();
+        clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)
         themedPanelHost_->setStyle(settingsPanelStyle());
 
         const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
@@ -6590,10 +6634,13 @@ void MainWindow::openRetroAchievements()
         else
             themedPanelHost_->present(tr("RetroAchievements"), rows, onAct, onBack);
 
-        // Async login result: success rebuilds into the signed-in state; failure updates the status row.
+        // Async login result: success rebuilds into the signed-in state — SELF-GATED on RA being the live top
+        // (the lifetime model): a login completing after the user navigated away is dropped (the token is stored
+        // by Achievements, so the next entry renders signed-in). Failure patches the status row (updateRow is
+        // inherently safe — it no-ops when no stacked panel carries ra.status).
         if (ach_)
             panelPageConns_ << connect(ach_, &Achievements::loginResult, this, [this, setStatus](bool ok, const QString& msg) {
-                if (ok) openRetroAchievements();
+                if (ok) { if (themedPanelIsTop(tr("RetroAchievements"))) openRetroAchievements(); }
                 else    setStatus(MainWindow::tr("Status"), MainWindow::tr("Sign-in failed: %1").arg(msg));
             });
 

@@ -253,8 +253,11 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     case PanelRow::TextField:
     {
         // externalEdit contract: the HOST runs the editor. Mirror the OSK on THIS graph so Back inside it closes
-        // the OSK only (and its close revives the panel's cursor through the graph's one handler).
-        const QString t = Osk::getText(r.label, r.value, QLineEdit::Normal, window(), graph_);
+        // the OSK only (and its close revives the panel's cursor through the graph's one handler). A masked row
+        // (credentials) masks during EDITING too — the OSK honors the echo mode (the PIN flows already use
+        // QLineEdit::Password), matching classic's Password fields.
+        const QString t = Osk::getText(r.label, r.value,
+                                       r.masked ? QLineEdit::Password : QLineEdit::Normal, window(), graph_);
         if (!t.isNull())
         {
             r.value = t;
