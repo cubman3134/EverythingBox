@@ -268,12 +268,16 @@ Rectangle {
                             font.pixelSize: 16; elide: Text.ElideRight
                         }
 
-                        // Info: static right value (dim).
+                        // Info / Progress: static right value (dim). For a Progress row (a Downloads job) this is
+                        // the status line ("Downloading — 1.2 MB / 5 MB (24%)", "Paused", "Done") sitting above the
+                        // bar; the title label on the left elides to make room.
                         Text {
-                            visible: del.kind === root.kInfo
-                            anchors.verticalCenter: parent.verticalCenter
+                            visible: del.kind === root.kInfo || del.kind === root.kProgress
+                            anchors.verticalCenter: del.kind === root.kProgress ? undefined : parent.verticalCenter
+                            anchors.top: del.kind === root.kProgress ? parent.top : undefined
+                            anchors.topMargin: del.kind === root.kProgress ? 10 : 0
                             text: del.rowData ? del.rowData.value : ""
-                            color: root.cDim; font.pixelSize: 16
+                            color: root.cDim; font.pixelSize: del.kind === root.kProgress ? 14 : 16
                         }
 
                         // Action: a chevron.

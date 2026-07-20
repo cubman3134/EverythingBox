@@ -317,9 +317,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
     connect(dm_, &DownloadManager::jobProgress, this, &MainWindow::updateDownloadRow);
-    // State changes (queued/active/failed/removed) change which buttons a row needs, so rebuild the panel.
+    // State changes (queued/active/failed/removed) change the row SET (a job added/removed, empty-state toggling,
+    // Clear-finished appearing) — and, in themed mode, the action-chooser contents — so rebuild the panel.
     connect(dm_, &DownloadManager::changed, this, [this] {
         if (dlPanelOpen_ && stack_->currentWidget() == panelPage_) openDownloadManager();
+#ifdef MMV_HAVE_QML
+        else if (themedPanelIsTop(tr("Downloads"))) openDownloadManager();   // themed: replaceTop (reentry) below
+#endif
     });
     PerfTrace::end(QStringLiteral("startup.addons"));
 
@@ -5195,6 +5199,60 @@ static QString downloadStatusText(const DownloadJob& j)
 // a controller D-pad, or the mouse. Rebuilt on state changes; progress ticks update the bars in place.
 void MainWindow::openDownloadManager()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: each job = one Progress row (label=title, progress=pct, value=status text). Activating a job
+    // row opens a NavMenu action chooser (the established overlay — like the XMB game menu) with that job's
+    // applicable actions (Pause/Resume/Retry/Cancel/Remove per the SAME state logic classic uses to decide its
+    // per-job buttons), calling the SAME DownloadManager methods (showDownloadActionMenu). Empty state -> an Info
+    // row. LIVE: jobProgress ticks patch the row in place via updateDownloadRow -> host updateRow("dl:"+id), which
+    // no-ops when no stacked panel carries the row (the themed analogue of the classic dlPanelOpen_ guard). State
+    // changes rebuild in place via replaceTop (reentry). Downloads is a hub child -> nested present(), Back ->
+    // openSettingsHub. The classic dlPanelOpen_/dlBars_ machinery below is UNTOUCHED (classic mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        const QVector<DownloadJob>& jobs = dm_->jobs();
+
+        QVector<PanelRow> rows;
+        bool anyFinished = false;
+        if (jobs.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("dl.empty");
+            r.label = tr("No downloads yet.");
+            r.value = tr("Choose “Download” on a game, movie or book.");
+            rows << r;
+        }
+        for (const DownloadJob& j : jobs)
+        {
+            if (j.state == DownloadJob::Done || j.state == DownloadJob::Failed) anyFinished = true;
+            PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + j.id;
+            r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
+            r.value = downloadStatusText(j);
+            r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
+            rows << r;
+        }
+        if (anyFinished)
+        {
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("dl.clearfinished");
+            r.label = tr("Clear finished"); rows << r;
+        }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("dl.clearfinished")) { dm_->clearFinished(); return; }
+            if (id.startsWith(QStringLiteral("dl:")))      showDownloadActionMenu(id.mid(3));
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Downloads is a hub child — Back pops to the hub
+
+        if (themedPanelHost_->panelTitle() == tr("Downloads"))
+            themedPanelHost_->replaceTop(tr("Downloads"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Downloads"), rows, onAct, onBack);
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     dlBars_.clear();
     dlStatus_.clear();
 
@@ -5302,6 +5360,24 @@ void MainWindow::openDownloadManager()
 // leaves keyboard/controller focus undisturbed, unlike a full panel rebuild).
 void MainWindow::updateDownloadRow(const QString& id)
 {
+#ifdef MMV_HAVE_QML
+    // Themed: patch the job's Progress row in place (no rebuild, cursor undisturbed). host->updateRow no-ops when
+    // no stacked panel carries "dl:"+id — the themed analogue of the classic dlPanelOpen_ guard: a tick that
+    // arrives after the user left Downloads finds no matching row and returns false (no stray update, no crash).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        for (const DownloadJob& j : dm_->jobs()) {
+            if (j.id != id) continue;
+            PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + id;
+            r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
+            r.value = downloadStatusText(j);
+            r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
+            themedPanelHost_->updateRow(QStringLiteral("dl:") + id, r);
+            return;
+        }
+        return;
+    }
+#endif
     if (!dlPanelOpen_) return;
     for (const DownloadJob& j : dm_->jobs()) {
         if (j.id != id) continue;
@@ -5312,6 +5388,44 @@ void MainWindow::updateDownloadRow(const QString& id)
         return;
     }
 }
+
+#ifdef MMV_HAVE_QML
+// Themed Downloads: activating a job's Progress row opens a NavMenu action chooser with exactly the actions the
+// classic panel would show as per-job buttons for that job's state — calling the SAME DownloadManager methods.
+// The overlay mirrors itself as a level on the panel host's own NavGraph (like Osk::getText does), so Back closes
+// the menu only and the panel graph depth tracks reality. Freed-pointer discipline: the job is looked up by id
+// here AND again in the chosen-action lambda (the list can change between open and choice — never cache a job).
+void MainWindow::showDownloadActionMenu(const QString& id)
+{
+    const DownloadJob* job = nullptr;
+    for (const DownloadJob& j : dm_->jobs()) if (j.id == id) { job = &j; break; }
+    if (!job) return;
+    const DownloadJob::State st = job->state;
+
+    QStringList labels;
+    QVector<int> acts;                 // parallel to labels; the DownloadJob::State-driven action for each row
+    enum { A_Pause, A_Resume, A_Retry, A_Cancel, A_Remove };
+    if (st == DownloadJob::Active || st == DownloadJob::Queued)                     { labels << tr("Pause");  acts << A_Pause; }
+    if (st == DownloadJob::Paused)                                                  { labels << tr("Resume"); acts << A_Resume; }
+    if (st == DownloadJob::Failed)                                                  { labels << tr("Retry");  acts << A_Retry; }
+    if (st == DownloadJob::Active || st == DownloadJob::Queued || st == DownloadJob::Paused) { labels << tr("Cancel"); acts << A_Cancel; }
+    if (st == DownloadJob::Failed || st == DownloadJob::Done)                       { labels << tr("Remove"); acts << A_Remove; }
+    if (labels.isEmpty()) return;      // nothing applicable (shouldn't happen — every state has an action)
+
+    const QString title = job->title.isEmpty() ? tr("Download") : job->title;
+    auto* menu = new NavMenu(title, labels, [this, id, acts](int row) {
+        if (row < 0 || row >= acts.size()) return;             // backed out
+        switch (acts[row]) {
+            case A_Pause:  dm_->pauseJob(id);  break;
+            case A_Resume: dm_->resumeJob(id); break;
+            case A_Retry:  dm_->retry(id);     break;
+            case A_Cancel: dm_->cancel(id);    break;
+            case A_Remove: dm_->removeJob(id); break;
+        }
+    }, this);
+    menu->setNavGraph(themedPanelHost_ ? themedPanelHost_->navGraph() : nullptr);
+}
+#endif
 
 void MainWindow::openGeneralSettings()
 {
@@ -6567,9 +6681,10 @@ void MainWindow::openRetroAchievements()
 {
 #ifdef MMV_HAVE_QML
     // Themed mode: the login form (username/password TextFields) OR the signed-in state (web API key TextField +
-    // Sign Out) per the SAME ach_->isLoggedIn() branch. Password + API key rows are MASKED (dots in the value
-    // display; the OSK itself is unchanged). The row SET flips with login state, so the async loginResult / a
-    // logout rebuild IN PLACE via replaceTop (reentry). Same flow: loginWithPassword() / the ra/apikey ini key.
+    // Sign Out) per the SAME ach_->isLoggedIn() branch. Password + API key rows are MASKED — dots both in the
+    // value display AND while editing (the host opens the OSK in QLineEdit::Password echo for a masked row; see
+    // ThemedPanelHost::onGraphActivated). The row SET flips with login state, so the async loginResult / a logout
+    // rebuild IN PLACE via replaceTop (reentry). Same flow: loginWithPassword() / the ra/apikey ini key.
     if (themedHomeEnabled() && themedPanelHost_)
     {
         clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)

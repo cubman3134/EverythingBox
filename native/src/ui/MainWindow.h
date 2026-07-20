@@ -76,6 +76,9 @@ private slots:
     void enqueueDownload(const MediaItem& item);
     void openDownloadManager();          // Settings ▸ Downloads: the download-manager panel
     void updateDownloadRow(const QString& id); // refresh one job's progress bar/label in place
+    // Themed Downloads: a job's Progress row is activated to open a NavMenu action chooser (Pause/Resume/Retry/
+    // Cancel/Remove per the SAME state logic classic uses for its per-job buttons), mirrored on the panel graph.
+    void showDownloadActionMenu(const QString& id);
     // Window-level notification overlay for download/resolve progress + errors. A child-widget overlay owned by
     // Notifier, floating over the central area and raised above the current page so it shows over ANY view
     // (the QQuickWidget themed home and the libmpv QOpenGLWidget both composite with sibling widgets). Driven by

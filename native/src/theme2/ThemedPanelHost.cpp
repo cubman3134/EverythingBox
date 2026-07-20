@@ -109,13 +109,15 @@ void ThemedPanelHost::setStyle(const QVariantMap& style)
 
 bool ThemedPanelHost::selectable(const PanelRow& r)
 {
-    // Separator/Info/Progress are non-interactive status rows the cursor skips (dividers). Action/Toggle/
-    // Choice/TextField/LogView are activatable (LogView enters scroll mode — Task 3).
+    // Separator/Info are non-interactive status rows the cursor skips (dividers). Action/Toggle/Choice/TextField/
+    // LogView are activatable (LogView enters scroll mode — Task 3). Progress rows ARE activatable (Task 4): a
+    // Downloads job is a Progress row and activating it opens the per-job action chooser (Pause/Resume/…). A
+    // pure-status Progress row (no handler) simply fires an ignored onActivate — benign; Downloads is the only
+    // consumer today. Disabled rows are never selectable.
     switch (r.kind)
     {
     case PanelRow::Separator:
     case PanelRow::Info:
-    case PanelRow::Progress:
         return false;
     default:
         return r.enabled;
@@ -230,6 +232,7 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     switch (r.kind)
     {
     case PanelRow::Action:
+    case PanelRow::Progress:   // a Downloads job row: activation opens the per-job action chooser (host-driven)
         if (e.onActivate) e.onActivate(r.id, QString());
         break;
     case PanelRow::Toggle:
@@ -268,7 +271,6 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     }
     case PanelRow::LogView:      // scroll mode (Task 3) — no commit dispatch yet
     case PanelRow::Info:
-    case PanelRow::Progress:
     case PanelRow::Separator:
         break;
     }
