@@ -1,5 +1,6 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
+#include "FormFactor.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/NavThemeGraph.h"
 
@@ -308,6 +309,9 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         }
     }
     qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph);
+    // The form-factor authority (subsystem D): every themed surface reads `form` for uiScale / safe-area insets.
+    // Context properties must precede setSource; the singleton outlives every view, so it is not parented here.
+    qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     qv->setProperty("mmvNavGraph", QVariant::fromValue<QObject*>(graph)); // for ThemeEngine::navGraph()
 
     qv->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));

@@ -42,9 +42,12 @@
 #include <QQuickWidget>
 #include <QQuickWindow>
 #include <QKeyEvent>
+#include <QFont>
 #include <QQmlError>
 #include <QSGRendererInterface>
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
+#include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
+#include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
 #else
 #include <QGuiApplication>
 #endif
@@ -121,6 +124,7 @@ static void runThemedInputAsserts()
     QQuickWidget qw;
     qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
     qw.rootContext()->setContextProperty(QStringLiteral("nav"), &graph);
+    qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance()); // §19 parity: `form` beside `nav`
 
     QQmlComponent comp(qw.engine());
     comp.setData(QByteArray(qml), QUrl(QStringLiteral("qrc:/theme2/probe_host.qml")));
@@ -728,6 +732,7 @@ static void runThemeViewAsserts()
         QQuickWidget qw;
         qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
         qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance()); // §19 parity: `form` beside `nav`
         qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
         QQuickItem* root = qw.rootObject();
         CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (xmb case)");
@@ -763,6 +768,7 @@ static void runThemeViewAsserts()
         QQuickWidget qw;
         qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
         qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance()); // §19 parity: `form` beside `nav`
         bool rootBackFired = false;
         QObject::connect(&g, &NavGraph::rootBack, [&rootBackFired] { rootBackFired = true; });
         qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
@@ -794,6 +800,113 @@ static void runThemeViewAsserts()
             CHECK(rootBackFired, "grid-home Escape with an empty level stack emits rootBack (the pause-menu leg)");
         }
     }
+}
+
+// §19 — `form` context property + TV scale/insets on the ThemeView surface (D1 Task 2). Loads the REAL
+// ThemeView.qml from the qrc with `form` registered (= &FormFactor::instance()) exactly as ThemeEngine::buildView
+// now does, forces TV mode (Settings::setDisplayMode + FormFactor::refresh — setDisplayMode writes but does NOT
+// refresh), and asserts the two consumers: the content Item is inset by the safe-area fraction
+// (round(min(w,h) * safeAreaFrac)) and a themed Text's pixelSize rides uiScale (fraction * host.height * 1.3).
+// Then Desktop mode is the IDENTITY net — inset 0 and the PRE-SCALE pixelSize (fraction * host.height, ffs == 1)
+// — proving every D1 Task 2 change is a pixel-for-pixel no-op with default settings. A SQUARE fixture (w == h)
+// makes min(w,h) == width, so the inset reads identically whether expressed as width- or min-based.
+static void runFormFactorAsserts()
+{
+    const qreal frac = 0.03;                                  // the themed Text's fractional fontSize
+    const int   side = 1000;                                  // square: min(w,h) == width
+    const QVariantMap textEl{ { QStringLiteral("type"), QStringLiteral("text") },
+                              { QStringLiteral("text"), QStringLiteral("FFPROBE") },
+                              { QStringLiteral("fontSize"), frac },
+                              { QStringLiteral("pos"), QVariantList{ 0.1, 0.1 } },
+                              { QStringLiteral("size"), QVariantList{ 0.5, 0.1 } } };
+    const QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                            { QStringLiteral("elements"), QVariantList{ textEl } } };
+    const QVariantMap theme{ { QStringLiteral("name"), QStringLiteral("FF") },
+                             { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+
+    // Force TV mode BEFORE the fixture builds (setDisplayMode writes the setting; the singleton must refresh()).
+    Settings::setDisplayMode(QStringLiteral("tv"));
+    FormFactor::instance().refresh();
+    CHECK(FormFactor::instance().modeName() == QStringLiteral("tv"), "formfactor: TV mode is active for the fixture");
+
+    NavGraph g;
+    buildThemedNavGraph(g, 0);
+    buildAudioPageNavGraph(g);
+    QQuickWidget qw;
+    qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+    qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+    qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance()); // the D1 Task 2 prop
+    qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+    QQuickItem* root = qw.rootObject();
+    CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (formfactor case)");
+    if (!root) { Settings::setDisplayMode(QStringLiteral("auto")); FormFactor::instance().refresh(); return; }
+
+    root->setProperty("items", QVariantList{});
+    root->setProperty("currentIndex", 0);
+    root->setProperty("currentView", QStringLiteral("home"));
+    root->setProperty("theme", theme);                       // set last — everything depends on it
+    qw.resize(side, side);
+    qw.show();
+    pump(); pump();
+    qw.grabFramebuffer();   // force a synchronous render pass so the Repeater realizes its element delegates
+    pump();
+
+    const qreal w = root->width(), h = root->height();
+    CHECK(qFuzzyCompare(w, qreal(side)) && qFuzzyCompare(h, qreal(side)),
+          "formfactor: the fixture root is square (min == width)");
+
+    // (a) TV content inset: the content Item (objectName ffContent) is anchors.fill parent + anchors.margins ==
+    //     round(min(w,h) * safeAreaFrac). Observe it via geometry: x/y == inset, width == side - 2*inset. On the
+    //     square fixture round(min * 0.05) == round(width * 0.05) == 50.
+    QQuickItem* content = root->findChild<QQuickItem*>(QStringLiteral("ffContent"));
+    CHECK(content != nullptr, "formfactor: the content Item carries objectName ffContent");
+    const int expectInset = qRound(qMin(w, h) * 0.05);
+    if (content)
+    {
+        CHECK(qRound(content->x()) == expectInset && qRound(content->y()) == expectInset,
+              "formfactor(TV): the content Item is inset by the safe area (round(min*0.05)) on x and y");
+        CHECK(qRound(content->width()) == side - 2 * expectInset,
+              "formfactor(TV): the content Item width is reduced by twice the safe-area inset");
+    }
+
+    // (b) TV Text scale: the themed Text's pixelSize rides uiScale — round(fraction * host.height * 1.3), ±1px.
+    //     The element is a Repeater delegate: it is VISUALLY parented (childItems) but not a QObject child, so
+    //     walk the visual tree to reach it (findChildren, which follows QObject parentage, never sees it).
+    QQuickItem* txt = nullptr;
+    {
+        QList<QQuickItem*> stack = root->childItems();
+        while (!stack.isEmpty())
+        {
+            QQuickItem* it = stack.takeLast();
+            if (it->property("text").toString() == QStringLiteral("FFPROBE")) { txt = it; break; }
+            stack += it->childItems();
+        }
+    }
+    CHECK(txt != nullptr, "formfactor: the themed Text element instantiated");
+    const int expectTvPx = qRound(frac * h * 1.3);
+    if (txt)
+        CHECK(qAbs(txt->property("font").value<QFont>().pixelSize() - expectTvPx) <= 1,
+              "formfactor(TV): the themed Text pixelSize rides uiScale (fraction*host.height*1.3)");
+
+    // ---- Desktop IDENTITY net: inset 0 and the pre-scale pixelSize (ffs == 1). The changed() signal rebinds
+    //      the live content margins + the Text's ffs, so the SAME loaded scene must collapse to the no-op.
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    FormFactor::instance().refresh();
+    pump(); pump();
+    CHECK(FormFactor::instance().modeName() == QStringLiteral("desktop"), "formfactor: Desktop mode is active for the identity leg");
+    if (content)
+        CHECK(qRound(content->x()) == 0 && qRound(content->y()) == 0 && qRound(content->width()) == side,
+              "formfactor(identity): Desktop insets the content by 0 (full-bleed, pixel no-op)");
+    if (txt)
+    {
+        const int expectBasePx = qRound(frac * h);           // the pre-scale baseline (no uiScale multiply)
+        CHECK(qAbs(txt->property("font").value<QFont>().pixelSize() - expectBasePx) <= 1,
+              "formfactor(identity): Desktop pixelSize == the pre-scale baseline (fraction*host.height, ffs==1)");
+    }
+
+    // Restore the stored mode so the setting the probe wrote does not leak into later runs / other consumers.
+    Settings::setDisplayMode(QStringLiteral("auto"));
+    FormFactor::instance().refresh();
 }
 #endif // MMV_HAVE_QML
 
@@ -1903,6 +2016,9 @@ int main(int argc, char** argv)
     runAppearancePanelAsserts();
     // §18(g): ThemeView-level pins — the XMB-buttons guard + grid-home rootBack (B2 Task 6 hardening).
     runThemeViewAsserts();
+    // §19: the `form` context property + TV scale/insets on the ThemeView surface (D1 Task 2), plus the Desktop
+    // identity net that guards the whole form-factor branch as a pixel no-op. Runs LAST + restores the setting.
+    runFormFactorAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

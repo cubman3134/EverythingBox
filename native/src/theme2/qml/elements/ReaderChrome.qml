@@ -22,6 +22,11 @@ Rectangle {
     // (incl. the font ThemedChoice zone) are never even instantiated in this strip.
     property string region: (typeof chromeRegion !== "undefined") ? chromeRegion : "top"
     property int    barHeight: (typeof chromeBarHeight !== "undefined") ? chromeBarHeight : 40
+    // Form-factor UI scale (subsystem D): the strip's fonts + fixed controls grow with uiScale (the host scales the
+    // strip's OUTER geometry in ReaderChromeHost::layoutStrips). Desktop uiScale is 1.0 (identity) — every
+    // Math.round(literal * 1) is a no-op. typeof-guarded so a strip loaded without `form` renders unchanged.
+    readonly property real ffs: (typeof form !== "undefined" && form) ? form.uiScale : 1
+    readonly property int  barH: Math.round(barHeight * ffs)   // the scaled inner settings-bar height
     readonly property color accent: "#3A6FB0"
 
     color: "#0E1218"                     // OPAQUE — Variant A (no translucency dependency)
@@ -46,12 +51,12 @@ Rectangle {
         Column {
             // Compact settings bar (aligned to the reader's reserved top inset).
             Rectangle {
-                width: parent.width; height: chrome.barHeight
+                width: parent.width; height: chrome.barH
                 color: "#141A22"
                 Text {
                     anchors.left: parent.left; anchors.leftMargin: 12
                     anchors.verticalCenter: parent.verticalCenter
-                    color: "#9AA6B2"; font.pixelSize: 13
+                    color: "#9AA6B2"; font.pixelSize: Math.round(13 * chrome.ffs)
                     text: chrome.br ? ("Page " + chrome.br.pageLabel) : ""  // range-aware (comic spread: "3–4 / 20")
                 }
                 // The reader-settings zone. Book: a font-size ThemedChoice. Pdf/Comic: a row of plain buttons
@@ -71,7 +76,7 @@ Rectangle {
                             spacing: 10
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                color: "#9AA6B2"; font.pixelSize: 13; text: "Font"
+                                color: "#9AA6B2"; font.pixelSize: Math.round(13 * chrome.ffs); text: "Font"
                             }
                             // externalEdit -> activation cycles to the next size via the host bridge (no inline
                             // focus grab; the strip is NoFocus). The host also feeds the zone's count, so
@@ -82,7 +87,7 @@ Rectangle {
                                 navZone: "readerSettings"; navRow: 1; navCol: 0
                                 externalEdit: true
                                 accent: chrome.accent
-                                width: 108; height: Math.min(chrome.barHeight - 6, 34)
+                                width: Math.round(108 * chrome.ffs); height: Math.min(chrome.barH - 6, Math.round(34 * chrome.ffs))
                                 options: chrome.br ? chrome.br.fontOptions : []
                                 currentOption: chrome.br ? chrome.br.fontIndex : 0
                                 onEditRequested: (zone) => {
@@ -113,14 +118,14 @@ Rectangle {
                                     // the two-up toggle also shows its ON state (pressed look) from the bridge
                                     readonly property bool active2: modelData.i === 3 && chrome.br && chrome.br.twoUp
                                     anchors.verticalCenter: parent.verticalCenter
-                                    width: Math.max(34, btnTxt.implicitWidth + 18)
-                                    height: Math.min(chrome.barHeight - 6, 30); radius: 6
+                                    width: Math.max(Math.round(34 * chrome.ffs), btnTxt.implicitWidth + 18)
+                                    height: Math.min(chrome.barH - 6, Math.round(30 * chrome.ffs)); radius: 6
                                     color: sel ? chrome.accent : (active2 ? "#243A57" : "#1E2632")
                                     border.width: sel ? 2 : 1
                                     border.color: sel ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
                                     Text {
                                         id: btnTxt; anchors.centerIn: parent
-                                        text: modelData.t; color: "#E6ECF3"; font.pixelSize: 13
+                                        text: modelData.t; color: "#E6ECF3"; font.pixelSize: Math.round(13 * chrome.ffs)
                                     }
                                     MouseArea {
                                         anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -137,7 +142,7 @@ Rectangle {
             // strip to reveal it, so it overlays the page like the classic contents panel.
             Rectangle {
                 width: parent.width
-                height: parent.height - chrome.barHeight
+                height: parent.height - chrome.barH
                 visible: height > 0 && chrome.g && chrome.g.zone === "readerToc"
                 color: "#0E1218"
                 border.color: "#22303C"; border.width: 1
@@ -153,7 +158,7 @@ Rectangle {
                         required property var modelData
                         required property int index
                         width: tocView.width
-                        height: 30
+                        height: Math.round(30 * chrome.ffs)
                         readonly property bool sel: (chrome.g && chrome.g.zone === "readerToc" && chrome.g.index === index)
                         color: sel ? Qt.rgba(0.23, 0.44, 0.69, 0.35) : "transparent"
                         radius: 5
@@ -162,7 +167,7 @@ Rectangle {
                             anchors.right: parent.right; anchors.rightMargin: 10
                             anchors.verticalCenter: parent.verticalCenter
                             text: modelData; elide: Text.ElideRight
-                            color: parent.sel ? "#FFFFFF" : "#C7D0DA"; font.pixelSize: 14
+                            color: parent.sel ? "#FFFFFF" : "#C7D0DA"; font.pixelSize: Math.round(14 * chrome.ffs)
                         }
                         MouseArea {
                             anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -189,11 +194,11 @@ Rectangle {
                 id: prevBtn
                 anchors.left: parent.left; anchors.leftMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
-                width: 96; height: parent.height - 12; radius: 8
+                width: Math.round(96 * chrome.ffs); height: parent.height - 12; radius: 8
                 color: navbar.navSel(0) ? chrome.accent : "#1E2632"
                 border.width: navbar.navSel(0) ? 2 : 1
                 border.color: navbar.navSel(0) ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
-                Text { anchors.centerIn: parent; text: "‹ Prev"; color: "#E6ECF3"; font.pixelSize: 14 }
+                Text { anchors.centerIn: parent; text: "‹ Prev"; color: "#E6ECF3"; font.pixelSize: Math.round(14 * chrome.ffs) }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: navbar.fire(0) }
             }
 
@@ -201,7 +206,7 @@ Rectangle {
                 id: progress
                 anchors.left: prevBtn.right; anchors.right: nextBtn.left; anchors.margins: 14
                 anchors.verticalCenter: parent.verticalCenter
-                height: 22; radius: 11
+                height: Math.round(22 * chrome.ffs); radius: 11
                 color: navbar.navSel(1) ? "#223042" : "#1A222C"
                 border.width: navbar.navSel(1) ? 2 : 1
                 border.color: navbar.navSel(1) ? chrome.accent : "#2A3540"
@@ -218,7 +223,7 @@ Rectangle {
                 Text {
                     anchors.centerIn: parent
                     text: chrome.br ? chrome.br.pageLabel : ""  // range-aware (comic spread: "3–4 / 20")
-                    color: "#C7D0DA"; font.pixelSize: 12
+                    color: "#C7D0DA"; font.pixelSize: Math.round(12 * chrome.ffs)
                 }
             }
 
@@ -226,11 +231,11 @@ Rectangle {
                 id: nextBtn
                 anchors.right: parent.right; anchors.rightMargin: 12
                 anchors.verticalCenter: parent.verticalCenter
-                width: 96; height: parent.height - 12; radius: 8
+                width: Math.round(96 * chrome.ffs); height: parent.height - 12; radius: 8
                 color: navbar.navSel(2) ? chrome.accent : "#1E2632"
                 border.width: navbar.navSel(2) ? 2 : 1
                 border.color: navbar.navSel(2) ? Qt.lighter(chrome.accent, 1.3) : "#2A3540"
-                Text { anchors.centerIn: parent; text: "Next ›"; color: "#E6ECF3"; font.pixelSize: 14 }
+                Text { anchors.centerIn: parent; text: "Next ›"; color: "#E6ECF3"; font.pixelSize: Math.round(14 * chrome.ffs) }
                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: navbar.fire(2) }
             }
         }

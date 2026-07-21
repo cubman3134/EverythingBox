@@ -178,6 +178,7 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: `form` + TV scale/insets on the QML surfaces
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
@@ -251,8 +252,10 @@ if(MYMEDIAVAULT_BUILD_APP)
         qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
+            src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
+            src/core/Settings.cpp src/core/Settings.h
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${MMV_THEME2_RCC_PROBE})
-        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui ${MPV_INCLUDE_DIR})
+        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
@@ -312,7 +315,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_navqml tools/probe_navqml.cpp
         src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h)
-    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2)
+    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2 src/core)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
     if(MMV_HAVE_QML)
         # Compile theme2.qrc explicitly for this probe too (a target_sources-added .qrc silently no-ops — see
@@ -326,7 +329,11 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
             src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
             src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
-            src/ui/nav/Osk.cpp        src/ui/nav/Osk.h)
+            src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
+            # §19 (D1 Task 2) drives the REAL FormFactor singleton (which reads the display/mode setting) so the
+            # `form` context property + the TV scale/insets on the ThemeView surface are pinned end to end.
+            src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+            src/core/Settings.cpp     src/core/Settings.h)
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
     endif()

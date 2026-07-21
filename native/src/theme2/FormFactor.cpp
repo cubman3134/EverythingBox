@@ -1,5 +1,5 @@
 #include "FormFactor.h"
-#include "Settings.h"
+#include "../core/Settings.h"   // relative (matches ThemeEngine's ../core/… convention): resolves in the app build too
 
 // Mode -> adaptivity tokens (spec: subsystem D §1). The Desktop row is IDENTITY by contract — uiScale 1.0,
 // minHitPx 0, safeAreaFrac 0.0, density 1.0 — so every consumer that multiplies/insets by these is a

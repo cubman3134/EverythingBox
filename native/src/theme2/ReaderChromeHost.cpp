@@ -1,4 +1,5 @@
 #include "ReaderChromeHost.h"
+#include "FormFactor.h"
 #include "../ui/nav/NavGraph.h"
 
 #include <QQuickWidget>
@@ -172,6 +173,9 @@ void ReaderChromeHost::buildStrips()
         qv->setFocusPolicy(Qt::NoFocus);                        // spike constraint 1: reader keeps key focus
         qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph_);
         qv->rootContext()->setContextProperty(QStringLiteral("readerBridge"), bridge_);
+        // `form` (subsystem D): the strip scales its fonts/controls from the form-factor uiScale. Registered INSIDE
+        // the lambda because makeStrip runs TWICE (top + bottom) — both strips must see `form` before setSource.
+        qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
         // region + barHeight are CONTEXT properties set BEFORE setSource so the region Loaders resolve to the
         // right sub-tree at creation. (A root property set AFTER setSource loads the QML with region defaulted
         // to "top" first, which would transiently create — then destroy — the OTHER strip's font ThemedChoice,
@@ -191,11 +195,16 @@ void ReaderChromeHost::layoutStrips()
 {
     if (!topStrip_) return;
     const int w = width(), h = height();
-    const int barH = reader_->chromeTopReserve();            // the reserved top inset — align the strip to it
-    const int botH = qMax(barH, 46);
-    const int tocH = tocOpen_ ? qBound(120, h * 2 / 5, h - barH - botH - 8) : 0;
-    topStrip_->setGeometry(0, 0, w, barH + tocH);
-    bottomStrip_->setGeometry(0, h - botH, w, botH);
+    // Form-factor tokens (subsystem D): the strips grow with uiScale and pull in from the bezel by the safe-area
+    // fraction of the shorter edge. Desktop is IDENTITY (uiScale 1.0, safeAreaFrac 0.0), so every qRound below is
+    // a no-op and the strips keep their exact classic geometry.
+    const qreal us   = FormFactor::instance().uiScale();
+    const int   ins  = qRound(qMin(w, h) * FormFactor::instance().safeAreaFrac());
+    const int   barH = qRound(reader_->chromeTopReserve() * us);  // the reserved top inset — align the strip to it
+    const int   botH = qMax(barH, qRound(46 * us));
+    const int   tocH = tocOpen_ ? qBound(qRound(120 * us), h * 2 / 5, h - barH - botH - 8) : 0;
+    topStrip_->setGeometry(ins, ins, w - 2 * ins, barH + tocH);
+    bottomStrip_->setGeometry(ins, h - botH - ins, w - 2 * ins, botH);
     if (chromeVisible_) { topStrip_->raise(); bottomStrip_->raise(); } // raise ONCE per (re)layout (constraint 2)
 }
 

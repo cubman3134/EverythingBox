@@ -14,6 +14,14 @@ Rectangle {
     id: root
     focus: true
 
+    // Form-factor tokens (subsystem D). ffs scales fonts + chrome, density scales row heights, safeInset pulls the
+    // whole surface off the bezel by safeAreaFrac of the shorter edge. Desktop is IDENTITY (ffs 1, density 1,
+    // safeAreaFrac 0), so every Math.round(literal * 1) + 0 below reproduces the exact classic pixel geometry.
+    // typeof-guarded so a fixture loaded without `form` still renders unchanged.
+    readonly property real ffs:     (typeof form !== "undefined" && form) ? form.uiScale : 1
+    readonly property real density: (typeof form !== "undefined" && form) ? form.density : 1
+    readonly property int  safeInset: Math.round(Math.min(width, height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+
     // Row-kind ints — must match PanelRow::Kind order (PanelModel.h).
     readonly property int kAction: 0
     readonly property int kToggle: 1
@@ -85,7 +93,8 @@ Rectangle {
     Rectangle {
         id: header
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        height: 74
+        anchors.topMargin: root.safeInset; anchors.leftMargin: root.safeInset; anchors.rightMargin: root.safeInset
+        height: Math.round(74 * root.ffs)
         color: cBg
         readonly property bool sel: root.g && root.g.zone === "panelBack"
 
@@ -93,13 +102,13 @@ Rectangle {
             id: backBtn
             anchors.left: parent.left; anchors.leftMargin: 28
             anchors.verticalCenter: parent.verticalCenter
-            width: 104; height: 42; radius: 9
+            width: Math.round(104 * root.ffs); height: Math.round(42 * root.ffs); radius: 9
             color: header.sel ? root.cAccent : root.cRow
             border.width: header.sel ? 2 : 1
             border.color: header.sel ? Qt.lighter(root.cAccent, 1.3) : Qt.darker(root.cRow, 1.2)
             Text {
                 anchors.centerIn: parent
-                text: "‹ Back"; color: root.cText; font.pixelSize: 16
+                text: "‹ Back"; color: root.cText; font.pixelSize: Math.round(16 * root.ffs)
             }
             MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
@@ -110,7 +119,7 @@ Rectangle {
             anchors.left: backBtn.right; anchors.leftMargin: 22
             anchors.verticalCenter: parent.verticalCenter
             text: (typeof panel !== "undefined" && panel) ? panel.title : ""
-            color: root.cText; font.pixelSize: 26; font.bold: true
+            color: root.cText; font.pixelSize: Math.round(26 * root.ffs); font.bold: true
         }
         Rectangle {   // hairline under the header
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
@@ -121,9 +130,11 @@ Rectangle {
     // ---- The row list --------------------------------------------------------------------------------------
     ListView {
         id: list
-        anchors.top: header.bottom; anchors.topMargin: 12
+        anchors.top: header.bottom; anchors.topMargin: Math.round(12 * root.ffs)
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
-        anchors.leftMargin: 28; anchors.rightMargin: 28; anchors.bottomMargin: 20
+        anchors.leftMargin: Math.round(28 * root.ffs) + root.safeInset
+        anchors.rightMargin: Math.round(28 * root.ffs) + root.safeInset
+        anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset
         clip: true
         spacing: 8
         interactive: false
@@ -143,7 +154,7 @@ Rectangle {
             readonly property bool destructive: rowData && rowData.destructive === true
             readonly property bool dim: rowData && rowData.enabled === false
             readonly property bool scrolling: isLog && sel && root.logScroll
-            height: isSep ? 40 : (isLog ? 320 : 56)
+            height: isSep ? Math.round(40 * root.density) : (isLog ? Math.round(320 * root.density) : Math.round(56 * root.density))
 
             // Publish the selected row's kind to the root (only the sel==true delegate writes, so it's unambiguous).
             onSelChanged: if (sel) root.selRowKind = kind
@@ -180,7 +191,7 @@ Rectangle {
                                                                                      : (del.sel ? "   — Enter to scroll" : ""))
                           : (del.rowData ? del.rowData.label : "")
                     color: del.destructive ? root.cWarn : (del.isLog ? root.cDim : root.cText)
-                    font.pixelSize: del.isLog ? 13 : 17
+                    font.pixelSize: del.isLog ? Math.round(13 * root.ffs) : Math.round(17 * root.ffs)
                     font.bold: del.isLog; elide: Text.ElideRight
                 }
 

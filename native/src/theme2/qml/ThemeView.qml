@@ -478,7 +478,12 @@ Item {
     // (home<->browse<->detail), so transitions read smoothly. Software-backend friendly (an opacity animation).
     Item {
         id: content
+        objectName: "ffContent"
         anchors.fill: parent
+        // Form-factor safe area (subsystem D): inset ONLY the foreground content by safeAreaFrac of the shorter
+        // edge, so TV title-safe margins keep the UI off the bezel while the backgrounds above stay full-bleed.
+        // Desktop safeAreaFrac is 0.0 (identity), so Math.round(min*0) == 0 — a pixel-for-pixel no-op.
+        anchors.margins: Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
         opacity: 0
         Component.onCompleted: fade.restart()
         NumberAnimation { id: fade; target: content; property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
