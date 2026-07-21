@@ -130,9 +130,14 @@ Item {
         }
         MouseArea { anchors.fill: parent; enabled: parent.on; cursorShape: Qt.PointingHandCursor
             onClicked: {
-                if (!ch.host || !ch.host.gotoItem) return
-                ch.host.gotoItem(parent.forward ? Math.min(ch.count - 1, (ch.page + 1) * ch.perPage)
-                                                 : Math.max(0, (ch.page - 1) * ch.perPage))
+                // Page arrows PAGE the selection only — never activate. Under mobile one-tap `gotoItem` would
+                // drill into the landed slot, so route through the select-only helper (falls back to gotoItem
+                // on a host that predates it — desktop two-step there is still select-only for a non-current i).
+                if (!ch.host) return
+                var target = parent.forward ? Math.min(ch.count - 1, (ch.page + 1) * ch.perPage)
+                                            : Math.max(0, (ch.page - 1) * ch.perPage)
+                if (ch.host.gotoItemSelectOnly) ch.host.gotoItemSelectOnly(target)
+                else if (ch.host.gotoItem) ch.host.gotoItem(target)
             }
         }
     }

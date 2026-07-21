@@ -976,6 +976,19 @@ static void runTouchAsserts()
     int activatedCount = 0;
     QObject::connect(&g, &NavGraph::activated, root, [&activatedCount](const QString&, int) { ++activatedCount; });
 
+    // A mouse-drag helper — the same driver §20's flick uses (the offscreen harness engages the edge-back
+    // DragHandler and the content Flickable from QTest::mouse*, not from synthetic touch; see the flick note).
+    auto mouseDrag = [](QQuickWindow* w, QPoint a, QPoint b, int steps) {
+        QTest::mousePress(w, Qt::LeftButton, Qt::NoModifier, a);
+        for (int i = 1; i <= steps; ++i)
+        {
+            QTest::mouseMove(w, QPoint(a.x() + (b.x() - a.x()) * i / steps, a.y() + (b.y() - a.y()) * i / steps));
+            pump();
+        }
+        QTest::mouseRelease(w, Qt::LeftButton, Qt::NoModifier, b);
+        pump();
+    };
+
     // Grid geometry on the 1280x720 square-free fixture: 4 cols -> cellWidth 320, cellHeight 320*1.4=448.
     // Row 0 items are centred at y=224; item i centre x = i*320 + 160.
     const QPoint pItem1(1 * 320 + 160, 224);   // (480, 224) — item 1, non-selected (currentIndex 0)
@@ -992,6 +1005,16 @@ static void runTouchAsserts()
           "touch(mobile): a tap moves the grid selection to the tapped item (through gotoItem -> the graph)");
     CHECK(activatedCount == 1,
           "touch(mobile): the SAME tap also activates the item (one-tap semantics)");
+
+    // ---- (a2) gotoItemSelectOnly: the Channels page-arrow path moves the selection but NEVER activates ----
+    // (Even in mobile, where a plain tap one-tap-activates — a page flip must not drill into the landed slot.)
+    g.select(QStringLiteral("items"), 0);
+    root->setProperty("currentIndex", 0);
+    activatedCount = 0;
+    QMetaObject::invokeMethod(root, "gotoItemSelectOnly", Q_ARG(QVariant, QVariant(3)));
+    pump();
+    CHECK(g.zone() == QStringLiteral("items") && g.index() == 3 && activatedCount == 0,
+          "touch(mobile): gotoItemSelectOnly moves the selection but does NOT activate (page-arrow paging)");
 
     // ---- (b) DESKTOP two-step: first tap selects only; a second tap on the selected item activates ----
     Settings::setDisplayMode(QStringLiteral("desktop"));
@@ -1012,29 +1035,52 @@ static void runTouchAsserts()
     CHECK(activatedCount == 1,
           "touch(desktop): a second tap on the now-selected item activates it (the two-step click)");
 
-    // ---- (e) MOBILE edge-swipe: a rightward drag from the left edge fires back; a short one does NOT ----
+    // ---- (e) MOBILE edge-swipe: the left-edge DragHandler is HORIZONTAL-ONLY (intent detection) ----
+    // Driven by mouse-drag (like the flick — the offscreen harness engages the DragHandler from QTest::mouse*,
+    // not from synthetic touch). A rightward sweep from x<12 >=80px fires Back; a short one does NOT; and a
+    // VERTICAL drag from the edge must NOT fire Back (yAxis disabled leaves it to the content Flickable — the
+    // fix-round change that stops the strip from swallowing an edge-started scroll).
     Settings::setDisplayMode(QStringLiteral("mobile"));
     FormFactor::instance().refresh();
     pump();
     int backCount = 0;
     QObject::connect(&g, &NavGraph::backInvoked, root, [&backCount] { ++backCount; });
-    // A long sweep (>=80px rightward) from x<12.
-    QTest::touchEvent(qw.quickWindow(), dev).press(0, QPoint(4, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(30, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(60, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(95, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(120, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).release(0, QPoint(120, 360));
-    pump();
-    CHECK(backCount >= 1, "touch(mobile): an edge-swipe from x<12 rightward >=80px fires back (nav.back)");
-    // A short drag from the edge (<80px) must NOT fire back (the threshold guard).
+    mouseDrag(qw.quickWindow(), QPoint(4, 360), QPoint(115, 360), 6);   // long rightward sweep from x<12
+    CHECK(backCount >= 1, "edge-swipe(mobile): a rightward drag from x<12 >=80px fires back (nav.back)");
     const int backAfterLong = backCount;
-    QTest::touchEvent(qw.quickWindow(), dev).press(0, QPoint(4, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(20, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(40, 360));
-    QTest::touchEvent(qw.quickWindow(), dev).release(0, QPoint(40, 360));
-    pump();
-    CHECK(backCount == backAfterLong, "touch(mobile): a short edge drag (<80px) does NOT fire back (threshold)");
+    mouseDrag(qw.quickWindow(), QPoint(4, 360), QPoint(40, 360), 4);    // short (<80px) rightward drag
+    CHECK(backCount == backAfterLong, "edge-swipe(mobile): a short edge drag (<80px) does NOT fire back (threshold)");
+
+    // A VERTICAL drag STARTING in the 12px edge strip must reach the content Flickable (yAxis disabled leaves it
+    // to the grid) — it SCROLLS the GridView contentY and does NOT fire Back (Important #2: the strip must not
+    // swallow an edge-started scroll). The grid fills to x=0, so x<12 overlaps its Flickable; give it enough rows
+    // to overflow (40 items -> 10 rows * 448 = 4480 > 720) so there is contentY to move.
+    root->setProperty("items", []() { QVariantList v; for (int i = 0; i < 40; ++i)
+        v << QVariantMap{ { QStringLiteral("title"), QStringLiteral("G%1").arg(i) } }; return v; }());
+    pump(); qw.grabFramebuffer(); pump();
+    // The Grid element is a Repeater-delegate Loader child — VISUALLY parented but not a QObject child, so walk
+    // the visual tree (findChild follows QObject parentage and never reaches it — mirrors the FFPROBE walk).
+    QQuickItem* grid = nullptr;
+    {
+        QList<QQuickItem*> stack = root->childItems();
+        while (!stack.isEmpty())
+        {
+            QQuickItem* it = stack.takeLast();
+            if (it->objectName() == QStringLiteral("themeGrid")) { grid = it; break; }
+            stack += it->childItems();
+        }
+    }
+    CHECK(grid != nullptr, "edge-swipe(mobile): the Grid element carries objectName themeGrid");
+    const int backAfterShort = backCount;
+    if (grid)
+    {
+        const qreal gcy0 = grid->property("contentY").toReal();
+        mouseDrag(qw.quickWindow(), QPoint(4, 560), QPoint(4, 300), 6); // VERTICAL (finger up) from the edge strip
+        CHECK(qAbs(grid->property("contentY").toReal() - gcy0) > 1.0,
+              "edge-swipe(mobile): a VERTICAL drag from x<12 scrolls the grid contentY (reaches the Flickable)");
+        CHECK(backCount == backAfterShort,
+              "edge-swipe(mobile): the VERTICAL edge drag does NOT fire back (yAxis off -> intent detection)");
+    }
 
     // ============================ PANEL surface (SettingsPanel via the REAL ThemedPanelHost) ============================
     Settings::setDisplayMode(QStringLiteral("mobile"));
@@ -1111,6 +1157,15 @@ static void runTouchAsserts()
             Settings::setDisplayMode(QStringLiteral("mobile"));
             FormFactor::instance().refresh();
             pump();
+
+            // ---- (f) fix-round: the panel's OWN left-edge Back swipe (Minor #3). A rightward edge sweep
+            //      >=80px fires Back (its ‹ Back header remains too). The panel ListView is inset past the 12px
+            //      strip (leftMargin ~28*ffs), so the vertical-drag-reaches-Flickable case is pinned on the grid
+            //      above (whose Flickable fills to x=0); here we pin the panel's horizontal edge-back.
+            int pBack = 0;
+            QObject::connect(pg, &NavGraph::backInvoked, &host, [&pBack] { ++pBack; });
+            mouseDrag(pqw->quickWindow(), QPoint(6, 300), QPoint(120, 300), 6); // horizontal edge sweep >=80px
+            CHECK(pBack >= 1, "edge(panel,mobile): a rightward edge drag from x<12 >=80px fires Back (panel edge-swipe)");
         }
     }
 

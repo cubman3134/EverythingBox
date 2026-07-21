@@ -1402,9 +1402,14 @@ QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::S
 
 // Build the gesture's frames, then drive them one per timer tick (first frame delivered immediately). Parses
 // "tap X Y", "flick X1 Y1 X2 Y2 [MS]" (default 150ms, >=6 interpolated moves), "pinch CX CY SCALE [MS]".
-void uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
+// Returns false if a sequence is already in flight — overlapping gestures share touch id 0 and would interleave
+// press/update/release into corrupt Qt touch state (a stuck point), so a second command is rejected (`err busy`)
+// rather than queued. The busy latch is a GUI-thread-only static (the pipe + the QTimer both run there).
+bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
 {
-    if (!win) return;
+    static bool inFlight = false;
+    if (inFlight) return false;                            // a gesture is mid-flight: reject (caller retries)
+    if (!win) return true;                                 // no window to touch: accepted, nothing to do
     using S = QEventPoint::State;
     const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
     const QString sub = t.value(0).toLower();
@@ -1452,8 +1457,10 @@ void uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
         frames->append(frame(half0 * scale, S::Released, S::Released));
         intervalMs = qMax(1, ms / (steps + 1));
     }
-    else { delete frames; return; }                        // malformed: nothing to deliver
+    else { delete frames; return true; }                   // malformed: accepted, nothing to deliver
 
+    // A real sequence is starting: latch busy until its final frame is delivered (cleared in the terminal tick).
+    inFlight = true;
     // Deliver frame 0 now; a repeating single-shot-style QTimer walks the rest, then self-destructs.
     QWindowSystemInterface::handleTouchEvent(win, uitestTouchDevice(), frames->at(0));
     auto* idx = new int(1);
@@ -1463,12 +1470,14 @@ void uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
     QObject::connect(timer, &QTimer::timeout, timer, [alive, frames, idx, timer] {
         if (!alive || *idx >= frames->size())
         {
+            inFlight = false;                              // sequence done (or window gone): the channel re-opens
             timer->stop(); timer->deleteLater(); delete frames; delete idx; return;
         }
         QWindowSystemInterface::handleTouchEvent(alive, uitestTouchDevice(), frames->at(*idx));
         ++(*idx);
     });
     timer->start();
+    return true;
 }
 
 } // namespace
@@ -1557,12 +1566,13 @@ void MainWindow::updateUiTestServer()
     };
     h.screenshot = [this](const QString& path) { return grab().save(path); };
     h.openDoc = [this](const QString& path) { return openDocumentPath(path); }; // reader tests: open by path (real ok)
-    h.touch = [this](const QString& arg) {
+    h.touch = [this](const QString& arg) -> bool {
         // Qt-INTERNAL activation only (parity with sendKey) — no OS foreground change. Real touch on the
         // top-level window handle: Qt hit-tests + routes it into the widget tree / embedded QML scene exactly
-        // as a physical touchscreen would (the whole point — no shortcut into the graph).
+        // as a physical touchscreen would (the whole point — no shortcut into the graph). Returns false (=> the
+        // server replies `err busy`) when a sequence is already in flight, so overlaps can't corrupt touch state.
         if (!isActiveWindow()) QApplication::setActiveWindow(this);
-        uitestRunTouch(windowHandle(), arg, this);
+        return uitestRunTouch(windowHandle(), arg, this);
     };
     uiTest_ = new UiTestServer(h, this);
     mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));

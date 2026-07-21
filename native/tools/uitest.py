@@ -12,6 +12,9 @@ Usage:
   uitest.py touch tap 640 360              synthesize a real touch tap at window coords (X, Y)
   uitest.py touch flick 640 600 640 200    a drag/flick from (X1,Y1) to (X2,Y2) [add MS for duration]
   uitest.py touch pinch 640 360 2.0        two fingers around (CX,CY) diverging by SCALE [add MS]
+                                           (X/Y are LOGICAL window coords, as reported by state's "size";
+                                            a touch while a gesture is still in flight replies "err busy" —
+                                            wait for the previous gesture to finish, then retry)
   uitest.py send "open C:/x.cbz"           raw passthrough of any server command
 
 No third-party deps. Windows: named pipe \\\\.\\pipe\\MyMediaVault-uitest; elsewhere: the QLocalServer

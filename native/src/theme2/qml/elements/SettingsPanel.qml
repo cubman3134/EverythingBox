@@ -337,4 +337,30 @@ Rectangle {
             }
         }
     }
+
+    // Left-edge Back swipe (mobile only; D1 Task 4) — mirrors ThemeView: a HORIZONTAL-ONLY DragHandler so a
+    // rightward sweep from the left edge fires Back (the panel's ‹ Back header remains), while a VERTICAL drag
+    // starting in the strip is left to the row ListView (so the user can scroll a long panel from the edge).
+    Item {
+        id: edgeBack
+        readonly property bool ffMobile: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
+        enabled: ffMobile
+        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+        width: 12
+        z: -1                                              // BEHIND the rows so a vertical drag reaches the ListView
+        property bool fired: false
+        DragHandler {
+            target: null
+            enabled: edgeBack.enabled
+            xAxis.enabled: true
+            yAxis.enabled: false
+            onActiveChanged: if (!active) edgeBack.fired = false
+            onActiveTranslationChanged: {
+                if (!edgeBack.fired && activeTranslation.x >= 80) {
+                    edgeBack.fired = true
+                    if (root.g) root.g.back()
+                }
+            }
+        }
+    }
 }

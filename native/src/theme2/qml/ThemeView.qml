@@ -218,6 +218,16 @@ Item {
         if (i === currentIndex) { nav.select("items", i); nav.activate() } // click the focused item -> press it
         else { nav.select("items", i); navigate() }        // click another -> move the selection there
     }
+    // Select-only variant for affordances that PAGE rather than open — e.g. the Channels element's page arrows,
+    // which jump the selection to the next page's first slot. Under mobile one-tap `gotoItem` would ACTIVATE
+    // (drill into) that slot, which a page-flip must never do; this moves the selection and stops (no activate).
+    function gotoItemSelectOnly(i) {
+        forceActiveFocus()
+        if (actionsOpen) return
+        var n = items ? items.length : 0
+        if (i < 0 || i >= n || isHeader(i)) return
+        if (i !== currentIndex) { nav.select("items", i); navigate() }
+    }
     function buttonAction(name) { forceActiveFocus(); actionRequested(name) } // a `button` element was pressed
     function gotoCat(i) {                                   // XMB: click a category to switch to it
         forceActiveFocus()
@@ -526,31 +536,35 @@ Item {
 
     // --- touch: left-edge Back swipe + a Back chevron (mobile only; D1 Task 4) -------------------------------
     // A thin strip along the left edge that turns a rightward drag (>= 80px) into a Back gesture, like a phone's
-    // edge-back. It sits above the content (high z) but is only 12px wide, so it overlaps just the leftmost
-    // column's edge. It must NOT eat taps: a press that never becomes a drag is released un-accepted and its
-    // composed `clicked` is propagated to whatever is beneath (propagateComposedEvents), so a tap at the very
-    // left edge still reaches the item under it. Enabled only in mobile — Desktop/TV never instantiate the drag.
-    MouseArea {
+    // edge-back. A HORIZONTAL-ONLY DragHandler (yAxis disabled) so it only claims the grab once horizontal
+    // intent crosses the drag threshold — a VERTICAL drag starting in the strip is left to the content Flickable
+    // underneath (so a phone user can scroll a grid/carousel whose left edge is at x<12), and a tap (no drag)
+    // falls straight through to the item beneath. Enabled only in mobile; Desktop/TV never engage it.
+    // BEHIND the content (z -1), NOT on top: a top strip would block a vertical drag from reaching the content
+    // Flickable at x<12. From behind, the DragHandler still receives the pointer (handlers are collected for all
+    // items under the point) and TAKES OVER the grab for a horizontal sweep (CanTakeOverFromItems), while a
+    // vertical drag stays with the content Flickable (yAxis off + the Flickable is in front) — so an
+    // edge-started scroll is never swallowed (Important #2).
+    Item {
         id: edgeBack
         enabled: root.ffMobile
-        visible: enabled
         anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
         width: 12
-        z: 1000
-        propagateComposedEvents: true
-        preventStealing: true                              // keep the grab through a horizontal drag over a Flickable
-        property real pressX: -1
+        z: -1
         property bool fired: false
-        onPressed: function(e) { pressX = e.x; fired = false; e.accepted = true }
-        onPositionChanged: function(e) {
-            if (!fired && pressX >= 0 && (e.x - pressX) >= 80) {   // crossed the 80px rightward threshold
-                fired = true
-                if (typeof nav !== "undefined" && nav) nav.back()
+        DragHandler {
+            target: null                                   // we don't move anything — just detect the sweep
+            enabled: edgeBack.enabled
+            xAxis.enabled: true
+            yAxis.enabled: false                           // vertical intent is NOT claimed -> reaches the Flickable
+            onActiveChanged: if (!active) edgeBack.fired = false
+            onActiveTranslationChanged: {
+                if (!edgeBack.fired && activeTranslation.x >= 80) {   // crossed the 80px rightward threshold
+                    edgeBack.fired = true
+                    if (typeof nav !== "undefined" && nav) nav.back()
+                }
             }
         }
-        onReleased: function(e) { pressX = -1 }
-        // A press that never dragged is a tap: let its composed click fall through to the item beneath.
-        onClicked: function(e) { if (!fired) e.accepted = false }
     }
 
     // A small Back chevron, top-left, on any non-home view (browse/detail) in mobile — the touch equivalent of

@@ -11,6 +11,7 @@ import "../Theme.js" as T
 
 GridView {
     id: gv
+    objectName: "themeGrid"   // probe_navqml §20 introspects contentY / interactive through this
     property var el: ({})
     property var ctx: ({})
     property var host

@@ -33,7 +33,10 @@ public:
         // Synthesize a REAL touch sequence on the top-level window (QWindowSystemInterface::handleTouchEvent —
         // real hit-testing, not a shortcut into the graph). arg is the raw sub-line: "tap X Y",
         // "flick X1 Y1 X2 Y2 [MS]", or "pinch CX CY SCALE [MS]". Non-blocking (a QTimer state machine).
-        std::function<void(const QString&)> touch;
+        // Returns false if a sequence is already in flight (the caller gets `err busy` and should retry) —
+        // overlapping sequences share a touch id and would interleave press/update/release into corrupt Qt
+        // touch state, so a second command is REJECTED rather than queued (keeps the harness deterministic).
+        std::function<bool(const QString&)> touch;
     };
 
     static bool wanted();                                 // MMV_UITEST=1 or --uitest present

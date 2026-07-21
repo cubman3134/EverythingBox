@@ -100,8 +100,8 @@ QString UiTestServer::handle(const QString& line)
         if (sub != QStringLiteral("tap") && sub != QStringLiteral("flick") && sub != QStringLiteral("pinch"))
             return QStringLiteral("err usage: touch tap X Y | flick X1 Y1 X2 Y2 [MS] | pinch CX CY SCALE [MS]");
         if (!hooks_.touch) return QStringLiteral("err no touch hook");
-        hooks_.touch(arg);
-        return QStringLiteral("ok");
+        // false = a sequence is already in flight; reject so overlapping gestures can't corrupt Qt touch state.
+        return hooks_.touch(arg) ? QStringLiteral("ok") : QStringLiteral("err busy");
     }
     return QStringLiteral("err unknown command '%1' (key/state/shot/open/touch)").arg(cmd);
 }
