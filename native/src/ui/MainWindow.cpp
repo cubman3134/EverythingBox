@@ -100,6 +100,7 @@
 #include <QMoveEvent>
 #include <QShortcut>
 #include <QKeyEvent>
+#include <QTouchEvent>
 #include <QFileDialog>
 #include <QMenu>
 #include <QFileInfo>
@@ -785,25 +786,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
-    connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
-        // Hide after the inactivity timeout. Every interaction (mouse move or arrow-key navigation) calls
-        // revealMediaControls(), which restarts this timer - so the controls stay up while you're actively
-        // navigating and fade out a few seconds after you stop. Clear keyboard focus so the next arrow press
-        // cleanly re-reveals and re-focuses a button. In full screen also blank the cursor.
-        QWidget* fw = focusWidget();
-        if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
-            fw->clearFocus();
-        mediaControls_->hide();
-        videoBack_->hide();
-        streamIssueBtn_->hide();
-        if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
-            player_->setCursor(Qt::BlankCursor); // but never hide the cursor while the subtitle panel is open
-    });
+    // Hide after the inactivity timeout. Every interaction (mouse move or arrow-key navigation) calls
+    // revealMediaControls(), which restarts this timer - so the controls stay up while you're actively
+    // navigating and fade out a few seconds after you stop. (The hide body is shared with the touch tap-toggle.)
+    connect(controlsHideTimer_, &QTimer::timeout, this, [this] { hideMediaControls(); });
 
     // Reveal the controls on mouse movement over the player / controls.
     player_->setMouseTracking(true);
     player_->installEventFilter(this);
     mediaControls_->installEventFilter(this);
+
+    // Touch (D1 Task 5): a tap on the bare video TOGGLES the transport chrome; a double-tap (<350 ms) on the
+    // left/right third seeks ∓10 s. Gated on QTouchEvent only — the mouse path above is untouched, so a physical
+    // click behaves exactly as today. The pending-tap timer defers the single-tap toggle so it never fires on the
+    // first tap of a double-tap.
+    player_->setAttribute(Qt::WA_AcceptTouchEvents, true);
+    playerTapTimer_ = new QTimer(this);
+    playerTapTimer_->setSingleShot(true);
+    connect(playerTapTimer_, &QTimer::timeout, this, [this] { togglePlayerChrome(); });
 
     // HomeView's progress/error toasts now render as our window-level overlay so they stay visible over any
     // theme (a themed home is a native QQuickView the view's own toast couldn't cover).
@@ -961,6 +961,11 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (t == QEvent::MouseButtonRelease || t == QEvent::Wheel) return true;
     }
 #endif
+
+    // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
+    if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
+                           || event->type() == QEvent::TouchEnd))
+        return handlePlayerTouch(static_cast<QTouchEvent*>(event));
 
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
@@ -1558,6 +1563,14 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("panelFocus"), themedPanelHost_->focusedRowLabel());
         }
 #endif
+        if (cur == playerPage_)
+        {
+            // Player-touch automation (D1 Task 5): chrome visibility (tap toggle) + seek position in permille of
+            // the duration (double-tap ±10 s seek) — read straight off the live transport widgets.
+            o.insert(QStringLiteral("mediaControls"), mediaControls_ && mediaControls_->isVisible());
+            o.insert(QStringLiteral("playerPermille"), seek_ ? seek_->value() : 0);
+            o.insert(QStringLiteral("playerDur"), duration_);
+        }
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
         o.insert(QStringLiteral("fullscreen"), isFullScreen());
         o.insert(QStringLiteral("active"), isActiveWindow());
@@ -1565,7 +1578,15 @@ void MainWindow::updateUiTestServer()
         return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
     };
     h.screenshot = [this](const QString& path) { return grab().save(path); };
-    h.openDoc = [this](const QString& path) { return openDocumentPath(path); }; // reader tests: open by path (real ok)
+    h.openDoc = [this](const QString& path) {
+        // reader tests open by path (pdf/cbz/epub -> the readers). Route video/audio extensions to the player so
+        // the player-touch tests (tap chrome, double-tap seek) can reach playerPage_ headlessly too.
+        static const QSet<QString> media = { QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("mov"),
+            QStringLiteral("avi"), QStringLiteral("webm"), QStringLiteral("m4v"), QStringLiteral("mp3"),
+            QStringLiteral("flac"), QStringLiteral("m4a"), QStringLiteral("wav") };
+        if (media.contains(QFileInfo(path).suffix().toLower())) { openVideoPath(path); return true; }
+        return openDocumentPath(path);
+    };
     h.touch = [this](const QString& arg) -> bool {
         // Qt-INTERNAL activation only (parity with sendKey) — no OS foreground change. Real touch on the
         // top-level window handle: Qt hit-tests + routes it into the widget tree / embedded QML scene exactly
@@ -2013,6 +2034,83 @@ void MainWindow::positionMediaControls()
 void MainWindow::notify(const QString& text, int ms)
 {
     if (notifier_) notifier_->notify(text, ms);
+}
+
+// Hide the transport chrome NOW — the shared body of the idle-timeout and the touch tap-toggle. Clears keyboard
+// focus off a transport button (so the next arrow press cleanly re-reveals + re-focuses) and, in full screen,
+// blanks the cursor (never while the subtitle panel is open).
+void MainWindow::hideMediaControls()
+{
+    QWidget* fw = focusWidget();
+    if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
+        fw->clearFocus();
+    if (mediaControls_) mediaControls_->hide();
+    if (videoBack_) videoBack_->hide();
+    if (streamIssueBtn_) streamIssueBtn_->hide();
+    if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
+        player_->setCursor(Qt::BlankCursor);
+}
+
+// Touch tap on the player: a shown chrome hides, a hidden chrome reveals (revealMediaControls re-arms the idle
+// timer). Only over an open media item.
+void MainWindow::togglePlayerChrome()
+{
+    if (stack_->currentWidget() != playerPage_) return;
+    if (mediaControls_ && mediaControls_->isVisible()) { controlsHideTimer_->stop(); hideMediaControls(); }
+    else revealMediaControls();
+}
+
+// Player touch filter (touch-only — the mouse path is frozen). Single-finger tap on the BARE video is a tap
+// candidate; a touch that lands on the visible transport chrome (slider/buttons) is DEFERRED (return false) so it
+// rides synthesized mouse (QSlider drag / QPushButton tap need nothing new). Consuming the bare-video tap stops
+// mouse synthesis so a tap can't double-fire. Movement past a slop cancels the tap (a bare-video drag is inert).
+bool MainWindow::handlePlayerTouch(QTouchEvent* te)
+{
+    const auto pts = te->points();
+    auto overControls = [this](const QPointF& p) {
+        const QPoint ip = p.toPoint();
+        return (mediaControls_ && mediaControls_->isVisible() && mediaControls_->geometry().contains(ip))
+            || (videoBack_ && videoBack_->isVisible() && videoBack_->geometry().contains(ip))
+            || (streamIssueBtn_ && streamIssueBtn_->isVisible() && streamIssueBtn_->geometry().contains(ip));
+    };
+    switch (te->type())
+    {
+    case QEvent::TouchBegin:
+        if (pts.size() != 1 || overControls(pts.first().position())) { playerTouchTap_ = false; return false; }
+        playerTouchTap_ = true;
+        playerTouchStart_ = pts.first().position();
+        return true;
+    case QEvent::TouchUpdate:
+        if (playerTouchTap_ && !pts.isEmpty()
+            && (pts.first().position() - playerTouchStart_).manhattanLength() > 24)
+            playerTouchTap_ = false;
+        return playerTouchTap_;
+    case QEvent::TouchEnd:
+        if (!playerTouchTap_) return false;
+        playerTouchTap_ = false;
+        onPlayerTap(pts.isEmpty() ? playerTouchStart_ : pts.first().position());
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Resolve a bare-video tap: a second tap within 350 ms is a double-tap seek (left third −10 s / right third
+// +10 s via the EXACT relative-seek the ⏪/⏩ transport buttons fire, with a transient notify flash); a lone tap
+// (the timer expires) toggles the chrome. A centre double-tap is a net single toggle.
+void MainWindow::onPlayerTap(const QPointF& pos)
+{
+    if (playerTapTimer_->isActive())
+    {
+        playerTapTimer_->stop();
+        const int w = player_->width();
+        const qreal x = pos.x();
+        if (x < w / 3.0)              { player_->seekRelative(-10.0); notify(tr("⏪  −10s"), 900); revealMediaControls(); }
+        else if (x > 2.0 * w / 3.0)   { player_->seekRelative(10.0);  notify(tr("⏩  +10s"), 900); revealMediaControls(); }
+        else                          togglePlayerChrome();
+        return;
+    }
+    playerTapTimer_->start(350);
 }
 
 void MainWindow::hideNotice()
