@@ -457,6 +457,114 @@ static void runPanelHostReplaceTopAsserts()
     }
 }
 
+// §18(j) — HOST re-entrancy safety (final-review fix round): the three defects the whole-branch reviewer found in
+// ThemedPanelHost's dispatch. All three are host-local and headlessly pinnable without MainWindow linkage.
+//   (a) replaceTop invoked from INSIDE an onActivate callback: the entry's onActivate is move-assigned while it
+//       executes. onGraphActivated dispatches through a BY-VALUE copy, so the executing closure survives — the
+//       activation body runs to completion and the in-place rebuild lands. RED-DEMO: the onActivate captures a
+//       heap sentinel and reads it AFTER calling replaceTop; before the fix that read is a use-after-free of the
+//       just-destroyed closure's captures (a copy keeps it alive). Observable: the post-replace body completed,
+//       the sentinel survived, depth stayed frozen (no stacked level), the rebuilt rows are current.
+//   (b) overlayAbove(): the primitive MainWindow::themedPanelIsTop now also consults so an async handler never
+//       rebuilds under a live OSK/menu. An overlay mirrors itself as an extra graph level, so overlayAbove() is
+//       true exactly while the graph carries more levels than the host has panels.
+//   (c) TextField commit re-location: after the (blocking) OSK returns, the value is committed by RE-LOCATING the
+//       row by id in the CURRENT top entry — a mid-edit replaceTop that dropped the row must make the commit a
+//       safe no-op (never a write through the freed buffer). Pinned via the shared find-by-id primitive
+//       (updateRow) that the commit relocation uses: a patch to a vanished id no-ops; to a surviving id applies.
+static void runPanelHostReentrancyAsserts()
+{
+    auto onBack = [] {};
+
+    // ---- (a) replaceTop from inside an onActivate — the executing closure must survive its own reassignment.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+
+        auto sentinel = std::make_shared<int>(0xA11E);   // heap object the closure captures
+        bool bodyCompleted = false;
+        QString titleAfterReplace;
+
+        QVector<PanelRow> before = panelActionRows(1, QStringLiteral("go"));   // one Action row: "go0"
+        // The onActivate rebuilds THIS panel (replaceTop) and then KEEPS RUNNING — reading its captured sentinel
+        // and the host state AFTER the rebuild. Pre-fix (dispatch via e.onActivate directly) the replaceTop
+        // destroys this very closure, so every line below the replaceTop call touches freed captures.
+        auto onAct = [&host, &sentinel, &bodyCompleted, &titleAfterReplace, onBack]
+                     (const QString&, const QString&) {
+            host.replaceTop(QStringLiteral("Rebuilt"), panelActionRows(3, QStringLiteral("nw")),
+                            [](const QString&, const QString&) {}, onBack);
+            // Everything from here on runs on a closure that replaceTop just move-assigned over:
+            const int keepAlive = *sentinel;          // UAF pre-fix (captured heap ptr in a destroyed closure)
+            titleAfterReplace = host.panelTitle();
+            bodyCompleted = (keepAlive != 0);
+        };
+
+        host.present(QStringLiteral("Start"), before, onAct, onBack);
+        CHECK(host.levelDepth() == 1, "panel-host(reentrant): the start panel presented (depth 1)");
+        g->select(QStringLiteral("panelRows"), 0);
+        g->activate();                                 // → onGraphActivated → the copied onAct runs
+
+        CHECK(bodyCompleted, "panel-host(reentrant): the activation body ran to completion past its own replaceTop");
+        CHECK(host.levelDepth() == 1,
+              "panel-host(reentrant): the in-place rebuild did NOT stack a level (depth stays 1)");
+        CHECK(host.panelTitle() == QStringLiteral("Rebuilt") && titleAfterReplace == QStringLiteral("Rebuilt"),
+              "panel-host(reentrant): the top panel is the rebuilt one, seen from inside the surviving closure");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+              "panel-host(reentrant): the rebuilt row set landed on its first selectable row");
+        CHECK(g->validate(nullptr), "panel-host(reentrant): the graph validates after the reentrant rebuild");
+    }
+
+    // ---- (b) overlayAbove() — the top-gate primitive: an overlay mirrors an EXTRA graph level over the panel.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Panel"), panelActionRows(3, QStringLiteral("p")), [](const QString&, const QString&) {}, onBack);
+        CHECK(!host.overlayAbove(),
+              "panel-host(overlay): no overlay over a freshly presented panel (graph levels == host panels)");
+        // Mirror an overlay exactly as Osk::getText / NavOverlay::setNavGraph do — one extra "overlay" level.
+        g->pushLevel(QStringLiteral("overlay"), [] {});
+        CHECK(host.overlayAbove(),
+              "panel-host(overlay): overlayAbove() is TRUE while an overlay level sits above the panel");
+        g->popLevel();
+        CHECK(!host.overlayAbove(),
+              "panel-host(overlay): overlayAbove() clears when the overlay level pops (the gate re-opens)");
+    }
+
+    // ---- (c) TextField commit re-location — a commit to a row a mid-edit replaceTop removed is a safe no-op.
+    //      The OSK loop can't be driven headlessly (it needs synthetic input), so this pins the find-by-id
+    //      relocation the post-OSK commit performs, via the shared updateRow primitive: present a panel carrying
+    //      a TextField "au.url", rebuild it AWAY (replaceTop to a set without that id), then a commit addressed to
+    //      the vanished id must NOT reach the model; a commit to a surviving id must apply.
+    {
+        ThemedPanelHost host;
+        QVector<PanelRow> withField;
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = QStringLiteral("URL"); withField << r; }
+        { PanelRow r; r.kind = PanelRow::Action;    r.id = QStringLiteral("au.add"); r.label = QStringLiteral("Add"); withField << r; }
+        host.present(QStringLiteral("Add by URL"), withField, [](const QString&, const QString&) {}, onBack);
+
+        // Mid-edit rebuild drops "au.url" (the shape of an async replaceTop while the URL OSK was open).
+        host.replaceTop(QStringLiteral("Add-ons"), panelActionRows(2, QStringLiteral("lib")),
+                        [](const QString&, const QString&) {}, onBack);
+        CHECK(host.panelTitle() == QStringLiteral("Add-ons"),
+              "panel-host(textfield-drop): the panel rebuilt away from the edited field");
+        // A post-OSK commit relocates by id; the id is gone, so it drops. patchRow on the model must report false.
+        PanelRow stale; stale.kind = PanelRow::TextField; stale.id = QStringLiteral("au.url"); stale.value = QStringLiteral("http://x");
+        host.updateRow(QStringLiteral("au.url"), stale);   // no crash, no effect (id absent from the rebuilt set)
+        CHECK(host.focusedRowLabel() != QStringLiteral("URL"),
+              "panel-host(textfield-drop): the vanished field is not present after the rebuild (commit safely dropped)");
+
+        // Positive leg: a commit to a surviving id lands (the ordinary no-rebuild case).
+        QVector<PanelRow> keepField;
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("k.url"); r.label = QStringLiteral("Keep"); keepField << r; }
+        host.replaceTop(QStringLiteral("Keeper"), keepField, [](const QString&, const QString&) {}, onBack);
+        PanelRow patched; patched.kind = PanelRow::TextField; patched.id = QStringLiteral("k.url");
+        patched.label = QStringLiteral("Keep"); patched.value = QStringLiteral("committed");
+        host.updateRow(QStringLiteral("k.url"), patched);   // relocate-by-id succeeds → applies in place
+        CHECK(host.levelDepth() == 1,
+              "panel-host(textfield-drop): the surviving-row commit path leaves the stack intact (depth 1)");
+    }
+}
+
 // §18(h) — the Add-ons manager panel graph (B2 Task 6.5), pinned against the REAL ThemedPanelHost with row sets
 // mirroring the shipped shapes. (The remove confirm is a NavConfirm::ask overlay — Cancel focused, Back=Cancel,
 // the confirmDeleteProfile pattern — so it is NOT a panel level; the panel graph is root → detail → config plus
@@ -1783,6 +1891,10 @@ int main(int argc, char** argv)
     // §18(f): replaceTop's same-level contract (in-place rebuild never stacks a level) — the host leg of the
     // panel async-connection lifetime model (MainWindow's themedPanelIsTop-gated rebuild handlers).
     runPanelHostReplaceTopAsserts();
+    // §18(j): HOST re-entrancy safety (final-review fix round) — (a) replaceTop from inside an onActivate survives
+    // the closure's own reassignment, (b) overlayAbove() gate primitive, (c) TextField commit relocates by id and
+    // drops safely when a mid-edit replaceTop removed the row.
+    runPanelHostReentrancyAsserts();
     // §18(h): the Add-ons manager panel graph (B2 Task 6.5) — divider-skip landing, the three-level remove-flow
     // double-pop cursor restore, and the masked config field's in-place patch.
     runAddonsPanelAsserts();

@@ -220,6 +220,14 @@ void ThemedPanelHost::onLevelPopped()
         gone.onBack();             // the last panel was dismissed — the root onBack leaves the host
 }
 
+bool ThemedPanelHost::overlayAbove() const
+{
+    // Every panel present() pushes exactly one graph level, so the graph's panel-levels always equal stack_.size();
+    // an OSK / NavMenu mirrors itself as an EXTRA "overlay" level (Osk::getText / NavOverlay::setNavGraph). Any
+    // excess depth is therefore an overlay sitting above the top panel.
+    return graph_ && graph_->levelDepth() > stack_.size();
+}
+
 void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
 {
     if (zone == QStringLiteral("panelBack")) { graph_->back(); return; }
@@ -230,17 +238,34 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     PanelRow& r = e.rows[index];
     if (!selectable(r)) return;
 
+    // RE-ENTRANCY SAFETY (host-local). An onActivate body may synchronously — or, under a blocking OSK / QFileDialog
+    // nested loop, ASYNCHRONOUSLY — rebuild THIS panel via present()/replaceTop(). Shipping actors: openLibrary's
+    // lib.install / lib.reload branches call openLibrary() (→ replaceTop) then keep running (setAddonsStatus); the
+    // Emulator "Change folder…" flow takes an async replaceTop under its QFileDialog; RetroAchievements' async
+    // loginResult → openRetroAchievements() → replaceTop can fire while a TextField OSK is open ("Signing in…").
+    // replaceTop move-assigns e.onActivate (destroying the closure WHILE it executes — UB) and reassigns e.rows
+    // (dangling `r`, and any reference held across the OSK's nested loop — the UAF the review found). Defences:
+    //   * dispatch through a BY-VALUE copy of the handler — the entry's copy is then free to be replaced mid-call;
+    //   * snapshot the row id, and never touch `r` / `e` after the handler (or after the OSK loop) returns;
+    //   * TextField: after the OSK, RE-LOCATE the row by id in the CURRENT top entry (the panel may have been
+    //     rebuilt) before committing — if it's gone, drop the commit safely.
+    const ActivateFn fn = e.onActivate;
+    const QString rowId = r.id;
+
     switch (r.kind)
     {
     case PanelRow::Action:
     case PanelRow::Progress:   // a Downloads job row: activation opens the per-job action chooser (host-driven)
-        if (e.onActivate) e.onActivate(r.id, QString());
+        if (fn) fn(rowId, QString());   // NB: `r`/`e` may be dangling after this — do not touch them below
         break;
     case PanelRow::Toggle:
+    {
         r.checked = !r.checked;
-        model_->patchRow(r.id, r);
-        if (e.onActivate) e.onActivate(r.id, r.checked ? QStringLiteral("1") : QStringLiteral("0"));
+        const bool on = r.checked;      // read the new state BEFORE dispatch (fn may reassign e.rows)
+        model_->patchRow(rowId, r);
+        if (fn) fn(rowId, on ? QStringLiteral("1") : QStringLiteral("0"));
         break;
+    }
     case PanelRow::Choice:
     {
         // externalEdit-style cycle: advance to the next option (wrap), commit, fire onActivate with the pick.
@@ -249,24 +274,31 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
             int cur = r.options.indexOf(r.value);
             if (cur < 0) cur = 0;
             r.value = r.options[(cur + 1) % r.options.size()];
-            model_->patchRow(r.id, r);
-            if (e.onActivate) e.onActivate(r.id, r.value);
+            const QString picked = r.value;   // snapshot before dispatch
+            model_->patchRow(rowId, r);
+            if (fn) fn(rowId, picked);
         }
         break;
     }
     case PanelRow::TextField:
     {
-        // externalEdit contract: the HOST runs the editor. Mirror the OSK on THIS graph so Back inside it closes
-        // the OSK only (and its close revives the panel's cursor through the graph's one handler). A masked row
-        // (credentials) masks during EDITING too — the OSK honors the echo mode (the PIN flows already use
-        // QLineEdit::Password), matching classic's Password fields.
-        const QString t = Osk::getText(r.label, r.value,
-                                       r.masked ? QLineEdit::Password : QLineEdit::Normal, window(), graph_);
+        // externalEdit contract: the HOST runs the editor in a BLOCKING nested loop (Osk::getText). Mirror the OSK
+        // on THIS graph so Back inside it closes the OSK only (and its close revives the panel's cursor through the
+        // graph's one handler). A masked row (credentials) masks during EDITING too — the OSK honors the echo mode.
+        // Snapshot the edit inputs first: a REFERENCE into e.rows must NOT survive the loop (an async replaceTop can
+        // free this row's buffer mid-edit — the UAF the review found), so `r` is untouched from here on.
+        const QString label = r.label, initial = r.value;
+        const QLineEdit::EchoMode echo = r.masked ? QLineEdit::Password : QLineEdit::Normal;
+        const QString t = Osk::getText(label, initial, echo, window(), graph_);
         if (!t.isNull())
         {
-            r.value = t;
-            model_->patchRow(r.id, r);
-            if (e.onActivate) e.onActivate(r.id, t);
+            // Re-locate the row by id in the CURRENT top entry (the panel may have been rebuilt during the OSK).
+            // If it's gone, drop the commit AND the dispatch — never write through a stale row / fire a stale edit.
+            bool committed = false;
+            if (!stack_.isEmpty())
+                for (PanelRow& er : stack_.last().rows)
+                    if (er.id == rowId) { er.value = t; model_->patchRow(rowId, er); committed = true; break; }
+            if (committed && fn) fn(rowId, t);   // fire the handler captured when the edit began
         }
         break;
     }

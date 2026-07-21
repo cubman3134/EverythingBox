@@ -7021,8 +7021,14 @@ void MainWindow::clearPanelPageConns()
 bool MainWindow::themedPanelIsTop(const QString& title) const
 {
 #ifdef MMV_HAVE_QML
+    // ALSO require no overlay (OSK / NavMenu) above the top panel: an overlay doesn't change panelTitle(), so
+    // without this a late async handler could rebuild the panel UNDER a live edit — force-cancelling the user's
+    // OSK text, or (presentAddByUrl's deferred handleBack) popping the OSK's mirrored level and stacking a
+    // duplicate level. While an overlay is up the rebuild is DROPPED; the state persists and renders on the next
+    // top-gated event or re-present (the user keeps their edit).
     return themedPanelHost_ && stack_->currentWidget() == themedPanelHost_
-           && themedPanelHost_->panelTitle() == title;
+           && themedPanelHost_->panelTitle() == title
+           && !themedPanelHost_->overlayAbove();
 #else
     Q_UNUSED(title);
     return false;

@@ -113,6 +113,13 @@ public:
     // Key/Back arbitration for when this host is the current stack page. handleBack pops one panel level.
     void handleBack();
 
+    // True when an OSK / NavMenu overlay level sits ABOVE the top panel — the graph mirrors every overlay as its
+    // own level (Osk::getText / NavOverlay::setNavGraph pushLevel "overlay"), so the graph carries MORE levels
+    // than the host has panels exactly while one is up. MainWindow::themedPanelIsTop consults this so a late async
+    // handler never rebuilds the panel out from under a live overlay (force-cancelling the user's edit, or —
+    // presentAddByUrl's ~700ms handleBack — popping the OSK's mirrored level and stacking a duplicate level).
+    bool overlayAbove() const;
+
     // UI-test snapshot helpers (the QQuickWidget focus is opaque).
     QString panelTitle() const;
     int levelDepth() const;
