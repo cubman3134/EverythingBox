@@ -6,6 +6,9 @@
 //   key <up|down|left|right|enter|back|escape|Nx>   inject a nav key through sendNavKey (Nx = raw Qt::Key int)
 //   state                                           -> "ok {json}": page, focus widget, overlays, geometry
 //   shot <absolute-path.png>                        render the whole window (works occluded/backgrounded)
+//   touch tap X Y                                   synthesize a real touch tap at window coords (X, Y)
+//   touch flick X1 Y1 X2 Y2 [MS]                    a real drag/flick from (X1,Y1) to (X2,Y2) over MS (default 150)
+//   touch pinch CX CY SCALE [MS]                    two fingers around (CX,CY) diverging by SCALE over MS
 //
 // Injected keys use the app's own routing (overlays -> rings -> back actions), not OS input, so they need
 // no focus; before each one the window is given Qt-INTERNAL activation (no OS foreground change) so focus
@@ -27,6 +30,13 @@ public:
         std::function<QString()> state;                   // compact JSON snapshot of the UI state
         std::function<bool(const QString&)> screenshot;   // render the window to a PNG path
         std::function<bool(const QString&)> openDoc;      // open a document/book by path (reader tests)
+        // Synthesize a REAL touch sequence on the top-level window (QWindowSystemInterface::handleTouchEvent —
+        // real hit-testing, not a shortcut into the graph). arg is the raw sub-line: "tap X Y",
+        // "flick X1 Y1 X2 Y2 [MS]", or "pinch CX CY SCALE [MS]". Non-blocking (a QTimer state machine).
+        // Returns false if a sequence is already in flight (the caller gets `err busy` and should retry) —
+        // overlapping sequences share a touch id and would interleave press/update/release into corrupt Qt
+        // touch state, so a second command is REJECTED rather than queued (keeps the harness deterministic).
+        std::function<bool(const QString&)> touch;
     };
 
     static bool wanted();                                 // MMV_UITEST=1 or --uitest present

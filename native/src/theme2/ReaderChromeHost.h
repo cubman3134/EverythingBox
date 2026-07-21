@@ -20,6 +20,9 @@
 #include <QWidget>
 #include <QStringList>
 #include <QVariantList>
+#include <QPointF>
+
+class QTouchEvent;
 
 #include "../ui/nav/NavThemeGraph.h"
 #include "HostedReader.h"
@@ -123,6 +126,7 @@ private:
     void hideChrome();           // hide strips, collapse the toc, return focus to the reader
     void armAutoHide();          // (re)start the idle timer
     bool arbitrateKey(int key);  // the shared key router for physical + synthetic keys
+    bool handleReaderTouch(QTouchEvent* te);      // tap-zones + swipe + pinch (one impl, all three readers)
     void onGraphActivated(const QString& zone, int index);
     void onSelectionChanged(const QString& zone, int index);
 
@@ -138,4 +142,10 @@ private:
     bool chromeVisible_ = false;
     bool tocOpen_ = false;      // the chapter list is expanded (nav cursor on readerToc) -> the top strip grows
     bool levelPushed_ = false;  // exactly one "reader" level is on the graph
+
+    // Touch state (D1 Task 5): the in-flight single-finger start, a multi-touch (pinch) latch, and the current
+    // two-finger baseline separation (re-based after each zoom step; 0 = no pinch in flight).
+    QPointF touchStart_;
+    bool    sawMulti_ = false;
+    qreal   pinchBaseDist_ = 0.0;
 };

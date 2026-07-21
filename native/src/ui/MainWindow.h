@@ -7,6 +7,7 @@
 #include <QVariantMap>
 #include <QColor>
 #include <QPointer>
+#include <QPointF>
 #include <QElapsedTimer>
 #include <memory>
 #include <functional>
@@ -248,6 +249,10 @@ private:
     qint64  padNext_[8] = { 0 };      // per-nav-input: tick at which a held direction may repeat again
     void revealMediaControls();
     void positionMediaControls();
+    void hideMediaControls();               // hide the transport chrome now (shared by the idle timer + touch tap)
+    void togglePlayerChrome();              // touch tap: hide if shown / reveal (+re-arm) if hidden
+    bool handlePlayerTouch(class QTouchEvent* te); // player tap-toggle + double-tap ±10 s seek (touch only)
+    void onPlayerTap(const QPointF& pos);   // pending-tap resolver: single = toggle, double(<350ms) = seek
     void showNextSourceFeedback(const QString& msg);          // player overlay (playing) or status bar (reader)
     void stepPlayerFocus(int dir); // arrow-key focus across the transport buttons (dir +1/-1, or 0 = enter row)
     // Show an in-window panel page (Settings/Theme/Cloud/General are embedded here, no popup windows).
@@ -259,6 +264,13 @@ private:
                          const std::function<void(int result)>& onFinished,
                          const std::function<void()>& onBack);
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
+
+    // Form-factor adaptivity (D1 Task 3). applyFormFactorWidgets re-derives EVERY widget-side size from the
+    // FormFactor tokens (the one chokepoint: NavOverlay/Osk fonts+key sizes, player-chrome hit targets, seek
+    // slider, split-pane bar) — connected to FormFactor::changed and called once at startup. maybeOfferTvMode
+    // is the one-time "this looks like a TV" suggestion, fired once post-show behind its guards.
+    void applyFormFactorWidgets();
+    void maybeOfferTvMode();
 
     // ---- Themed Profiles picker (B2 Task 5): the ProfileDialog surface on the Nav Contract. mustChoose is the
     // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
@@ -479,6 +491,9 @@ private:
     class PlaybackSession* session_ = nullptr; // audio-queue + resume state machine (see connect block)
     QVector<QPushButton*> playerButtons_; // transport buttons in Left/Right arrow-nav order
     QTimer* controlsHideTimer_ = nullptr;
+    QTimer* playerTapTimer_ = nullptr;  // pending single-tap; a 2nd tap within 350ms upgrades it to a seek
+    QPointF playerTouchStart_;          // TouchBegin pos, for the tap-vs-drag discriminator
+    bool    playerTouchTap_ = false;    // the in-flight touch is still a tap candidate (small travel, 1 finger)
     QStackedWidget* stack_ = nullptr;
     QSlider* seek_ = nullptr;
     QLabel* time_ = nullptr;

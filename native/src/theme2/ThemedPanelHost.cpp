@@ -1,4 +1,5 @@
 #include "ThemedPanelHost.h"
+#include "FormFactor.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/Osk.h"
 
@@ -93,6 +94,8 @@ void ThemedPanelHost::buildView()
     // model; `panel` carries the title/style/model the delegates bind.
     view_->rootContext()->setContextProperty(QStringLiteral("nav"), graph_);
     view_->rootContext()->setContextProperty(QStringLiteral("panel"), bridge_);
+    // `form` (subsystem D): the panel scales its rows/fonts + insets the safe area from the form-factor tokens.
+    view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/SettingsPanel.qml")));
 }
 

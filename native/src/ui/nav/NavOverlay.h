@@ -41,6 +41,12 @@ public:
     // only. Applies to EVERY NavOverlay subclass (NavMenu/NavConfirm) via the shared panel stylesheet.
     static void setThemeColors(const QVariantMap& colors);
 
+    // Form-factor sizing (D1 Task 3): the panel body font sizes, pushed by MainWindow::applyFormFactorWidgets
+    // (the ONE place the token math lives). Defaults are today's desktop-identity values (14px labels/buttons,
+    // 16px list rows), so an overlay built before any push renders exactly as it always has. Read at
+    // construction time by the shared panel stylesheet — every NavOverlay subclass picks them up.
+    static void setPanelFontPx(int panelFontPx, int listFontPx);
+
     // Arrow-select a QLineEdit and press Enter: open the on-screen keyboard on it (implemented in
     // Osk.cpp). After commit the edit gets its text plus a synthetic Return, so returnPressed flows run.
     static void editLineEdit(QLineEdit* edit);
@@ -95,6 +101,8 @@ private:
     bool dismissed_ = false;
     static QVector<QPointer<NavOverlay>> s_stack;
     static QVariantMap s_themeColors;   // active theme's settingsPanel block (empty -> hardcoded fallbacks)
+    static int s_panelFontPx;           // panel label/button font px (default 14 = desktop identity)
+    static int s_listFontPx;            // panel list-row font px (default 16 = desktop identity)
 };
 
 // A vertical action menu (the game menu / esc menu / cast picker shape): a title and a list of rows.

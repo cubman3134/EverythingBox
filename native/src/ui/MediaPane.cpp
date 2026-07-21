@@ -73,6 +73,7 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
 
     connect(closeBtn_, &QPushButton::clicked, this, &MediaPane::closeRequested);
     connect(pauseBtn_, &QPushButton::clicked, this, &MediaPane::togglePause);
+    applyBarMinHit(0); // desktop identity until MainWindow pushes the live token
     connect(volume_, &QSlider::valueChanged, this, [this](int v) { volPct_ = v; applyVolume(); emit focusRequested(); });
     // A reader's own Back/Home closes this pane (the pane, not the whole app).
     connect(book_,  &EbookView::backRequested, this, &MediaPane::closeRequested);
@@ -90,6 +91,17 @@ MediaPane::MediaPane(QWidget* parent) : QWidget(parent)
 
     setStyleSheet(QStringLiteral("MediaPane{background:#0e1014;}"));
     setFocused(false);
+}
+
+void MediaPane::applyBarMinHit(int hit)
+{
+    // hit==0 (desktop) restores the exact original 40px-wide bar buttons; a larger hit floors width AND height
+    // to the touch target (mobile). Pure setter — the token math lives in MainWindow::applyFormFactorWidgets.
+    const int w = qMax(40, hit);
+    pauseBtn_->setFixedWidth(w);
+    closeBtn_->setFixedWidth(w);
+    pauseBtn_->setMinimumHeight(hit);
+    closeBtn_->setMinimumHeight(hit);
 }
 
 void MediaPane::showView(QWidget* w, const QString& title, bool hasAudio)

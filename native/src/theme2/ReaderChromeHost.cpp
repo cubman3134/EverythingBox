@@ -1,4 +1,5 @@
 #include "ReaderChromeHost.h"
+#include "FormFactor.h"
 #include "../ui/nav/NavGraph.h"
 
 #include <QQuickWidget>
@@ -8,6 +9,8 @@
 #include <QTimer>
 #include <QKeyEvent>
 #include <QResizeEvent>
+#include <QTouchEvent>
+#include <QLineF>
 #include <QColor>
 #include <QUrl>
 #include <algorithm>
@@ -154,6 +157,16 @@ ReaderChromeHost::ReaderChromeHost(HostedReader* reader, ReaderKind kind, QWidge
 
     // Physical AND synthetic (controller) keys arrive at the focused reader; the host arbitrates them.
     rw->installEventFilter(this);
+
+    // Touch (D1 Task 5): ONE implementation for all three readers lives HERE. The reader widget accepts touch so
+    // this filter sees the QTouchEvent stream — tap-zones + horizontal swipe + centre chrome toggle, and (comic/
+    // pdf) pinch-to-zoom read straight off the two-finger separation. We deliberately do NOT grabGesture(Qt::
+    // PinchGesture): Qt's QPinchGesture recognition off a raw touch stream proved non-deterministic here (a run
+    // would emit the gesture, the next would emit nothing and still swallow the TouchUpdate/End frames), so we
+    // track the pinch ourselves — deterministic across desktop and touchscreen, and drivable by the uitest harness.
+    // Mouse is FROZEN: gestures fire on QTouchEvent only, never a physical click, so text-select/desktop click are
+    // unchanged. Themed-gated (arbitrateKey is too) — classic mode leaves the reader its own bar + input entirely.
+    rw->setAttribute(Qt::WA_AcceptTouchEvents, true);
 }
 
 void ReaderChromeHost::onReaderPageInfo() { bridge_->refresh(); }
@@ -172,6 +185,9 @@ void ReaderChromeHost::buildStrips()
         qv->setFocusPolicy(Qt::NoFocus);                        // spike constraint 1: reader keeps key focus
         qv->rootContext()->setContextProperty(QStringLiteral("nav"), graph_);
         qv->rootContext()->setContextProperty(QStringLiteral("readerBridge"), bridge_);
+        // `form` (subsystem D): the strip scales its fonts/controls from the form-factor uiScale. Registered INSIDE
+        // the lambda because makeStrip runs TWICE (top + bottom) — both strips must see `form` before setSource.
+        qv->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
         // region + barHeight are CONTEXT properties set BEFORE setSource so the region Loaders resolve to the
         // right sub-tree at creation. (A root property set AFTER setSource loads the QML with region defaulted
         // to "top" first, which would transiently create — then destroy — the OTHER strip's font ThemedChoice,
@@ -191,11 +207,16 @@ void ReaderChromeHost::layoutStrips()
 {
     if (!topStrip_) return;
     const int w = width(), h = height();
-    const int barH = reader_->chromeTopReserve();            // the reserved top inset — align the strip to it
-    const int botH = qMax(barH, 46);
-    const int tocH = tocOpen_ ? qBound(120, h * 2 / 5, h - barH - botH - 8) : 0;
-    topStrip_->setGeometry(0, 0, w, barH + tocH);
-    bottomStrip_->setGeometry(0, h - botH, w, botH);
+    // Form-factor tokens (subsystem D): the strips grow with uiScale and pull in from the bezel by the safe-area
+    // fraction of the shorter edge. Desktop is IDENTITY (uiScale 1.0, safeAreaFrac 0.0), so every qRound below is
+    // a no-op and the strips keep their exact classic geometry.
+    const qreal us   = FormFactor::instance().uiScale();
+    const int   ins  = qRound(qMin(w, h) * FormFactor::instance().safeAreaFrac());
+    const int   barH = qRound(reader_->chromeTopReserve() * us);  // the reserved top inset — align the strip to it
+    const int   botH = qMax(barH, qRound(46 * us));
+    const int   tocH = tocOpen_ ? qBound(qRound(120 * us), h * 2 / 5, h - barH - botH - 8) : 0;
+    topStrip_->setGeometry(ins, ins, w - 2 * ins, barH + tocH);
+    bottomStrip_->setGeometry(ins, h - botH - ins, w - 2 * ins, botH);
     if (chromeVisible_) { topStrip_->raise(); bottomStrip_->raise(); } // raise ONCE per (re)layout (constraint 2)
 }
 
@@ -299,12 +320,86 @@ bool ReaderChromeHost::handleNavKey(int key) { return arbitrateKey(key); }
 
 bool ReaderChromeHost::eventFilter(QObject* o, QEvent* e)
 {
-    if (o == reader_->asWidget() && e->type() == QEvent::KeyPress)
+    if (o == reader_->asWidget())
     {
-        auto* ke = static_cast<QKeyEvent*>(e);
-        if (arbitrateKey(ke->key())) return true; // consumed: the reader does not also page/back
+        switch (e->type())
+        {
+        case QEvent::KeyPress:
+            if (arbitrateKey(static_cast<QKeyEvent*>(e)->key())) return true; // reader does not also page/back
+            break;
+        case QEvent::TouchBegin:
+        case QEvent::TouchUpdate:
+        case QEvent::TouchEnd:
+            if (handleReaderTouch(static_cast<QTouchEvent*>(e))) return true;
+            break;
+        default:
+            break;
+        }
     }
     return QWidget::eventFilter(o, e);
+}
+
+// Touch on the reader page. TWO fingers = pinch-to-zoom (pdf/comic): step zoomDelta(±1) — the EXACT ± the zoom
+// buttons fire — for each 15% change in the finger separation, re-baselining after each step so a slow pinch keeps
+// stepping. ONE finger = tap-zones (left ⅓ = prev, right ⅓ = next, centre = chrome toggle) or a horizontal swipe
+// (≥80 px, leftward = next / rightward = prev — the page-flip convention). Consuming the stream stops synthesized-
+// mouse, keeping the reader's mouse behavior frozen. Themed-only (classic mode owns its own input, like
+// arbitrateKey). sawMulti_ latches a pinch so a lifted-to-one-finger tail is never mistaken for a tap/swipe.
+bool ReaderChromeHost::handleReaderTouch(QTouchEvent* te)
+{
+    if (!themed_) return false;
+    const auto pts = te->points();
+
+    if (pts.size() >= 2)   // pinch: read the zoom straight off the two-finger separation
+    {
+        sawMulti_ = true;
+        if (kind_ != ReaderKind::Book && te->type() != QEvent::TouchEnd) // zoomDelta() is pdf/comic only
+        {
+            const qreal d = QLineF(pts[0].position(), pts[1].position()).length();
+            if (pinchBaseDist_ <= 0.0) pinchBaseDist_ = d;              // first pinch frame: set the baseline
+            else if (d > 0.0)
+            {
+                const qreal r = d / pinchBaseDist_;
+                if (r >= 1.15)          { reader_->zoomDelta(+1); pinchBaseDist_ = d; }
+                else if (r <= 1.0 / 1.15) { reader_->zoomDelta(-1); pinchBaseDist_ = d; }
+            }
+        }
+        return true;
+    }
+
+    switch (te->type())
+    {
+    case QEvent::TouchBegin:
+        sawMulti_ = false;
+        pinchBaseDist_ = 0.0;
+        touchStart_ = pts.isEmpty() ? QPointF() : pts.first().position();
+        return true;
+    case QEvent::TouchUpdate:
+        return true;   // single-finger drag: consumed (swipe is resolved on release), no synthesized mouse
+    case QEvent::TouchEnd:
+    {
+        pinchBaseDist_ = 0.0;
+        if (sawMulti_) { sawMulti_ = false; return true; } // the pinch's final frame — not a tap/swipe
+        const QPointF end = pts.isEmpty() ? touchStart_ : pts.first().position();
+        const qreal dx = end.x() - touchStart_.x(), dy = end.y() - touchStart_.y();
+        if (qAbs(dx) >= 80.0 && qAbs(dx) > qAbs(dy))
+        {
+            if (dx < 0) reader_->nextPage(); else reader_->prevPage(); // leftward swipe = next
+        }
+        else if (qAbs(dx) < 24.0 && qAbs(dy) < 24.0)                   // a tap (no meaningful travel)
+        {
+            const int w = reader_->asWidget()->width();
+            const qreal x = end.x();
+            if (x < w / 3.0)             reader_->prevPage();
+            else if (x > 2.0 * w / 3.0)  reader_->nextPage();
+            else if (chromeVisible_)     hideChrome();                 // centre: toggle the themed chrome
+            else                         revealChrome();
+        }
+        return true;
+    }
+    default:
+        return true;
+    }
 }
 
 bool ReaderChromeHost::arbitrateKey(int key)

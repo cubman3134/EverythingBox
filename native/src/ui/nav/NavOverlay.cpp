@@ -19,8 +19,16 @@
 
 QVector<QPointer<NavOverlay>> NavOverlay::s_stack;
 QVariantMap NavOverlay::s_themeColors;
+int NavOverlay::s_panelFontPx = 14;  // desktop identity (see setPanelFontPx)
+int NavOverlay::s_listFontPx  = 16;  // desktop identity
 
 void NavOverlay::setThemeColors(const QVariantMap& colors) { s_themeColors = colors; }
+
+void NavOverlay::setPanelFontPx(int panelFontPx, int listFontPx)
+{
+    s_panelFontPx = panelFontPx;
+    s_listFontPx  = listFontPx;
+}
 
 // ---------------------------------------------------------------- NavOverlay
 
@@ -48,16 +56,19 @@ NavOverlay::NavOverlay(QWidget* window)
     const QString sel     = navCol("rowSelected", "#2f5fd0");
     panel_ = new QFrame(this);
     panel_->setObjectName(QStringLiteral("navOverlayPanel"));
+    // Body font sizes ride the form-factor tokens (s_panelFontPx / s_listFontPx, pushed by
+    // applyFormFactorWidgets); defaults are today's 14px / 16px so desktop is a pixel-for-pixel no-op.
     panel_->setStyleSheet(QStringLiteral(
         "#navOverlayPanel { background: %1; border: 1px solid %2; border-radius: 10px; }"
-        "QLabel { color: %3; font-size: 14px; }"
+        "QLabel { color: %3; font-size: %7px; }"
         "QPushButton { background: %4; color: %3; border: 1px solid %2;"
-        "              border-radius: 6px; padding: 8px 18px; font-size: 14px; }"
+        "              border-radius: 6px; padding: 8px 18px; font-size: %7px; }"
         "QPushButton:focus { background: %6; border-color: %5; }"
-        "QListWidget { background: transparent; border: none; color: %3; outline: none; font-size: 16px; }"
+        "QListWidget { background: transparent; border: none; color: %3; outline: none; font-size: %8px; }"
         "QListWidget::item { padding: 9px 14px; border-radius: 6px; }"
         "QListWidget::item:selected { background: %6; }")
-        .arg(panelBg, border, text, rowBg, accent, sel));
+        .arg(panelBg, border, text, rowBg, accent, sel)
+        .arg(s_panelFontPx).arg(s_listFontPx));
     ring_ = new NavRing(panel_, this);
 
     prevFocus_ = QApplication::focusWidget();

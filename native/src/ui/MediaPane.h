@@ -31,6 +31,11 @@ public:
     bool isEmpty() const { return kind_ == None; }
     void setFocused(bool on);           // visual highlight + route input to this pane's game
 
+    // Form-factor sizing (D1 Task 3): floor the top-bar pause/close hit targets to `hit` px (0 = desktop
+    // identity, restoring the plain 40px-wide buttons). Driven by MainWindow::applyFormFactorWidgets — the
+    // one place the token math lives; this is a pure setter.
+    void applyBarMinHit(int hit);
+
     RetroView* retro() const { return retro_; }
 
 signals:

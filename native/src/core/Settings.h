@@ -46,6 +46,26 @@ namespace Settings
     bool startFullscreen();
     void setStartFullscreen(bool on);
 
+    // Form-factor / adaptivity (subsystem D). The chosen display mode: "auto" (default — platform detection)
+    // or an explicit "desktop"|"tv"|"mobile" override. FormFactor resolves this into its token table; a
+    // caller that writes it must then call FormFactor::instance().refresh() to re-resolve + notify.
+    QString displayMode();                    // "auto"|"desktop"|"tv"|"mobile"; default "auto"; key "display/mode"
+    void    setDisplayMode(const QString& mode);
+    // Whether the one-time "we detected a TV — switch to the TV layout?" prompt has already been shown.
+    bool    tvPromptDone();                   // key "display/tvPromptDone", default false
+    void    setTvPromptDone(bool done);
+
+    // On-screen virtual gamepad (touch form factors). Tri-state override stored as "auto"|"on"|"off":
+    // "auto" (default) shows it only in the Mobile form factor, "on" always, "off" never. Opacity is 0..100
+    // (default 45). virtualPadEnabled() is the ONE visibility resolver the emulator uses (RetroView::
+    // virtualPadShouldShow() delegates to it); "auto" resolves against the FormFactor authority, not the raw
+    // display/mode string.
+    QString virtualPad();                     // key "emu/virtualPad", default "auto"
+    void    setVirtualPad(const QString& mode);
+    bool    virtualPadEnabled();              // "on" || ("auto" && FormFactor::mode()==Mobile)
+    int     virtualPadOpacity();              // key "emu/virtualPadOpacity", 0..100, default 45
+    void    setVirtualPadOpacity(int pct);
+
     // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);

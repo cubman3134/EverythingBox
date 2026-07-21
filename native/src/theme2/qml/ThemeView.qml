@@ -204,13 +204,29 @@ Item {
     // Mouse parity for the elements: clicking an item navigates to it; clicking the already-selected item
     // activates it (the "click to move, click again to press" model). Clicking also gives the scene keyboard
     // focus so the arrow keys work afterwards. Selection goes through `nav`; the bridge writes the props.
+    // Mobile (touch) uses ONE-TAP semantics: a tap both selects and activates the tapped item, the way a phone
+    // list opens a row on first touch. Desktop/TV keep the two-step "click to move, click again to press" model
+    // (frozen — probe §20 has a desktop two-step assert). All element MouseAreas route through here, so this is
+    // the single seam the tap model lives at (Xmb gotoCat stays select-only — a category hop shouldn't activate).
+    readonly property bool ffMobile: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
     function gotoItem(i) {
         forceActiveFocus()
         if (actionsOpen) return                            // the chooser is up; clicks go to its buttons
         var n = items ? items.length : 0
         if (i < 0 || i >= n || isHeader(i)) return         // dividers aren't clickable
+        if (ffMobile) { nav.select("items", i); nav.activate(); return } // mobile: one tap selects + activates
         if (i === currentIndex) { nav.select("items", i); nav.activate() } // click the focused item -> press it
         else { nav.select("items", i); navigate() }        // click another -> move the selection there
+    }
+    // Select-only variant for affordances that PAGE rather than open — e.g. the Channels element's page arrows,
+    // which jump the selection to the next page's first slot. Under mobile one-tap `gotoItem` would ACTIVATE
+    // (drill into) that slot, which a page-flip must never do; this moves the selection and stops (no activate).
+    function gotoItemSelectOnly(i) {
+        forceActiveFocus()
+        if (actionsOpen) return
+        var n = items ? items.length : 0
+        if (i < 0 || i >= n || isHeader(i)) return
+        if (i !== currentIndex) { nav.select("items", i); navigate() }
     }
     function buttonAction(name) { forceActiveFocus(); actionRequested(name) } // a `button` element was pressed
     function gotoCat(i) {                                   // XMB: click a category to switch to it
@@ -478,7 +494,12 @@ Item {
     // (home<->browse<->detail), so transitions read smoothly. Software-backend friendly (an opacity animation).
     Item {
         id: content
+        objectName: "ffContent"
         anchors.fill: parent
+        // Form-factor safe area (subsystem D): inset ONLY the foreground content by safeAreaFrac of the shorter
+        // edge, so TV title-safe margins keep the UI off the bezel while the backgrounds above stay full-bleed.
+        // Desktop safeAreaFrac is 0.0 (identity), so Math.round(min*0) == 0 — a pixel-for-pixel no-op.
+        anchors.margins: Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
         opacity: 0
         Component.onCompleted: fade.restart()
         NumberAnimation { id: fade; target: content; property: "opacity"; from: 0; to: 1; duration: 220; easing.type: Easing.OutCubic }
@@ -510,6 +531,59 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // --- touch: left-edge Back swipe + a Back chevron (mobile only; D1 Task 4) -------------------------------
+    // A thin strip along the left edge that turns a rightward drag (>= 80px) into a Back gesture, like a phone's
+    // edge-back. A HORIZONTAL-ONLY DragHandler (yAxis disabled) so it only claims the grab once horizontal
+    // intent crosses the drag threshold — a VERTICAL drag starting in the strip is left to the content Flickable
+    // underneath (so a phone user can scroll a grid/carousel whose left edge is at x<12), and a tap (no drag)
+    // falls straight through to the item beneath. Enabled only in mobile; Desktop/TV never engage it.
+    // BEHIND the content (z -1), NOT on top: a top strip would block a vertical drag from reaching the content
+    // Flickable at x<12. From behind, the DragHandler still receives the pointer (handlers are collected for all
+    // items under the point) and TAKES OVER the grab for a horizontal sweep (CanTakeOverFromItems), while a
+    // vertical drag stays with the content Flickable (yAxis off + the Flickable is in front) — so an
+    // edge-started scroll is never swallowed (Important #2).
+    Item {
+        id: edgeBack
+        enabled: root.ffMobile
+        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+        width: 12
+        z: -1
+        property bool fired: false
+        DragHandler {
+            target: null                                   // we don't move anything — just detect the sweep
+            enabled: edgeBack.enabled
+            xAxis.enabled: true
+            yAxis.enabled: false                           // vertical intent is NOT claimed -> reaches the Flickable
+            onActiveChanged: if (!active) edgeBack.fired = false
+            onActiveTranslationChanged: {
+                if (!edgeBack.fired && activeTranslation.x >= 80) {   // crossed the 80px rightward threshold
+                    edgeBack.fired = true
+                    if (typeof nav !== "undefined" && nav) nav.back()
+                }
+            }
+        }
+    }
+
+    // A small Back chevron, top-left, on any non-home view (browse/detail) in mobile — the touch equivalent of
+    // the controller's Back. ThemeView has no explicit level-depth prop, so it keys off currentView (home is the
+    // root, where Back is the pause menu and needs no on-screen affordance). Hit target rides form.minHitPx.
+    Rectangle {
+        id: backChevron
+        visible: root.ffMobile && root.currentView !== "home"
+        z: 1000
+        anchors.left: parent.left; anchors.top: parent.top
+        anchors.leftMargin: 16 + Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+        anchors.topMargin: 16 + Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+        property int hit: (typeof form !== "undefined" && form) ? Math.max(44, form.minHitPx) : 44
+        width: hit; height: hit; radius: height / 2
+        color: "#CC0E141E"; border.color: "#3A6FB0"; border.width: 2
+        Text { anchors.centerIn: parent; text: "‹"; color: "#FFFFFF"; font.pixelSize: parent.height * 0.5; font.bold: true }
+        MouseArea {
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+            onClicked: { root.forceActiveFocus(); if (typeof nav !== "undefined" && nav) nav.back() }
         }
     }
 

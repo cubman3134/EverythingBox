@@ -28,6 +28,12 @@ public:
 
     QString text() const { return preview_->text(); }
 
+    // Form-factor key sizing (D1 Task 3): key box W×H and the preview-field font px, pushed by
+    // MainWindow::applyFormFactorWidgets (the ONE place the token math lives — keyW/keyH come from
+    // FormFactor::hitClamp). Defaults are today's desktop-identity values (46×40 keys, 15px preview), so an
+    // OSK built before any push is pixel-for-pixel unchanged. Read at construction.
+    static void setKeyMetrics(int keyW, int keyH, int previewFontPx);
+
 protected:
     bool handleNavKey(int key) override;
     void keyPressEvent(QKeyEvent* e) override;
@@ -42,4 +48,8 @@ private:
     bool shift_ = false;
     bool symbols_ = false;
     std::function<void(const QString&, bool)> onDone_;
+
+    static int s_keyW;          // key box width  (default 46 = desktop identity)
+    static int s_keyH;          // key box height (default 40 = desktop identity)
+    static int s_previewFontPx; // preview line-edit font px (default 15 = desktop identity)
 };

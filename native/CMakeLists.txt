@@ -40,7 +40,7 @@ option(MYMEDIAVAULT_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)"
 if(MYMEDIAVAULT_BUILD_APP)
     # QtPdf (PDFium) isn't shipped for Android in the open-source packages, so it's desktop-only; PdfView is
     # stubbed on Android (see src/pdf/PdfView.cpp).
-    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent)
+    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent Test)
     if(NOT ANDROID)
         list(APPEND MMV_QT_COMPONENTS Pdf PdfWidgets)
     endif()
@@ -85,6 +85,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
         src/ebook/EbookSource.h
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
@@ -117,6 +118,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
+        # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
+        # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
@@ -163,7 +167,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         third_party/duktape/duktape.c)
     target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
+    # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
+    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
@@ -178,6 +183,8 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            # FormFactor is now in the unconditional app source list above (Settings/RetroView need it in
+            # the no-QML build too). It still drives `form` + TV scale/insets on the QML surfaces here.
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
@@ -225,6 +232,15 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_mobi PRIVATE src src/ebook)
     target_link_libraries(probe_mobi PRIVATE Qt6::Core)
 
+    # FormFactor core: mode resolution + the adaptivity token table + the display/mode setting (D1 Task 1).
+    # QtCore-only (no Quick/Widgets) so the probe links lean; Qt6::Test supplies QSignalSpy for the
+    # changed()-fires-once assert.
+    add_executable(probe_formfactor tools/probe_formfactor.cpp
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/Settings.cpp src/core/Settings.h)
+    target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
+    target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
+
     # Console harness for the PDF -> reflow-text reader (needs QtPdf).
     add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
     target_include_directories(probe_pdftext PRIVATE src src/ebook)
@@ -242,8 +258,10 @@ if(MYMEDIAVAULT_BUILD_APP)
         qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
+            src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
+            src/core/Settings.cpp src/core/Settings.h
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${MMV_THEME2_RCC_PROBE})
-        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui ${MPV_INCLUDE_DIR})
+        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
@@ -303,7 +321,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_navqml tools/probe_navqml.cpp
         src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h)
-    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2)
+    target_include_directories(probe_navqml PRIVATE src src/ui src/theme2 src/core)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
     if(MMV_HAVE_QML)
         # Compile theme2.qrc explicitly for this probe too (a target_sources-added .qrc silently no-ops — see
@@ -317,8 +335,13 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
             src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
             src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
-            src/ui/nav/Osk.cpp        src/ui/nav/Osk.h)
-        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
+            src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
+            # §19 (D1 Task 2) drives the REAL FormFactor singleton (which reads the display/mode setting) so the
+            # `form` context property + the TV scale/insets on the ThemeView surface are pinned end to end.
+            src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+            src/core/Settings.cpp     src/core/Settings.h)
+        # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
+        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test)
         target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
     endif()
 
@@ -367,6 +390,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
         src/core/GamelistStore.cpp src/core/Settings.cpp
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

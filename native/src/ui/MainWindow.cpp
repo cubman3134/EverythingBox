@@ -52,6 +52,7 @@
 #include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
+#include "../theme2/FormFactor.h"
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
@@ -78,10 +79,14 @@
 #include <QHBoxLayout>
 #include <QScrollArea>
 #include <QApplication>
+#include <QGuiApplication>
+#include <QSize>
 #include <QWindow>
 #include <QPointer>
 #include <QImage>
 #include <QScreen>
+#include <QPointingDevice>                    // uitest `touch`: the synthetic touchscreen device
+#include <qpa/qwindowsysteminterface.h>       // uitest `touch`: REAL touch delivery (real hit-testing)
 #include <QPushButton>
 #include <QProgressBar>
 #include <QProcess>
@@ -95,6 +100,7 @@
 #include <QMoveEvent>
 #include <QShortcut>
 #include <QKeyEvent>
+#include <QTouchEvent>
 #include <QFileDialog>
 #include <QMenu>
 #include <QFileInfo>
@@ -780,25 +786,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     controlsHideTimer_ = new QTimer(this);
     controlsHideTimer_->setSingleShot(true);
-    connect(controlsHideTimer_, &QTimer::timeout, this, [this] {
-        // Hide after the inactivity timeout. Every interaction (mouse move or arrow-key navigation) calls
-        // revealMediaControls(), which restarts this timer - so the controls stay up while you're actively
-        // navigating and fade out a few seconds after you stop. Clear keyboard focus so the next arrow press
-        // cleanly re-reveals and re-focuses a button. In full screen also blank the cursor.
-        QWidget* fw = focusWidget();
-        if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
-            fw->clearFocus();
-        mediaControls_->hide();
-        videoBack_->hide();
-        streamIssueBtn_->hide();
-        if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
-            player_->setCursor(Qt::BlankCursor); // but never hide the cursor while the subtitle panel is open
-    });
+    // Hide after the inactivity timeout. Every interaction (mouse move or arrow-key navigation) calls
+    // revealMediaControls(), which restarts this timer - so the controls stay up while you're actively
+    // navigating and fade out a few seconds after you stop. (The hide body is shared with the touch tap-toggle.)
+    connect(controlsHideTimer_, &QTimer::timeout, this, [this] { hideMediaControls(); });
 
     // Reveal the controls on mouse movement over the player / controls.
     player_->setMouseTracking(true);
     player_->installEventFilter(this);
     mediaControls_->installEventFilter(this);
+
+    // Touch (D1 Task 5): a tap on the bare video TOGGLES the transport chrome; a double-tap (<350 ms) on the
+    // left/right third seeks ∓10 s. Gated on QTouchEvent only — the mouse path above is untouched, so a physical
+    // click behaves exactly as today. The pending-tap timer defers the single-tap toggle so it never fires on the
+    // first tap of a double-tap.
+    player_->setAttribute(Qt::WA_AcceptTouchEvents, true);
+    playerTapTimer_ = new QTimer(this);
+    playerTapTimer_->setSingleShot(true);
+    connect(playerTapTimer_, &QTimer::timeout, this, [this] { togglePlayerChrome(); });
 
     // HomeView's progress/error toasts now render as our window-level overlay so they stay visible over any
     // theme (a themed home is a native QQuickView the view's own toast couldn't cover).
@@ -911,6 +916,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
+    // Form-factor adaptivity (D1 Task 3): re-derive every widget-side size whenever the mode changes, and once
+    // now so the initial build carries the current tokens (desktop identity: a pixel-for-pixel no-op).
+    connect(&FormFactor::instance(), &FormFactor::changed, this, &MainWindow::applyFormFactorWidgets);
+    applyFormFactorWidgets();
+
+    // Quit provenance: EVERY clean shutdown routes through aboutToQuit, and each explicit QApplication::quit()
+    // site also logs its trigger (grep "quit:" in this file). So a harness "clean exit" always names itself in
+    // stream_debug.log instead of recurring as an unexplained footnote. Harmless in production (append-only log).
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [] { mwLog(QStringLiteral("aboutToQuit (clean exit path)")); });
+
     // Dominant home-build cost (classic HomeView, or the themed QML home if enabled). The HomeView ctor
     // sits in the unspanned gap just after the startup.addons region (cheap today), so it's excluded here.
     PerfTrace::begin(QStringLiteral("startup.home"));
@@ -946,6 +961,11 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
         if (t == QEvent::MouseButtonRelease || t == QEvent::Wheel) return true;
     }
 #endif
+
+    // Touch on the bare video surface: tap toggles chrome, double-tap seeks (touch-only; mouse path unchanged).
+    if (obj == player_ && (event->type() == QEvent::TouchBegin || event->type() == QEvent::TouchUpdate
+                           || event->type() == QEvent::TouchEnd))
+        return handlePlayerTouch(static_cast<QTouchEvent*>(event));
 
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
@@ -1337,6 +1357,136 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
 #endif
 }
 
+// ---- uitest `touch` verb: synthesize REAL touch sequences on the top-level window --------------------------
+// The whole point is to exercise the QML touch handlers (MouseAreas, Flickables, the edge-back MouseArea)
+// through real hit-testing — NOT to shortcut into the NavGraph. So we post QWindowSystemInterface touch events
+// against the window handle exactly as a physical touchscreen would, and let Qt route + hit-test them. Multi-
+// frame gestures run on a QTimer state machine so the pipe handler is never blocked mid-sequence.
+namespace {
+
+// The touchscreen device Qt attributes the synthetic points to. Registered ONCE (Qt owns it thereafter).
+QPointingDevice* uitestTouchDevice()
+{
+    static QPointingDevice* dev = [] {
+        auto* d = new QPointingDevice(
+            QStringLiteral("uitest-touchscreen"), 0x0107E57,
+            QInputDevice::DeviceType::TouchScreen, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Area
+                | QInputDevice::Capability::Pressure,
+            10 /*maxTouchPoints*/, 0 /*buttonCount*/);
+        QWindowSystemInterface::registerInputDevice(d);
+        return d;
+    }();
+    return dev;
+}
+
+// One synthetic touch point. Callers pass a window-local point in LOGICAL (device-independent) coordinates —
+// the same space `state` reports the window `size` in, so `touch tap X Y` uses the coordinates an agent already
+// sees. QWindowSystemInterface::TouchPoint.area is in NATIVE (physical-pixel) global screen coordinates, so we
+// map local -> global (logical) and scale up by the window's device-pixel ratio (single-origin screen). Qt maps
+// it back to window-local logical during delivery, so the point lands exactly where the caller intended.
+QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::State st, QPointF local)
+{
+    QWindowSystemInterface::TouchPoint tp;
+    tp.id = id;
+    tp.state = st;
+    const QPointF gLogical = win->mapToGlobal(local);
+    const qreal dpr = win->devicePixelRatio();
+    const QPointF gNative = gLogical * dpr;                 // -> native pixels for the QPA layer
+    tp.area = QRectF(gNative.x() - 1, gNative.y() - 1, 2, 2);
+    if (QScreen* sc = win->screen())
+    {
+        const QRect sg = sc->geometry();                   // logical; the ratio is DPR-invariant
+        if (sg.width() > 0 && sg.height() > 0)
+            tp.normalPosition = QPointF(qreal(gLogical.x() - sg.x()) / sg.width(),
+                                        qreal(gLogical.y() - sg.y()) / sg.height());
+    }
+    tp.pressure = (st == QEventPoint::State::Released) ? 0.0 : 1.0;
+    return tp;
+}
+
+// Build the gesture's frames, then drive them one per timer tick (first frame delivered immediately). Parses
+// "tap X Y", "flick X1 Y1 X2 Y2 [MS]" (default 150ms, >=6 interpolated moves), "pinch CX CY SCALE [MS]".
+// Returns false if a sequence is already in flight — overlapping gestures share touch id 0 and would interleave
+// press/update/release into corrupt Qt touch state (a stuck point), so a second command is rejected (`err busy`)
+// rather than queued. The busy latch is a GUI-thread-only static (the pipe + the QTimer both run there).
+bool uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
+{
+    static bool inFlight = false;
+    if (inFlight) return false;                            // a gesture is mid-flight: reject (caller retries)
+    if (!win) return true;                                 // no window to touch: accepted, nothing to do
+    using S = QEventPoint::State;
+    const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QString sub = t.value(0).toLower();
+
+    auto* frames = new QVector<QList<QWindowSystemInterface::TouchPoint>>();
+    int intervalMs = 30;
+    auto tp = [win](int id, S st, qreal x, qreal y) { return uitestTP(win, id, st, QPointF(x, y)); };
+
+    if (sub == QStringLiteral("tap") && t.size() >= 3)
+    {
+        const qreal x = t[1].toDouble(), y = t[2].toDouble();
+        frames->append({ tp(0, S::Pressed, x, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        intervalMs = 30;                                   // 2 frames, ~30ms apart
+    }
+    else if (sub == QStringLiteral("flick") && t.size() >= 5)
+    {
+        const qreal x1 = t[1].toDouble(), y1 = t[2].toDouble(), x2 = t[3].toDouble(), y2 = t[4].toDouble();
+        const int ms = t.size() >= 6 ? t[5].toInt() : 150;
+        const int steps = 8;                               // 8 interpolated moves (>= the required 6)
+        frames->append({ tp(0, S::Pressed, x1, y1) });
+        for (int i = 1; i <= steps; ++i)
+        {
+            const qreal f = qreal(i) / steps;
+            frames->append({ tp(0, S::Updated, x1 + (x2 - x1) * f, y1 + (y2 - y1) * f) });
+        }
+        frames->append({ tp(0, S::Released, x2, y2) });
+        intervalMs = qMax(1, ms / (steps + 1));
+    }
+    else if (sub == QStringLiteral("pinch") && t.size() >= 4)
+    {
+        const qreal cx = t[1].toDouble(), cy = t[2].toDouble(), scale = t[3].toDouble();
+        const int ms = t.size() >= 5 ? t[4].toInt() : 150;
+        const int steps = 8;
+        const qreal half0 = 60.0;                          // initial half-separation of the two fingers (px)
+        auto frame = [&](qreal half, S s0, S s1) {
+            return QList<QWindowSystemInterface::TouchPoint>{ tp(0, s0, cx - half, cy), tp(1, s1, cx + half, cy) };
+        };
+        frames->append(frame(half0, S::Pressed, S::Pressed));
+        for (int i = 1; i <= steps; ++i)
+        {
+            const qreal f = qreal(i) / steps;
+            frames->append(frame(half0 * (1.0 + (scale - 1.0) * f), S::Updated, S::Updated));
+        }
+        frames->append(frame(half0 * scale, S::Released, S::Released));
+        intervalMs = qMax(1, ms / (steps + 1));
+    }
+    else { delete frames; return true; }                   // malformed: accepted, nothing to deliver
+
+    // A real sequence is starting: latch busy until its final frame is delivered (cleared in the terminal tick).
+    inFlight = true;
+    // Deliver frame 0 now; a repeating single-shot-style QTimer walks the rest, then self-destructs.
+    QWindowSystemInterface::handleTouchEvent(win, uitestTouchDevice(), frames->at(0));
+    auto* idx = new int(1);
+    auto* timer = new QTimer(parent);
+    timer->setInterval(intervalMs);
+    QPointer<QWindow> alive(win);
+    QObject::connect(timer, &QTimer::timeout, timer, [alive, frames, idx, timer] {
+        if (!alive || *idx >= frames->size())
+        {
+            inFlight = false;                              // sequence done (or window gone): the channel re-opens
+            timer->stop(); timer->deleteLater(); delete frames; delete idx; return;
+        }
+        QWindowSystemInterface::handleTouchEvent(alive, uitestTouchDevice(), frames->at(*idx));
+        ++(*idx);
+    });
+    timer->start();
+    return true;
+}
+
+} // namespace
+
 void MainWindow::updateUiTestServer()
 {
     if (!UiTestServer::wanted())
@@ -1413,6 +1563,14 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("panelFocus"), themedPanelHost_->focusedRowLabel());
         }
 #endif
+        if (cur == playerPage_)
+        {
+            // Player-touch automation (D1 Task 5): chrome visibility (tap toggle) + seek position in permille of
+            // the duration (double-tap ±10 s seek) — read straight off the live transport widgets.
+            o.insert(QStringLiteral("mediaControls"), mediaControls_ && mediaControls_->isVisible());
+            o.insert(QStringLiteral("playerPermille"), seek_ ? seek_->value() : 0);
+            o.insert(QStringLiteral("playerDur"), duration_);
+        }
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
         o.insert(QStringLiteral("fullscreen"), isFullScreen());
         o.insert(QStringLiteral("active"), isActiveWindow());
@@ -1420,7 +1578,23 @@ void MainWindow::updateUiTestServer()
         return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
     };
     h.screenshot = [this](const QString& path) { return grab().save(path); };
-    h.openDoc = [this](const QString& path) { return openDocumentPath(path); }; // reader tests: open by path (real ok)
+    h.openDoc = [this](const QString& path) {
+        // reader tests open by path (pdf/cbz/epub -> the readers). Route video/audio extensions to the player so
+        // the player-touch tests (tap chrome, double-tap seek) can reach playerPage_ headlessly too.
+        static const QSet<QString> media = { QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("mov"),
+            QStringLiteral("avi"), QStringLiteral("webm"), QStringLiteral("m4v"), QStringLiteral("mp3"),
+            QStringLiteral("flac"), QStringLiteral("m4a"), QStringLiteral("wav") };
+        if (media.contains(QFileInfo(path).suffix().toLower())) { openVideoPath(path); return true; }
+        return openDocumentPath(path);
+    };
+    h.touch = [this](const QString& arg) -> bool {
+        // Qt-INTERNAL activation only (parity with sendKey) — no OS foreground change. Real touch on the
+        // top-level window handle: Qt hit-tests + routes it into the widget tree / embedded QML scene exactly
+        // as a physical touchscreen would (the whole point — no shortcut into the graph). Returns false (=> the
+        // server replies `err busy`) when a sequence is already in flight, so overlaps can't corrupt touch state.
+        if (!isActiveWindow()) QApplication::setActiveWindow(this);
+        return uitestRunTouch(windowHandle(), arg, this);
+    };
     uiTest_ = new UiTestServer(h, this);
     mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
 
@@ -1707,6 +1881,9 @@ void MainWindow::showEvent(QShowEvent* event)
         activateWindow();
         if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
+        // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
+        // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
+        QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
     });
 }
 
@@ -1754,12 +1931,79 @@ void MainWindow::promptStartupProfile()
         {
             ProfileStore::setCurrent(dlg->selectedId());
             openHome();                    // render for the chosen profile
+            // The startup picker took this path, so showEvent returned before its own maybeOfferTvMode
+            // singleShot — make the one-time offer now that home has landed (guards keep it idempotent).
+            QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
         }
         else
         {
+            mwLog(QStringLiteral("quit: startup-picker declined"));
             QApplication::quit(); // declined to choose -> exit (matches the old must-choose behaviour)
         }
-    }, [this] { QApplication::quit(); }); // Back == decline -> exit
+    }, [this] { mwLog(QStringLiteral("quit: startup-picker backed out")); QApplication::quit(); }); // Back == decline -> exit
+}
+
+// The ONE widget-side sizing chokepoint (D1 Task 3). Re-derives every widget metric from the FormFactor
+// tokens and pushes them to the surfaces (overlays/OSK read the statics at construction; live widgets are
+// resized in place). ALL token math lives here — the surfaces expose plain setters. Desktop is identity:
+// with default tokens (uiScale 1.0, minHitPx 0) hitClamp(n)==n and int(px*1.0)==px, so every value below is
+// exactly today's, pixel-for-pixel. Connected to FormFactor::changed + called once at startup.
+void MainWindow::applyFormFactorWidgets()
+{
+    FormFactor& ff = FormFactor::instance();
+    const qreal s   = ff.uiScale();
+    const int   hit = ff.minHitPx();
+
+    // Overlay / OSK: body fonts scale with uiScale; OSK key boxes go through hitClamp (the probed path).
+    NavOverlay::setPanelFontPx(int(14 * s), int(16 * s));           // desktop: 14 / 16
+    Osk::setKeyMetrics(ff.hitClamp(46), ff.hitClamp(40), int(15 * s)); // desktop: 46 / 40 / 15
+
+    // Player transport chrome: floor each button (and the Back overlay) to the hit target when one is set,
+    // otherwise clear the floor (desktop identity — Qt's default minimum, no size change).
+    const QSize floorSz = hit > 0 ? QSize(hit, hit) : QSize(0, 0);
+    for (QPushButton* b : playerButtons_) if (b) b->setMinimumSize(floorSz);
+    if (videoBack_)     videoBack_->setMinimumSize(floorSz);
+    if (streamIssueBtn_) streamIssueBtn_->setMinimumSize(floorSz);
+    if (seek_) seek_->setMinimumHeight(hit); // desktop: 0 (no change); mobile: a grabbable track
+
+    // Split-screen pane bars (only if the split view has been built): floor the pause/close hit targets.
+    if (splitView_)
+    {
+        if (splitView_->paneA()) splitView_->paneA()->applyBarMinHit(hit);
+        if (splitView_->paneB()) splitView_->paneB()->applyBarMinHit(hit);
+    }
+}
+
+// One-time "this looks like a TV" suggestion (D1 Task 3). Fires at most once, only when the display really
+// reads as a big living-room screen, and only while nothing else is on top. Either answer marks it done so it
+// never asks again. Guards: auto mode (the user hasn't chosen), not already prompted, full screen, and a
+// primary screen whose reported physical width is >= 700mm — an empty/zero physicalSize (unreliable EDID)
+// fails silent (no prompt), never a false positive.
+void MainWindow::maybeOfferTvMode()
+{
+    if (Settings::displayMode() != QStringLiteral("auto")) return;
+    if (Settings::tvPromptDone()) return;
+    // Themed mode only: the Display-mode revert row lives in the THEMED Appearance panel, so a classic user who
+    // accepts "Use TV mode" would have no in-classic way back. Don't offer what they can't undo where they are.
+    if (!themedHomeEnabled()) return;
+    if (!isFullScreen()) return;
+    if (NavOverlay::topmost() || QApplication::activeModalWidget()) return; // never over the startup picker/an overlay
+    QScreen* scr = QGuiApplication::primaryScreen();
+    if (!scr) return;
+    qreal physWidthMm = scr->physicalSize().width(); // millimetres; empty/zero => unreliable, do not guess
+    // Test-only seam (parity with the MMV_UITEST channel): the physical-size guard is hardware-bound and can't
+    // be seeded from an ini, so let the UI-test harness substitute a screen width to exercise this prompt. Never
+    // active in production — qEnvironmentVariableIsSet("MMV_UITEST") is only ever set by the test launcher.
+    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_SCREEN_MM"))
+        physWidthMm = qEnvironmentVariableIntValue("MMV_TEST_SCREEN_MM");
+    if (physWidthMm < 700.0) return;
+
+    const int r = NavConfirm::ask(
+        tr("Big screen detected"),
+        tr("This looks like a TV. Switch to TV mode for larger text and controls you can read from the couch?"),
+        { tr("Not now"), tr("Use TV mode") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    Settings::setTvPromptDone(true); // either answer settles it — never ask again
+    if (r == 1) { Settings::setDisplayMode(QStringLiteral("tv")); FormFactor::instance().refresh(); }
 }
 
 void MainWindow::revealMediaControls()
@@ -1793,6 +2037,83 @@ void MainWindow::positionMediaControls()
 void MainWindow::notify(const QString& text, int ms)
 {
     if (notifier_) notifier_->notify(text, ms);
+}
+
+// Hide the transport chrome NOW — the shared body of the idle-timeout and the touch tap-toggle. Clears keyboard
+// focus off a transport button (so the next arrow press cleanly re-reveals + re-focuses) and, in full screen,
+// blanks the cursor (never while the subtitle panel is open).
+void MainWindow::hideMediaControls()
+{
+    QWidget* fw = focusWidget();
+    if (fw && (fw == videoBack_ || fw == streamIssueBtn_ || (mediaControls_ && mediaControls_->isAncestorOf(fw))))
+        fw->clearFocus();
+    if (mediaControls_) mediaControls_->hide();
+    if (videoBack_) videoBack_->hide();
+    if (streamIssueBtn_) streamIssueBtn_->hide();
+    if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
+        player_->setCursor(Qt::BlankCursor);
+}
+
+// Touch tap on the player: a shown chrome hides, a hidden chrome reveals (revealMediaControls re-arms the idle
+// timer). Only over an open media item.
+void MainWindow::togglePlayerChrome()
+{
+    if (stack_->currentWidget() != playerPage_) return;
+    if (mediaControls_ && mediaControls_->isVisible()) { controlsHideTimer_->stop(); hideMediaControls(); }
+    else revealMediaControls();
+}
+
+// Player touch filter (touch-only — the mouse path is frozen). Single-finger tap on the BARE video is a tap
+// candidate; a touch that lands on the visible transport chrome (slider/buttons) is DEFERRED (return false) so it
+// rides synthesized mouse (QSlider drag / QPushButton tap need nothing new). Consuming the bare-video tap stops
+// mouse synthesis so a tap can't double-fire. Movement past a slop cancels the tap (a bare-video drag is inert).
+bool MainWindow::handlePlayerTouch(QTouchEvent* te)
+{
+    const auto pts = te->points();
+    auto overControls = [this](const QPointF& p) {
+        const QPoint ip = p.toPoint();
+        return (mediaControls_ && mediaControls_->isVisible() && mediaControls_->geometry().contains(ip))
+            || (videoBack_ && videoBack_->isVisible() && videoBack_->geometry().contains(ip))
+            || (streamIssueBtn_ && streamIssueBtn_->isVisible() && streamIssueBtn_->geometry().contains(ip));
+    };
+    switch (te->type())
+    {
+    case QEvent::TouchBegin:
+        if (pts.size() != 1 || overControls(pts.first().position())) { playerTouchTap_ = false; return false; }
+        playerTouchTap_ = true;
+        playerTouchStart_ = pts.first().position();
+        return true;
+    case QEvent::TouchUpdate:
+        if (playerTouchTap_ && !pts.isEmpty()
+            && (pts.first().position() - playerTouchStart_).manhattanLength() > 24)
+            playerTouchTap_ = false;
+        return playerTouchTap_;
+    case QEvent::TouchEnd:
+        if (!playerTouchTap_) return false;
+        playerTouchTap_ = false;
+        onPlayerTap(pts.isEmpty() ? playerTouchStart_ : pts.first().position());
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Resolve a bare-video tap: a second tap within 350 ms is a double-tap seek (left third −10 s / right third
+// +10 s via the EXACT relative-seek the ⏪/⏩ transport buttons fire, with a transient notify flash); a lone tap
+// (the timer expires) toggles the chrome. A centre double-tap is a net single toggle.
+void MainWindow::onPlayerTap(const QPointF& pos)
+{
+    if (playerTapTimer_->isActive())
+    {
+        playerTapTimer_->stop();
+        const int w = player_->width();
+        const qreal x = pos.x();
+        if (x < w / 3.0)              { player_->seekRelative(-10.0); notify(tr("⏪  −10s"), 900); revealMediaControls(); }
+        else if (x > 2.0 * w / 3.0)   { player_->seekRelative(10.0);  notify(tr("⏩  +10s"), 900); revealMediaControls(); }
+        else                          togglePlayerChrome();
+        return;
+    }
+    playerTapTimer_->start(350);
 }
 
 void MainWindow::hideNotice()
@@ -3736,11 +4057,23 @@ void MainWindow::openAppearance()
         auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
             PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
 
+        // Display-mode <-> stored-value mapping (Choice cycles display names; the handler maps back to the stored
+        // key). Order matches the stored values below one-for-one.
+        const QStringList dispOpts   = { tr("Auto"), tr("Desktop"), tr("TV"), tr("Mobile") };
+        const QStringList dispValues = { QStringLiteral("auto"), QStringLiteral("desktop"),
+                                         QStringLiteral("tv"), QStringLiteral("mobile") };
+        const int dispIdx = qMax(0, dispValues.indexOf(Settings::displayMode()));
+        const QString dispCur = dispOpts.value(dispIdx);
+
         toggle(QStringLiteral("appr.themed"), tr("Use the themed home screen (beta)"), themedHomeEnabled());
         sep(tr("Theme"));
         choice(QStringLiteral("appr.theme"), tr("Theme"), themeOpts, curDisp);
         info(QStringLiteral("appr.applies"),
              tr("Applies live as you pick — the full theme takes effect when you leave Appearance."), QString());
+        sep(tr("Display mode"));
+        choice(QStringLiteral("appr.dispmode"), tr("Display mode"), dispOpts, dispCur);
+        info(QStringLiteral("appr.dispmodehint"),
+             tr("Auto fits this device; TV enlarges text and controls for the couch, Mobile for touch."), QString());
         sep(tr("Get more themes"));
         info(QStringLiteral("appr.customise"),
              tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
@@ -3750,11 +4083,22 @@ void MainWindow::openAppearance()
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         themedPanelHost_->present(tr("Appearance"), rows,
-            [this, themePairs](const QString& id, const QString& val) {
+            [this, themePairs, dispOpts, dispValues](const QString& id, const QString& val) {
                 if (id == QStringLiteral("appr.themed")) {
                     // Save only (classic semantics); do NOT hot-swap the UI mid-panel — see the note above.
                     store().setValue(QStringLiteral("themedHome/enabled"), val == QStringLiteral("1"));
                     store().sync();
+                }
+                else if (id == QStringLiteral("appr.dispmode")) {
+                    // Map the picked display name back to its stored value, save, then re-resolve the form factor.
+                    // FormFactor::changed then live-restyles the widget surfaces (applyFormFactorWidgets) and the
+                    // QML form.* bindings update automatically; restyle THIS panel on the same setStyle mechanism
+                    // as the theme row so the surface you are looking at re-renders immediately.
+                    const int i = dispOpts.indexOf(val);
+                    const QString mode = dispValues.value(i < 0 ? 0 : i, QStringLiteral("auto"));
+                    Settings::setDisplayMode(mode);
+                    FormFactor::instance().refresh();
+                    themedPanelHost_->setStyle(settingsPanelStyle());
                 }
                 else if (id == QStringLiteral("appr.theme")) {
                     QString folder = val;   // map the picked display name back to its folder
@@ -3884,6 +4228,7 @@ void MainWindow::enterSplitScreen()
             stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
             home_->focusContent();
         });
+        applyFormFactorWidgets(); // size the just-built pane bars to the current form-factor tokens
     }
     // Park the playing views (don't leave a movie playing behind the split) and show the empty split.
     // The window state is left exactly as it is — no screen ever changes it on the user's behalf.
@@ -4130,6 +4475,10 @@ void MainWindow::chooseProfile(const QString& id)
 {
     ProfileStore::setCurrent(id);
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
+    // When this resolves the pre-home startup picker, showEvent already returned before its own
+    // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,
+    // so scheduling it here on the runtime profile switcher too is harmless.
+    QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
 }
 
 // mustChoose Back: the classic must-choose dialog exited the app on close. Themed rendering: confirm the quit
@@ -4139,7 +4488,7 @@ void MainWindow::quitConfirmFromStartup()
     const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
         tr("You need to choose a profile to continue."),
         { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
-    if (choice == 1) { QApplication::quit(); return; }
+    if (choice == 1) { mwLog(QStringLiteral("quit: startup-picker quit-confirm")); QApplication::quit(); return; }
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
 #endif // MMV_HAVE_QML
@@ -6071,12 +6420,14 @@ void MainWindow::performUninstall()
         { QStringLiteral("/c"), QStringLiteral("start"), QString(), QStringLiteral("/min"),
           QStringLiteral("cmd"), QStringLiteral("/c"), QDir::toNativeSeparators(cmdPath) });
     forceClose_ = true;
+    mwLog(QStringLiteral("quit: uninstall"));
     qApp->quit();
 #else
     // macOS/Linux: the app is a bundle/AppImage the user removes by deleting it. Clear our data dir + cache + quit.
     QDir(QCoreApplication::applicationDirPath()).removeRecursively();
     QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
     forceClose_ = true;
+    mwLog(QStringLiteral("quit: uninstall"));
     qApp->quit();
 #endif
 }

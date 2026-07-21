@@ -11,7 +11,9 @@ ListView {
 
     orientation: ListView.Horizontal
     clip: true
-    interactive: false
+    // Native kinetic scrolling on touch (D1 Task 4): a mobile drag flicks the strip; key/controller nav still
+    // snaps via currentIndex + StrictlyEnforceRange. Desktop/TV stay non-interactive (a pixel/behaviour no-op).
+    interactive: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
     spacing: Number(T.val(el, "spacing", 0.01)) * (host ? host.width : 1280)
     model: ctx ? ctx.items : []
     currentIndex: ctx ? ctx.index : 0
