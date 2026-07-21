@@ -239,7 +239,8 @@ if(MYMEDIAVAULT_BUILD_APP)
     # changed()-fires-once assert.
     add_executable(probe_formfactor tools/probe_formfactor.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/core/Settings.cpp src/core/Settings.h)
+        src/core/Settings.cpp src/core/Settings.h
+        src/core/LifecyclePolicy.h)
     target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
     target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
 

@@ -149,7 +149,9 @@ bool NavOverlay::handleNavKey(int key)
 {
     switch (key)
     {
-    case Qt::Key_Backspace: case Qt::Key_Escape:
+    // Key_Back is Android's hardware/gesture/remote Back — same "close this overlay" as Escape/Backspace, so
+    // a confirm card / the exit-menu / any overlay is dismissable by the OS Back and never swallows it dead.
+    case Qt::Key_Backspace: case Qt::Key_Escape: case Qt::Key_Back:
         dismiss(-1);
         return true;
     default:
@@ -165,6 +167,7 @@ void NavOverlay::keyPressEvent(QKeyEvent* e)
     {
     case Qt::Key_Up: case Qt::Key_Down: case Qt::Key_Left: case Qt::Key_Right:
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Backspace: case Qt::Key_Escape:
+    case Qt::Key_Back: // Android hardware/remote Back: route it to handleNavKey (dismiss) like Escape
         handleNavKey(e->key());
         e->accept();
         return;
