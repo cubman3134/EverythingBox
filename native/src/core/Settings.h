@@ -46,6 +46,15 @@ namespace Settings
     bool startFullscreen();
     void setStartFullscreen(bool on);
 
+    // Form-factor / adaptivity (subsystem D). The chosen display mode: "auto" (default — platform detection)
+    // or an explicit "desktop"|"tv"|"mobile" override. FormFactor resolves this into its token table; a
+    // caller that writes it must then call FormFactor::instance().refresh() to re-resolve + notify.
+    QString displayMode();                    // "auto"|"desktop"|"tv"|"mobile"; default "auto"; key "display/mode"
+    void    setDisplayMode(const QString& mode);
+    // Whether the one-time "we detected a TV — switch to the TV layout?" prompt has already been shown.
+    bool    tvPromptDone();                   // key "display/tvPromptDone", default false
+    void    setTvPromptDone(bool done);
+
     // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);

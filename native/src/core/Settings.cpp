@@ -114,6 +114,17 @@ void Settings::setStartFullscreen(bool on)
 {
     store().setValue(QStringLiteral("general/startFullscreen"), on); store().sync();
 }
+QString Settings::displayMode() { return store().value(QStringLiteral("display/mode"), QStringLiteral("auto")).toString(); }
+void Settings::setDisplayMode(const QString& mode)
+{
+    store().setValue(QStringLiteral("display/mode"), mode); store().sync();
+}
+bool Settings::tvPromptDone() { return store().value(QStringLiteral("display/tvPromptDone"), false).toBool(); }
+void Settings::setTvPromptDone(bool done)
+{
+    store().setValue(QStringLiteral("display/tvPromptDone"), done); store().sync();
+}
+
 bool Settings::checkUpdatesOnStartup() { return store().value(QStringLiteral("general/checkUpdatesOnStartup"), true).toBool(); }
 void Settings::setCheckUpdatesOnStartup(bool on)
 {

@@ -40,7 +40,7 @@ option(MYMEDIAVAULT_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)"
 if(MYMEDIAVAULT_BUILD_APP)
     # QtPdf (PDFium) isn't shipped for Android in the open-source packages, so it's desktop-only; PdfView is
     # stubbed on Android (see src/pdf/PdfView.cpp).
-    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent)
+    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent Test)
     if(NOT ANDROID)
         list(APPEND MMV_QT_COMPONENTS Pdf PdfWidgets)
     endif()
@@ -224,6 +224,15 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_mobi tools/probe_mobi.cpp src/ebook/MobiBook.cpp)
     target_include_directories(probe_mobi PRIVATE src src/ebook)
     target_link_libraries(probe_mobi PRIVATE Qt6::Core)
+
+    # FormFactor core: mode resolution + the adaptivity token table + the display/mode setting (D1 Task 1).
+    # QtCore-only (no Quick/Widgets) so the probe links lean; Qt6::Test supplies QSignalSpy for the
+    # changed()-fires-once assert.
+    add_executable(probe_formfactor tools/probe_formfactor.cpp
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        src/core/Settings.cpp src/core/Settings.h)
+    target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
+    target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
 
     # Console harness for the PDF -> reflow-text reader (needs QtPdf).
     add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
