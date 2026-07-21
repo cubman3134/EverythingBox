@@ -1,5 +1,7 @@
 #include "RetroView.h"
 #include "NetplaySession.h"
+#include "VirtualPad.h"
+#include "../theme2/FormFactor.h"
 #include "../core/AppPaths.h"
 #include "../core/CoreManager.h"
 #include "../core/Settings.h"
@@ -99,10 +101,13 @@ void RetroView::buildMenu()
     optBtn_      = new QPushButton(tr("Core Options"), mainPage_);
     auto* cheats = new QPushButton(tr("Cheats"), mainPage_);
     filterBtn_   = new QPushButton(videoFilterLabel(), mainPage_);
+    vpadBtn_        = new QPushButton(mainPage_);
+    vpadOpacityBtn_ = new QPushButton(mainPage_);
     auto* shot   = new QPushButton(tr("Screenshot"), mainPage_);
     auto* netp   = new QPushButton(tr("Netplay"), mainPage_);
     auto* exit   = new QPushButton(tr("Exit Emulator"), mainPage_);
-    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_, shot, netp, exit }) mp->addWidget(b);
+    for (QPushButton* b : { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_,
+                            vpadBtn_, vpadOpacityBtn_, shot, netp, exit }) mp->addWidget(b);
     menuBody_->addWidget(mainPage_);
 
     menuStatus_ = new QLabel(QString(), menu_);
@@ -123,8 +128,34 @@ void RetroView::buildMenu()
     connect(netp, &QPushButton::clicked, this, [this] { showNetplay(); });
     connect(diskBtn_, &QPushButton::clicked, this, [this] { showDisk(); });
     connect(optBtn_, &QPushButton::clicked, this, [this] { showCoreOptions(); });
+
+    // Virtual gamepad: cycle the override Auto -> On -> Off, and the opacity 25 -> 45 -> 70%.
+    auto vpadLabel = [] {
+        const QString v = Settings::virtualPad();
+        const QString s = v == QStringLiteral("on") ? tr("On") : v == QStringLiteral("off") ? tr("Off") : tr("Auto");
+        return tr("Virtual Pad: %1").arg(s); };
+    auto vpadOpacityLabel = [] { return tr("Pad Opacity: %1%").arg(Settings::virtualPadOpacity()); };
+    vpadBtn_->setText(vpadLabel());
+    vpadOpacityBtn_->setText(vpadOpacityLabel());
+    connect(vpadBtn_, &QPushButton::clicked, this, [this, vpadLabel] {
+        const QString v = Settings::virtualPad();
+        Settings::setVirtualPad(v == QStringLiteral("auto") ? QStringLiteral("on")
+                              : v == QStringLiteral("on")   ? QStringLiteral("off")
+                                                            : QStringLiteral("auto"));
+        vpadBtn_->setText(vpadLabel());
+        updateVirtualPad();
+        if (menu_ && menu_->isVisible()) menu_->raise(); // updateVirtualPad may have re-raised the pad
+    });
+    connect(vpadOpacityBtn_, &QPushButton::clicked, this, [this, vpadOpacityLabel] {
+        const int o = Settings::virtualPadOpacity();
+        Settings::setVirtualPadOpacity(o < 45 ? 45 : o < 70 ? 70 : 25); // 25 -> 45 -> 70 -> 25
+        vpadOpacityBtn_->setText(vpadOpacityLabel());
+        if (vpad_) vpad_->setOpacity(Settings::virtualPadOpacity());
+    });
+
     // Remember the main buttons so showMainMenu() can restore navigation to them.
-    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_, shot, netp, exit };
+    mainButtons_ = { resume, save, load, diskBtn_, optBtn_, cheats, filterBtn_,
+                     vpadBtn_, vpadOpacityBtn_, shot, netp, exit };
     menuButtons_ = mainButtons_;
 
     menu_->hide();
@@ -743,6 +774,7 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     running_ = true;
     startEmu();                 // GUI timer, or a dedicated worker thread in threaded (split-pane) mode
     loadCheats(); applyCheats(); // this game's saved cheats, pushed into the core
+    updateVirtualPad();          // build/show the on-screen gamepad if the form factor (or setting) calls for it
     setFocus();
     // RetroAchievements: identify this game and start watching memory (no-op if not logged in / unsupported).
     if (ach_)
@@ -906,6 +938,8 @@ void RetroView::stop()
     netLocalInputs_.clear();
     Settings::setInputScope(QString()); // back to the global binding scope once no game is running
     pressedKeys_.clear();
+    virtualPad_ = 0;
+    if (vpad_) { vpad_->reset(); vpad_->hide(); }
     ffKey_ = rewindKey_ = fastForward_ = rewinding_ = false;
     rewindBuf_.clear();
     rewindBytes_ = 0;
@@ -945,6 +979,10 @@ void RetroView::showMenu()
     setPaused(true);
     menuStatus_->clear();
     showMainMenu();               // always open on the main page (centres + focuses the first button)
+    // Opening the menu drops any held virtual-pad input (the setInputActive(false)-equivalent for full-screen)
+    // and hides the pad so a mid-hold can't stick a button while paused.
+    if (vpad_) { vpad_->reset(); vpad_->hide(); }
+    virtualPad_ = 0;
     menu_->show();
     menu_->raise();
     if (!menuButtons_.isEmpty()) menuButtons_.first()->setFocus(Qt::TabFocusReason); // arrow keys work at once
@@ -960,11 +998,13 @@ void RetroView::hideMenu()
     menuComboPrev_ = menuComboHeld(); // carry the still-held closing combo so tick() doesn't reopen at once
     menu_->hide();
     setPaused(false);                 // resumes the game frame loop
+    updateVirtualPad();               // bring the on-screen pad back if it should be showing
     setFocus(); // keep Esc / gameplay keys coming to the view
 }
 
 void RetroView::resizeEvent(QResizeEvent*)
 {
+    if (vpad_) vpad_->setGeometry(rect()); // the overlay fills the view
     if (menu_ && menu_->isVisible())
         menu_->move((width() - menu_->width()) / 2, (height() - menu_->height()) / 2);
 }
@@ -1655,7 +1695,10 @@ int16_t RetroView::resolveInput(unsigned port, unsigned device, unsigned index, 
     {
         const int k = keymap_.key(port, id); // this player's keyboard binding for this button
         const bool kb = (k != Keymap::kUnbound) && pressedKeys_.count(k);
-        const bool held = kb || pad_.button(port, id);
+        // The on-screen virtual gamepad feeds port 0 only. pollInput() builds snapBtn_ from resolveInput(), so
+        // threaded/split cores that read the snapshot pick the mask up here too (dead pad otherwise).
+        const bool vp = (port == 0) && ((virtualPad_ >> id) & 1u);
+        const bool held = kb || pad_.button(port, id) || vp;
         if (!held) return 0;
         // Turbo buttons only register on the "on" half of the autofire cycle while held.
         if (turboMask_[port] & (1 << id)) return turboOn_ ? 1 : 0;
@@ -1678,7 +1721,49 @@ void RetroView::setVolume(qreal v) // 0.0..1.0; lets each split pane mix at its 
 void RetroView::setInputActive(bool active)
 {
     inputActive_ = active;
-    if (!active) pressedKeys_.clear(); // drop any held keys so they don't stick when focus leaves
+    if (!active)
+    {
+        pressedKeys_.clear();  // drop any held keys so they don't stick when focus leaves
+        virtualPad_ = 0;       // and any held virtual-pad bits (e.g. a hold when the Esc menu opens)
+        if (vpad_) vpad_->reset(); // clear the pad's own touch state too, so a held finger re-emits after a
+                                   // split-pane focus swap (mirrors what showMenu()/stop() do)
+    }
+}
+
+// The on-screen pad shows when the user forced it on, or (auto) when the current form factor is Mobile. Delegate
+// to Settings::virtualPadEnabled() — the ONE visibility resolver — so this path can never diverge from the value
+// the settings UI and probe pin. (That resolver consults the FormFactor authority for the "auto" case.)
+bool RetroView::virtualPadShouldShow() const
+{
+    return Settings::virtualPadEnabled();
+}
+
+void RetroView::ensureVirtualPad()
+{
+    if (vpad_) return;
+    vpad_ = new VirtualPad(this);
+    vpad_->setGeometry(rect());
+    connect(vpad_, &VirtualPad::maskChanged, this, &RetroView::setVirtualPadMask);
+    // Re-resolve visibility if the form factor flips at runtime (e.g. TV<->Mobile in settings).
+    connect(&FormFactor::instance(), &FormFactor::changed, this, [this] { updateVirtualPad(); });
+}
+
+void RetroView::updateVirtualPad()
+{
+    const bool show = running_ && virtualPadShouldShow();
+    if (!show)
+    {
+        if (vpad_) { vpad_->reset(); vpad_->hide(); }
+        virtualPad_ = 0;
+        return;
+    }
+    ensureVirtualPad();
+    vpad_->setOpacity(Settings::virtualPadOpacity());
+    vpad_->setGeometry(rect());
+    vpad_->show();
+    // Keep the pad below the pause menu (which raises itself when shown) but above the game frame.
+    vpad_->raise();
+    if (menu_ && menu_->isVisible()) menu_->raise();
 }
 
 void RetroView::loadTurbo()

@@ -85,6 +85,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
+        src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
         src/ebook/EbookSource.h
         src/ebook/EpubBook.cpp    src/ebook/EpubBook.h
