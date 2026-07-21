@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19
 **Status:** Subsystem B complete: B1 + B2 — themed everywhere, classic paths deprecation-logged, themed default ON. Subsystem D (TV+mobile) next.
-  _(Task 7 no-classic capstone walk: 40+ themed surfaces driven live, zero classic surfaces reachable except the one recorded below — Appearance, which is deprecation-logged. Full probe suite green, perf flat vs the B2T6 perf-track baseline, watchdog clean.)_
+  _(Task 7 no-classic capstone walk: 40+ themed surfaces driven live, zero classic surfaces reachable in themed mode. Full probe suite green, perf flat vs the B2T6 perf-track baseline, watchdog clean. Task 6.75 then converted the Appearance panel — the single classic surface the walk found — to ThemedPanelHost, so no classic-styled surface is reachable in themed mode at all.)_
 **Builds on:** `2026-07-18-nav-contract-design.md` (subsystem A complete: NavGraph contract,
 declared edges, two-state inputs, one Back router, watchdog)
 
@@ -156,17 +156,19 @@ panel-polish pass.
 
 The capstone walk drove 40+ themed surfaces live. Every settings panel, both reader-exit origin restores,
 the Esc/pause menu, the startup + in-app profile pickers, game launch/exit, and the video player all render
-themed. The one classic surface still reachable in themed mode, plus minor observations:
+themed. The remaining minor observations (the one classic surface the walk found — Appearance — was converted
+in Task 6.75; see below):
 
-- **Appearance panel is still classic (the one gap).** `openAppearance()` (`MainWindow.cpp`) builds its
-  panel unconditionally via classic `showPanel` — a `QWidget` with the themed-home checkbox, a `QListWidget`
-  theme list, and a **live themed-home preview** embedded on the right. Reached from the themed Settings hub's
-  "Appearance" row (and Ctrl+Shift+A), it shows `page:QWidget pageName:settingsPanel` and logs
-  `deprecated-classic: panel:Appearance` — the ONLY `deprecated-classic` line the whole themed walk produced.
-  Every other settings panel is on `ThemedPanelHost`. Converting it is a real job (re-home the theme-list +
-  the live QML preview on the Nav Contract / `PanelRow` model), NOT a one-line routing fix, so it is recorded
-  here rather than fixed in the verification task. This is the last panel blocking B2's literal
-  "settings fully themed" goal; give it its own conversion task.
+- **Appearance panel — CONVERTED to themed (Task 6.75, DONE).** `openAppearance()` (`MainWindow.cpp`) now
+  renders a themed `ThemedPanelHost` panel in themed mode (a themed-home Toggle + a Theme Choice + condensed
+  Info rows + an "Open the theme gallery (GitHub)…" Action), driven by the Nav Contract / `PanelRow` model like
+  every other settings panel; the classic `QWidget`/`QListWidget`/live-preview builder is retained UNCHANGED as
+  the classic-mode fallback. Themed mode no longer logs `deprecated-classic: panel:Appearance` (verified: zero
+  such lines across the live re-walk). The classic panel's live embedded preview is replaced by apply-on-select:
+  picking a theme saves `themedHome/theme` and restyles the live panel to that theme's `settingsPanel` block (a
+  preview on the very surface, no underlay rebuild — so no wedge), and the full theme lands on panel exit via the
+  hub root's existing `showHomeScreen()` rebuild. Probe: `probe_navqml` §18(i). This was the last panel blocking
+  B2's literal "settings fully themed" goal — now met.
 - **`split-pane-pick` classic drop (documented inventory item, not driven).** `enterSplitScreen`'s
   `openHereRequested` lambda still drops to the classic `HomeView` and logs `deprecated-classic:
   split-pane-pick` if split-screen is driven. Not exercised in the walk (no split-screen driven); carry the
@@ -177,10 +179,12 @@ themed. The one classic surface still reachable in themed mode, plus minor obser
 - **Profile-icon mojibake.** The stored profile icon (`[profiles] list` in the ini) is a double-encoded emoji
   (`Ã°Å¸ÂÂ¶` for 🐶); the themed home/switcher render the mojibake as-is. A stored-data/encoding issue
   (the classic HomeView decodes it correctly), not a themed-surface bug — worth a one-time migration.
-- **Live theme-change from the (classic) Appearance panel wedges the panel host.** Selecting a different theme
-  in the classic Appearance theme list live-applies it, but Back/Escape then can't return the `ThemedPanelHost`
-  hub to the home surface (`panelDepth` sticks at 0) until a relaunch. Likely a consequence of rebuilding the
-  themed home under an open panel; folds into the Appearance-conversion task.
+- **Live theme-change wedge — RESOLVED (Task 6.75).** The classic Appearance panel rebuilt the themed home
+  under the open panel on theme-select, which wedged the host (`panelDepth` stuck, Back couldn't leave until
+  relaunch). The themed Appearance panel deliberately does NOT rebuild the underlay: apply-on-select only
+  restyles the live panel, and the full theme rebuilds on exit (the hub root's `showHomeScreen()`). Verified in
+  the live re-walk: switch theme in the themed panel → Back pops Appearance→hub (depth 2→1) → hub→themed home,
+  no wedge.
 - **`Xmb.qml` `still` binding-loop warning** (already noted under B1) still logs on every hero-metadata bind
   in themed XMB, plus a missing `themes2/XMB/poster` image warning — noisy but cosmetic.
 

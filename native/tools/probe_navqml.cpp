@@ -533,6 +533,52 @@ static void runAddonsPanelAsserts()
     CHECK(host.levelDepth() == 1 && g->index() == 6, "addons: Back from Add-by-URL restores the root cursor (6)");
 }
 
+// §18(i) — the Appearance panel graph (B2 Task 6.75, the last classic surface converted), pinned against the REAL
+// ThemedPanelHost with the shipped row shape: a Toggle, then a Separator + Choice, then a run of Info/Separator
+// dividers, then a lone trailing Action. Its distinctive geometry — three selectable rows (Toggle 0, Choice 2,
+// Action 8) separated by MULTIPLE consecutive dividers, including a five-divider gap between the Choice and the
+// lone Action — is a shape the other §18 sets don't cover (they never step ACROSS a multi-divider block via
+// move()). Legs: (1) fresh present lands on the first selectable (the Toggle, skipping nothing); (2) Down steps
+// Toggle -> Choice skipping the "Theme" Separator; (3) Down steps Choice -> Action hopping the FIVE trailing
+// dividers in one move; (4) Up mirrors Action -> Choice; (5) presented as a hub child, one Back pops to the
+// parent (the panel is nested under the settings hub — its onBack is the defensive root leg, not run on a pop).
+static void runAppearancePanelAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    ThemedPanelHost host;
+    NavGraph* g = host.navGraph();
+
+    // The shipped Appearance row set (indices must match openAppearance's builder).
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Toggle;    r.id = QStringLiteral("appr.themed");    r.label = QStringLiteral("Use the themed home screen (beta)"); r.checked = true; rows << r; } // 0 selectable
+    { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Theme"); rows << r; }                                                                                            // 1 divider
+    { PanelRow r; r.kind = PanelRow::Choice;    r.id = QStringLiteral("appr.theme");     r.label = QStringLiteral("Theme"); r.options = { QStringLiteral("Default"), QStringLiteral("Lumen") }; r.value = QStringLiteral("Default"); rows << r; } // 2 selectable
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.applies");   r.label = QStringLiteral("Applies live…"); rows << r; }                                            // 3 divider
+    { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Get more themes"); rows << r; }                                                                                  // 4 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.customise");  r.label = QStringLiteral("Edit theme.json…"); rows << r; }                                        // 5 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.root");       r.label = QStringLiteral("Themes folder"); r.value = QStringLiteral("/path"); rows << r; }        // 6 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.community");  r.label = QStringLiteral("Browse community themes…"); rows << r; }                                // 7 divider
+    { PanelRow r; r.kind = PanelRow::Action;    r.id = QStringLiteral("appr.gallery");    r.label = QStringLiteral("Open the theme gallery (GitHub)…"); rows << r; }                        // 8 selectable
+
+    // Present as a hub child (a bare hub root below, so the pop reveals a parent rather than leaving the host).
+    host.present(QStringLiteral("Settings"), panelActionRows(13, QStringLiteral("hub")), noop, onBack);
+    host.present(QStringLiteral("Appearance"), rows, noop, onBack);
+    CHECK(host.levelDepth() == 2 && g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+          "appearance: fresh present lands on the first selectable row (the themed-home Toggle, index 0)");
+    CHECK(g->move(Qt::Key_Down) && g->index() == 2,
+          "appearance: Down steps Toggle -> Choice, skipping the 'Theme' Separator (1)");
+    CHECK(g->move(Qt::Key_Down) && g->index() == 8,
+          "appearance: Down steps Choice -> the lone Action, hopping the five trailing dividers (3..7) in one move");
+    CHECK(g->move(Qt::Key_Up) && g->index() == 2,
+          "appearance: Up mirrors Action -> Choice back across the divider block");
+    CHECK(g->validate(nullptr), "appearance: the graph validates for the Appearance row shape");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1,
+          "appearance: one Back pops Appearance to the settings hub (nested child — no host exit)");
+}
+
 // §18(g) — ThemeView-level pins (B2 Task 6 hardening): the two behaviours that live in ThemeView.qml itself and
 // couldn't be tested from a bare NavGraph — (a) the XMB-buttons guard (a theme mixing an `xmb` element with
 // `button` elements must NOT let the cursor reach the bottom-button bar: the QML holds the `buttons` zone count
@@ -1740,6 +1786,9 @@ int main(int argc, char** argv)
     // §18(h): the Add-ons manager panel graph (B2 Task 6.5) — divider-skip landing, the three-level remove-flow
     // double-pop cursor restore, and the masked config field's in-place patch.
     runAddonsPanelAsserts();
+    // §18(i): the Appearance panel graph (B2 Task 6.75) — the divider-skip stepping across its multi-divider
+    // trailing block (Toggle -> Choice -> lone Action) + a nested-child Back pop to the settings hub.
+    runAppearancePanelAsserts();
     // §18(g): ThemeView-level pins — the XMB-buttons guard + grid-home rootBack (B2 Task 6 hardening).
     runThemeViewAsserts();
 #endif

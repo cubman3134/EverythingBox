@@ -3686,6 +3686,97 @@ void MainWindow::showThemedBrowse()
 // Changes save as you make them and preview live; backing out (-> the settings hub -> home) applies them.
 void MainWindow::openAppearance()
 {
+    // Themed mode: render Appearance as a flat PanelRow list on the Nav Contract (ThemedPanelHost), instead of
+    // the classic QWidget builder — the last classic surface reachable in themed mode (B2 Task 6.75). Same setters
+    // verbatim: the themed-home Toggle writes themedHome/enabled; the theme Choice writes themedHome/theme (+sync).
+    //
+    // PREVIEW: the classic panel embedded a live QQuickWidget preview of the picked theme. In themed mode the app
+    // ITSELF is theme-rendered, so apply-on-select IS the preview — picking a theme restyles the LIVE panel host
+    // to that theme's settingsPanel block (setStyle(settingsPanelStyle()), which reads the just-saved key), so the
+    // surface you are looking at re-renders in the new theme immediately. We deliberately do NOT rebuild the themed
+    // HOME underlay here: showThemedHome() ends in stack_->setCurrentWidget(themedHome_), which would yank the
+    // current page away from this panel — exactly the wedge follow-up #5 recorded against the classic panel
+    // (Back could no longer leave the host). The FULL theme (home/browse/detail layout) applies on exit: the hub
+    // root's onBack already calls showHomeScreen(), which rebuilds the themed home from the saved key. So:
+    // apply-on-select restyles the panel live; the full theme lands on the way out — no underlay rebuild, no wedge.
+    //
+    // TOGGLE: turning themedHome/enabled OFF while inside the themed panel just SAVES the key (classic semantics —
+    // value persists, takes effect on next navigation). We do NOT hot-swap the whole UI mid-panel; the panel stays
+    // up until the user leaves, at which point normal navigation honours the new value (Back to the hub root ->
+    // showHomeScreen renders the classic home if it was turned off). Least-surprising, and matches the classic setter.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        // Theme folder <-> display-name mapping (the Choice cycles display names; the handler maps the pick back
+        // to its folder for the store, mirroring General's subtitle-language display<->code round-trip).
+        const QStringList themeFolders = ThemeEngine::availableThemes();
+        QList<QPair<QString, QString>> themePairs;   // (display, folder), captured by the handler
+        QStringList themeOpts;
+        for (const QString& folder : themeFolders)
+        {
+            const QString disp = ThemeEngine::themeDisplayName(folder);
+            themePairs << qMakePair(disp, folder);
+            themeOpts << disp;
+        }
+        QString curFolder = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        if (!themeFolders.contains(curFolder)) curFolder = themeFolders.value(0, QStringLiteral("Default"));
+        QString curDisp;
+        for (const auto& p : themePairs) if (p.second == curFolder) { curDisp = p.first; break; }
+        if (curDisp.isEmpty()) curDisp = themeOpts.value(0);
+
+        themedPanelHost_->setStyle(settingsPanelStyle());   // the active theme's settingsPanel block (hard fallbacks)
+
+        QVector<PanelRow> rows;
+        auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto toggle = [&rows](const QString& id, const QString& label, bool on) {
+            PanelRow r; r.kind = PanelRow::Toggle; r.id = id; r.label = label; r.checked = on; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
+            PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
+
+        toggle(QStringLiteral("appr.themed"), tr("Use the themed home screen (beta)"), themedHomeEnabled());
+        sep(tr("Theme"));
+        choice(QStringLiteral("appr.theme"), tr("Theme"), themeOpts, curDisp);
+        info(QStringLiteral("appr.applies"),
+             tr("Applies live as you pick — the full theme takes effect when you leave Appearance."), QString());
+        sep(tr("Get more themes"));
+        info(QStringLiteral("appr.customise"),
+             tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
+        info(QStringLiteral("appr.root"), tr("Themes folder"), ThemeEngine::themesRoot());
+        info(QStringLiteral("appr.community"),
+             tr("Browse and share community themes at github.com/cubman3134/mymediavault-themes."), QString());
+        action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
+
+        themedPanelHost_->present(tr("Appearance"), rows,
+            [this, themePairs](const QString& id, const QString& val) {
+                if (id == QStringLiteral("appr.themed")) {
+                    // Save only (classic semantics); do NOT hot-swap the UI mid-panel — see the note above.
+                    store().setValue(QStringLiteral("themedHome/enabled"), val == QStringLiteral("1"));
+                    store().sync();
+                }
+                else if (id == QStringLiteral("appr.theme")) {
+                    QString folder = val;   // map the picked display name back to its folder
+                    for (const auto& p : themePairs) if (p.first == val) { folder = p.second; break; }
+                    store().setValue(QStringLiteral("themedHome/theme"), folder); store().sync();   // save on selection
+                    // Apply-on-select IS the preview: restyle THIS panel to the newly-picked theme's settingsPanel
+                    // block (settingsPanelStyle() reads the key we just saved). No underlay rebuild -> no wedge; the
+                    // full theme lands when the hub root's onBack runs showHomeScreen() on the way out.
+                    themedPanelHost_->setStyle(settingsPanelStyle());
+                }
+                else if (id == QStringLiteral("appr.gallery")) {
+                    // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
+                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/cubman3134/mymediavault-themes")));
+                }
+            },
+            [this] { openSettingsHub(); });   // defensive root onBack: Appearance is nested, so a pop re-renders the hub
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+
     if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
 
     // A representative stand-in for the preview: the four inherent categories (so XMB themes show their cross).
