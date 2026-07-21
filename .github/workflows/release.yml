@@ -301,7 +301,9 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          modules: 'qtmultimedia qtpdf qtdeclarative'
+          # qtdeclarative (QtQml/QtQuick) is an ESSENTIAL bundled in the Qt base install — aqt rejects it as
+          # an add-on module ("packages ['qtdeclarative'] were not found"). Only genuine add-ons go here.
+          modules: 'qtmultimedia qtpdf'
           cache: true
       - name: Remember host Qt
         run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
@@ -313,7 +315,9 @@ jobs:
           host: linux
           target: android
           arch: ${{ env.QT_ANDROID_ARCH }}
-          modules: 'qtmultimedia qtdeclarative'   # QtPdf isn't published for Android; PdfView is stubbed there
+          # QtPdf isn't published for Android (PdfView is stubbed there); qtdeclarative (QtQuick/QtQml) is a
+          # base essential, not an aqt add-on module, so it must NOT be listed here either.
+          modules: 'qtmultimedia'
           cache: true
 
       - name: Provide libmpv for Android
