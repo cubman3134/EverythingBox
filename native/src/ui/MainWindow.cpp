@@ -919,6 +919,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(&FormFactor::instance(), &FormFactor::changed, this, &MainWindow::applyFormFactorWidgets);
     applyFormFactorWidgets();
 
+    // Quit provenance: EVERY clean shutdown routes through aboutToQuit, and each explicit QApplication::quit()
+    // site also logs its trigger (grep "quit:" in this file). So a harness "clean exit" always names itself in
+    // stream_debug.log instead of recurring as an unexplained footnote. Harmless in production (append-only log).
+    connect(qApp, &QCoreApplication::aboutToQuit, this, [] { mwLog(QStringLiteral("aboutToQuit (clean exit path)")); });
+
     // Dominant home-build cost (classic HomeView, or the themed QML home if enabled). The HomeView ctor
     // sits in the unspanned gap just after the startup.addons region (cheap today), so it's excluded here.
     PerfTrace::begin(QStringLiteral("startup.home"));
@@ -1768,9 +1773,10 @@ void MainWindow::promptStartupProfile()
         }
         else
         {
+            mwLog(QStringLiteral("quit: startup-picker declined"));
             QApplication::quit(); // declined to choose -> exit (matches the old must-choose behaviour)
         }
-    }, [this] { QApplication::quit(); }); // Back == decline -> exit
+    }, [this] { mwLog(QStringLiteral("quit: startup-picker backed out")); QApplication::quit(); }); // Back == decline -> exit
 }
 
 // The ONE widget-side sizing chokepoint (D1 Task 3). Re-derives every widget metric from the FormFactor
@@ -1813,6 +1819,9 @@ void MainWindow::maybeOfferTvMode()
 {
     if (Settings::displayMode() != QStringLiteral("auto")) return;
     if (Settings::tvPromptDone()) return;
+    // Themed mode only: the Display-mode revert row lives in the THEMED Appearance panel, so a classic user who
+    // accepts "Use TV mode" would have no in-classic way back. Don't offer what they can't undo where they are.
+    if (!themedHomeEnabled()) return;
     if (!isFullScreen()) return;
     if (NavOverlay::topmost() || QApplication::activeModalWidget()) return; // never over the startup picker/an overlay
     QScreen* scr = QGuiApplication::primaryScreen();
@@ -4234,7 +4243,7 @@ void MainWindow::quitConfirmFromStartup()
     const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
         tr("You need to choose a profile to continue."),
         { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
-    if (choice == 1) { QApplication::quit(); return; }
+    if (choice == 1) { mwLog(QStringLiteral("quit: startup-picker quit-confirm")); QApplication::quit(); return; }
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
 #endif // MMV_HAVE_QML
@@ -6166,12 +6175,14 @@ void MainWindow::performUninstall()
         { QStringLiteral("/c"), QStringLiteral("start"), QString(), QStringLiteral("/min"),
           QStringLiteral("cmd"), QStringLiteral("/c"), QDir::toNativeSeparators(cmdPath) });
     forceClose_ = true;
+    mwLog(QStringLiteral("quit: uninstall"));
     qApp->quit();
 #else
     // macOS/Linux: the app is a bundle/AppImage the user removes by deleting it. Clear our data dir + cache + quit.
     QDir(QCoreApplication::applicationDirPath()).removeRecursively();
     QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).removeRecursively();
     forceClose_ = true;
+    mwLog(QStringLiteral("quit: uninstall"));
     qApp->quit();
 #endif
 }
