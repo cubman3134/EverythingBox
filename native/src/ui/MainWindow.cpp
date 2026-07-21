@@ -52,6 +52,7 @@
 #include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
+#include "../theme2/FormFactor.h"
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
@@ -78,6 +79,8 @@
 #include <QHBoxLayout>
 #include <QScrollArea>
 #include <QApplication>
+#include <QGuiApplication>
+#include <QSize>
 #include <QWindow>
 #include <QPointer>
 #include <QImage>
@@ -911,6 +914,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
     connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
 
+    // Form-factor adaptivity (D1 Task 3): re-derive every widget-side size whenever the mode changes, and once
+    // now so the initial build carries the current tokens (desktop identity: a pixel-for-pixel no-op).
+    connect(&FormFactor::instance(), &FormFactor::changed, this, &MainWindow::applyFormFactorWidgets);
+    applyFormFactorWidgets();
+
     // Dominant home-build cost (classic HomeView, or the themed QML home if enabled). The HomeView ctor
     // sits in the unspanned gap just after the startup.addons region (cheap today), so it's excluded here.
     PerfTrace::begin(QStringLiteral("startup.home"));
@@ -1707,6 +1715,9 @@ void MainWindow::showEvent(QShowEvent* event)
         activateWindow();
         if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
+        // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
+        // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
+        QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
     });
 }
 
@@ -1760,6 +1771,66 @@ void MainWindow::promptStartupProfile()
             QApplication::quit(); // declined to choose -> exit (matches the old must-choose behaviour)
         }
     }, [this] { QApplication::quit(); }); // Back == decline -> exit
+}
+
+// The ONE widget-side sizing chokepoint (D1 Task 3). Re-derives every widget metric from the FormFactor
+// tokens and pushes them to the surfaces (overlays/OSK read the statics at construction; live widgets are
+// resized in place). ALL token math lives here — the surfaces expose plain setters. Desktop is identity:
+// with default tokens (uiScale 1.0, minHitPx 0) hitClamp(n)==n and int(px*1.0)==px, so every value below is
+// exactly today's, pixel-for-pixel. Connected to FormFactor::changed + called once at startup.
+void MainWindow::applyFormFactorWidgets()
+{
+    FormFactor& ff = FormFactor::instance();
+    const qreal s   = ff.uiScale();
+    const int   hit = ff.minHitPx();
+
+    // Overlay / OSK: body fonts scale with uiScale; OSK key boxes go through hitClamp (the probed path).
+    NavOverlay::setPanelFontPx(int(14 * s), int(16 * s));           // desktop: 14 / 16
+    Osk::setKeyMetrics(ff.hitClamp(46), ff.hitClamp(40), int(15 * s)); // desktop: 46 / 40 / 15
+
+    // Player transport chrome: floor each button (and the Back overlay) to the hit target when one is set,
+    // otherwise clear the floor (desktop identity — Qt's default minimum, no size change).
+    const QSize floorSz = hit > 0 ? QSize(hit, hit) : QSize(0, 0);
+    for (QPushButton* b : playerButtons_) if (b) b->setMinimumSize(floorSz);
+    if (videoBack_)     videoBack_->setMinimumSize(floorSz);
+    if (streamIssueBtn_) streamIssueBtn_->setMinimumSize(floorSz);
+    if (seek_) seek_->setMinimumHeight(hit); // desktop: 0 (no change); mobile: a grabbable track
+
+    // Split-screen pane bars (only if the split view has been built): floor the pause/close hit targets.
+    if (splitView_)
+    {
+        if (splitView_->paneA()) splitView_->paneA()->applyBarMinHit(hit);
+        if (splitView_->paneB()) splitView_->paneB()->applyBarMinHit(hit);
+    }
+}
+
+// One-time "this looks like a TV" suggestion (D1 Task 3). Fires at most once, only when the display really
+// reads as a big living-room screen, and only while nothing else is on top. Either answer marks it done so it
+// never asks again. Guards: auto mode (the user hasn't chosen), not already prompted, full screen, and a
+// primary screen whose reported physical width is >= 700mm — an empty/zero physicalSize (unreliable EDID)
+// fails silent (no prompt), never a false positive.
+void MainWindow::maybeOfferTvMode()
+{
+    if (Settings::displayMode() != QStringLiteral("auto")) return;
+    if (Settings::tvPromptDone()) return;
+    if (!isFullScreen()) return;
+    if (NavOverlay::topmost() || QApplication::activeModalWidget()) return; // never over the startup picker/an overlay
+    QScreen* scr = QGuiApplication::primaryScreen();
+    if (!scr) return;
+    qreal physWidthMm = scr->physicalSize().width(); // millimetres; empty/zero => unreliable, do not guess
+    // Test-only seam (parity with the MMV_UITEST channel): the physical-size guard is hardware-bound and can't
+    // be seeded from an ini, so let the UI-test harness substitute a screen width to exercise this prompt. Never
+    // active in production — qEnvironmentVariableIsSet("MMV_UITEST") is only ever set by the test launcher.
+    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_SCREEN_MM"))
+        physWidthMm = qEnvironmentVariableIntValue("MMV_TEST_SCREEN_MM");
+    if (physWidthMm < 700.0) return;
+
+    const int r = NavConfirm::ask(
+        tr("Big screen detected"),
+        tr("This looks like a TV. Switch to TV mode for larger text and controls you can read from the couch?"),
+        { tr("Not now"), tr("Use TV mode") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    Settings::setTvPromptDone(true); // either answer settles it — never ask again
+    if (r == 1) { Settings::setDisplayMode(QStringLiteral("tv")); FormFactor::instance().refresh(); }
 }
 
 void MainWindow::revealMediaControls()
@@ -3736,11 +3807,23 @@ void MainWindow::openAppearance()
         auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
             PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
 
+        // Display-mode <-> stored-value mapping (Choice cycles display names; the handler maps back to the stored
+        // key). Order matches the stored values below one-for-one.
+        const QStringList dispOpts   = { tr("Auto"), tr("Desktop"), tr("TV"), tr("Mobile") };
+        const QStringList dispValues = { QStringLiteral("auto"), QStringLiteral("desktop"),
+                                         QStringLiteral("tv"), QStringLiteral("mobile") };
+        const int dispIdx = qMax(0, dispValues.indexOf(Settings::displayMode()));
+        const QString dispCur = dispOpts.value(dispIdx);
+
         toggle(QStringLiteral("appr.themed"), tr("Use the themed home screen (beta)"), themedHomeEnabled());
         sep(tr("Theme"));
         choice(QStringLiteral("appr.theme"), tr("Theme"), themeOpts, curDisp);
         info(QStringLiteral("appr.applies"),
              tr("Applies live as you pick — the full theme takes effect when you leave Appearance."), QString());
+        sep(tr("Display mode"));
+        choice(QStringLiteral("appr.dispmode"), tr("Display mode"), dispOpts, dispCur);
+        info(QStringLiteral("appr.dispmodehint"),
+             tr("Auto fits this device; TV enlarges text and controls for the couch, Mobile for touch."), QString());
         sep(tr("Get more themes"));
         info(QStringLiteral("appr.customise"),
              tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
@@ -3750,11 +3833,22 @@ void MainWindow::openAppearance()
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         themedPanelHost_->present(tr("Appearance"), rows,
-            [this, themePairs](const QString& id, const QString& val) {
+            [this, themePairs, dispOpts, dispValues](const QString& id, const QString& val) {
                 if (id == QStringLiteral("appr.themed")) {
                     // Save only (classic semantics); do NOT hot-swap the UI mid-panel — see the note above.
                     store().setValue(QStringLiteral("themedHome/enabled"), val == QStringLiteral("1"));
                     store().sync();
+                }
+                else if (id == QStringLiteral("appr.dispmode")) {
+                    // Map the picked display name back to its stored value, save, then re-resolve the form factor.
+                    // FormFactor::changed then live-restyles the widget surfaces (applyFormFactorWidgets) and the
+                    // QML form.* bindings update automatically; restyle THIS panel on the same setStyle mechanism
+                    // as the theme row so the surface you are looking at re-renders immediately.
+                    const int i = dispOpts.indexOf(val);
+                    const QString mode = dispValues.value(i < 0 ? 0 : i, QStringLiteral("auto"));
+                    Settings::setDisplayMode(mode);
+                    FormFactor::instance().refresh();
+                    themedPanelHost_->setStyle(settingsPanelStyle());
                 }
                 else if (id == QStringLiteral("appr.theme")) {
                     QString folder = val;   // map the picked display name back to its folder
@@ -3884,6 +3978,7 @@ void MainWindow::enterSplitScreen()
             stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
             home_->focusContent();
         });
+        applyFormFactorWidgets(); // size the just-built pane bars to the current form-factor tokens
     }
     // Park the playing views (don't leave a movie playing behind the split) and show the empty split.
     // The window state is left exactly as it is — no screen ever changes it on the user's behalf.

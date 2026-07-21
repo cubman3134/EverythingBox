@@ -25,6 +25,12 @@ public:
     qreal   safeAreaFrac() const;  // table
     qreal   density() const;       // table
 
+    // The ONE size-derivation helper every widget-side consumer routes through: a base pixel size scaled by
+    // uiScale() then floored to the minimum hit target. Desktop is identity (uiScale 1.0, minHitPx 0), so
+    // hitClamp(n) == n on desktop — pixel-for-pixel no-op. applyFormFactorWidgets() pins the real path through
+    // here; probe_formfactor asserts the table (hitClamp(46): desktop 46, tv 59, mobile 52).
+    int     hitClamp(int basePx) const { return qMax(int(basePx * uiScale()), minHitPx()); }
+
     void    refresh();             // re-read Settings::displayMode(), re-resolve, emit changed() if different
     static Mode resolveAuto();     // Phase 1: always Desktop on desktop platforms
 signals:

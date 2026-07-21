@@ -17,6 +17,17 @@
 static const char* kLetterRows[] = { "1234567890", "qwertyuiop", "asdfghjkl'", "zxcvbnm,._" };
 static const char* kSymbolRows[] = { "1234567890", "!@#$%^&*()", "-+=/\\:;\"'?", "<>[]{}|~`_" };
 
+int Osk::s_keyW = 46;          // desktop identity (see setKeyMetrics)
+int Osk::s_keyH = 40;          // desktop identity
+int Osk::s_previewFontPx = 15; // desktop identity
+
+void Osk::setKeyMetrics(int keyW, int keyH, int previewFontPx)
+{
+    s_keyW = keyW;
+    s_keyH = keyH;
+    s_previewFontPx = previewFontPx;
+}
+
 Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
          const std::function<void(const QString&, bool)>& onDone, QWidget* window)
     : NavOverlay(window), onDone_(onDone)
@@ -36,16 +47,18 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
     preview_->setReadOnly(true);          // the grid + physical keys edit it; the caret never owns input
     preview_->setFocusPolicy(Qt::NoFocus); // keep it out of the ring
     preview_->setMinimumWidth(430);
+    // Preview font + key box size ride the form-factor tokens (s_previewFontPx / s_keyW / s_keyH, pushed by
+    // applyFormFactorWidgets); defaults are today's 15px / 46×40 so desktop is a pixel-for-pixel no-op.
     preview_->setStyleSheet(QStringLiteral(
         "QLineEdit { background: #0d0f14; color: #e8eaf0; border: 1px solid #2c2f3a;"
-        "            border-radius: 6px; padding: 8px 10px; font-size: 15px; }"));
+        "            border-radius: 6px; padding: 8px 10px; font-size: %1px; }").arg(s_previewFontPx));
     v->addWidget(preview_);
 
     auto* grid = new QGridLayout;
     grid->setSpacing(6);
     auto makeKey = [this](const QString& label) {
         auto* b = new QPushButton(label, panel());
-        b->setFixedSize(46, 40);
+        b->setFixedSize(s_keyW, s_keyH);
         b->setFocusPolicy(Qt::StrongFocus);
         return b;
     };
@@ -69,7 +82,7 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
     // Width from the label itself (never below `least`): a fixed pixel budget clipped "Cancel"/"Done".
     auto makeAction = [this](const QString& label, int least, const std::function<void()>& fn) {
         auto* b = new QPushButton(label, panel());
-        b->setFixedHeight(40);
+        b->setFixedHeight(s_keyH); // match the char keys' height (desktop identity: 40)
         b->setMinimumWidth(qMax(least, b->fontMetrics().horizontalAdvance(label) + 30));
         b->setFocusPolicy(Qt::StrongFocus);
         connect(b, &QPushButton::clicked, this, fn);

@@ -260,6 +260,13 @@ private:
                          const std::function<void()>& onBack);
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
 
+    // Form-factor adaptivity (D1 Task 3). applyFormFactorWidgets re-derives EVERY widget-side size from the
+    // FormFactor tokens (the one chokepoint: NavOverlay/Osk fonts+key sizes, player-chrome hit targets, seek
+    // slider, split-pane bar) — connected to FormFactor::changed and called once at startup. maybeOfferTvMode
+    // is the one-time "this looks like a TV" suggestion, fired once post-show behind its guards.
+    void applyFormFactorWidgets();
+    void maybeOfferTvMode();
+
     // ---- Themed Profiles picker (B2 Task 5): the ProfileDialog surface on the Nav Contract. mustChoose is the
     // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
     // (Back keeps the current profile). Both reuse ProfileStore data ops exactly. ----

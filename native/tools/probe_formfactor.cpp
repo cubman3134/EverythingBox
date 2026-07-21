@@ -91,6 +91,26 @@ int main(int argc, char** argv)
     CHECK(ff.mode() == FormFactor::Mode::Desktop);
     CHECK(qFuzzyCompare(ff.uiScale(), 1.0));
 
+    // 5. hitClamp(base) = qMax(int(base*uiScale), minHitPx) — the ONE size-derivation helper the widget-side
+    // chokepoint (applyFormFactorWidgets) routes OSK key/bar sizing through. Pinning it here pins the real
+    // pixel math. Desktop is identity (hitClamp(n)==n); tv scales by 1.3 (no floor); mobile scales by 1.15
+    // then floors to 44 (so small bases snap UP to the touch target while the OSK keys stay above it).
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    ff.refresh();
+    CHECK(ff.hitClamp(46) == 46);   // identity
+    CHECK(ff.hitClamp(40) == 40);
+    CHECK(ff.hitClamp(20) == 20);
+    Settings::setDisplayMode(QStringLiteral("tv"));
+    ff.refresh();
+    CHECK(ff.hitClamp(46) == 59);   // int(46*1.3)=59
+    CHECK(ff.hitClamp(40) == 52);   // int(40*1.3)=52
+    CHECK(ff.hitClamp(20) == 26);   // int(20*1.3)=26, no floor
+    Settings::setDisplayMode(QStringLiteral("mobile"));
+    ff.refresh();
+    CHECK(ff.hitClamp(46) == 52);   // int(46*1.15)=52 (> floor 44)
+    CHECK(ff.hitClamp(40) == 46);   // int(40*1.15)=46 (> floor 44)
+    CHECK(ff.hitClamp(20) == 44);   // int(20*1.15)=23 -> floored up to 44
+
     if (failures == 0) { std::puts("FORMFACTOR-OK"); return 0; }
     std::fprintf(stderr, "FORMFACTOR: %d check(s) failed\n", failures);
     return 1;
