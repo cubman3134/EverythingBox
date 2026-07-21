@@ -5,6 +5,7 @@
 #include <QtQml>
 #endif
 #include "core/AppPaths.h"
+#include "core/AssetBootstrap.h"
 #include <QIcon>
 #include <QFile>
 #include <QFileInfo>
@@ -183,6 +184,20 @@ int main(int argc, char** argv)
         "QSlider:focus{background:rgba(91,140,255,0.20);border-radius:4px;}"
         "QListWidget::item,QListView::item{min-height:34px;}"
         "QScrollBar:vertical{width:14px;}QScrollBar:horizontal{height:14px;}"));
+
+    // First-run asset extraction (D2 Task 2). A fresh Android install boots into an empty AppPaths::dataDir()
+    // with the stock themes2/ + first-party addons/ only inside the read-only APK, so extract them before
+    // AddonManager/ThemeEngine (built by MainWindow below) read those dirs off disk. On desktop this is a
+    // no-op UNLESS MMV_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
+    // desktop-verifiable without an Android toolchain (see probe_bootstrap).
+#if defined(Q_OS_ANDROID)
+    AssetBootstrap::run(QStringLiteral("assets:/mmv"), AppPaths::dataDir(),
+                        QString::fromLatin1(kAppVersion));
+#else
+    if (qEnvironmentVariableIsSet("MMV_TEST_BOOTSTRAP_SRC"))
+        AssetBootstrap::run(qEnvironmentVariable("MMV_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
+                            QString::fromLatin1(kAppVersion));
+#endif
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
