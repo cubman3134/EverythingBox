@@ -257,13 +257,25 @@ jobs:
           generate_release_notes: true
 
   # ---------------------------------------------------------------- Android ---
-  # Android / Android TV APK (arm64). Self-provisioning: pulls a prebuilt libmpv (+ ffmpeg) from Maven
-  # Central and the mpv headers from the mpv repo, then qt-cmake -> androiddeployqt -> APK.
+  # Android / Android TV APK. Self-provisioning: pulls a prebuilt libmpv (+ ffmpeg) from Maven Central
+  # and the mpv headers from the mpv repo, then qt-cmake -> androiddeployqt -> APK.
+  # Matrixed over arm64-v8a (real devices / TV) and x86_64 (emulator). The jdtech AAR ships .so's for
+  # both ABIs (verified: jni/arm64-v8a/ and jni/x86_64/ both carry libmpv.so + the full libav stack).
   # See native/docs/android-port.md.
   android:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - qt_arch: android_arm64_v8a
+            jni_abi: arm64-v8a
+            name: arm64
+          - qt_arch: android_x86_64
+            jni_abi: x86_64
+            name: x86_64
     env:
-      QT_ANDROID_ARCH: android_arm64_v8a
+      QT_ANDROID_ARCH: ${{ matrix.qt_arch }}
       NDK_VERSION: '26.1.10909125'   # Qt 6.8's recommended NDK (r26b)
     steps:
       - uses: actions/checkout@v4
@@ -293,8 +305,8 @@ jobs:
           cache: true
       - name: Remember host Qt
         run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
-      # ... and the Android (arm64) Qt that we actually link against.
-      - name: Install Qt (Android arm64)
+      # ... and the Android Qt (per-ABI) that we actually link against.
+      - name: Install Qt (Android ${{ matrix.name }})
         uses: jurplel/install-qt-action@v4
         with:
           version: ${{ env.QT_VERSION }}
@@ -306,16 +318,17 @@ jobs:
 
       - name: Provide libmpv for Android
         env:
-          # Prebuilt libmpv (+ its ffmpeg stack) for arm64 from the Jellyfin/jdtech AAR on Maven Central, and
-          # matching public mpv headers (the AAR ships none). Override LIBMPV_AAR_URL via a repo variable to
-          # pin a different prebuilt.
+          # Prebuilt libmpv (+ its ffmpeg stack) from the Jellyfin/jdtech AAR on Maven Central, and matching
+          # public mpv headers (the AAR ships none). The AAR carries per-ABI jni/ dirs; we pull the one for
+          # this matrix ABI. Override LIBMPV_AAR_URL via a repo variable to pin a different prebuilt.
           LIBMPV_AAR_URL: ${{ vars.LIBMPV_AAR_URL || 'https://repo1.maven.org/maven2/dev/jdtech/mpv/libmpv/1.0.0/libmpv-1.0.0.aar' }}
           MPV_HEADERS_TAG: 'v0.40.0'
+          JNI_ABI: ${{ matrix.jni_abi }}
         run: |
           set -e
           curl -fL "$LIBMPV_AAR_URL" -o libmpv.aar
           mkdir -p mpv-android/libs mpv-android/include/mpv
-          unzip -o -j libmpv.aar 'jni/arm64-v8a/*.so' -d mpv-android/libs
+          unzip -o -j libmpv.aar "jni/${JNI_ABI}/*.so" -d mpv-android/libs
           # libplayer.so is jdtech's JNI wrapper (unused); libc++_shared.so is provided by the NDK/Qt - drop
           # both so they aren't bundled twice. libmpv.so + the libav*/libsw* deps are kept and ride along.
           rm -f mpv-android/libs/libplayer.so mpv-android/libs/libc++_shared.so
@@ -342,21 +355,26 @@ jobs:
         run: cmake --build build-android
 
       - name: Collect APK
+        env:
+          ABI_NAME: ${{ matrix.name }}
         run: |
           apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | head -n1)
           [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | head -n1)
           [ -n "$apk" ] || { echo "No APK produced"; find build-android -name '*.apk' -o -name '*.aab'; exit 1; }
-          cp "$apk" MyMediaVault-android-arm64.apk
-          ls -la MyMediaVault-android-arm64.apk
+          cp "$apk" "MyMediaVault-android-${ABI_NAME}.apk"
+          ls -la "MyMediaVault-android-${ABI_NAME}.apk"
+          # Sanity: the staged assets and the qtdeclarative/mpv .so's must actually be inside the APK.
+          echo "=== APK assets/mmv (expect themes2 + addons) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'assets/mmv' | head -20 || true
+          echo "=== APK libs (expect libmpv + libQt6Quick) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libmpv|Qt6Quick|Qt6Qml)' | head -20 || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-android-arm64
-          path: MyMediaVault-android-arm64.apk
+          name: MyMediaVault-android-${{ matrix.name }}
+          path: MyMediaVault-android-${{ matrix.name }}.apk
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-android-arm64.apk
+          files: MyMediaVault-android-${{ matrix.name }}.apk
           generate_release_notes: true
