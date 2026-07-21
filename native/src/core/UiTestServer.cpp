@@ -63,6 +63,9 @@ QString UiTestServer::handle(const QString& line)
             { QStringLiteral("left"), Qt::Key_Left },   { QStringLiteral("right"), Qt::Key_Right },
             { QStringLiteral("enter"), Qt::Key_Return },{ QStringLiteral("back"), Qt::Key_Backspace },
             { QStringLiteral("escape"), Qt::Key_Escape },
+            // "hwback" = Android's hardware/gesture/remote Back (Qt::Key_Back), distinct from the app's logical
+            // "back" (Backspace). Lets a UI-test drive the exact key the OS delivers on Android from desktop.
+            { QStringLiteral("hwback"), Qt::Key_Back },
             // Space: the nav ring passes it through (NavRing::handleKey default), so it reaches the focused
             // widget natively — e.g. toggles a QListWidget checkbox (the Library's per-source enable box).
             { QStringLiteral("space"), Qt::Key_Space },

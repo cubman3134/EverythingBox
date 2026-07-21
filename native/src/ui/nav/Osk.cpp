@@ -162,7 +162,9 @@ void Osk::keyPressEvent(QKeyEvent* e)
         // the controller pressing the focused key button and goes to the ring.
         if (!NavContext::syntheticKey()) { accept(); e->accept(); return; }
         break;
-    case Qt::Key_Escape:
+    // Key_Back is Android's hardware/gesture/remote Back — cancel the OSK exactly like Escape, so the
+    // keyboard is dismissable by the OS Back rather than swallowing it (an uncancellable OSK on a remote).
+    case Qt::Key_Escape: case Qt::Key_Back:
     { const auto done = onDone_; dismiss(0); if (done) done(QString(), false); e->accept(); return; }
     default: break;
     }

@@ -68,7 +68,9 @@ bool NavCombo::eventFilter(QObject* obj, QEvent* ev)
     case Qt::Key_Return: case Qt::Key_Enter: case Qt::Key_Select: case Qt::Key_Space:
         c->showPopup();   // "select into" it -> the scrollable popup
         return true;
-    case Qt::Key_Backspace: case Qt::Key_Escape:
+    // Key_Back is Android's hardware/remote Back: bubble it like Escape so the unified Back rule leaves the
+    // screen. (This filter only guards the CLOSED combo; an open popup is owned by the combo's own view.)
+    case Qt::Key_Backspace: case Qt::Key_Escape: case Qt::Key_Back:
         return false;     // Back leaves the screen (the unified Back rule handles it)
     default:
         return true;      // no type-ahead / Page/Home/End value change until it's opened
@@ -164,7 +166,9 @@ bool NavTextField::eventFilter(QObject* obj, QEvent* ev)
     {
         // Interacting (editing a line edit / scrolling a view): Escape drops back to the plain SELECTION
         // without leaving the screen. A line edit's Enter commits (returnPressed fires) and drops back.
-        if (key == Qt::Key_Escape) { setInteracting(false); return true; }
+        // Key_Back (Android hardware/remote Back) behaves like Escape here — drop to selection, NOT bubble to
+        // goBack — so one Back exits editing (matching the selected-state Back below that then leaves).
+        if (key == Qt::Key_Escape || key == Qt::Key_Back) { setInteracting(false); return true; }
         if (lineEdit_ && (key == Qt::Key_Return || key == Qt::Key_Enter)) { setInteracting(false); return false; }
         return false; // otherwise the widget types / scrolls normally
     }
@@ -182,7 +186,8 @@ bool NavTextField::eventFilter(QObject* obj, QEvent* ev)
         if (editable_ && NavContext::syntheticKey()) NavOverlay::editLineEdit(static_cast<QLineEdit*>(w_.data()));
         else setInteracting(true);
         return true;
-    case Qt::Key_Backspace: case Qt::Key_Escape:
+    // Key_Back is Android's hardware/remote Back: bubble it like Escape so the unified Back rule leaves the screen.
+    case Qt::Key_Backspace: case Qt::Key_Escape: case Qt::Key_Back:
         return false; // selected-state Back leaves the screen (the unified Back rule handles it)
     default:
         return true;  // a printable key does NOT auto-start typing — navigate = select, not type
