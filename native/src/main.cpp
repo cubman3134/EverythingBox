@@ -214,8 +214,18 @@ int main(int argc, char** argv)
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));
         qApp->installEventFilter(new FirstPaintProbe(&window));
     }
+#ifdef Q_OS_ANDROID
+    // Android has no windowed mode: the app is always fullscreen. showFullScreen() also drives Qt 6.8's
+    // QtActivityDelegate into sticky-immersive — it maps the top-level Qt::WindowFullScreen state onto the
+    // Android WindowInsetsController (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, API 30+) / the legacy
+    // SYSTEM_UI_FLAG_IMMERSIVE_STICKY, so the status + navigation bars stay hidden over video and the
+    // emulator and auto-re-hide after a swipe, with NO hand-rolled JNI and no custom manifest theme. See
+    // .superpowers/sdd/d2-task-3-report.md for the investigation.
+    window.showFullScreen();
+#else
     if (Settings::startFullscreen()) window.showFullScreen();
     else                             window.show();
+#endif
     // A zero-timer fires after the event loop's first pass (first paint), so startup.total spans launch->visible.
     QTimer::singleShot(0, [] { PerfTrace::end(QStringLiteral("startup.total")); });
     window.raise();

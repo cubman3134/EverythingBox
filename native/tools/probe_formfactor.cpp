@@ -17,6 +17,7 @@
 // touches a deployed install. Every assert sets "display/mode" explicitly, so a leftover ini can't skew it.
 #include "FormFactor.h"
 #include "Settings.h"
+#include "LifecyclePolicy.h"
 
 #include <QCoreApplication>
 #include <QSignalSpy>
@@ -139,6 +140,66 @@ int main(int argc, char** argv)
     Settings::setVirtualPad(QStringLiteral("auto"));       // restore defaults so a leftover ini can't skew later
     Settings::setDisplayMode(QStringLiteral("auto"));
     ff.refresh();
+
+    // 7. Android OS-lifecycle pause/resume decision core (D2 Task 3). MainWindow::onApplicationStateChanged is
+    // not headless-linkable (full widget/GL app), so the remember-and-restore policy lives in the pure
+    // mmv::LifecyclePolicy that MainWindow routes RetroView/MpvWidget state through — pinning it here pins the
+    // real "pause on background, resume ONLY what we paused, never touch a user-paused item" behaviour.
+    {
+        // (a) A running, PLAYING core: backgrounding pauses it; foregrounding resumes exactly it.
+        mmv::LifecyclePolicy p;
+        auto s = p.onSuspend(/*coreRunning*/true, /*corePaused*/false, /*videoActive*/false, /*videoPaused*/false);
+        CHECK(s.core && !s.video);            // freeze the core, nothing else
+        CHECK(p.corePausedByUs());
+        auto r = p.onResume();
+        CHECK(r.core && !r.video);            // resume exactly what we froze
+        CHECK(!p.corePausedByUs());           // latch cleared after resume
+    }
+    {
+        // (b) A USER-paused core: backgrounding must NOT claim it, so foregrounding must NOT un-pause it.
+        mmv::LifecyclePolicy p;
+        auto s = p.onSuspend(/*coreRunning*/true, /*corePaused*/true, false, false);
+        CHECK(!s.core);                       // already paused by the user -> we don't touch it
+        CHECK(!p.corePausedByUs());
+        auto r = p.onResume();
+        CHECK(!r.core);                       // and we never resume it
+    }
+    {
+        // (c) A PLAYING video: same remember-and-restore, on the video axis.
+        mmv::LifecyclePolicy p;
+        auto s = p.onSuspend(false, false, /*videoActive*/true, /*videoPaused*/false);
+        CHECK(s.video && !s.core);
+        auto r = p.onResume();
+        CHECK(r.video && !r.core);
+    }
+    {
+        // (d) A USER-paused video stays paused on return (the brief's explicit case).
+        mmv::LifecyclePolicy p;
+        auto s = p.onSuspend(false, false, /*videoActive*/true, /*videoPaused*/true);
+        CHECK(!s.video);
+        auto r = p.onResume();
+        CHECK(!r.video);
+    }
+    {
+        // (e) Sticky across repeated suspends: Active -> Inactive (we pause the core) -> Suspended (core now
+        // reads paused-by-us) must NOT drop the latch; the eventual resume still un-pauses it.
+        mmv::LifecyclePolicy p;
+        auto s1 = p.onSuspend(true, /*corePaused*/false, false, false);
+        CHECK(s1.core);                       // first suspend pauses it
+        auto s2 = p.onSuspend(true, /*corePaused*/true, false, false); // second callback: already paused-by-us
+        CHECK(!s2.core);                      // nothing new to pause
+        CHECK(p.corePausedByUs());            // ...but the latch is STICKY
+        auto r = p.onResume();
+        CHECK(r.core);                        // so resume still fires
+    }
+    {
+        // (f) Nothing active: every transition is a no-op.
+        mmv::LifecyclePolicy p;
+        auto s = p.onSuspend(false, false, false, false);
+        CHECK(!s.core && !s.video);
+        auto r = p.onResume();
+        CHECK(!r.core && !r.video);
+    }
 
     if (failures == 0) { std::puts("FORMFACTOR-OK"); return 0; }
     std::fprintf(stderr, "FORMFACTOR: %d check(s) failed\n", failures);

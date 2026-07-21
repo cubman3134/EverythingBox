@@ -336,6 +336,14 @@ void MpvWidget::setPaused(bool paused)
     mpv_set_property(mpv, "pause", MPV_FORMAT_FLAG, &flag);
 }
 
+bool MpvWidget::isPaused() const
+{
+    if (!mpv) return false;
+    int flag = 0;
+    mpv_get_property(mpv, "pause", MPV_FORMAT_FLAG, &flag);
+    return flag != 0;
+}
+
 void MpvWidget::togglePause()
 {
     const char* cmd[] = { "cycle", "pause", nullptr };

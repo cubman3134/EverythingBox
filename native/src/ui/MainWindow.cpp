@@ -243,6 +243,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
     if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+
+    // Android OS lifecycle: when the app is backgrounded, freeze a running core / playing video (battery +
+    // audio focus), and resume ONLY what we froze on return (onApplicationStateChanged -> LifecyclePolicy).
+    // Android-only: on desktop, applicationStateChanged fires on every alt-tab, which must NOT pause playback.
+    // The handler itself is unguarded so a probe/test can drive it directly.
+#ifdef Q_OS_ANDROID
+    connect(qApp, &QGuiApplication::applicationStateChanged,
+            this, &MainWindow::onApplicationStateChanged);
+#endif
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
     comic_ = new ComicView(this);
@@ -1142,6 +1151,30 @@ void MainWindow::sendNavKey(int key)
     deliver(w, key);
 }
 
+// Android OS lifecycle handler (connected only under Q_OS_ANDROID; see the ctor). Backgrounding the app must
+// freeze a running emulator core and any playing video so they don't burn battery / hold audio focus while
+// off-screen; returning to the foreground resumes ONLY what we froze. The remember-and-restore decision is
+// the pure LifecyclePolicy, so "a user-paused video stays paused on return" is enforced there (and pinned by
+// probe_formfactor). Unguarded so a probe/test can invoke it directly with any state.
+void MainWindow::onApplicationStateChanged(Qt::ApplicationState state)
+{
+    if (state == Qt::ApplicationActive)
+    {
+        const auto act = lifecycle_.onResume();
+        if (act.core  && retro_)  retro_->setPaused(false);
+        if (act.video && player_) player_->setPaused(false);
+        return;
+    }
+    // Suspended / Inactive / Hidden are all "leaving the foreground" on Android.
+    const bool coreRunning = retro_ && retro_->running();
+    const bool corePaused  = retro_ && retro_->paused();
+    const bool videoActive = stack_ && stack_->currentWidget() == playerPage_;
+    const bool videoPaused = player_ && player_->isPaused();
+    const auto act = lifecycle_.onSuspend(coreRunning, corePaused, videoActive, videoPaused);
+    if (act.core  && retro_)  retro_->setPaused(true);
+    if (act.video && player_) player_->setPaused(true);
+}
+
 // The one Back rule for the whole app: Escape, Backspace and the controller's Back all call this, so a
 // "go back" gesture behaves identically on every screen — it always takes you to the previous screen, and
 // only at the home root does it open the app pause menu (Resume / Exit). Anything layered on top (an
@@ -1787,7 +1820,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Backspace before this (so typing still deletes); its Escape reaching here still means "leave", which is
     // right. The subtitle overlay (handled just below) and the emulator (consumes Esc itself) are the
     // exceptions that manage their own Back. F11 still toggles full screen independently.
-    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace)
+    // Qt::Key_Back is Android's hardware/gesture Back: route it into the SAME unified Back so it lands on the
+    // previous screen and, at the home root, opens the exit-confirm pause menu — never an instant app kill. It
+    // is a distinct key from Backspace, so it never deletes text and is never treated as "typing" below. No
+    // desktop key generates Key_Back, so this branch is inert off Android.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Back)
     {
         QWidget* fw = focusWidget();
         // Backspace belongs to a text widget only while it's actually being INTERACTED with (a live cursor,
@@ -1833,7 +1870,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         int idx = col.indexOf(fw);
         switch (e->key())
         {
-        case Qt::Key_Escape: case Qt::Key_Backspace: hideSubtitleMenu(); return;
+        case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back: hideSubtitleMenu(); return;
         case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return;
         case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return;
         case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;

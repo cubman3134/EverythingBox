@@ -12,6 +12,7 @@
 #include <memory>
 #include <functional>
 #include "../addons/AddonModels.h"
+#include "../core/LifecyclePolicy.h"
 
 class MpvWidget;
 class RetroView;
@@ -120,6 +121,12 @@ protected:
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
     void changeEvent(QEvent* event) override;               // re-focus the themed view when the window reactivates
     void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
+
+    // Android OS lifecycle: on backgrounding, freeze a running core / playing video; on foregrounding, resume
+    // ONLY what we froze (LifecyclePolicy). Left unguarded (a probe/test can call it directly); the connect
+    // in the ctor is gated on Q_OS_ANDROID so desktop app-state churn (alt-tab) never touches playback.
+    void onApplicationStateChanged(Qt::ApplicationState state);
+    mmv::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
 
 private:
     class DownloadManager* dm_ = nullptr;

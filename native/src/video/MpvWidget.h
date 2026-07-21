@@ -21,6 +21,7 @@ public:
     void play(const QString& url);   // local path or http(s)/stream URL
     void stop();
     void setPaused(bool paused);
+    bool isPaused() const;   // current mpv "pause" flag (OS-lifecycle pause query)
     void togglePause();
     void seekRelative(double seconds);
     void setPosition(double seconds);
