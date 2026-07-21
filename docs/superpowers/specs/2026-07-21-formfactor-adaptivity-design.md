@@ -183,3 +183,19 @@ Non-blocking items surfaced during Phase 1; carry into Phase 2 planning or a pol
 - **probe_meta / probe_navqml first-run flake** — occasionally FAIL on the first
   runner pass in a full-suite context (offscreen QML/GPU timing); green standalone and
   on re-run. Pin down the warmup ordering so CI doesn't need a retry.
+- **ReaderChromeHost outer-strip staleness on mode flip** — `layoutStrips` doesn't
+  re-run on `FormFactor::changed`, so the outer strip keeps its old sizing until the
+  reader is re-presented. Self-heals on next present; wire it to the signal if a live
+  mid-read flip needs to reflow.
+- **Osk / NavOverlay construction-read metrics** — these read their sizing statics at
+  construction, so an overlay/OSK left open across a mode change keeps the old metrics
+  until it's closed and reopened. `applyFormFactorWidgets` pushes new statics but doesn't
+  re-lay-out an already-open surface. Fine in practice (a mode flip closes the surface);
+  revisit if a mid-open reflow is ever needed.
+- **VirtualPad::layoutZones resize-only** — the pad recomputes its hit zones on resize;
+  a mode flip that leaves the widget geometry unchanged keeps the old hit sizes until the
+  next resize. Force a relayout on `FormFactor::changed` if a same-geometry mode flip must
+  resize the touch zones.
+- **Mobile tap-interrupting-flick one-tap activation** — a tap that interrupts an
+  in-progress flick may activate the item under the finger. Wants a real-device check with
+  the Carousel left-edge item to confirm it doesn't mis-fire an activation.

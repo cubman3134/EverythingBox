@@ -1931,6 +1931,9 @@ void MainWindow::promptStartupProfile()
         {
             ProfileStore::setCurrent(dlg->selectedId());
             openHome();                    // render for the chosen profile
+            // The startup picker took this path, so showEvent returned before its own maybeOfferTvMode
+            // singleShot — make the one-time offer now that home has landed (guards keep it idempotent).
+            QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
         }
         else
         {
@@ -4472,6 +4475,10 @@ void MainWindow::chooseProfile(const QString& id)
 {
     ProfileStore::setCurrent(id);
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
+    // When this resolves the pre-home startup picker, showEvent already returned before its own
+    // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,
+    // so scheduling it here on the runtime profile switcher too is harmless.
+    QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
 }
 
 // mustChoose Back: the classic must-choose dialog exited the app on close. Themed rendering: confirm the quit

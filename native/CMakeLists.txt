@@ -118,6 +118,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
+        # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
+        # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
@@ -180,7 +183,8 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
-            src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: `form` + TV scale/insets on the QML surfaces
+            # FormFactor is now in the unconditional app source list above (Settings/RetroView need it in
+            # the no-QML build too). It still drives `form` + TV scale/insets on the QML surfaces here.
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
@@ -386,6 +390,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
         src/core/GamelistStore.cpp src/core/Settings.cpp
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)

@@ -60,6 +60,11 @@ RetroView::RetroView(QWidget* parent) : QWidget(parent)
     timer_ = new QTimer(this);
     connect(timer_, &QTimer::timeout, this, &RetroView::tick);
 
+    // Re-resolve virtual-pad visibility if the form factor flips at runtime (e.g. TV<->Mobile in settings),
+    // even mid-game before the pad has ever been created. Wired here (not in ensureVirtualPad) so a flip to
+    // Mobile shows the pad without needing an Esc-menu visit first. updateVirtualPad() is null-safe on vpad_.
+    connect(&FormFactor::instance(), &FormFactor::changed, this, [this] { updateVirtualPad(); });
+
     loadVideoFilter();
     buildMenu();
 }
@@ -1744,8 +1749,8 @@ void RetroView::ensureVirtualPad()
     vpad_ = new VirtualPad(this);
     vpad_->setGeometry(rect());
     connect(vpad_, &VirtualPad::maskChanged, this, &RetroView::setVirtualPadMask);
-    // Re-resolve visibility if the form factor flips at runtime (e.g. TV<->Mobile in settings).
-    connect(&FormFactor::instance(), &FormFactor::changed, this, [this] { updateVirtualPad(); });
+    // (The FormFactor::changed -> updateVirtualPad() wiring lives in the constructor so a mid-game mode flip
+    // shows the pad before it has ever been created — see RetroView::RetroView.)
 }
 
 void RetroView::updateVirtualPad()
