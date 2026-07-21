@@ -1,7 +1,8 @@
 # Phase 3, Subsystem B — Themed Content Surfaces Design
 
 **Date:** 2026-07-19
-**Status:** B1 complete: detail + 4 readers themed on the contract; classic retired from themed flows. B2 (settings + hardening) next.
+**Status:** Subsystem B complete: B1 + B2 — themed everywhere, classic paths deprecation-logged, themed default ON. Subsystem D (TV+mobile) next.
+  _(Task 7 no-classic capstone walk: 40+ themed surfaces driven live, zero classic surfaces reachable except the one recorded below — Appearance, which is deprecation-logged. Full probe suite green, perf flat vs the B2T6 perf-track baseline, watchdog clean.)_
 **Builds on:** `2026-07-18-nav-contract-design.md` (subsystem A complete: NavGraph contract,
 declared edges, two-state inputs, one Back router, watchdog)
 
@@ -150,6 +151,38 @@ panel-polish pass.
   (one `label` + one right-hand `value`) can't carry that guidance, so it was dropped from the themed panel.
   Needs either a multi-line `Info`/help row kind or a dedicated help affordance before the Trakt setup flow
   is fully reachable in themed mode.
+
+### Task 7 no-classic-walk follow-ups (surfaced by the B2 capstone walk; recorded, not fixed)
+
+The capstone walk drove 40+ themed surfaces live. Every settings panel, both reader-exit origin restores,
+the Esc/pause menu, the startup + in-app profile pickers, game launch/exit, and the video player all render
+themed. The one classic surface still reachable in themed mode, plus minor observations:
+
+- **Appearance panel is still classic (the one gap).** `openAppearance()` (`MainWindow.cpp`) builds its
+  panel unconditionally via classic `showPanel` — a `QWidget` with the themed-home checkbox, a `QListWidget`
+  theme list, and a **live themed-home preview** embedded on the right. Reached from the themed Settings hub's
+  "Appearance" row (and Ctrl+Shift+A), it shows `page:QWidget pageName:settingsPanel` and logs
+  `deprecated-classic: panel:Appearance` — the ONLY `deprecated-classic` line the whole themed walk produced.
+  Every other settings panel is on `ThemedPanelHost`. Converting it is a real job (re-home the theme-list +
+  the live QML preview on the Nav Contract / `PanelRow` model), NOT a one-line routing fix, so it is recorded
+  here rather than fixed in the verification task. This is the last panel blocking B2's literal
+  "settings fully themed" goal; give it its own conversion task.
+- **`split-pane-pick` classic drop (documented inventory item, not driven).** `enterSplitScreen`'s
+  `openHereRequested` lambda still drops to the classic `HomeView` and logs `deprecated-classic:
+  split-pane-pick` if split-screen is driven. Not exercised in the walk (no split-screen driven); carry the
+  themed split-pane picker as a follow-up.
+- **Reader-exit key is inconsistent across readers.** Book and comic readers exit on Back (Backspace); the PDF
+  reader consumes Back (page-nav) and only exits on Escape. All three restore the themed origin surface, so
+  it's not a classic leak — but the exit affordance should be unified.
+- **Profile-icon mojibake.** The stored profile icon (`[profiles] list` in the ini) is a double-encoded emoji
+  (`Ã°Å¸ÂÂ¶` for 🐶); the themed home/switcher render the mojibake as-is. A stored-data/encoding issue
+  (the classic HomeView decodes it correctly), not a themed-surface bug — worth a one-time migration.
+- **Live theme-change from the (classic) Appearance panel wedges the panel host.** Selecting a different theme
+  in the classic Appearance theme list live-applies it, but Back/Escape then can't return the `ThemedPanelHost`
+  hub to the home surface (`panelDepth` sticks at 0) until a relaunch. Likely a consequence of rebuilding the
+  themed home under an open panel; folds into the Appearance-conversion task.
+- **`Xmb.qml` `still` binding-loop warning** (already noted under B1) still logs on every hero-metadata bind
+  in themed XMB, plus a missing `themes2/XMB/poster` image warning — noisy but cosmetic.
 
 ## Composition decision (Task 1 outcome)
 
