@@ -1,7 +1,7 @@
 # Subsystem D: Form-Factor Adaptivity (TV + Mobile) — Design
 
 **Date:** 2026-07-21
-**Status:** Approved design; Phase 1 planning next.
+**Status:** Phase 1 complete: TV + Mobile modes on desktop; auto+override; touch on the contract. Phase 2 (Android provisioning) next.
 **Origin:** The UI-refactor request's last clause — "All UI and Player UI should be
 intuitive on all systems such as tv or mobile" — after subsystems A (Nav Contract)
 and B (themed surfaces everywhere, themed default ON) closed.
@@ -153,3 +153,33 @@ the graph or not at all.)
 - Per-form-factor layout forks (Approach B) — one themed UI, token-adapted.
 - Per-core custom virtual-pad layouts; swipe-volume; iOS (not feasible — JIT);
   Play Store packaging; casting/netplay changes (separately tracked as unverified).
+
+## Phase 1 follow-ups (deferred from Tasks 1–7 verification)
+
+Non-blocking items surfaced during Phase 1; carry into Phase 2 planning or a polish pass:
+
+- **Xmb / Channels kinetic scroll** — these two elements are `Item` + positioned
+  Repeaters (custom slide / paged), not Views, so mobile kinetic flick was deferred
+  (tap-to-move + page arrows kept). No custom physics until there's a real need.
+- **Xmb leaf-category touch open** — a leaf category with no item column (Settings)
+  opens by tap-to-select then tap-again on the focal icon (`gotoCat` "no column → open"
+  branch); confirm this two-tap-to-open reads well on real touch hardware.
+- **Ebook (reflow) pinch** — excluded by design; pinch-to-zoom is scoped to comic/PDF
+  (`zoomDelta`) only. Revisit if reflow font-scale-by-pinch is wanted.
+- **Swipe-for-volume** — deferred player gesture (spec non-goal for Phase 1).
+- **Carousel left-edge contention** — the 12px edge-back `MouseArea` overlaps a
+  horizontal Carousel's left edge; verified fine on desktop-synth touch, wants a
+  real-device check that a genuine horizontal flick from the very edge still pages.
+- **Mixed-DPR / multi-monitor** — tokens verified at DPR 1.5; validate scale/inset
+  math across mixed-DPR displays and on a genuine phone DPR.
+- **Qt6::GuiPrivate coupling** — `mymediavault` links `Qt6::GuiPrivate` for the qpa
+  touch-synthesis header (uitest); recheck this still resolves on a Qt version bump
+  and on the Android Qt kit.
+- **grabGesture(PinchGesture) follow-up** — intentionally NOT used (non-deterministic
+  on this build); pinch reads raw two-finger separation. Revisit whether the native
+  gesture recognizer is dependable on Android before relying on it.
+- **Magic-number constants** — the 80px swipe / 12px edge / 24px slop / 350ms
+  double-tap / 15% pinch-step literals are inline; fold into named constants.
+- **probe_meta / probe_navqml first-run flake** — occasionally FAIL on the first
+  runner pass in a full-suite context (offscreen QML/GPU timing); green standalone and
+  on re-run. Pin down the warmup ordering so CI doesn't need a retry.
