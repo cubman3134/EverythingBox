@@ -458,12 +458,14 @@ static void runPanelHostReplaceTopAsserts()
 }
 
 // §18(h) — the Add-ons manager panel graph (B2 Task 6.5), pinned against the REAL ThemedPanelHost with row sets
-// mirroring the shipped shapes. Three legs the other §18 host asserts don't cover: (1) a mixed row set whose
-// leading rows include a Separator + Info dividers lands + snaps the cursor onto the first SELECTABLE row (the
-// §18(e)/(f) sets were all-Action, so divider-skipping on a fresh present was never pinned); (2) a THREE-level
-// drill (root → detail → confirm) whose remove flow pops TWO levels (handleBack ×2) and must restore the root's
-// remembered INTERIOR source row (the confirmRemoveAddon nav); (3) a masked config TextField patched in place
-// keeps its level (updateRow is in-place). All are headlessly pinnable (no MainWindow linkage needed).
+// mirroring the shipped shapes. (The remove confirm is a NavConfirm::ask overlay — Cancel focused, Back=Cancel,
+// the confirmDeleteProfile pattern — so it is NOT a panel level; the panel graph is root → detail → config plus
+// the root-nested Add-by-URL form.) Three legs the other §18 host asserts don't cover: (1) a row set whose
+// LEADING row is an Info divider lands + snaps the cursor onto the first SELECTABLE row (the §18(e)/(f) sets
+// were all-Action, so divider-skipping on a fresh present was never pinned) — the Add-by-URL shape; (2) a
+// THREE-level drill (root → detail → config) whose Backs restore each parent's remembered INTERIOR row, the
+// root's across TWO pops; (3) a masked config TextField patched in place keeps its level (updateRow is
+// in-place). All are headlessly pinnable (no MainWindow linkage needed).
 static void runAddonsPanelAsserts()
 {
     auto noop   = [](const QString&, const QString&) {};
@@ -492,41 +494,43 @@ static void runAddonsPanelAsserts()
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.about"); r.value = QStringLiteral("desc"); detail << r; }
     host.present(QStringLiteral("Addon"), detail, noop, onBack);
     CHECK(host.levelDepth() == 2 && g->index() == 0, "addons: detail lands on the Enabled toggle (first selectable)");
-    g->select(QStringLiteral("panelRows"), 2);                 // the Remove row
+    g->select(QStringLiteral("panelRows"), 1);                 // park on Configure (interior — the drill row)
 
-    // ---- Remove-confirm: two leading Info dividers + a destructive Action — the cursor SKIPS to index 2.
-    QVector<PanelRow> confirm;
-    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.msg"); r.value = QStringLiteral("Remove?"); confirm << r; }
-    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.status"); confirm << r; }
-    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("rm.confirm"); r.label = QStringLiteral("Remove"); r.destructive = true; confirm << r; }
-    host.present(QStringLiteral("Remove add-on"), confirm, noop, onBack);
-    CHECK(host.levelDepth() == 3, "addons: remove-confirm presented (depth 3)");
-    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 2,
-          "addons: confirm cursor SKIPS the two leading Info dividers to the destructive Action (index 2)");
-
-    // ---- The remove flow pops confirm + detail (handleBack ×2) to a rebuilt root; the interior source cursor (6)
-    //      must survive the double pop (confirmRemoveAddon's deferred handleBack ×2 then openLibrary rebuild).
-    host.handleBack();
-    CHECK(host.levelDepth() == 2 && g->index() == 2,
-          "addons: first Back reveals the detail, restoring its remembered Remove row (2)");
-    host.handleBack();
-    CHECK(host.levelDepth() == 1, "addons: second Back reveals the root");
-    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 6,
-          "addons: the double-pop restores the root's remembered interior source row (6)");
-    CHECK(g->validate(nullptr), "addons: the graph validates after the two-level remove-flow pop");
-
-    // ---- Config masked-field round-trip: a masked TextField is the first selectable row; updateRow patches it
-    //      IN PLACE (level unchanged); Back restores the root cursor (6).
+    // ---- Config (depth 3): a masked TextField first + a trailing Info note. Lands on the masked field;
+    //      updateRow patches it IN PLACE (level unchanged) — the credentials round-trip shape.
     QVector<PanelRow> cfg;
     { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; cfg << r; }
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.value = QStringLiteral("plaintext note"); cfg << r; }
     host.present(QStringLiteral("Config"), cfg, noop, onBack);
-    CHECK(host.levelDepth() == 2 && g->index() == 0, "addons: config lands on the masked TextField (first selectable)");
+    CHECK(host.levelDepth() == 3 && g->index() == 0, "addons: config lands on the masked TextField (first selectable)");
     { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; r.value = QStringLiteral("secret");
       host.updateRow(QStringLiteral("cfg:sspassword"), r); }
-    CHECK(host.levelDepth() == 2, "addons: updateRow on the masked config field keeps the level (in place)");
+    CHECK(host.levelDepth() == 3, "addons: updateRow on the masked config field keeps the level (in place)");
+
+    // ---- Backs restore each parent's remembered interior row: config → detail (Configure, 1), detail → root
+    //      (source row 6 — surviving TWO pops from the innermost level).
     host.handleBack();
-    CHECK(host.levelDepth() == 1 && g->index() == 6, "addons: Back from config restores the root cursor (6)");
+    CHECK(host.levelDepth() == 2 && g->index() == 1,
+          "addons: Back from config restores the detail's remembered Configure row (1)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1, "addons: second Back reveals the root");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 6,
+          "addons: the root's remembered interior source row (6) survives the two-level drill");
+    CHECK(g->validate(nullptr), "addons: the graph validates after the drill unwinds");
+
+    // ---- Add-by-URL (root-nested): the LEADING row is an Info divider (the hint), so a fresh present must
+    //      SKIP it and land on the TextField (index 1) — the divider-skip-on-present pin.
+    QVector<PanelRow> addurl;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.hint"); r.value = QStringLiteral("Its manifest.json or base URL"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = QStringLiteral("URL"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.status"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("au.add"); r.label = QStringLiteral("Add"); addurl << r; }
+    host.present(QStringLiteral("Add by URL"), addurl, noop, onBack);
+    CHECK(host.levelDepth() == 2, "addons: Add-by-URL presented over the root (depth 2)");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 1,
+          "addons: Add-by-URL SKIPS the leading Info divider and lands on the URL TextField (index 1)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1 && g->index() == 6, "addons: Back from Add-by-URL restores the root cursor (6)");
 }
 
 // §18(g) — ThemeView-level pins (B2 Task 6 hardening): the two behaviours that live in ThemeView.qml itself and

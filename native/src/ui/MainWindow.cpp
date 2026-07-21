@@ -2610,9 +2610,11 @@ void MainWindow::presentAddonConfig(const AddonManifest& manifest)
     updateNavForPage();
 }
 
-// Nested remove-confirm (Info message + a status Info row + a destructive Remove Action). Back CANCELS (never
-// removes — the confirm is a deliberate drill). On confirm: removeAddon (delete files) or removeRemoteSource
-// (drop the URL), then pop the confirm + detail back to a freshly rebuilt root (the removed source is gone).
+// Remove confirm: the canonical NavConfirm::ask card — Cancel FOCUSED (focusIndex 0), Back = Cancel — matching
+// confirmDeleteProfile. NOT a panel whose only selectable row is the destructive Action: there the cursor
+// auto-lands on Remove, so a rapid double-activate (open confirm → confirm) could remove with the card only
+// flashed; classic's QDialogButtonBox never pre-focused the destructive button either. On confirm:
+// removeAddon (delete files) or removeRemoteSource (drop the URL), pop the detail, rebuild the root.
 void MainWindow::confirmRemoveAddon(const QString& sourceId)
 {
     LoadedAddon* s = addons_->sourceById(sourceId);
@@ -2622,32 +2624,22 @@ void MainWindow::confirmRemoveAddon(const QString& sourceId)
     const QString addonId = s->manifest.id;
     const QString baseUrl = s->baseUrl;
 
-    QVector<PanelRow> rows;
-    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.msg"); r.label = tr("Remove");
-      r.value = remote ? tr("Remove the remote source \"%1\"? Only the saved URL is removed.").arg(name)
-                       : tr("Remove \"%1\" and delete its files?").arg(name); rows << r; }
-    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("rm.status"); rows << r; }
-    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("rm.confirm"); r.label = tr("Remove");
-      r.destructive = true; rows << r; }
+    const int choice = NavConfirm::ask(tr("Remove add-on"),
+        remote ? tr("Remove the remote source \"%1\"? Only the saved URL is removed.").arg(name)
+               : tr("Remove \"%1\" and delete its files?").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice != 1) return;                                     // cancelled / backed out — nothing touched
 
-    themedPanelHost_->present(tr("Remove add-on"), rows,
-        [this, addonId, baseUrl, name, remote](const QString& id, const QString&) {
-            if (id != QStringLiteral("rm.confirm")) return;
-            const bool ok = remote ? addons_->removeRemoteSource(baseUrl) : addons_->removeAddon(addonId);
-            if (!ok) { updatePanelInfo(QStringLiteral("rm.status"), tr("Couldn't remove \"%1\".").arg(name)); return; }
-            // Removed: pop the confirm + the detail (deferred so this activate() unwinds first), landing on a
-            // rebuilt root. removeRemoteSource emits sourcesChanged synchronously, but "Remove add-on" is top
-            // at that instant so the root's top-gated handler drops it — this deferred rebuild is the refresh.
-            QTimer::singleShot(0, this, [this, name] {
-                themedPanelHost_->handleBack();   // pop the confirm -> the addon detail
-                themedPanelHost_->handleBack();   // pop the detail  -> the root ("Add-ons")
-                openLibrary();                    // root now top -> replaceTop with the source gone
-                setAddonsStatus(tr("Removed \"%1\".").arg(name));
-            });
-        },
-        [] { /* nested: Back cancels — the user's add-ons are never touched */ });
-    stack_->setCurrentWidget(themedPanelHost_);
-    updateNavForPage();
+    const bool ok = remote ? addons_->removeRemoteSource(baseUrl) : addons_->removeAddon(addonId);
+    if (!ok) { notify(tr("Couldn't remove \"%1\".").arg(name)); return; }
+    // Removed: pop the detail (deferred so the activation unwinds first), landing on a rebuilt root.
+    // removeRemoteSource emits sourcesChanged synchronously, but the detail is top at that instant so the
+    // root's top-gated handler drops it — this deferred rebuild is the refresh.
+    QTimer::singleShot(0, this, [this, name] {
+        themedPanelHost_->handleBack();   // pop the detail -> the root ("Add-ons")
+        openLibrary();                    // root now top -> replaceTop with the source gone
+        setAddonsStatus(tr("Removed \"%1\".").arg(name));
+    });
 }
 
 // Add-by-URL nested panel: a URL TextField (via the OSK) + an Add Action → mgr_->addRemoteSource (ASYNC). The
