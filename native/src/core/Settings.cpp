@@ -119,6 +119,26 @@ void Settings::setDisplayMode(const QString& mode)
 {
     store().setValue(QStringLiteral("display/mode"), mode); store().sync();
 }
+QString Settings::virtualPad() { return store().value(QStringLiteral("emu/virtualPad"), QStringLiteral("auto")).toString(); }
+void Settings::setVirtualPad(const QString& mode)
+{
+    store().setValue(QStringLiteral("emu/virtualPad"), mode); store().sync();
+}
+bool Settings::virtualPadEnabled()
+{
+    const QString v = virtualPad();
+    if (v == QStringLiteral("on"))  return true;
+    if (v == QStringLiteral("off")) return false;
+    return displayMode() == QStringLiteral("mobile"); // "auto": on for the touch (Mobile) form factor
+}
+int Settings::virtualPadOpacity()
+{
+    return qBound(0, store().value(QStringLiteral("emu/virtualPadOpacity"), 45).toInt(), 100);
+}
+void Settings::setVirtualPadOpacity(int pct)
+{
+    store().setValue(QStringLiteral("emu/virtualPadOpacity"), qBound(0, pct, 100)); store().sync();
+}
 bool Settings::tvPromptDone() { return store().value(QStringLiteral("display/tvPromptDone"), false).toBool(); }
 void Settings::setTvPromptDone(bool done)
 {

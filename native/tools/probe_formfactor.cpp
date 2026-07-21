@@ -111,6 +111,26 @@ int main(int argc, char** argv)
     CHECK(ff.hitClamp(40) == 46);   // int(40*1.15)=46 (> floor 44)
     CHECK(ff.hitClamp(20) == 44);   // int(20*1.15)=23 -> floored up to 44
 
+    // 6. Virtual gamepad settings seam (D1 Task 6). resolveInput's OR-in and the overlay itself need a live
+    // GL RetroView (not headless-probeable — see the report), but the visibility/opacity contract the emulator
+    // reads IS self-contained in Settings, so pin it here: tri-state override + auto->Mobile resolution +
+    // opacity default/clamp.
+    Settings::setVirtualPad(QStringLiteral("auto"));
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    CHECK(!Settings::virtualPadEnabled());                 // auto + non-mobile => hidden
+    Settings::setDisplayMode(QStringLiteral("mobile"));
+    CHECK(Settings::virtualPadEnabled());                  // auto + mobile => shown
+    Settings::setVirtualPad(QStringLiteral("off"));
+    CHECK(!Settings::virtualPadEnabled());                 // explicit off beats mobile
+    Settings::setVirtualPad(QStringLiteral("on"));
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    CHECK(Settings::virtualPadEnabled());                  // explicit on beats non-mobile
+    CHECK(Settings::virtualPadOpacity() == 45);            // default
+    Settings::setVirtualPadOpacity(200);
+    CHECK(Settings::virtualPadOpacity() == 100);           // clamped to 0..100
+    Settings::setVirtualPadOpacity(45);
+    Settings::setVirtualPad(QStringLiteral("auto"));       // restore default so a leftover ini can't skew later
+
     if (failures == 0) { std::puts("FORMFACTOR-OK"); return 0; }
     std::fprintf(stderr, "FORMFACTOR: %d check(s) failed\n", failures);
     return 1;

@@ -31,6 +31,7 @@ class QOpenGLFramebufferObject;
 class QNetworkAccessManager;
 class NetplaySession;
 class PortMapper;
+class VirtualPad;
 
 class RetroView : public QWidget
 {
@@ -60,6 +61,7 @@ public:
     void setPaused(bool paused);          // freeze/resume emulation (used by the Esc menu)
     void setVolume(qreal v);              // 0.0..1.0 audio level (per-pane mixing in split screen)
     void setInputActive(bool active);     // when false, ignore controller/keyboard (unfocused split pane)
+    void setVirtualPadMask(quint32 m) { virtualPad_ = m; } // on-screen pad -> held RetroPad bits (port 0)
     void setAchievements(class Achievements* a) { ach_ = a; } // RetroAchievements (full-screen emulator only)
     // Show a RetroAchievements unlock toast (badge + title + points) over the game. Queues if one is already up.
     void showAchievement(const QString& title, const QString& description, int points, const QString& badgeUrl);
@@ -174,6 +176,7 @@ private:
     QString coreName_;        // the bare core id of the running game (for the netplay handshake)
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
+    quint32 virtualPad_ = 0;    // held RetroPad bitmask from the on-screen virtual gamepad (port 0), OR'd in resolveInput
     bool running_ = false;
     bool paused_ = false;
     bool inputActive_ = true; // false = a backgrounded split pane (no controller/keyboard)
@@ -212,6 +215,14 @@ private:
     QPushButton* diskBtn_ = nullptr;    // "Disk" entry, shown only when the core has a disk-control interface
     QPushButton* optBtn_ = nullptr;     // "Core Options" entry, shown only when the core exposes options
     QScrollArea* subScroll_ = nullptr;  // the scroll area of a scrollable sub-page (core options), for focus-follow
+
+    // ---- on-screen virtual gamepad (touch form factors) ----
+    VirtualPad* vpad_ = nullptr;        // child overlay; emits maskChanged -> setVirtualPadMask
+    void ensureVirtualPad();            // build vpad_ on demand and wire it
+    void updateVirtualPad();            // apply visibility (enabled || Mobile) + opacity, resize to fill
+    bool virtualPadShouldShow() const;  // Settings override on, or auto + Mobile form factor
+    QPushButton* vpadBtn_ = nullptr;    // Esc-menu "Virtual Pad: Auto/On/Off" cycle row
+    QPushButton* vpadOpacityBtn_ = nullptr; // Esc-menu "Pad Opacity: N%" cycle row
 
     struct Cheat { QString desc; QString code; bool enabled = true; }; // one per-game cheat
     QVector<Cheat> cheats_;             // this game's cheats (persisted per ROM)

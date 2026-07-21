@@ -55,6 +55,15 @@ namespace Settings
     bool    tvPromptDone();                   // key "display/tvPromptDone", default false
     void    setTvPromptDone(bool done);
 
+    // On-screen virtual gamepad (touch form factors). Tri-state override stored as "auto"|"on"|"off":
+    // "auto" (default) shows it only in the Mobile form factor, "on" always, "off" never. Opacity is 0..100
+    // (default 45). virtualPadEnabled() is the resolved boolean the emulator uses to decide visibility.
+    QString virtualPad();                     // key "emu/virtualPad", default "auto"
+    void    setVirtualPad(const QString& mode);
+    bool    virtualPadEnabled();              // "on" || ("auto" && displayMode()=="mobile")
+    int     virtualPadOpacity();              // key "emu/virtualPadOpacity", 0..100, default 45
+    void    setVirtualPadOpacity(int pct);
+
     // Check GitHub for a newer app release on startup (default on). The check is silent unless one is found.
     bool checkUpdatesOnStartup();
     void setCheckUpdatesOnStartup(bool on);
