@@ -1,6 +1,7 @@
 {
   "name": "Grid",
   "author": "My Media Vault",
+  "settingsPanel": { "background": "#12141A", "panel": "#191C24", "row": "#1C2028", "rowSelected": "#26304A", "accent": "#5B7FE0", "text": "#FFFFFF", "dim": "#9AA3B4", "separator": "#767E90", "warning": "#E0524E" },
   "views": {
     "home": {
       "background": { "color": "#12141A", "dim": 0 },

@@ -18,6 +18,7 @@
 #include "../core/Achievements.h"
 #include "ControllerRemapDialog.h"
 #include "../addons/AddonManager.h"
+#include "../addons/AddonContext.h"
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
@@ -63,6 +64,7 @@
 #include <QAbstractSpinBox>
 #include <QScrollBar>
 #include "SettingsDialog.h"
+#include "../libretro/LibretroCore.h"   // themed core-options editor reads CoreOption headlessly (B2 Task 5)
 
 #include <QWidget>
 #include <QStackedWidget>
@@ -122,6 +124,8 @@
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ReaderChromeHost.h"
+#include "../theme2/ThemedPanelHost.h"
+#include "../theme2/PanelModel.h"
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
@@ -315,9 +319,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     });
     // Live progress: update the open panel's bars/labels in place (a full rebuild would steal focus).
     connect(dm_, &DownloadManager::jobProgress, this, &MainWindow::updateDownloadRow);
-    // State changes (queued/active/failed/removed) change which buttons a row needs, so rebuild the panel.
+    // State changes (queued/active/failed/removed) change the row SET (a job added/removed, empty-state toggling,
+    // Clear-finished appearing) — and, in themed mode, the action-chooser contents — so rebuild the panel.
     connect(dm_, &DownloadManager::changed, this, [this] {
         if (dlPanelOpen_ && stack_->currentWidget() == panelPage_) openDownloadManager();
+#ifdef MMV_HAVE_QML
+        else if (themedPanelIsTop(tr("Downloads"))) openDownloadManager();   // themed: replaceTop (reentry) below
+#endif
     });
     PerfTrace::end(QStringLiteral("startup.addons"));
 
@@ -366,6 +374,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stack_->addWidget(comicHost_); // index 6 - comic (CBZ) reader (via host)
 #else
     stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
+#endif
+#ifdef MMV_HAVE_QML
+    // The themed settings-panel surface (B2): a persistent stack page rendering PanelRow lists through the Nav
+    // Contract, used in themed mode instead of the classic showPanel widget panel. Classic mode never shows it.
+    themedPanelHost_ = new ThemedPanelHost(this);
+    themedPanelHost_->setObjectName(QStringLiteral("themedPanelHost"));
+    stack_->addWidget(themedPanelHost_);
 #endif
 
     // Inline settings panel page (Settings / Theme / Cloud Sync / General live here instead of popups).
@@ -810,6 +825,31 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (comicHost_)  comicHost_->onLeaving();
 #endif
         book_->persist(); pdf_->persist(); comic_->persist();
+        // Return to the surface the reader was opened FROM, not a hardcoded home (B2 Task 6, item 1). The reader
+        // is a separate stack page, so the themed home/browse it was launched off still holds its exact view
+        // (detail if opened from detail, browse otherwise) and cursor — just switch back to it. A classic-mode
+        // or unknown origin falls back to the classic HomeView (the original behaviour, which also preserves the
+        // list position by NOT rebuilding it).
+        QWidget* origin = readerOrigin_;
+        readerOrigin_ = nullptr;
+#ifdef MMV_HAVE_QML
+        if (themedHomeEnabled())
+        {
+            if (origin && (origin == themedHome_ || origin == themedBrowse_))
+            {
+                stack_->setCurrentWidget(origin);
+                origin->setFocus();
+                return;
+            }
+            // Null/foreign origin in THEMED mode (e.g. a reader opened off the Library page or before any
+            // capture): route through showHomeScreen() — the themed home, or its LOGGED classic fallback —
+            // instead of silently landing on the raw classic home_ (B2 Task 6 fix round).
+            showHomeScreen();
+            return;
+        }
+#endif
+        // Classic mode: the original behaviour — the classic HomeView WITHOUT a refresh, so the chapter/catalog
+        // list you came from keeps its position.
         stack_->setCurrentWidget(home_);
         home_->focusContent();
     };
@@ -886,6 +926,27 @@ MainWindow::~MainWindow() = default; // AddonManager is complete in this transla
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
+#ifdef MMV_HAVE_QML
+    // Themed input-mapping CAPTURE: while active this is installed on qApp, so it sees keys before the themed
+    // QQuickWidget's QML nav. Swallow all key traffic (modal capture): Esc cancels, a keyboard key binds, the
+    // pad button arrives via the poll timer. (ShortcutOverride too, so a key can't trigger a shortcut instead.)
+    // MOUSE is modal too: SettingsPanel.qml's MouseAreas drive the graph directly (row clicks + the header
+    // "‹ Back"), so an unswallowed click would navigate/activate WITHOUT ending capture — leaking this filter
+    // (every keystroke app-wide swallowed), leaving the pad timer polling, and arming the NEXT key as a silent
+    // binding write for a row that may no longer be shown. A press CANCELS the capture and is consumed (the
+    // click does not also activate — the first click just cancels, like Esc); release/dblclick/wheel are
+    // consumed so no orphan half-click reaches the page behind.
+    if (remap_.active)
+    {
+        const QEvent::Type t = event->type();
+        if (t == QEvent::KeyPress)   return inputCaptureKeyFilter(static_cast<QKeyEvent*>(event));
+        if (t == QEvent::KeyRelease || t == QEvent::ShortcutOverride) return true;
+        if (t == QEvent::MouseButtonPress || t == QEvent::MouseButtonDblClick)
+        { endInputCapture(/*cancelled*/ true); return true; }
+        if (t == QEvent::MouseButtonRelease || t == QEvent::Wheel) return true;
+    }
+#endif
+
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
         revealMediaControls();
@@ -1006,6 +1067,11 @@ void MainWindow::sendNavKey(int key)
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
+#ifdef MMV_HAVE_QML
+    // 4.2. The themed settings-panel host is a QQuickWidget too — hand it the key; SettingsPanel.qml's Keys
+    //      handler drives its NavGraph (arrows / Enter) AND its own Back (nav.back() pops one panel level).
+    if (themedPanelHost_ && cur == themedPanelHost_) { deliver(themedPanelHost_->quickWidget(), key); return; }
+#endif
     // 4.5. The themed reader hosts: hand the key to the wrapped reader widget — its installed chrome event
     //      filter arbitrates (drive the graph while the chrome is visible, reveal on Up, else let the reader
     //      page/zoom). Back is caught by that same filter, so this covers the reader's Back rule too.
@@ -1074,11 +1140,16 @@ void MainWindow::goBack()
     // The themed reader host owns its own Back rule (chrome visible -> hide; hidden -> pop the reader level,
     // which returns us home). Route to it before the plain reader case below.
 #ifdef MMV_HAVE_QML
+    // The themed settings-panel host owns its own Back (pop one panel level; at the root, its onBack leaves to
+    // the home screen). Route to it before the plain-reader/other cases below.
+    if (themedPanelHost_ && cur == themedPanelHost_) { themedPanelHost_->handleBack(); return; }
     if (readerHost_ && cur == readerHost_) { readerHost_->handleBack(); return; }
     if (pdfHost_    && cur == pdfHost_)    { pdfHost_->handleBack();    return; }
     if (comicHost_  && cur == comicHost_)  { comicHost_->handleBack();  return; }
 #endif
-    // Readers: back to the home they were opened from (persist positions first).
+    // CLASSIC-mode readers only: in themed mode the reader is a ReaderChromeHost page (handled above), whose
+    // exit routes through returnFromReader with origin-restore. A raw book_/pdf_/comic_ page is reachable only
+    // in a non-QML build (or classic mode), where the classic HomeView is always the right destination.
     if (cur == book_ || cur == pdf_ || cur == comic_)
     { book_->persist(); pdf_->persist(); comic_->persist(); stack_->setCurrentWidget(home_); home_->focusContent(); return; }
     // Standalone-emulator wait page: close the emulator.
@@ -1100,8 +1171,20 @@ void MainWindow::goBack()
 // Show the just-opened book: themed mode wraps it in the chrome host (themed strips on the Nav Contract),
 // classic mode shows it with its own widget chrome. The host is a persistent stack page that already holds
 // book_; present() only toggles which chrome is live, so there's no reparenting churn per open.
+// Remember which surface a reader is being opened from, so its exit can return there (B2 Task 6, item 1). Only
+// captured when we're NOT already inside a reader: a stream-issue re-open (next source) re-presents while a
+// reader host is current, and must keep the ORIGINAL origin, not overwrite it with the reader page itself.
+void MainWindow::captureReaderOrigin()
+{
+    QWidget* cur = stack_->currentWidget();
+    const bool inReader = (readerHost_ && cur == readerHost_) || (pdfHost_ && cur == pdfHost_)
+                       || (comicHost_ && cur == comicHost_) || cur == book_ || cur == pdf_ || cur == comic_;
+    if (!inReader) readerOrigin_ = cur;
+}
+
 void MainWindow::presentBook()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (readerHost_)
     {
@@ -1115,6 +1198,7 @@ void MainWindow::presentBook()
 
 void MainWindow::presentPdf()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (pdfHost_)
     {
@@ -1128,6 +1212,7 @@ void MainWindow::presentPdf()
 
 void MainWindow::presentComic()
 {
+    captureReaderOrigin();
 #ifdef MMV_HAVE_QML
     if (comicHost_)
     {
@@ -1186,6 +1271,10 @@ void MainWindow::updateNavForPage()
                               : (comicHost_  && cur == comicHost_)  ? comicHost_ : nullptr;
     if (!pageGraph && curHost && curHost->themed())
         pageGraph = curHost->navGraph();
+    // The themed settings-panel host owns its own selection surface too — register its graph so the kit marks
+    // the page navigable (its Back arrives via sendNavKey delivering to the QQuickWidget, so no back action here).
+    if (!pageGraph && themedPanelHost_ && cur == themedPanelHost_)
+        pageGraph = themedPanelHost_->navGraph();
     navCtx_->setActiveGraph(pageGraph);
 #endif
 }
@@ -1309,6 +1398,19 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("readerPageCount"), rh->readerPageCount());
             if (rh->kind() == ReaderKind::Book) o.insert(QStringLiteral("readerFont"), book_->fontPt());
             if (rh->kind() == ReaderKind::Comic) o.insert(QStringLiteral("readerTwoUp"), rh->readerTwoUp());
+        }
+        // The themed settings-panel host: its QQuickWidget focus is opaque, so surface the graph selection +
+        // panel title + the focused row's label so panel automation is as precise as the Qt panels.
+        if (themedPanelHost_ && cur == themedPanelHost_)
+        {
+            o.insert(QStringLiteral("panelTitle"), themedPanelHost_->panelTitle());
+            o.insert(QStringLiteral("panelDepth"), themedPanelHost_->levelDepth());
+            if (NavGraph* pg = themedPanelHost_->navGraph())
+            {
+                o.insert(QStringLiteral("panelZone"), pg->zone());
+                o.insert(QStringLiteral("panelIndex"), pg->index());
+            }
+            o.insert(QStringLiteral("panelFocus"), themedPanelHost_->focusedRowLabel());
         }
 #endif
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
@@ -1640,6 +1742,12 @@ void MainWindow::changeEvent(QEvent* event)
 void MainWindow::promptStartupProfile()
 {
     startupChooseProfile_ = false;
+#ifdef MMV_HAVE_QML
+    // Themed mode: render the picker on the Nav Contract (ThemedPanelHost) instead of hosting the classic
+    // ProfileDialog. The host is a persistent stack page constructed in the ctor (independent of themedHome_,
+    // which openHome builds AFTER a profile is chosen) — so it can present pre-home. mustChoose = no Back escape.
+    if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
+#endif
     auto* dlg = new ProfileDialog(/*mustChoose*/ true, this);
     showDialogPanel(tr("Who's using My Media Vault?"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
@@ -1964,6 +2072,98 @@ void MainWindow::ensureEmuPage()
 
 void MainWindow::openEmulatorManager()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: folder Info row + Change… Action (native QFileDialog — the documented exception) + fullscreen
+    // Toggle (same setter) + per-emulator Separator (display name) + status Info row (installed path / "Not
+    // installed.") + Download/Update Action + Launch Action — the SAME launcher_->install()/runEmulator() calls
+    // as classic. Install progress: GameLauncher forwards EmulatorManager::status; we patch the installing
+    // emulator's status row in place (top-gated via panelPageConns_ per the lifetime model at openCloudSync's
+    // connect block), and completion/failure rebuilds so the status + button reflect the new state. Hub child ->
+    // nested present(), Back -> openSettingsHub. The classic builder below is UNTOUCHED (classic mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.folder"); r.label = tr("Folder");
+          r.value = EmulatorManager::emulatorsRoot(); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.changefolder");
+          r.label = tr("Change folder…"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("emu.fullscreen");
+          r.label = tr("Launch emulators full screen"); r.checked = EmulatorManager::launchFullscreen(); rows << r; }
+
+        for (const ExternalEmulator& em : EmulatorRegistry::all())
+        {
+            const QString bin = EmulatorManager::resolveBinary(em);
+            { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("emu.sep:") + em.id;
+              r.label = em.displayName; rows << r; }
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + em.id; r.label = tr("Status");
+              r.value = bin.isEmpty() ? tr("Not installed.") : bin; rows << r; }
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.install:") + em.id;
+              r.label = bin.isEmpty() ? tr("Download %1").arg(em.displayName)
+                                      : tr("Re-download / Update %1").arg(em.displayName); rows << r; }
+            { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("emu.launch:") + em.id;
+              r.label = tr("Launch %1").arg(em.displayName); rows << r; }
+        }
+
+        auto onAct = [this](const QString& id, const QString& val) {
+            if (id == QStringLiteral("emu.changefolder")) {
+                const QString d = QFileDialog::getExistingDirectory(this, tr("Emulators folder"),
+                                                                    EmulatorManager::emulatorsRoot());
+                if (!d.isEmpty()) { EmulatorManager::setEmulatorsRoot(d); openEmulatorManager(); }
+            }
+            else if (id == QStringLiteral("emu.fullscreen")) {
+                EmulatorManager::setLaunchFullscreen(val == QStringLiteral("1"));
+            }
+            else if (id.startsWith(QStringLiteral("emu.install:"))) {
+                const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);   // emulator ids carry no colon
+                const ExternalEmulator* em = EmulatorRegistry::byId(emId);
+                if (!em) return;
+                if (launcher_->emulatorBusy()) {
+                    statusBar()->showMessage(tr("An emulator operation is already running."), kFeedbackLong); return; }
+                emInstallId_ = emId;
+                PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emId; r.label = tr("Status");
+                r.value = tr("Downloading…"); themedPanelHost_->updateRow(r.id, r);
+                statusBar()->showMessage(tr("Downloading %1…").arg(em->displayName));
+                launcher_->install(*em);
+            }
+            else if (id.startsWith(QStringLiteral("emu.launch:"))) {
+                const QString emId = id.mid(id.indexOf(QLatin1Char(':')) + 1);
+                if (const ExternalEmulator* em = EmulatorRegistry::byId(emId)) launcher_->runEmulator(*em);
+            }
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Emulators is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("Emulators"))
+            themedPanelHost_->replaceTop(tr("Emulators"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Emulators"), rows, onAct, onBack);
+
+        // Install stream (Settings ▸ Emulators). Progress ticks patch the installing emulator's status row in
+        // place; completion rebuilds (installed path + "Re-download" label); failure shows the error on the row.
+        // Top-gated per the lifetime model — a status tick from a game-launch install (panel not up) is dropped.
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallProgress, this,
+                                   [this](const QString& t, int pct) {
+            if (!themedPanelIsTop(tr("Emulators")) || emInstallId_.isEmpty()) return;
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emInstallId_;
+            r.label = MainWindow::tr("Status"); r.value = pct >= 0 ? MainWindow::tr("%1 — %2%").arg(t).arg(pct) : t;
+            themedPanelHost_->updateRow(r.id, r); });
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallFinished, this, [this](const QString&) {
+            emInstallId_.clear();
+            if (themedPanelIsTop(tr("Emulators"))) openEmulatorManager(); });   // rebuild: now-installed state
+        panelPageConns_ << connect(launcher_, &GameLauncher::emulatorInstallFailed, this, [this](const QString& msg) {
+            if (themedPanelIsTop(tr("Emulators")) && !emInstallId_.isEmpty()) {
+                PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("emu.status:") + emInstallId_;
+                r.label = MainWindow::tr("Status"); r.value = MainWindow::tr("Failed: %1").arg(msg);
+                themedPanelHost_->updateRow(r.id, r); }
+            emInstallId_.clear(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Emulators"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Standalone emulators are kept in their own folder and launched to play "
             "their systems (Dolphin runs GameCube/Wii). They open in their own window — close the emulator "
@@ -2031,6 +2231,44 @@ void MainWindow::openEmulatorManager()
 // protocols (HLS, etc.) for both audio and video; audio-only streams show the "now playing" overlay.
 void MainWindow::openStreamPrompt()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: a URL TextField (via the OSK) + a Play Action that feeds openStreamUrl() exactly. This is a
+    // ROOT panel reached from the home flows (onRequestOpenFile "stream"), NOT a hub child — so it is a fresh
+    // reset()+present() with Back returning to home (its classic onBack).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // reset() below is a lifetime boundary too — no panel may keep async listeners
+        themedPanelHost_->reset();                        // fresh root presentation from home
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        auto pending = std::make_shared<QString>();
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.hint");
+          r.label = tr("Paste a direct http(s), HLS or .m3u/.m3u8 link"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("stream.url"); r.label = tr("Link"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.err"); r.label = tr("Status"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("stream.play"); r.label = tr("▶  Play"); rows << r; }
+
+        themedPanelHost_->present(tr("Stream from a link"), rows,
+            [this, pending](const QString& id, const QString& val) {
+                if (id == QStringLiteral("stream.url")) *pending = val;
+                else if (id == QStringLiteral("stream.play")) {
+                    const QString link = pending->trimmed();
+                    if (!link.contains(QStringLiteral("://"))) {
+                        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("stream.err"); r.label = tr("Status");
+                        r.value = tr("Enter a full http(s) link."); themedPanelHost_->updateRow(QStringLiteral("stream.err"), r);
+                        return;
+                    }
+                    openStreamUrl(link);   // leaves the host for the player page
+                }
+            },
+            [this] { openHome(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Stream from a link"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Paste a direct audio or video link (http/https, HLS, or an .m3u/.m3u8 "
                                     "playlist) to stream it."));
@@ -2168,9 +2406,480 @@ bool MainWindow::openDocumentPath(const QString& f)
 
 void MainWindow::openLibrary()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode (B2 Task 6.5): the Add-ons manager's SOURCE MANAGEMENT surface on the Nav Contract. Root rows =
+    // Browse/Install-from-file/Add-by-URL/Reload actions + a Separator + one Action per installed source (drill
+    // into presentAddonDetail). Catalog browsing / Local ROMs stay OUT of scope (the themed home covers content).
+    // Refresh is IMPERATIVE: installPackage/removeAddon/reload do NOT emit sourcesChanged (only remote add/remove
+    // + background updates do), so each mutating op re-presents the root (this is a hub child — panelTitle gates
+    // present vs replaceTop). The classic LibraryView below is UNTOUCHED (classic mode / no host).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // hub child present replaces the pool (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        QVector<PanelRow> rows;
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        action(QStringLiteral("lib.browse"),  tr("Browse Add-ons…"));
+        action(QStringLiteral("lib.install"), tr("Install from file…"));
+        action(QStringLiteral("lib.addurl"),  tr("Add by URL…"));
+        action(QStringLiteral("lib.reload"),  tr("Reload"));
+        { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("lib.sep"); r.label = tr("Sources"); rows << r; }
+
+        const QVector<LoadedAddon*>& srcs = addons_->sources();
+        if (srcs.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.none");
+            r.label = tr("No add-on sources installed yet."); rows << r;
+        }
+        else for (LoadedAddon* s : srcs)
+        {
+            QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+            if (s->transport == LoadedAddon::RemoteHttp) name += tr("  (remote)"); // distinguish URL-based sources
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + s->manifest.id;
+            r.label = name;
+            r.value = addons_->isEnabled(s->manifest.id) ? QString() : tr("disabled"); // enabled-state annotation
+            rows << r;
+        }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("lib.status"); rows << r; } // add-by-URL / op results
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("lib.browse")) presentAddonRegistry();
+            else if (id == QStringLiteral("lib.install"))
+            {
+                // Native file picker is the documented exception (like Emulator Manager's Change folder…).
+                const QString f = QFileDialog::getOpenFileName(this, tr("Install add-on"), QString(),
+                    tr("Addon packages (*.addon *.zip);;All files (*.*)"));
+                if (f.isEmpty()) return;
+                QString err;
+                if (!addons_->installPackage(f, &err)) { setAddonsStatus(tr("Install failed: %1").arg(err)); return; }
+                openLibrary();                       // root is top -> replaceTop with the new source
+                setAddonsStatus(tr("Add-on installed."));
+            }
+            else if (id == QStringLiteral("lib.addurl")) presentAddByUrl();
+            else if (id == QStringLiteral("lib.reload"))
+            {
+                addons_->reload();
+                openLibrary();                       // rebuild the source list from the re-scanned root
+                setAddonsStatus(tr("Reloaded."));
+            }
+            else if (id.startsWith(QStringLiteral("lib.src:")))
+                presentAddonDetail(id.mid(id.indexOf(QLatin1Char(':')) + 1));
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Add-ons is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("Add-ons"))
+            themedPanelHost_->replaceTop(tr("Add-ons"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Add-ons"), rows, onAct, onBack);
+
+        // Remote source changes (a successful add-by-URL/registry-remote install, a background manifest refresh /
+        // self-update) that land while THIS root is the live top rebuild the list. When a child add-flow panel is
+        // top instead, this drops (its own top-gated handler owns the row/status); the child returns to a freshly
+        // rebuilt root on success. Armed in panelPageConns_ per the lifetime model (top-gated, replaced on re-present).
+        panelPageConns_ << connect(addons_.get(), &AddonManager::sourcesChanged, this, [this] {
+            if (themedPanelIsTop(tr("Add-ons"))) openLibrary(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
+    // Classic fallback: the Add-ons manager is the classic LibraryView QWidget. This log marks that the classic
+    // surface was ACTUALLY shown (the themed branch above returns first, so themed mode never logs it — the Task 7
+    // walk greps a themed run to prove zero classic surfaces). Classic mode reaches here and logs, as expected.
+    mwLog(QStringLiteral("deprecated-classic: addons"));
     library_->refreshSources();
     stack_->setCurrentWidget(library_);
 }
+
+#ifdef MMV_HAVE_QML
+// Patch the root "Add-ons" panel's status Info row in place (op results / add-by-URL outcomes). No-ops harmlessly
+// (updateRow returns false) when the root isn't the model's top panel.
+void MainWindow::setAddonsStatus(const QString& msg) { updatePanelInfo(QStringLiteral("lib.status"), msg); }
+
+// Patch ANY Info row's value in place by id (status lines on the add-by-URL / remove / registry panels). The row
+// keeps its (empty) label; updateRow patches every stack entry carrying the id, so a backgrounded panel stays fresh.
+void MainWindow::updatePanelInfo(const QString& id, const QString& value)
+{
+    PanelRow r; r.kind = PanelRow::Info; r.id = id; r.value = value;
+    themedPanelHost_->updateRow(id, r);
+}
+
+// Per-addon nested panel: Toggle Enabled + Configure… (or an Info when the manifest declares no settings) + a
+// destructive Remove + version/author/description Info rows. All data ops reuse AddonManager verbatim. Enable/
+// disable rides mgr_->setEnabled (which emits sourceEnabledChanged → the prefetcher resweeps) and patches the
+// backgrounded root's source row so its enabled-state annotation stays correct on pop-restore.
+void MainWindow::presentAddonDetail(const QString& sourceId)
+{
+    LoadedAddon* s = addons_->sourceById(sourceId);
+    if (!s) { openLibrary(); return; }   // vanished (e.g. removed underneath us) — back to the root
+    const AddonManifest m = s->manifest;
+    const bool remote = (s->transport == LoadedAddon::RemoteHttp);
+    const QString name = m.name.isEmpty() ? m.id : m.name;
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("ad.enabled"); r.label = tr("Enabled");
+      r.checked = addons_->isEnabled(m.id); rows << r; }
+    if (!m.settings.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.configure"); r.label = tr("Configure…"); rows << r; }
+    else
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.noconfig"); r.label = tr("Configure");
+      r.value = tr("No configurable settings."); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.remove");
+      r.label = remote ? tr("Remove source") : tr("Remove add-on"); r.destructive = true; rows << r; }
+    if (!m.version.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.version"); r.label = tr("Version"); r.value = m.version; rows << r; }
+    if (!m.author.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.author"); r.label = tr("Author"); r.value = m.author; rows << r; }
+    if (!m.description.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.about"); r.label = tr("About"); r.value = m.description; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.kind"); r.label = tr("Kind");
+      r.value = remote ? tr("Remote source — %1").arg(s->baseUrl) : tr("Local add-on"); rows << r; }
+
+    auto onAct = [this, sourceId, m, name, remote](const QString& id, const QString& val) {
+        if (id == QStringLiteral("ad.enabled"))
+        {
+            const bool on = (val == QStringLiteral("1"));
+            addons_->setEnabled(m.id, on);   // emits sourceEnabledChanged → prefetcher resweep (verified via log)
+            // Keep the backgrounded root's source-row annotation correct for the pop-restore.
+            QString label = m.name.isEmpty() ? m.id : m.name;
+            if (remote) label += tr("  (remote)");
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("lib.src:") + m.id; r.label = label;
+            r.value = on ? QString() : tr("disabled");
+            themedPanelHost_->updateRow(r.id, r);
+        }
+        else if (id == QStringLiteral("ad.configure")) presentAddonConfig(m);
+        else if (id == QStringLiteral("ad.remove"))    confirmRemoveAddon(sourceId);
+    };
+    themedPanelHost_->present(name, rows, onAct, [this] { openLibrary(); }); // defensive root onBack
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+// Manifest-driven config form (nested on the addon detail): one row per AddonSetting — checkbox → Toggle,
+// password → masked TextField (OSK masks during editing too), number/text → TextField. Values load via
+// AddonContext::readConfig; each commit writes via AddonContext::writeConfig IMMEDIATELY (the themed-panel
+// convention — the addon's script picks the new value up on its next run, like classic's post-Save re-fetch). A
+// footer Info row carries the plaintext-storage note (the landmine). NO devid/devpassword special-casing — the
+// form is strictly manifest-driven (absent fields simply don't appear).
+void MainWindow::presentAddonConfig(const AddonManifest& manifest)
+{
+    const QString name = manifest.name.isEmpty() ? manifest.id : manifest.name;
+
+    QVector<PanelRow> rows;
+    if (manifest.settings.isEmpty())
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.none");
+      r.label = tr("This add-on has no configurable settings."); rows << r; }
+    else for (const AddonSetting& sset : manifest.settings)
+    {
+        const QString stored = AddonContext::readConfig(manifest.id, sset.key, sset.defaultValue);
+        PanelRow r; r.id = QStringLiteral("cfg:") + sset.key; r.label = sset.label.isEmpty() ? sset.key : sset.label;
+        if (sset.type == QStringLiteral("checkbox"))
+        {
+            r.kind = PanelRow::Toggle;
+            r.checked = (stored.compare(QStringLiteral("true"), Qt::CaseInsensitive) == 0 || stored == QStringLiteral("1"));
+        }
+        else
+        {
+            r.kind = PanelRow::TextField;
+            r.value = stored;
+            if (sset.type == QStringLiteral("password")) r.masked = true; // dots in the row AND in the OSK editor
+        }
+        rows << r;
+    }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.label = tr("Note");
+      r.value = tr("Credentials are stored on this device (plaintext in mymediavault.ini) and are only sent "
+                   "where the add-on's script chooses to use them."); rows << r; }
+
+    themedPanelHost_->present(tr("%1 — Settings").arg(name), rows,
+        [this, manifest](const QString& id, const QString& val) {
+            if (!id.startsWith(QStringLiteral("cfg:"))) return;
+            const QString key = id.mid(4);
+            QString value = val;
+            // Toggle delivers "1"/"0"; convert ONLY for a checkbox setting (a text/password field's literal
+            // "0"/"1" must be stored verbatim). Look the type up from the manifest to disambiguate.
+            for (const AddonSetting& sset : manifest.settings)
+                if (sset.key == key && sset.type == QStringLiteral("checkbox"))
+                { value = (val == QStringLiteral("1")) ? QStringLiteral("true") : QStringLiteral("false"); break; }
+            AddonContext::writeConfig(manifest.id, key, value);
+        },
+        [] { /* nested: Back pops to the addon detail */ });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+// Remove confirm: the canonical NavConfirm::ask card — Cancel FOCUSED (focusIndex 0), Back = Cancel — matching
+// confirmDeleteProfile. NOT a panel whose only selectable row is the destructive Action: there the cursor
+// auto-lands on Remove, so a rapid double-activate (open confirm → confirm) could remove with the card only
+// flashed; classic's QDialogButtonBox never pre-focused the destructive button either. On confirm:
+// removeAddon (delete files) or removeRemoteSource (drop the URL), pop the detail, rebuild the root.
+void MainWindow::confirmRemoveAddon(const QString& sourceId)
+{
+    LoadedAddon* s = addons_->sourceById(sourceId);
+    if (!s) { openLibrary(); return; }
+    const QString name = s->manifest.name.isEmpty() ? s->manifest.id : s->manifest.name;
+    const bool remote = (s->transport == LoadedAddon::RemoteHttp);
+    const QString addonId = s->manifest.id;
+    const QString baseUrl = s->baseUrl;
+
+    const int choice = NavConfirm::ask(tr("Remove add-on"),
+        remote ? tr("Remove the remote source \"%1\"? Only the saved URL is removed.").arg(name)
+               : tr("Remove \"%1\" and delete its files?").arg(name),
+        { tr("Cancel"), tr("Remove") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice != 1) return;                                     // cancelled / backed out — nothing touched
+
+    const bool ok = remote ? addons_->removeRemoteSource(baseUrl) : addons_->removeAddon(addonId);
+    if (!ok) { notify(tr("Couldn't remove \"%1\".").arg(name)); return; }
+    // Removed: pop the detail (deferred so the activation unwinds first), landing on a rebuilt root.
+    // removeRemoteSource emits sourcesChanged synchronously, but the detail is top at that instant so the
+    // root's top-gated handler drops it — this deferred rebuild is the refresh.
+    QTimer::singleShot(0, this, [this, name] {
+        themedPanelHost_->handleBack();   // pop the detail -> the root ("Add-ons")
+        openLibrary();                    // root now top -> replaceTop with the source gone
+        setAddonsStatus(tr("Removed \"%1\".").arg(name));
+    });
+}
+
+// Add-by-URL nested panel: a URL TextField (via the OSK) + an Add Action → mgr_->addRemoteSource (ASYNC). The
+// result arrives on AddonManager::remoteSourceResult; a top-gated handler (armed here in panelPageConns_) shows
+// it on the status Info row — an invalid URL surfaces the error with no wedge. On success it pops back to a
+// freshly rebuilt root so the new source appears.
+void MainWindow::presentAddByUrl()
+{
+    auto pending = std::make_shared<QString>();
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.hint"); r.label = tr("Add-on URL");
+      r.value = tr("Its manifest.json or base URL"); rows << r; }
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = tr("URL");
+      r.value = *pending; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.status"); rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("au.add"); r.label = tr("Add"); rows << r; }
+
+    themedPanelHost_->present(tr("Add by URL"), rows,
+        [this, pending](const QString& id, const QString& val) {
+            if (id == QStringLiteral("au.url")) *pending = val;
+            else if (id == QStringLiteral("au.add"))
+            {
+                const QString url = pending->trimmed();
+                if (url.isEmpty()) { updatePanelInfo(QStringLiteral("au.status"), tr("Enter an add-on URL.")); return; }
+                updatePanelInfo(QStringLiteral("au.status"), tr("Fetching add-on…"));
+                addons_->addRemoteSource(url);   // async → remoteSourceResult (handled below)
+            }
+        },
+        [] { /* nested: Back pops to the root */ });
+
+    // Result handler, top-gated on THIS panel (per the lifetime model). Failure surfaces on the status row and
+    // stays put (no wedge); success shows the message then returns to a rebuilt root so the new source is visible.
+    panelPageConns_ << connect(addons_.get(), &AddonManager::remoteSourceResult, this,
+        [this](bool ok, const QString& msg) {
+            if (!themedPanelIsTop(tr("Add by URL"))) return;   // a different add-flow (registry) is top — not ours
+            updatePanelInfo(QStringLiteral("au.status"), msg);
+            if (ok) QTimer::singleShot(700, this, [this] {
+                if (!themedPanelIsTop(tr("Add by URL"))) return;
+                themedPanelHost_->handleBack();   // pop to the root
+                openLibrary();                    // rebuild with the new source (sourcesChanged also fired, but
+            });                                   // the root wasn't top then, so this is the refresh)
+        });
+
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+}
+
+namespace {
+// The built-in add-on registry (the always-present cubman3134 store index).
+QString addonsRegistryDefaultUrl()
+{ return QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-addons/main/index.json"); }
+// The directory an index URL lives in (its files are resolved relative to this).
+QString registryBaseUrl(const QString& indexUrl)
+{ const int slash = indexUrl.lastIndexOf(QLatin1Char('/')); return slash > 0 ? indexUrl.left(slash) : indexUrl; }
+// A registry entry with a "url" is a remote (HTTP) add-on: installing it just subscribes to the URL.
+bool registryEntryIsRemote(const QJsonObject& e) { return !e.value(QStringLiteral("url")).toString().isEmpty(); }
+QString registryNormalizeUrl(QString u)
+{
+    u = u.trimmed();
+    if (u.endsWith(QStringLiteral("/manifest.json"))) u.chop(int(qstrlen("/manifest.json")));
+    while (u.endsWith(QLatin1Char('/'))) u.chop(1);
+    return u;
+}
+// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
+bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+{
+    QNetworkRequest req((QUrl(url)));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QNetworkReply* reply = nam->get(req);
+    QEventLoop loop;
+    QTimer to; to.setSingleShot(true);
+    QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
+    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    to.start(20000);
+    loop.exec();
+    if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
+    {
+        if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
+        reply->abort(); reply->deleteLater();
+        return false;
+    }
+    const QByteArray data = reply->readAll();
+    reply->deleteLater();
+    QFileInfo fi(destPath);
+    QDir().mkpath(fi.absolutePath());
+    QFile f(destPath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) { if (error) *error = QStringLiteral("can't write file"); return false; }
+    f.write(data);
+    return true;
+}
+} // namespace
+
+// The add-on registry "store" as a nested panel: fetch the configured registry index(es) (the built-in
+// cubman3134 add-on index + saved extras), render one Action row per entry ("Install" / "Installed ✓" disabled).
+// A remote entry subscribes via addRemoteSource (async → the top-gated remoteSourceResult rebuilds the rows); a
+// packaged entry downloads its files (blocking, classic parity) then reload()s. Reachable only when a registry is
+// reachable — an unreachable/empty fetch degrades to a graceful "unreachable" Info row (the brief's failure case).
+void MainWindow::presentAddonRegistry()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+    registryInstallRowId_.clear();
+
+    // Present a loading placeholder immediately; the entries replace it once every index has been fetched.
+    QVector<PanelRow> loading;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+      r.value = tr("Loading…"); loading << r; }
+    themedPanelHost_->present(tr("Browse Add-ons"), loading, [](const QString&, const QString&) {}, [] {});
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+
+    // Configured registries: the built-in add-on index + any user-saved extras (kept in the ini by the classic
+    // browser). We render entries from them but omit the add/remove-registry management UI (source management only).
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    QStringList regs; regs << addonsRegistryDefaultUrl();
+    for (const QString& u : iniStore.value(QStringLiteral("registry/addonsExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+
+    struct RegFetch { int pending = 0; QVector<QPair<QJsonObject, QString>> entries; };
+    auto st = std::make_shared<RegFetch>();
+    st->pending = regs.size();
+
+    auto finish = [this, st] {
+        if (!themedPanelIsTop(tr("Browse Add-ons"))) return;   // navigated away while fetching — drop
+        QVector<PanelRow> rows;
+        if (st->entries.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+            r.value = tr("No add-ons found — the registry may be unreachable."); rows << r;
+        }
+        else
+        {
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("reg.status"); r.label = tr("Registry");
+              r.value = tr("%n add-on(s) available.", "", int(st->entries.size())); rows << r; }
+            for (int i = 0; i < st->entries.size(); ++i)
+            {
+                const QJsonObject& e = st->entries[i].first;
+                const QString name = e.value(QStringLiteral("name")).toString();
+                const QString author = e.value(QStringLiteral("author")).toString();
+                bool installed = false;
+                if (registryEntryIsRemote(e))
+                    installed = addons_->remoteSourceUrls().contains(registryNormalizeUrl(e.value(QStringLiteral("url")).toString()));
+                else
+                {
+                    const QString eid = e.value(QStringLiteral("id")).toString();
+                    installed = !eid.isEmpty() && QFile::exists(addons_->addonsRoot() + QStringLiteral("/") + eid + QStringLiteral("/manifest.json"));
+                }
+                PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("reg:") + QString::number(i);
+                r.label = name.isEmpty() ? e.value(QStringLiteral("id")).toString() : name;
+                r.value = installed ? tr("Installed ✓") : (author.isEmpty() ? QString() : tr("by %1").arg(author));
+                r.enabled = !installed;
+                rows << r;
+            }
+        }
+        themedPanelHost_->replaceTop(tr("Browse Add-ons"), rows,
+            [this, st](const QString& id, const QString&) {
+                if (!id.startsWith(QStringLiteral("reg:"))) return;
+                const int i = id.mid(4).toInt();
+                if (i < 0 || i >= st->entries.size()) return;
+                installRegistryEntry(st->entries[i].first, st->entries[i].second, id);
+            },
+            [] {});
+    };
+
+    // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
+    QTimer::singleShot(15000, this, [st, finish] { if (st->pending > 0) { st->pending = 0; finish(); } });
+
+    for (const QString& indexUrl : regs)
+    {
+        QNetworkRequest req((QUrl(indexUrl)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
+            reply->deleteLater();
+            if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
+            if (reply->error() == QNetworkReply::NoError)
+            {
+                const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+                for (const QJsonValue& v : root.value(QStringLiteral("addons")).toArray())
+                    if (v.isObject()) st->entries << qMakePair(v.toObject(), indexUrl);
+            }
+            if (--st->pending <= 0) finish();
+        });
+    }
+
+    // A remote entry's addRemoteSource result (kicked from installRegistryEntry) rebuilds the rows so the installed
+    // entry flips to "Installed ✓"; the status line carries the message. Top-gated on THIS panel (lifetime model).
+    panelPageConns_ << connect(addons_.get(), &AddonManager::remoteSourceResult, this,
+        [this, finish](bool, const QString& msg) {
+            if (!themedPanelIsTop(tr("Browse Add-ons")) || registryInstallRowId_.isEmpty()) return;
+            registryInstallRowId_.clear();
+            finish();                                                 // rebuild (installed entry now shows ✓)
+            updatePanelInfo(QStringLiteral("reg.status"), msg);
+        });
+}
+
+// Install one registry entry: remote → addRemoteSource (async, the panel's remoteSourceResult handler rebuilds);
+// packaged → blocking download of its files into addons/<id>/ then reload(). The row shows "Installing…" while it runs.
+void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId)
+{
+    const QString name = entry.value(QStringLiteral("name")).toString();
+    { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installing…");
+      r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
+
+    if (registryEntryIsRemote(entry))
+    {
+        registryInstallRowId_ = rowId;                              // the remoteSourceResult handler patches this row
+        addons_->addRemoteSource(entry.value(QStringLiteral("url")).toString());
+        return;
+    }
+
+    const QString id = entry.value(QStringLiteral("id")).toString();
+    if (id.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Registry entry has no id.")); return; }
+    const QString destDir = addons_->addonsRoot() + QStringLiteral("/") + id;
+    const QString base = registryBaseUrl(indexUrl);
+    QStringList files;
+    for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
+    if (files.isEmpty()) { updatePanelInfo(QStringLiteral("reg.status"), tr("Nothing to download for this entry.")); return; }
+
+    for (const QString& rel : files)
+    {
+        if (rel.isEmpty()) continue;
+        QString err;
+        if (!registryDownloadTo(docNam_, base + QStringLiteral("/") + rel,
+                                destDir + QStringLiteral("/") + QFileInfo(rel).fileName(), &err))
+        {
+            updatePanelInfo(QStringLiteral("reg.status"), tr("Download failed: %1").arg(err));
+            PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Retry");
+            r.enabled = true; themedPanelHost_->updateRow(rowId, r);
+            return;
+        }
+    }
+    addons_->reload();                                              // pick up the new add-on folder
+    { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installed ✓");
+      r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
+    updatePanelInfo(QStringLiteral("reg.status"), tr("Installed \"%1\".").arg(name));
+}
+#endif // MMV_HAVE_QML
 
 void MainWindow::openHome()
 {
@@ -2201,6 +2910,11 @@ void MainWindow::openHome()
 void MainWindow::showHomeScreen()
 {
 #ifdef MMV_HAVE_QML
+    // Keep the in-window overlays (Esc pause menu, action choosers, confirms) matched to the active theme: push
+    // the current settingsPanel block on every return home (theme changes rebuild the home, so this re-runs after
+    // an Appearance switch). Classic mode -> empty map -> the overlays keep their original hardcoded darks.
+    NavOverlay::setThemeColors(themedHomeEnabled() ? settingsPanelStyle() : QVariantMap());
+
     // Rebuild a fresh themed view on return so it reflects the current theme/catalogs. The themed pages are
     // QQuickWidgets (plain widgets, no native child window), so this is safe: no compositing tricks needed.
     if (themedHomeEnabled())
@@ -2215,6 +2929,9 @@ void MainWindow::showHomeScreen()
             notifier_->notify(tr("No themes found in %1 — using the classic home screen.")
                                   .arg(QDir::toNativeSeparators(ThemeEngine::themesRoot())), kFeedbackLong);
         }
+        // Deprecation signal (B2 Task 6, item 2): themed home is on but we fell through to the classic HomeView
+        // (no themes on disk). The Task 7 walk greps this to prove no classic home in a normal themed run.
+        mwLog(QStringLiteral("deprecated-classic: home"));
     }
 #endif
     stack_->setCurrentWidget(home_);
@@ -2235,7 +2952,11 @@ void MainWindow::nudgeThemedHome() {}
 bool MainWindow::themedHomeEnabled() const
 {
 #ifdef MMV_HAVE_QML
-    return store().value(QStringLiteral("themedHome/enabled"), false).toBool();
+    // Default ON (B2 Task 6, item 3). The default only applies when the key is ABSENT: QSettings returns the
+    // stored value whenever the key exists, so a user who explicitly chose classic (wrote `false` via the
+    // Appearance toggle) is respected — only fresh installs and users who never touched the toggle now get the
+    // themed home. Semantics: absent -> true (themed wins), stored false -> false (classic), stored true -> true.
+    return store().value(QStringLiteral("themedHome/enabled"), true).toBool();
 #else
     return false;
 #endif
@@ -2497,6 +3218,9 @@ void MainWindow::showThemedAudioPage()
     if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("nowplayingAudio")))
     {
         // The theme has no audio page — keep the classic player page for this session.
+        // Deprecation signal (B2 Task 6, item 2): a themed-mode audio session that falls back to the classic
+        // QSplitter player page. The Task 7 walk greps this; a themed theme WITH an audio view stays silent.
+        mwLog(QStringLiteral("deprecated-classic: audio-nowplaying"));
         themedAudioSession_ = false;
         playlist_->clear();
         for (const QString& t : themedAudioQueue_) playlist_->addItem(t);
@@ -2962,6 +3686,97 @@ void MainWindow::showThemedBrowse()
 // Changes save as you make them and preview live; backing out (-> the settings hub -> home) applies them.
 void MainWindow::openAppearance()
 {
+    // Themed mode: render Appearance as a flat PanelRow list on the Nav Contract (ThemedPanelHost), instead of
+    // the classic QWidget builder — the last classic surface reachable in themed mode (B2 Task 6.75). Same setters
+    // verbatim: the themed-home Toggle writes themedHome/enabled; the theme Choice writes themedHome/theme (+sync).
+    //
+    // PREVIEW: the classic panel embedded a live QQuickWidget preview of the picked theme. In themed mode the app
+    // ITSELF is theme-rendered, so apply-on-select IS the preview — picking a theme restyles the LIVE panel host
+    // to that theme's settingsPanel block (setStyle(settingsPanelStyle()), which reads the just-saved key), so the
+    // surface you are looking at re-renders in the new theme immediately. We deliberately do NOT rebuild the themed
+    // HOME underlay here: showThemedHome() ends in stack_->setCurrentWidget(themedHome_), which would yank the
+    // current page away from this panel — exactly the wedge follow-up #5 recorded against the classic panel
+    // (Back could no longer leave the host). The FULL theme (home/browse/detail layout) applies on exit: the hub
+    // root's onBack already calls showHomeScreen(), which rebuilds the themed home from the saved key. So:
+    // apply-on-select restyles the panel live; the full theme lands on the way out — no underlay rebuild, no wedge.
+    //
+    // TOGGLE: turning themedHome/enabled OFF while inside the themed panel just SAVES the key (classic semantics —
+    // value persists, takes effect on next navigation). We do NOT hot-swap the whole UI mid-panel; the panel stays
+    // up until the user leaves, at which point normal navigation honours the new value (Back to the hub root ->
+    // showHomeScreen renders the classic home if it was turned off). Least-surprising, and matches the classic setter.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        // Theme folder <-> display-name mapping (the Choice cycles display names; the handler maps the pick back
+        // to its folder for the store, mirroring General's subtitle-language display<->code round-trip).
+        const QStringList themeFolders = ThemeEngine::availableThemes();
+        QList<QPair<QString, QString>> themePairs;   // (display, folder), captured by the handler
+        QStringList themeOpts;
+        for (const QString& folder : themeFolders)
+        {
+            const QString disp = ThemeEngine::themeDisplayName(folder);
+            themePairs << qMakePair(disp, folder);
+            themeOpts << disp;
+        }
+        QString curFolder = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        if (!themeFolders.contains(curFolder)) curFolder = themeFolders.value(0, QStringLiteral("Default"));
+        QString curDisp;
+        for (const auto& p : themePairs) if (p.second == curFolder) { curDisp = p.first; break; }
+        if (curDisp.isEmpty()) curDisp = themeOpts.value(0);
+
+        themedPanelHost_->setStyle(settingsPanelStyle());   // the active theme's settingsPanel block (hard fallbacks)
+
+        QVector<PanelRow> rows;
+        auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto toggle = [&rows](const QString& id, const QString& label, bool on) {
+            PanelRow r; r.kind = PanelRow::Toggle; r.id = id; r.label = label; r.checked = on; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
+            PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
+
+        toggle(QStringLiteral("appr.themed"), tr("Use the themed home screen (beta)"), themedHomeEnabled());
+        sep(tr("Theme"));
+        choice(QStringLiteral("appr.theme"), tr("Theme"), themeOpts, curDisp);
+        info(QStringLiteral("appr.applies"),
+             tr("Applies live as you pick — the full theme takes effect when you leave Appearance."), QString());
+        sep(tr("Get more themes"));
+        info(QStringLiteral("appr.customise"),
+             tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
+        info(QStringLiteral("appr.root"), tr("Themes folder"), ThemeEngine::themesRoot());
+        info(QStringLiteral("appr.community"),
+             tr("Browse and share community themes at github.com/cubman3134/mymediavault-themes."), QString());
+        action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
+
+        themedPanelHost_->present(tr("Appearance"), rows,
+            [this, themePairs](const QString& id, const QString& val) {
+                if (id == QStringLiteral("appr.themed")) {
+                    // Save only (classic semantics); do NOT hot-swap the UI mid-panel — see the note above.
+                    store().setValue(QStringLiteral("themedHome/enabled"), val == QStringLiteral("1"));
+                    store().sync();
+                }
+                else if (id == QStringLiteral("appr.theme")) {
+                    QString folder = val;   // map the picked display name back to its folder
+                    for (const auto& p : themePairs) if (p.first == val) { folder = p.second; break; }
+                    store().setValue(QStringLiteral("themedHome/theme"), folder); store().sync();   // save on selection
+                    // Apply-on-select IS the preview: restyle THIS panel to the newly-picked theme's settingsPanel
+                    // block (settingsPanelStyle() reads the key we just saved). No underlay rebuild -> no wedge; the
+                    // full theme lands when the hub root's onBack runs showHomeScreen() on the way out.
+                    themedPanelHost_->setStyle(settingsPanelStyle());
+                }
+                else if (id == QStringLiteral("appr.gallery")) {
+                    // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
+                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/cubman3134/mymediavault-themes")));
+                }
+            },
+            [this] { openSettingsHub(); });   // defensive root onBack: Appearance is nested, so a pop re-renders the hub
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+
     if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
 
     // A representative stand-in for the preview: the four inherent categories (so XMB themes show their cross).
@@ -3063,6 +3878,9 @@ void MainWindow::enterSplitScreen()
         connect(splitView_, &SplitView::exitRequested, this, &MainWindow::exitSplitScreen);
         connect(splitView_, &SplitView::openHereRequested, this, [this](MediaPane* pane) {
             splitTarget_ = pane;                 // the next opened item loads into this pane
+            // Deprecation signal (B2 Task 6 fix round): the split-screen pane-pick drops to the classic
+            // HomeView even in themed mode (the themed home has no split-target picking flow yet).
+            if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: split-pane-pick"));
             stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
             home_->focusContent();
         });
@@ -3150,6 +3968,11 @@ bool MainWindow::parentalUnlock(const QString& reason)
 void MainWindow::onSwitchProfile()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to switch profiles."))) return;
+#ifdef MMV_HAVE_QML
+    // Themed mode: the switcher on the Nav Contract. Back keeps the current profile (openHome), matching the
+    // classic Cancel button (which mustChoose hides). The classic ProfileDialog path below stays for classic mode.
+    if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ false); return; }
+#endif
     auto* dlg = new ProfileDialog(/*mustChoose*/ false, this);
     showDialogPanel(tr("Profiles"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
@@ -3159,6 +3982,167 @@ void MainWindow::onSwitchProfile()
         openHome();
     }, [this] { openHome(); });
 }
+
+#ifdef MMV_HAVE_QML
+// ---- Themed Profiles picker (B2 Task 5) --------------------------------------------------------------------
+// The classic ProfileDialog (a QStackedWidget: list page + a name/icon picker page) becomes, in themed mode, a
+// ThemedPanelHost presentation: the list is the root panel (Action row per profile + "Create New Profile"); the
+// picker's second page is a nested panel level (name TextField via the OSK + icon Choice). Activating a profile
+// row opens a NavMenu chooser (Switch / Edit / Delete) — the themed analogue of the classic row's three buttons.
+// All data ops go through ProfileStore verbatim.
+
+void MainWindow::presentProfilePicker(bool mustChoose)
+{
+    clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
+    themedPanelHost_->reset();        // fresh ROOT presentation (also drops any stale panel levels)
+    themedPanelHost_->setStyle(settingsPanelStyle());
+    NavOverlay::setThemeColors(settingsPanelStyle());  // the picker's own menus/confirms (pre-home) match the theme
+    presentProfileList(mustChoose, /*replace*/ false);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+void MainWindow::presentProfileList(bool mustChoose, bool replace)
+{
+    const QString title = mustChoose ? tr("Who's using My Media Vault?") : tr("Profiles");
+
+    QVector<PanelRow> rows;
+    for (const Profile& p : ProfileStore::list())
+    {
+        PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("profile:") + p.id;
+        r.label = (p.icon.isEmpty() ? QStringLiteral("🙂") : p.icon) + QStringLiteral("   ") + p.name;
+        rows << r;
+    }
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep"); rows << s; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("new");
+      r.label = tr("＋  Create New Profile"); rows << r; }
+
+    auto onAct = [this, mustChoose](const QString& id, const QString&) {
+        if (id == QStringLiteral("new"))            editProfilePanel(QString(), mustChoose); // nested picker
+        else if (id.startsWith(QStringLiteral("profile:"))) profileRowMenu(id.mid(8), mustChoose);
+    };
+    auto onBack = [this, mustChoose] {
+        if (mustChoose) quitConfirmFromStartup();  // startup: no escape — confirm quit (or re-present the list)
+        else            openHome();                // switcher: Back keeps the current profile
+    };
+
+    if (replace && themedPanelIsTop(title))
+        themedPanelHost_->replaceTop(title, rows, onAct, onBack);
+    else
+        themedPanelHost_->present(title, rows, onAct, onBack);
+}
+
+// The name/icon picker: New (id empty) or Edit an existing profile. A nested panel level (present) so Back pops
+// back to the list. name is a TextField (host runs the OSK); icon is a Choice cycling the shared glyph set.
+// Values held pending (shared_ptr) and committed only on Create/Save (classic parity — Back discards).
+void MainWindow::editProfilePanel(const QString& id, bool mustChoose)
+{
+    const bool isNew = id.isEmpty();
+    Profile target;
+    if (!isNew)
+        for (const Profile& p : ProfileStore::list())
+            if (p.id == id) { target = p; break; }
+
+    const QStringList icons = ProfileDialog::iconChoices();
+    auto name = std::make_shared<QString>(target.name);
+    auto icon = std::make_shared<QString>(target.icon.isEmpty() ? icons.value(0) : target.icon);
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("name"); r.label = tr("Name");
+      r.value = *name; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("icon"); r.label = tr("Icon");
+      r.value = *icon; r.options = icons; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("save");
+      r.label = isNew ? tr("Create Profile") : tr("Save"); rows << r; }
+
+    themedPanelHost_->present(isNew ? tr("New Profile") : tr("Edit Profile"), rows,
+        [this, id, isNew, name, icon, mustChoose](const QString& rid, const QString& val) {
+            if (rid == QStringLiteral("name"))      *name = val;
+            else if (rid == QStringLiteral("icon")) *icon = val;
+            else if (rid == QStringLiteral("save"))
+            {
+                const QString entered = name->trimmed();
+                if (entered.isEmpty()) { notify(tr("Please enter a name.")); return; }
+                if (isNew)
+                {
+                    const Profile p = ProfileStore::add(entered, *icon);   // add + auto-select (classic parity)
+                    chooseProfile(p.id);                                   // finish: setCurrent + openHome
+                }
+                else
+                {
+                    ProfileStore::update(id, entered, *icon);
+                    // Pop this picker level then refresh the list in place (deferred: we're inside the picker's
+                    // own onActivate, so let it unwind before mutating the panel stack).
+                    QTimer::singleShot(0, this, [this, mustChoose] {
+                        themedPanelHost_->handleBack();
+                        presentProfileList(mustChoose, /*replace*/ true);
+                    });
+                }
+            }
+        },
+        [] { /* nested: Back is a graph-level pop -> the host restores the list; nothing to run here */ });
+}
+
+void MainWindow::profileRowMenu(const QString& profileId, bool mustChoose)
+{
+    Profile target;
+    for (const Profile& p : ProfileStore::list())
+        if (p.id == profileId) { target = p; break; }
+    if (target.id.isEmpty()) return;
+
+    QStringList labels; QVector<int> acts;
+    enum { A_Switch, A_Edit, A_Delete };
+    labels << tr("Switch to %1").arg(target.name); acts << A_Switch;
+    labels << tr("Edit");                          acts << A_Edit;
+    if (ProfileStore::list().size() > 1) { labels << tr("Delete"); acts << A_Delete; } // never delete the last one
+
+    auto* menu = new NavMenu(target.name, labels, [this, profileId, acts, mustChoose](int row) {
+        if (row < 0 || row >= acts.size()) return;  // backed out
+        switch (acts[row])
+        {
+        case A_Switch: chooseProfile(profileId);                break;  // setCurrent + openHome
+        case A_Edit:   editProfilePanel(profileId, mustChoose); break;  // nested picker
+        case A_Delete: confirmDeleteProfile(profileId, mustChoose); break;
+        }
+    }, this);
+    menu->setNavGraph(themedPanelHost_ ? themedPanelHost_->navGraph() : nullptr);
+}
+
+void MainWindow::confirmDeleteProfile(const QString& profileId, bool mustChoose)
+{
+    Profile target;
+    for (const Profile& p : ProfileStore::list())
+        if (p.id == profileId) { target = p; break; }
+    if (target.id.isEmpty()) return;
+
+    const int choice = NavConfirm::ask(tr("Delete profile"),
+        tr("Delete “%1”? Their recent list will be removed. This can't be undone.").arg(target.name),
+        { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice == 1)
+    {
+        ProfileStore::remove(profileId);                 // if it was current, ProfileStore repoints current
+        presentProfileList(mustChoose, /*replace*/ true); // refresh the list in place
+    }
+}
+
+void MainWindow::chooseProfile(const QString& id)
+{
+    ProfileStore::setCurrent(id);
+    openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
+}
+
+// mustChoose Back: the classic must-choose dialog exited the app on close. Themed rendering: confirm the quit
+// (the "you must pick a profile" contract), or re-present the list if the user chooses to keep choosing.
+void MainWindow::quitConfirmFromStartup()
+{
+    const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
+        tr("You need to choose a profile to continue."),
+        { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+    if (choice == 1) { QApplication::quit(); return; }
+    presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
+}
+#endif // MMV_HAVE_QML
 
 // A game whose platform is desktop Windows isn't an emulator ROM — we run it on the PC itself. The addon
 // tags these with the platform name it was opened from (e.g. "PC (Windows)").
@@ -4817,6 +5801,11 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     // pointers to its progress bars; clear the "is-open" flag here so a stray download tick can never touch the
     // freed widgets of a panel we've navigated away from. openDownloadManager re-sets it once it has rebuilt.
     dlPanelOpen_ = false;
+    // Deprecation signal (B2 Task 6, item 2): showPanel is the single chokepoint for every classic QWidget
+    // settings panel + inline dialog (showDialogPanel routes through here). Reaching one WHILE the themed home
+    // is enabled means a classic surface leaked into themed mode — the Task 7 walk greps this line to prove
+    // zero such sightings. Classic mode (themed disabled) is silent; that's the sanctioned classic path.
+    if (themedHomeEnabled()) mwLog(QStringLiteral("deprecated-classic: panel:%1").arg(title));
     panelTitle_->setText(title);
     panelOnBack_ = onBack;
     auto* content = new QWidget;
@@ -4880,7 +5869,8 @@ void MainWindow::updateBackgroundMusic()
 {
     if (!bgm_) return;
     QWidget* w = stack_->currentWidget();
-    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
+    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_
+                       || w == themedPanelHost_);
     bgm_->setActive(menu);
 }
 
@@ -4910,11 +5900,98 @@ void MainWindow::updateThemedNowPlaying()
 #endif
 }
 
+// The active theme's `settingsPanel` styling block (colors/accent) for the themed panels. Resolved from the same
+// theme the themed home uses; missing keys fall back HARD in SettingsPanel.qml, so an empty map still renders.
+QVariantMap MainWindow::settingsPanelStyle() const
+{
+    QVariantMap out;
+#ifdef MMV_HAVE_QML
+    const QStringList themes = ThemeEngine::availableThemes();
+    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName
+                            + QStringLiteral("/theme.json");
+    QFile f(themeFile);
+    if (f.open(QIODevice::ReadOnly))
+        out = QJsonDocument::fromJson(f.readAll()).object()
+                  .value(QStringLiteral("settingsPanel")).toObject().toVariantMap();
+#endif
+    return out;
+}
+
 void MainWindow::openSettingsHub()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to open Settings."))) return;
-    // Entering the settings area from a real page: remember it so the top-level Back returns there.
-    if (stack_->currentWidget() != panelPage_) panelReturnTo_ = stack_->currentWidget();
+    // Entering the settings area from a real page: remember it so the top-level Back returns there. (Coming back
+    // from a child panel — classic panelPage_ or the themed host — must NOT clobber the remembered return page.)
+    if (stack_->currentWidget() != panelPage_
+        && stack_->currentWidget() != static_cast<QWidget*>(themedPanelHost_))
+        panelReturnTo_ = stack_->currentWidget();
+
+#ifdef MMV_HAVE_QML
+    // Themed mode: render the hub on the Nav Contract (ThemedPanelHost) instead of the classic widget panel. The
+    // SAME rows, as Action descriptors, dispatch to the SAME open* methods (which route themed/classic per mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // settings-area BOUNDARY: every panel level is dropped below, so no stale
+                                 // Cloud/RA listener may outlive its panel (the lifetime model at openCloudSync)
+        themedPanelHost_->reset();                       // fresh root presentation — drop any stale panel levels
+        themedPanelHost_->setStyle(settingsPanelStyle()); // the active theme's settingsPanel block (hard fallbacks)
+
+        QVector<PanelRow> rows;
+        auto act = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r;
+        };
+        act(QStringLiteral("general"),      tr("General"));
+        act(QStringLiteral("appearance"),   tr("Appearance"));
+        act(QStringLiteral("addons"),       tr("Add-ons"));
+        act(QStringLiteral("downloads"),    tr("Downloads"));
+        act(QStringLiteral("cloud"),        tr("Cloud Sync"));
+        act(QStringLiteral("split"),        tr("Split Screen"));
+        act(QStringLiteral("retroach"),     tr("RetroAchievements"));
+#if !defined(Q_OS_ANDROID)
+        act(QStringLiteral("standalone"),   tr("Stand Alone Emulators Settings"));
+#endif
+        act(QStringLiteral("libretro"),     tr("Libretro Emulator Settings"));
+        act(QStringLiteral("bios"),         tr("BIOS Check"));
+        act(QStringLiteral("input"),        tr("Input Mapping…"));
+        act(QStringLiteral("debug"),        tr("Debug"));
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("uninstall");
+          r.label = tr("Uninstall My Media Vault…"); r.destructive = true; rows << r; }
+
+        themedPanelHost_->present(tr("Settings"), rows,
+            [this](const QString& id, const QString&) {
+                // Dispatch to the SAME handlers the classic hub connects (each routes themed/classic per mode).
+                if      (id == QStringLiteral("general"))    openGeneralSettings();
+                else if (id == QStringLiteral("appearance")) openAppearance();
+                else if (id == QStringLiteral("addons"))     openLibrary();
+                else if (id == QStringLiteral("downloads"))  openDownloadManager();
+                else if (id == QStringLiteral("cloud"))      openCloudSync();
+                else if (id == QStringLiteral("split"))      enterSplitScreen();
+                else if (id == QStringLiteral("retroach"))   openRetroAchievements();
+                else if (id == QStringLiteral("standalone")) openEmulatorManager();
+                else if (id == QStringLiteral("libretro"))   openEmulatorSettings();
+                else if (id == QStringLiteral("bios"))       openBiosCheck();
+                else if (id == QStringLiteral("input"))      openInputMapping();
+                else if (id == QStringLiteral("debug"))      openDebug();
+                else if (id == QStringLiteral("uninstall"))  confirmUninstall();
+            },
+            [this] {
+                // The last panel dismissed (Back at the hub root): return to the home screen (rebuilt so an
+                // Appearance/theme change applies), exactly like the classic hub's onBack. Leaving the settings
+                // area is the other lifetime BOUNDARY: drop any armed panel listeners with it.
+                clearPanelPageConns();
+                if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
+                else if (panelReturnTo_) stack_->setCurrentWidget(panelReturnTo_);
+                else showHomeScreen();
+            });
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+
     showPanel(tr("Settings"), [this](QVBoxLayout* v) {
         auto add = [this, v](const QString& label, std::function<void()> fn) {
             auto* b = panelRow(label);
@@ -5035,6 +6112,60 @@ static QString downloadStatusText(const DownloadJob& j)
 // a controller D-pad, or the mouse. Rebuilt on state changes; progress ticks update the bars in place.
 void MainWindow::openDownloadManager()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: each job = one Progress row (label=title, progress=pct, value=status text). Activating a job
+    // row opens a NavMenu action chooser (the established overlay — like the XMB game menu) with that job's
+    // applicable actions (Pause/Resume/Retry/Cancel/Remove per the SAME state logic classic uses to decide its
+    // per-job buttons), calling the SAME DownloadManager methods (showDownloadActionMenu). Empty state -> an Info
+    // row. LIVE: jobProgress ticks patch the row in place via updateDownloadRow -> host updateRow("dl:"+id), which
+    // no-ops when no stacked panel carries the row (the themed analogue of the classic dlPanelOpen_ guard). State
+    // changes rebuild in place via replaceTop (reentry). Downloads is a hub child -> nested present(), Back ->
+    // openSettingsHub. The classic dlPanelOpen_/dlBars_ machinery below is UNTOUCHED (classic mode).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        const QVector<DownloadJob>& jobs = dm_->jobs();
+
+        QVector<PanelRow> rows;
+        bool anyFinished = false;
+        if (jobs.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("dl.empty");
+            r.label = tr("No downloads yet.");
+            r.value = tr("Choose “Download” on a game, movie or book.");
+            rows << r;
+        }
+        for (const DownloadJob& j : jobs)
+        {
+            if (j.state == DownloadJob::Done || j.state == DownloadJob::Failed) anyFinished = true;
+            PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + j.id;
+            r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
+            r.value = downloadStatusText(j);
+            r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
+            rows << r;
+        }
+        if (anyFinished)
+        {
+            PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("dl.clearfinished");
+            r.label = tr("Clear finished"); rows << r;
+        }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("dl.clearfinished")) { dm_->clearFinished(); return; }
+            if (id.startsWith(QStringLiteral("dl:")))      showDownloadActionMenu(id.mid(3));
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Downloads is a hub child — Back pops to the hub
+
+        if (themedPanelHost_->panelTitle() == tr("Downloads"))
+            themedPanelHost_->replaceTop(tr("Downloads"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Downloads"), rows, onAct, onBack);
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     dlBars_.clear();
     dlStatus_.clear();
 
@@ -5142,6 +6273,24 @@ void MainWindow::openDownloadManager()
 // leaves keyboard/controller focus undisturbed, unlike a full panel rebuild).
 void MainWindow::updateDownloadRow(const QString& id)
 {
+#ifdef MMV_HAVE_QML
+    // Themed: patch the job's Progress row in place (no rebuild, cursor undisturbed). host->updateRow no-ops when
+    // no stacked panel carries "dl:"+id — the themed analogue of the classic dlPanelOpen_ guard: a tick that
+    // arrives after the user left Downloads finds no matching row and returns false (no stray update, no crash).
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        for (const DownloadJob& j : dm_->jobs()) {
+            if (j.id != id) continue;
+            PanelRow r; r.kind = PanelRow::Progress; r.id = QStringLiteral("dl:") + id;
+            r.label = j.title.isEmpty() ? tr("(untitled)") : j.title;
+            r.value = downloadStatusText(j);
+            r.progress = j.total > 0 ? int(qRound(100.0 * double(j.received) / double(j.total))) : 0;
+            themedPanelHost_->updateRow(QStringLiteral("dl:") + id, r);
+            return;
+        }
+        return;
+    }
+#endif
     if (!dlPanelOpen_) return;
     for (const DownloadJob& j : dm_->jobs()) {
         if (j.id != id) continue;
@@ -5153,8 +6302,329 @@ void MainWindow::updateDownloadRow(const QString& id)
     }
 }
 
+#ifdef MMV_HAVE_QML
+// Themed Downloads: activating a job's Progress row opens a NavMenu action chooser with exactly the actions the
+// classic panel would show as per-job buttons for that job's state — calling the SAME DownloadManager methods.
+// The overlay mirrors itself as a level on the panel host's own NavGraph (like Osk::getText does), so Back closes
+// the menu only and the panel graph depth tracks reality. Freed-pointer discipline: the job is looked up by id
+// here AND again in the chosen-action lambda (the list can change between open and choice — never cache a job).
+void MainWindow::showDownloadActionMenu(const QString& id)
+{
+    const DownloadJob* job = nullptr;
+    for (const DownloadJob& j : dm_->jobs()) if (j.id == id) { job = &j; break; }
+    if (!job) return;
+    const DownloadJob::State st = job->state;
+
+    QStringList labels;
+    QVector<int> acts;                 // parallel to labels; the DownloadJob::State-driven action for each row
+    enum { A_Pause, A_Resume, A_Retry, A_Cancel, A_Remove };
+    if (st == DownloadJob::Active || st == DownloadJob::Queued)                     { labels << tr("Pause");  acts << A_Pause; }
+    if (st == DownloadJob::Paused)                                                  { labels << tr("Resume"); acts << A_Resume; }
+    if (st == DownloadJob::Failed)                                                  { labels << tr("Retry");  acts << A_Retry; }
+    if (st == DownloadJob::Active || st == DownloadJob::Queued || st == DownloadJob::Paused) { labels << tr("Cancel"); acts << A_Cancel; }
+    if (st == DownloadJob::Failed || st == DownloadJob::Done)                       { labels << tr("Remove"); acts << A_Remove; }
+    if (labels.isEmpty()) return;      // nothing applicable (shouldn't happen — every state has an action)
+
+    const QString title = job->title.isEmpty() ? tr("Download") : job->title;
+    auto* menu = new NavMenu(title, labels, [this, id, acts](int row) {
+        if (row < 0 || row >= acts.size()) return;             // backed out
+        switch (acts[row]) {
+            case A_Pause:  dm_->pauseJob(id);  break;
+            case A_Resume: dm_->resumeJob(id); break;
+            case A_Retry:  dm_->retry(id);     break;
+            case A_Cancel: dm_->cancel(id);    break;
+            case A_Remove: dm_->removeJob(id); break;
+        }
+    }, this);
+    menu->setNavGraph(themedPanelHost_ ? themedPanelHost_->navGraph() : nullptr);
+}
+#endif
+
 void MainWindow::openGeneralSettings()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: render General as a flat PanelRow descriptor list on the Nav Contract (ThemedPanelHost),
+    // instead of the classic QWidget builder. Every row writes the SAME Settings key via the SAME setter the
+    // classic handler used. This is a NESTED present() (the hub is already up at level 1) — NO reset(), so Back
+    // is a graph-level pop that renderTop(restore)s the hub to the row we entered from (the first live exercise
+    // of Task 1's pop-restore path). Section headers -> Separator rows; the subtitle-language combo -> a Choice;
+    // credentials + the ROMs path/actions -> TextField/Action rows; the parental PIN keeps Osk::getText nesting.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        // Drop any Trakt live-status hookups from a previous presentation (the host persists — classic's child
+        // labels auto-disconnected on teardown; we manage ours). Re-added after present() below.
+        for (const QMetaObject::Connection& c : genSettingsConns_) disconnect(c);
+        genSettingsConns_.clear();
+
+        if (bgm_) bgm_->reload();                          // rescan music, exactly as the classic builder does
+        themedPanelHost_->setStyle(settingsPanelStyle());  // active theme's settingsPanel block (hard fallbacks)
+
+        // Subtitle language table (display <-> code). The Choice cycles the display names; the handler maps the
+        // picked display back to its code via this same pair list (so a prior "(custom)" code round-trips exact).
+        const QList<QPair<QString, QString>> langs = {
+            { tr("Any / first available"), QString() }, { QStringLiteral("English"), QStringLiteral("eng") },
+            { QStringLiteral("Spanish"), QStringLiteral("spa") }, { QStringLiteral("French"), QStringLiteral("fra") },
+            { QStringLiteral("German"), QStringLiteral("deu") }, { QStringLiteral("Italian"), QStringLiteral("ita") },
+            { QStringLiteral("Portuguese"), QStringLiteral("por") }, { QStringLiteral("Dutch"), QStringLiteral("nld") },
+            { QStringLiteral("Russian"), QStringLiteral("rus") }, { QStringLiteral("Japanese"), QStringLiteral("jpn") },
+            { QStringLiteral("Korean"), QStringLiteral("kor") }, { QStringLiteral("Chinese"), QStringLiteral("zho") },
+            { QStringLiteral("Arabic"), QStringLiteral("ara") },
+        };
+        const QString curLang = Settings::subtitleLanguage();
+        QList<QPair<QString, QString>> langOptPairs = langs;   // captured by the handler for display->code mapping
+        QString curLangDisp;
+        for (const auto& l : langs) if (l.second == curLang) { curLangDisp = l.first; break; }
+        if (curLangDisp.isEmpty() && !curLang.isEmpty()) {     // keep a previously-set code the list doesn't carry
+            curLangDisp = tr("%1 (custom)").arg(curLang);
+            langOptPairs << qMakePair(curLangDisp, curLang);
+        }
+        if (curLangDisp.isEmpty()) curLangDisp = langs.first().first;
+        QStringList langOpts;
+        for (const auto& p : langOptPairs) langOpts << p.first;
+
+        // Background-music volume: the contract has no Slider row, so the continuous 0..100 slider becomes a
+        // discrete Choice in 10% steps (documented gap — see report). Same write path (setBgmVolume/setVolume).
+        QStringList volOpts;
+        for (int p = 0; p <= 100; p += 10) volOpts << QStringLiteral("%1%").arg(p);
+        const QString curVolDisp = QStringLiteral("%1%").arg(int(qRound(Settings::bgmVolume() / 10.0) * 10));
+
+        QVector<PanelRow> rows;
+        auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto toggle = [&rows](const QString& id, const QString& label, bool on) {
+            PanelRow r; r.kind = PanelRow::Toggle; r.id = id; r.label = label; r.checked = on; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto textf  = [&rows](const QString& id, const QString& label, const QString& value, bool masked = false) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked; rows << r; };
+        auto choice = [&rows](const QString& id, const QString& label, const QStringList& opts, const QString& cur) {
+            PanelRow r; r.kind = PanelRow::Choice; r.id = id; r.label = label; r.options = opts; r.value = cur; rows << r; };
+
+        // --- Display ---
+        sep(tr("Display"));
+        toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
+        // --- Updates ---
+        sep(tr("Updates"));
+        info(QStringLiteral("update.version"), tr("Version"), AppUpdater::currentVersion());
+        toggle(QStringLiteral("update.autocheck"), tr("Check for updates on startup"), Settings::checkUpdatesOnStartup());
+        action(QStringLiteral("update.check"), tr("Check for updates now"));
+        action(QStringLiteral("update.install"), (updater_ && updater_->updatePending())
+                   ? tr("Install %1 and restart").arg(updater_->latestVersion()) : tr("Install update"));
+        info(QStringLiteral("update.status"), tr("Status"), QString());
+        // --- Game ROMs ---
+        sep(tr("Game ROMs"));
+        info(QStringLiteral("roms.path"), Settings::romsFolder(), QString());
+        action(QStringLiteral("roms.change"), tr("Change ROMs folder…"));
+        action(QStringLiteral("roms.open"), tr("Open ROMs folder"));
+        toggle(QStringLiteral("roms.keepscrape"), tr("Keep scraped data in the ROMs folder (gamelist.xml)"),
+               Settings::keepScrapedData());
+        // --- Playback ---
+        sep(tr("Playback"));
+        toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        toggle(QStringLiteral("pb.bezel"), tr("Show bezel / border art around games"), Settings::bezelEnabled());
+        action(QStringLiteral("pb.bezelopen"), tr("Open bezels folder"));
+        // --- Subtitles ---
+        sep(tr("Subtitles"));
+        toggle(QStringLiteral("subs.on"), tr("Show subtitles by default"), Settings::subtitlesOnByDefault());
+        choice(QStringLiteral("subs.lang"), tr("Default language"), langOpts, curLangDisp);
+        // --- Auto-download from OpenSubtitles (the password is masked — dots in the row; the OSK is unchanged) ---
+        sep(tr("Auto-download from OpenSubtitles"));
+        textf(QStringLiteral("os.api"), tr("API key"), Settings::openSubApiKey());
+        textf(QStringLiteral("os.user"), tr("Username"), Settings::openSubUsername());
+        textf(QStringLiteral("os.pass"), tr("Password"), Settings::openSubPassword(), /*masked=*/true);
+        // --- Trakt.tv ---
+        sep(tr("Trakt.tv"));
+        textf(QStringLiteral("trakt.id"), tr("Client ID"), Settings::traktClientId());
+        textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret(), /*masked=*/true);
+        action(QStringLiteral("trakt.connect"), TraktClient::connected() ? tr("Disconnect from Trakt")
+                                                                          : tr("Connect to Trakt"));
+        info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
+                                                                                     : tr("Not connected"));
+        // --- Parental Controls (the PIN flows keep Osk::getText nesting exactly) ---
+        sep(tr("Parental Controls"));
+        info(QStringLiteral("parental.status"), tr("PIN"), Settings::hasParentalPin() ? tr("A PIN is set")
+                                                                                       : tr("No PIN set"));
+        action(QStringLiteral("parental.setpin"), Settings::hasParentalPin() ? tr("Change PIN") : tr("Set PIN"));
+        action(QStringLiteral("parental.clearpin"), tr("Remove PIN"));
+        info(QStringLiteral("parental.profileshdr"), tr("Restricted (kids) profiles"), QString());
+        for (const Profile& pr : ProfileStore::list())
+            toggle(QStringLiteral("profile:") + pr.id,
+                   (pr.icon.isEmpty() ? QString() : pr.icon + QStringLiteral("  ")) + pr.name, pr.restricted);
+        // --- Background Music ---
+        sep(tr("Background Music"));
+        toggle(QStringLiteral("bgm.on"), tr("Play background music"), Settings::bgmEnabled());
+        choice(QStringLiteral("bgm.vol"), tr("Volume"), volOpts, curVolDisp);
+        action(QStringLiteral("bgm.open"), tr("Open music folder"));
+        // --- PC Game Achievements (Steam) ---
+        sep(tr("PC Game Achievements (Steam)"));
+        textf(QStringLiteral("steam.key"), tr("Steam Web API key"),
+              store().value(QStringLiteral("steam/apikey")).toString());
+        // --- Streaming (Debrid) ---
+        sep(tr("Streaming (Debrid)"));
+        textf(QStringLiteral("debrid.torbox"), tr("TorBox API key"),
+              store().value(QStringLiteral("debrid/torbox/apikey")).toString());
+
+        // Small helpers to patch a status Info / an Action label in place (updateRow replaces the whole row).
+        auto setInfo = [this](const QString& id, const QString& caption, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = caption; r.value = value;
+            themedPanelHost_->updateRow(id, r); };
+        auto setAction = [this](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label;
+            themedPanelHost_->updateRow(id, r); };
+
+        themedPanelHost_->present(tr("General"), rows,
+            [this, langOptPairs, setInfo, setAction](const QString& id, const QString& val) {
+                const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
+                if (id == QStringLiteral("disp.fullscreen")) {
+                    Settings::setStartFullscreen(on);
+                    if (on) showFullScreen(); else if (isFullScreen()) leaveFullScreen();
+                }
+                else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
+                else if (id == QStringLiteral("update.check")) {
+                    if (!updater_) return;
+                    setInfo(QStringLiteral("update.status"), tr("Status"), tr("Checking…"));
+                    connect(updater_, &AppUpdater::updateAvailable, this,
+                        [this, setInfo, setAction](const QString& ver, const QString&) {
+                            setInfo(QStringLiteral("update.status"), tr("Status"), tr("Version %1 is available.").arg(ver));
+                            setAction(QStringLiteral("update.install"), tr("Install %1 and restart").arg(ver));
+                        }, Qt::SingleShotConnection);
+                    connect(updater_, &AppUpdater::upToDate, this, [this, setInfo] {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("You're already on the latest version."));
+                    }, Qt::SingleShotConnection);
+                    connect(updater_, &AppUpdater::checkFailed, this, [this, setInfo](const QString& why) {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("Couldn't check for updates: %1").arg(why));
+                    }, Qt::SingleShotConnection);
+                    updater_->checkForUpdate();
+                }
+                else if (id == QStringLiteral("update.install")) {
+                    if (updater_ && updater_->updatePending()) {
+                        setInfo(QStringLiteral("update.status"), tr("Status"),
+                                tr("Downloading and installing… the app will restart."));
+                        updater_->downloadAndApply();
+                    } else {
+                        setInfo(QStringLiteral("update.status"), tr("Status"), tr("No update ready — check first."));
+                    }
+                }
+                else if (id == QStringLiteral("roms.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose the ROMs folder"),
+                                                                          Settings::romsFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setRomsFolder(dir);
+                    setInfo(QStringLiteral("roms.path"), dir, QString());
+                    RomLibrary::ensureStructure();
+                    const int added = RomLibrary::syncToDownloads();
+                    statusBar()->showMessage(added > 0
+                        ? tr("ROMs folder set to %1 — added %n game(s) to Downloaded.", "", added).arg(dir)
+                        : tr("ROMs folder set to %1").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("roms.open")) {
+                    RomLibrary::ensureStructure();
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
+                }
+                else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
+                else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("pb.bezel")) Settings::setBezelEnabled(on);
+                else if (id == QStringLiteral("pb.bezelopen")) {
+                    const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
+                    QDir().mkpath(d);
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(d));
+                }
+                else if (id == QStringLiteral("subs.on")) Settings::setSubtitlesOnByDefault(on);
+                else if (id == QStringLiteral("subs.lang")) {
+                    QString code = val;
+                    for (const auto& p : langOptPairs) if (p.first == val) { code = p.second; break; }
+                    Settings::setSubtitleLanguage(code);
+                }
+                else if (id == QStringLiteral("os.api"))  Settings::setOpenSubApiKey(val);
+                else if (id == QStringLiteral("os.user")) Settings::setOpenSubUsername(val);
+                else if (id == QStringLiteral("os.pass")) Settings::setOpenSubPassword(val);
+                else if (id == QStringLiteral("trakt.id"))     Settings::setTraktClientId(val);
+                else if (id == QStringLiteral("trakt.secret")) Settings::setTraktClientSecret(val);
+                else if (id == QStringLiteral("trakt.connect")) {
+                    if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
+                    if (!TraktClient::configured()) {
+                        setInfo(QStringLiteral("trakt.status"), tr("Status"),
+                                tr("Enter your Client ID and Secret first.")); return;
+                    }
+                    setInfo(QStringLiteral("trakt.status"), tr("Status"), tr("Requesting a code from Trakt…"));
+                    trakt_->connectAccount();
+                }
+                else if (id == QStringLiteral("parental.setpin")) {
+                    if (Settings::hasParentalPin()) {
+                        const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(),
+                                                         QLineEdit::Password, this, themedPanelHost_->navGraph());
+                        if (cur.isNull()) return;
+                        if (!Settings::checkParentalPin(cur)) {
+                            setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("Incorrect PIN.")); return; }
+                    }
+                    const QString a = Osk::getText(tr("New PIN:"), QString(), QLineEdit::Password, this,
+                                                   themedPanelHost_->navGraph());
+                    if (a.isNull() || a.isEmpty()) return;
+                    const QString b = Osk::getText(tr("Confirm PIN:"), QString(), QLineEdit::Password, this,
+                                                   themedPanelHost_->navGraph());
+                    if (b.isNull()) return;
+                    if (a != b) { setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("PINs didn't match.")); return; }
+                    Settings::setParentalPin(a);
+                    setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("A PIN is set"));
+                    setAction(QStringLiteral("parental.setpin"), tr("Change PIN"));
+                }
+                else if (id == QStringLiteral("parental.clearpin")) {
+                    if (!Settings::hasParentalPin()) {
+                        setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("No PIN set")); return; }
+                    const QString cur = Osk::getText(tr("Enter the current PIN:"), QString(),
+                                                     QLineEdit::Password, this, themedPanelHost_->navGraph());
+                    if (cur.isNull()) return;
+                    if (!Settings::checkParentalPin(cur)) {
+                        setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("Incorrect PIN.")); return; }
+                    Settings::setParentalPin(QString());
+                    setInfo(QStringLiteral("parental.status"), tr("PIN"), tr("No PIN set"));
+                    setAction(QStringLiteral("parental.setpin"), tr("Set PIN"));
+                }
+                else if (id.startsWith(QStringLiteral("profile:")))
+                    ProfileStore::setRestricted(id.mid(8), on);
+                else if (id == QStringLiteral("bgm.on")) {
+                    Settings::setBgmEnabled(on); if (bgm_) bgm_->setEnabled(on); updateBackgroundMusic();
+                }
+                else if (id == QStringLiteral("bgm.vol")) {
+                    const int p = val.left(val.size() - 1).toInt();   // strip the trailing "%"
+                    Settings::setBgmVolume(p); if (bgm_) bgm_->setVolume(p);
+                }
+                else if (id == QStringLiteral("bgm.open")) {
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(BackgroundMusic::musicDir()));
+                    if (bgm_) { bgm_->reload(); updateBackgroundMusic(); }
+                }
+                else if (id == QStringLiteral("steam.key")) {
+                    store().setValue(QStringLiteral("steam/apikey"), val.trimmed()); store().sync();
+                    statusBar()->showMessage(tr("Saved Steam Web API key."), 4000);
+                }
+                else if (id == QStringLiteral("debrid.torbox")) {
+                    store().setValue(QStringLiteral("debrid/torbox/apikey"), val.trimmed()); store().sync();
+                }
+            },
+            [this] { openSettingsHub(); });   // defensive root onBack: General is nested, so a pop re-renders the hub
+
+        // Live Trakt status (persist while the panel is up; dropped at the top of the next present via genSettingsConns_).
+        genSettingsConns_ << connect(trakt_, &TraktClient::deviceCode, this,
+            [setInfo](const QString& code, const QString& url) {
+                setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"),
+                        MainWindow::tr("Go to %1 and enter code: %2").arg(url, code)); });
+        genSettingsConns_ << connect(trakt_, &TraktClient::connectError, this,
+            [setInfo](const QString& m) { setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"), m); });
+        genSettingsConns_ << connect(trakt_, &TraktClient::connectedChanged, this,
+            [setInfo, setAction](bool conn) {
+                setInfo(QStringLiteral("trakt.status"), MainWindow::tr("Status"),
+                        conn ? MainWindow::tr("Connected") : MainWindow::tr("Not connected"));
+                setAction(QStringLiteral("trakt.connect"),
+                          conn ? MainWindow::tr("Disconnect from Trakt") : MainWindow::tr("Connect to Trakt")); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+
     showPanel(tr("General"), [this](QVBoxLayout* v) {
         // --- Display: open the app full screen on launch. ---
         auto* dispHeading = new QLabel(tr("Display"));
@@ -5538,9 +7008,110 @@ void MainWindow::openGeneralSettings()
     }, [this] { openSettingsHub(); });
 }
 
+// The two legs of the panel async-connection lifetime model (full statement at openCloudSync's connect block).
+void MainWindow::clearPanelPageConns()
+{
+    for (const QMetaObject::Connection& c : panelPageConns_) disconnect(c);
+    panelPageConns_.clear();
+}
+
+// True when the themed panel host is the CURRENT stack page AND `title` is its live top panel — the gate every
+// panelPageConns_ REBUILD handler runs before re-presenting: a late async event (an OAuth completing minutes
+// after the user navigated to Debug/home) must be dropped, never present a panel over an unrelated screen.
+bool MainWindow::themedPanelIsTop(const QString& title) const
+{
+#ifdef MMV_HAVE_QML
+    // ALSO require no overlay (OSK / NavMenu) above the top panel: an overlay doesn't change panelTitle(), so
+    // without this a late async handler could rebuild the panel UNDER a live edit — force-cancelling the user's
+    // OSK text, or (presentAddByUrl's deferred handleBack) popping the OSK's mirrored level and stacking a
+    // duplicate level. While an overlay is up the rebuild is DROPPED; the state persists and renders on the next
+    // top-gated event or re-present (the user keeps their edit).
+    return themedPanelHost_ && stack_->currentWidget() == themedPanelHost_
+           && themedPanelHost_->panelTitle() == title
+           && !themedPanelHost_->overlayAbove();
+#else
+    Q_UNUSED(title);
+    return false;
+#endif
+}
+
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
+#ifdef MMV_HAVE_QML
+    // Themed mode: the four sign-in Actions become state-gated PanelRows (omitted, not just hidden, per the SAME
+    // isConfigured()/isSignedIn() checks the classic refresh() uses), over a status Info row. The row SET flips
+    // with sign-in state, so the async signals rebuild IN PLACE via replaceTop (reentry) — no stacked level. Same
+    // flows: signIn()/signOut()/cloudSyncNow()/openCloudClientSetup().
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // this present replaces the pool (re-armed below)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const bool cfg = CloudSync::isConfigured();
+        const bool in  = cloud_->isSignedIn();
+        QString status;
+        if (!cfg)    status = tr("Google sign-in isn't set up yet — choose \"Set up sign-in…\" to paste a Desktop-app client.");
+        else if (in) status = tr("Signed in as %1.").arg(cloud_->accountEmail());
+        else         status = tr("Not signed in — choose \"Sign in with Google\".");
+
+        QVector<PanelRow> rows;
+        auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        info(QStringLiteral("cloud.status"), tr("Status"), status);
+        if (cfg && !in) action(QStringLiteral("cloud.signin"), tr("Sign in with Google"));
+        if (in)         action(QStringLiteral("cloud.syncnow"), tr("Sync now"));
+        if (in)         action(QStringLiteral("cloud.signout"), tr("Sign out"));
+        action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
+
+        auto setStatus = [this](const QString& s) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.status"); r.label = MainWindow::tr("Status");
+            r.value = s; themedPanelHost_->updateRow(QStringLiteral("cloud.status"), r); };
+
+        auto onAct = [this, setStatus](const QString& id, const QString&) {
+            if      (id == QStringLiteral("cloud.signin"))  { setStatus(tr("Opening your browser…")); cloud_->signIn(); }
+            else if (id == QStringLiteral("cloud.syncnow")) { setStatus(tr("Syncing…")); cloudSyncNow(); }
+            else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
+            else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
+        };
+        auto onBack = [this] { openSettingsHub(); };   // Cloud is a hub child — Back pops to the hub
+
+        // Re-entry (an async sign-in state change while Cloud is the top panel) rebuilds the row SET in place;
+        // the first entry from the hub is a nested present().
+        if (themedPanelHost_->panelTitle() == tr("Cloud Sync"))
+            themedPanelHost_->replaceTop(tr("Cloud Sync"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("Cloud Sync"), rows, onAct, onBack);
+
+        // CONNECTION-LIFETIME MODEL (panelPageConns_, shared by Cloud + RetroAchievements — THE statement):
+        //  * Armed when their panel PRESENTS (here). NOT cleared by nested children: a child's Back pop restores
+        //    this panel via renderTop WITHOUT re-running openCloudSync, so these listeners must survive the
+        //    drill — clearing them in openCloudClientSetup left "Sign in with Google" silently DEAD after
+        //    backing out of the setup form (the regression the review found).
+        //  * Replaced wholesale whenever ANY pool user re-presents (the clearPanelPageConns at the top).
+        //  * Cleared at the settings-area boundaries: openSettingsHub entry + the hub root's leave-to-home.
+        //  * REBUILD handlers self-gate on themedPanelIsTop and DROP otherwise — an OAuth completing after the
+        //    user navigated away must not present a Cloud panel over Debug/home (CloudSync persists the sign-in
+        //    state, so the next entry renders it; the gate also makes the Save-time signOut in
+        //    openCloudClientSetup safe, since "Sign-in client" is top at that moment).
+        //  * ROW-PATCH handlers (setStatus) need no gate: updateRow patches by row id and no-ops when no stacked
+        //    panel carries the row — a backgrounded Cloud (under the setup child) still receives the status.
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+            if (!themedPanelIsTop(tr("Cloud Sync"))) return;   // navigated away — drop (state persists)
+            openCloudSync(); raise(); activateWindow(); cloudSyncNow(); });   // rebuild (now signed-in) + first push
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signInFailed, this, [setStatus](const QString& e) {
+            setStatus(MainWindow::tr("Sign-in failed: %1").arg(e)); });
+        panelPageConns_ << connect(cloud_.get(), &CloudSync::signedOut, this, [this] {
+            if (!themedPanelIsTop(tr("Cloud Sync"))) return;   // e.g. Save-time signOut in the setup child — drop
+            openCloudSync(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Cloud Sync"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, "
             "settings and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."));
@@ -5628,6 +7199,86 @@ QString fileMd5(const QString& path)
 
 void MainWindow::openBiosCheck()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the RichText per-file MD5 report degrades to one Info row per system (name + a tick/cross/warn
+    // glyph summarising that system's files), under a summary Info row. Same MD5 verification (biosFilePath +
+    // fileMd5), same Download/Repair (drop wrong-hash files, then ensureBios) and Open Folder flows. Download
+    // rebuilds the panel in place (replaceTop) so the ticks refresh without stacking a level.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        int total = 0, good = 0, bad = 0, missing = 0;
+        QVector<PanelRow> sysRows;
+        for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+        {
+            const QList<BiosFile>& files = BiosCatalog::forSystem(bs.systemId);
+            if (files.isEmpty()) continue;
+            int sgood = 0, sbad = 0, smiss = 0;
+            for (const BiosFile& bf : files)
+            {
+                ++total;
+                const QString path = biosFilePath(bs.systemId, bf.fileName);
+                if (path.isEmpty()) { ++missing; ++smiss; }
+                else if (!bf.md5.isEmpty() && fileMd5(path).compare(bf.md5, Qt::CaseInsensitive) != 0) { ++bad; ++sbad; }
+                else { ++good; ++sgood; }
+            }
+            QString value;
+            if (smiss == 0 && sbad == 0)
+                value = tr("✓  %1/%2 present").arg(sgood).arg(files.size());
+            else if (sbad > 0)
+                value = smiss > 0 ? tr("⚠  %1 wrong MD5, %2 missing").arg(sbad).arg(smiss)
+                                  : tr("⚠  %1 wrong MD5").arg(sbad);
+            else
+                value = tr("✗  %1 of %2 missing").arg(smiss).arg(files.size());
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.sys:") + bs.systemId;
+            r.label = bs.name; r.value = value; sysRows << r;
+        }
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("bios.summary"); r.label = tr("BIOS files");
+          r.value = bad > 0 ? tr("%1/%2 OK, %n failed", "", bad).arg(good).arg(total)
+                            : tr("%1 of %2 present").arg(good).arg(total); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Separator; r.label = tr("By system"); rows << r; }
+        rows += sysRows;
+
+        const bool needsDownload = (missing > 0 || bad > 0);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.download");
+          r.label = needsDownload ? tr("Download / Repair BIOS") : tr("Re-check"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("bios.open"); r.label = tr("Open BIOS Folder"); rows << r; }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("bios.download")) {
+                statusBar()->showMessage(tr("Checking BIOS…"));
+                for (const BiosCatalog::BiosSystem& bs : BiosCatalog::systemsWithBios())
+                {
+                    for (const BiosFile& bf : BiosCatalog::forSystem(bs.systemId))
+                    {
+                        if (bf.md5.isEmpty()) continue;
+                        const QString p = biosFilePath(bs.systemId, bf.fileName);
+                        if (!p.isEmpty() && fileMd5(p).compare(bf.md5, Qt::CaseInsensitive) != 0) QFile::remove(p);
+                    }
+                    CoreManager::ensureBios(bs.systemId, biosDestDir(bs.systemId),
+                                            [this](const QString& s) { statusBar()->showMessage(s); });
+                }
+                statusBar()->showMessage(tr("BIOS check complete."), 4000);
+                openBiosCheck();   // rebuild (replaceTop, we're the top panel) so the ticks refresh
+            }
+            else if (id == QStringLiteral("bios.open"))
+                QDesktopServices::openUrl(QUrl::fromLocalFile(CoreManager::systemDir()));
+        };
+        auto onBack = [this] { openSettingsHub(); };
+
+        if (themedPanelHost_->panelTitle() == tr("BIOS Check"))
+            themedPanelHost_->replaceTop(tr("BIOS Check"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("BIOS Check"), rows, onAct, onBack);
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("BIOS Check"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Required BIOS / firmware for each system, verified by MD5. Missing files "
             "are fetched automatically the first time you launch a game for that system — or download them all "
@@ -5705,6 +7356,63 @@ void MainWindow::openBiosCheck()
 // Inline form (no popup) to paste the Google OAuth client id/secret used for Drive sign-in.
 void MainWindow::openCloudClientSetup()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: two TextField rows (client id/secret via the OSK) + Save. Same write path (the cloud/clientId,
+    // cloud/clientSecret ini keys) and same follow-through (signOut + back to a refreshed Cloud panel). Values are
+    // held pending and only committed on Save — exactly like the classic form (Back discards). This is a nested
+    // present() on the Cloud panel; Save pops back to Cloud and rebuilds it (now configured) via replaceTop.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        // Do NOT clear panelPageConns_ here: this is a nested child of Cloud, and Back restores the CACHED Cloud
+        // parent (renderTop) without re-running openCloudSync — the parent's sign-in listeners must stay armed or
+        // "Sign in with Google" goes silently dead after backing out (the lifetime model at openCloudSync's
+        // connect block). The Save-time signOut below is safe: the signedOut rebuild handler self-gates on Cloud
+        // being top, and "Sign-in client" is top at that moment.
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        QSettings s(iniPath, QSettings::IniFormat);
+        auto pending = std::make_shared<QPair<QString, QString>>(
+            s.value(QStringLiteral("cloud/clientId")).toString(),
+            s.value(QStringLiteral("cloud/clientSecret")).toString());
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.note"); r.label = tr("Client");
+          r.value = tr("Google Desktop-app OAuth"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cc.id"); r.label = tr("Client id");
+          r.value = pending->first; rows << r; }
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cc.secret"); r.label = tr("Client secret");
+          r.value = pending->second; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.err"); r.label = tr("Status"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("cc.save"); r.label = tr("Save"); rows << r; }
+
+        themedPanelHost_->present(tr("Sign-in client"), rows,
+            [this, pending, iniPath](const QString& id, const QString& val) {
+                if      (id == QStringLiteral("cc.id"))     pending->first = val;
+                else if (id == QStringLiteral("cc.secret")) pending->second = val;
+                else if (id == QStringLiteral("cc.save")) {
+                    if (pending->first.trimmed().isEmpty()) {
+                        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cc.err"); r.label = tr("Status");
+                        r.value = tr("Enter a client id."); themedPanelHost_->updateRow(QStringLiteral("cc.err"), r);
+                        return;
+                    }
+                    QSettings s(iniPath, QSettings::IniFormat);
+                    s.setValue(QStringLiteral("cloud/clientId"), pending->first.trimmed());
+                    s.setValue(QStringLiteral("cloud/clientSecret"), pending->second.trimmed());
+                    s.sync();
+                    cloud_->signOut();   // a new client invalidates the old sign-in (the signedOut rebuild
+                                         // handler self-gates on Cloud being top — Setup is top here, so it drops)
+                    // Pop back to Cloud and rebuild it (now configured) — deferred so this activate() unwinds first.
+                    QTimer::singleShot(0, this, [this] { themedPanelHost_->handleBack(); openCloudSync(); });
+                }
+            },
+            [this] { openCloudSync(); });   // defensive root onBack (nested: a pop just renders the Cloud parent)
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Sign-in client"), [this](QVBoxLayout* v) {
         QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
         auto* intro = new QLabel(tr("Paste a Google <b>Desktop-app</b> OAuth client (from the Google Cloud "
@@ -5890,6 +7598,91 @@ void MainWindow::closeEvent(QCloseEvent* e)
 
 void MainWindow::openRetroAchievements()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the login form (username/password TextFields) OR the signed-in state (web API key TextField +
+    // Sign Out) per the SAME ach_->isLoggedIn() branch. Password + API key rows are MASKED — dots both in the
+    // value display AND while editing (the host opens the OSK in QLineEdit::Password echo for a masked row; see
+    // ThemedPanelHost::onGraphActivated). The row SET flips with login state, so the async loginResult / a logout
+    // rebuild IN PLACE via replaceTop (reentry). Same flow: loginWithPassword() / the ra/apikey ini key.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        const bool in = ach_ && ach_->isLoggedIn();
+
+        QVector<PanelRow> rows;
+        auto info = [&rows](const QString& id, const QString& label, const QString& value) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r; };
+        auto action = [&rows](const QString& id, const QString& label) {
+            PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
+        auto textf = [&rows](const QString& id, const QString& label, const QString& value, bool masked) {
+            PanelRow r; r.kind = PanelRow::TextField; r.id = id; r.label = label; r.value = value; r.masked = masked; rows << r; };
+
+        // Held-pending edits (username/password when signed out; the api key when signed in).
+        auto pend = std::make_shared<QHash<QString, QString>>();
+
+        if (in)
+        {
+            QSettings raStore(iniPath, QSettings::IniFormat);
+            (*pend)[QStringLiteral("apikey")] = raStore.value(QStringLiteral("ra/apikey")).toString();
+            info(QStringLiteral("ra.status"), tr("Account"), tr("Signed in as %1.").arg(ach_->username()));
+            textf(QStringLiteral("ra.apikey"), tr("Web API key"), (*pend)[QStringLiteral("apikey")], /*masked=*/true);
+            action(QStringLiteral("ra.savekey"), tr("Save API Key"));
+            action(QStringLiteral("ra.signout"), tr("Sign Out"));
+        }
+        else
+        {
+            info(QStringLiteral("ra.status"), tr("Status"), tr("Sign in to earn achievements while you play."));
+            textf(QStringLiteral("ra.user"), tr("Username"), QString(), /*masked=*/false);
+            textf(QStringLiteral("ra.pass"), tr("Password"), QString(), /*masked=*/true);
+            action(QStringLiteral("ra.signin"), tr("Sign In"));
+        }
+
+        auto setStatus = [this](const QString& label, const QString& s) {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ra.status"); r.label = label; r.value = s;
+            themedPanelHost_->updateRow(QStringLiteral("ra.status"), r); };
+
+        auto onAct = [this, pend, iniPath, setStatus](const QString& id, const QString& val) {
+            if      (id == QStringLiteral("ra.user"))   (*pend)[QStringLiteral("user")] = val;
+            else if (id == QStringLiteral("ra.pass"))   (*pend)[QStringLiteral("pass")] = val;
+            else if (id == QStringLiteral("ra.apikey")) (*pend)[QStringLiteral("apikey")] = val;
+            else if (id == QStringLiteral("ra.savekey")) {
+                QSettings s(iniPath, QSettings::IniFormat);
+                s.setValue(QStringLiteral("ra/apikey"), (*pend)[QStringLiteral("apikey")].trimmed()); s.sync();
+                statusBar()->showMessage(tr("Saved RetroAchievements web API key."), 4000);
+            }
+            else if (id == QStringLiteral("ra.signout")) { if (ach_) ach_->logout(); openRetroAchievements(); }
+            else if (id == QStringLiteral("ra.signin")) {
+                const QString u = (*pend)[QStringLiteral("user")].trimmed(), p = (*pend)[QStringLiteral("pass")];
+                if (!ach_ || u.isEmpty() || p.isEmpty()) { setStatus(tr("Status"), tr("Enter your username and password.")); return; }
+                setStatus(tr("Status"), tr("Signing in…"));
+                ach_->loginWithPassword(u, p);
+            }
+        };
+        auto onBack = [this] { openSettingsHub(); };   // RA is a hub child
+
+        if (themedPanelHost_->panelTitle() == tr("RetroAchievements"))
+            themedPanelHost_->replaceTop(tr("RetroAchievements"), rows, onAct, onBack);
+        else
+            themedPanelHost_->present(tr("RetroAchievements"), rows, onAct, onBack);
+
+        // Async login result: success rebuilds into the signed-in state — SELF-GATED on RA being the live top
+        // (the lifetime model): a login completing after the user navigated away is dropped (the token is stored
+        // by Achievements, so the next entry renders signed-in). Failure patches the status row (updateRow is
+        // inherently safe — it no-ops when no stacked panel carries ra.status).
+        if (ach_)
+            panelPageConns_ << connect(ach_, &Achievements::loginResult, this, [this, setStatus](bool ok, const QString& msg) {
+                if (ok) { if (themedPanelIsTop(tr("RetroAchievements"))) openRetroAchievements(); }
+                else    setStatus(MainWindow::tr("Status"), MainWindow::tr("Sign-in failed: %1").arg(msg));
+            });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("RetroAchievements"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("Sign in with your <b>RetroAchievements</b> account to earn achievements while "
             "playing. Your password is exchanged for a token (stored locally) and not kept. Softcore for now — "
@@ -5960,6 +7753,59 @@ void MainWindow::openRetroAchievements()
 
 void MainWindow::openDebug()
 {
+#ifdef MMV_HAVE_QML
+    // Themed mode: the diagnostic log becomes a scrollable read-only LogView row (activate = scroll mode: Up/Down
+    // scroll the tail, Esc returns to row selection — NavTextField's read-only two-state semantics at the panel
+    // level) alongside Refresh / Clear / Open-location Actions and the UI-test Toggle. Same flows: the same log
+    // path + 500-line tail, the same Settings::setUiTestChannel + updateUiTestServer.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        const QString path = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
+
+        auto loadTail = [path]() -> QString {
+            QFile f(path);
+            QString text = f.open(QIODevice::ReadOnly | QIODevice::Text)
+                               ? QString::fromUtf8(f.readAll()) : MainWindow::tr("(no log entries yet)");
+            const QStringList lines = text.split(QLatin1Char('\n'));
+            constexpr int keep = 500;
+            return lines.size() > keep ? lines.mid(lines.size() - keep).join(QLatin1Char('\n')) : text;
+        };
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("debug.path"); r.label = tr("Log file");
+          r.value = path; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.refresh"); r.label = tr("Refresh"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.clear"); r.label = tr("Clear log"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("debug.openloc"); r.label = tr("Open file location"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("debug.uitest");
+          r.label = tr("UI test channel (local automation pipe — no focus needed)");
+          r.checked = Settings::uiTestChannel(); rows << r; }
+        { PanelRow r; r.kind = PanelRow::LogView; r.id = QStringLiteral("debug.log"); r.label = tr("Log");
+          r.value = loadTail(); rows << r; }
+
+        auto setLog = [this](const QString& t) {
+            PanelRow r; r.kind = PanelRow::LogView; r.id = QStringLiteral("debug.log"); r.label = MainWindow::tr("Log");
+            r.value = t; themedPanelHost_->updateRow(QStringLiteral("debug.log"), r); };
+
+        themedPanelHost_->present(tr("Debug"), rows,
+            [this, path, loadTail, setLog](const QString& id, const QString& val) {
+                if      (id == QStringLiteral("debug.refresh")) setLog(loadTail());
+                else if (id == QStringLiteral("debug.clear"))   { QFile::remove(path); setLog(loadTail()); }
+                else if (id == QStringLiteral("debug.openloc"))
+                    QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(path).absolutePath()));
+                else if (id == QStringLiteral("debug.uitest")) {
+                    Settings::setUiTestChannel(val == QStringLiteral("1"));
+                    updateUiTestServer();   // start/stop the pipe right away
+                }
+            },
+            [this] { openSettingsHub(); });
+
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
     showPanel(tr("Debug"), [this](QVBoxLayout* v) {
         const QString path = AppPaths::dataDir() + QStringLiteral("/stream_debug.log");
 
@@ -6023,19 +7869,396 @@ void MainWindow::openEmulatorSettings()
     // The dialog loads cores headlessly to read their options; only one libretro core can be live at a
     // time (the C ABI routes through a global), so stop any running game first.
     retro_->stop();
+#ifdef MMV_HAVE_QML
+    // Themed mode: the per-system core picker on the Nav Contract (ThemedPanelHost) instead of the classic
+    // SettingsDialog. Same combo data (SystemCatalog + Settings::coreFor); the per-core options editor page
+    // becomes a nested panel level. A hub child -> nested present(), Back -> openSettingsHub.
+    if (themedHomeEnabled() && themedPanelHost_) { presentEmulatorCorePicker(); return; }
+#endif
     auto* dlg = new SettingsDialog(this);
     showDialogPanel(tr("Emulator Settings"), dlg, [this](int) { openSettingsHub(); },
                     [this] { openSettingsHub(); });
 }
 
+#ifdef MMV_HAVE_QML
+// Themed core picker: one Choice row per system (cycles the libretro core, applied+persisted immediately via
+// Settings::setCoreFor — the themed-panel convention, no separate Save) + an indented "Options…" Action per
+// system that drills into that core's options as a nested panel level. retro_->stop() (openEmulatorSettings)
+// keeps sole use of the single libretro slot before any headless core load in editCoreOptions.
+void MainWindow::presentEmulatorCorePicker()
+{
+    themedPanelHost_->setStyle(settingsPanelStyle());
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("intro");
+      r.label = tr("Libretro core per system"); r.value = tr("Auto-used on launch"); rows << r; }
+    for (const GameSystem& sys : SystemCatalog::systems())
+    {
+        if (!sys.externalEmulator.isEmpty()) continue;   // standalone emulators have no libretro core to pick
+        QString chosen = Settings::coreFor(sys.id);
+        if (chosen.isEmpty()) chosen = sys.cores.value(0);
+        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("core:") + sys.id; r.label = sys.name;
+          r.value = chosen; r.options = sys.cores; rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("opts:") + sys.id;
+          r.label = QStringLiteral("      ") + tr("Options…"); rows << r; } // indented: belongs to the row above
+    }
+
+    auto onAct = [this](const QString& id, const QString& val) {
+        if (id.startsWith(QStringLiteral("core:")))
+            Settings::setCoreFor(id.mid(5), val);            // immediate apply (persists to ini)
+        else if (id.startsWith(QStringLiteral("opts:")))
+            editCoreOptions(id.mid(5));                       // nested per-core options page
+    };
+    auto onBack = [this] { openSettingsHub(); };             // core picker is a hub child
+
+    if (themedPanelIsTop(tr("Emulator Settings")))
+        themedPanelHost_->replaceTop(tr("Emulator Settings"), rows, onAct, onBack);
+    else
+        themedPanelHost_->present(tr("Emulator Settings"), rows, onAct, onBack);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+// The per-core options editor as a nested panel level: load the selected core headlessly (downloading first if
+// needed), read its CoreOptions, and render each as a Choice row. Values persist keyed by core name — the SAME
+// Settings::optionValue/setOptionValue the classic editor uses. Applied immediately on cycle (themed convention).
+void MainWindow::editCoreOptions(const QString& systemId)
+{
+    QString core;
+    for (const GameSystem& sys : SystemCatalog::systems())
+        if (sys.id == systemId) { core = Settings::coreFor(sys.id); if (core.isEmpty()) core = sys.cores.value(0); break; }
+    if (core.isEmpty()) { notify(tr("No core selected for this system.")); return; }
+
+    // Ensure the core is present (download on first use), then load it headlessly to read its options. Progress +
+    // failures surface as the themed notification toast (the panel isn't presented during the blocking load).
+    QString dlErr;
+    const QString corePath = CoreManager::ensureCore(core, &dlErr, [this, core](int pct) {
+        notify(tr("Downloading core ‘%1’… %2%").arg(core).arg(pct), 2000);
+    });
+    if (corePath.isEmpty())
+    {
+        notify(dlErr.isEmpty() ? tr("Couldn't download core ‘%1’.").arg(core) : dlErr);
+        return;
+    }
+
+    LibretroCore tmp;
+    std::string err;
+    if (!tmp.loadCore(corePath.toStdString(), &err))
+    {
+        notify(tr("Couldn't load core ‘%1’: %2").arg(core, QString::fromStdString(err)));
+        return;
+    }
+    const std::vector<CoreOption> opts = tmp.options();   // copy out before unloading
+    tmp.unload();
+
+    // Per Choice row: the options list shows LABELS (what the classic combo shows); map each label back to its
+    // value for setOptionValue. One label->value map per option key, captured for the activation handler.
+    auto label2value = std::make_shared<QHash<QString, QHash<QString, QString>>>();
+    QVector<PanelRow> rows;
+    if (opts.empty())
+    {
+        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("none");
+        r.label = tr("This core doesn't expose any configurable options."); rows << r;
+    }
+    else for (const CoreOption& o : opts)
+    {
+        const QString key = QString::fromStdString(o.key);
+        QStringList labels; QHash<QString, QString> l2v; QString curLabel;
+        QString curVal = Settings::optionValue(core, key);
+        if (curVal.isEmpty()) curVal = QString::fromStdString(o.defaultValue);
+        for (const auto& vp : o.values)
+        {
+            const QString value = QString::fromStdString(vp.first), lbl = QString::fromStdString(vp.second);
+            labels << lbl; l2v.insert(lbl, value);
+            if (value == curVal) curLabel = lbl;
+        }
+        if (curLabel.isEmpty()) curLabel = labels.value(0);
+        label2value->insert(key, l2v);
+        PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("opt:") + key;
+        r.label = QString::fromStdString(o.desc); r.value = curLabel; r.options = labels; rows << r;
+    }
+
+    themedPanelHost_->present(tr("%1 — Core Options").arg(core), rows,
+        [this, core, label2value](const QString& rid, const QString& val) {
+            if (!rid.startsWith(QStringLiteral("opt:"))) return;
+            const QString key = rid.mid(4);
+            const QString value = label2value->value(key).value(val, val);
+            Settings::setOptionValue(core, key, value);      // immediate apply (persists to ini)
+        },
+        [] { /* nested: Back pops back to the core list */ });
+}
+#endif // MMV_HAVE_QML
+
 void MainWindow::openInputMapping()
 {
-    // Stop the game so the remap dialog has sole use of the controller (for "press a button" capture).
+    // Stop the game so the remap has sole use of the controller (for "press a button" capture).
     retro_->stop();
+#ifdef MMV_HAVE_QML
+    // Themed mode: a themed SHELL on the Nav Contract. player/scope/turbo Choices + per-button binding Action
+    // rows; activating a binding row enters CAPTURE (the ControllerRemapDialog's capture machinery — keyboard
+    // grab + pad poll — driven headlessly from the shell). Classic ControllerRemapDialog stays for classic mode.
+    if (themedHomeEnabled() && themedPanelHost_) { presentInputMapping(); return; }
+#endif
     auto* dlg = new ControllerRemapDialog(retro_->gamepad(), retro_->keymap(), this);
     showDialogPanel(tr("Input Mapping"), dlg, [this](int) { openSettingsHub(); },
                     [this] { openSettingsHub(); });
 }
+
+#ifdef MMV_HAVE_QML
+// The RetroPad buttons in editing order (mirrors ControllerRemapDialog::kRows — the stable
+// RETRO_DEVICE_ID_JOYPAD_* ABI numbers). Kept local to the themed shell.
+namespace {
+struct RemapBtn { int retroId; const char* label; };
+const RemapBtn kRemapRows[] = {
+    { 4, "D-Pad Up" }, { 5, "D-Pad Down" }, { 6, "D-Pad Left" }, { 7, "D-Pad Right" },
+    { 8, "A" },        { 0, "B" },          { 9, "X" },          { 1, "Y" },
+    { 10, "L" },       { 11, "R" },         { 12, "L2" },        { 13, "R2" },
+    { 14, "L3" },      { 15, "R3" },        { 2, "Select" },     { 3, "Start" },
+};
+}
+
+// Present/rebuild the themed input-mapping shell. Bindings apply+persist immediately (Gamepad::setBinding /
+// Keymap::setKey / Settings::setTurbo* all "update live + persist" to the CURRENT input scope) — the themed-panel
+// convention, so there's no working-copy/Save step. A hub child -> nested present(), Back -> openSettingsHub.
+void MainWindow::presentInputMapping()
+{
+    remapScope_ = Settings::inputScope();
+    remapPort_ = 0;
+    themedPanelHost_->setStyle(settingsPanelStyle());
+    buildInputMappingRows(/*replace*/ false);
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+    updateBackgroundMusic();
+}
+
+void MainWindow::buildInputMappingRows(bool replace)
+{
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+
+    // --- header Choices: player / profile-scope / turbo speed ---
+    QStringList players;
+    for (int p = 0; p < ControllerRemapDialog::kPlayers; ++p) players << tr("Player %1").arg(p + 1);
+
+    QStringList scopeNames; QString curScopeName = tr("All systems (default)");
+    scopeNames << tr("All systems (default)");
+    for (const GameSystem& s : SystemCatalog::systems())
+    {
+        scopeNames << s.name;
+        if (s.id == remapScope_) curScopeName = s.name;
+    }
+
+    QStringList turboNames; turboNames << tr("Slow") << tr("Medium") << tr("Fast") << tr("Ultra");
+    const int hp = Settings::turboHalfPeriod();
+    const QString curTurbo = hp >= 5 ? tr("Slow") : hp == 3 ? tr("Medium") : hp == 2 ? tr("Fast") : tr("Ultra");
+
+    // --- controller status Info (a snapshot; refreshed on rebuild) ---
+    QString status;
+    if (pad && pad->portConnected(remapPort_))
+    {
+        const std::string n = pad->name(remapPort_);
+        status = tr("Player %1 controller: %2").arg(remapPort_ + 1)
+                     .arg(n.empty() ? tr("connected") : QString::fromStdString(n));
+    }
+    else if (pad && pad->connected())
+        status = tr("No controller in this slot — capturing from any connected controller.");
+    else
+        status = tr("No controller detected — connect one to assign controller buttons.");
+
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("player"); r.label = tr("Editing player");
+      r.value = players.value(remapPort_); r.options = players; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("scope"); r.label = tr("Profile");
+      r.value = curScopeName; r.options = scopeNames; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("turbo"); r.label = tr("Turbo speed");
+      r.value = curTurbo; r.options = turboNames; rows << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("status"); r.label = status; rows << r; }
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep"); s.label = tr("Buttons"); rows << s; }
+
+    // --- per-button: controller binding + keyboard binding Actions + a turbo Toggle ---
+    for (const RemapBtn& b : kRemapRows)
+    {
+        const QString bn = tr(b.label);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(b.retroId);
+          r.label = tr("%1 — Controller").arg(bn);
+          r.value = pad ? QString::fromStdString(Gamepad::labelFor(pad->binding(remapPort_, b.retroId)))
+                        : tr("—"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(b.retroId);
+          r.label = tr("%1 — Keyboard").arg(bn);
+          r.value = keys ? Keymap::labelFor(keys->key(remapPort_, b.retroId)) : tr("—"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("turbo:") + QString::number(b.retroId);
+          r.label = tr("%1 — Turbo (autofire)").arg(bn);
+          r.checked = Settings::turboButton(remapPort_, b.retroId); rows << r; }
+    }
+
+    // Classic parity: Reset to Defaults for the currently-shown player (pad + keyboard + turbo), applied
+    // immediately (the themed convention — classic staged it until Save).
+    { PanelRow s; s.kind = PanelRow::Separator; s.id = QStringLiteral("sep2"); rows << s; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("reset");
+      r.label = tr("Reset to Defaults (this player)"); rows << r; }
+
+    auto onAct = [this](const QString& id, const QString& val) {
+        // Defensive: a graph activation must never arrive mid-capture (the qApp filter swallows keys AND mouse
+        // while remap_.active), but if one ever does, cancel first so the filter/pad-timer can't leak.
+        if (remap_.active) endInputCapture(/*cancelled*/ true);
+        if (id == QStringLiteral("reset"))
+        {
+            Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+            Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+            for (const RemapBtn& b : kRemapRows)
+            {
+                if (pad)  pad->setBinding(remapPort_, b.retroId, Gamepad::defaultBinding(b.retroId));
+                if (keys) keys->setKey(remapPort_, b.retroId, Keymap::defaultKey(remapPort_, b.retroId));
+                Settings::setTurboButton(remapPort_, b.retroId, false);
+            }
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("player"))
+        {
+            const int idx = qMax(0, val.section(' ', 1, 1).toInt() - 1);   // "Player N" -> N-1
+            remapPort_ = qBound(0, idx, ControllerRemapDialog::kPlayers - 1);
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("scope"))
+        {
+            QString newScope;   // "All systems (default)" -> "" (global)
+            for (const GameSystem& s : SystemCatalog::systems()) if (s.name == val) { newScope = s.id; break; }
+            remapScope_ = newScope;
+            Settings::setInputScope(newScope);
+            if (Gamepad* g = retro_ ? retro_->gamepad() : nullptr) g->reloadMapping();
+            if (Keymap*  k = retro_ ? retro_->keymap()  : nullptr) k->reload();
+            buildInputMappingRows(/*replace*/ true);
+        }
+        else if (id == QStringLiteral("turbo"))
+        {
+            const int hp2 = val == tr("Slow") ? 5 : val == tr("Medium") ? 3 : val == tr("Fast") ? 2 : 1;
+            Settings::setTurboHalfPeriod(hp2);
+        }
+        else if (id.startsWith(QStringLiteral("turbo:")))
+        {
+            const int rid = id.mid(6).toInt();
+            Settings::setTurboButton(remapPort_, rid, val == QStringLiteral("1"));   // Toggle delivers "1"/"0"
+        }
+        else if (id.startsWith(QStringLiteral("pad:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ false);
+        else if (id.startsWith(QStringLiteral("key:")))  beginInputCapture(id.mid(4).toInt(), /*keyboard*/ true);
+    };
+    // Leaving the panel mid-capture must tear the capture down with it (filter removed, pad timer stopped) —
+    // unreachable while the modal filter swallows keys+mouse, but the boundary owns its own cleanup regardless.
+    auto onBack = [this] { if (remap_.active) endInputCapture(/*cancelled*/ true); openSettingsHub(); };
+
+    if (replace && themedPanelIsTop(tr("Input Mapping")))
+        themedPanelHost_->replaceTop(tr("Input Mapping"), rows, onAct, onBack);
+    else
+        themedPanelHost_->present(tr("Input Mapping"), rows, onAct, onBack);
+}
+
+// Enter CAPTURE for one binding: patch the row to the "Press a …" prompt, then run the SAME capture machinery as
+// ControllerRemapDialog — a pad-poll timer for a controller input, an application-level key filter for a keyboard
+// key (installed on qApp so it sees the key BEFORE the QQuickWidget's QML nav consumes it). Esc cancels. Modal:
+// while active, every physical key is swallowed by inputCaptureKeyFilter.
+void MainWindow::beginInputCapture(int retroId, bool keyboard)
+{
+    if (remap_.active) endInputCapture(/*cancelled*/ true);
+    remap_ = { true, keyboard, remapPort_, retroId, false };
+
+    // Patch the target row to the capture prompt.
+    PanelRow r; r.kind = PanelRow::Action;
+    r.id = (keyboard ? QStringLiteral("key:") : QStringLiteral("pad:")) + QString::number(retroId);
+    const char* bn = "";
+    for (const RemapBtn& b : kRemapRows) if (b.retroId == retroId) { bn = b.label; break; }
+    r.label = keyboard ? tr("%1 — Keyboard").arg(tr(bn)) : tr("%1 — Controller").arg(tr(bn));
+    r.value = keyboard ? tr("Press a key…  (Esc cancels)") : tr("Press a button…  (Esc cancels)");
+    themedPanelHost_->updateRow(r.id, r);
+
+    qApp->installEventFilter(this);   // see physical keys before the QML scene (removed in endInputCapture)
+    if (!keyboard)
+    {
+        if (!remapPadTimer_)
+        {
+            remapPadTimer_ = new QTimer(this);
+            remapPadTimer_->setInterval(30);
+            connect(remapPadTimer_, &QTimer::timeout, this, &MainWindow::onInputCapturePadTick);
+        }
+        remapPadTimer_->start();
+    }
+}
+
+void MainWindow::onInputCapturePadTick()
+{
+    if (!remap_.active || remap_.keyboard) return;
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    if (!pad) return;
+    pad->poll();
+    const int code = pad->anyPressed(remap_.port);      // prefer this player's controller
+    if (!remap_.sawRelease) { if (code == Gamepad::kUnbound) remap_.sawRelease = true; return; }
+    if (code != Gamepad::kUnbound)
+    {
+        pad->setBinding(remap_.port, remap_.retroId, code);   // update live + persist
+        endInputCapture(/*cancelled*/ false);                 // ends + schedules the deferred row refresh
+    }
+}
+
+// The app-level key filter while capturing: Esc cancels; in keyboard mode the next key binds; everything is
+// swallowed (modal). Returns true when the event is consumed.
+bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
+{
+    if (!remap_.active) return false;
+    if (e->key() == Qt::Key_Escape) { endInputCapture(/*cancelled*/ true); return true; }
+    if (remap_.keyboard)
+    {
+        Keymap* keys = retro_ ? retro_->keymap() : nullptr;
+        const int rid = remap_.retroId, port = remap_.port, k = e->key();
+        if (keys)
+        {
+            keys->setKey(port, rid, k);   // update live + persist
+            // A key drives one button within this profile; clear it from any other button (data only — the whole
+            // grid's labels are re-patched by the deferred refresh below, so every cleared row updates too).
+            for (const RemapBtn& b : kRemapRows)
+                if (b.retroId != rid && keys->key(port, b.retroId) == k)
+                    keys->setKey(port, b.retroId, Keymap::kUnbound);
+        }
+        endInputCapture(/*cancelled*/ false);
+    }
+    // pad mode: swallow non-Esc keys (stay in capture — the button arrives via the pad tick)
+    return true;
+}
+
+void MainWindow::endInputCapture(bool /*cancelled*/)
+{
+    if (!remap_.active) return;
+    remap_.active = false;
+    if (remapPadTimer_) remapPadTimer_->stop();
+    qApp->removeEventFilter(this);
+    // Refresh the binding labels AFTER this event dispatch returns to the loop. Patching the model mid-dispatch
+    // (we're inside the qApp key filter, or a pad-timer tick) reliably repaints only the SELECTED delegate — a
+    // non-selected row cleared by the duplicate-key rule kept showing its stale binding. A singleShot(0) runs the
+    // updateRow patches from a clean context, so the bound row AND every cleared row refresh. Cursor is preserved
+    // (updateRow patches in place; both cancelled and committed captures re-read current state).
+    QTimer::singleShot(0, this, [this] { refreshInputButtonRows(); });
+}
+
+// Re-patch every button row's current binding label (controller + keyboard) in place — cursor untouched. Used
+// after a capture commits/cancels so the whole grid reflects current state (incl. duplicate-cleared rows).
+void MainWindow::refreshInputButtonRows()
+{
+    if (!themedPanelIsTop(tr("Input Mapping"))) return;
+    Gamepad* pad = retro_ ? retro_->gamepad() : nullptr;
+    Keymap*  keys = retro_ ? retro_->keymap() : nullptr;
+    for (const RemapBtn& b : kRemapRows)
+    {
+        const QString bn = tr(b.label);
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("pad:") + QString::number(b.retroId);
+          r.label = tr("%1 — Controller").arg(bn);
+          r.value = pad ? QString::fromStdString(Gamepad::labelFor(pad->binding(remapPort_, b.retroId))) : tr("—");
+          themedPanelHost_->updateRow(r.id, r); }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("key:") + QString::number(b.retroId);
+          r.label = tr("%1 — Keyboard").arg(bn);
+          r.value = keys ? Keymap::labelFor(keys->key(remapPort_, b.retroId)) : tr("—");
+          themedPanelHost_->updateRow(r.id, r); }
+    }
+}
+#endif // MMV_HAVE_QML
 
 void MainWindow::onDuration(double seconds)
 {

@@ -35,4 +35,7 @@ public:
     virtual void fitWidth() {}                  // pdf/comic: fit-to-width
     virtual void setTwoUp(bool) {}              // comic: enable/disable the two-page spread
     virtual bool twoUp() const { return false; } // comic: is the two-up spread preference on
+    virtual bool spreadActive() const { return false; } // comic: a two-page spread is on screen RIGHT NOW (fit
+                                                        // + two-up + a next page exists) — the themed page label
+                                                        // then reads a RANGE ("3–4 / 20"), matching the classic bar
 };

@@ -3,6 +3,7 @@
 // Cancel just keeps the current profile). On accept, selectedId() is the chosen/created profile id.
 #pragma once
 #include <QDialog>
+#include <QStringList>
 #include <functional>
 
 class QVBoxLayout;
@@ -14,6 +15,10 @@ class ProfileDialog : public QDialog
 public:
     explicit ProfileDialog(bool mustChoose, QWidget* parent = nullptr);
     QString selectedId() const { return selectedId_; }
+
+    // The set of cute avatar glyphs offered in the name/icon picker — shared with the themed Profiles panel
+    // (ThemedPanelHost) so both surfaces offer the SAME icon list from one source of truth.
+    static QStringList iconChoices();
 
 private:
     void rebuild();         // (re)draw the list of profile rows

@@ -304,6 +304,7 @@ void GameLauncher::ensureEmu()
         // Update the wait-page label only if it's already the current view — an install-only flow (Settings ▸
         // Emulators) must NOT be yanked onto the wait page and stranded there. runEmulator/launched switch views.
         emit waitPageStatus(line);
+        emit emulatorInstallProgress(t, pct);   // themed Emulators panel: tick the emulator's status row in place
     });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         emit waitPage(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "
@@ -352,12 +353,14 @@ void GameLauncher::ensureEmu()
     });
     connect(emu_, &EmulatorManager::installed, this, [this](const QString& name) {
         emit statusMessage(tr("%1 is installed.").arg(name), kFeedbackShort);
+        emit emulatorInstallFinished(name);
     });
     connect(emu_, &EmulatorManager::failed, this, [this](const QString& msg) {
         glLog(QStringLiteral("emu: failed: %1").arg(msg));
         stopEmuHotkeyWatch();
         emit statusMessage(msg, kFeedbackLong);
         emit waitPageDone();
+        emit emulatorInstallFailed(msg);
     });
 }
 

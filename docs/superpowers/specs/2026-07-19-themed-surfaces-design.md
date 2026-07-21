@@ -1,7 +1,8 @@
 # Phase 3, Subsystem B — Themed Content Surfaces Design
 
 **Date:** 2026-07-19
-**Status:** B1 complete: detail + 4 readers themed on the contract; classic retired from themed flows. B2 (settings + hardening) next.
+**Status:** Subsystem B complete: B1 + B2 — themed everywhere, classic paths deprecation-logged, themed default ON. Subsystem D (TV+mobile) next.
+  _(Task 7 no-classic capstone walk: 40+ themed surfaces driven live, zero classic surfaces reachable in themed mode. Full probe suite green, perf flat vs the B2T6 perf-track baseline, watchdog clean. Task 6.75 then converted the Appearance panel — the single classic surface the walk found — to ThemedPanelHost, so no classic-styled surface is reachable in themed mode at all.)_
 **Builds on:** `2026-07-18-nav-contract-design.md` (subsystem A complete: NavGraph contract,
 declared edges, two-state inputs, one Back router, watchdog)
 
@@ -66,6 +67,13 @@ background (the inversion of the proven XMB-over-widget layering).
   a themed equivalent of the `showPanel` in-window panel system built from the
   two-state components, one settings screen per plan-task, including the Esc menu
   styling and profile picker.
+- A uniform themed row-list surface (ThemedPanelHost) models its rows as ONE Vertical
+  panelRows zone with per-row indices — not per-row self-registering
+  ThemedChoice/ThemedTextField zones, which suit Repeater/Loader surfaces of
+  heterogeneous fields. Row interaction (Toggle flip / Choice cycle / TextField OSK
+  edit) is dispatched host-side in onGraphActivated, honoring the externalEdit
+  contract — select → activate → edit-via-Osk::getText → commit-exactly-once, cancel
+  commits nothing — at the row level. Delegates are pure render.
 
 ## Phasing
 
@@ -126,6 +134,59 @@ or a dedicated polish pass.
   the spike but never demoed in a shipped reader; capture a live demo if B enhancement lands.
 - **`Xmb.qml`/`Video.qml` "still" binding-loop warning.** Themed XMB logs `QML Video: Binding loop
   detected for property "still"` on the metadata panel; pre-existing (not touched by B1), noisy in logs.
+
+### B2 follow-ups (recorded during the settings-panel conversions; triaged fine-as-follow-up)
+
+Gaps surfaced converting the classic `showPanel` builders onto the `PanelRow` model (`PanelModel.h`) /
+`ThemedPanelHost`. None block B2; each is a widening of the row-model vocabulary, carried into a later
+panel-polish pass.
+
+- **Missing `Slider` `PanelRow` kind.** `PanelModel.h`'s `Kind` enum has no continuous-value row, so the
+  BGM volume control shipped as a `Choice` cycling 10% steps (0/10/…/100%) instead of a real slider. A
+  `Slider` kind (min/max/step + Left/Right to adjust in place, mirroring the reader settings zone's
+  bidirectional cross-axis cycle) would restore fine-grained control and generalize to brightness/volume
+  rows. Until then, `Choice`-as-coarse-slider is the stand-in.
+- **Dropped Trakt redirect-URI setup hint.** The classic Trakt/Cloud-Sync panel showed a multi-line setup
+  hint (the OAuth redirect URI to paste into the Trakt app registration). The single-line `PanelRow` model
+  (one `label` + one right-hand `value`) can't carry that guidance, so it was dropped from the themed panel.
+  Needs either a multi-line `Info`/help row kind or a dedicated help affordance before the Trakt setup flow
+  is fully reachable in themed mode.
+
+### Task 7 no-classic-walk follow-ups (surfaced by the B2 capstone walk; recorded, not fixed)
+
+The capstone walk drove 40+ themed surfaces live. Every settings panel, both reader-exit origin restores,
+the Esc/pause menu, the startup + in-app profile pickers, game launch/exit, and the video player all render
+themed. The remaining minor observations (the one classic surface the walk found — Appearance — was converted
+in Task 6.75; see below):
+
+- **Appearance panel — CONVERTED to themed (Task 6.75, DONE).** `openAppearance()` (`MainWindow.cpp`) now
+  renders a themed `ThemedPanelHost` panel in themed mode (a themed-home Toggle + a Theme Choice + condensed
+  Info rows + an "Open the theme gallery (GitHub)…" Action), driven by the Nav Contract / `PanelRow` model like
+  every other settings panel; the classic `QWidget`/`QListWidget`/live-preview builder is retained UNCHANGED as
+  the classic-mode fallback. Themed mode no longer logs `deprecated-classic: panel:Appearance` (verified: zero
+  such lines across the live re-walk). The classic panel's live embedded preview is replaced by apply-on-select:
+  picking a theme saves `themedHome/theme` and restyles the live panel to that theme's `settingsPanel` block (a
+  preview on the very surface, no underlay rebuild — so no wedge), and the full theme lands on panel exit via the
+  hub root's existing `showHomeScreen()` rebuild. Probe: `probe_navqml` §18(i). This was the last panel blocking
+  B2's literal "settings fully themed" goal — now met.
+- **`split-pane-pick` classic drop (documented inventory item, not driven).** `enterSplitScreen`'s
+  `openHereRequested` lambda still drops to the classic `HomeView` and logs `deprecated-classic:
+  split-pane-pick` if split-screen is driven. Not exercised in the walk (no split-screen driven); carry the
+  themed split-pane picker as a follow-up.
+- **Reader-exit key is inconsistent across readers.** Book and comic readers exit on Back (Backspace); the PDF
+  reader consumes Back (page-nav) and only exits on Escape. All three restore the themed origin surface, so
+  it's not a classic leak — but the exit affordance should be unified.
+- **Profile-icon mojibake.** The stored profile icon (`[profiles] list` in the ini) is a double-encoded emoji
+  (`Ã°Å¸ÂÂ¶` for 🐶); the themed home/switcher render the mojibake as-is. A stored-data/encoding issue
+  (the classic HomeView decodes it correctly), not a themed-surface bug — worth a one-time migration.
+- **Live theme-change wedge — RESOLVED (Task 6.75).** The classic Appearance panel rebuilt the themed home
+  under the open panel on theme-select, which wedged the host (`panelDepth` stuck, Back couldn't leave until
+  relaunch). The themed Appearance panel deliberately does NOT rebuild the underlay: apply-on-select only
+  restyles the live panel, and the full theme rebuilds on exit (the hub root's `showHomeScreen()`). Verified in
+  the live re-walk: switch theme in the themed panel → Back pops Appearance→hub (depth 2→1) → hub→themed home,
+  no wedge.
+- **`Xmb.qml` `still` binding-loop warning** (already noted under B1) still logs on every hero-metadata bind
+  in themed XMB, plus a missing `themes2/XMB/poster` image warning — noisy but cosmetic.
 
 ## Composition decision (Task 1 outcome)
 

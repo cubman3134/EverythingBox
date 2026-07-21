@@ -196,3 +196,40 @@ inline void buildReaderNavGraph(NavGraph& g, ReaderKind kind)
     // kind is not consulted here — keeping the shape identical is exactly what lets ONE builder back all three.
     (void)kind;
 }
+
+// ---- Themed settings PANEL surface (Plan B2, Task 1): the showPanel analogue on the Nav Contract -----------
+//
+// A themed panel (ThemedPanelHost) is its OWN NavGraph — a standalone stack page like the reader, with NO home
+// surface co-resident in the same graph, so the whole panel graph IS the surface. The host owns the panel
+// LEVEL(s): present() pushes "panel:<title>"; a nested present() stacks another; Back pops one (the host's
+// onPop re-renders the parent panel, or leaves the host when the last level goes). Shared verbatim between the
+// app (ThemedPanelHost) and probe_navqml's §18 shape-test — the NavThemeGraph.h discipline, so the CI
+// assertion can never drift from the shipped graph.
+//
+// Zones (a two-zone surface, mirroring classic showPanel's header-Back + row list):
+//   * panelRows (row 1, col 0, Vertical) — the row list; count = rowCount. The default zone the panel opens on.
+//   * panelBack (row 0, col 0, Horizontal, count 1) — the header Back affordance, always present. Enter on it
+//     is the host's Back (pop the level); Up-crossing from the first row lands here, like the classic panel.
+//
+// Declared edges: panelBack --Down--> panelRows (panelBack is Horizontal, so Down is its CROSS axis — safe to
+// declare; it enters panelRows at that zone's REMEMBERED index). The reverse (Up off the first row) is left to
+// GEOMETRY: a declared Up on the Vertical panelRows would freeze its along-axis stepping (the reader lesson),
+// so panelRows' Up steps the list and, at the top row, crosses up to panelBack by grid geometry (both sit in
+// col 0, panelBack a row above). Containment SELF pins (the standalone surface has nothing to escape onto, but
+// the pins keep a stray arrow a visible no-op instead of a silent geometric hop): panelBack Up/Left/Right (a
+// 1-count strip — nothing above or beside it) and panelRows' cross-axis Left/Right. panelRows' Down is left to
+// geometry (steps the list; past the last row nothing sits below row 1 — a contained no-op).
+inline void buildPanelNavGraph(NavGraph& g, int rowCount)
+{
+    g.registerZone(QStringLiteral("panelRows"), rowCount, 1, 0, Qt::Vertical);
+    g.registerZone(QStringLiteral("panelBack"), 1, 0, 0, Qt::Horizontal);
+    g.setDefaultZone(QStringLiteral("panelRows"));
+    // The back-zone edge: Down off the header enters the row list at its remembered index (cross-axis, safe).
+    g.addEdge(QStringLiteral("panelBack"), Qt::Key_Down, QStringLiteral("panelRows"));
+    // Containment pins (SELF = consume, no geometric escape off the standalone panel surface).
+    g.addEdge(QStringLiteral("panelBack"), Qt::Key_Up,    QStringLiteral("panelBack"));
+    g.addEdge(QStringLiteral("panelBack"), Qt::Key_Left,  QStringLiteral("panelBack"));
+    g.addEdge(QStringLiteral("panelBack"), Qt::Key_Right, QStringLiteral("panelBack"));
+    g.addEdge(QStringLiteral("panelRows"), Qt::Key_Left,  QStringLiteral("panelRows"));
+    g.addEdge(QStringLiteral("panelRows"), Qt::Key_Right, QStringLiteral("panelRows"));
+}

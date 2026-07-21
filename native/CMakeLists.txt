@@ -177,6 +177,7 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
+            src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
             ${MMV_THEME2_RCC})
         target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
@@ -309,6 +310,14 @@ if(MYMEDIAVAULT_BUILD_APP)
         # the app target's note above), so qrc:/theme2/elements/ThemedTextField.qml is embedded and loadable.
         qt_add_resources(MMV_THEME2_RCC_NAVQML resources/theme2.qrc)
         target_sources(probe_navqml PRIVATE ${MMV_THEME2_RCC_NAVQML})
+        # §18(e) drives the REAL ThemedPanelHost (not the bare NavGraph) to pin the pop-restore clamp hazard at
+        # host level. That drags in the panel host + the nav-kit closure its OSK edit path references
+        # (Osk/NavOverlay/Nav) — the exact set probe_nav already links with only Qt6::Widgets, so no MainWindow.
+        target_sources(probe_navqml PRIVATE
+            src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
+            src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
+            src/ui/nav/Osk.cpp        src/ui/nav/Osk.h)
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
         target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
     endif()

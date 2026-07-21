@@ -62,7 +62,7 @@ private:
     void rescale();
     void updateLabel();
 
-    bool spreadActive() const; // currently showing two pages side by side (book mode)
+    bool spreadActive() const override; // currently showing two pages side by side (HostedReader: themed label range)
 
     QVector<QByteArray> pages_; // each entry = one page's encoded image bytes (jpg/png/…)
     int current_ = 0;

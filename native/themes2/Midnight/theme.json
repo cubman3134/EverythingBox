@@ -2,6 +2,7 @@
   "name": "Midnight",
   "author": "My Media Vault",
   "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.55 },
+  "settingsPanel": { "background": "#0A0B10", "panel": "#12141C", "row": "#161822", "rowSelected": "#2A2030", "accent": "#FF6A3D", "text": "#EAECF2", "dim": "#8A90A0", "separator": "#6C7284", "warning": "#FF5C5C" },
   "views": {
     "home": {
       "background": { "color": "#0A0B10" },

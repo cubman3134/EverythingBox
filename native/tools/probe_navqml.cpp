@@ -44,6 +44,7 @@
 #include <QKeyEvent>
 #include <QQmlError>
 #include <QSGRendererInterface>
+#include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #else
 #include <QGuiApplication>
 #endif
@@ -88,6 +89,8 @@ static void runThemedInputAsserts()
         "    property string xLastCommit: \"\"\n"
         "    property int xCommitCount: 0\n"
         "    property int xEditReq: 0\n"
+        "    property int emptyChosen: 0\n"
+        "    property int emptyEditReq: 0\n"
         "    Keys.onPressed: (event) => {\n"
         "        if (event.key === Qt.Key_Left || event.key === Qt.Key_Right\n"
         "            || event.key === Qt.Key_Up || event.key === Qt.Key_Down) { nav.move(event.key); event.accepted = true }\n"
@@ -101,6 +104,9 @@ static void runThemedInputAsserts()
         "        El.ThemedChoice { objectName: \"tc\"; navZone: \"choice1\"; navRow: 1; navCol: 0; options: [\"Alpha\", \"Beta\", \"Gamma\"]\n"
         "            onChosen: (i) => { host.chosenIndex = i; host.chosenCount++ }\n"
         "            onEditRequested: (z) => host.chEditReq++ }\n"
+        "        El.ThemedChoice { objectName: \"tcEmpty\"; navZone: \"choiceEmpty\"; navRow: 4; navCol: 0; options: []\n"  // empty-options guard subject
+        "            onChosen: (i) => { host.emptyChosen++ }\n"
+        "            onEditRequested: (z) => host.emptyEditReq++ }\n"
         "        Loader {\n"       // teardown vehicle: activating registers field2, deactivating must DEregister it
         "            objectName: \"dynLoader\"; active: false\n"
         "            sourceComponent: El.ThemedTextField { navZone: \"field2\"; navRow: 2; navCol: 0 }\n"
@@ -264,6 +270,42 @@ static void runThemedInputAsserts()
     CHECK(!tc->property("externalPending").toBool(), "the choice returns to selected");
     tc->setProperty("externalEdit", false);
 
+    // ---- 9c. ThemedChoice empty-options guard (B2 Task 6 hardening): a 0-option Choice must not open ----
+    // A Choice with no options has nothing to pick; activating it must be a total no-op — no inline list, no
+    // editRequested, no chosen(), and the selection stays put (a wedge here would strand the cursor mid-panel).
+    {
+        QQuickItem* tce = host->findChild<QQuickItem*>(QStringLiteral("tcEmpty"));
+        CHECK(tce != nullptr, "the empty-options choice is present");
+        if (tce)
+        {
+            const int chosenBefore = host->property("emptyChosen").toInt();
+            const int reqBefore     = host->property("emptyEditReq").toInt();
+            // (a) inline mode: activate does nothing (no editing state, selection stays on the empty choice).
+            graph.select(QStringLiteral("choiceEmpty"), 0);
+            pump();
+            CHECK(graph.zone() == QStringLiteral("choiceEmpty"), "the empty choice can still be SELECTED (zone count 1)");
+            graph.activate();
+            pump();
+            CHECK(!tce->property("editing").toBool(), "activating a 0-option choice does NOT enter editing");
+            CHECK(host->property("emptyChosen").toInt() == chosenBefore, "a 0-option choice fires no chosen()");
+            CHECK(graph.zone() == QStringLiteral("choiceEmpty"), "the selection stays put (no wedge/reassign)");
+            // (b) externalEdit mode: activate must not emit editRequested either (nothing for the host to pick).
+            tce->setProperty("externalEdit", true);
+            graph.activate();
+            pump();
+            CHECK(host->property("emptyEditReq").toInt() == reqBefore, "a 0-option external choice emits no editRequested");
+            CHECK(!tce->property("externalPending").toBool(), "a 0-option external choice never goes pending");
+            tce->setProperty("externalEdit", false);
+            // Sanity: giving it options re-enables the picker (the guard is options-driven, not a permanent off).
+            tce->setProperty("options", QVariantList{ QStringLiteral("One"), QStringLiteral("Two") });
+            pump();
+            graph.activate();
+            pump();
+            CHECK(tce->property("editing").toBool(), "populating options re-enables activation (guard lifts)");
+            sendKey(win, Qt::Key_Escape);
+        }
+    }
+
     // ---- 10. teardown: destruction DEregisters the zone (no phantom zones after a Loader unload) ----
     QQuickItem* dynLoader = host->findChild<QQuickItem*>(QStringLiteral("dynLoader"));
     CHECK(dynLoader != nullptr, "the teardown Loader is present");
@@ -294,6 +336,463 @@ static void runThemedInputAsserts()
         CHECK(graph.zone() != QStringLiteral("field2") && !graph.zone().isEmpty(),
               "destroying the SELECTED field reassigns the selection to a live zone");
         CHECK(graph.validate(nullptr), "the graph validates after the selected-zone teardown");
+    }
+}
+
+// A run of Action rows (all selectable) with a tag-derived id/label — the panel content §18(e) drills.
+static QVector<PanelRow> panelActionRows(int n, const QString& tag)
+{
+    QVector<PanelRow> rows;
+    for (int i = 0; i < n; ++i)
+    {
+        PanelRow r;
+        r.kind  = PanelRow::Action;
+        r.id    = tag + QString::number(i);
+        r.label = tag + QStringLiteral(" ") + QString::number(i);
+        rows.push_back(r);
+    }
+    return rows;
+}
+
+// §18(e) — HOST-LEVEL pop-restore, the guard §18(d) structurally cannot be. §18(d) drives the BARE NavGraph
+// through the host's call *sequence*, so it can only prove the graph leg; it never runs ThemedPanelHost::
+// renderTop, where the real defect lived: renderTop read Entry.lastIndex AFTER setZoneCount had already shrunk
+// the panelRows zone. When the popped child had MORE rows than the parent, that shrink clamps the stale child
+// index into the smaller count and emits selectionChanged — onSelectionChanged then writes that clamped value
+// into the just-revealed parent entry (stack_.last() is now the parent), clobbering the remembered row before
+// renderTop reads it. The fix captures the target index BEFORE any graph mutation; this exercises the REAL host
+// (present → drive cursor → present larger child → drive it down → pop) to pin that ordering, in both clamp
+// directions. If this ever regresses (capture moved back after the mutations), assert (i) below goes red.
+static void runPanelHostPopRestoreAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    // ---- (i) child LARGER than parent: the pop SHRINKS panelRows, so the clamp fires — the exact bug shape.
+    //      The remembered parent row is INTERIOR (2 of 6), deliberately NOT the last row: the shrink clamps the
+    //      stale child index to count-1 (== 5), so a host that restored the clamped value would land on 5, not
+    //      2 — the two are distinct only because the remembered row is off the boundary. (A boundary remembered
+    //      row would coincide with the clamp target and mask the defect, which is why the pure-graph §18(d)
+    //      sequence, and any parent-at-last-row check, could never have gone red.)
+    {
+        ThemedPanelHost host;                                       // offscreen (QT_QPA_PLATFORM=offscreen)
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Parent"), panelActionRows(6, QStringLiteral("p")), noop, onBack);
+        CHECK(host.levelDepth() == 1, "panel-host: parent panel presented (depth 1)");
+        g->select(QStringLiteral("panelRows"), 2);                 // the user's place on the parent (interior)
+        CHECK(g->index() == 2, "panel-host: parent cursor parked on the interior row 2");
+
+        host.present(QStringLiteral("Child"), panelActionRows(12, QStringLiteral("c")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host: a LARGER child (12 rows) presented (depth 2)");
+        g->select(QStringLiteral("panelRows"), 11);                // drive the child cursor to its LAST row
+        CHECK(g->index() == 11, "panel-host: child cursor driven to its last row (11)");
+
+        host.handleBack();                                         // pop the child -> renderTop(restore=true)
+        CHECK(host.levelDepth() == 1, "panel-host: Back pops the child, revealing the parent (depth 1)");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 2,
+              "panel-host: pop restores the parent's remembered INTERIOR row (2), NOT the shrink-clamped child index (5)");
+        CHECK(g->validate(nullptr), "panel-host: the graph validates after the larger-child pop");
+    }
+
+    // ---- (ii) inverse — child SMALLER than parent: the pop GROWS panelRows, so NO clamp fires. This pins the
+    //      other direction (the §18(d) shape) at host level: the remembered parent row still returns exactly.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Parent"), panelActionRows(6, QStringLiteral("p")), noop, onBack);
+        g->select(QStringLiteral("panelRows"), 4);                 // interior parent row
+        CHECK(g->index() == 4, "panel-host(inverse): parent cursor parked on row 4");
+
+        host.present(QStringLiteral("Child"), panelActionRows(3, QStringLiteral("c")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host(inverse): a SMALLER child (3 rows) presented (depth 2)");
+        g->select(QStringLiteral("panelRows"), 2);                 // child cursor within its 3 rows
+        host.handleBack();
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 4,
+              "panel-host(inverse): pop grows the zone and restores the parent's remembered row (4)");
+        CHECK(g->validate(nullptr), "panel-host(inverse): the graph validates after the smaller-child pop");
+    }
+}
+
+// §18(f) — replaceTop's SAME-LEVEL contract, the host leg the panel async-connection lifetime model rides on.
+// A state-gated panel (Cloud Sync sign-in state, RA login, BIOS re-check) rebuilds its row SET on async events;
+// MainWindow's handlers self-gate on the panel being top and then call the open* method, whose reentry path is
+// replaceTop. That is only safe because replaceTop swaps the TOP entry IN PLACE: the level depth must NOT grow
+// (a stray pushLevel would stack a duplicate panel the user Backs through twice — the exact "panel presented
+// over something else" failure the gate exists to prevent), the fresh row set must land on its first selectable
+// row (the old cursor is meaningless in a new set), and ONE Back afterwards must still pop straight to the
+// parent. The MainWindow-side gate itself (themedPanelIsTop) is not linkable here; this pins the host half.
+static void runPanelHostReplaceTopAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    // ---- (i) replaceTop on a presented stack: depth frozen, rows swapped, cursor re-homed, Back unaffected.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Hub"), panelActionRows(5, QStringLiteral("h")), noop, onBack);
+        host.present(QStringLiteral("Cloud"), panelActionRows(6, QStringLiteral("a")), noop, onBack);
+        CHECK(host.levelDepth() == 2, "panel-host(replaceTop): panel presented over the hub (depth 2)");
+        g->select(QStringLiteral("panelRows"), 3);                 // the user's place in the OLD row set
+
+        host.replaceTop(QStringLiteral("Cloud"), panelActionRows(4, QStringLiteral("b")), noop, onBack);
+        CHECK(host.levelDepth() == 2,
+              "panel-host(replaceTop): an in-place rebuild does NOT stack a level (depth stays 2)");
+        CHECK(host.panelTitle() == QStringLiteral("Cloud"), "panel-host(replaceTop): the top title is the rebuilt panel");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+              "panel-host(replaceTop): the fresh row set lands on its first selectable row (the old cursor is void)");
+        CHECK(g->validate(nullptr), "panel-host(replaceTop): the graph validates after the in-place rebuild");
+
+        host.handleBack();                                         // ONE Back must reach the parent, not a duplicate
+        CHECK(host.levelDepth() == 1 && host.panelTitle() == QStringLiteral("Hub"),
+              "panel-host(replaceTop): one Back pops straight to the parent (no duplicate level to Back through)");
+    }
+
+    // ---- (ii) replaceTop on an EMPTY host degrades to present() (documented fallback).
+    {
+        ThemedPanelHost host;
+        host.replaceTop(QStringLiteral("Fresh"), panelActionRows(3, QStringLiteral("f")), noop, onBack);
+        CHECK(host.levelDepth() == 1 && host.panelTitle() == QStringLiteral("Fresh"),
+              "panel-host(replaceTop): on an empty stack it degrades to a plain present (depth 1)");
+    }
+}
+
+// §18(j) — HOST re-entrancy safety (final-review fix round): the three defects the whole-branch reviewer found in
+// ThemedPanelHost's dispatch. All three are host-local and headlessly pinnable without MainWindow linkage.
+//   (a) replaceTop invoked from INSIDE an onActivate callback: the entry's onActivate is move-assigned while it
+//       executes. onGraphActivated dispatches through a BY-VALUE copy, so the executing closure survives — the
+//       activation body runs to completion and the in-place rebuild lands. RED-DEMO: the onActivate captures a
+//       heap sentinel and reads it AFTER calling replaceTop; before the fix that read is a use-after-free of the
+//       just-destroyed closure's captures (a copy keeps it alive). Observable: the post-replace body completed,
+//       the sentinel survived, depth stayed frozen (no stacked level), the rebuilt rows are current.
+//   (b) overlayAbove(): the primitive MainWindow::themedPanelIsTop now also consults so an async handler never
+//       rebuilds under a live OSK/menu. An overlay mirrors itself as an extra graph level, so overlayAbove() is
+//       true exactly while the graph carries more levels than the host has panels.
+//   (c) TextField commit re-location: after the (blocking) OSK returns, the value is committed by RE-LOCATING the
+//       row by id in the CURRENT top entry — a mid-edit replaceTop that dropped the row must make the commit a
+//       safe no-op (never a write through the freed buffer). Pinned via the shared find-by-id primitive
+//       (updateRow) that the commit relocation uses: a patch to a vanished id no-ops; to a surviving id applies.
+static void runPanelHostReentrancyAsserts()
+{
+    auto onBack = [] {};
+
+    // ---- (a) replaceTop from inside an onActivate — the executing closure must survive its own reassignment.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+
+        auto sentinel = std::make_shared<int>(0xA11E);   // heap object the closure captures
+        bool bodyCompleted = false;
+        QString titleAfterReplace;
+
+        QVector<PanelRow> before = panelActionRows(1, QStringLiteral("go"));   // one Action row: "go0"
+        // The onActivate rebuilds THIS panel (replaceTop) and then KEEPS RUNNING — reading its captured sentinel
+        // and the host state AFTER the rebuild. Pre-fix (dispatch via e.onActivate directly) the replaceTop
+        // destroys this very closure, so every line below the replaceTop call touches freed captures.
+        auto onAct = [&host, &sentinel, &bodyCompleted, &titleAfterReplace, onBack]
+                     (const QString&, const QString&) {
+            host.replaceTop(QStringLiteral("Rebuilt"), panelActionRows(3, QStringLiteral("nw")),
+                            [](const QString&, const QString&) {}, onBack);
+            // Everything from here on runs on a closure that replaceTop just move-assigned over:
+            const int keepAlive = *sentinel;          // UAF pre-fix (captured heap ptr in a destroyed closure)
+            titleAfterReplace = host.panelTitle();
+            bodyCompleted = (keepAlive != 0);
+        };
+
+        host.present(QStringLiteral("Start"), before, onAct, onBack);
+        CHECK(host.levelDepth() == 1, "panel-host(reentrant): the start panel presented (depth 1)");
+        g->select(QStringLiteral("panelRows"), 0);
+        g->activate();                                 // → onGraphActivated → the copied onAct runs
+
+        CHECK(bodyCompleted, "panel-host(reentrant): the activation body ran to completion past its own replaceTop");
+        CHECK(host.levelDepth() == 1,
+              "panel-host(reentrant): the in-place rebuild did NOT stack a level (depth stays 1)");
+        CHECK(host.panelTitle() == QStringLiteral("Rebuilt") && titleAfterReplace == QStringLiteral("Rebuilt"),
+              "panel-host(reentrant): the top panel is the rebuilt one, seen from inside the surviving closure");
+        CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+              "panel-host(reentrant): the rebuilt row set landed on its first selectable row");
+        CHECK(g->validate(nullptr), "panel-host(reentrant): the graph validates after the reentrant rebuild");
+    }
+
+    // ---- (b) overlayAbove() — the top-gate primitive: an overlay mirrors an EXTRA graph level over the panel.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        host.present(QStringLiteral("Panel"), panelActionRows(3, QStringLiteral("p")), [](const QString&, const QString&) {}, onBack);
+        CHECK(!host.overlayAbove(),
+              "panel-host(overlay): no overlay over a freshly presented panel (graph levels == host panels)");
+        // Mirror an overlay exactly as Osk::getText / NavOverlay::setNavGraph do — one extra "overlay" level.
+        g->pushLevel(QStringLiteral("overlay"), [] {});
+        CHECK(host.overlayAbove(),
+              "panel-host(overlay): overlayAbove() is TRUE while an overlay level sits above the panel");
+        g->popLevel();
+        CHECK(!host.overlayAbove(),
+              "panel-host(overlay): overlayAbove() clears when the overlay level pops (the gate re-opens)");
+    }
+
+    // ---- (c) TextField commit re-location — a commit to a row a mid-edit replaceTop removed is a safe no-op.
+    //      The OSK loop can't be driven headlessly (it needs synthetic input), so this pins the find-by-id
+    //      relocation the post-OSK commit performs, via the shared updateRow primitive: present a panel carrying
+    //      a TextField "au.url", rebuild it AWAY (replaceTop to a set without that id), then a commit addressed to
+    //      the vanished id must NOT reach the model; a commit to a surviving id must apply.
+    {
+        ThemedPanelHost host;
+        QVector<PanelRow> withField;
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = QStringLiteral("URL"); withField << r; }
+        { PanelRow r; r.kind = PanelRow::Action;    r.id = QStringLiteral("au.add"); r.label = QStringLiteral("Add"); withField << r; }
+        host.present(QStringLiteral("Add by URL"), withField, [](const QString&, const QString&) {}, onBack);
+
+        // Mid-edit rebuild drops "au.url" (the shape of an async replaceTop while the URL OSK was open).
+        host.replaceTop(QStringLiteral("Add-ons"), panelActionRows(2, QStringLiteral("lib")),
+                        [](const QString&, const QString&) {}, onBack);
+        CHECK(host.panelTitle() == QStringLiteral("Add-ons"),
+              "panel-host(textfield-drop): the panel rebuilt away from the edited field");
+        // A post-OSK commit relocates by id; the id is gone, so it drops. patchRow on the model must report false.
+        PanelRow stale; stale.kind = PanelRow::TextField; stale.id = QStringLiteral("au.url"); stale.value = QStringLiteral("http://x");
+        host.updateRow(QStringLiteral("au.url"), stale);   // no crash, no effect (id absent from the rebuilt set)
+        CHECK(host.focusedRowLabel() != QStringLiteral("URL"),
+              "panel-host(textfield-drop): the vanished field is not present after the rebuild (commit safely dropped)");
+
+        // Positive leg: a commit to a surviving id lands (the ordinary no-rebuild case).
+        QVector<PanelRow> keepField;
+        { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("k.url"); r.label = QStringLiteral("Keep"); keepField << r; }
+        host.replaceTop(QStringLiteral("Keeper"), keepField, [](const QString&, const QString&) {}, onBack);
+        PanelRow patched; patched.kind = PanelRow::TextField; patched.id = QStringLiteral("k.url");
+        patched.label = QStringLiteral("Keep"); patched.value = QStringLiteral("committed");
+        host.updateRow(QStringLiteral("k.url"), patched);   // relocate-by-id succeeds → applies in place
+        CHECK(host.levelDepth() == 1,
+              "panel-host(textfield-drop): the surviving-row commit path leaves the stack intact (depth 1)");
+    }
+}
+
+// §18(h) — the Add-ons manager panel graph (B2 Task 6.5), pinned against the REAL ThemedPanelHost with row sets
+// mirroring the shipped shapes. (The remove confirm is a NavConfirm::ask overlay — Cancel focused, Back=Cancel,
+// the confirmDeleteProfile pattern — so it is NOT a panel level; the panel graph is root → detail → config plus
+// the root-nested Add-by-URL form.) Three legs the other §18 host asserts don't cover: (1) a row set whose
+// LEADING row is an Info divider lands + snaps the cursor onto the first SELECTABLE row (the §18(e)/(f) sets
+// were all-Action, so divider-skipping on a fresh present was never pinned) — the Add-by-URL shape; (2) a
+// THREE-level drill (root → detail → config) whose Backs restore each parent's remembered INTERIOR row, the
+// root's across TWO pops; (3) a masked config TextField patched in place keeps its level (updateRow is
+// in-place). All are headlessly pinnable (no MainWindow linkage needed).
+static void runAddonsPanelAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    ThemedPanelHost host;
+    NavGraph* g = host.navGraph();
+
+    // ---- Root "Add-ons": 4 action rows + a Separator + 3 source rows + a trailing Info status row.
+    QVector<PanelRow> root;
+    for (int i = 0; i < 4; ++i) { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("act%1").arg(i); r.label = r.id; root << r; }
+    { PanelRow r; r.kind = PanelRow::Separator; r.id = QStringLiteral("sep"); r.label = QStringLiteral("Sources"); root << r; }
+    for (int i = 0; i < 3; ++i) { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("src%1").arg(i); r.label = r.id; root << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("status"); root << r; }
+    host.present(QStringLiteral("Add-ons"), root, noop, onBack);
+    CHECK(host.levelDepth() == 1 && g->index() == 0, "addons: root lands on the first action row");
+    g->select(QStringLiteral("panelRows"), 6);                 // a source row (interior: index 6 of the 3 sources)
+    CHECK(g->index() == 6, "addons: cursor parked on an interior source row (6)");
+
+    // ---- Per-addon detail: Toggle + Configure Action + destructive Remove + 2 Info rows.
+    QVector<PanelRow> detail;
+    { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("ad.enabled"); r.label = QStringLiteral("Enabled"); r.checked = true; detail << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.configure"); r.label = QStringLiteral("Configure"); detail << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("ad.remove"); r.label = QStringLiteral("Remove"); r.destructive = true; detail << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.version"); r.value = QStringLiteral("1.0"); detail << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("ad.about"); r.value = QStringLiteral("desc"); detail << r; }
+    host.present(QStringLiteral("Addon"), detail, noop, onBack);
+    CHECK(host.levelDepth() == 2 && g->index() == 0, "addons: detail lands on the Enabled toggle (first selectable)");
+    g->select(QStringLiteral("panelRows"), 1);                 // park on Configure (interior — the drill row)
+
+    // ---- Config (depth 3): a masked TextField first + a trailing Info note. Lands on the masked field;
+    //      updateRow patches it IN PLACE (level unchanged) — the credentials round-trip shape.
+    QVector<PanelRow> cfg;
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; cfg << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.value = QStringLiteral("plaintext note"); cfg << r; }
+    host.present(QStringLiteral("Config"), cfg, noop, onBack);
+    CHECK(host.levelDepth() == 3 && g->index() == 0, "addons: config lands on the masked TextField (first selectable)");
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("cfg:sspassword"); r.label = QStringLiteral("Password"); r.masked = true; r.value = QStringLiteral("secret");
+      host.updateRow(QStringLiteral("cfg:sspassword"), r); }
+    CHECK(host.levelDepth() == 3, "addons: updateRow on the masked config field keeps the level (in place)");
+
+    // ---- Backs restore each parent's remembered interior row: config → detail (Configure, 1), detail → root
+    //      (source row 6 — surviving TWO pops from the innermost level).
+    host.handleBack();
+    CHECK(host.levelDepth() == 2 && g->index() == 1,
+          "addons: Back from config restores the detail's remembered Configure row (1)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1, "addons: second Back reveals the root");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 6,
+          "addons: the root's remembered interior source row (6) survives the two-level drill");
+    CHECK(g->validate(nullptr), "addons: the graph validates after the drill unwinds");
+
+    // ---- Add-by-URL (root-nested): the LEADING row is an Info divider (the hint), so a fresh present must
+    //      SKIP it and land on the TextField (index 1) — the divider-skip-on-present pin.
+    QVector<PanelRow> addurl;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.hint"); r.value = QStringLiteral("Its manifest.json or base URL"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::TextField; r.id = QStringLiteral("au.url"); r.label = QStringLiteral("URL"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("au.status"); addurl << r; }
+    { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("au.add"); r.label = QStringLiteral("Add"); addurl << r; }
+    host.present(QStringLiteral("Add by URL"), addurl, noop, onBack);
+    CHECK(host.levelDepth() == 2, "addons: Add-by-URL presented over the root (depth 2)");
+    CHECK(g->zone() == QStringLiteral("panelRows") && g->index() == 1,
+          "addons: Add-by-URL SKIPS the leading Info divider and lands on the URL TextField (index 1)");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1 && g->index() == 6, "addons: Back from Add-by-URL restores the root cursor (6)");
+}
+
+// §18(i) — the Appearance panel graph (B2 Task 6.75, the last classic surface converted), pinned against the REAL
+// ThemedPanelHost with the shipped row shape: a Toggle, then a Separator + Choice, then a run of Info/Separator
+// dividers, then a lone trailing Action. Its distinctive geometry — three selectable rows (Toggle 0, Choice 2,
+// Action 8) separated by MULTIPLE consecutive dividers, including a five-divider gap between the Choice and the
+// lone Action — is a shape the other §18 sets don't cover (they never step ACROSS a multi-divider block via
+// move()). Legs: (1) fresh present lands on the first selectable (the Toggle, skipping nothing); (2) Down steps
+// Toggle -> Choice skipping the "Theme" Separator; (3) Down steps Choice -> Action hopping the FIVE trailing
+// dividers in one move; (4) Up mirrors Action -> Choice; (5) presented as a hub child, one Back pops to the
+// parent (the panel is nested under the settings hub — its onBack is the defensive root leg, not run on a pop).
+static void runAppearancePanelAsserts()
+{
+    auto noop   = [](const QString&, const QString&) {};
+    auto onBack = [] {};
+
+    ThemedPanelHost host;
+    NavGraph* g = host.navGraph();
+
+    // The shipped Appearance row set (indices must match openAppearance's builder).
+    QVector<PanelRow> rows;
+    { PanelRow r; r.kind = PanelRow::Toggle;    r.id = QStringLiteral("appr.themed");    r.label = QStringLiteral("Use the themed home screen (beta)"); r.checked = true; rows << r; } // 0 selectable
+    { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Theme"); rows << r; }                                                                                            // 1 divider
+    { PanelRow r; r.kind = PanelRow::Choice;    r.id = QStringLiteral("appr.theme");     r.label = QStringLiteral("Theme"); r.options = { QStringLiteral("Default"), QStringLiteral("Lumen") }; r.value = QStringLiteral("Default"); rows << r; } // 2 selectable
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.applies");   r.label = QStringLiteral("Applies live…"); rows << r; }                                            // 3 divider
+    { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Get more themes"); rows << r; }                                                                                  // 4 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.customise");  r.label = QStringLiteral("Edit theme.json…"); rows << r; }                                        // 5 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.root");       r.label = QStringLiteral("Themes folder"); r.value = QStringLiteral("/path"); rows << r; }        // 6 divider
+    { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.community");  r.label = QStringLiteral("Browse community themes…"); rows << r; }                                // 7 divider
+    { PanelRow r; r.kind = PanelRow::Action;    r.id = QStringLiteral("appr.gallery");    r.label = QStringLiteral("Open the theme gallery (GitHub)…"); rows << r; }                        // 8 selectable
+
+    // Present as a hub child (a bare hub root below, so the pop reveals a parent rather than leaving the host).
+    host.present(QStringLiteral("Settings"), panelActionRows(13, QStringLiteral("hub")), noop, onBack);
+    host.present(QStringLiteral("Appearance"), rows, noop, onBack);
+    CHECK(host.levelDepth() == 2 && g->zone() == QStringLiteral("panelRows") && g->index() == 0,
+          "appearance: fresh present lands on the first selectable row (the themed-home Toggle, index 0)");
+    CHECK(g->move(Qt::Key_Down) && g->index() == 2,
+          "appearance: Down steps Toggle -> Choice, skipping the 'Theme' Separator (1)");
+    CHECK(g->move(Qt::Key_Down) && g->index() == 8,
+          "appearance: Down steps Choice -> the lone Action, hopping the five trailing dividers (3..7) in one move");
+    CHECK(g->move(Qt::Key_Up) && g->index() == 2,
+          "appearance: Up mirrors Action -> Choice back across the divider block");
+    CHECK(g->validate(nullptr), "appearance: the graph validates for the Appearance row shape");
+    host.handleBack();
+    CHECK(host.levelDepth() == 1,
+          "appearance: one Back pops Appearance to the settings hub (nested child — no host exit)");
+}
+
+// §18(g) — ThemeView-level pins (B2 Task 6 hardening): the two behaviours that live in ThemeView.qml itself and
+// couldn't be tested from a bare NavGraph — (a) the XMB-buttons guard (a theme mixing an `xmb` element with
+// `button` elements must NOT let the cursor reach the bottom-button bar: the QML holds the `buttons` zone count
+// at 0 whenever xmbMode is true, so its declared items->buttons edge stays inert) and (b) grid-home rootBack
+// (Escape at a grid home with an empty level stack routes through nav.back() to rootBack — the pause-menu leg).
+// Loads the REAL ThemeView.qml from the qrc with a REAL NavGraph (built by the shared buildThemedNavGraph, so
+// this rides the shipped graph shape) exposed as `nav` — the §14 offscreen-QQuickWidget pattern.
+static void runThemeViewAsserts()
+{
+    auto probeItems = []() -> QVariantList {
+        QVariantList v;
+        for (int i = 0; i < 4; ++i)
+            v << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        return v;
+    };
+    const QVariantMap xmbEl{ { QStringLiteral("type"), QStringLiteral("xmb") },
+                             { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                             { QStringLiteral("size"), QVariantList{ 1, 1 } } };
+    const QVariantMap gridEl{ { QStringLiteral("type"), QStringLiteral("grid") },
+                              { QStringLiteral("columns"), 4 },
+                              { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                              { QStringLiteral("size"), QVariantList{ 1, 0.8 } } };
+    const QVariantMap btnEl{ { QStringLiteral("type"), QStringLiteral("button") },
+                             { QStringLiteral("action"), QStringLiteral("settings") },
+                             { QStringLiteral("pos"), QVariantList{ 0.9, 0.9 } },
+                             { QStringLiteral("size"), QVariantList{ 0.1, 0.06 } } };
+    auto themeWith = [](const QVariantList& elements) -> QVariantMap {
+        QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                          { QStringLiteral("elements"), elements } };
+        return QVariantMap{ { QStringLiteral("name"), QStringLiteral("Probe") },
+                            { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+    };
+
+    // ---- (a) XMB + a button: the `buttons` zone stays hidden, so the cursor can never enter the bar ----
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 4);
+        buildAudioPageNavGraph(g);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* root = qw.rootObject();
+        CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (xmb case)");
+        if (root)
+        {
+            root->setProperty("categories", QVariantList{ QStringLiteral("Video"), QStringLiteral("Games") });
+            root->setProperty("items", probeItems());
+            root->setProperty("currentIndex", 0);
+            root->setProperty("currentView", QStringLiteral("home"));
+            root->setProperty("theme", themeWith(QVariantList{ xmbEl, btnEl })); // set last
+            qw.resize(1280, 720);
+            qw.show();
+            pump(); pump();
+            CHECK(root->property("xmbMode").toBool(), "the xmb element puts the view in xmbMode");
+            CHECK(root->property("buttonList").toList().size() == 1, "the button element is present in buttonList");
+            // The guard: `buttons` is held hidden (count 0), so select() refuses to steer onto it…
+            g.select(QStringLiteral("items"), 0);
+            g.select(QStringLiteral("buttons"), 0);
+            CHECK(g.zone() == QStringLiteral("items"),
+                  "XMB-buttons guard: `buttons` hidden (count 0) — the cursor cannot enter the bar");
+            // …and its declared items->buttons Down edge is inert too (a hidden target makes the edge inert),
+            // so no arrow can cross into the bar from the column.
+            CHECK(!g.move(Qt::Key_Down) || g.zone() != QStringLiteral("buttons"),
+                  "XMB-buttons guard: the items->buttons edge is inert (Down never crosses into the bar)");
+        }
+    }
+
+    // ---- (b) grid home (no xmb): the button bar IS live (positive control), and Escape -> rootBack ----
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 4);
+        buildAudioPageNavGraph(g);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        bool rootBackFired = false;
+        QObject::connect(&g, &NavGraph::rootBack, [&rootBackFired] { rootBackFired = true; });
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* root = qw.rootObject();
+        CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (grid case)");
+        if (root)
+        {
+            root->setProperty("categories", QVariantList{});
+            root->setProperty("items", probeItems());
+            root->setProperty("currentIndex", 0);
+            root->setProperty("currentView", QStringLiteral("home"));
+            root->setProperty("theme", themeWith(QVariantList{ gridEl, btnEl })); // set last
+            qw.resize(1280, 720);
+            qw.show();
+            pump(); pump();
+            CHECK(!root->property("xmbMode").toBool(), "the grid home is NOT xmbMode");
+            // Positive control (the guard's RED leans on this): the SAME button, in grid mode, IS reachable —
+            // proving the xmbMode gate is what hides it above, not a missing button.
+            CHECK(root->property("buttonList").toList().size() == 1, "grid buttonList carries the button");
+            g.select(QStringLiteral("buttons"), 0);
+            CHECK(g.zone() == QStringLiteral("buttons"),
+                  "grid mode: the button-bar zone is live (count = buttonList.length) — the cursor can enter it");
+            // grid-home rootBack: Escape at the root (empty level stack) routes nav.back() -> rootBack.
+            g.select(QStringLiteral("items"), 0);
+            root->forceActiveFocus();
+            pump();
+            CHECK(!rootBackFired, "no rootBack before the Escape");
+            sendKey(qw.quickWindow(), Qt::Key_Escape);
+            CHECK(rootBackFired, "grid-home Escape with an empty level stack emits rootBack (the pause-menu leg)");
+        }
     }
 }
 #endif // MMV_HAVE_QML
@@ -348,6 +847,69 @@ int main(int argc, char** argv)
         // (e) a null / empty grab -> NEVER black (a FAILED grab must not trip the watchdog).
         CHECK(!BlackFrameWatchdog::isBlack(QImage()), "a null image is never classified black (failed grab guard)");
         CHECK(!BlackFrameWatchdog::isBlack(QImage(0, 0, QImage::Format_ARGB32)), "an empty image is never black");
+    }
+
+    // ------------------------------------------------------------- 0b. watchdog tick() run logic (Task 6)
+    // isBlack (above) is the classifier; tick() is the STATE MACHINE around it: the consecutive-black counter
+    // that fires recovery on the 2nd frame, and the skip lambda that BOTH ignores an expected-black frame AND
+    // resets the run so a legit black view (a game/reader) never primes a false recovery on exit. Driven here
+    // with injected sampler/skip lambdas (tick() is synchronous — no real 1 s timer needed).
+    {
+        bool black = false, skip = false;
+        auto sampler = [&black]() -> QImage {
+            QImage im(8, 8, QImage::Format_ARGB32);
+            im.fill(black ? qRgb(0, 0, 0) : qRgb(200, 200, 200));
+            return im;
+        };
+        BlackFrameWatchdog wd(sampler, [&skip] { return skip; });
+        QVector<int> emissions;
+        QObject::connect(&wd, &BlackFrameWatchdog::blackFrameDetected, [&emissions](int c) { emissions.push_back(c); });
+
+        // (a) a non-black frame never fires and holds the run at 0.
+        black = false; skip = false; wd.tick();
+        CHECK(wd.consecutive() == 0 && emissions.isEmpty(), "a non-black frame leaves the run at 0, no emission");
+
+        // (b) consecutive black frames step the counter and emit each time (the host acts on consec==2).
+        black = true;  wd.tick();
+        CHECK(wd.consecutive() == 1 && emissions.size() == 1 && emissions.last() == 1, "1st black frame: consec 1, emitted");
+        wd.tick();
+        CHECK(wd.consecutive() == 2 && emissions.size() == 2 && emissions.last() == 2, "2nd consecutive black: consec 2 (recovery point)");
+
+        // (c) a non-black frame breaks the run back to 0 (recovery ran / the view repainted).
+        black = false; wd.tick();
+        CHECK(wd.consecutive() == 0, "a non-black frame resets the consecutive run");
+
+        // (d) a SKIPPED tick (expected-black context: game/video/reader) both no-ops AND resets the run, so a
+        //     legit black view can never accumulate toward a false recovery — even across black frames.
+        black = true; skip = false; wd.tick(); wd.tick();
+        CHECK(wd.consecutive() == 2, "two black frames primed the run to 2");
+        skip = true; wd.tick();
+        CHECK(wd.consecutive() == 0, "a skipped tick resets the run (expected-black view never primes recovery)");
+        const int emittedBeforeSkipRun = emissions.size();
+        black = true; skip = true; wd.tick(); wd.tick();
+        CHECK(wd.consecutive() == 0 && emissions.size() == emittedBeforeSkipRun,
+              "black frames while skipping never step the counter nor emit");
+    }
+
+    // -------------------------------------------------- 0c. NavGraph::activate() hidden-zone guard (Task 6)
+    // Activating a hidden/empty zone must be a safe no-op. The model parks the selection on the only zone even
+    // after it hides itself (there is nowhere else to go — no null state); activate there would hand the host a
+    // phantom row. The guard refuses to emit activated on a count-0 zone.
+    {
+        NavGraph g;
+        g.registerZone(QStringLiteral("solo"), 3, 0, 0);
+        int fired = 0;
+        QObject::connect(&g, &NavGraph::activated, [&fired](const QString&, int) { ++fired; });
+        g.activate();
+        CHECK(fired == 1, "positive control: activate on a visible zone emits activated");
+        g.setZoneCount(QStringLiteral("solo"), 0);        // hides the only zone -> selection parks on it (hidden)
+        CHECK(g.zone() == QStringLiteral("solo"), "the only zone stays selected even when hidden (no null state)");
+        const int before = fired;
+        g.activate();
+        CHECK(fired == before, "activate on a HIDDEN zone is a no-op (no phantom activation)");
+        g.setZoneCount(QStringLiteral("solo"), 2);        // re-shown -> activation works again
+        g.activate();
+        CHECK(fired == before + 1, "re-showing the zone re-enables activation");
     }
 
     // ---------------------------------------------------------------- 1. selection valid on first zone
@@ -1220,10 +1782,127 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---------------------------------------------------------------- 18. the REAL themed PANEL graph (Task B2.1)
+    {
+        // A themed settings panel (ThemedPanelHost) is its OWN standalone NavGraph — panelRows (the row list) +
+        // panelBack (the header Back affordance) — built by the SAME shared builder the app's host runs
+        // (buildPanelNavGraph, NavThemeGraph.h), the ONE definition this shape-test asserts so the CI assertion
+        // can never drift from the shipped graph. The panel is the whole surface (no home zones underneath), so
+        // a directed BFS must reach EXACTLY the two panel zones and validate() must hold.
+
+        // (a) validate: a hub-sized panel (14 rows) forms a connected graph.
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            QString why;
+            CHECK(g.validate(&why), "panel: the themed panel graph validates (panelRows + panelBack)");
+        }
+
+        // (b) the back-zone edge + geometry: Down off the header enters the row list; Up off the FIRST row
+        //     crosses back up to the header; Up off a deeper row steps within the list (not to the header).
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            g.select(QStringLiteral("panelBack"), 0);
+            g.move(Qt::Key_Down);
+            CHECK(g.zone() == QStringLiteral("panelRows"),
+                  "panel: Down off the header Back enters the row list");
+            g.select(QStringLiteral("panelRows"), 0);
+            g.move(Qt::Key_Up);
+            CHECK(g.zone() == QStringLiteral("panelBack"),
+                  "panel: Up off the first row crosses to the header Back");
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("panelRows") && g.index() == 6,
+                  "panel: Down steps within the row list");
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.move(Qt::Key_Up) && g.zone() == QStringLiteral("panelRows") && g.index() == 4,
+                  "panel: Up off a deeper row steps within the list (does not jump to the header)");
+        }
+
+        // (c) containment: no arrow off the header escapes (a 1-count strip pinned on Up/Left/Right); a directed
+        //     BFS from the row list reaches EXACTLY panelRows + panelBack.
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);
+            g.select(QStringLiteral("panelBack"), 0);
+            CHECK(!g.move(Qt::Key_Up) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Up off the header Back is a contained no-op");
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Left off the header Back is a contained no-op");
+            CHECK(!g.move(Qt::Key_Right) && g.zone() == QStringLiteral("panelBack"),
+                  "panel: Right off the header Back is a contained no-op");
+            // The row list's cross-axis Left/Right are SELF-pinned no-ops (a Vertical list has no sideways move).
+            g.select(QStringLiteral("panelRows"), 3);
+            CHECK(!g.move(Qt::Key_Left) && g.zone() == QStringLiteral("panelRows") && g.index() == 3,
+                  "panel: Left on the row list is a contained no-op");
+
+            std::set<QString> reached;
+            std::set<std::pair<QString,int>> seen;
+            std::deque<std::pair<QString,int>> q;
+            g.select(QStringLiteral("panelRows"), 0);
+            q.push_back({g.zone(), g.index()});
+            seen.insert({g.zone(), g.index()});
+            reached.insert(g.zone());
+            static const Qt::Key parr[] = {Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right};
+            while (!q.empty()) {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : parr) {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); reached.insert(st.first); q.push_back(st); }
+                }
+            }
+            CHECK(reached.count(QStringLiteral("panelRows")) && reached.count(QStringLiteral("panelBack"))
+                  && reached.size() == 2,
+                  "panel: the contained walk reaches exactly the row list + header Back");
+        }
+
+        // (d) POP-RESTORE: a nested panel returning to its parent restores the parent's cursor (the user's
+        //     place), not row 0. The REMEMBERING lives host-side (ThemedPanelHost records the top entry's
+        //     panelRows index off selectionChanged; renderTop(restore=true) re-selects it on pop) — beyond the
+        //     pure graph, so this asserts the graph-level leg by driving the host's EXACT call sequence on the
+        //     shared builder: re-count + re-select after a nested panel's smaller count must land EXACTLY on
+        //     the remembered row (select() clamps + divider-snaps, which also covers a shrunk parent list).
+        {
+            NavGraph g;
+            buildPanelNavGraph(g, 14);                          // parent panel (the hub)
+            g.select(QStringLiteral("panelRows"), 5);           // the user's place on the parent
+            CHECK(g.index() == 5, "panel-restore: the parent cursor sits on row 5");
+            // Nested present(): the child re-counts the zone and lands on ITS first row.
+            g.setZoneCount(QStringLiteral("panelRows"), 6);     // child panel (fewer rows)
+            g.select(QStringLiteral("panelRows"), 0);
+            CHECK(g.index() == 0, "panel-restore: the nested child lands on its first row");
+            // Pop: the host re-renders the parent — re-count + re-select the remembered index (Entry.lastIndex).
+            g.setZoneCount(QStringLiteral("panelRows"), 14);
+            g.select(QStringLiteral("panelRows"), 5);
+            CHECK(g.zone() == QStringLiteral("panelRows") && g.index() == 5,
+                  "panel-restore: pop re-selects the parent's remembered row (5), not row 0");
+        }
+    }
+
 #ifdef MMV_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).
     runThemedInputAsserts();
+    // §18(e): the pop-restore clamp hazard, pinned against the REAL ThemedPanelHost (renderTop's capture-before-
+    // mutate ordering) — the host-level guard §18(d) above structurally cannot be. See the function's note.
+    runPanelHostPopRestoreAsserts();
+    // §18(f): replaceTop's same-level contract (in-place rebuild never stacks a level) — the host leg of the
+    // panel async-connection lifetime model (MainWindow's themedPanelIsTop-gated rebuild handlers).
+    runPanelHostReplaceTopAsserts();
+    // §18(j): HOST re-entrancy safety (final-review fix round) — (a) replaceTop from inside an onActivate survives
+    // the closure's own reassignment, (b) overlayAbove() gate primitive, (c) TextField commit relocates by id and
+    // drops safely when a mid-edit replaceTop removed the row.
+    runPanelHostReentrancyAsserts();
+    // §18(h): the Add-ons manager panel graph (B2 Task 6.5) — divider-skip landing, the three-level remove-flow
+    // double-pop cursor restore, and the masked config field's in-place patch.
+    runAddonsPanelAsserts();
+    // §18(i): the Appearance panel graph (B2 Task 6.75) — the divider-skip stepping across its multi-divider
+    // trailing block (Toggle -> Choice -> lone Action) + a nested-child Back pop to the settings hub.
+    runAppearancePanelAsserts();
+    // §18(g): ThemeView-level pins — the XMB-buttons guard + grid-home rootBack (B2 Task 6 hardening).
+    runThemeViewAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

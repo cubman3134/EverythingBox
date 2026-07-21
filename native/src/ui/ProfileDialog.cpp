@@ -21,6 +21,13 @@ static const char* const kProfileIcons[] = {
     "🐝", "🦖", "🐢", "🍄", "⭐", "🌈", "🍀", "🎮"
 };
 
+QStringList ProfileDialog::iconChoices()
+{
+    QStringList out;
+    for (const char* const g : kProfileIcons) out << QString::fromUtf8(g);
+    return out;
+}
+
 ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
     : QDialog(parent), mustChoose_(mustChoose)
 {

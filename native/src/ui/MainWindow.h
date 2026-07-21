@@ -4,6 +4,7 @@
 #include <QStringList>
 #include <QVector>
 #include <QHash>
+#include <QVariantMap>
 #include <QColor>
 #include <QPointer>
 #include <QElapsedTimer>
@@ -15,6 +16,7 @@ class MpvWidget;
 class RetroView;
 class EbookView;
 class ReaderChromeHost;
+class ThemedPanelHost;
 class PdfView;
 class ComicView;
 class LibraryView;
@@ -74,6 +76,9 @@ private slots:
     void enqueueDownload(const MediaItem& item);
     void openDownloadManager();          // Settings ▸ Downloads: the download-manager panel
     void updateDownloadRow(const QString& id); // refresh one job's progress bar/label in place
+    // Themed Downloads: a job's Progress row is activated to open a NavMenu action chooser (Pause/Resume/Retry/
+    // Cancel/Remove per the SAME state logic classic uses for its per-job buttons), mirrored on the panel graph.
+    void showDownloadActionMenu(const QString& id);
     // Window-level notification overlay for download/resolve progress + errors. A child-widget overlay owned by
     // Notifier, floating over the central area and raised above the current page so it shows over ANY view
     // (the QQuickWidget themed home and the libmpv QOpenGLWidget both composite with sibling widgets). Driven by
@@ -85,6 +90,7 @@ private slots:
     // then hand it to the comic reader (which gives natural page order + resume for free).
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    QVariantMap settingsPanelStyle() const; // the active theme's `settingsPanel` block (themed panels; B2)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openCloudSync();     // Google Drive sign-in + sync panel
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
@@ -118,6 +124,10 @@ private:
     QHash<QString, class QProgressBar*> dlBars_;
     QHash<QString, class QLabel*> dlStatus_;
     bool dlPanelOpen_ = false;           // the Downloads panel is the current view (rebuild it on state changes)
+    // Themed Emulators: the emulator whose install we kicked from Settings ▸ Emulators, so GameLauncher's install
+    // status stream patches the RIGHT status row (EmulatorManager::status carries no id; only one installs at a
+    // time). Cleared on completion/failure.
+    QString emInstallId_;
 
     static QString fmt(double seconds);
     // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
@@ -225,6 +235,7 @@ private:
     void presentBook(); // show book_ themed (wrapped in readerHost_) or classic (direct), per themedHomeEnabled
     void presentPdf();   // show pdf_ themed (wrapped in pdfHost_) or classic, per themedHomeEnabled (Task 4)
     void presentComic(); // show comic_ themed (wrapped in comicHost_) or classic, per themedHomeEnabled (Task 4)
+    void captureReaderOrigin(); // record the launch surface into readerOrigin_ (skips a reader-to-reader re-open)
 
     // Controller navigation of the menus (EmulationStation-style): poll the shared gamepad on menu screens and
     // synthesise the arrow / Enter / Back keys the UI already understands, with a stick deadzone (in Gamepad)
@@ -248,6 +259,54 @@ private:
                          const std::function<void(int result)>& onFinished,
                          const std::function<void()>& onBack);
     void promptStartupProfile();        // inline "Who's using…" picker shown once the window is up
+
+    // ---- Themed Profiles picker (B2 Task 5): the ProfileDialog surface on the Nav Contract. mustChoose is the
+    // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
+    // (Back keeps the current profile). Both reuse ProfileStore data ops exactly. ----
+    void presentProfilePicker(bool mustChoose);                  // reset()+present() the root list (also for startup, pre-home)
+    void presentProfileList(bool mustChoose, bool replace);      // (re)build the profile list rows; replace = in place
+    void editProfilePanel(const QString& id, bool mustChoose);   // nested name(TextField)+icon(Choice) picker; id "" = create
+    void profileRowMenu(const QString& profileId, bool mustChoose); // Switch/Edit/Delete chooser for a profile row
+    void confirmDeleteProfile(const QString& profileId, bool mustChoose);
+    void chooseProfile(const QString& id);                       // setCurrent + openHome (the finish for both variants)
+    void quitConfirmFromStartup();                               // mustChoose Back: confirm quit, or re-present the list
+
+    // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----
+    void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
+    void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
+
+    // ---- Themed Add-ons manager (B2 Task 6.5): the LibraryView source-management surface on the Nav Contract.
+    // openLibrary() presents the ROOT (Browse/Install/Add-by-URL/Reload + one Action per source); drilling a
+    // source opens presentAddonDetail (Toggle Enabled / Configure / Remove + info). List refresh is imperative
+    // (install/remove/reload don't emit sourcesChanged) — mutating ops re-present the root. Catalog browsing /
+    // Local ROMs stay OUT of scope (the themed home covers content). ----
+    void presentAddonDetail(const QString& sourceId);            // per-addon nested panel (enable/configure/remove/info)
+    void presentAddonConfig(const AddonManifest& manifest);      // manifest-driven config form (nested on the detail)
+    void confirmRemoveAddon(const QString& sourceId);            // nested confirm (Info + destructive Action)
+    void presentAddByUrl();                                      // nested TextField + Add -> addRemoteSource (async)
+    void presentAddonRegistry();                                 // the add-on registry "store" as a nested panel
+    void installRegistryEntry(const QJsonObject& entry, const QString& indexUrl, const QString& rowId); // registry install
+    void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place
+    void updatePanelInfo(const QString& id, const QString& value); // patch an Info row's value in place (status lines)
+    QString registryInstallRowId_;                               // the registry entry row currently installing (async remote)
+
+    // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
+    // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows
+    // "Press a key/button…", Esc cancels. Bindings apply+persist immediately (themed-panel convention). ----
+    void presentInputMapping();
+    void buildInputMappingRows(bool replace);                    // (re)build the shell rows for the current port/scope
+    void beginInputCapture(int retroId, bool keyboard);          // enter capture for one button binding
+    void endInputCapture(bool cancelled);                        // leave capture (bind was written, or cancelled)
+    void refreshInputButtonRows();                               // re-patch every button row's binding label (cursor kept)
+    void onInputCapturePadTick();                                // poll the pad while capturing a controller input
+    bool inputCaptureKeyFilter(class QKeyEvent* e);              // consume the next physical key while capturing a key
+    // Capture state for the themed input panel (mirrors ControllerRemapDialog's capture machinery, driven headlessly).
+    struct RemapCapture { bool active = false; bool keyboard = false; int port = 0; int retroId = -1; bool sawRelease = false; };
+    RemapCapture remap_;
+    class QTimer* remapPadTimer_ = nullptr;
+    QString remapScope_;   // system id currently being edited ("" = global default)
+    int     remapPort_ = 0; // player port whose profile is being edited
+
     QWidget* firstPanelRow() const;     // the first focusable row in the current panel content (or null)
     QVector<QWidget*> panelNavRing() const; // Back + the panel's focusable rows, top-to-bottom (arrow/Tab nav)
 
@@ -259,6 +318,25 @@ private:
     ReaderChromeHost* pdfHost_ = nullptr;    // themed chrome wrapping pdf_ (Task 4); null without QML
     ComicView* comic_ = nullptr;
     ReaderChromeHost* comicHost_ = nullptr;  // themed chrome wrapping comic_ (Task 4); null without QML
+    // The surface a reader (book/pdf/comic) was launched FROM, captured at present* time. On reader exit
+    // themed mode returns HERE (the themed home/browse still showing its detail/browse view — the reader is a
+    // separate stack page, so that surface's currentView is untouched) instead of the classic HomeView. Null /
+    // a non-themed origin falls back to the classic home_ (the original behaviour). (B2 Task 6, item 1.)
+    QWidget* readerOrigin_ = nullptr;
+    ThemedPanelHost* themedPanelHost_ = nullptr; // themed settings-panel surface (B2); null without QML
+    // Async signal hookups the themed General panel installs (Trakt live status). The host persists across
+    // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own
+    // these and disconnect them on each (re)present of General.
+    QVector<QMetaObject::Connection> genSettingsConns_;
+    // Async signal hookups for the OTHER themed child panels (Cloud Sync sign-in state, RetroAchievements login
+    // result). LIFETIME MODEL (the full statement lives at openCloudSync's connect block): armed at panel
+    // present; NOT cleared by nested children (a child's Back restores the parent without re-running open*, so
+    // the parent's listeners must survive the drill); replaced wholesale when any pool user re-presents; cleared
+    // at the settings-area boundaries (hub entry + leave-to-home); rebuild handlers self-gate on
+    // themedPanelIsTop so a late async event never presents a panel over an unrelated screen.
+    QVector<QMetaObject::Connection> panelPageConns_;
+    void clearPanelPageConns();
+    bool themedPanelIsTop(const QString& title) const; // themed host is the CURRENT page AND `title` is its top panel
     LibraryView* library_ = nullptr;
     BackgroundMusic* bgm_ = nullptr;    // menu background music; plays on menu screens, pauses on content
     void updateBackgroundMusic();       // play/pause the BGM to match the current view
@@ -266,8 +344,9 @@ private:
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
 
-    // Themed (QML) home, opt-in via "themedHome/enabled" (default off). showHomeScreen() routes Home to it
-    // or the classic HomeView. The themed-home methods are no-ops in builds without the QML engine.
+    // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
+    // explicit stored `false` still selects classic). showHomeScreen() routes Home to it or the classic
+    // HomeView. The themed-home methods are no-ops in builds without the QML engine.
     void showHomeScreen();
     bool themedHomeEnabled() const;
     void showThemedHome();
