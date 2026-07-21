@@ -103,10 +103,15 @@ bool VirtualPad::event(QEvent* e)
 {
     switch (e->type())
     {
+    case QEvent::TouchCancel:
+        // A cancel abandons the whole sequence; its points may still report non-Released states, so force every
+        // touch bit off unconditionally rather than recomputing (else a stray point would leave a button held).
+        setTouchMask(0);
+        e->accept();
+        return true;
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
     case QEvent::TouchEnd:
-    case QEvent::TouchCancel:
     {
         auto* te = static_cast<QTouchEvent*>(e);
         quint32 touch = 0;

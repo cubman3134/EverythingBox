@@ -1,5 +1,6 @@
 #include "Settings.h"
 #include "AppPaths.h"
+#include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -129,7 +130,10 @@ bool Settings::virtualPadEnabled()
     const QString v = virtualPad();
     if (v == QStringLiteral("on"))  return true;
     if (v == QStringLiteral("off")) return false;
-    return displayMode() == QStringLiteral("mobile"); // "auto": on for the touch (Mobile) form factor
+    // "auto": on for the touch (Mobile) form factor. Consult the FormFactor authority (the RESOLVED mode),
+    // not the raw display/mode string — so a mobile device under stored "auto" (Phase 2 resolveAuto()->Mobile)
+    // gets the pad too. This is the ONE visibility resolver; RetroView::virtualPadShouldShow() delegates here.
+    return FormFactor::instance().mode() == FormFactor::Mode::Mobile;
 }
 int Settings::virtualPadOpacity()
 {

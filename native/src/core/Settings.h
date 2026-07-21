@@ -57,10 +57,12 @@ namespace Settings
 
     // On-screen virtual gamepad (touch form factors). Tri-state override stored as "auto"|"on"|"off":
     // "auto" (default) shows it only in the Mobile form factor, "on" always, "off" never. Opacity is 0..100
-    // (default 45). virtualPadEnabled() is the resolved boolean the emulator uses to decide visibility.
+    // (default 45). virtualPadEnabled() is the ONE visibility resolver the emulator uses (RetroView::
+    // virtualPadShouldShow() delegates to it); "auto" resolves against the FormFactor authority, not the raw
+    // display/mode string.
     QString virtualPad();                     // key "emu/virtualPad", default "auto"
     void    setVirtualPad(const QString& mode);
-    bool    virtualPadEnabled();              // "on" || ("auto" && displayMode()=="mobile")
+    bool    virtualPadEnabled();              // "on" || ("auto" && FormFactor::mode()==Mobile)
     int     virtualPadOpacity();              // key "emu/virtualPadOpacity", 0..100, default 45
     void    setVirtualPadOpacity(int pct);
 

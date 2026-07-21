@@ -111,25 +111,34 @@ int main(int argc, char** argv)
     CHECK(ff.hitClamp(40) == 46);   // int(40*1.15)=46 (> floor 44)
     CHECK(ff.hitClamp(20) == 44);   // int(20*1.15)=23 -> floored up to 44
 
-    // 6. Virtual gamepad settings seam (D1 Task 6). resolveInput's OR-in and the overlay itself need a live
-    // GL RetroView (not headless-probeable — see the report), but the visibility/opacity contract the emulator
-    // reads IS self-contained in Settings, so pin it here: tri-state override + auto->Mobile resolution +
-    // opacity default/clamp.
+    // 6. Virtual gamepad visibility resolver (D1 Task 6). resolveInput's OR-in and the overlay widget need a
+    // live GL RetroView (not headless-probeable — see the report), but visibility is decided by the ONE
+    // resolver Settings::virtualPadEnabled(), which RetroView::virtualPadShouldShow() delegates to — so pinning
+    // it here pins the live emulator path. It resolves "auto" against the FormFactor authority (mode()), so we
+    // drive FormFactor via setDisplayMode + refresh(), exactly as the running app does.
     Settings::setVirtualPad(QStringLiteral("auto"));
     Settings::setDisplayMode(QStringLiteral("desktop"));
-    CHECK(!Settings::virtualPadEnabled());                 // auto + non-mobile => hidden
+    ff.refresh();
+    CHECK(!Settings::virtualPadEnabled());                 // auto + FormFactor Desktop => hidden
+    // Phase 1 resolveAuto() is always Desktop, so an explicit "mobile" override is how FormFactor reaches Mobile
+    // in this probe. (Phase 2: a real mobile device under stored "auto" resolves Mobile and shows it the same
+    // way, since virtualPadEnabled() reads the resolved mode() and not the raw display/mode string.)
     Settings::setDisplayMode(QStringLiteral("mobile"));
-    CHECK(Settings::virtualPadEnabled());                  // auto + mobile => shown
+    ff.refresh();
+    CHECK(Settings::virtualPadEnabled());                  // auto + FormFactor Mobile => shown
     Settings::setVirtualPad(QStringLiteral("off"));
-    CHECK(!Settings::virtualPadEnabled());                 // explicit off beats mobile
+    CHECK(!Settings::virtualPadEnabled());                 // explicit off beats Mobile
     Settings::setVirtualPad(QStringLiteral("on"));
     Settings::setDisplayMode(QStringLiteral("desktop"));
-    CHECK(Settings::virtualPadEnabled());                  // explicit on beats non-mobile
+    ff.refresh();
+    CHECK(Settings::virtualPadEnabled());                  // explicit on beats non-Mobile
     CHECK(Settings::virtualPadOpacity() == 45);            // default
     Settings::setVirtualPadOpacity(200);
     CHECK(Settings::virtualPadOpacity() == 100);           // clamped to 0..100
     Settings::setVirtualPadOpacity(45);
-    Settings::setVirtualPad(QStringLiteral("auto"));       // restore default so a leftover ini can't skew later
+    Settings::setVirtualPad(QStringLiteral("auto"));       // restore defaults so a leftover ini can't skew later
+    Settings::setDisplayMode(QStringLiteral("auto"));
+    ff.refresh();
 
     if (failures == 0) { std::puts("FORMFACTOR-OK"); return 0; }
     std::fprintf(stderr, "FORMFACTOR: %d check(s) failed\n", failures);

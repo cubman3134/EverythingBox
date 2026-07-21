@@ -1725,17 +1725,17 @@ void RetroView::setInputActive(bool active)
     {
         pressedKeys_.clear();  // drop any held keys so they don't stick when focus leaves
         virtualPad_ = 0;       // and any held virtual-pad bits (e.g. a hold when the Esc menu opens)
+        if (vpad_) vpad_->reset(); // clear the pad's own touch state too, so a held finger re-emits after a
+                                   // split-pane focus swap (mirrors what showMenu()/stop() do)
     }
 }
 
-// The on-screen pad shows when the user forced it on, or (auto) when the current form factor is Mobile — the
-// FormFactor authority, so an Android/Mobile build gets it even under "auto".
+// The on-screen pad shows when the user forced it on, or (auto) when the current form factor is Mobile. Delegate
+// to Settings::virtualPadEnabled() — the ONE visibility resolver — so this path can never diverge from the value
+// the settings UI and probe pin. (That resolver consults the FormFactor authority for the "auto" case.)
 bool RetroView::virtualPadShouldShow() const
 {
-    const QString v = Settings::virtualPad();
-    if (v == QStringLiteral("on"))  return true;
-    if (v == QStringLiteral("off")) return false;
-    return FormFactor::instance().mode() == FormFactor::Mode::Mobile; // "auto"
+    return Settings::virtualPadEnabled();
 }
 
 void RetroView::ensureVirtualPad()
