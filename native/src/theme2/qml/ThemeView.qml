@@ -204,11 +204,17 @@ Item {
     // Mouse parity for the elements: clicking an item navigates to it; clicking the already-selected item
     // activates it (the "click to move, click again to press" model). Clicking also gives the scene keyboard
     // focus so the arrow keys work afterwards. Selection goes through `nav`; the bridge writes the props.
+    // Mobile (touch) uses ONE-TAP semantics: a tap both selects and activates the tapped item, the way a phone
+    // list opens a row on first touch. Desktop/TV keep the two-step "click to move, click again to press" model
+    // (frozen — probe §20 has a desktop two-step assert). All element MouseAreas route through here, so this is
+    // the single seam the tap model lives at (Xmb gotoCat stays select-only — a category hop shouldn't activate).
+    readonly property bool ffMobile: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
     function gotoItem(i) {
         forceActiveFocus()
         if (actionsOpen) return                            // the chooser is up; clicks go to its buttons
         var n = items ? items.length : 0
         if (i < 0 || i >= n || isHeader(i)) return         // dividers aren't clickable
+        if (ffMobile) { nav.select("items", i); nav.activate(); return } // mobile: one tap selects + activates
         if (i === currentIndex) { nav.select("items", i); nav.activate() } // click the focused item -> press it
         else { nav.select("items", i); navigate() }        // click another -> move the selection there
     }
@@ -515,6 +521,55 @@ Item {
                     }
                 }
             }
+        }
+    }
+
+    // --- touch: left-edge Back swipe + a Back chevron (mobile only; D1 Task 4) -------------------------------
+    // A thin strip along the left edge that turns a rightward drag (>= 80px) into a Back gesture, like a phone's
+    // edge-back. It sits above the content (high z) but is only 12px wide, so it overlaps just the leftmost
+    // column's edge. It must NOT eat taps: a press that never becomes a drag is released un-accepted and its
+    // composed `clicked` is propagated to whatever is beneath (propagateComposedEvents), so a tap at the very
+    // left edge still reaches the item under it. Enabled only in mobile — Desktop/TV never instantiate the drag.
+    MouseArea {
+        id: edgeBack
+        enabled: root.ffMobile
+        visible: enabled
+        anchors.left: parent.left; anchors.top: parent.top; anchors.bottom: parent.bottom
+        width: 12
+        z: 1000
+        propagateComposedEvents: true
+        preventStealing: true                              // keep the grab through a horizontal drag over a Flickable
+        property real pressX: -1
+        property bool fired: false
+        onPressed: function(e) { pressX = e.x; fired = false; e.accepted = true }
+        onPositionChanged: function(e) {
+            if (!fired && pressX >= 0 && (e.x - pressX) >= 80) {   // crossed the 80px rightward threshold
+                fired = true
+                if (typeof nav !== "undefined" && nav) nav.back()
+            }
+        }
+        onReleased: function(e) { pressX = -1 }
+        // A press that never dragged is a tap: let its composed click fall through to the item beneath.
+        onClicked: function(e) { if (!fired) e.accepted = false }
+    }
+
+    // A small Back chevron, top-left, on any non-home view (browse/detail) in mobile — the touch equivalent of
+    // the controller's Back. ThemeView has no explicit level-depth prop, so it keys off currentView (home is the
+    // root, where Back is the pause menu and needs no on-screen affordance). Hit target rides form.minHitPx.
+    Rectangle {
+        id: backChevron
+        visible: root.ffMobile && root.currentView !== "home"
+        z: 1000
+        anchors.left: parent.left; anchors.top: parent.top
+        anchors.leftMargin: 16 + Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+        anchors.topMargin: 16 + Math.round(Math.min(root.width, root.height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+        property int hit: (typeof form !== "undefined" && form) ? Math.max(44, form.minHitPx) : 44
+        width: hit; height: hit; radius: height / 2
+        color: "#CC0E141E"; border.color: "#3A6FB0"; border.width: 2
+        Text { anchors.centerIn: parent; text: "‹"; color: "#FFFFFF"; font.pixelSize: parent.height * 0.5; font.bold: true }
+        MouseArea {
+            anchors.fill: parent; cursorShape: Qt.PointingHandCursor
+            onClicked: { root.forceActiveFocus(); if (typeof nav !== "undefined" && nav) nav.back() }
         }
     }
 

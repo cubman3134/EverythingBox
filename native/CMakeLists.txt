@@ -163,7 +163,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         third_party/duktape/duktape.c)
     target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
-    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent ${MPV_LIBRARY})
+    # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
+    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
         target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
@@ -334,7 +335,8 @@ if(MYMEDIAVAULT_BUILD_APP)
             # `form` context property + the TV scale/insets on the ThemeView surface are pinned end to end.
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h
             src/core/Settings.cpp     src/core/Settings.h)
-        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
+        # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
+        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test)
         target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
     endif()
 

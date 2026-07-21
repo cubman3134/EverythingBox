@@ -85,6 +85,8 @@
 #include <QPointer>
 #include <QImage>
 #include <QScreen>
+#include <QPointingDevice>                    // uitest `touch`: the synthetic touchscreen device
+#include <qpa/qwindowsysteminterface.h>       // uitest `touch`: REAL touch delivery (real hit-testing)
 #include <QPushButton>
 #include <QProgressBar>
 #include <QProcess>
@@ -1350,6 +1352,127 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
 #endif
 }
 
+// ---- uitest `touch` verb: synthesize REAL touch sequences on the top-level window --------------------------
+// The whole point is to exercise the QML touch handlers (MouseAreas, Flickables, the edge-back MouseArea)
+// through real hit-testing — NOT to shortcut into the NavGraph. So we post QWindowSystemInterface touch events
+// against the window handle exactly as a physical touchscreen would, and let Qt route + hit-test them. Multi-
+// frame gestures run on a QTimer state machine so the pipe handler is never blocked mid-sequence.
+namespace {
+
+// The touchscreen device Qt attributes the synthetic points to. Registered ONCE (Qt owns it thereafter).
+QPointingDevice* uitestTouchDevice()
+{
+    static QPointingDevice* dev = [] {
+        auto* d = new QPointingDevice(
+            QStringLiteral("uitest-touchscreen"), 0x0107E57,
+            QInputDevice::DeviceType::TouchScreen, QPointingDevice::PointerType::Finger,
+            QInputDevice::Capability::Position | QInputDevice::Capability::Area
+                | QInputDevice::Capability::Pressure,
+            10 /*maxTouchPoints*/, 0 /*buttonCount*/);
+        QWindowSystemInterface::registerInputDevice(d);
+        return d;
+    }();
+    return dev;
+}
+
+// One synthetic touch point. Callers pass a window-local point in LOGICAL (device-independent) coordinates —
+// the same space `state` reports the window `size` in, so `touch tap X Y` uses the coordinates an agent already
+// sees. QWindowSystemInterface::TouchPoint.area is in NATIVE (physical-pixel) global screen coordinates, so we
+// map local -> global (logical) and scale up by the window's device-pixel ratio (single-origin screen). Qt maps
+// it back to window-local logical during delivery, so the point lands exactly where the caller intended.
+QWindowSystemInterface::TouchPoint uitestTP(QWindow* win, int id, QEventPoint::State st, QPointF local)
+{
+    QWindowSystemInterface::TouchPoint tp;
+    tp.id = id;
+    tp.state = st;
+    const QPointF gLogical = win->mapToGlobal(local);
+    const qreal dpr = win->devicePixelRatio();
+    const QPointF gNative = gLogical * dpr;                 // -> native pixels for the QPA layer
+    tp.area = QRectF(gNative.x() - 1, gNative.y() - 1, 2, 2);
+    if (QScreen* sc = win->screen())
+    {
+        const QRect sg = sc->geometry();                   // logical; the ratio is DPR-invariant
+        if (sg.width() > 0 && sg.height() > 0)
+            tp.normalPosition = QPointF(qreal(gLogical.x() - sg.x()) / sg.width(),
+                                        qreal(gLogical.y() - sg.y()) / sg.height());
+    }
+    tp.pressure = (st == QEventPoint::State::Released) ? 0.0 : 1.0;
+    return tp;
+}
+
+// Build the gesture's frames, then drive them one per timer tick (first frame delivered immediately). Parses
+// "tap X Y", "flick X1 Y1 X2 Y2 [MS]" (default 150ms, >=6 interpolated moves), "pinch CX CY SCALE [MS]".
+void uitestRunTouch(QWindow* win, const QString& arg, QObject* parent)
+{
+    if (!win) return;
+    using S = QEventPoint::State;
+    const QStringList t = arg.split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    const QString sub = t.value(0).toLower();
+
+    auto* frames = new QVector<QList<QWindowSystemInterface::TouchPoint>>();
+    int intervalMs = 30;
+    auto tp = [win](int id, S st, qreal x, qreal y) { return uitestTP(win, id, st, QPointF(x, y)); };
+
+    if (sub == QStringLiteral("tap") && t.size() >= 3)
+    {
+        const qreal x = t[1].toDouble(), y = t[2].toDouble();
+        frames->append({ tp(0, S::Pressed, x, y) });
+        frames->append({ tp(0, S::Released, x, y) });
+        intervalMs = 30;                                   // 2 frames, ~30ms apart
+    }
+    else if (sub == QStringLiteral("flick") && t.size() >= 5)
+    {
+        const qreal x1 = t[1].toDouble(), y1 = t[2].toDouble(), x2 = t[3].toDouble(), y2 = t[4].toDouble();
+        const int ms = t.size() >= 6 ? t[5].toInt() : 150;
+        const int steps = 8;                               // 8 interpolated moves (>= the required 6)
+        frames->append({ tp(0, S::Pressed, x1, y1) });
+        for (int i = 1; i <= steps; ++i)
+        {
+            const qreal f = qreal(i) / steps;
+            frames->append({ tp(0, S::Updated, x1 + (x2 - x1) * f, y1 + (y2 - y1) * f) });
+        }
+        frames->append({ tp(0, S::Released, x2, y2) });
+        intervalMs = qMax(1, ms / (steps + 1));
+    }
+    else if (sub == QStringLiteral("pinch") && t.size() >= 4)
+    {
+        const qreal cx = t[1].toDouble(), cy = t[2].toDouble(), scale = t[3].toDouble();
+        const int ms = t.size() >= 5 ? t[4].toInt() : 150;
+        const int steps = 8;
+        const qreal half0 = 60.0;                          // initial half-separation of the two fingers (px)
+        auto frame = [&](qreal half, S s0, S s1) {
+            return QList<QWindowSystemInterface::TouchPoint>{ tp(0, s0, cx - half, cy), tp(1, s1, cx + half, cy) };
+        };
+        frames->append(frame(half0, S::Pressed, S::Pressed));
+        for (int i = 1; i <= steps; ++i)
+        {
+            const qreal f = qreal(i) / steps;
+            frames->append(frame(half0 * (1.0 + (scale - 1.0) * f), S::Updated, S::Updated));
+        }
+        frames->append(frame(half0 * scale, S::Released, S::Released));
+        intervalMs = qMax(1, ms / (steps + 1));
+    }
+    else { delete frames; return; }                        // malformed: nothing to deliver
+
+    // Deliver frame 0 now; a repeating single-shot-style QTimer walks the rest, then self-destructs.
+    QWindowSystemInterface::handleTouchEvent(win, uitestTouchDevice(), frames->at(0));
+    auto* idx = new int(1);
+    auto* timer = new QTimer(parent);
+    timer->setInterval(intervalMs);
+    QPointer<QWindow> alive(win);
+    QObject::connect(timer, &QTimer::timeout, timer, [alive, frames, idx, timer] {
+        if (!alive || *idx >= frames->size())
+        {
+            timer->stop(); timer->deleteLater(); delete frames; delete idx; return;
+        }
+        QWindowSystemInterface::handleTouchEvent(alive, uitestTouchDevice(), frames->at(*idx));
+        ++(*idx);
+    });
+    timer->start();
+}
+
+} // namespace
+
 void MainWindow::updateUiTestServer()
 {
     if (!UiTestServer::wanted())
@@ -1434,6 +1557,13 @@ void MainWindow::updateUiTestServer()
     };
     h.screenshot = [this](const QString& path) { return grab().save(path); };
     h.openDoc = [this](const QString& path) { return openDocumentPath(path); }; // reader tests: open by path (real ok)
+    h.touch = [this](const QString& arg) {
+        // Qt-INTERNAL activation only (parity with sendKey) — no OS foreground change. Real touch on the
+        // top-level window handle: Qt hit-tests + routes it into the widget tree / embedded QML scene exactly
+        // as a physical touchscreen would (the whole point — no shortcut into the graph).
+        if (!isActiveWindow()) QApplication::setActiveWindow(this);
+        uitestRunTouch(windowHandle(), arg, this);
+    };
     uiTest_ = new UiTestServer(h, this);
     mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
 

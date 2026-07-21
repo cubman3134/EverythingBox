@@ -45,6 +45,8 @@
 #include <QFont>
 #include <QQmlError>
 #include <QSGRendererInterface>
+#include <QPointingDevice>            // §20: the synthetic touchscreen device QTest::touchEvent drives
+#include <QtTest/QTest>              // §20: QTest::touchEvent — real touch sequences with real hit-testing
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
 #include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
@@ -902,6 +904,214 @@ static void runFormFactorAsserts()
         const int expectBasePx = qRound(frac * h);           // the pre-scale baseline (no uiScale multiply)
         CHECK(qAbs(txt->property("font").value<QFont>().pixelSize() - expectBasePx) <= 1,
               "formfactor(identity): Desktop pixelSize == the pre-scale baseline (fraction*host.height, ffs==1)");
+    }
+
+    // Restore the stored mode so the setting the probe wrote does not leak into later runs / other consumers.
+    Settings::setDisplayMode(QStringLiteral("auto"));
+    FormFactor::instance().refresh();
+}
+
+// §20 — the touch INPUT model (D1 Task 4). Synthesizes REAL touch sequences (QTest::touchEvent → real
+// hit-testing through the QML scene, NOT a shortcut into the graph) against the two themed surfaces and pins
+// the mobile tap/flick/edge-back contract, plus the Desktop identity net (two-step click frozen). Runs LAST +
+// restores the stored mode. Everything is gated on FormFactor mode, so the Desktop leg proves a pixel/behaviour
+// no-op with default settings.
+//
+//   (a) MOBILE grid tap on a non-selected item: selection MOVES to it AND activated fires (one-tap activate).
+//   (b) DESKTOP grid tap: first tap SELECTS only (no activate); a second tap on the now-selected item activates.
+//   (c) MOBILE SettingsPanel row tap: select+activate (already one-click — assert unchanged).
+//   (d) MOBILE SettingsPanel ListView flick: contentY changes (native kinetic) AND the selection does NOT.
+//   (e) MOBILE edge-swipe from x<12 rightward ≥80px: backInvoked fires; a short (<80px) edge drag does NOT.
+static void runTouchAsserts()
+{
+    auto probeItems = []() -> QVariantList {
+        QVariantList v;
+        for (int i = 0; i < 4; ++i)
+            v << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        return v;
+    };
+    const QVariantMap gridEl{ { QStringLiteral("type"), QStringLiteral("grid") },
+                              { QStringLiteral("columns"), 4 },
+                              { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                              { QStringLiteral("size"), QVariantList{ 1, 1 } } };
+    const QVariantMap home{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                            { QStringLiteral("elements"), QVariantList{ gridEl } } };
+    const QVariantMap theme{ { QStringLiteral("name"), QStringLiteral("Touch") },
+                             { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+
+    QPointingDevice* dev = QTest::createTouchDevice();   // one registered touchscreen for the whole run
+
+    // ============================ GRID surface (ThemeView) ============================
+    Settings::setDisplayMode(QStringLiteral("mobile"));
+    FormFactor::instance().refresh();
+    CHECK(FormFactor::instance().modeName() == QStringLiteral("mobile"), "touch: mobile mode active for the grid fixture");
+
+    NavGraph g;
+    buildThemedNavGraph(g, 4);
+    buildAudioPageNavGraph(g);
+    QQuickWidget qw;
+    qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+    qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+    qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+    QQuickItem* root = qw.rootObject();
+    CHECK(root != nullptr, "touch: ThemeView.qml instantiates from the qrc (grid case)");
+    if (!root) { Settings::setDisplayMode(QStringLiteral("auto")); FormFactor::instance().refresh(); return; }
+    root->setProperty("categories", QVariantList{});
+    root->setProperty("items", probeItems());
+    root->setProperty("currentIndex", 0);
+    root->setProperty("currentView", QStringLiteral("home"));
+    root->setProperty("theme", theme);                       // set last
+    qw.resize(1280, 720);
+    qw.show();
+    pump(); pump();
+    qw.grabFramebuffer();   // force a synchronous render pass so the GridView realizes its delegates
+    pump();
+
+    // Emulate the C++ bridge's items-zone write-back (selectionChanged -> currentIndex): the two-step desktop
+    // path re-reads currentIndex to decide select-vs-activate, and live that mirror is the ThemeEngine bridge.
+    QObject::connect(&g, &NavGraph::selectionChanged, root, [root](const QString& z, int i) {
+        if (z == QStringLiteral("items")) root->setProperty("currentIndex", i);
+    });
+    int activatedCount = 0;
+    QObject::connect(&g, &NavGraph::activated, root, [&activatedCount](const QString&, int) { ++activatedCount; });
+
+    // Grid geometry on the 1280x720 square-free fixture: 4 cols -> cellWidth 320, cellHeight 320*1.4=448.
+    // Row 0 items are centred at y=224; item i centre x = i*320 + 160.
+    const QPoint pItem1(1 * 320 + 160, 224);   // (480, 224) — item 1, non-selected (currentIndex 0)
+    const QPoint pItem2(2 * 320 + 160, 224);   // (800, 224) — item 2
+
+    // ---- (a) MOBILE one-tap: tap a non-selected item -> selection moves AND activated fires ----
+    g.select(QStringLiteral("items"), 0);
+    root->setProperty("currentIndex", 0);
+    activatedCount = 0;
+    QTest::touchEvent(qw.quickWindow(), dev).press(0, pItem1);
+    QTest::touchEvent(qw.quickWindow(), dev).release(0, pItem1);
+    pump();
+    CHECK(g.zone() == QStringLiteral("items") && g.index() == 1,
+          "touch(mobile): a tap moves the grid selection to the tapped item (through gotoItem -> the graph)");
+    CHECK(activatedCount == 1,
+          "touch(mobile): the SAME tap also activates the item (one-tap semantics)");
+
+    // ---- (b) DESKTOP two-step: first tap selects only; a second tap on the selected item activates ----
+    Settings::setDisplayMode(QStringLiteral("desktop"));
+    FormFactor::instance().refresh();
+    pump();
+    CHECK(FormFactor::instance().modeName() == QStringLiteral("desktop"), "touch: desktop mode active for the identity leg");
+    g.select(QStringLiteral("items"), 0);
+    root->setProperty("currentIndex", 0);
+    activatedCount = 0;
+    QTest::touchEvent(qw.quickWindow(), dev).press(0, pItem2);
+    QTest::touchEvent(qw.quickWindow(), dev).release(0, pItem2);
+    pump();
+    CHECK(g.zone() == QStringLiteral("items") && g.index() == 2 && activatedCount == 0,
+          "touch(desktop): the first tap only SELECTS the item (no activate — two-step frozen)");
+    QTest::touchEvent(qw.quickWindow(), dev).press(0, pItem2);
+    QTest::touchEvent(qw.quickWindow(), dev).release(0, pItem2);
+    pump();
+    CHECK(activatedCount == 1,
+          "touch(desktop): a second tap on the now-selected item activates it (the two-step click)");
+
+    // ---- (e) MOBILE edge-swipe: a rightward drag from the left edge fires back; a short one does NOT ----
+    Settings::setDisplayMode(QStringLiteral("mobile"));
+    FormFactor::instance().refresh();
+    pump();
+    int backCount = 0;
+    QObject::connect(&g, &NavGraph::backInvoked, root, [&backCount] { ++backCount; });
+    // A long sweep (>=80px rightward) from x<12.
+    QTest::touchEvent(qw.quickWindow(), dev).press(0, QPoint(4, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(30, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(60, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(95, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(120, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).release(0, QPoint(120, 360));
+    pump();
+    CHECK(backCount >= 1, "touch(mobile): an edge-swipe from x<12 rightward >=80px fires back (nav.back)");
+    // A short drag from the edge (<80px) must NOT fire back (the threshold guard).
+    const int backAfterLong = backCount;
+    QTest::touchEvent(qw.quickWindow(), dev).press(0, QPoint(4, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(20, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).move(0, QPoint(40, 360));
+    QTest::touchEvent(qw.quickWindow(), dev).release(0, QPoint(40, 360));
+    pump();
+    CHECK(backCount == backAfterLong, "touch(mobile): a short edge drag (<80px) does NOT fire back (threshold)");
+
+    // ============================ PANEL surface (SettingsPanel via the REAL ThemedPanelHost) ============================
+    Settings::setDisplayMode(QStringLiteral("mobile"));
+    FormFactor::instance().refresh();
+    ThemedPanelHost host;
+    NavGraph* pg = host.navGraph();
+    // 40 Action rows: plenty to overflow a 400px-tall panel, so contentHeight > height and the ListView can flick.
+    host.present(QStringLiteral("Touch Panel"), panelActionRows(40, QStringLiteral("row")),
+                 [](const QString&, const QString&) {}, [] {});
+    host.resize(600, 400);
+    host.show();
+    pump(); pump();
+    QQuickWidget* pqw = qobject_cast<QQuickWidget*>(host.quickWidget());
+    CHECK(pqw != nullptr, "touch: the panel host exposes its QQuickWidget");
+    if (pqw)
+    {
+        pqw->grabFramebuffer();
+        pump();
+        QQuickItem* proot = pqw->rootObject();
+        QQuickItem* listv = proot ? proot->findChild<QQuickItem*>(QStringLiteral("panelList")) : nullptr;
+        CHECK(listv != nullptr, "touch: the SettingsPanel ListView carries objectName panelList");
+
+        int pAct = 0;
+        QObject::connect(pg, &NavGraph::activated, &host, [&pAct](const QString&, int) { ++pAct; });
+
+        // ---- (c) a row tap: select+activate (one-click — the panel behaviour is unchanged) ----
+        // A point well inside the list body (below the ~85px header + margin), centred horizontally.
+        const QPoint pRow(300, 150);
+        QTest::touchEvent(pqw->quickWindow(), dev).press(0, pRow);
+        QTest::touchEvent(pqw->quickWindow(), dev).release(0, pRow);
+        pump();
+        CHECK(pg->zone() == QStringLiteral("panelRows") && pAct == 1,
+              "touch(panel): a row tap selects AND activates it in one click (unchanged)");
+
+        // ---- (d) a vertical flick: contentY changes (native kinetic) AND the selection does NOT ----
+        // NOTE ON THE DRIVER: QTest::touchEvent taps route fine through this offscreen QQuickWidget (proven by
+        // (c) above), but the offscreen harness does NOT engage a Flickable's touch-drag from synthetic touch —
+        // dragging never latches (verified: no contentY movement at any press point). Qt's own Flickable tests
+        // therefore drive drags with QTest::mouse* events, which exercise the IDENTICAL Flickable drag path. A
+        // mouse drag over an `interactive` Flickable scrolls it; over a NON-interactive one it does not — so this
+        // still distinguishes the mobile change from the frozen Desktop default. (The real kinetic touch scroll
+        // is verified live in the report; here we pin the interactive behaviour headlessly.)
+        if (listv)
+        {
+            const qreal cy0 = listv->property("contentY").toReal();
+            const QString z0 = pg->zone();
+            const int idx0 = pg->index();
+            const QPoint start(300, 340), end(300, 120);
+            QTest::mousePress(pqw->quickWindow(), Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(pqw->quickWindow(), QPoint(300, 300)); pump();
+            QTest::mouseMove(pqw->quickWindow(), QPoint(300, 240)); pump();
+            QTest::mouseMove(pqw->quickWindow(), QPoint(300, 180)); pump();
+            QTest::mouseMove(pqw->quickWindow(), end); pump();
+            QTest::mouseRelease(pqw->quickWindow(), Qt::LeftButton, Qt::NoModifier, end);
+            pump(); pump();
+            const qreal cy1 = listv->property("contentY").toReal();
+            CHECK(qAbs(cy1 - cy0) > 1.0,
+                  "touch(panel,mobile): a vertical drag flicks the ListView contentY (interactive kinetic scroll)");
+            CHECK(pg->zone() == z0 && pg->index() == idx0,
+                  "touch(panel,mobile): the flick does NOT move the selection (drag != tap)");
+
+            // Desktop identity net: the SAME drag over the now non-interactive ListView must NOT scroll it.
+            Settings::setDisplayMode(QStringLiteral("desktop"));
+            FormFactor::instance().refresh();
+            pump();
+            const qreal dcy0 = listv->property("contentY").toReal();
+            QTest::mousePress(pqw->quickWindow(), Qt::LeftButton, Qt::NoModifier, start);
+            QTest::mouseMove(pqw->quickWindow(), QPoint(300, 240)); pump();
+            QTest::mouseMove(pqw->quickWindow(), end); pump();
+            QTest::mouseRelease(pqw->quickWindow(), Qt::LeftButton, Qt::NoModifier, end);
+            pump(); pump();
+            CHECK(qFuzzyCompare(listv->property("contentY").toReal() + 1.0, dcy0 + 1.0),
+                  "touch(panel,desktop): the non-interactive ListView does NOT scroll on a drag (identity)");
+            Settings::setDisplayMode(QStringLiteral("mobile"));
+            FormFactor::instance().refresh();
+            pump();
+        }
     }
 
     // Restore the stored mode so the setting the probe wrote does not leak into later runs / other consumers.
@@ -2019,6 +2229,9 @@ int main(int argc, char** argv)
     // §19: the `form` context property + TV scale/insets on the ThemeView surface (D1 Task 2), plus the Desktop
     // identity net that guards the whole form-factor branch as a pixel no-op. Runs LAST + restores the setting.
     runFormFactorAsserts();
+    // §20: the touch INPUT model (D1 Task 4) — mobile one-tap activate, the Desktop two-step identity net, the
+    // SettingsPanel kinetic flick, and the left-edge back-swipe, all via REAL synthetic touch (real hit-testing).
+    runTouchAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

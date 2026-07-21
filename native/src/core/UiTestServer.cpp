@@ -91,5 +91,17 @@ QString UiTestServer::handle(const QString& line)
         return hooks_.openDoc(arg) ? QStringLiteral("ok ") + arg
                                    : QStringLiteral("err couldn't open %1").arg(arg);
     }
-    return QStringLiteral("err unknown command '%1' (key/state/shot/open)").arg(cmd);
+    if (cmd == QStringLiteral("touch"))
+    {
+        // arg is the sub-line ("tap X Y" / "flick X1 Y1 X2 Y2 [MS]" / "pinch CX CY SCALE [MS]"). The gesture
+        // validates its own argument count app-side (MainWindow); here we only route the raw line. The hook
+        // starts a QTimer state machine and returns immediately (no blocking of the pipe handler).
+        const QString sub = arg.section(QLatin1Char(' '), 0, 0).toLower();
+        if (sub != QStringLiteral("tap") && sub != QStringLiteral("flick") && sub != QStringLiteral("pinch"))
+            return QStringLiteral("err usage: touch tap X Y | flick X1 Y1 X2 Y2 [MS] | pinch CX CY SCALE [MS]");
+        if (!hooks_.touch) return QStringLiteral("err no touch hook");
+        hooks_.touch(arg);
+        return QStringLiteral("ok");
+    }
+    return QStringLiteral("err unknown command '%1' (key/state/shot/open/touch)").arg(cmd);
 }

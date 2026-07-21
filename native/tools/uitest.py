@@ -9,6 +9,9 @@ Usage:
   uitest.py shot C:/tmp/screen.png         save a screenshot of the window (works while occluded)
   uitest.py walk N [key]                   press a key N times (default: down), printing state each step
   uitest.py open C:/path/to/doc.pdf        open a document/book/comic by path (reader tests)
+  uitest.py touch tap 640 360              synthesize a real touch tap at window coords (X, Y)
+  uitest.py touch flick 640 600 640 200    a drag/flick from (X1,Y1) to (X2,Y2) [add MS for duration]
+  uitest.py touch pinch 640 360 2.0        two fingers around (CX,CY) diverging by SCALE [add MS]
   uitest.py send "open C:/x.cbz"           raw passthrough of any server command
 
 No third-party deps. Windows: named pipe \\\\.\\pipe\\MyMediaVault-uitest; elsewhere: the QLocalServer
@@ -72,6 +75,10 @@ def main() -> int:
     elif cmd == "open":
         # Open a document/book by path through the reader-test hook (src/core/UiTestServer -> openDocumentPath).
         print(_send(f"open {os.path.abspath(sys.argv[2])}"))
+    elif cmd == "touch":
+        # Synthesize a real touch gesture: `touch tap X Y`, `touch flick X1 Y1 X2 Y2 [MS]`,
+        # `touch pinch CX CY SCALE [MS]`. The rest of argv is passed through verbatim to the server.
+        print(_send("touch " + " ".join(sys.argv[2:])))
     elif cmd == "send":
         # Raw passthrough of any server command (e.g. `send "open C:/x.pdf"`), for ad-hoc reader driving.
         print(_send(sys.argv[2]))

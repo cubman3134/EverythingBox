@@ -130,6 +130,7 @@ Rectangle {
     // ---- The row list --------------------------------------------------------------------------------------
     ListView {
         id: list
+        objectName: "panelList"   // probe_navqml §20 introspects contentY through this
         anchors.top: header.bottom; anchors.topMargin: Math.round(12 * root.ffs)
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
         anchors.leftMargin: Math.round(28 * root.ffs) + root.safeInset
@@ -137,7 +138,10 @@ Rectangle {
         anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset
         clip: true
         spacing: 8
-        interactive: false
+        // Native kinetic scrolling on touch (D1 Task 4): a mobile drag flicks the row list; key/controller nav
+        // still snaps via positionViewAtIndex on the selection change, and a stationary row tap still commits the
+        // selection (so flick-then-tap is coherent). Desktop/TV stay non-interactive (a pixel/behaviour no-op).
+        interactive: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
         model: (typeof panel !== "undefined" && panel) ? panel.model : null
         currentIndex: (root.g && root.g.zone === "panelRows") ? root.g.index : -1
         onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)

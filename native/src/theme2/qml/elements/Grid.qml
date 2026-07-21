@@ -20,7 +20,9 @@ GridView {
     property real labelFrac: (labelMode === "below" || labelMode === "top") ? Number(T.val(card, "labelSize", 0.24)) : 0.0
 
     clip: true
-    interactive: false
+    // Native kinetic scrolling on touch (D1 Task 4): a mobile drag flicks the grid; key/controller nav still
+    // snaps via currentIndex. Desktop/TV stay non-interactive (wheel + tap-to-move), a pixel/behaviour no-op.
+    interactive: (typeof form !== "undefined" && form) ? form.mode === "mobile" : false
     cellWidth: width / cols
     cellHeight: cellWidth * Number(T.val(el, "aspect", 1.4))
     model: ctx ? ctx.items : []
