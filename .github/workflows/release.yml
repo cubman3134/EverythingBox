@@ -289,7 +289,7 @@ jobs:
           host: linux
           target: desktop
           arch: linux_gcc_64
-          modules: 'qtmultimedia qtpdf'
+          modules: 'qtmultimedia qtpdf qtdeclarative'
           cache: true
       - name: Remember host Qt
         run: echo "QT_HOST_ROOT=$QT_ROOT_DIR" >> "$GITHUB_ENV"
@@ -301,7 +301,7 @@ jobs:
           host: linux
           target: android
           arch: ${{ env.QT_ANDROID_ARCH }}
-          modules: 'qtmultimedia'   # QtPdf isn't published for Android; PdfView is stubbed there
+          modules: 'qtmultimedia qtdeclarative'   # QtPdf isn't published for Android; PdfView is stubbed there
           cache: true
 
       - name: Provide libmpv for Android

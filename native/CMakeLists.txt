@@ -57,12 +57,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     set(MMV_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSecrets.cmake")
 
-    # QML theme engine (declarative, fully themeable front end) - desktop-first. OPTIONAL so a Qt install
-    # without qtdeclarative still builds the app (the theme engine just isn't compiled). Gate its targets on
-    # TARGET Qt6::Quick. The Android build keeps the Qt-Widgets UI until QML is added to its provisioning.
-    if(NOT ANDROID)
-        find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
-    endif()
+    # QML theme engine (declarative, fully themeable front end). OPTIONAL so a Qt install without qtdeclarative
+    # still builds the app (the theme engine just isn't compiled). Gate its targets on TARGET Qt6::Quick. Runs
+    # for every platform (incl. Android) now that the kits provision qtdeclarative; a kit still missing it
+    # degrades gracefully via the STATUS message below.
+    find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
     if(TARGET Qt6::Quick AND TARGET Qt6::Qml AND TARGET Qt6::QuickWidgets)
         set(MMV_HAVE_QML ON)
         message(STATUS "MyMediaVault: QML theme engine enabled")
