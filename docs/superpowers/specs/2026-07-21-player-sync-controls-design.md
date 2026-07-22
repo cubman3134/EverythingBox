@@ -1,7 +1,7 @@
 # VLC-Class Player Controls: Sync Offsets + Boost/Tracks Confirmation — Design
 
 **Date:** 2026-07-21
-**Status:** Approved design; plan next.
+**Status:** Complete: sync controls live (per-file + global), boost + track selection verified as features (2026-07-21).
 **Origin:** User request — "VLC lets you change the sound to 200%, shows all available
 subtitles, and makes the sound/subtitles sync faster or slower. Make sure we have all
 those features."
@@ -18,6 +18,10 @@ those features."
   mpv's `sub-auto` sidecar loading covers external .srt discovery.
 - **Subtitle delay plumbing**: `MpvWidget::subDelay()/setSubDelay(seconds)` exist
   (MpvWidget.cpp ~:481-487) with ZERO UI callers.
+
+**Verification (2026-07-21):** volume boost to 200 and multi-track (audio+subtitle)
+switching were live-verified this date on the deployed Release build (state.volume=200;
+audio→JPN switch with ENG subtitle rendering confirmed) — see sync-task-2-report evidence.
 
 ## What's missing (the build)
 
