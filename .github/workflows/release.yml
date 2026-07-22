@@ -274,6 +274,9 @@ jobs:
           - qt_arch: android_x86_64
             jni_abi: x86_64
             name: x86_64
+          - qt_arch: android_armv7
+            jni_abi: armeabi-v7a
+            name: armv7
     env:
       QT_ANDROID_ARCH: ${{ matrix.qt_arch }}
       NDK_VERSION: '26.1.10909125'   # Qt 6.8's recommended NDK (r26b)
@@ -377,8 +380,9 @@ jobs:
           # reference, so REPLACE the NDK runtime libc++_shared.so that androiddeployqt bundles with jdtech's.
           # Then drop jdtech's from mpv-android/libs so EXTRA_LIBS doesn't also add it (same soname -> collision).
           case "$JNI_ABI" in
-            x86_64)    TRIPLE=x86_64-linux-android ;;
-            arm64-v8a) TRIPLE=aarch64-linux-android ;;
+            x86_64)     TRIPLE=x86_64-linux-android ;;
+            arm64-v8a)  TRIPLE=aarch64-linux-android ;;
+            armeabi-v7a) TRIPLE=arm-linux-androideabi ;;
             *) echo "unknown ABI $JNI_ABI"; exit 1 ;;
           esac
           NDK_LIBCXX=$(find "$ANDROID_NDK_ROOT" -path "*/$TRIPLE/libc++_shared.so" | head -1)
