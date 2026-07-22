@@ -23,4 +23,5 @@ namespace ProfileStore
     QString currentId();                // active profile id ("" if none selected yet)
     void setCurrent(const QString& id);
     Profile current();                  // the active profile (empty Profile if none)
+    void migrateIcons();                // one-time: repair legacy Windows-1252 mojibake in stored icons
 }

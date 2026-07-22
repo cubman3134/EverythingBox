@@ -201,6 +201,7 @@ int main(int argc, char** argv)
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
+    ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
 
     // A profile must be active before the app is usable. One profile -> use it. With none or several, the
     // picker is shown inline once the window is up (chooseProfile); set a provisional current first so the

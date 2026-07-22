@@ -9,6 +9,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # and /OPT:REF,/OPT:ICF restore the dead-code/COMDAT-folding size optimizations that a bare /DEBUG turns off.
 # Set before any target so the static libs (our libretro frontend, etc.) contribute symbols to the final .pdb.
 if(MSVC)
+    # Treat sources AND narrow string literals as UTF-8. Our source files hold raw UTF-8 emoji literals
+    # (e.g. the profile-icon glyph set in ProfileDialog.cpp); without /utf-8, MSVC decodes source bytes via the
+    # system codepage and re-encodes literals to the ANSI codepage, which mangles multibyte glyphs into
+    # mojibake. This makes emoji round-trips correct-by-construction regardless of the build host's locale.
+    add_compile_options(/utf-8)
     add_compile_options($<$<CONFIG:Release>:/Zi>)
     add_link_options($<$<CONFIG:Release>:/DEBUG>)
     add_link_options($<$<CONFIG:Release>:/OPT:REF>)
