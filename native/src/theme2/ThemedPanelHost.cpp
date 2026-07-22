@@ -10,6 +10,8 @@
 #include <QUrl>
 #include <QColor>
 #include <QSet>
+#include <QTimer>
+#include <functional>
 
 // ---- PanelListModel ----------------------------------------------------------------------------------------
 
@@ -229,9 +231,27 @@ void ThemedPanelHost::onLevelPopped()
     if (stack_.isEmpty()) return;
     const Entry gone = stack_.takeLast();
     if (!stack_.isEmpty())
+    {
         renderTop(/*restore=*/true);   // back to the parent panel, cursor on the row the user left it at
-    else if (gone.onBack)
-        gone.onBack();             // the last panel was dismissed — the root onBack leaves the host
+        return;
+    }
+    if (!gone.onBack) return;
+#ifdef Q_OS_ANDROID
+    // F7 — the Settings-ROOT nav trap on TV. The root onBack LEAVES this host: it tears down the panel page and
+    // rebuilds the themed home (a heavy QQuickWidget add/setCurrentWidget/deleteLater swap in showThemedHome).
+    // We reach here mid-callback from THIS host's own QML scene — hardware Back and the panelBack "‹ Back" CENTER
+    // both funnel through NavGraph::back() -> popLevel() -> here while the panel host's QQuickWidget is still
+    // dispatching its key/activate event. On Android that in-scene QQuickWidget→QQuickWidget swap silently NO-OPs,
+    // stranding the user on the Settings root (BACK dead, header ‹ Back won't activate). Sub-panels are unaffected
+    // because their pop stays IN-host (renderTop above — no widget swap). Defer the leave-host one event-loop turn
+    // so this callback fully unwinds before the rebuild — the same idiom as openCloudSync's deferred handleBack.
+    // Desktop keeps the synchronous path verbatim (probe_navqml §18 drives this host headlessly), so its semantics
+    // and the desktop suite are untouched.
+    std::function<void()> onBack = gone.onBack;
+    QTimer::singleShot(0, this, [onBack] { onBack(); });
+#else
+    gone.onBack();                 // the last panel was dismissed — the root onBack leaves the host
+#endif
 }
 
 bool ThemedPanelHost::overlayAbove() const
