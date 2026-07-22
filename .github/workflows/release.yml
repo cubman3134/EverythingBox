@@ -421,6 +421,10 @@ jobs:
 
       - name: Configure (qt-cmake)
         run: |
+          # A freshly aqt-extracted Android kit (no prior cache — e.g. the armv7 ABI) can land qt-cmake
+          # without its execute bit, so the wrapper dies with "Permission denied" (exit 126). Cached kits
+          # keep perms from the tarball, so this is a no-op for them. Restore +x before invoking.
+          chmod +x "$QT_ROOT_DIR/bin/"* 2>/dev/null || true
           "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \
             -DQT_HOST_PATH="$QT_HOST_ROOT" \
             -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
