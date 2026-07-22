@@ -1685,14 +1685,29 @@ void HomeView::playRandomFromPlaylist(const QString& playlistId)
 // Air one channel pick: resolve + open the entry at `index` through the SAME per-entry path a row activation
 // uses (playlistItemsCatalog -> openResolvedItem), so a channel pick behaves byte-identically to opening that
 // row by hand. MainWindow owns the shuffle bag + the natural-end chain and calls this for each pick.
-QString HomeView::playChannelItem(const QString& playlistId, int index)
+HomeView::ChannelAir HomeView::playChannelItem(const QString& playlistId, int index, int gen)
 {
     Playlist p;
-    if (!PlaylistStore::get(playlistId, p)) return QString();
+    if (!PlaylistStore::get(playlistId, p)) return ChannelAir::Detoured;   // gone -> MainWindow skips/exits
     auto cat = browse::playlistItemsCatalog(p);      // 1:1 with p.items, same order (see SyntheticCatalogs)
-    if (index < 0 || index >= cat.items.size()) return QString();
-    openResolvedItem(cat.items[index], /*levelAddon=*/nullptr);
-    return cat.items[index].title;
+    if (index < 0 || index >= cat.items.size()) return ChannelAir::Detoured;
+    return openResolvedItem(cat.items[index], /*levelAddon=*/nullptr, /*forChannel=*/true, gen);
+}
+
+bool HomeView::channelItemPlaysDirectly(const QString& playlistId, int index)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return false;
+    auto cat = browse::playlistItemsCatalog(p);
+    if (index < 0 || index >= cat.items.size()) return false;
+    const MediaItem& it = cat.items[index];
+    if (it.mime.startsWith(QStringLiteral("localgame:"))) return true; // local file -> plays
+    if (!it.url.isEmpty()) return true;                                // already carries a url -> plays
+    LoadedAddon* addon = it.sourceAddonId.isEmpty() ? nullptr : mgr_->sourceById(it.sourceAddonId);
+    // A remote leaf that will async-resolve a /stream (same gate openResolvedItem uses to attempt a resolve).
+    if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
+        && it.type != QStringLiteral("platform") && !isInfoPageType(it.type)) return true;
+    return false; // info-page movie/episode, container, or stream-less -> detail-page detour
 }
 
 // Rename via the OSK, prefilled with the current name; PlaylistStore::rename persists it and we refresh the
@@ -2324,13 +2339,14 @@ void HomeView::activateItem(int row)
 // Open a single item through the per-entry resolution path — the generic tail of activateItem, shared with
 // Play-random. Local-file entries re-open by path; a remote leaf resolves its /stream and plays; info-page
 // types (movies/episodes, comics/books) and stream-less/container items open a detail page instead.
-void HomeView::openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon)
+HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon,
+                                                bool forChannel, int channelGen)
 {
     // A local game/file entry (Recent/Downloaded item added to a playlist) re-opens by path.
     if (it.mime.startsWith(QStringLiteral("localgame:")))
-    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return; }
+    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return ChannelAir::Played; }
     // A file is already associated (a local video/audio) -> the main window plays it directly.
-    if (!it.url.isEmpty()) { emit openItem(it); return; }
+    if (!it.url.isEmpty()) { emit openItem(it); return ChannelAir::Played; }
 
     LoadedAddon* addon = levelAddon;
     if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // per-entry / cross-addon
@@ -2346,16 +2362,29 @@ void HomeView::openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon)
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
-        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider](const QString& url, const QString& mime) {
-            if (!url.isEmpty()) { hideToast(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
-            else { hideToast(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](const QString& url, const QString& mime) {
+            hideToast();
+            if (!url.isEmpty())
+            {
+                MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider;
+                if (forChannel) emit channelPickResolved(channelGen, m); // MainWindow gates on gen, then plays
+                else            emit openItem(m);
+            }
+            // No stream: a channel SKIPS this pick (never dumps the viewer on a detail page mid-channel); a
+            // normal open shows its metadata instead.
+            else if (forChannel) emit channelPickDetoured(channelGen);
+            else                 openDetailLevel(addon, item);
         });
-        return;
+        return ChannelAir::Pending;
     }
 
-    // No file yet: open a detail page. Its metadata header describes the item; for a container
-    // (TV show / season / album / console) the page also drills into its children below the header.
+    // No file yet: this opens a detail page (info-page movie/episode, container, stream-less item). For a
+    // channel that's a DETOUR, not playback — report it so the channel skips instead of stranding the viewer
+    // on an info page and wedging the chain.
+    if (forChannel) return ChannelAir::Detoured;
+    // Its metadata header describes the item; for a container (show/season/album/console) it also drills in.
     openDetailLevel(addon, it);
+    return ChannelAir::Detoured;
 }
 
 void HomeView::requestNextSource()

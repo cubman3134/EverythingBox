@@ -63,10 +63,23 @@ public:
     // passes asRoot=true when the "playlistsCategory" row is activated. categoryKey = video|audio|game|reading.
     void openPlaylistsLevel(const QString& categoryKey, bool asRoot = false);
 
+    // The outcome of resolving+opening one item (openResolvedItem / playChannelItem). A channel airing needs to
+    // know whether its pick actually PLAYED (chain continues), DETOURED to a detail page / stream-less dead end
+    // (the channel must SKIP it, not wedge), or is PENDING an async /stream resolve (the resolveStream callback
+    // reports the real outcome later, via channelPickResolved / channelPickDetoured).
+    enum class ChannelAir { Played, Detoured, Pending };
+
     // Channel mode (driven by MainWindow, which owns the bag + the EOF-chain): air one playlist entry through
     // the SAME per-entry open path a row activation / Play-random uses, so a channel pick resolves identically.
-    // Returns the entry's display title (for the "Next: …" interstitial), or empty if the index is out of range.
-    QString playChannelItem(const QString& playlistId, int index);
+    // `gen` tags this airing so a stale async result (superseded by a later pick / a manual play / channel exit)
+    // is dropped. Returns the SYNCHRONOUS outcome; Pending means the async signal decides.
+    ChannelAir playChannelItem(const QString& playlistId, int index, int gen);
+
+    // Would this entry reach actual playback (vs. detour to a detail page)? Mirrors openResolvedItem's routing:
+    // a local file / already-resolved url / an async-resolvable remote leaf plays; an info-page movie/episode,
+    // container, or stream-less item detours. Lets the channel skip a detour BEFORE naming it in the countdown
+    // (a remote leaf counts as "plays" — its rare async-resolve miss is caught after airing, not predictable here).
+    bool channelItemPlaysDirectly(const QString& playlistId, int index);
 
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
@@ -158,6 +171,11 @@ signals:
     // Start a channel over this (video/audio) playlist: MainWindow owns the shuffle bag + the EOF-chain, and
     // calls back into playChannelItem() to air each pick through the same per-entry open path a row uses.
     void startChannelRequested(const QString& playlistId);
+    // Async outcome of a channel pick's /stream resolve (see openResolvedItem). `gen` lets MainWindow drop a
+    // result whose airing was superseded (a later pick, a manual play, or channel exit). Resolved carries the
+    // now-playable item; Detoured means it produced no stream (skip it).
+    void channelPickResolved(int gen, const MediaItem& item);
+    void channelPickDetoured(int gen);
     // At the home root there's nowhere further back -> the host opens the app pause menu (one Back rule).
     void backRequested();
     void settingsRequested();                  // the "Settings" button in the top bar
@@ -230,8 +248,11 @@ private:
     void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
     void renamePlaylistInteractive(const QString& playlistId); // OSK prefilled with the current name -> rename
     void deletePlaylistInteractive(const QString& playlistId); // Cancel-focused confirm -> remove
-    // Open one item through the per-entry resolution path (shared by activateItem's tail + Play-random).
-    void openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon);
+    // Open one item through the per-entry resolution path (shared by activateItem's tail + Play-random). When
+    // forChannel, a would-be detail-page open is SUPPRESSED and reported (Detoured / channelPickDetoured) so the
+    // channel skips the pick instead of dumping the viewer on an info page; channelGen tags the async result.
+    ChannelAir openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon,
+                                bool forChannel = false, int channelGen = 0);
 
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
     // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.

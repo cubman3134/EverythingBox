@@ -856,6 +856,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
     connect(home_, &HomeView::startChannelRequested, this, &MainWindow::startChannel);
+    connect(home_, &HomeView::channelPickResolved, this, &MainWindow::onChannelPickResolved);
+    connect(home_, &HomeView::channelPickDetoured, this, &MainWindow::onChannelPickDetoured);
     connect(home_, &HomeView::switchProfileRequested, this, &MainWindow::onSwitchProfile);
     connect(home_, &HomeView::themeChanged, this, &MainWindow::onThemeChanged);
     connect(home_, &HomeView::settingsRequested, this, &MainWindow::openSettingsHub);
@@ -2447,6 +2449,7 @@ void MainWindow::startChannel(const QString& playlistId)
     { notify(tr("This playlist is empty."), kFeedbackShort); return; }
     channelPlaylistId_ = playlistId;
     channelBag_.reset(int(p.items.size())); // a fresh shuffled bag for this run
+    channelSkips_ = 0;
     notify(tr("Channel started — playing “%1” on shuffle.").arg(p.name), kFeedbackStandard);
     airChannelPick(channelBag_.next());      // air the first pick immediately (no interstitial before item one)
 }
@@ -2460,7 +2463,21 @@ void MainWindow::advanceChannel()
     if (!PlaylistStore::get(channelPlaylistId_, p) || p.items.isEmpty())
     { exitChannel(); openHome(); return; }   // playlist vanished under us -> end the channel, land on Home
 
-    const int next = channelBag_.next();
+    // Draw the next pick, but SKIP any that would only open a detail page (an addon movie/episode, a container,
+    // a stream-less item) BEFORE the interstitial — so the countdown only ever names something that will really
+    // play (no interstitial for skips). If every remaining pick detours, nothing plays directly: stop with a
+    // notice. A remote leaf counts as playable here; a rare async-resolve miss is caught after airing.
+    int next = channelBag_.next();
+    for (int skipped = 0; !home_->channelItemPlaysDirectly(channelPlaylistId_, next); ++skipped)
+    {
+        if (skipped + 1 >= int(p.items.size()))
+        {
+            exitChannel();
+            notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
+            return;
+        }
+        next = channelBag_.next();
+    }
     if (next < 0 || next >= p.items.size()) { exitChannel(); openHome(); return; }
     const QString title = p.items[next].title.isEmpty() ? tr("the next item") : p.items[next].title;
 
@@ -2477,33 +2494,80 @@ void MainWindow::advanceChannel()
     airChannelPick(next);
 }
 
-// Drive one playlist entry through HomeView's per-entry open path (identical to activating that row). The latch
-// tells notePlaybackStart that the play it's about to see IS the channel's own pick, so the manual-play guard
-// doesn't tear the channel down. The latch is consumed (reset) by whichever play sink the pick reaches — sync
-// for a local file (openRecent -> openVideoPath), or async for a remote leaf (resolveStream -> openItem) — so
-// it survives the resolve gap and never leaks to a later manual play.
+// Drive one playlist entry through HomeView's per-entry open path (identical to activating that row). Sets the
+// synchronous latch so the play sink this pick reaches keeps the channel alive; a NEW gen tags any async result.
+// The pick can resolve three ways:
+//   * Played  (sync): a local file / already-resolved url -> the sink consumed the latch during this call.
+//   * Detoured(sync): an info-page/container/stream-less item would open a DETAIL page -> HomeView suppressed it;
+//                     the channel SKIPS to the next pick (no interstitial), never wedging on a detail surface.
+//   * Pending (async): a remote /stream resolve is in flight -> onChannelPickResolved / onChannelPickDetoured
+//                     decide later, gated on the gen so a superseded airing is dropped.
 void MainWindow::airChannelPick(int index)
 {
     if (index < 0) { exitChannel(); return; }
-    channelAirLatch_ = true;
-    home_->playChannelItem(channelPlaylistId_, index);
+    channelAiring_ = true;
+    const int gen = ++channelAirGen_;               // this airing's identity (gates its async result)
+    const HomeView::ChannelAir r = home_->playChannelItem(channelPlaylistId_, index, gen);
+    if (r == HomeView::ChannelAir::Played) return;  // the sink already consumed the latch (+ reset channelSkips_)
+    channelAiring_ = false;                          // Pending/Detoured: never hold the latch across the gap
+    if (r == HomeView::ChannelAir::Detoured) channelSkip(); // this pick can't play directly -> next pick, silently
+    // Pending: the gen-gated async slot decides.
 }
 
-// Every user-stop / Back / queue-clear-to-home path AND the start of any non-channel playback clears the
-// channel, so the next natural end after ANY exit does not chain. Idempotent (safe when no channel is live).
+// A pick detoured (a detail page / no stream). Skip to the next bag pick immediately — NO interstitial (skips are
+// silent) — until one plays. If every pick in the playlist skips (consecutive skips reach the playlist size),
+// nothing can play directly: stop the channel with a notice. channelSkips_ is reset to 0 by the next real play.
+void MainWindow::channelSkip()
+{
+    const int n = channelBag_.size();
+    if (n <= 0) { exitChannel(); return; }
+    if (++channelSkips_ >= n)
+    {
+        exitChannel();
+        notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
+        return;
+    }
+    airChannelPick(channelBag_.next());
+}
+
+// Async pick got a stream. If this airing is still the current one (gen match) and the channel is still live,
+// play it (arming the latch just before the sink so it's kept). A stale result — a manual play or exit bumped the
+// gen — is dropped, so a superseded pick never interrupts nor secretly revives the channel.
+void MainWindow::onChannelPickResolved(int gen, const MediaItem& item)
+{
+    if (gen != channelAirGen_ || !channelActive()) return; // superseded / channel gone -> drop
+    channelAiring_ = true;                                  // consumed synchronously by openLibraryItem's sink
+    openLibraryItem(item);
+}
+
+// Async pick produced no stream. If still current, skip it like a sync detour; a stale result is dropped.
+void MainWindow::onChannelPickDetoured(int gen)
+{
+    if (gen != channelAirGen_ || !channelActive()) return;
+    channelAiring_ = false;
+    channelSkip();
+}
+
+// Every user-stop / Back / queue-clear-to-home path AND the start of any non-channel playback clears the channel,
+// so the next natural end after ANY exit does not chain. Bumping the gen invalidates any in-flight async pick.
+// Idempotent (safe when no channel is live).
 void MainWindow::exitChannel()
 {
     channelPlaylistId_.clear();
-    channelAirLatch_ = false;
+    channelAiring_ = false;
+    channelSkips_ = 0;
+    ++channelAirGen_;            // a pending async pick's result is now stale -> it will be dropped
     channelBag_.reset(0);
 }
 
-// A play sink was reached. If the channel armed this play (its own pick), consume the latch and keep the
-// channel alive; otherwise this is a user-initiated play, which ends any live channel (a manual play kills it).
+// A play sink was reached. If the channel armed this play (its own pick, sync or a just-resolved async one),
+// consume the latch, reset the skip run, and keep the channel. Otherwise this is a user-initiated play, which
+// ends any live channel (a manual play kills it). Because channelAiring_ is only ever true across a synchronous
+// dispatch, a manual play interleaved during a pending async resolve sees it FALSE here and correctly exits.
 void MainWindow::notePlaybackStart()
 {
-    if (channelAirLatch_) { channelAirLatch_ = false; return; } // the channel's own pick — keep it
-    if (channelActive()) exitChannel();                          // a manual play supersedes the channel
+    if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
+    if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
 
 void MainWindow::openGame()
