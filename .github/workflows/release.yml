@@ -334,12 +334,20 @@ jobs:
           set -e
           KIT="$QT_ROOT_DIR"
           echo "Pruning Qt FFmpeg backend from kit: $KIT"
+          # 1) The FFmpeg media plugin .so itself.
           echo "--- ffmpeg media plugin(s):"
           find "$KIT" -name '*ffmpegmediaplugin*' -print -delete || true
+          # 2) Its CMake package files. find_package(Qt6 Multimedia) auto-includes every
+          #    lib/cmake/Qt6Multimedia/Qt6*PluginConfig.cmake (file(GLOB)+include) and declares an IMPORTED
+          #    target whose IMPORTED_LOCATION is the plugin .so — configure hard-fails if that .so is gone.
+          #    Removing the plugin's *Config.cmake drops it from the glob, so the target is never declared.
+          echo "--- ffmpeg plugin CMake package files:"
+          find "$KIT" -path '*cmake/Qt6Multimedia/*QFFmpegMediaPlugin*' -print -delete || true
+          # 3) Qt's own libav*/libsw* (a different FFmpeg build than jdtech's; sonames collide in the APK).
           echo "--- Qt-bundled libav*/libsw*:"
           find "$KIT" \( -name 'libav*.so' -o -name 'libsw*.so' \) -print -delete || true
-          echo "--- remaining av/sw libs in kit (expect none):"
-          find "$KIT" \( -name 'libav*.so' -o -name 'libsw*.so' \) -print || echo "(none)"
+          echo "--- remaining ffmpeg artifacts in kit (expect none):"
+          find "$KIT" \( -name '*ffmpegmediaplugin*' -o -name 'libav*.so' -o -name 'libsw*.so' -o -path '*QFFmpegMediaPlugin*' \) -print || echo "(none)"
 
       - name: Provide libmpv for Android
         env:
