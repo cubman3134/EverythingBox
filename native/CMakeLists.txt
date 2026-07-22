@@ -244,6 +244,18 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
     target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
 
+    # SyncOffsets store: per-file/global audio+subtitle sync offsets, the persistence foundation the player's
+    # sync controls (player/sync-controls Task 2) wire onto. QtCore-only (no Quick/Widgets) so the probe links
+    # lean and runs under offscreen QPA. Settings.cpp is linked per the plan (shared mymediavault.ini store);
+    # it in turn calls FormFactor::instance() (Settings::virtualPadEnabled), so FormFactor.cpp comes along as
+    # its link dependency — the same Core-only set probe_formfactor uses.
+    add_executable(probe_sync tools/probe_sync.cpp
+        src/core/SyncOffsets.cpp src/core/SyncOffsets.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_sync PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_sync PRIVATE Qt6::Core)
+
     # Android asset bootstrap core: first-run extraction of the APK-bundled themes2/ + addons/ into the
     # writable data dir (D2 Task 2). QtCore-only (no Quick/Widgets) like FormFactor, so the probe links lean
     # and runs under offscreen QPA in CI. Desktop-verifiable: run() is a pure fn of (sourceRoot, dataDir, ver).

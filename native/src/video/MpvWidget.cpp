@@ -487,6 +487,18 @@ void MpvWidget::setSubtitleDelay(double seconds)
     if (mpv) mpv_set_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &seconds);
 }
 
+double MpvWidget::audioDelay() const
+{
+    double d = 0.0;
+    if (mpv) mpv_get_property(mpv, "audio-delay", MPV_FORMAT_DOUBLE, &d);
+    return d;
+}
+
+void MpvWidget::setAudioDelay(double seconds)
+{
+    if (mpv) mpv_set_property(mpv, "audio-delay", MPV_FORMAT_DOUBLE, &seconds);
+}
+
 double MpvWidget::subtitleScale() const
 {
     double f = 1.0;

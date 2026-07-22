@@ -37,6 +37,8 @@ public:
     void setAudioTrack(int id);               // select audio track id; id < 0 disables audio
     double subtitleDelay() const;             // current subtitle timing offset, seconds
     void setSubtitleDelay(double seconds);
+    double audioDelay() const;                // current audio timing offset, seconds (mpv "audio-delay"); 0.0 when no mpv
+    void setAudioDelay(double seconds);
     double subtitleScale() const;             // current subtitle size multiplier (1.0 = default)
     void setSubtitleScale(double factor);
     void nextChapter();                       // jump to the next chapter (M4B audiobooks, chaptered videos)
