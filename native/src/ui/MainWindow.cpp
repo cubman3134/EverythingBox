@@ -734,7 +734,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // to resume via signals; we own the actual player + playlist widget.
     session_ = new PlaybackSession(QString(), this);
     connect(session_, &PlaybackSession::playRequested, this,
-            [this](const QString& p) { player_->play(p); });
+            [this](const QString& p) {
+        // Per-track choke point for EVERY queue-driven load — initial track and advances alike, keyed exactly
+        // as PlaybackSession::beginResume(tracks_[index]) keys the resume. Covers local audio folders/multi-select
+        // and IPTV queues (the direct-play paths set their own key and never reach here). openAudioStream re-keys
+        // the initial track to its stable id AFTER setQueue, so a stable id still wins track 1 while advances fall
+        // through to this per-track key.
+        syncKey_ = p;
+        player_->play(p);
+    });
     connect(session_, &PlaybackSession::queueChanged, this,
             [this](const QStringList& titles, int current) {
         themedAudioQueue_ = titles;
@@ -1642,10 +1650,13 @@ void MainWindow::updateUiTestServer()
     h.screenshot = [this](const QString& path) { return grab().save(path); };
     h.openDoc = [this](const QString& path) {
         // reader tests open by path (pdf/cbz/epub -> the readers). Route video/audio extensions to the player so
-        // the player-touch tests (tap chrome, double-tap seek) can reach playerPage_ headlessly too.
+        // the player-touch tests (tap chrome, double-tap seek) can reach playerPage_ headlessly too. m3u/m3u8
+        // route through openVideoPath's isM3uRef branch -> a multi-file playlist queue (lets a test drive queue
+        // advances + per-track sync keying).
         static const QSet<QString> media = { QStringLiteral("mp4"), QStringLiteral("mkv"), QStringLiteral("mov"),
             QStringLiteral("avi"), QStringLiteral("webm"), QStringLiteral("m4v"), QStringLiteral("mp3"),
-            QStringLiteral("flac"), QStringLiteral("m4a"), QStringLiteral("wav") };
+            QStringLiteral("flac"), QStringLiteral("m4a"), QStringLiteral("wav"),
+            QStringLiteral("m3u"), QStringLiteral("m3u8") };
         if (media.contains(QFileInfo(path).suffix().toLower())) { openVideoPath(path); return true; }
         return openDocumentPath(path);
     };
@@ -2734,13 +2745,15 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
-    syncKey_ = rkey;             // audio uses the same MpvWidget; set before setQueue kicks off playback (sub offset harmless)
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
     session_->setQueue({ url }, 0, { t }, rkey);
+    syncKey_ = rkey;             // AFTER setQueue: the playRequested choke point just set syncKey_ to the volatile
+                                 // url; override the initial track with the stable id (audio uses the same
+                                 // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
     RecentStore::add({ url, t, QStringLiteral("audio"), thumbnailUrl, rkey });
 }
 
