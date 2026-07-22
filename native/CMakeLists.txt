@@ -122,6 +122,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
+        src/core/SyncOffsets.cpp  src/core/SyncOffsets.h  # player audio/sub sync-offset store (Task 2 wires the card onto it)
         # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
         # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
@@ -248,6 +249,15 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/LifecyclePolicy.h)
     target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
     target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
+
+    # SyncOffsets store: per-file/global audio+subtitle sync offsets, the persistence foundation the player's
+    # sync controls (player/sync-controls Task 2) wire onto. QtCore-only (no Quick/Widgets) so the probe links
+    # lean and runs under offscreen QPA. SyncOffsets.cpp is self-contained (its own QSettings store() on the
+    # shared mymediavault.ini), so the target needs neither Settings.cpp nor FormFactor.cpp — Qt6::Core only.
+    add_executable(probe_sync tools/probe_sync.cpp
+        src/core/SyncOffsets.cpp src/core/SyncOffsets.h)
+    target_include_directories(probe_sync PRIVATE src src/core)
+    target_link_libraries(probe_sync PRIVATE Qt6::Core)
 
     # Android asset bootstrap core: first-run extraction of the APK-bundled themes2/ + addons/ into the
     # writable data dir (D2 Task 2). QtCore-only (no Quick/Widgets) like FormFactor, so the probe links lean
