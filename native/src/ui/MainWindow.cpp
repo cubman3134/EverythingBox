@@ -3812,6 +3812,54 @@ void MainWindow::themedDetailEditTags()
     }
 }
 
+// The browse Filter menu (triggered by "F" on the themed browse view): a NavMenu over All / Favorites / each
+// completion status, plus a "By tag…" sub-pick when the profile has any tags. The chosen mode is a TRANSIENT,
+// level-scoped presentation filter (HomeView::setBrowseFilter) — not persisted, cleared on the next level load.
+// After a pick we re-read browseItems() into the live view so the narrowed set (and any orphaned group header)
+// refreshes in place with no re-fetch.
+void MainWindow::runThemedBrowseFilter()
+{
+    // Target the current themed browse surface — the flat browse view, or the XMB home column while drilled
+    // into a catalog (mirrors the browseItemsChanged fan-out). Nothing to filter on any other surface.
+    QWidget* tgt = nullptr;
+    if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
+    else if (themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_ && stack_->currentWidget() == themedHome_)
+        tgt = themedHome_;
+    if (!tgt) return;
+    struct Opt { int mode; int comp; QString label; };
+    const QVector<Opt> opts = {
+        { 0, 0, tr("All") },
+        { 1, 0, tr("★ Favorites") },
+        { 2, static_cast<int>(ItemMarks::Completion::Planned),    tr("Planned") },
+        { 2, static_cast<int>(ItemMarks::Completion::InProgress), tr("In progress") },
+        { 2, static_cast<int>(ItemMarks::Completion::Finished),   tr("Finished") },
+        { 2, static_cast<int>(ItemMarks::Completion::Abandoned),  tr("Abandoned") },
+    };
+    const QStringList tags = ItemMarks::tagVocab();
+    QStringList rows;
+    for (const Opt& o : opts) rows << o.label;
+    int byTagIdx = -1;
+    if (!tags.isEmpty()) { byTagIdx = rows.size(); rows << tr("By tag…"); }
+
+    const int pick = NavMenu::pick(tr("Filter"), rows, this);
+    if (pick < 0) return; // Back leaves the current filter unchanged
+    if (pick == byTagIdx)
+    {
+        const int t = NavMenu::pick(tr("Filter by tag"), tags, this);
+        if (t < 0 || t >= tags.size()) return;
+        home_->setBrowseFilter(3, 0, tags[t]);
+    }
+    else
+    {
+        home_->setBrowseFilter(opts[pick].mode, opts[pick].comp, QString());
+    }
+    if (QQuickItem* r = ThemeEngine::rootItem(tgt))
+    {
+        r->setProperty("items", home_->browseItems()); // narrow the presentation (rebuilds the row map)
+        r->setProperty("currentIndex", home_->browseRestoreIndex());
+    }
+}
+
 // ---- Themed AUDIO now-playing page (Task 5) ---------------------------------------------------------------
 // The current themed surface (home/browse) that hosts the audio page, or null if we're not on one.
 QWidget* MainWindow::themedAudioHost() const
@@ -4211,9 +4259,13 @@ void MainWindow::showThemedXmb()
         if (r) home_->addBrowseItemToPlaylist(r->property("currentIndex").toInt());
     };
 
+    // "F" inside an XMB catalog opens the transient browse Filter menu (a no-op at the XMB category root).
+    auto onButton = [this](const QString& v) {
+        if (v == QStringLiteral("filter") && themedXmbInCatalog_) runThemedBrowseFilter();
+    };
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
-                                        onSelect, onAction, onPlaylistAdd, /*onButton=*/{},
+                                        onSelect, onAction, onPlaylistAdd, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
@@ -4287,9 +4339,11 @@ void MainWindow::showThemedBrowse()
     // Selection neared the end -> pull the next page (if any). browseItemsChanged appends + keeps selection.
     auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
 
+    // "F" on the browse view emits actionRequested("filter") -> open the transient browse Filter menu.
+    auto onButton = [this](const QString& v) { if (v == QStringLiteral("filter")) runThemedBrowseFilter(); };
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd, {}, {}, {}, {}, {},
+                                        onSearch, onNearEnd, {}, {}, {}, {}, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },

@@ -69,6 +69,13 @@ public:
     void browseLoadMore();                   // pull the next page (no-op if none / already loading)
     int  browseRestoreIndex() const;         // the browse index of the row we last drilled into (for Back), else 0
 
+    // Transient browse-level presentation filter (NOT persisted; cleared on the next real level load). mode:
+    // 0 = All, 1 = Favorites, 2 = a completion status (comp = ItemMarks::Completion cast to int), 3 = a tag.
+    // browseItems() applies it on top of the hidden filter; the host re-reads browseItems() after setting it.
+    void setBrowseFilter(int mode, int comp, const QString& tag);
+    void clearBrowseFilter();                // reset to All (called on every fresh level load)
+    bool browseFilterActive() const { return browseFilterMode_ != 0; }
+
     // Triple/XMB theme: live metadata beside the selection + an inline Play/Favorite on a leaf, all without
     // leaving the themed view. requestThemedMeta() emits themedMetaReady() (a skeleton at once, then the
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
@@ -172,6 +179,7 @@ private:
         MediaItem item;          // the container we drilled into (when detail)
         QString title;
         int childRow = -1;       // items_ index last drilled into from this level (restored on Back)
+        QVector<MediaItem> synthItems; // a shelf level's resolved intersection (favorites/tag/hidden), re-shown on Back
     };
 
     // The classic detail page's action gates for an item at the CURRENT drill level (stack_.last().addon is
@@ -214,6 +222,11 @@ private:
     void populateDownloads(const QString& marker);       // (re)build that list as re-openable rows
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
+    // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT
+    // level's items that match, snapshotted into the pushed Level (re-shown on Back, no re-fetch).
+    void openShelfLevel(const MediaItem& folder);        // drill a shelf folder -> its matching items
+    QVector<MediaItem> shelfMatches(const MediaItem& folder) const; // current-level items matching the shelf
+    bool passesBrowseFilter(const MediaItem& it) const;  // the transient browse filter membership test
     void requestSteamMeta(const MediaItem& item, int reqId); // native detail fetch for a Steam game
     QWidget* detailActionButton() const; // the focusable action on the detail page (Play for Steam, else Favorite)
     void renderRecents();            // populate the grid from RecentStore + favourites, grouped under headers
@@ -276,6 +289,9 @@ private:
     QString lastMediaKey_;           // last media type entered (to re-highlight on return to the carousel)
     QListWidget* grid_ = nullptr;
     QString browseSelectKey_; // url/id to re-select after the next themed re-sync (keeps the spot after fav/uninstall)
+    int     browseFilterMode_ = 0;   // transient browse filter: 0 All, 1 Favorites, 2 Status, 3 Tag (see setBrowseFilter)
+    int     browseFilterComp_ = 0;   // ItemMarks::Completion (cast to int) when browseFilterMode_ == 2
+    QString browseFilterTag_;        // the tag when browseFilterMode_ == 3
     QLineEdit* search_ = nullptr;
     QWidget* filterBar_ = nullptr;       // row of filter dropdowns above the grid (per-catalog, dynamic)
     QHBoxLayout* filterLayout_ = nullptr;

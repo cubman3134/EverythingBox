@@ -411,6 +411,11 @@ Item {
         // "/" (or the dedicated Search key) asks the host to prompt for a query. Not in the detail view.
         else if ((e.key === Qt.Key_Slash || e.key === Qt.Key_Search) && currentView !== "detail")
                                                                 { searchRequested(); e.accepted = true }
+        // "F" asks the host to open the browse Filter menu (All / Favorites / status / by tag) — a transient,
+        // level-scoped presentation filter. Fired broadly (like "/" search); the host acts only while inside a
+        // browsable catalog level (XMB-in-catalog or the flat browse view) and ignores it at an XMB root.
+        else if (e.key === Qt.Key_F && currentView !== "detail" && currentView !== "nowplayingAudio")
+                                                                { actionRequested("filter"); e.accepted = true }
     }
 
     // Enter in the detail view fires the focused action-row verb (detailActionIndex is bridge-written). The
