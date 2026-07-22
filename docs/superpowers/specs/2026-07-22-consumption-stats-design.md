@@ -1,7 +1,7 @@
 # Consumption Stats (Playnite roadmap #3) — Design
 
 **Date:** 2026-07-22
-**Status:** Approved roadmap item (user-set order); plan next.
+**Status:** Complete: per-profile media/reading accrual + Stats surface (themed + classic) shipped 2026-07-22; games via PlayStats display-join; importers ride-alongs landed.
 **Origin:** User request — Playnite tracks playtime; generalized: hours watched/listened/
 played + pages read, per title + per catalog, per profile, with a stats surface.
 
@@ -75,3 +75,25 @@ extend those keys; it gets its own per-profile store.
   the throwaway profile's accruals (deleted with it).
 - Suite + perf gates (the persistResume hook is on the 5s heartbeat — nav/startup
   untouched; verify).
+
+## Follow-ups (close-out 2026-07-22)
+
+- Pause-aware game time (subtract paused spans; Playnite counts wall time too).
+- Stats SHELVES ("Most played" home rows).
+- Time-series / history charts (totals-only today, Playnite-parity).
+- Playlist-gog registry re-resolve routing: a persisted gog tile carries its exe path
+  frozen at add-time; re-resolving via the registry at launch would survive an install
+  move/upgrade (nicety, not a correctness gap — the console tile shares the same frozen
+  path today).
+- Add-flow persistence probe coverage: the epic/gog addon-stamp + gog `url→path` add
+  path is validated by probe_importers §9 (store→tile→activation) but the persist round-
+  trip (PlaylistStore write-then-reload of the stamped entry) has no dedicated probe.
+- Cross-reader open-page inconsistency: the three readers accrue pages on different
+  edges (PdfView::currentPageChanged, ComicView::showPage, EbookView page/chapter
+  advance); the "current page" semantics at open differ slightly across them — audit for
+  a uniform first-visit definition.
+- Heartbeat double-sync cost: accrual adds a second QSettings::sync() (the per-profile
+  ConsumptionStats store) per ≥5s persistResume heartbeat during media playback, on top
+  of the existing resume-store sync. Outside the measured perf route (route opens a game
+  via PlayStats, no media playback); bounded by reasoning as negligible (one small extra
+  ini flush per 5s, off every hot path — see the T3 baseline note).
