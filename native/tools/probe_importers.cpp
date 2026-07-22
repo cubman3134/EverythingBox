@@ -18,10 +18,15 @@
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
 // a real ini.
 #include "SteamLibrary.h"
+#include "EpicLibrary.h"
+#include "GogLibrary.h"
 #include "RecentStore.h"
 #include "../src/browse/SyntheticCatalogs.h"
 
 #include <QCoreApplication>
+#include <QTemporaryDir>
+#include <QFile>
+#include <QSettings>
 #include <cstdio>
 
 static int failures = 0;
@@ -143,6 +148,8 @@ int main(int argc, char** argv)
     // ---- 5. Recent-kind dispatch table (openRecent mirrors this) ------------------------------------------
     using RL = RecentStore::Relaunch;
     CHECK(RecentStore::relaunchFor(QStringLiteral("steamgame")) == RL::SteamGame);
+    CHECK(RecentStore::relaunchFor(QStringLiteral("epicgame"))  == RL::EpicGame);
+    CHECK(RecentStore::relaunchFor(QStringLiteral("goggame"))   == RL::GogGame);
     CHECK(RecentStore::relaunchFor(QStringLiteral("pcgame"))    == RL::PcGame);
     CHECK(RecentStore::relaunchFor(QStringLiteral("video"))     == RL::Video);
     CHECK(RecentStore::relaunchFor(QStringLiteral("audio"))     == RL::Audio);
@@ -151,8 +158,142 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QStringLiteral("bogus"))     == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
 
-    // ---- 6. Marks-sanity foundation: a steamgame Recent draws the game icon (keyFor keys are steam:<appid>) -
+    // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));
+    CHECK(browse::iconTypeForKind(QStringLiteral("epicgame"))  == QStringLiteral("game"));
+    CHECK(browse::iconTypeForKind(QStringLiteral("goggame"))   == QStringLiteral("game"));
+
+    // ==== EPIC (Task 2) ====================================================================================
+
+    // ---- 7. Epic manifest parse: a real game is kept -----------------------------------------------------
+    {
+        const QByteArray game = R"({"AppName":"Fortnite","DisplayName":"Fortnite",
+            "InstallLocation":"C:\\Games\\Fortnite","bIsIncompleteInstall":false,
+            "MainGameAppName":"","AppCategories":["public","games","applications"]})";
+        const EpicGame g = EpicLibrary::parseManifest(game);
+        CHECK(g.appName == QStringLiteral("Fortnite"));
+        CHECK(g.name == QStringLiteral("Fortnite"));
+        CHECK(g.installLocation == QStringLiteral("C:/Games/Fortnite")); // native separators normalized
+    }
+
+    // ---- 7b. Epic discriminator: DLC / incomplete / engine-tool / malformed are all filtered -------------
+    {
+        // DLC: MainGameAppName points at a DIFFERENT parent app.
+        const QByteArray dlc = R"({"AppName":"FortniteDLC","DisplayName":"Fortnite Skin Pack",
+            "InstallLocation":"C:\\Games\\Fortnite","MainGameAppName":"Fortnite","AppCategories":["games","addons"]})";
+        CHECK(EpicLibrary::parseManifest(dlc).appName.isEmpty());
+        // Still downloading -> not launchable.
+        const QByteArray incomplete = R"({"AppName":"Half","DisplayName":"Half Downloaded",
+            "InstallLocation":"C:\\Games\\Half","bIsIncompleteInstall":true,"AppCategories":["games"]})";
+        CHECK(EpicLibrary::parseManifest(incomplete).appName.isEmpty());
+        // Engine/plugin tool (the real shape on this dev machine): categories carry "engines", not "games".
+        const QByteArray engine = R"({"AppName":"UE_5.8","DisplayName":"Unreal Engine",
+            "InstallLocation":"C:\\Program Files\\Epic Games\\UE_5.8","AppCategories":["engines/ue5","engines"]})";
+        CHECK(EpicLibrary::parseManifest(engine).appName.isEmpty());
+        // No "games" category at all -> filtered.
+        const QByteArray noCat = R"({"AppName":"Bridge","DisplayName":"Quixel Bridge",
+            "InstallLocation":"C:\\Program Files\\Epic Games\\UE_5.8","AppCategories":[]})";
+        CHECK(EpicLibrary::parseManifest(noCat).appName.isEmpty());
+        // Malformed JSON / missing required fields -> filtered (never throws).
+        CHECK(EpicLibrary::parseManifest(QByteArray("not json {")).appName.isEmpty());
+        CHECK(EpicLibrary::parseManifest(QByteArray("[]")).appName.isEmpty());
+        const QByteArray noInstall = R"({"AppName":"X","DisplayName":"X","AppCategories":["games"]})";
+        CHECK(EpicLibrary::parseManifest(noInstall).appName.isEmpty()); // no InstallLocation
+    }
+
+    // ---- 7c. Epic installedGames over a fixture manifests dir (a game kept, a DLC + malformed skipped) ----
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid());
+        auto writeItem = [&](const QString& fn, const QByteArray& body) {
+            QFile f(dir.filePath(fn));
+            CHECK(f.open(QIODevice::WriteOnly));
+            f.write(body);
+        };
+        writeItem(QStringLiteral("a.item"), R"({"AppName":"Alpha","DisplayName":"Alpha Game",
+            "InstallLocation":"C:\\G\\Alpha","AppCategories":["games"]})");
+        writeItem(QStringLiteral("b.item"), R"({"AppName":"Beta","DisplayName":"Beta Game",
+            "InstallLocation":"C:\\G\\Beta","AppCategories":["games"]})");
+        writeItem(QStringLiteral("dlc.item"), R"({"AppName":"AlphaDLC","DisplayName":"Alpha DLC",
+            "InstallLocation":"C:\\G\\Alpha","MainGameAppName":"Alpha","AppCategories":["games"]})");
+        writeItem(QStringLiteral("junk.item"), QByteArray("garbage {"));
+
+        CHECK(EpicLibrary::isAvailable(dir.path()));
+        const QVector<EpicGame> games = EpicLibrary::installedGames(dir.path());
+        CHECK(games.size() == 2);                                  // Alpha + Beta; DLC + junk filtered
+        CHECK(games[0].name == QStringLiteral("Alpha Game"));      // name-sorted
+        CHECK(games[1].name == QStringLiteral("Beta Game"));
+
+        // An empty dir -> not available, no games.
+        QTemporaryDir empty;
+        CHECK(!EpicLibrary::isAvailable(empty.path()));
+        CHECK(EpicLibrary::installedGames(empty.path()).isEmpty());
+    }
+
+    // ---- 7d. Epic launch URI + console builder -----------------------------------------------------------
+    CHECK(EpicLibrary::launchUrl(QStringLiteral("Fortnite"))
+          == QStringLiteral("com.epicgames.launcher://apps/Fortnite?action=launch&silent=true"));
+    {
+        QList<EpicGame> installed{ { QStringLiteral("Zed"), QStringLiteral("Zed Game"), QStringLiteral("C:/G/Zed") },
+                                   { QStringLiteral("Ace"), QStringLiteral("Ace Game"), QStringLiteral("C:/G/Ace") } };
+        const MediaCatalog cat = browse::epicGamesCatalog(installed, QString());
+        CHECK(cat.items.size() == 2);
+        const MediaItem* ace = find(cat, QStringLiteral("epic:Ace"));
+        CHECK(ace && ace->mime == QStringLiteral("epicgame"));
+        CHECK(ace && ace->url.isEmpty());   // no url -> info page + Play (URI launch), mirrors steamgame
+        CHECK(ace && ace->title == QStringLiteral("Ace Game"));
+        // Query scopes by name.
+        const MediaCatalog scoped = browse::epicGamesCatalog(installed, QStringLiteral("zed"));
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("epic:Zed")));
+    }
+
+    // ==== GOG (Task 2) ====================================================================================
+
+    // ---- 8. GOG installedGames over a fake-registry INI fixture ------------------------------------------
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid());
+        const QString iniPath = dir.filePath(QStringLiteral("gog.ini"));
+        {
+            QSettings ini(iniPath, QSettings::IniFormat);
+            ini.setValue(QStringLiteral("1207658924/gameName"), QStringLiteral("The Witcher"));
+            ini.setValue(QStringLiteral("1207658924/path"), QStringLiteral("C:\\GOG Games\\The Witcher"));
+            ini.setValue(QStringLiteral("1207658924/exe"), QStringLiteral("C:\\GOG Games\\The Witcher\\witcher.exe"));
+            ini.setValue(QStringLiteral("1992450334/gameName"), QStringLiteral("Solitaire Collection"));
+            ini.setValue(QStringLiteral("1992450334/path"), QStringLiteral("C:\\GOG Games\\Solitaire"));
+            ini.setValue(QStringLiteral("1992450334/exe"), QStringLiteral("C:\\GOG Games\\Solitaire\\sol.exe"));
+            // An incomplete key (no exe) is skipped.
+            ini.setValue(QStringLiteral("999/gameName"), QStringLiteral("Broken"));
+            ini.sync();
+        }
+        CHECK(GogLibrary::isAvailable(iniPath));
+        const QVector<GogGame> games = GogLibrary::installedGames(iniPath);
+        CHECK(games.size() == 2);                                  // Broken (no exe) skipped
+        CHECK(games[0].name == QStringLiteral("Solitaire Collection")); // name-sorted
+        CHECK(games[0].id == QStringLiteral("1992450334"));
+        CHECK(games[0].exe == QStringLiteral("C:/GOG Games/Solitaire/sol.exe")); // native separators normalized
+        CHECK(games[1].name == QStringLiteral("The Witcher"));
+
+        // An empty ini -> not available.
+        const QString emptyIni = dir.filePath(QStringLiteral("empty.ini"));
+        { QSettings e(emptyIni, QSettings::IniFormat); e.sync(); }
+        CHECK(!GogLibrary::isAvailable(emptyIni));
+        CHECK(GogLibrary::installedGames(emptyIni).isEmpty());
+    }
+
+    // ---- 8b. GOG console builder: exe rides the tile (launchPcExe target); mime goggame -------------------
+    {
+        QList<GogGame> installed{
+            { QStringLiteral("100"), QStringLiteral("Alpha"), QStringLiteral("C:/G/Alpha/a.exe"), QStringLiteral("C:/G/Alpha") },
+            { QStringLiteral("200"), QStringLiteral("Bravo"), QStringLiteral("C:/G/Bravo/b.exe"), QStringLiteral("C:/G/Bravo") } };
+        const MediaCatalog cat = browse::gogGamesCatalog(installed, QString());
+        CHECK(cat.items.size() == 2);
+        const MediaItem* alpha = find(cat, QStringLiteral("gog:100"));
+        CHECK(alpha && alpha->mime == QStringLiteral("goggame"));
+        CHECK(alpha && alpha->url == QStringLiteral("C:/G/Alpha/a.exe")); // the exe rides on the tile
+        const MediaCatalog scoped = browse::gogGamesCatalog(installed, QStringLiteral("brav"));
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("gog:200")));
+    }
 
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }
     std::fprintf(stderr, "IMPORTERS: %d check(s) failed\n", failures);

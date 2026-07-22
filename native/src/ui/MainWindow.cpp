@@ -35,6 +35,8 @@
 #include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
 #include "../core/SteamLibrary.h"
+#include "../core/EpicLibrary.h"
+#include "../core/GogLibrary.h"
 #include "../core/ExternalPlayer.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -4831,6 +4833,24 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
             statusBar()->showMessage(tr("Launching “%1” via Steam…").arg(title), 5000);
             return;
         }
+        case RecentStore::Relaunch::EpicGame:
+        {
+            // Re-launch through the Epic launcher (fire-and-forget). Key is "epic:<AppName>"; the recorded path
+            // is the launcher URI. Re-record so the re-open moves to the front of Recents.
+            const QString appName = resumeKey.startsWith(QStringLiteral("epic:"))
+                                        ? resumeKey.mid(QStringLiteral("epic:").size())
+                                        : path.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
+            const QString url = EpicLibrary::launchUrl(appName);
+            QDesktopServices::openUrl(QUrl(url));
+            RecentStore::add({ url, title, QStringLiteral("epicgame"), thumb, QStringLiteral("epic:") + appName });
+            statusBar()->showMessage(tr("Launching “%1” via Epic…").arg(title), 5000);
+            return;
+        }
+        // A GOG game re-opens through the monitored exe path (re-resolving from the registry, falling back to the
+        // recorded exe). launchPcExe records the "goggame" Recent itself.
+        case RecentStore::Relaunch::GogGame:
+            relaunchGogGame(resumeKey, title, thumb, path);
+            return;
         // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path this
         // Recent entry recorded (e.g. its one-time installer) is stale or gone.
         case RecentStore::Relaunch::PcGame:
@@ -5471,14 +5491,20 @@ QString MainWindow::locateInstalledGameExe(const QString& title, const QString& 
     return findGameExe(pcRoot, title, /*titleMatchOnly*/ true);
 }
 
-// Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
-// exact executable (not the installer).
-void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb)
+// Run a resolved local-game exe and record it in Recent so re-opening from Home relaunches this exact
+// executable. `kind` ("pcgame" default, or "goggame") is the Recent routing kind — the launch MECHANICS below
+// are identical for both (GOG games are DRM-free processes, just like a downloaded PC repack). The kind-vs-
+// mechanics split: a GOG game records the "goggame" kind (so it groups on the GOG console and re-opens via the
+// GogGame dispatch) but rides this pcgame monitor path; and it is NOT added to the PC-console Downloads (it's
+// an installed registry game, not a downloaded repack), so we skip that store write for non-pcgame kinds.
+void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb,
+                            const QString& kind)
 {
-    mwLog(QStringLiteral("pcgame: launch \"%1\"").arg(QFileInfo(exe).fileName()));
+    mwLog(QStringLiteral("%1: launch \"%2\"").arg(kind, QFileInfo(exe).fileName()));
     notify(tr("Launching “%1”…").arg(title), 5000);
-    RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
-    DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
+    RecentStore::add({ exe, title, kind, thumb, id });
+    if (kind == QStringLiteral("pcgame"))
+        DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
@@ -5778,6 +5804,20 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
     if (tryLaunchInstalledPcGame(id, title, thumb)) return;
     if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath)) { launchPcExe(recordedPath, id, title, thumb); return; }
     notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), kFeedbackLong);
+}
+
+// Re-open a GOG game from a Recent entry (kind "goggame", key "gog:<id>"): prefer the registry's current exe
+// (survives a game update/move), then the exact exe the Recent recorded, then give up. Uses the "goggame" kind
+// so re-recording keeps it on the GOG console (not the PC console).
+void MainWindow::relaunchGogGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath)
+{
+    const QString gogId = id.startsWith(QStringLiteral("gog:")) ? id.mid(QStringLiteral("gog:").size()) : id;
+    for (const GogGame& g : GogLibrary::installedGames())
+        if (g.id == gogId && !g.exe.isEmpty() && QFileInfo::exists(g.exe))
+        { launchPcExe(g.exe, id, title, thumb, QStringLiteral("goggame")); return; }
+    if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath))
+    { launchPcExe(recordedPath, id, title, thumb, QStringLiteral("goggame")); return; }
+    notify(tr("Couldn't find “%1”. It may have been uninstalled from GOG.").arg(title), kFeedbackLong);
 }
 
 void MainWindow::startScrobble(const QString& imdbStreamId)
@@ -6238,6 +6278,25 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
         statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), kFeedbackLong);
+        return;
+    }
+    // A GOG game: a DRM-free exe launched through the MONITORED path (launchPcExe records the "goggame" Recent
+    // itself — do NOT re-record here). Its exe rides on item.url; id/title/thumb come from the tile.
+    if (item.mime == QStringLiteral("goggame"))
+    {
+        launchPcExe(item.url, item.id, item.title, item.thumbnailUrl, QStringLiteral("goggame"));
+        return;
+    }
+    // An Epic game: hand the launcher URI to the OS (fire-and-forget, exactly like steam://). Record a Recent
+    // (kind "epicgame", key "epic:<AppName>") so it resumes from the Recent tab and re-launches via the URI.
+    if (item.url.startsWith(QStringLiteral("com.epicgames.launcher://")))
+    {
+        QDesktopServices::openUrl(QUrl(item.url));
+        const QString appName = item.url.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
+        const QString key = item.id.startsWith(QStringLiteral("epic:"))
+                                ? item.id : QStringLiteral("epic:") + appName;
+        RecentStore::add({ item.url, item.title, QStringLiteral("epicgame"), item.thumbnailUrl, key });
+        statusBar()->showMessage(tr("Launching “%1” via Epic…").arg(item.title), 5000);
         return;
     }
     // A Steam game: hand it to the Steam client to launch (it handles install/run). Fire-and-forget — the Steam

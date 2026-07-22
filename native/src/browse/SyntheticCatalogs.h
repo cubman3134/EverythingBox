@@ -11,6 +11,8 @@
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
 #include "../core/SteamLibrary.h"
+#include "../core/EpicLibrary.h"
+#include "../core/GogLibrary.h"
 #include <functional>
 
 namespace browse
@@ -60,4 +62,19 @@ namespace browse
     MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
                                    const std::function<QString(const SteamGame&)>& poster = {},
                                    const QList<SteamGame>& owned = {});
+
+    // The Epic console grid, built natively from the local manifests. Each EpicGame -> a MediaItem (id
+    // "epic:"+AppName, mime "epicgame" — no url, so clicking opens the info page and Play launches it via the
+    // launcher URI, mirroring steamgame). A non-empty query scopes by name (case-insensitive). Epic has no
+    // local capsule convention, so poster defaults to empty (title-keyed scrapers fill art later); a test may
+    // inject one. Pure: no EpicLibrary I/O here.
+    MediaCatalog epicGamesCatalog(const QList<EpicGame>& installed, const QString& query,
+                                  const std::function<QString(const EpicGame&)>& poster = {});
+
+    // The GOG console grid, built natively from the registry. Each GogGame -> a MediaItem (id "gog:"+id, mime
+    // "goggame", url = the resolved exe — GOG games are DRM-free processes launched through the MONITORED
+    // launchPcExe path, so the exe rides on the tile). A non-empty query scopes by name. poster defaults to
+    // empty (no local capsule; title-keyed scrapers fill art later).
+    MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& query,
+                                 const std::function<QString(const GogGame&)>& poster = {});
 }

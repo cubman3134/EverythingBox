@@ -162,6 +162,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
+        src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
+        src/core/GogLibrary.cpp   src/core/GogLibrary.h
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -362,6 +364,8 @@ if(MYMEDIAVAULT_BUILD_APP)
     # recents) + MetaCache (SyntheticCatalogs' offline-art resolve) + AddonModels (MediaItem/Catalog).
     add_executable(probe_importers tools/probe_importers.cpp
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
+        src/core/EpicLibrary.cpp src/core/EpicLibrary.h
+        src/core/GogLibrary.cpp src/core/GogLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/MetaCache.cpp src/core/RecentStore.cpp
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp)

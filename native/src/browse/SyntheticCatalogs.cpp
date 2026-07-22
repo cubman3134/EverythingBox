@@ -13,7 +13,8 @@ QString iconTypeForKind(const QString& kind)
     if (kind == QStringLiteral("audio"))    return QStringLiteral("album");
     if (kind == QStringLiteral("document")) return QStringLiteral("book");
     if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")
-        || kind == QStringLiteral("steamgame")) return QStringLiteral("game");
+        || kind == QStringLiteral("steamgame") || kind == QStringLiteral("epicgame")
+        || kind == QStringLiteral("goggame")) return QStringLiteral("game");
     return QString();
 }
 
@@ -29,7 +30,8 @@ MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
         // PC + Steam games belong to the game catalogue's Recent view alongside emulated ones.
         const bool match = r.kind == kind
                            || (kind == QStringLiteral("game")
-                               && (r.kind == QStringLiteral("pcgame") || r.kind == QStringLiteral("steamgame")));
+                               && (r.kind == QStringLiteral("pcgame") || r.kind == QStringLiteral("steamgame")
+                                   || r.kind == QStringLiteral("epicgame") || r.kind == QStringLiteral("goggame")));
         if (!kind.isEmpty() && !match) continue;
         if (!system.isEmpty() && r.system != system) continue; // per-console scope
         MediaItem it;
@@ -188,6 +190,49 @@ MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString&
         it.mime = QStringLiteral("steamgame");
         it.url = SteamLibrary::installUrl(g.appid);              // activation -> steam://install/<appid>
         it.thumbnailUrl = posterFor(g);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
+MediaCatalog epicGamesCatalog(const QList<EpicGame>& installed, const QString& query,
+                              const std::function<QString(const EpicGame&)>& poster)
+{
+    const QString q = query.trimmed();
+    MediaCatalog cat;
+    cat.title = q.isEmpty() ? QObject::tr("Epic Games") : QObject::tr("Epic Games · %1").arg(q);
+    for (const EpicGame& g : installed)
+    {
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
+        MediaItem it;
+        it.id = QStringLiteral("epic:") + g.appName;
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.mime = QStringLiteral("epicgame"); // no url -> info page; Play launches via the launcher URI
+        if (poster) it.thumbnailUrl = poster(g); // Epic has no local capsule; empty -> scrapers fill it later
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
+MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& query,
+                             const std::function<QString(const GogGame&)>& poster)
+{
+    const QString q = query.trimmed();
+    MediaCatalog cat;
+    cat.title = q.isEmpty() ? QObject::tr("GOG") : QObject::tr("GOG · %1").arg(q);
+    for (const GogGame& g : installed)
+    {
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
+        MediaItem it;
+        it.id = QStringLiteral("gog:") + g.id;
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.mime = QStringLiteral("goggame"); // launched through the monitored launchPcExe path
+        it.url = g.exe;                       // the resolved exe rides the tile (MainWindow runs it)
+        if (poster) it.thumbnailUrl = poster(g);
         cat.items.push_back(it);
     }
     cat.hasMore = false;
