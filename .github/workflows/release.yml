@@ -320,6 +320,27 @@ jobs:
           modules: 'qtmultimedia'
           cache: true
 
+      # Qt Multimedia's FFmpeg *media plugin* DT_NEEDs Qt's OWN libav*/libsw* — a DIFFERENT FFmpeg build than
+      # the jdtech libmpv AAR's. Both sets share sonames, so only one of each can land in the APK's lib/<abi>/.
+      # In practice jdtech wins libavcodec/util/sw*/avdevice but Qt wins libavformat.so — and jdtech's
+      # libavdevice.so then can't bind avpriv_register_devices against Qt's libavformat, so the process dies
+      # with UnsatisfiedLinkError in QtLoader BEFORE main() (see d2-task-6 report). Fix: remove Qt's FFmpeg
+      # plugin + libs from the kit so androiddeployqt bundles ONLY jdtech's matched FFmpeg set (libmpv then
+      # binds a single coherent build). QtMultimedia stays fully functional via the Android (OpenSL ES / Media
+      # Codec) backend — QAudioSink emulator audio, QSoundEffect menu SFX and QMediaDevices need no FFmpeg; all
+      # app media decode goes through libmpv regardless. No QMediaPlayer/FFmpeg-decode path is used on Android.
+      - name: Drop Qt Multimedia's FFmpeg backend (SONAME clash with libmpv's FFmpeg)
+        run: |
+          set -e
+          KIT="$QT_ROOT_DIR"
+          echo "Pruning Qt FFmpeg backend from kit: $KIT"
+          echo "--- ffmpeg media plugin(s):"
+          find "$KIT" -name '*ffmpegmediaplugin*' -print -delete || true
+          echo "--- Qt-bundled libav*/libsw*:"
+          find "$KIT" \( -name 'libav*.so' -o -name 'libsw*.so' \) -print -delete || true
+          echo "--- remaining av/sw libs in kit (expect none):"
+          find "$KIT" \( -name 'libav*.so' -o -name 'libsw*.so' \) -print || echo "(none)"
+
       - name: Provide libmpv for Android
         env:
           # Prebuilt libmpv (+ its ffmpeg stack) from the Jellyfin/jdtech AAR on Maven Central, and matching
