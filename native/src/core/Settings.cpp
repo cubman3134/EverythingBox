@@ -110,6 +110,17 @@ void Settings::setNetplayRelay(const QString& hostPort)
     store().setValue(QStringLiteral("netplay/relay"), hostPort.trimmed()); store().sync();
 }
 
+QString Settings::externalPlayer() { return store().value(QStringLiteral("player/external"), QStringLiteral("builtin")).toString(); }
+void Settings::setExternalPlayer(const QString& id)
+{
+    store().setValue(QStringLiteral("player/external"), id.trimmed()); store().sync();
+}
+QString Settings::externalPlayerPath() { return store().value(QStringLiteral("player/externalPath")).toString(); }
+void Settings::setExternalPlayerPath(const QString& path)
+{
+    store().setValue(QStringLiteral("player/externalPath"), path); store().sync();
+}
+
 bool Settings::startFullscreen() { return store().value(QStringLiteral("general/startFullscreen"), false).toBool(); }
 void Settings::setStartFullscreen(bool on)
 {
