@@ -17,6 +17,7 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/SteamLibrary.h"
+#include "../core/ItemMarks.h"
 #include "CarouselView.h"
 #include "XmbView.h"
 #include <QHash>
@@ -93,6 +94,22 @@ static QSettings& settingsStore()
     static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
+}
+
+// The GLOBAL "show hidden items" override (Settings ▸ General): when on, hidden marks are ignored so hidden
+// items render everywhere they normally would. Off by default. Read live on every populate/render so a toggle
+// takes effect on the next refresh (no cached copy to go stale).
+static bool showHiddenItems()
+{
+    return settingsStore().value(QStringLiteral("library/showHidden"), false).toBool();
+}
+
+// A catalog item is dropped from the rows/search when it carries the per-profile `hidden` mark and the global
+// Show-hidden override is off. Synthetic rows (folders/headers, type starting '_' or "rechdr") have no marks
+// key and are never filtered — callers only pass real media items here.
+static bool isHiddenItem(const MediaItem& it)
+{
+    return !showHiddenItems() && ItemMarks::get(MetaCache::keyFor(it)).hidden;
 }
 
 // Resume progress (0..1) for a played media path/url, or -1 if none. Mirrors MainWindow's key scheme
@@ -1344,6 +1361,11 @@ QVariantList HomeView::browseItems()
         const MediaItem& it = items_[r];
         if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info"))
             continue;
+        // An item hidden AFTER this level was populated is still sitting in items_ (populate only filters on a
+        // fresh load). Skip it here too so a mid-session Hide vanishes from the themed model on the next rebuild
+        // (browseItemsChanged) with no re-fetch. Headers/synthetic rows carry no marks key and are unaffected.
+        if (it.type != QStringLiteral("rechdr") && !it.type.startsWith(QLatin1Char('_')) && isHiddenItem(it))
+            continue;
         browseRowMap_ << r;
         if (it.type == QStringLiteral("rechdr")) // a section divider ("★ Favorites", "Games", …) — non-selectable
         {
@@ -1715,8 +1737,9 @@ void HomeView::renderRecents()
     // leads with what was recently played and favourites are their own section at the bottom.
     auto renderFavorites = [&]() {
         const QVector<FavoriteItem> favs = FavoritesStore::list();
-        if (favs.isEmpty()) return;
-        addHeader(tr("★ Favorites"));
+        // Build the (hidden-filtered) favourite rows first so the header is skipped when every favourite is
+        // hidden (an empty "★ Favorites" divider would otherwise linger).
+        QVector<MediaItem> favItems;
         for (const FavoriteItem& f : favs)
         {
             MediaItem it;
@@ -1727,8 +1750,14 @@ void HomeView::renderRecents()
             it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl); // offline-first artwork
             it.expandable = f.expandable;
             it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
+            if (isHiddenItem(it)) continue;               // hidden mark hides it from the Favorites shelf too
+            favItems.push_back(it);
+        }
+        if (favItems.isEmpty()) return;
+        addHeader(tr("★ Favorites"));
+        for (const MediaItem& it : favItems)
+        {
             items_.push_back(it);
-
             auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title, grid_);
             w->setSizeHint(QSize(0, 52));
             w->setIcon(defaultIcon(it.type, iconSz));
@@ -1749,7 +1778,9 @@ void HomeView::renderRecents()
 
     for (const QString& key : order)
     {
-        addHeader(recentGroupLabel(key));
+        // Map the group's recents to MediaItems and drop the hidden ones first, so a group whose every item is
+        // hidden contributes no orphan header (same rule as the Favorites section below).
+        QVector<MediaItem> rows;
         for (const RecentItem& r : groups[key])
         {
             MediaItem it;
@@ -1761,6 +1792,13 @@ void HomeView::renderRecents()
             // (saved when the item was downloaded) wins so the shelf renders offline.
             it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
+            if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
+            rows.push_back(it);
+        }
+        if (rows.isEmpty()) continue;
+        addHeader(recentGroupLabel(key));
+        for (const MediaItem& it : rows)
+        {
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
@@ -3003,6 +3041,23 @@ void HomeView::favoriteThemedLeaf(int idx)
     emit themedMetaReady(idx, m);
 }
 
+// The per-profile marks key for the browse-item at `idx` — the SAME MetaCache::keyFor the hidden filter and
+// the detail hide/status/tags verbs use, so a hide here matches the filter that drops it from the rows.
+QString HomeView::themedLeafKey(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return QString();
+    return MetaCache::keyFor(items_[browseRowMap_[idx]]);
+}
+
+// Re-apply the hidden filter after Show-hidden / a profile switch flipped it. The Home list rebuilds in place
+// (renderRecents re-reads the stores and re-runs the filter); a catalogue level re-issues its request so the
+// filter runs in populate() as the fresh items land. browseItemsChanged re-syncs any themed browse mirror.
+void HomeView::reloadForFilterChange()
+{
+    if (recentView_) { renderRecents(); emit browseItemsChanged(false); return; }
+    if (!stack_.isEmpty()) loadTop();
+}
+
 // A non-expandable info-page leaf (movie/series/book/comic/…): the themed grid browse opens the themed detail
 // view for it (replacing the classic info page) instead of drilling. Games/tracks are direct-open, not this.
 bool HomeView::isThemedInfoLeaf(int idx) const
@@ -3127,6 +3182,27 @@ QVariantMap HomeView::themedDetailData(int idx)
     {
         if (ExternalPlayer::anyTarget()) verbs << QStringLiteral("external"); // one-off, any default
         if (ExternalPlayer::available()) verbs << QStringLiteral("builtin");  // alternative, default IS external
+    }
+    // Library-management verbs (hidden / completion status / tags) on any REAL media item — gated off the
+    // synthetic folder/marker rows (type starting '_'), which carry no marks key. These act on the item's marks
+    // (ItemMarks, per profile) via MainWindow's dispatch; `hidden`/`completion` below drive the pill labels.
+    // Hidden is personal, not parental — offered on restricted profiles too (per spec).
+    if (!it.type.startsWith(QLatin1Char('_')))
+    {
+        verbs << QStringLiteral("hide") << QStringLiteral("status") << QStringLiteral("tags");
+        const ItemMarks::Marks marks = ItemMarks::get(metaKey);
+        out.insert(QStringLiteral("hidden"), marks.hidden);
+        // Stable completion token the action row maps to a label (mirrors ItemMarks' own token strings).
+        QString comp = QStringLiteral("none");
+        switch (marks.completion)
+        {
+            case ItemMarks::Completion::InProgress: comp = QStringLiteral("inProgress"); break;
+            case ItemMarks::Completion::Finished:   comp = QStringLiteral("finished");   break;
+            case ItemMarks::Completion::Abandoned:  comp = QStringLiteral("abandoned");  break;
+            case ItemMarks::Completion::Planned:    comp = QStringLiteral("planned");    break;
+            case ItemMarks::Completion::None:       break;
+        }
+        out.insert(QStringLiteral("completion"), comp);
     }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
@@ -3789,7 +3865,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         from = items_.size();
     }
-    items_ += cat.items;
+    // Hidden-item filter: drop items the active profile has marked hidden (unless Show-hidden is on) BEFORE
+    // they enter items_, so they vanish from every surface this feeds — the poster grid/carousel/XMB here, the
+    // themed browse model (browseItems reads items_), AND search: both live in-catalog search and the cross-
+    // addon "search everything" ride populate() (SearchAggregator::resultsAppended -> populate). Synthetic
+    // folder/open rows were pushed above (not via cat.items) and are never marks-bearing, so they're untouched.
+    for (const MediaItem& it : cat.items)
+        if (!isHiddenItem(it)) items_.push_back(it);
 
     for (int i = from; i < items_.size(); ++i)
     {

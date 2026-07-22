@@ -16,9 +16,12 @@
 // empty/duplicate '/' separators — or a URL-shaped key — never alias to the same entry. The store owns key
 // sanitization; callers pass their natural keys. An empty key is a no-op on every writer and reads back {}.
 //
-// Cache: get() is the hot path — row/hidden filtering calls it once per catalog item. So a QHash<itemHash,
-// Marks> is built LAZILY for the ACTIVE profile on first read and reused; invalidate() drops it (call on
-// profile switch or any external ini change). ItemMarks' own writers invalidate for you.
+// Cache: get() is the hot path — row/hidden filtering calls it once per catalog item. A QHash<itemHash,
+// Marks> is built LAZILY for the ACTIVE profile on first read and reused, so a warm get() costs only a
+// ProfileStore::currentId() read + a cheap profile compare (the self-healing profile-switch check) + one MD5
+// of the caller key for the lookup — the blob parse and the "marks/<id>/items" group-string resolution happen
+// once per build, not per call. invalidate() drops it (call on profile switch or any external ini change).
+// ItemMarks' own writers invalidate for you.
 //
 // NOTE on shelves: the stored item keys are HASHED and MD5 is one-way, so a hash can NOT be reversed back to
 // an item. Shelf/row building therefore INTERSECTS the current catalog: for each candidate item the builder

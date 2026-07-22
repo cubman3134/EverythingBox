@@ -421,8 +421,14 @@ private:
     // the item it was opened for, and (grid browse) open it for an info-page leaf on Enter.
     void openThemedDetail(int browseIndex);
     bool openThemedDetailForInfoLeaf(int browseIndex); // true if it opened detail (a movie/book/… leaf), else drill
-    void runThemedDetailAction(const QString& verb);   // play/download/favorite/playlist on themedDetailIndex_
+    void runThemedDetailAction(const QString& verb);   // play/download/favorite/playlist/hide/status/tags
     int themedDetailIndex_ = -1;             // the browse index the themed detail view is currently showing
+    QString themedDetailKey_;                // the marks key (MetaCache::keyFor) of that item — hide/status/tags
+                                             // address ItemMarks through this, index-churn-proof
+    bool themedDetailMarksDirty_ = false;    // a Hide/Show change happened in this detail -> rebuild the browse
+                                             // model on pop so the row vanishes/returns (no re-fetch)
+    void themedDetailPickStatus();           // the completion-status picker (NavMenu) for themedDetailKey_
+    void themedDetailEditTags();             // the re-presenting tags picker/loop for themedDetailKey_
 
     // The themed AUDIO now-playing view (Task 5): in themed mode, audio opens (openAudioPath/openAudioStream/
     // audio queue) route HERE instead of the classic player page — mpv plays invisibly while this QML page is

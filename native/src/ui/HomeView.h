@@ -90,6 +90,14 @@ public:
     // divider/synthetic row (not a media item). This is what the themed detail view binds through selected.*.
     QVariantMap themedDetailData(int browseIndex);
     bool isThemedInfoLeaf(int browseIndex) const;  // a non-expandable info-page leaf (movie/book/…): opens detail
+    // The per-profile marks key (MetaCache::keyFor) for the browse-item at `browseIndex`, or empty for an out-
+    // of-range/synthetic row. MainWindow's detail hide/status/tags verbs address ItemMarks through this so they
+    // stay correct regardless of any row-index churn a hide causes.
+    QString themedLeafKey(int browseIndex) const;
+    // Re-apply the hidden filter to the live surface (the Show-hidden toggle / a profile switch changed it):
+    // the Home list rebuilds synchronously; a catalogue level re-issues its request so the filter runs as its
+    // items land. Cheapest existing refresh path — no bespoke re-filter of items_ in place.
+    void reloadForFilterChange();
 
     // For themed search: run the existing search machinery with `query` against the current level (scoped to
     // a console, else the base media-type catalog). Empty query restores the full list. Fires browseItemsChanged.

@@ -121,25 +121,36 @@ void writeStringArray(const QString& key, const QStringList& list)
 }
 
 // ---- Lazy per-profile cache -------------------------------------------------------------------------------
-// get() is called once per catalog item during hidden-filtering/shelf-building, so parse the whole profile's
-// items ONCE into a QHash<itemHash, Marks> and serve lookups from it. mCacheGroup records which profile the
-// cache is for so a profile switch rebuilds transparently; invalidate() forces a rebuild for external ini
-// changes. mAnyHidden is precomputed during the build so anyHidden() is O(1).
-QString mCacheGroup;          // the itemsGroup() the cache was built for; empty => not built
+// get() is the hot path — hidden-filtering/shelf-building calls it once per catalog item. Its true per-call
+// cost is a ProfileStore::currentId() read + a QString compare (the self-healing profile-switch check) + one
+// MD5 of the caller key for the QHash lookup. The expensive parts — resolving the "marks/<id>/items" group
+// string and parsing every stored blob — happen ONCE at (re)build time and are reused: mCacheItemsGroup is the
+// resolved group, mCacheProfileId records which profile the cache is for so a profile switch rebuilds
+// transparently, and mAnyHidden is precomputed so anyHidden() is O(1). invalidate() forces a rebuild for
+// external ini changes; ItemMarks' own writers invalidate for you.
+QString mCacheProfileId;      // profile id the cache was built for; empty => not built (compared cheaply per get())
+QString mCacheItemsGroup;     // resolved itemsGroup() for that profile — computed ONCE at build, not per get()
 bool    mCacheBuilt = false;
 QHash<QString, Marks> mCache; // itemHash -> Marks
 bool    mAnyHidden = false;
 
 void ensureCache()
 {
-    const QString grp = itemsGroup();
-    if (mCacheBuilt && mCacheGroup == grp) return;
+    // Cheap self-healing check: a single currentId() read + QString compare (NOT a full itemsGroup() rebuild
+    // with its "marks/" + "/items" concatenations) decides whether the cached profile is still current.
+    const QString id = ProfileStore::currentId();
+    if (mCacheBuilt && mCacheProfileId == id) return;
 
     mCache.clear();
     mAnyHidden = false;
+    mCacheProfileId = id;
+    // Resolve the group ONCE from the id we just read (mirrors profileGroup()/itemsGroup(); reusing `id` avoids
+    // a second currentId() read and guarantees the built group matches the id the cache is keyed on).
+    mCacheItemsGroup = QStringLiteral("marks/") + (id.isEmpty() ? QStringLiteral("default") : id)
+                       + QStringLiteral("/items");
 
     QSettings& s = store();
-    s.beginGroup(grp);
+    s.beginGroup(mCacheItemsGroup);
     const QStringList hashes = s.childKeys();
     for (const QString& h : hashes)
     {
@@ -150,7 +161,6 @@ void ensureCache()
     }
     s.endGroup();
 
-    mCacheGroup = grp;
     mCacheBuilt = true;
 }
 
@@ -290,7 +300,8 @@ bool ItemMarks::anyHidden()
 void ItemMarks::invalidate()
 {
     mCacheBuilt = false;
-    mCacheGroup.clear();
+    mCacheProfileId.clear();
+    mCacheItemsGroup.clear();
     mCache.clear();
     mAnyHidden = false;
 }
