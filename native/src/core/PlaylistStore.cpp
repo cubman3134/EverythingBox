@@ -122,6 +122,10 @@ bool PlaylistStore::migrateToCategories()
             changed = true;
         }
     if (changed) saveAll(all); // rewrite in v2 shape (categoryKey + preserved legacyKey; ids/items untouched)
+    // A failed write must NOT stamp the schema version: stamping a lost migration would mark this profile
+    // "done" while its playlists are still in v1 shape (and no later run would retry). Only stamp when the
+    // store is healthy — an errored save leaves the profile un-stamped so the next access migrates again.
+    if (store().status() != QSettings::NoError) return false;
     store().setValue(schemaKey(), kSchemaVersion);
     store().sync();
     return changed;

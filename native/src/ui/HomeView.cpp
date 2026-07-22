@@ -27,6 +27,7 @@
 #include <QPaintEvent>
 #include <QSet>
 #include <QListWidget>
+#include <QRandomGenerator>
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
@@ -1643,6 +1644,68 @@ void HomeView::createPlaylistInteractive(const QString& categoryKey)
     populatePlaylists(categoryKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
 }
 
+// A playlist row's action menu (the game-item-menu precedent): Open (default row, drills as before) / Play
+// random / Rename / Delete. An in-window NavMenu overlay — controller + keyboard + mouse, no separate window.
+void HomeView::showPlaylistMenu(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return; // deleted out from under us
+    const QStringList rows = {
+        tr("▶   Open"),
+        tr("🔀   Play random"),
+        tr("✎   Rename…"),
+        tr("🗑   Delete playlist"),
+    };
+    new NavMenu(p.name, rows, [this, playlistId](int row) {
+        switch (row)
+        {
+        case 0: openPlaylistLevel(playlistId); break;
+        case 1: playRandomFromPlaylist(playlistId); break;
+        case 2: renamePlaylistInteractive(playlistId); break;
+        case 3: deletePlaylistInteractive(playlistId); break;
+        }
+    }, window());
+}
+
+// Uniform-random pick over a playlist's entries, opened through the SAME per-entry path a row activation uses
+// (built via playlistItemsCatalog so the picked row is byte-identical to the one the grid would activate).
+void HomeView::playRandomFromPlaylist(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p) || p.items.isEmpty())
+    { showToast(tr("This playlist is empty."), kFeedbackShort); return; }
+    auto cat = browse::playlistItemsCatalog(p); // exactly the rows the playlist level shows
+    const int idx = int(QRandomGenerator::global()->bounded(cat.items.size()));
+    openResolvedItem(cat.items[idx], /*levelAddon=*/nullptr); // playlist level is addon-less: entries self-resolve
+}
+
+// Rename via the OSK, prefilled with the current name; PlaylistStore::rename persists it and we refresh the
+// list we're standing on. Empty / unchanged name is a no-op (covers a backed-out OSK too).
+void HomeView::renamePlaylistInteractive(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return;
+    const QString name = Osk::getText(tr("Rename playlist:"), p.name, QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty() || name == p.name) return;
+    PlaylistStore::rename(playlistId, name);
+    populatePlaylists(p.categoryKey); // we're on the playlists level -> re-render with the new name
+}
+
+// Delete behind a Cancel-focused confirm (the house shape for a destructive action: Back / default focus is
+// the safe Cancel). Only the playlist bookkeeping is removed — files on disk are never touched.
+void HomeView::deletePlaylistInteractive(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return;
+    const QString msg = tr("Delete “%1”? Its %n item(s) are removed from the playlist (files on disk are left in place).",
+                           "", int(p.items.size())).arg(p.name);
+    if (NavConfirm::ask(tr("Delete playlist"), msg, { tr("Delete"), tr("Cancel") },
+                        /*focusIndex=*/1, /*cancelIndex=*/1, window()) != 0)
+        return; // Cancel / Back
+    PlaylistStore::remove(playlistId);
+    populatePlaylists(p.categoryKey); // refresh the list we're standing on (the row disappears)
+}
+
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
@@ -2226,12 +2289,35 @@ void HomeView::activateItem(int row)
     if (it.type == QStringLiteral("_playlists"))
         { openPlaylistsLevel(it.mime.mid(QStringLiteral("playlists:").size())); return; }
     if (it.type == QStringLiteral("_playlist"))
-        { openPlaylistLevel(it.mime.mid(QStringLiteral("playlist:").size())); return; }
+    {
+        // A playlist row opens an action menu (Open / Play random / Rename / Delete) rather than drilling
+        // straight in — Open (the default row) drills exactly as before. Deferred a turn so the themed QML
+        // view doesn't build the overlay from inside its own `activated` handler (the game-menu pattern).
+        const QString pid = it.mime.mid(QStringLiteral("playlist:").size());
+        QMetaObject::invokeMethod(this, [this, pid] { showPlaylistMenu(pid); }, Qt::QueuedConnection);
+        return;
+    }
     if (it.type == QStringLiteral("_newplaylist"))
         { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
 
-    LoadedAddon* addon = stack_.last().addon;
-    if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // cross-addon search result
+    // A generic leaf/container: resolve + open through the shared per-entry path (also reused by Play-random
+    // over a playlist, so a random pick resolves identically to activating that item's row).
+    openResolvedItem(it, stack_.last().addon);
+}
+
+// Open a single item through the per-entry resolution path — the generic tail of activateItem, shared with
+// Play-random. Local-file entries re-open by path; a remote leaf resolves its /stream and plays; info-page
+// types (movies/episodes, comics/books) and stream-less/container items open a detail page instead.
+void HomeView::openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon)
+{
+    // A local game/file entry (Recent/Downloaded item added to a playlist) re-opens by path.
+    if (it.mime.startsWith(QStringLiteral("localgame:")))
+    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return; }
+    // A file is already associated (a local video/audio) -> the main window plays it directly.
+    if (!it.url.isEmpty()) { emit openItem(it); return; }
+
+    LoadedAddon* addon = levelAddon;
+    if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // per-entry / cross-addon
 
     // A remote leaf (a track, etc.) carries no url in the catalog - its source comes from the /stream
     // endpoint, fetched on open: resolve and open it directly. Movies/episodes (Play) and comics/manga/books

@@ -160,6 +160,35 @@ int main(int argc, char** argv)
         CHECK(p.items.size() == 1 && p.items[0].itemId == QStringLiteral("tmdb:movie:1275779"));
     }
 
+    // ---- 7. rename + remove: T2's menu is the first real caller of these store ops -------------------------
+    {
+        const QString id = PlaylistStore::create(QStringLiteral("video"), QStringLiteral("Throwaway"));
+        CHECK(!id.isEmpty());
+        // A mixed pair — an addon item + a local-file item — exactly what Play-random must resolve across.
+        PlaylistEntry addonE; addonE.addonId = QStringLiteral("com.x"); addonE.itemId = QStringLiteral("tmdb:movie:42");
+        addonE.type = QStringLiteral("movie"); addonE.title = QStringLiteral("A");
+        PlaylistEntry localE; localE.itemId = QStringLiteral("local:1"); localE.path = QStringLiteral("C:/v.mp4");
+        localE.kind = QStringLiteral("video"); localE.type = QStringLiteral("video"); localE.title = QStringLiteral("B");
+        PlaylistStore::addItem(id, addonE);
+        PlaylistStore::addItem(id, localE);
+
+        // rename persists the new name and disturbs nothing else (id / category / items intact).
+        PlaylistStore::rename(id, QStringLiteral("Renamed"));
+        Playlist p;
+        CHECK(PlaylistStore::get(id, p));
+        CHECK(p.name == QStringLiteral("Renamed"));
+        CHECK(p.categoryKey == QStringLiteral("video"));
+        CHECK(p.items.size() == 2);
+        CHECK(p.items[0].addonId == QStringLiteral("com.x") && p.items[0].path.isEmpty());        // addon entry
+        CHECK(p.items[1].path == QStringLiteral("C:/v.mp4") && p.items[1].addonId.isEmpty());      // local-file entry
+
+        // remove drops exactly this playlist; the bucket's other lists (Weekend Picks + Mystery) are untouched.
+        const int videoBefore = PlaylistStore::forCategory(QStringLiteral("video")).size();
+        PlaylistStore::remove(id);
+        CHECK(!PlaylistStore::get(id, p));                                            // gone
+        CHECK(PlaylistStore::forCategory(QStringLiteral("video")).size() == videoBefore - 1);
+    }
+
     if (failures == 0) { std::puts("PLAYLISTS-OK"); return 0; }
     std::fprintf(stderr, "PLAYLISTS: %d check(s) failed\n", failures);
     return 1;

@@ -217,6 +217,13 @@ private:
     void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
     void createPlaylistInteractive(const QString& categoryKey); // prompt for a name + create, refresh the list
     void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
+    // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
+    void showPlaylistMenu(const QString& playlistId);
+    void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
+    void renamePlaylistInteractive(const QString& playlistId); // OSK prefilled with the current name -> rename
+    void deletePlaylistInteractive(const QString& playlistId); // Cancel-focused confirm -> remove
+    // Open one item through the per-entry resolution path (shared by activateItem's tail + Play-random).
+    void openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon);
 
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
     // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.
