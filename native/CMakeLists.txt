@@ -151,6 +151,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
+        src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
@@ -259,6 +260,16 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SyncOffsets.cpp src/core/SyncOffsets.h)
     target_include_directories(probe_sync PRIVATE src src/core)
     target_link_libraries(probe_sync PRIVATE Qt6::Core)
+
+    # ItemMarks store: per-profile hidden/completion/tags + tag vocab + pinned shelves, the persistence
+    # foundation later library-management tasks (hidden filtering, detail actions, shelves) wire onto.
+    # QtCore-only (a QSettings wrapper over the shared mymediavault.ini) so the probe links lean and runs
+    # under offscreen QPA. Needs ProfileStore.cpp (marks are namespaced by the active profile id).
+    add_executable(probe_marks tools/probe_marks.cpp
+        src/core/ItemMarks.cpp src/core/ItemMarks.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_marks PRIVATE src src/core)
+    target_link_libraries(probe_marks PRIVATE Qt6::Core)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire

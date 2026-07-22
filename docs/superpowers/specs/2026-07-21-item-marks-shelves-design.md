@@ -10,6 +10,11 @@ Roadmap (user-set order): THIS (marks+completion+shelves) → category playlists
 
 - **Per-profile ownership** for ALL of it: favorites, hidden, tags, completion. Each
   profile has its own marks and its own tag vocabulary.
+- **Favorites stay in the existing per-profile `FavoritesStore`** (already verb-wired
+  into detail/home). The new `ItemMarks` store owns hidden / completion / tags only —
+  it does NOT duplicate a favorite bit. The "Favorites" shelf builds FROM
+  `FavoritesStore`; every other shelf (pinned tags, Hidden, status filters) builds
+  from `ItemMarks`. This keeps one source of truth per concern.
 
 ## Design
 
