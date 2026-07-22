@@ -548,6 +548,22 @@ if(MYMEDIAVAULT_BUILD_APP)
         if(SDL2_LIBRARY)
             set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")
         endif()
+        # OpenSSL runtime for TLS. Qt's OpenSSL *plugin* is bundled, but without a per-ABI libssl/libcrypto in
+        # the APK, Qt's on-device dlopen of the system libcrypto.so is namespace-denied by Android's linker and
+        # ALL HTTPS fails ("No TLS backend is available"). Bundle the prebuilt OpenSSL 3 .so's for this ABI
+        # (CI fetches github.com/KDAB/android_openssl and points OPENSSL_ANDROID_LIBS_DIR at ssl_3/<abi>) so
+        # Qt's TLS backend resolves them from the app's own lib dir. Globs the whole dir: both the plain and
+        # the version-suffixed sonames (libssl.so + libssl_3.so, libcrypto.so + libcrypto_3.so) ride along so
+        # whichever name Qt's backend dlopens — and the libssl->libcrypto soname dependency — is satisfied.
+        if(OPENSSL_ANDROID_LIBS_DIR)
+            file(GLOB _mmv_ssllibs "${OPENSSL_ANDROID_LIBS_DIR}/*.so")
+            if(_mmv_ssllibs)
+                set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_ssllibs})
+                message(STATUS "Bundling Android OpenSSL runtime: ${_mmv_ssllibs}")
+            else()
+                message(WARNING "OPENSSL_ANDROID_LIBS_DIR=${OPENSSL_ANDROID_LIBS_DIR} has no .so's — TLS will fail on device")
+            endif()
+        endif()
         message(STATUS "Configuring Android APK target (ABI: ${CMAKE_ANDROID_ARCH_ABI}). "
                        "Cores download to the app data dir at runtime; external emulators are disabled.")
     endif()

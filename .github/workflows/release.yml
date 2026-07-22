@@ -419,6 +419,25 @@ jobs:
           echo "MPV_LIBRARY=$(realpath mpv-android/libs/libmpv.so)" >> "$GITHUB_ENV"
           echo "MPV_INCLUDE_DIR=$(realpath mpv-android/include)" >> "$GITHUB_ENV"
 
+      # OpenSSL runtime for Android TLS. The APK bundles Qt's OpenSSL *plugin*
+      # (libplugins_tls_qopensslbackend) but NOT a per-ABI libssl/libcrypto, so on-device Qt's dlopen of the
+      # system /system/lib*/libcrypto.so is namespace-denied by Android's linker ("... is not accessible for
+      # the namespace") and every HTTPS request dies with "No TLS backend is available" — zero addon content,
+      # metadata, or downloads (verified on armv7 TV, but ALL THREE ABIs ship the same gap; this fetch is
+      # matrixed so arm64 + x86_64 are fixed by the same leg). Fix: bundle KDAB's prebuilt OpenSSL 3 .so's
+      # (ssl_3 matches Qt 6.8's OpenSSL 3) for THIS ABI into the APK's lib/<abi>/ via QT_ANDROID_EXTRA_LIBS
+      # (the same mechanism libmpv rides), so Qt's TLS backend loads them from the app's own linker namespace.
+      - name: Provide OpenSSL for Android (per-ABI libssl/libcrypto)
+        env:
+          JNI_ABI: ${{ matrix.jni_abi }}
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/KDAB/android_openssl.git android_openssl
+          SSL_DIR="android_openssl/ssl_3/${JNI_ABI}"
+          [ -d "$SSL_DIR" ] || { echo "No OpenSSL 3 prebuilts for ABI $JNI_ABI at $SSL_DIR"; ls android_openssl/ssl_3 || true; exit 1; }
+          echo "--- bundling OpenSSL for $JNI_ABI:"; ls -la "$SSL_DIR"
+          echo "OPENSSL_ANDROID_LIBS_DIR=$(realpath "$SSL_DIR")" >> "$GITHUB_ENV"
+
       - name: Configure (qt-cmake)
         run: |
           # A freshly aqt-extracted Android kit (no prior cache — e.g. the armv7 ABI) can land qt-cmake
@@ -431,7 +450,8 @@ jobs:
             -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
             -DMYMEDIAVAULT_BUILD_APP=ON \
             -DMPV_INCLUDE_DIR="$MPV_INCLUDE_DIR" \
-            -DMPV_LIBRARY="$MPV_LIBRARY"
+            -DMPV_LIBRARY="$MPV_LIBRARY" \
+            -DOPENSSL_ANDROID_LIBS_DIR="$OPENSSL_ANDROID_LIBS_DIR"
           # SDL2-for-Android (gamepad) is optional; omitted here, so the first APK builds without controller input.
 
       - name: Build APK
@@ -449,6 +469,10 @@ jobs:
           # Sanity: the staged assets and the qtdeclarative/mpv .so's must actually be inside the APK.
           echo "=== APK assets/mmv (expect themes2 + addons) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'assets/mmv' | head -20 || true
           echo "=== APK libs (expect libmpv + libQt6Quick) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libmpv|Qt6Quick|Qt6Qml)' | head -20 || true
+          echo "=== APK OpenSSL (expect libssl + libcrypto — TLS) ==="
+          if ! unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libssl|libcrypto)'; then
+            echo "FATAL: no libssl/libcrypto bundled — TLS would be dead on device (F2)"; exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
