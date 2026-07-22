@@ -34,6 +34,7 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
+#include "../core/ExternalPlayer.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/FavoritesStore.h"
@@ -1198,6 +1199,7 @@ void MainWindow::onApplicationStateChanged(Qt::ApplicationState state)
 // overlay/menu/keyboard, or the pause menu itself) is dismissed first.
 void MainWindow::goBack()
 {
+    playRouteOverride_ = PlayRoute::Default; // defensive: a one-off armed but backed out of can't leak
     if (NavOverlay* top = NavOverlay::topmost()) { top->dismiss(-1); return; } // close the thing on top
     if (subOverlay_ && subOverlay_->isVisible()) { hideSubtitleMenu(); return; }
     if (escMenuVisible()) { hideEscMenu(); return; }                            // pause menu -> resume
@@ -2217,11 +2219,51 @@ void MainWindow::openFile()
     openVideoPath(f);
 }
 
+// Decide whether a VIDEO play hands off to a configured external player (VLC/MPC/Custom) instead of the
+// built-in libmpv player. The single choke point every video entry point consults. Returns true iff the media
+// was handed off (caller records Recent and returns). A restricted (kids) profile ALWAYS stays built-in — the
+// external action is hidden and this refuses the handoff, so a restricted profile can't escape into another
+// app. A configured external whose launch fails (missing/broken exe) notifies once and returns false, so the
+// built-in player still gets the media. playRouteOverride_ (consumed here, one play only) lets a detail-view
+// one-off action force this play external / built-in regardless of the default.
+bool MainWindow::routePlay(const QString& urlOrPath, PlayRoute explicitRoute)
+{
+    const PlayRoute member = playRouteOverride_;
+    playRouteOverride_ = PlayRoute::Default;                // consume the member — affects exactly one play
+    // An explicit route (from MediaItem::playRouteHint on an async catalog leaf) wins; else the member (a
+    // synchronous local/recents one-off); else Default (honour the configured player).
+    const PlayRoute ov = (explicitRoute != PlayRoute::Default) ? explicitRoute : member;
+
+    if (ProfileStore::current().restricted) return false;  // restricted profiles never leave the app
+    if (ov == PlayRoute::ForceBuiltin)      return false;   // "Play with built-in player" one-off
+    const ExternalPlayer::Kind k = ExternalPlayer::configuredKind();
+    const bool forceExt = (ov == PlayRoute::ForceExternal);
+    const bool wantExternal = forceExt || (k != ExternalPlayer::Kind::Builtin);
+    if (!wantExternal) return false;                        // default is built-in and no override -> libmpv
+#ifndef Q_OS_ANDROID
+    if (!forceExt && k == ExternalPlayer::Kind::AndroidIntent) return false; // no intent target on desktop
+#endif
+    // A one-off forces a CONCRETE target even when the default is Built-in (configuredPath() would be empty):
+    // resolveForceTarget() picks the configured kind, else a Custom path, else the first detected player.
+    const bool ok = forceExt
+        ? ExternalPlayer::launchExe(urlOrPath, ExternalPlayer::resolveForceTarget())
+        : ExternalPlayer::launch(urlOrPath);
+    if (ok) return true;                                   // handed off to the external app
+    notify(tr("No app can play this."));                   // the external target couldn't take it
+    return false;                                          // fall through to the built-in player
+}
+
 void MainWindow::openVideoPath(const QString& path)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
     if (StreamResolver::isM3uRef(path)) { streams_->resolve(path, QFileInfo(path).completeBaseName()); return; } // playlist, not a plain file
     if (splitTarget_) { splitTarget_->openVideo(path, QFileInfo(path).completeBaseName()); finishSplitOpen(); return; }
+    // External-player handoff: a configured external player takes the file (Recent still recorded on both routes).
+    if (routePlay(path)) {
+        PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
+        RecentStore::add({ path, QFileInfo(path).completeBaseName(), QStringLiteral("video"), QString() });
+        return;
+    }
     subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     themedAudioSession_ = false;       // openVideoPath is VIDEO — keep the classic player page
@@ -2708,6 +2750,17 @@ void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, con
 void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
+    // External-player handoff: hand the link straight to the configured external player (Recent on both routes).
+    if (routePlay(url)) {
+        PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
+        const QUrl u(url);
+        QString t = title;
+        if (t.isEmpty()) t = u.fileName();
+        if (t.isEmpty()) t = u.host();
+        if (t.isEmpty()) t = url;
+        RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
+        return;
+    }
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     themedAudioSession_ = false;       // playStream is VIDEO — keep the classic player page
     stopScrobble();                    // leaving whatever was playing
@@ -3287,6 +3340,7 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
 
 void MainWindow::openHome()
 {
+    playRouteOverride_ = PlayRoute::Default; // defensive: a one-off armed but abandoned can't leak past home
     // Leaving whatever was open: stop playback/emulation, save reader positions.
     hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
     stopScrobble();     // Trakt: close out the current watch
@@ -3581,6 +3635,15 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     if (verb == QStringLiteral("play"))          home_->playThemedLeaf(idx);
     else if (verb == QStringLiteral("download")) home_->downloadThemedLeaf(idx);
     else if (verb == QStringLiteral("playlist")) home_->addBrowseItemToPlaylist(idx);
+    // One-off external/built-in override for THIS play. Two leak-free channels (see routePlay): the member
+    // carries a SYNCHRONOUS local/recents leaf (consumed inside playThemedLeaf, then cleared right after so it
+    // can't survive to a later play); the hint rides an ASYNC catalog leaf on the resolved MediaItem.
+    else if (verb == QStringLiteral("external") || verb == QStringLiteral("builtin")) {
+        const PlayRoute r = (verb == QStringLiteral("external")) ? PlayRoute::ForceExternal : PlayRoute::ForceBuiltin;
+        playRouteOverride_ = r;                       // synchronous local/recents path reads this in routePlay
+        home_->playThemedLeaf(idx, hintFromRoute(r)); // async catalog path stamps the hint on its item instead
+        playRouteOverride_ = PlayRoute::Default;      // already consumed if synchronous; cleared so async can't leak
+    }
     else if (verb == QStringLiteral("favorite"))
     {
         home_->favoriteThemedLeaf(idx);
@@ -5904,10 +5967,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     }
     else // "video", "link", or anything else playable -> libmpv (handles files and http/streams)
     {
-        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         // Resume + Recent are keyed by the item's stable id when it has one (a debrid/stream URL changes every
         // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
         const QString rkey = item.id.isEmpty() ? url : item.id;
+        // External-player handoff: an external player takes the resolved URL (Recent on both routes). A one-off
+        // armed on this leaf rode here as item.playRouteHint (leak-free — a failed resolve never reaches here).
+        if (routePlay(url, routeFromHint(item.playRouteHint))) {
+            const QString rt = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
+            RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
+            return;
+        }
+        retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         session_->beginResume(rkey);
         syncKey_ = rkey;         // catalog stream: key sync offsets by the stable id, not the volatile URL
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
@@ -6913,6 +6983,37 @@ void MainWindow::openGeneralSettings()
         for (int p = 0; p <= 100; p += 10) volOpts << QStringLiteral("%1%").arg(p);
         const QString curVolDisp = QStringLiteral("%1%").arg(int(qRound(Settings::bgmVolume() / 10.0) * 10));
 
+        // External-player choice: Built-in + each detected desktop player (VLC/MPC) + Custom. (Android build:
+        // Built-in + "Ask another app…".) The Choice delivers the display string; this pair list maps it back
+        // to the stored key so nothing but builtin/vlc/mpc/custom is ever written on desktop — the "android"
+        // key never appears in a desktop options list, so a desktop ini can't acquire it here.
+        QList<QPair<QString, QString>> playerOptPairs;
+        playerOptPairs << qMakePair(tr("Built-in player"), QStringLiteral("builtin"));
+#ifdef Q_OS_ANDROID
+        playerOptPairs << qMakePair(tr("Ask another app…"), QStringLiteral("android"));
+#else
+        for (const ExternalPlayer::Detected& d : ExternalPlayer::detect())
+        {
+            if      (d.kind == ExternalPlayer::Kind::Vlc) playerOptPairs << qMakePair(d.display, QStringLiteral("vlc"));
+            else if (d.kind == ExternalPlayer::Kind::Mpc) playerOptPairs << qMakePair(d.display, QStringLiteral("mpc"));
+        }
+        playerOptPairs << qMakePair(tr("Custom…"), QStringLiteral("custom"));
+#endif
+        const QString curPlayerKey = Settings::externalPlayer();
+        QString curPlayerDisp;
+        for (const auto& p : playerOptPairs) if (p.second == curPlayerKey) { curPlayerDisp = p.first; break; }
+        // A configured kind whose player isn't currently detected (e.g. VLC uninstalled) — keep it shown so the
+        // setting is visible and changeable rather than silently snapping to Built-in.
+        if (curPlayerDisp.isEmpty())
+        {
+            if (curPlayerKey == QStringLiteral("vlc"))      curPlayerDisp = tr("VLC media player");
+            else if (curPlayerKey == QStringLiteral("mpc")) curPlayerDisp = tr("MPC-HC");
+            if (!curPlayerDisp.isEmpty()) playerOptPairs << qMakePair(curPlayerDisp, curPlayerKey);
+            else curPlayerDisp = playerOptPairs.first().first; // builtin/unknown -> Built-in
+        }
+        QStringList playerOpts;
+        for (const auto& p : playerOptPairs) playerOpts << p.first;
+
         QVector<PanelRow> rows;
         auto sep    = [&rows](const QString& t) { PanelRow r; r.kind = PanelRow::Separator; r.label = t; rows << r; };
         auto info   = [&rows](const QString& id, const QString& label, const QString& value) {
@@ -6947,6 +7048,15 @@ void MainWindow::openGeneralSettings()
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        // Videos play in the built-in player by default, or hand off to an installed/custom external player.
+        // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
+        if (!ProfileStore::current().restricted)
+        {
+            choice(QStringLiteral("player.external"), tr("Play videos with"), playerOpts, curPlayerDisp);
+            action(QStringLiteral("player.custompath"), Settings::externalPlayerPath().isEmpty()
+                       ? tr("Choose custom player program…")
+                       : tr("Custom player: %1").arg(QFileInfo(Settings::externalPlayerPath()).fileName()));
+        }
         toggle(QStringLiteral("pb.bezel"), tr("Show bezel / border art around games"), Settings::bezelEnabled());
         action(QStringLiteral("pb.bezelopen"), tr("Open bezels folder"));
         // --- Subtitles ---
@@ -6999,7 +7109,7 @@ void MainWindow::openGeneralSettings()
             themedPanelHost_->updateRow(id, r); };
 
         themedPanelHost_->present(tr("General"), rows,
-            [this, langOptPairs, setInfo, setAction](const QString& id, const QString& val) {
+            [this, langOptPairs, playerOptPairs, setInfo, setAction](const QString& id, const QString& val) {
                 const bool on = (val == QStringLiteral("1"));   // Toggle rows deliver "1"/"0"
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
@@ -7049,6 +7159,36 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("player.external")) {
+                    QString key = val;                              // map the picked display back to the stored key
+                    for (const auto& p : playerOptPairs) if (p.first == val) { key = p.second; break; }
+                    Settings::setExternalPlayer(key);
+                    // Choosing "Custom…" with no path yet: prompt for the program path right away (the on-screen
+                    // keyboard, same nesting as the parental PIN) so the setting isn't left pointing nowhere.
+                    if (key == QStringLiteral("custom") && Settings::externalPlayerPath().isEmpty()) {
+                        const QString picked = Osk::getText(tr("Path to the player program:"), QString(),
+                                                            QLineEdit::Normal, this, themedPanelHost_->navGraph());
+                        if (!picked.isNull() && !picked.trimmed().isEmpty()) {
+                            Settings::setExternalPlayerPath(picked.trimmed());
+                            setAction(QStringLiteral("player.custompath"),
+                                      tr("Custom player: %1").arg(QFileInfo(picked.trimmed()).fileName()));
+                        }
+                    }
+                }
+                else if (id == QStringLiteral("player.custompath")) {
+                    const QString exe = QFileDialog::getOpenFileName(this, tr("Choose a media player program"),
+                        QString(),
+#ifdef Q_OS_WIN
+                        tr("Programs (*.exe);;All files (*.*)"));
+#else
+                        tr("All files (*.*)"));
+#endif
+                    if (exe.isEmpty()) return;
+                    Settings::setExternalPlayerPath(exe);
+                    Settings::setExternalPlayer(QStringLiteral("custom")); // picking an exe implies Custom mode
+                    setAction(QStringLiteral("player.custompath"),
+                              tr("Custom player: %1").arg(QFileInfo(exe).fileName()));
+                }
                 else if (id == QStringLiteral("pb.bezel")) Settings::setBezelEnabled(on);
                 else if (id == QStringLiteral("pb.bezelopen")) {
                     const QString d = AppPaths::dataDir() + QStringLiteral("/bezels");
@@ -7263,6 +7403,60 @@ void MainWindow::openGeneralSettings()
         autoNext->setChecked(Settings::autoplayNextEpisode());
         connect(autoNext, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoplayNextEpisode(c); });
         v->addWidget(autoNext);
+
+        // Play videos with: the built-in player, a detected desktop player (VLC/MPC), or a custom program.
+        // Same Settings keys/setters as the themed panel — one write path, no drift. Hidden entirely for a
+        // restricted (kids) profile (no external escape hatch), matching the themed panel.
+        if (!ProfileStore::current().restricted)
+        {
+            auto* plRow = new QHBoxLayout();
+            auto* plLbl = new QLabel(tr("Play videos with"));
+            plLbl->setStyleSheet(QStringLiteral("font-size:15px;"));
+            auto* player = new QComboBox();
+            player->addItem(tr("Built-in player"), QStringLiteral("builtin"));
+#ifdef Q_OS_ANDROID
+            player->addItem(tr("Ask another app…"), QStringLiteral("android"));
+#else
+            for (const ExternalPlayer::Detected& d : ExternalPlayer::detect())
+            {
+                if      (d.kind == ExternalPlayer::Kind::Vlc) player->addItem(d.display, QStringLiteral("vlc"));
+                else if (d.kind == ExternalPlayer::Kind::Mpc) player->addItem(d.display, QStringLiteral("mpc"));
+            }
+            player->addItem(tr("Custom…"), QStringLiteral("custom"));
+#endif
+            const QString curKey = Settings::externalPlayer();
+            int sel = player->findData(curKey);
+            if (sel < 0) { // a configured-but-undetected player: keep it visible
+                const QString disp = curKey == QStringLiteral("vlc") ? tr("VLC media player")
+                                   : curKey == QStringLiteral("mpc") ? tr("MPC-HC") : QString();
+                if (!disp.isEmpty()) { player->addItem(disp, curKey); sel = player->count() - 1; } else sel = 0;
+            }
+            player->setCurrentIndex(qMax(0, sel));
+            auto* plCustom = new QPushButton(tr("Choose custom program…"));
+            plRow->addWidget(plLbl); plRow->addWidget(player); plRow->addWidget(plCustom); plRow->addStretch(1);
+            v->addLayout(plRow);
+            auto* plPath = new QLabel(Settings::externalPlayerPath().isEmpty()
+                ? QString() : tr("Custom player: %1").arg(Settings::externalPlayerPath()));
+            plPath->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+            v->addWidget(plPath);
+            connect(player, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+                    [player](int) { Settings::setExternalPlayer(player->currentData().toString()); });
+            connect(plCustom, &QPushButton::clicked, this, [this, player, plPath] {
+                const QString exe = QFileDialog::getOpenFileName(this, tr("Choose a media player program"),
+                    QString(),
+#ifdef Q_OS_WIN
+                    tr("Programs (*.exe);;All files (*.*)"));
+#else
+                    tr("All files (*.*)"));
+#endif
+                if (exe.isEmpty()) return;
+                Settings::setExternalPlayerPath(exe);
+                Settings::setExternalPlayer(QStringLiteral("custom"));
+                const int ci = player->findData(QStringLiteral("custom"));
+                if (ci >= 0) player->setCurrentIndex(ci);
+                plPath->setText(tr("Custom player: %1").arg(exe));
+            });
+        }
 
         auto* bezel = new QCheckBox(tr("Show bezel / border art around games"));
         bezel->setStyleSheet(QStringLiteral("font-size:15px;"));

@@ -13,27 +13,43 @@
 
 namespace {
 
-// One known desktop player: where its exe sits under a Program-Files-style root, plus the registry vendor
-// key/value that (on the real Windows system) records its install directory. The fs candidate is checked
-// first; the registry is a fallback for non-default install locations.
+// One registry fallback lookup for a candidate: the hive + subkey path (real hive, or the group used in a
+// fake-registry ini) and the value name. `appendExe` is the exe filename to append when the value holds an
+// install *directory* (VLC's InstallDir); leave it empty when the value already *is* the full exe path
+// (MPC-HC's ExePath). Different players record their install differently — and under different hives.
+struct RegLookup {
+    QString hive;       // "HKEY_LOCAL_MACHINE" / "HKEY_CURRENT_USER" for the real hive (ignored for a fake ini)
+    QString subKey;     // slash-separated key path, e.g. "SOFTWARE/VideoLAN/VLC" (also the fake-ini group)
+    QString value;      // value name under subKey
+    QString appendExe;  // exe to append to a directory value; "" => the value is already a full exe path
+};
+
+// One known desktop player: where its exe sits under a Program-Files-style root, plus an ordered list of
+// registry fallbacks (real hive or the injected fake) that record its install for a non-default location.
+// The fs candidate is checked first; the registry lookups are tried in order only if the fs check misses.
 struct Candidate {
     ExternalPlayer::Kind kind;
     QString display;
-    QString relExe;     // path of the exe relative to a Program Files root, e.g. "VideoLAN/VLC/vlc.exe"
-    QString regKey;     // HKLM\SOFTWARE\<regKey> group (also the group used in a fake-registry ini)
-    QString regValue;   // value under regKey holding the install directory
-    QString regExe;     // exe filename to append to the registry install dir
+    QString relExe;             // path of the exe relative to a Program Files root, e.g. "VideoLAN/VLC/vlc.exe"
+    QVector<RegLookup> regs;    // registry fallbacks, tried in order
 };
 
 QVector<Candidate> candidates()
 {
     return {
+        // VLC records InstallDir under HKLM; a 32-bit VLC on 64-bit Windows lands under WOW6432Node.
         { ExternalPlayer::Kind::Vlc, QStringLiteral("VLC media player"),
-          QStringLiteral("VideoLAN/VLC/vlc.exe"), QStringLiteral("VideoLAN/VLC"),
-          QStringLiteral("InstallDir"), QStringLiteral("vlc.exe") },
+          QStringLiteral("VideoLAN/VLC/vlc.exe"),
+          { { QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("SOFTWARE/VideoLAN/VLC"),
+              QStringLiteral("InstallDir"), QStringLiteral("vlc.exe") },
+            { QStringLiteral("HKEY_LOCAL_MACHINE"), QStringLiteral("SOFTWARE/WOW6432Node/VideoLAN/VLC"),
+              QStringLiteral("InstallDir"), QStringLiteral("vlc.exe") } } },
+        // MPC-HC writes its own full exe path to ExePath under HKCU (NOT HKLM) — the value is the exe itself,
+        // so nothing is appended.
         { ExternalPlayer::Kind::Mpc, QStringLiteral("MPC-HC"),
-          QStringLiteral("MPC-HC/mpc-hc64.exe"), QStringLiteral("MPC-HC"),
-          QStringLiteral("ExePath"), QStringLiteral("mpc-hc64.exe") },
+          QStringLiteral("MPC-HC/mpc-hc64.exe"),
+          { { QStringLiteral("HKEY_CURRENT_USER"), QStringLiteral("Software/MPC-HC/MPC-HC"),
+              QStringLiteral("ExePath"), QString() } } },
     };
 }
 
@@ -51,21 +67,27 @@ QStringList realFsRoots()
     return roots;
 }
 
-// Read a candidate's install dir from the registry. A non-empty regProbeRoot makes this read a fake registry
-// (an INI file) instead of the live hive — so tests (and CI) never touch HKLM. Returns "" when unavailable.
-QString registryInstallDir(const QString& regProbeRoot, const Candidate& c)
+// Resolve one registry lookup to a candidate exe path. A non-empty regProbeRoot makes this read a fake
+// registry (an INI file, keyed by the lookup's subKey/value) instead of the live hive — so tests (and CI)
+// never touch the real registry. The hive (HKLM vs HKCU) is honoured only for the real read. Returns "" when
+// the value is absent; otherwise the value itself (ExePath-style) or value+"/"+appendExe (InstallDir-style).
+QString registryExe(const QString& regProbeRoot, const RegLookup& r)
 {
+    QString raw;
     if (!regProbeRoot.isEmpty()) {
         QSettings ini(regProbeRoot, QSettings::IniFormat);
-        return ini.value(c.regKey + QLatin1Char('/') + c.regValue).toString();
-    }
+        raw = ini.value(r.subKey + QLatin1Char('/') + r.value).toString();
+    } else {
 #ifdef Q_OS_WIN
-    QSettings reg(QStringLiteral("HKEY_LOCAL_MACHINE\\SOFTWARE\\") + QString(c.regKey).replace(QLatin1Char('/'), QLatin1Char('\\')),
-                  QSettings::NativeFormat);
-    return reg.value(c.regValue).toString();
+        QSettings reg(r.hive + QLatin1Char('\\') + QString(r.subKey).replace(QLatin1Char('/'), QLatin1Char('\\')),
+                      QSettings::NativeFormat);
+        raw = reg.value(r.value).toString();
 #else
-    return QString();
+        return QString();
 #endif
+    }
+    if (raw.isEmpty()) return QString();
+    return r.appendExe.isEmpty() ? raw : (raw + QLatin1Char('/') + r.appendExe);
 }
 
 } // namespace
@@ -93,12 +115,15 @@ QVector<ExternalPlayer::Detected> ExternalPlayer::detect(const QString& fsProbeR
             if (fi.exists() && fi.isFile()) { hit = fi.absoluteFilePath(); break; }
         }
 
-        // Registry fallback for a non-default install location (real hive, or the injected fake).
+        // Registry fallback for a non-default install location (real hive, or the injected fake). Each
+        // candidate carries an ordered list of lookups (e.g. VLC's HKLM + WOW6432Node); the first that
+        // resolves to an existing exe wins.
         if (hit.isEmpty()) {
-            const QString dir = registryInstallDir(regProbeRoot, c);
-            if (!dir.isEmpty()) {
-                const QFileInfo fi(dir + QLatin1Char('/') + c.regExe);
-                if (fi.exists() && fi.isFile()) hit = fi.absoluteFilePath();
+            for (const RegLookup& r : c.regs) {
+                const QString cand = registryExe(regProbeRoot, r);
+                if (cand.isEmpty()) continue;
+                const QFileInfo fi(cand);
+                if (fi.exists() && fi.isFile()) { hit = fi.absoluteFilePath(); break; }
             }
         }
 
@@ -152,6 +177,43 @@ bool ExternalPlayer::available()
 #endif
 }
 
+bool ExternalPlayer::anyTarget(const QString& fsProbeRoot, const QString& regProbeRoot)
+{
+#ifdef Q_OS_ANDROID
+    Q_UNUSED(fsProbeRoot);
+    Q_UNUSED(regProbeRoot);
+    return true; // the ACTION_VIEW intent is always a possible handoff target
+#else
+    if (!Settings::externalPlayerPath().isEmpty()) return true;     // a Custom exe is configured
+    return !detect(fsProbeRoot, regProbeRoot).isEmpty();            // or a player is installed/detected
+#endif
+}
+
+QString ExternalPlayer::resolveForceTarget(const QString& fsProbeRoot, const QString& regProbeRoot)
+{
+#ifdef Q_OS_ANDROID
+    Q_UNUSED(fsProbeRoot);
+    Q_UNUSED(regProbeRoot);
+    return QString();   // no exe on Android; launchExe() falls back to the intent handoff
+#else
+    const QVector<Detected> found = detect(fsProbeRoot, regProbeRoot);
+    const Kind k = configuredKind();
+    // 1. The configured external kind, if it resolves.
+    if (k == Kind::Custom) {
+        const QString custom = Settings::externalPlayerPath();
+        if (!custom.isEmpty()) return custom;
+    } else if (k == Kind::Vlc || k == Kind::Mpc) {
+        for (const Detected& d : found) if (d.kind == k) return d.path;
+    }
+    // 2. A Custom path if one is set (regardless of the configured kind).
+    const QString custom = Settings::externalPlayerPath();
+    if (!custom.isEmpty()) return custom;
+    // 3. Otherwise the first detected desktop player.
+    if (!found.isEmpty()) return found.first().path;
+    return QString();
+#endif
+}
+
 bool ExternalPlayer::launch(const QString& urlOrPath)
 {
 #ifdef Q_OS_ANDROID
@@ -189,7 +251,16 @@ bool ExternalPlayer::launch(const QString& urlOrPath)
     context.callMethod<void>("startActivity", "(Landroid/content/Intent;)V", intent.object());
     return true;
 #else
-    const QString exe = configuredPath();
+    return launchExe(urlOrPath, configuredPath());
+#endif
+}
+
+bool ExternalPlayer::launchExe(const QString& urlOrPath, const QString& exe)
+{
+#ifdef Q_OS_ANDROID
+    Q_UNUSED(exe);
+    return launch(urlOrPath); // Android has no exe target; the ACTION_VIEW intent is the handoff
+#else
     if (exe.isEmpty()) return false;
     return QProcess::startDetached(exe, QStringList{ urlOrPath });
 #endif

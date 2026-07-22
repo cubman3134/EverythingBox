@@ -1,7 +1,9 @@
 // ActionRow element: the themed detail view's row of media actions — Play / Download / Favorite / Add-to-
-// playlist — as the `detailActions` contract zone. The available verbs are supplied by the host on the
-// selected detail item (ctx.selected.actions, a list of "play"/"download"/"favorite"/"playlist" filtered
-// per-item, mirroring the classic detail page's playBtn_/downloadBtn_/favBtn_ visibility rules). Keyboard /
+// playlist, plus the external-player one-offs (Open in external player / Play with built-in player) on video
+// leaves — as the `detailActions` contract zone. The available verbs are supplied by the host on the selected
+// detail item (ctx.selected.actions, a list of "play"/"download"/"favorite"/"playlist"/"external"/"builtin"
+// filtered per-item, mirroring the classic detail page's playBtn_/downloadBtn_/favBtn_ visibility rules plus
+// ExternalPlayer::available()+restricted gating for the external pair). Keyboard /
 // controller focus is driven by the NavGraph: the host writes host.detailZone ("actions" when this row holds
 // the cursor) and host.detailActionIndex (which button). Activating a button — by click or by the detail
 // key handler's Enter — emits host.detailActionRequested(verb), which the host routes to the same
@@ -33,6 +35,8 @@ Item {
         if (verb === "favorite") return { label: (favorited ? "★  Favorited" : "☆  Favorite"),
                                           color: (favorited ? "#E0A92E" : "#FFF1CC"), textColor: (favorited ? "#3A2A00" : "#7A4E00") }
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }
+        if (verb === "external") return { label: "🔗  Open in external player",         color: "#7C5CFF", textColor: "#FFFFFF" }
+        if (verb === "builtin")  return { label: "🖥  Play with built-in player",       color: "#E7EBF2", textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 

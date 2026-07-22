@@ -141,6 +141,26 @@ private:
     QString emInstallId_;
 
     static QString fmt(double seconds);
+    // External-player handoff decision for a VIDEO play. Called at the top of each video entry point
+    // (openVideoPath / playStream / openLibraryItem's video branch). Returns true when the media was handed
+    // off to an external player (the caller then only records Recent and returns); false to fall through to the
+    // built-in libmpv player. An external launch that fails notifies + returns false (built-in fallback).
+    // Restricted profiles never leave the app.
+    //
+    // The route is resolved from `explicitRoute` if given, else the consume-once member `playRouteOverride_`.
+    // TWO leak-free channels feed a detail-view one-off: (1) SYNCHRONOUS local/recents leaves go through the
+    // member — armed just before playThemedLeaf and cleared right after it returns, so it lives only for the
+    // synchronous call and can't survive to a later play; (2) ASYNC catalog leaves ride MediaItem::playRouteHint
+    // through the resolve chain and arrive as `explicitRoute` — a failed/abandoned resolve never emits the item,
+    // so nothing leaks. openHome()/goBack() also clear the member defensively.
+    enum class PlayRoute { Default, ForceBuiltin, ForceExternal };
+    static PlayRoute routeFromHint(int hint) {           // MediaItem::playRouteHint (0/1/2) -> PlayRoute
+        return hint == 2 ? PlayRoute::ForceExternal : hint == 1 ? PlayRoute::ForceBuiltin : PlayRoute::Default; }
+    static int hintFromRoute(PlayRoute r) {               // PlayRoute -> hint for playThemedLeaf/MediaItem
+        return r == PlayRoute::ForceExternal ? 2 : r == PlayRoute::ForceBuiltin ? 1 : 0; }
+    PlayRoute playRouteOverride_ = PlayRoute::Default;
+    bool routePlay(const QString& urlOrPath, PlayRoute explicitRoute = PlayRoute::Default);
+
     // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
     // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
     void openVideoPath(const QString& path);

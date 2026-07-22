@@ -97,6 +97,35 @@ int main(int argc, char** argv)
         CHECK(found.isEmpty());
     }
 
+    // 2b. Registry fallback (fs misses, the fake registry hits). This pins the carried hive fixes:
+    //   * VLC's 32-bit WOW6432Node fallback — the InstallDir value is a *directory*; the exe is appended;
+    //   * MPC-HC's HKCU\Software\MPC-HC\MPC-HC -> ExePath — the value is the *full exe path*, appended to
+    //     nothing. (The old code read HKLM and appended mpc-hc64.exe, so this coverage would fail against it.)
+    // The exes live OUTSIDE any scanned fs root (a separate dir), so only the registry path can find them.
+    {
+        const QString regFallbackDir = tmp.path() + QStringLiteral("/reginstall");
+        const QString vlcRegExe = touchExe(regFallbackDir, QStringLiteral("VLC/vlc.exe"));       // dir + appended exe
+        const QString mpcRegExe = touchExe(regFallbackDir, QStringLiteral("mpchc/mpc-hc64.exe")); // full ExePath value
+        const QString regFake = tmp.path() + QStringLiteral("/fakereg2.ini");
+        {
+            QSettings ini(regFake, QSettings::IniFormat);
+            // VLC via the WOW6432Node subkey: InstallDir is the *directory* holding vlc.exe.
+            ini.setValue(QStringLiteral("SOFTWARE/WOW6432Node/VideoLAN/VLC/InstallDir"),
+                         QFileInfo(vlcRegExe).absolutePath());
+            // MPC-HC via HKCU: ExePath is the *full exe path* (matching the real MPC-HC registry layout).
+            ini.setValue(QStringLiteral("Software/MPC-HC/MPC-HC/ExePath"), mpcRegExe);
+            ini.sync();
+        }
+        // fs root is empty -> the exes can only be found through the registry fallback.
+        const auto found = ExternalPlayer::detect(emptyRoot, regFake);
+        const auto* vlc = find(found, Kind::Vlc);
+        const auto* mpc = find(found, Kind::Mpc);
+        CHECK(vlc != nullptr);
+        CHECK(mpc != nullptr);
+        if (vlc) CHECK(QFileInfo(vlc->path) == QFileInfo(vlcRegExe));
+        if (mpc) CHECK(QFileInfo(mpc->path) == QFileInfo(mpcRegExe));
+    }
+
     // 3. Settings round-trip + configuredKind() string->Kind mapping (unknown/empty => Builtin).
     Settings::setExternalPlayer(QStringLiteral("vlc"));
     CHECK(Settings::externalPlayer() == QStringLiteral("vlc"));
@@ -126,6 +155,32 @@ int main(int argc, char** argv)
     CHECK(ExternalPlayer::available());
     Settings::setExternalPlayer(QStringLiteral("builtin"));
     CHECK(!ExternalPlayer::available());
+
+    // 5. One-off targets (Task 2 review): anyTarget()/resolveForceTarget() must work regardless of the default
+    //    so "Open in external player" is reachable even when the default is Built-in (the Stremio hand-off).
+    //    Probe roots injected so these consult the fake fs/registry, never the host. fsRoot holds vlc.exe +
+    //    mpc-hc64.exe; emptyRoot holds nothing.
+    {
+        Settings::setExternalPlayer(QStringLiteral("builtin")); // DEFAULT is built-in for every case below
+
+        // (a) builtin default + a Custom path set -> a target exists and resolves to that custom path.
+        Settings::setExternalPlayerPath(mpcExe);
+        CHECK(ExternalPlayer::anyTarget(emptyRoot, regRoot));                        // custom set => target exists
+        CHECK(ExternalPlayer::resolveForceTarget(emptyRoot, regRoot) == mpcExe);     // ...and it's the custom path
+
+        // (b) builtin default + NO custom + a detected player (fake fs root has VLC first) -> target = VLC path.
+        Settings::setExternalPlayerPath(QString());
+        CHECK(ExternalPlayer::anyTarget(fsRoot, regRoot));                           // detected => target exists
+        CHECK(QFileInfo(ExternalPlayer::resolveForceTarget(fsRoot, regRoot)) == QFileInfo(vlcExe)); // first hit=VLC
+
+        // (c) builtin default + NO custom + nothing detected (empty root) -> no target at all.
+        CHECK(!ExternalPlayer::anyTarget(emptyRoot, regRoot));
+        CHECK(ExternalPlayer::resolveForceTarget(emptyRoot, regRoot).isEmpty());
+
+        // (d) configured VLC + detected -> resolveForceTarget picks the configured kind's exact path.
+        Settings::setExternalPlayer(QStringLiteral("vlc"));
+        CHECK(QFileInfo(ExternalPlayer::resolveForceTarget(fsRoot, regRoot)) == QFileInfo(vlcExe));
+    }
 
     // Restore a clean player group so a rerun starts from defaults.
     {

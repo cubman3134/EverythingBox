@@ -31,9 +31,23 @@ namespace ExternalPlayer
 
     Kind    configuredKind();   // Settings player/external -> Kind (unknown/empty -> Builtin)
     QString configuredPath();   // resolved exe for the configured kind (Custom -> externalPath; Vlc/Mpc -> detect())
-    bool    available();        // a usable external target exists (config + detection + platform)
+    bool    available();        // the CONFIGURED external target is usable (config != Builtin + detection + platform)
+
+    // A one-off external handoff is possible regardless of the configured default: true when a Custom path is
+    // set or any player is detected (desktop), or always on Android (the intent). Drives the detail view's
+    // "Open in external player" pill, which must appear even when the default is the built-in player.
+    // The probe roots are injectable exactly like detect() (empty = real system) for hermetic tests.
+    bool    anyTarget(const QString& fsProbeRoot = QString(), const QString& regProbeRoot = QString());
+
+    // Resolve a concrete exe for a one-off "Open in external player" even when configuredKind()==Builtin.
+    // Order: the configured external kind if it resolves, else a set Custom path, else the first detect() hit.
+    // "" when nothing is available (the caller notifies). Probe roots injectable like detect() (empty = real).
+    QString resolveForceTarget(const QString& fsProbeRoot = QString(), const QString& regProbeRoot = QString());
 
     // Hand the media off. Returns true on a successful handoff start. Desktop: QProcess::startDetached.
     // Android: ACTION_VIEW intent (video/*); false if no activity can handle it (the caller notifies).
-    bool    launch(const QString& urlOrPath);
+    bool    launch(const QString& urlOrPath);                          // uses configuredPath() (the default)
+    // Hand off to an EXPLICIT exe (desktop) — for a one-off that targets a specific player regardless of the
+    // configured default. Empty exe -> false. Android ignores exe and fires the same ACTION_VIEW intent.
+    bool    launchExe(const QString& urlOrPath, const QString& exe);
 }
