@@ -230,37 +230,6 @@ static QSettings& store()
 
 static QPushButton* panelRow(const QString& label); // large TV-friendly menu row (defined below)
 
-#ifdef Q_OS_ANDROID
-namespace {
-// Android/TV hardware-Back while a nav-kit overlay (the OSK, a menu, a confirm) is open. On desktop the
-// overlay's grabKeyboard() feeds Back straight into its own keyPressEvent (cancel/close). On Android the
-// platform delivers KEYCODE_BACK to the focus WINDOW's focus object — which, over a QQuickWidget panel whose
-// scene lost active focus to the OSK's grab, is a dead scene item: the key goes unhandled and Android's
-// default finishes the Activity, so a single Back from the onboarding OSK exited the whole app (F3). An
-// application-level filter sees the event before ANY receiver (widget grab, top-level, or QML scene focus
-// object), so it reliably catches Back regardless of where the platform aimed it: route it to the topmost
-// overlay (Osk cancels, menus/confirms close) and consume it, so the Activity is never finished out from
-// under an open overlay. Installed on qApp only on Android — desktop's grab path is untouched.
-class OverlayBackFilter : public QObject
-{
-public:
-    using QObject::QObject;
-protected:
-    bool eventFilter(QObject*, QEvent* e) override
-    {
-        if ((e->type() == QEvent::KeyPress || e->type() == QEvent::ShortcutOverride)
-            && static_cast<QKeyEvent*>(e)->key() == Qt::Key_Back
-            && NavOverlay::topmost())
-        {
-            if (e->type() == QEvent::KeyPress) NavOverlay::routeTopmost(Qt::Key_Back);
-            return true; // consume: the overlay handled Back; Android must not finish the Activity
-        }
-        return false;
-    }
-};
-} // namespace
-#endif
-
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
@@ -290,9 +259,6 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #ifdef Q_OS_ANDROID
     connect(qApp, &QGuiApplication::applicationStateChanged,
             this, &MainWindow::onApplicationStateChanged);
-    // See OverlayBackFilter: keep the hardware Back from finishing the Activity while a nav-kit overlay (the
-    // onboarding/settings OSK, a menu, a confirm) is open — route it to the overlay to close it instead (F3).
-    qApp->installEventFilter(new OverlayBackFilter(this));
 #endif
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
