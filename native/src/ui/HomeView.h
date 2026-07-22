@@ -139,6 +139,7 @@ public:
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
     bool atFavoritesLevel() const;           // the current level is a console's synthetic Favorites folder
+    bool atSteamConsole() const;             // the top level is still the synthetic Steam console (async guard)
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
@@ -230,6 +231,10 @@ private:
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
     void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
     void populateSteamGames();                           // (re)build the Steam games list natively
+    void openEpicConsole(const MediaItem& consoleItem);  // drill the synthetic Epic console -> local games
+    void populateEpicGames();                            // (re)build the Epic games list natively
+    void openGogConsole(const MediaItem& consoleItem);   // drill the synthetic GOG console -> local games
+    void populateGogGames();                             // (re)build the GOG games list natively
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey

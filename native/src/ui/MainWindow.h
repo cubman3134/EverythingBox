@@ -179,7 +179,15 @@ private:
     // exe. tryLaunchInstalledPcGame returns true when it handled the open; false => no local copy yet, so
     // openPcGame downloads it. PC-game Recent entries (kind "pcgame") re-open through relaunchPcGame.
     bool tryLaunchInstalledPcGame(const QString& id, const QString& title, const QString& thumb);
-    void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb);
+    // Run a resolved local-game exe through the monitored path (ShellExecuteEx + grace-window + PlayStats).
+    // `kind` is the Recent/Downloads routing kind: "pcgame" (default) also records a PC-console Download; a GOG
+    // game passes "goggame" to reuse the SAME launch mechanics while recording under its own kind (so it groups
+    // on the GOG console) and NOT as a PC download (a GOG game isn't a downloaded repack).
+    void launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb,
+                     const QString& kind = QStringLiteral("pcgame"));
+    // Re-open a GOG game from a Recent (kind "goggame"): re-resolve its exe from the registry by id, falling
+    // back to the exact path the Recent recorded, then run it through launchPcExe with the "goggame" kind.
+    void relaunchGogGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
     // (The full-screen emulator / external-emulator play-time tracking lives in GameLauncher now. PC games are
     // still timed separately in launchPcExe, off their own process handle.)
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,

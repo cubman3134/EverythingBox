@@ -42,6 +42,14 @@ namespace Settings
     QString openSubPassword();
     void setOpenSubPassword(const QString& pass);
 
+    // Steam Web API credentials (user-supplied; NEVER embedded). The API key (also used by PC-game achievements)
+    // plus the 64-bit SteamID unlock the owned-but-not-installed library on the Steam console. Either empty =>
+    // installed-only, no network. Stored in the local INI at steam/apikey + steam/steamid.
+    QString steamWebApiKey();
+    void setSteamWebApiKey(const QString& key);
+    QString steamId();
+    void setSteamId(const QString& id);
+
     // Open the app maximized to full screen on launch (default off — a normal resizable window).
     bool startFullscreen();
     void setStartFullscreen(bool on);

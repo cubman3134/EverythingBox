@@ -1,7 +1,10 @@
 # Game Library Importers (Playnite roadmap #1: Steam parity + Epic/GOG) — Design
 
 **Date:** 2026-07-22
-**Status:** Approved roadmap item (user-set order); plan next.
+**Status:** Complete: Steam parity (Recents, marks, owned-games async extension), Epic + GOG
+importers shipped 2026-07-22. Verification posture: Steam live (27 games), GOG live (1 game),
+Epic games-positive fixture-only (this machine has engine tooling only); owned-games
+stub-verified (no user key configured).
 **Origin:** User request — Playnite's killer feature, importers, "Steam first, then Epic/GOG."
 
 ## Scope reality (scout, 2026-07-22)
@@ -69,3 +72,21 @@ Playnite parity, and what's genuinely new:
   this machine (scout at runtime; else probe fixtures stand + record device-
   unverified, the Android-precedent posture).
 - Suite + perf gates unchanged.
+
+## Follow-ups (post-ship, 2026-07-22 — T3 close-out)
+
+- **Same-pattern importers**: Xbox / EA (app) / Ubisoft Connect / Battle.net follow the Steam
+  shape (detect → synthetic console → mime + Recent kind) later if asked. None are in scope here.
+- **Play-time / stats = roadmap #3**: no play-time tracking on this track (launches are
+  fire-and-forget through each launcher). Note: GOG games already accrue PlayStats because they
+  launch through the monitored `launchPcExe` path — Steam/Epic (URI handoff) do not, and closing
+  that gap is roadmap #3's job, not a bug here.
+- **Scan persistence**: live scans are fast + self-healing; persist to a store ONLY if a scan ever
+  measurably lags a console-open. Not needed today.
+- **Epic/GOG artless-until-scraped**: Epic/GOG tiles start with empty artwork (no local capsule
+  convention); the title-keyed scrapers fill it in later. This is the intended posture, not a defect.
+- **GOG missing-exe weak-degrade (minor)**: a registry game whose recorded `exe` no longer exists
+  degrades weakly (the launch simply no-ops via ShellExecuteEx). Cosmetic; revisit only if it bites.
+- **Console-injection predicate dedup (cosmetic)**: the Steam/Epic/GOG console-injection guards in
+  HomeView share the same "library detected non-empty" shape; a small shared predicate would dedup
+  them. No behavior change — purely a tidy-up.

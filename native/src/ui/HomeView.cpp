@@ -18,6 +18,9 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/SteamLibrary.h"
+#include "../core/EpicLibrary.h"
+#include "../core/GogLibrary.h"
+#include "../core/Settings.h"
 #include "../core/ItemMarks.h"
 #include "CarouselView.h"
 #include "XmbView.h"
@@ -1554,12 +1557,67 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
     populateSteamGames(); // also re-run by loadTop() when Back returns to this level
 }
 
+// The top level is still the synthetic Steam console — the async owned-games re-present only fires while it is
+// (the browse-side analogue of MainWindow::themedPanelIsTop: a late reply must never rebuild an unrelated view).
+bool HomeView::atSteamConsole() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.mime == QStringLiteral("steam:console");
+}
+
 // (Re)build the Steam games grid/column natively from the local library (no addon request).
 void HomeView::populateSteamGames()
 {
-    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse).
+    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse/probe_importers).
     const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query));
+    // Owned-but-not-installed (creds-gated): a Steam Web API key + SteamID appends the owned library as "Not
+    // installed" tiles. No key/id -> installed-only (today's zero-friction behavior).
+    const QString key = Settings::steamWebApiKey();
+    const QString sid = Settings::steamId();
+    // INSTANT: installed + any TTL-cached owned. ownedGamesCached() is network-free, so console-open never blocks
+    // the GUI thread — the zero-key path shows installed the moment you drill in.
+    const QList<SteamGame> owned = SteamLibrary::ownedGamesCached(key, sid);
+    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query, {}, owned));
+
+    // BACKGROUND: with a key+SteamID configured and the cache stale, fetch owned off the GUI thread (async, 8s
+    // reply timeout). On completion — ONLY if the Steam console is STILL the top level — re-present so the owned
+    // entries append. A fresh cache / no key -> ownedGamesFetch no-ops (also what stops the re-present loop).
+    // Failures stay silent + TTL-cached (the console never surfaces an error).
+    SteamLibrary::ownedGamesFetch(key, sid, this, [this](const QVector<SteamGame>&) {
+        if (atSteamConsole()) populateSteamGames();
+    });
+}
+
+// Drill into the synthetic "Epic Games" console (mirrors openSteamConsole): list the local Epic library.
+void HomeView::openEpicConsole(const MediaItem& consoleItem)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Epic Games");
+    stack_.push_back(lvl);
+    populateEpicGames(); // also re-run by loadTop() when Back returns to this level
+}
+
+void HomeView::populateEpicGames()
+{
+    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
+    showSyntheticCatalog(browse::epicGamesCatalog(EpicLibrary::installedGames(), query));
+}
+
+// Drill into the synthetic "GOG" console (mirrors openSteamConsole): list the local GOG library.
+void HomeView::openGogConsole(const MediaItem& consoleItem)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("GOG");
+    stack_.push_back(lvl);
+    populateGogGames();
+}
+
+void HomeView::populateGogGames()
+{
+    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
+    showSyntheticCatalog(browse::gogGamesCatalog(GogLibrary::installedGames(), query));
 }
 
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
@@ -2079,7 +2137,8 @@ QString HomeView::openKindForView() const
     const Level& top = stack_.last();
     if (top.detail)
     {
-        if (top.item.mime == QStringLiteral("steam:console")) return QString(); // Steam games aren't ROM files
+        if (top.item.mime == QStringLiteral("steam:console") || top.item.mime == QStringLiteral("epic:console")
+            || top.item.mime == QStringLiteral("gog:console")) return QString(); // store games aren't ROM files
         return (top.item.type == QStringLiteral("platform")) ? QStringLiteral("game") : QString(); // games per-console
     }
     const QString& t = top.catalogType;
@@ -2303,6 +2362,8 @@ void HomeView::activateItem(int row)
 
     // The synthetic Steam console drills into the local library natively (not via the addon).
     if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
+    if (it.mime == QStringLiteral("epic:console"))  { openEpicConsole(it);  return; }
+    if (it.mime == QStringLiteral("gog:console"))   { openGogConsole(it);   return; }
 
     // The synthetic Recent folder drills into this catalogue's recently-opened items.
     if (it.type == QStringLiteral("_recents"))
@@ -2455,8 +2516,9 @@ void HomeView::dlNext()
 void HomeView::dlResolveLeaf(const DlNode& node)
 {
     const MediaItem it = node.item;
-    // Can't pull as a single file: a Steam launch, or a page-based manga chapter.
-    if (it.mime == QStringLiteral("steamgame") || isReadableChapter(it.type)) { dlNext(); return; }
+    // Can't pull as a single file: a store-launcher game (Steam/Epic/GOG), or a page-based manga chapter.
+    if (it.mime == QStringLiteral("steamgame") || it.mime == QStringLiteral("epicgame")
+        || it.mime == QStringLiteral("goggame") || isReadableChapter(it.type)) { dlNext(); return; }
 
     const bool localBridge = node.addon && node.addon->transport != LoadedAddon::RemoteHttp
         && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
@@ -2697,15 +2759,20 @@ void HomeView::openFavorite(const MediaItem& favItem)
             emit openRecent(f.path, f.kind, f.itemId, f.title, f.thumbnailUrl);
             return;
         }
-    // A favourited Steam game has no source addon - reopen its native info page (rooted at Home).
-    if (favItem.id.startsWith(QStringLiteral("steam:")))
+    // A favourited native-store game with no local file (Steam/Epic) has no source addon - reopen its native
+    // info page (rooted at Home); Play rebuilds the launch URL from the id. (A GOG favourite carries its exe as
+    // a path, so it re-opened via the openRecent branch above — the GogGame dispatch — and never lands here.)
+    const bool isSteamFav = favItem.id.startsWith(QStringLiteral("steam:"));
+    const bool isEpicFav  = favItem.id.startsWith(QStringLiteral("epic:"));
+    if (isSteamFav || isEpicFav)
     {
         recentView_ = false;
         applyGridMode(/*recentList*/ false);
         styleTypeButtons(QStringLiteral("home"));
         stack_.clear();
         MediaItem mi = favItem;
-        mi.mime = QStringLiteral("steamgame"); // restore the marker (drops the "fav:" tag)
+        mi.mime = isSteamFav ? QStringLiteral("steamgame")
+                             : QStringLiteral("epicgame"); // restore the marker (drops the "fav:" tag)
         mi.url.clear();
         Level lvl;
         lvl.addon = nullptr; lvl.detail = true; lvl.item = mi; lvl.title = mi.title;
@@ -2759,7 +2826,9 @@ void HomeView::doSearch()
     // Steam library (filtered locally in populateSteamGames).
     Level& cur = stack_.last();
     if (cur.detail && (cur.item.type == QStringLiteral("platform")
-                       || cur.item.mime == QStringLiteral("steam:console")))
+                       || cur.item.mime == QStringLiteral("steam:console")
+                       || cur.item.mime == QStringLiteral("epic:console")
+                       || cur.item.mime == QStringLiteral("gog:console")))
     {
         cur.query = q;
         cur.childRow = -1;
@@ -2842,6 +2911,8 @@ void HomeView::loadTop()
 
     // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
+    if (top.detail && top.item.mime == QStringLiteral("epic:console"))  { populateEpicGames();  return; }
+    if (top.detail && top.item.mime == QStringLiteral("gog:console"))   { populateGogGames();   return; }
     // Returning to a cross-addon search (Back out of a result): re-run the fan-out.
     if (top.detail && top.item.type == QStringLiteral("_search"))
         { startSearch(top.item.mime.mid(QStringLiteral("search:").size())); return; }
@@ -2906,8 +2977,26 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     if (it.mime == QStringLiteral("steamgame"))
     {
         MediaItem m = it;
-        m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
+        // An owned-not-installed tile already carries a steam://install/<appid> url — honor it; an installed
+        // tile has none, so build the run URL. Both ride the same MainWindow openUrl handoff.
+        if (m.url.isEmpty())
+            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
         emit openItem(m); // MainWindow launches the steam:// URL
+        return;
+    }
+    if (it.mime == QStringLiteral("epicgame"))
+    {
+        MediaItem m = it;
+        // Fire-and-forget through the Epic launcher URI, exactly like steam:// (the launcher owns the process).
+        m.url = EpicLibrary::launchUrl(it.id.mid(QStringLiteral("epic:").size()));
+        emit openItem(m); // MainWindow hands the com.epicgames.launcher:// URI to the OS
+        return;
+    }
+    if (it.mime == QStringLiteral("goggame"))
+    {
+        // GOG games are DRM-free exes: the tile already carries the resolved exe in `url`. Hand it to
+        // MainWindow, which runs it through the MONITORED launchPcExe path (recording a "goggame" Recent).
+        emit openItem(it);
         return;
     }
     if (isReadableChapter(it.type)) // a manga chapter -> resolve its page images, then open the reader
@@ -4148,6 +4237,33 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             steam.expandable = true;
             steam.mime = QStringLiteral("steam:console"); // marker -> drilled natively, not via the addon
             items_.push_back(steam);
+        }
+        // Alongside Steam: native Epic and GOG consoles, each shown only when its local library is non-empty
+        // (the same "appears when detected" rule). Epic launches fire-and-forget via the launcher URI (like
+        // Steam); GOG launches its DRM-free exe through the monitored PC-exe path.
+        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty()
+            && stack_.last().catalogType == QStringLiteral("game"))
+        {
+            if (EpicLibrary::isAvailable() && !EpicLibrary::installedGames().isEmpty())
+            {
+                MediaItem epic;
+                epic.id = QStringLiteral("epic:console");
+                epic.type = QStringLiteral("platform");
+                epic.title = tr("Epic Games");
+                epic.expandable = true;
+                epic.mime = QStringLiteral("epic:console");
+                items_.push_back(epic);
+            }
+            if (GogLibrary::isAvailable() && !GogLibrary::installedGames().isEmpty())
+            {
+                MediaItem gog;
+                gog.id = QStringLiteral("gog:console");
+                gog.type = QStringLiteral("platform");
+                gog.title = tr("GOG");
+                gog.expandable = true;
+                gog.mime = QStringLiteral("gog:console");
+                items_.push_back(gog);
+            }
         }
         from = 0;
     }

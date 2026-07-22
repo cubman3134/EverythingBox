@@ -34,6 +34,9 @@
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
+#include "../core/SteamLibrary.h"
+#include "../core/EpicLibrary.h"
+#include "../core/GogLibrary.h"
 #include "../core/ExternalPlayer.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -4814,9 +4817,48 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                             const QString& resumeKey, const QString& title, const QString& thumb)
 {
     currentNextSourceCapable_ = false; // a Recent re-open has no live Allarr context to swap sources
-    // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path
-    // this Recent entry recorded (e.g. its one-time installer) is stale or gone.
-    if (kind == QStringLiteral("pcgame")) { relaunchPcGame(resumeKey, title, thumb, path); return; }
+    // Game kinds dispatch through RecentStore::relaunchFor (the shared pure dispatch table; probe_importers pins it).
+    switch (RecentStore::relaunchFor(kind))
+    {
+        case RecentStore::Relaunch::SteamGame:
+        {
+            // Re-launch through the Steam client (fire-and-forget). Key is "steam:<appid>"; the recorded path is
+            // the steam://rungameid URL. Re-record so the re-open moves to the front of Recents.
+            const QString appid = resumeKey.startsWith(QStringLiteral("steam:"))
+                                      ? resumeKey.mid(QStringLiteral("steam:").size())
+                                      : path.section(QLatin1Char('/'), -1);
+            const QString url = SteamLibrary::launchUrl(appid);
+            QDesktopServices::openUrl(QUrl(url));
+            RecentStore::add({ url, title, QStringLiteral("steamgame"), thumb, QStringLiteral("steam:") + appid });
+            statusBar()->showMessage(tr("Launching “%1” via Steam…").arg(title), 5000);
+            return;
+        }
+        case RecentStore::Relaunch::EpicGame:
+        {
+            // Re-launch through the Epic launcher (fire-and-forget). Key is "epic:<AppName>"; the recorded path
+            // is the launcher URI. Re-record so the re-open moves to the front of Recents.
+            const QString appName = resumeKey.startsWith(QStringLiteral("epic:"))
+                                        ? resumeKey.mid(QStringLiteral("epic:").size())
+                                        : path.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
+            const QString url = EpicLibrary::launchUrl(appName);
+            QDesktopServices::openUrl(QUrl(url));
+            RecentStore::add({ url, title, QStringLiteral("epicgame"), thumb, QStringLiteral("epic:") + appName });
+            statusBar()->showMessage(tr("Launching “%1” via Epic…").arg(title), 5000);
+            return;
+        }
+        // A GOG game re-opens through the monitored exe path (re-resolving from the registry, falling back to the
+        // recorded exe). launchPcExe records the "goggame" Recent itself.
+        case RecentStore::Relaunch::GogGame:
+            relaunchGogGame(resumeKey, title, thumb, path);
+            return;
+        // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path this
+        // Recent entry recorded (e.g. its one-time installer) is stale or gone.
+        case RecentStore::Relaunch::PcGame:
+            relaunchPcGame(resumeKey, title, thumb, path);
+            return;
+        default:
+            break; // media kinds fall through to the file/URL handling below
+    }
     // A streamed link has no local file to check; route it straight to libmpv.
     const bool isUrl = path.contains(QStringLiteral("://"));
     if (!isUrl && !QFileInfo::exists(path))
@@ -5449,14 +5491,20 @@ QString MainWindow::locateInstalledGameExe(const QString& title, const QString& 
     return findGameExe(pcRoot, title, /*titleMatchOnly*/ true);
 }
 
-// Run a resolved PC game exe and record it in Recent as a "pcgame" so re-opening from Home relaunches this
-// exact executable (not the installer).
-void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb)
+// Run a resolved local-game exe and record it in Recent so re-opening from Home relaunches this exact
+// executable. `kind` ("pcgame" default, or "goggame") is the Recent routing kind — the launch MECHANICS below
+// are identical for both (GOG games are DRM-free processes, just like a downloaded PC repack). The kind-vs-
+// mechanics split: a GOG game records the "goggame" kind (so it groups on the GOG console and re-opens via the
+// GogGame dispatch) but rides this pcgame monitor path; and it is NOT added to the PC-console Downloads (it's
+// an installed registry game, not a downloaded repack), so we skip that store write for non-pcgame kinds.
+void MainWindow::launchPcExe(const QString& exe, const QString& id, const QString& title, const QString& thumb,
+                            const QString& kind)
 {
-    mwLog(QStringLiteral("pcgame: launch \"%1\"").arg(QFileInfo(exe).fileName()));
+    mwLog(QStringLiteral("%1: launch \"%2\"").arg(kind, QFileInfo(exe).fileName()));
     notify(tr("Launching “%1”…").arg(title), 5000);
-    RecentStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id });
-    DownloadsStore::add({ exe, title, QStringLiteral("pcgame"), thumb, id, QStringLiteral("pc") });
+    RecentStore::add({ exe, title, kind, thumb, id });
+    if (kind == QStringLiteral("pcgame"))
+        DownloadsStore::add({ exe, title, kind, thumb, id, QStringLiteral("pc") });
     const QString playId = PlayStats::identity(id, exe);
     PlayStats::markPlayed(playId); // last-played now; total time is banked when the process exits (Windows path)
     // Run with the working directory set to the game's own folder - most games load their DLLs, Content and
@@ -5756,6 +5804,20 @@ void MainWindow::relaunchPcGame(const QString& id, const QString& title, const Q
     if (tryLaunchInstalledPcGame(id, title, thumb)) return;
     if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath)) { launchPcExe(recordedPath, id, title, thumb); return; }
     notify(tr("Couldn't find “%1”. Open it from the library to download it again.").arg(title), kFeedbackLong);
+}
+
+// Re-open a GOG game from a Recent entry (kind "goggame", key "gog:<id>"): prefer the registry's current exe
+// (survives a game update/move), then the exact exe the Recent recorded, then give up. Uses the "goggame" kind
+// so re-recording keeps it on the GOG console (not the PC console).
+void MainWindow::relaunchGogGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath)
+{
+    const QString gogId = id.startsWith(QStringLiteral("gog:")) ? id.mid(QStringLiteral("gog:").size()) : id;
+    for (const GogGame& g : GogLibrary::installedGames())
+        if (g.id == gogId && !g.exe.isEmpty() && QFileInfo::exists(g.exe))
+        { launchPcExe(g.exe, id, title, thumb, QStringLiteral("goggame")); return; }
+    if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath))
+    { launchPcExe(recordedPath, id, title, thumb, QStringLiteral("goggame")); return; }
+    notify(tr("Couldn't find “%1”. It may have been uninstalled from GOG.").arg(title), kFeedbackLong);
 }
 
 void MainWindow::startScrobble(const QString& imdbStreamId)
@@ -6218,11 +6280,42 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), kFeedbackLong);
         return;
     }
-    // A Steam game: hand it to the Steam client to launch (it handles install/run).
+    // A GOG game: a DRM-free exe launched through the MONITORED path (launchPcExe records the "goggame" Recent
+    // itself — do NOT re-record here). Its exe rides on item.url; id/title/thumb come from the tile.
+    if (item.mime == QStringLiteral("goggame"))
+    {
+        launchPcExe(item.url, item.id, item.title, item.thumbnailUrl, QStringLiteral("goggame"));
+        return;
+    }
+    // An Epic game: hand the launcher URI to the OS (fire-and-forget, exactly like steam://). Record a Recent
+    // (kind "epicgame", key "epic:<AppName>") so it resumes from the Recent tab and re-launches via the URI.
+    if (item.url.startsWith(QStringLiteral("com.epicgames.launcher://")))
+    {
+        QDesktopServices::openUrl(QUrl(item.url));
+        const QString appName = item.url.section(QLatin1Char('/'), -1).section(QLatin1Char('?'), 0, 0);
+        const QString key = item.id.startsWith(QStringLiteral("epic:"))
+                                ? item.id : QStringLiteral("epic:") + appName;
+        RecentStore::add({ item.url, item.title, QStringLiteral("epicgame"), item.thumbnailUrl, key });
+        statusBar()->showMessage(tr("Launching “%1” via Epic…").arg(item.title), 5000);
+        return;
+    }
+    // A Steam game: hand it to the Steam client to launch (it handles install/run). Fire-and-forget — the Steam
+    // client owns the process (no play-time tracking on this path).
     if (item.url.startsWith(QStringLiteral("steam://")))
     {
         QDesktopServices::openUrl(QUrl(item.url));
-        statusBar()->showMessage(tr("Launching “%1” via Steam…").arg(item.title), 5000);
+        const bool installing = item.url.startsWith(QStringLiteral("steam://install/"));
+        // A RUN records a Recent (kind "steamgame", key "steam:<appid>", capsule thumb) so it resumes from the
+        // Recent tab and re-launches via SteamLibrary::launchUrl. An install handoff is not a play -> no Recent.
+        if (!installing)
+        {
+            const QString appid = item.url.section(QLatin1Char('/'), -1);
+            const QString key = item.id.startsWith(QStringLiteral("steam:"))
+                                    ? item.id : QStringLiteral("steam:") + appid;
+            RecentStore::add({ item.url, item.title, QStringLiteral("steamgame"), item.thumbnailUrl, key });
+        }
+        statusBar()->showMessage(installing ? tr("Installing “%1” via Steam…").arg(item.title)
+                                            : tr("Launching “%1” via Steam…").arg(item.title), 5000);
         return;
     }
     const QString url = item.url;
@@ -7499,10 +7592,15 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("bgm.on"), tr("Play background music"), Settings::bgmEnabled());
         choice(QStringLiteral("bgm.vol"), tr("Volume"), volOpts, curVolDisp);
         action(QStringLiteral("bgm.open"), tr("Open music folder"));
-        // --- PC Game Achievements (Steam) ---
-        sep(tr("PC Game Achievements (Steam)"));
+        // --- Steam (achievements + owned library) ---
+        // One Steam Web API key serves both PC-game achievements and the owned-not-installed library on the Steam
+        // console; the SteamID (64-bit) enables the latter. Key is MASKED. (Owned-games UI lives here on General
+        // rather than an addon-config surface: it's a native feature, not a manifest-driven addon setting.)
+        sep(tr("Steam (achievements + owned library)"));
         textf(QStringLiteral("steam.key"), tr("Steam Web API key"),
-              store().value(QStringLiteral("steam/apikey")).toString());
+              Settings::steamWebApiKey(), /*masked=*/true);
+        textf(QStringLiteral("steam.steamid"), tr("SteamID (64-bit) — shows owned, not-installed games"),
+              Settings::steamId());
         // --- Streaming (Debrid) ---
         sep(tr("Streaming (Debrid)"));
         textf(QStringLiteral("debrid.torbox"), tr("TorBox API key"),
@@ -7673,8 +7771,12 @@ void MainWindow::openGeneralSettings()
                     if (bgm_) { bgm_->reload(); updateBackgroundMusic(); }
                 }
                 else if (id == QStringLiteral("steam.key")) {
-                    store().setValue(QStringLiteral("steam/apikey"), val.trimmed()); store().sync();
+                    Settings::setSteamWebApiKey(val); // never echoed back to the log
                     statusBar()->showMessage(tr("Saved Steam Web API key."), 4000);
+                }
+                else if (id == QStringLiteral("steam.steamid")) {
+                    Settings::setSteamId(val);
+                    statusBar()->showMessage(tr("Saved SteamID."), 4000);
                 }
                 else if (id == QStringLiteral("debrid.torbox")) {
                     store().setValue(QStringLiteral("debrid/torbox/apikey"), val.trimmed()); store().sync();
@@ -8096,24 +8198,31 @@ void MainWindow::openGeneralSettings()
         });
         v->addWidget(openMusic);
 
-        // --- PC game achievements (Steam): a Steam web API key shows an installed PC game's Steam achievements. ---
+        // --- Steam (achievements + owned library): a Steam Web API key shows an installed PC game's Steam
+        // achievements; the key + a 64-bit SteamID also surface owned-but-not-installed games on the Steam console. ---
         v->addSpacing(10);
-        auto* sHeading = new QLabel(tr("PC Game Achievements (Steam)"));
+        auto* sHeading = new QLabel(tr("Steam (achievements + owned library)"));
         sHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
         v->addWidget(sHeading);
         auto* sNote = new QLabel(tr("Paste a Steam Web API key (steamcommunity.com/dev/apikey) to show an installed "
-            "PC game's Steam achievements in the Triple theme, with the ones you've unlocked highlighted. Unlocks "
-            "come from the game's Steam-emulator save."));
+            "PC game's Steam achievements in the Triple theme, with the ones you've unlocked highlighted. Add your "
+            "64-bit SteamID to also list owned-but-not-installed games on the Steam console (activating one installs "
+            "it via Steam). Leave the SteamID blank to keep the console installed-only."));
         sNote->setWordWrap(true); sNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(sNote);
-        auto* sKey = new QLineEdit(store().value(QStringLiteral("steam/apikey")).toString());
+        auto* sKey = new QLineEdit(Settings::steamWebApiKey());
         sKey->setMinimumHeight(34); sKey->setEchoMode(QLineEdit::Password);
         sKey->setPlaceholderText(tr("Steam Web API key"));
         v->addWidget(sKey);
-        auto* sSave = panelRow(tr("Save Steam Key"));
-        connect(sSave, &QPushButton::clicked, this, [this, sKey] {
-            store().setValue(QStringLiteral("steam/apikey"), sKey->text().trimmed()); store().sync();
-            statusBar()->showMessage(tr("Saved Steam Web API key."), 4000);
+        auto* sId = new QLineEdit(Settings::steamId());
+        sId->setMinimumHeight(34);
+        sId->setPlaceholderText(tr("64-bit SteamID (optional — for owned games)"));
+        v->addWidget(sId);
+        auto* sSave = panelRow(tr("Save Steam Key + SteamID"));
+        connect(sSave, &QPushButton::clicked, this, [this, sKey, sId] {
+            Settings::setSteamWebApiKey(sKey->text());
+            Settings::setSteamId(sId->text());
+            statusBar()->showMessage(tr("Saved Steam Web API key + SteamID."), 4000);
         });
         v->addWidget(sSave);
 
