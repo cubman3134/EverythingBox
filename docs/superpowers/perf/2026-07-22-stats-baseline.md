@@ -39,7 +39,7 @@ deployed to `C:\MyMediaVault-app`. 3 consecutive runs. Ranked spans, worst/avg m
 The accrual hooks `PlaybackSession::persistResume()` — the existing ≥5s-throttled resume
 heartbeat. Each heartbeat with ≥1 whole forward-second accrued now calls
 `ConsumptionStats::addMediaSeconds()`, which does its own `store().sync()` on the
-**separate** per-profile ConsumptionStats ini — i.e. a **second `QSettings::sync()` per
+per-profile ConsumptionStats store in the SAME mymediavault.ini (a second flush of the shared file) — i.e. a **second `QSettings::sync()` per
 5s during active video/audio playback**, on top of the pre-existing resume-store sync.
 
 **Not measured by this route:** the standard route opens a libretro **game** (PlayStats
