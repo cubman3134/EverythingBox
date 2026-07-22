@@ -1,7 +1,7 @@
 # Category Playlists + Channels (personal TV network) — Design
 
 **Date:** 2026-07-21
-**Status:** Approved design; plan queues after the marks/shelves track.
+**Status:** Complete: category playlists + migration, action menu + Play random, Channel mode (shuffle-bag autoplay, countdown interstitial, detour-skip) shipped 2026-07-22.
 **Origin:** User request — playlists scoped per CATEGORY (one Video playlist mixes TV
 episodes + movies + anything), a random-pick function, and channel-style random
 AUTOPLAY: "functionally create a TV network where you can put what you want on there."
@@ -64,6 +64,22 @@ key on ONE catalog (`catalogKey = addonId|catalogId|catalogType`). The user's
   runs on the REAL ini — snapshot first, verify Weekend Picks entries identical,
   restore only if verification fails).
 - Suite + perf gates unchanged.
+
+## Follow-ups (recorded, not built)
+
+- **Smart playlists** — `Playlist` gains an optional `rule` field; manual playlists have
+  empty rules. Future; nothing in this track precludes it.
+- **Weighted / scheduled programming** ("prime time") — future channel polish
+  (weighted picks, time-of-day scheduling).
+- **Channel + external-player interaction** — when a channel pick routes to an external
+  player (`routePlay` handoff early-return), `channelAiring_` skips `notePlaybackStart`.
+  Benign: the handoff can't EOF-chain (no in-app end-of-file), so nothing to adopt or
+  chain; recorded for awareness.
+- **Local-video-to-playlist UI add path** — no in-app control yet adds a local video file
+  to a playlist (playlists resolve local entries but the add gesture is missing for local
+  video). Product gap.
+- **Empty-playlist Play-random toast** — Play random on an empty playlist should surface a
+  toast rather than no-op. UX polish.
 
 ## Non-goals
 
