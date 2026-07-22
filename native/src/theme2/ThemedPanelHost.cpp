@@ -4,6 +4,7 @@
 #include "../ui/nav/Osk.h"
 
 #include <QQuickWidget>
+#include <QQuickItem>
 #include <QQmlContext>
 #include <QVBoxLayout>
 #include <QUrl>
@@ -97,6 +98,16 @@ void ThemedPanelHost::buildView()
     // `form` (subsystem D): the panel scales its rows/fonts + insets the safe area from the form-factor tokens.
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/SettingsPanel.qml")));
+    // The scene root, for the nav kit (same wire ThemeEngine::buildView adds to the themed home/browse — this
+    // host is a SEPARATE QQuickWidget that buildView never touches, so it needs it explicitly). NavOverlay::dismiss
+    // reads "mmvQuickRoot" and forceActiveFocus()es it when an overlay (the OSK the onboarding profile / settings
+    // TextField rows open) closes back onto this panel. Restoring widget focus alone leaves the QQuickWidget
+    // scene's active-focus item dead after the OSK's keyboard grab/release, so SettingsPanel.qml's Keys handler
+    // (all D-pad nav) goes deaf — invisible on desktop (widget focus revives the scene there) but a hard input
+    // wedge on Android/TV (F1), where the scene focus does not come back without the explicit kick. mmvQuickView
+    // mirrors the buildView marker so ThemeEngine::rootItem() also resolves this host.
+    view_->setProperty("mmvQuickView", QVariant::fromValue<QObject*>(view_));
+    view_->setProperty("mmvQuickRoot", QVariant::fromValue<QObject*>(view_->rootObject()));
 }
 
 QWidget* ThemedPanelHost::quickWidget() const { return view_; }
