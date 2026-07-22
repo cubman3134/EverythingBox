@@ -139,6 +139,7 @@ public:
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
     bool atFavoritesLevel() const;           // the current level is a console's synthetic Favorites folder
+    bool atSteamConsole() const;             // the top level is still the synthetic Steam console (async guard)
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).

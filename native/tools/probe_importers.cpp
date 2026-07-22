@@ -7,6 +7,8 @@
 //   * SteamLibrary::parseOwnedGames — the GetOwnedGames JSON parse over valid / invalid / empty fixtures
 //     (numeric appid, a nameless game keeping its appid as the label, name-sort);
 //   * SteamLibrary::ownedCacheFresh — the TTL window semantics (fresh inside, stale past, zero/future = not fresh);
+//   * SteamLibrary::ownedFetchDecision — the async owned-games state machine's pure core (unconfigured / cache
+//     hit for the same creds inside TTL / fetch when cold, stale, or the key/id changed);
 //   * SteamLibrary::launchUrl / installUrl — the run vs install handoff URLs;
 //   * browse::steamGamesCatalog with an owned list — installed entries unchanged (no subtitle, no url), owned-not-
 //     installed appended (badge "Not installed", url steam://install/<appid>), already-installed owned skipped,
@@ -89,6 +91,33 @@ int main(int argc, char** argv)
         CHECK(!SteamLibrary::ownedCacheFresh(base, base + ttl + 100, ttl));  // past the window: stale
         CHECK(!SteamLibrary::ownedCacheFresh(0, base, ttl));                 // never cached: not fresh
         CHECK(!SteamLibrary::ownedCacheFresh(base + 10, base, ttl));         // future timestamp: not fresh
+    }
+
+    // ---- 2b. Owned-fetch decision (the async state machine's pure core) -----------------------------------
+    {
+        using OF = SteamLibrary::OwnedFetch;
+        const int ttl = 1800;
+        const qint64 base = 1'000'000;
+        const QString K = QStringLiteral("KEY"), I = QStringLiteral("ID");
+
+        // Not configured: an empty key OR empty id -> never touch the network (no callback).
+        CHECK(SteamLibrary::ownedFetchDecision(QString(), QString(), 0, QString(), I, base, ttl) == OF::NotConfigured);
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, QString(), I, base, ttl) == OF::NotConfigured); // no key
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, K, QString(), base, ttl) == OF::NotConfigured); // no id
+
+        // Cold cache (never fetched) with creds -> Fetch.
+        CHECK(SteamLibrary::ownedFetchDecision(QString(), QString(), 0, K, I, base, ttl) == OF::Fetch);
+
+        // Same key+id, still inside the TTL window -> CacheHit (no re-fetch; this is what stops the re-present loop).
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, K, I, base, ttl) == OF::CacheHit);
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, K, I, base + ttl - 1, ttl) == OF::CacheHit);
+
+        // Same creds but the cache went stale -> Fetch again.
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, K, I, base + ttl, ttl) == OF::Fetch);
+
+        // A fresh cache but for DIFFERENT creds (key or id changed) -> Fetch (the cached list isn't ours).
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, QStringLiteral("K2"), I, base, ttl) == OF::Fetch);
+        CHECK(SteamLibrary::ownedFetchDecision(K, I, base, K, QStringLiteral("I2"), base, ttl) == OF::Fetch);
     }
 
     // ---- 3. Launch vs install handoff URLs ----------------------------------------------------------------

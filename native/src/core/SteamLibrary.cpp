@@ -13,8 +13,8 @@
 #include <QNetworkReply>
 #include <QUrl>
 #include <QUrlQuery>
-#include <QEventLoop>
 #include <QTimer>
+#include <QPointer>
 #include <QDateTime>
 #include <QtGlobal>
 #include <algorithm>
@@ -179,21 +179,51 @@ bool SteamLibrary::ownedCacheFresh(qint64 cachedTs, qint64 now, int ttlSecs)
     return cachedTs > 0 && now >= cachedTs && (now - cachedTs) < ttlSecs;
 }
 
-QVector<SteamGame> SteamLibrary::ownedGames(const QString& apiKey, const QString& steamId)
-{
-    static const int kTtlSecs = 30 * 60; // owned-list TTL (the catalogCache precedent)
-    struct Cache { QString key, id; qint64 ts = 0; QVector<SteamGame> games; };
-    static Cache cache;
+// The one shared owned-list cache (GUI thread only): the instant read and the async store both key off it.
+namespace {
+static const int kOwnedTtlSecs = 30 * 60; // owned-list TTL (the catalogCache precedent)
+struct OwnedCache { QString key, id; qint64 ts = 0; QVector<SteamGame> games; };
+OwnedCache& ownedCache() { static OwnedCache c; return c; }
+}
 
+SteamLibrary::OwnedFetch SteamLibrary::ownedFetchDecision(
+    const QString& cacheKey, const QString& cacheId, qint64 cacheTs,
+    const QString& reqKey, const QString& reqId, qint64 now, int ttlSecs)
+{
+    if (reqKey.isEmpty() || reqId.isEmpty()) return OwnedFetch::NotConfigured;
+    if (cacheKey == reqKey && cacheId == reqId && ownedCacheFresh(cacheTs, now, ttlSecs))
+        return OwnedFetch::CacheHit; // same key+id, still fresh -> nothing new to fetch
+    return OwnedFetch::Fetch;
+}
+
+QVector<SteamGame> SteamLibrary::ownedGamesCached(const QString& apiKey, const QString& steamId)
+{
     const QString key = apiKey.trimmed();
     const QString id  = steamId.trimmed();
-    if (key.isEmpty() || id.isEmpty()) return {}; // not configured -> installed-only, no network at all
-
+    const OwnedCache& c = ownedCache();
     const qint64 now = QDateTime::currentSecsSinceEpoch();
-    if (cache.key == key && cache.id == id && ownedCacheFresh(cache.ts, now, kTtlSecs))
-        return cache.games; // fresh TTL hit -> no network
+    // Reuse the pure decision: a fresh hit for the same key+id returns the cached list; anything else -> {}.
+    if (ownedFetchDecision(c.key, c.id, c.ts, key, id, now, kOwnedTtlSecs) == OwnedFetch::CacheHit)
+        return c.games;
+    return {};
+}
 
-    QNetworkAccessManager nam;
+void SteamLibrary::ownedGamesFetch(const QString& apiKey, const QString& steamId, QObject* context,
+                                   std::function<void(const QVector<SteamGame>&)> onReady)
+{
+    const QString key = apiKey.trimmed();
+    const QString id  = steamId.trimmed();
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const OwnedCache& c = ownedCache();
+    // Not configured -> no network, no callback. Already fresh -> the caller's cached read already has it; no
+    // callback (this is also what breaks the re-present loop: a callback re-runs the console builder, which
+    // calls back into fetch, which now sees a fresh cache and stops).
+    if (ownedFetchDecision(c.key, c.id, c.ts, key, id, now, kOwnedTtlSecs) != OwnedFetch::Fetch)
+        return;
+
+    // QNAM is parented to `context` so its lifetime is bound to the caller: if the caller dies, the manager
+    // (and its pending reply) go with it and the finished lambda never runs.
+    QNetworkAccessManager* nam = new QNetworkAccessManager(context);
     QUrl u(QStringLiteral("https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"));
     QUrlQuery q;
     q.addQueryItem(QStringLiteral("key"), key);
@@ -205,28 +235,33 @@ QVector<SteamGame> SteamLibrary::ownedGames(const QString& apiKey, const QString
     QNetworkRequest req(u);
     req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = nam.get(req);
+    QNetworkReply* reply = nam->get(req);
 
-    // Synchronous, TTL-guarded (so it hits the network at most ~once per 30 min): a bounded event loop with a
-    // timeout so a stalled request can never wedge the caller.
-    QEventLoop loop;
-    QTimer timer; timer.setSingleShot(true);
-    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
-    QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-    timer.start(8000);
-    loop.exec();
+    // Async 8s bound: a stalled reply is aborted, which fires finished(OperationCanceledError) -> the single
+    // completion path below treats it as a (silent, cached) failure. No event loop, no GUI-thread block.
+    QTimer* timer = new QTimer(nam);
+    timer->setSingleShot(true);
+    QObject::connect(timer, &QTimer::timeout, reply, [reply] {
+        if (!reply->isFinished()) reply->abort();
+    });
+    timer->start(8000);
 
-    QVector<SteamGame> games;
-    const bool ok = reply->isFinished() && reply->error() == QNetworkReply::NoError;
-    if (ok) games = parseOwnedGames(reply->readAll());
-    if (!reply->isFinished()) reply->abort();
-    reply->deleteLater();
+    QPointer<QObject> ctx(context);
+    QObject::connect(reply, &QNetworkReply::finished, nam, [=]() {
+        timer->stop();
+        const bool ok = reply->error() == QNetworkReply::NoError;
+        QVector<SteamGame> games = ok ? parseOwnedGames(reply->readAll()) : QVector<SteamGame>{};
 
-    // Outcome-only logging: NEVER log the key or the request URL (it embeds the key).
-    if (!ok || games.isEmpty())
-        qWarning("SteamLibrary::ownedGames: no owned games (offline/invalid/empty) - installed-only");
+        // Outcome-only logging: NEVER log the key or the request URL (it embeds the key).
+        if (!ok || games.isEmpty())
+            qWarning("SteamLibrary::ownedGamesFetch: no owned games (offline/invalid/empty) - installed-only");
 
-    // Cache even an empty result (a silent, TTL-bounded fallback): don't hammer the API while a key is bad/offline.
-    cache.key = key; cache.id = id; cache.ts = now; cache.games = games;
-    return games;
+        // Cache even an empty result (a silent, TTL-bounded fallback): don't hammer the API while a key is
+        // bad/offline. Stored on the shared cache the instant read consults.
+        OwnedCache& cw = ownedCache();
+        cw.key = key; cw.id = id; cw.ts = QDateTime::currentSecsSinceEpoch(); cw.games = games;
+
+        if (ctx && onReady) onReady(games);   // still-alive guard; the caller further guards staleness
+        nam->deleteLater();                    // reply + timer are children of nam -> torn down with it
+    });
 }

@@ -1557,19 +1557,35 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
     populateSteamGames(); // also re-run by loadTop() when Back returns to this level
 }
 
+// The top level is still the synthetic Steam console — the async owned-games re-present only fires while it is
+// (the browse-side analogue of MainWindow::themedPanelIsTop: a late reply must never rebuild an unrelated view).
+bool HomeView::atSteamConsole() const
+{
+    return !stack_.isEmpty() && stack_.last().detail
+        && stack_.last().item.mime == QStringLiteral("steam:console");
+}
+
 // (Re)build the Steam games grid/column natively from the local library (no addon request).
 void HomeView::populateSteamGames()
 {
     // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse/probe_importers).
     const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
     // Owned-but-not-installed (creds-gated): a Steam Web API key + SteamID appends the owned library as "Not
-    // installed" tiles. No key/id -> empty -> installed-only (today's behavior). ownedGames() TTL-caches and
-    // returns {} silently on any failure, so the console never surfaces an error.
+    // installed" tiles. No key/id -> installed-only (today's zero-friction behavior).
     const QString key = Settings::steamWebApiKey();
     const QString sid = Settings::steamId();
-    const QList<SteamGame> owned = (!key.isEmpty() && !sid.isEmpty())
-        ? SteamLibrary::ownedGames(key, sid) : QList<SteamGame>{};
+    // INSTANT: installed + any TTL-cached owned. ownedGamesCached() is network-free, so console-open never blocks
+    // the GUI thread — the zero-key path shows installed the moment you drill in.
+    const QList<SteamGame> owned = SteamLibrary::ownedGamesCached(key, sid);
     showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query, {}, owned));
+
+    // BACKGROUND: with a key+SteamID configured and the cache stale, fetch owned off the GUI thread (async, 8s
+    // reply timeout). On completion — ONLY if the Steam console is STILL the top level — re-present so the owned
+    // entries append. A fresh cache / no key -> ownedGamesFetch no-ops (also what stops the re-present loop).
+    // Failures stay silent + TTL-cached (the console never surfaces an error).
+    SteamLibrary::ownedGamesFetch(key, sid, this, [this](const QVector<SteamGame>&) {
+        if (atSteamConsole()) populateSteamGames();
+    });
 }
 
 // Drill into the synthetic "Epic Games" console (mirrors openSteamConsole): list the local Epic library.
