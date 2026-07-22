@@ -2508,9 +2508,16 @@ void MainWindow::airChannelPick(int index)
     channelAiring_ = true;
     const int gen = ++channelAirGen_;               // this airing's identity (gates its async result)
     const HomeView::ChannelAir r = home_->playChannelItem(channelPlaylistId_, index, gen);
-    if (r == HomeView::ChannelAir::Played) return;  // the sink already consumed the latch (+ reset channelSkips_)
-    channelAiring_ = false;                          // Pending/Detoured: never hold the latch across the gap
+    // Clear the latch unconditionally now the synchronous dispatch has returned. A normal in-app play already
+    // consumed it in notePlaybackStart (this re-clear is a no-op). But an external-player divert also reports
+    // Played — its sink early-returns from routePlay BEFORE notePlaybackStart, leaving the latch SET. Without
+    // this clear the next unrelated in-app play (e.g. openAudioPath, no routePlay) would be adopted as the
+    // channel's pick. The divert is not distinguishable from a real in-app play here (both report Played), so
+    // the unconditional clear is the fix; a channel simply can't EOF-chain through an external player.
+    channelAiring_ = false;
     if (r == HomeView::ChannelAir::Detoured) channelSkip(); // this pick can't play directly -> next pick, silently
+    // Played: the channel stays live (channelPlaylistId_ still set) so a natural in-app end chains to the next
+    //         pick; an external-divert Played leaves nothing to chain, which is the by-design channel exit.
     // Pending: the gen-gated async slot decides.
 }
 
@@ -2538,6 +2545,10 @@ void MainWindow::onChannelPickResolved(int gen, const MediaItem& item)
     if (gen != channelAirGen_ || !channelActive()) return; // superseded / channel gone -> drop
     channelAiring_ = true;                                  // consumed synchronously by openLibraryItem's sink
     openLibraryItem(item);
+    channelAiring_ = false;                                 // an external-player divert never reaches notePlaybackStart
+                                                            // (routePlay early-returns), leaving the latch set -> the next
+                                                            // in-app play would be adopted. Clear unconditionally; the
+                                                            // in-app Played case already consumed it (harmless re-clear).
 }
 
 // Async pick produced no stream. If still current, skip it like a sync detour; a stale result is dropped.

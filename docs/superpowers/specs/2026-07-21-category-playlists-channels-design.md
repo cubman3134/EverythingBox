@@ -71,15 +71,26 @@ key on ONE catalog (`catalogKey = addonId|catalogId|catalogType`). The user's
   empty rules. Future; nothing in this track precludes it.
 - **Weighted / scheduled programming** ("prime time") — future channel polish
   (weighted picks, time-of-day scheduling).
-- **Channel + external-player interaction** — when a channel pick routes to an external
-  player (`routePlay` handoff early-return), `channelAiring_` skips `notePlaybackStart`.
-  Benign: the handoff can't EOF-chain (no in-app end-of-file), so nothing to adopt or
-  chain; recorded for awareness.
+- **Channel + external-player interaction** — a channel pick that routes to an external
+  player (`routePlay` handoff early-return) reports `Played` but skips `notePlaybackStart`,
+  which formerly left `channelAiring_` latched and let the next unrelated in-app play be
+  adopted as the channel's pick (a real leak). Fixed: `airChannelPick` /
+  `onChannelPickResolved` clear the latch unconditionally after the synchronous dispatch.
+  Residual, by design: a channel exits at an external handoff — it can't EOF-chain through
+  an external player (no in-app end-of-file to trigger the next pick).
 - **Local-video-to-playlist UI add path** — no in-app control yet adds a local video file
   to a playlist (playlists resolve local entries but the add gesture is missing for local
   video). Product gap.
-- **Empty-playlist Play-random toast** — Play random on an empty playlist should surface a
-  toast rather than no-op. UX polish.
+- **Channel / Play-random can air a HIDDEN item** — explicit playlist membership currently
+  wins over the hidden flag: a hidden entry added to a playlist still airs/picks. Treated as
+  intentional (membership is an explicit user act) pending a user preference; policy
+  decision deferred.
+- **Mid-channel item removal shifts bag indices** — the shuffle bag holds indices into the
+  playlist snapshot; removing an entry mid-channel can shift positions so one subsequent
+  pick lands on a different-but-valid item (never a crash / out-of-range — bounds are
+  re-checked). Rebuild the bag on a size change if it ever matters in practice.
+- **NavCountdown %-placeholder doc nit** — the countdown label's format string / placeholder
+  documentation should be tidied for clarity. Cosmetic doc cleanup.
 
 ## Non-goals
 
