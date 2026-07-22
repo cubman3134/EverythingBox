@@ -105,7 +105,7 @@ FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint)
     return f;
 }
 
-MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalogKey)
+MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& categoryKey)
 {
     MediaCatalog cat; cat.title = QObject::tr("Playlists");
     for (const Playlist& p : all)
@@ -119,11 +119,11 @@ MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalog
         it.mime = QStringLiteral("playlist:") + p.id;
         cat.items.push_back(it);
     }
-    MediaItem add; // a New-playlist entry at the bottom (activates -> name prompt)
+    MediaItem add; // a New-playlist entry at the bottom (activates -> name prompt, creating in this category)
     add.id = QStringLiteral("_newplaylist");
     add.type = QStringLiteral("_newplaylist");
     add.title = QObject::tr("➕  New playlist…");
-    add.mime = QStringLiteral("newplaylist:") + catalogKey;
+    add.mime = QStringLiteral("newplaylist:") + categoryKey;
     cat.items.push_back(add);
     cat.hasMore = false;
     return cat;
@@ -137,6 +137,7 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
         MediaItem it;
         it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
         it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
+        it.sourceAddonId = e.addonId; // per-entry addon resolution (mixed-source category playlists)
         if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
         else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);

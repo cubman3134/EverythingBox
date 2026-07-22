@@ -57,6 +57,11 @@ public:
     static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
     QVariantList categoryItems();
     QVariantList categoryCatalogs(const QString& categoryKey);
+    // Drill the Playlists folder for a category. Reached two ways: nested under a catalogue (asRoot=false, the
+    // default — stacks on the catalogue level), or straight from the category-level bucket column (asRoot=true —
+    // resets the browse stack so the list is the root, its Back returning to the bucket column). The themed home
+    // passes asRoot=true when the "playlistsCategory" row is activated. categoryKey = video|audio|game|reading.
+    void openPlaylistsLevel(const QString& categoryKey, bool asRoot = false);
 
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
@@ -200,15 +205,17 @@ private:
     void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
     void populateSteamGames();                           // (re)build the Steam games list natively
 
-    // Playlists: every (unfiltered) catalogue root shows a "Playlists" folder; these drive its synthetic
-    // (addon-less) levels. catalogKey identifies the catalogue ("addonId|catalogId|catalogType").
+    // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
+    // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
+    // identifies a catalogue ("addonId|catalogId|catalogType"); currentCategoryKey() maps the current
+    // catalogue's type to its bucket (the key playlists actually filter/create on).
     QString currentCatalogKey() const;                   // key for the catalogue at the root of the browse stack
+    QString currentCategoryKey() const;                  // the bucket the current catalogue classifies into
     LoadedAddon* addonForKey(const QString& catalogKey) const; // the catalogue's source addon (null if native)
-    void openPlaylistsLevel(const QString& catalogKey);  // drill the Playlists folder -> the list of playlists
-    void populatePlaylists(const QString& catalogKey);   // (re)build that list (each playlist + a New entry)
+    void populatePlaylists(const QString& categoryKey);  // (re)build that list (each playlist + a New entry)
     void openPlaylistLevel(const QString& playlistId);   // drill a playlist -> its items
     void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
-    void createPlaylistInteractive(const QString& catalogKey); // prompt for a name + create, refresh the list
+    void createPlaylistInteractive(const QString& categoryKey); // prompt for a name + create, refresh the list
     void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
 
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a

@@ -1,6 +1,7 @@
 #include "HomeView.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
+#include "../core/MediaCategories.h"
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
@@ -1276,16 +1277,11 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
 // catalog via activateNav(). Colours match the tabs (typeColor).
 // Classify a catalog/media type into one of the four inherent top-level categories. Unknown types fall back
 // to Video (the most common media kind), so a new addon type still lands somewhere sensible.
+// Delegates to the core oracle (core/MediaCategories.h) so PlaylistStore's category migration + probe_playlists
+// pin the exact same type->bucket mapping this UI uses. Keep this a thin forwarder — never fork the rules here.
 QString HomeView::mediaCategory(const QString& type)
 {
-    const QString t = type.toLower();
-    if (t == "album" || t == "track" || t == "music" || t == "song"
-        || t == "audiobook" || t == "podcast" || t == "podcast_episode") return QStringLiteral("audio");
-    if (t == "game" || t == "platform" || t == "rom" || t == "console")  return QStringLiteral("game");
-    if (t == "book" || t == "ebook" || t == "novel" || t == "comic" || t == "comic_issue"
-        || t == "manga" || t == "manga_chapter")                         return QStringLiteral("reading");
-    // movie, series, tv, livetv, livesport(s), channel, film, video, ... and anything unrecognised:
-    return QStringLiteral("video");
+    return core::mediaCategory(type);
 }
 
 // Static metadata for a bucket key: display name, accent colour, and the glyph the XMB draws.
@@ -1331,6 +1327,12 @@ QVariantList HomeView::categoryCatalogs(const QString& categoryKey)
                             { QStringLiteral("type"), t.type }, { QStringLiteral("catalog"), true },
                             { QStringLiteral("accent"), typeColor(t.type).name() } };
     }
+    // The category-level Playlists folder: opens this bucket's saved lists (mixed across its catalogues). Carries
+    // no navKey — the themed home routes it to openPlaylistsLevel via "playlistsCategory". Kept out of the
+    // single-catalog auto-open count (that keys off navKey), so a lone-catalog bucket still dives straight in.
+    if (!out.isEmpty())
+        out << QVariantMap{ { QStringLiteral("title"), tr("Playlists") }, { QStringLiteral("type"), QStringLiteral("_playlists") },
+                            { QStringLiteral("playlistsCategory"), categoryKey }, { QStringLiteral("accent"), QStringLiteral("#6A6E78") } };
     return out;
 }
 
@@ -1578,22 +1580,34 @@ LoadedAddon* HomeView::addonForKey(const QString& catalogKey) const
     return nullptr;
 }
 
-void HomeView::openPlaylistsLevel(const QString& catalogKey)
+// The bucket the current catalogue classifies into — the key playlists filter/create on (playlists widened
+// from per-catalogue to per-category). Segment 2 of the catalogKey is the catalogType the oracle maps.
+QString HomeView::currentCategoryKey() const
 {
+    return mediaCategory(currentCatalogKey().section(QLatin1Char('|'), 2, 2));
+}
+
+void HomeView::openPlaylistsLevel(const QString& categoryKey, bool asRoot)
+{
+    if (asRoot)
+    {
+        stack_.clear();      // opened from the bucket column: the list is the root (Back -> bucket column)
+        recentView_ = false; // leave the home recents view, else activateItem routes rows through its recents path
+    }
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Playlists");
     lvl.item.id = QStringLiteral("_playlists");
     lvl.item.type = QStringLiteral("_playlists");
     lvl.item.expandable = true;
-    lvl.item.mime = QStringLiteral("playlists:") + catalogKey; // so loadTop() repopulates on Back
+    lvl.item.mime = QStringLiteral("playlists:") + categoryKey; // so loadTop() repopulates on Back
     stack_.push_back(lvl);
-    populatePlaylists(catalogKey);
+    populatePlaylists(categoryKey);
 }
 
-void HomeView::populatePlaylists(const QString& catalogKey)
+void HomeView::populatePlaylists(const QString& categoryKey)
 {
-    showSyntheticCatalog(browse::playlistsCatalog(PlaylistStore::forCatalog(catalogKey), catalogKey));
+    showSyntheticCatalog(browse::playlistsCatalog(PlaylistStore::forCategory(categoryKey), categoryKey));
 }
 
 void HomeView::openPlaylistLevel(const QString& playlistId)
@@ -1602,7 +1616,10 @@ void HomeView::openPlaylistLevel(const QString& playlistId)
     if (!PlaylistStore::get(playlistId, p)) return;
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
-    lvl.addon = addonForKey(p.catalogKey); // the catalogue's addon, so items re-open/resolve as in the catalog
+    // The playlist level is addon-less: category playlists may be mixed-source, so each item resolves its OWN
+    // addon (playlistItemsCatalog stamps every row's sourceAddonId, which activateItem uses when the level has
+    // no addon). Local-file entries re-open by path regardless.
+    lvl.addon = nullptr;
     lvl.detail = true; lvl.title = p.name;
     lvl.item.id = QStringLiteral("pl:") + p.id;
     lvl.item.type = QStringLiteral("_playlist");
@@ -1618,20 +1635,20 @@ void HomeView::populatePlaylistItems(const QString& playlistId)
     showSyntheticCatalog(browse::playlistItemsCatalog(p));
 }
 
-void HomeView::createPlaylistInteractive(const QString& catalogKey)
+void HomeView::createPlaylistInteractive(const QString& categoryKey)
 {
     const QString name = Osk::getText(tr("Playlist name:"), QString(), QLineEdit::Normal, window()).trimmed();
     if (name.isEmpty()) return; // covers backed-out (null) too
-    PlaylistStore::create(catalogKey, name);
-    populatePlaylists(catalogKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
+    PlaylistStore::create(categoryKey, name);
+    populatePlaylists(categoryKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
 }
 
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
-    const QString key = currentCatalogKey();
-    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    const QString key = currentCategoryKey(); // the whole category's playlists are offered, not just this catalogue's
+    QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
     opts << tr("➕ New playlist…");
@@ -2467,8 +2484,8 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
 
 void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
 {
-    const QString key = currentCatalogKey();
-    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    const QString key = currentCategoryKey(); // game-category playlists (offered across every games catalogue)
+    QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
     opts << tr("➕ New playlist…");
@@ -3930,7 +3947,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             pushFolders({
                 { QLatin1String("_recents"),   tr("Recent"),     QStringLiteral("recents:") + rkind,                      hasRecents },
                 { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
-                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCatalogKey(),      true },
+                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCategoryKey(),     true },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }

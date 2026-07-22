@@ -38,14 +38,16 @@ namespace browse
     // store entry, which knows ambiguous-extension consoles) or, failing that, the ROM extension.
     FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint);
 
-    // The Playlists folder for one catalogue: a row per playlist (drills into playlistItemsCatalog) followed by
-    // the trailing synthetic "_newplaylist" row (activation opens the name prompt). Pure: addon resolution
-    // happens later, at activation time (addonForKey), not here — so no addon data is needed.
-    MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& catalogKey);
+    // The Playlists folder for one CATEGORY: a row per playlist (drills into playlistItemsCatalog) followed by
+    // the trailing synthetic "_newplaylist" row (activation opens the name prompt). categoryKey rides that New
+    // row's mime so activation creates in the right bucket. Pure: addon resolution happens later, per-entry, at
+    // activation time — so no addon data is needed here.
+    MediaCatalog playlistsCatalog(const QList<Playlist>& all, const QString& categoryKey);
 
-    // One playlist's contents: PlaylistEntry -> MediaItem. Ordinary addon entries re-open through their addon;
-    // a "steam:" itemId launches natively (mime "steamgame"); a local-file entry (path set) re-opens by path
-    // (mime "localgame:<kind>", url = path).
+    // One playlist's contents: PlaylistEntry -> MediaItem. Each entry carries its OWN addonId (playlists are
+    // category-scoped and may be mixed-source), stamped onto the row's sourceAddonId so activateItem resolves
+    // the right addon per entry — the playlist level itself is addon-less. A "steam:" itemId launches natively
+    // (mime "steamgame"); a local-file entry (path set) re-opens by path (mime "localgame:<kind>", url = path).
     MediaCatalog playlistItemsCatalog(const Playlist& p);
 
     // The Steam console grid, built natively from the local library (no addon request). Each SteamGame maps to

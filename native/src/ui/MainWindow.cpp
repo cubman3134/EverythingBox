@@ -4125,12 +4125,20 @@ void MainWindow::showThemedXmb()
             return;
         }
         themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
-        if (themedXmbCatalogs_.size() == 1) // single catalog -> open straight into its contents
+        // Count real catalogs (navKey-bearing): the trailing Playlists folder has none, so a lone-catalog bucket
+        // still auto-opens its single catalog rather than stranding on a two-row [catalog, Playlists] column.
+        int realCatalogs = 0; QString onlyNavKey;
+        for (const QVariant& v : themedXmbCatalogs_)
+        {
+            const QString nk = v.toMap().value(QStringLiteral("navKey")).toString();
+            if (!nk.isEmpty()) { ++realCatalogs; onlyNavKey = nk; }
+        }
+        if (realCatalogs == 1) // single catalog -> open straight into its contents
         {
             themedXmbInCatalog_ = true;
             themedXmbAutoOpened_ = true;
             if (r) { r->setProperty("items", QVariantList()); r->setProperty("currentIndex", 0); r->setProperty("catLoading", true); } // clear + spinner while it loads
-            home_->activateNav(themedXmbCatalogs_[0].toMap().value(QStringLiteral("navKey")).toString());
+            home_->activateNav(onlyNavKey);
             return;
         }
         themedXmbInCatalog_ = false;
@@ -4163,7 +4171,25 @@ void MainWindow::showThemedXmb()
         if (!themedXmbInCatalog_) // the column is the catalog list -> open the chosen catalog into its items
         {
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
-            const QString navKey = themedXmbCatalogs_[itemIdx].toMap().value(QStringLiteral("navKey")).toString();
+            const QVariantMap sel = themedXmbCatalogs_[itemIdx].toMap();
+            const QString plCategory = sel.value(QStringLiteral("playlistsCategory")).toString();
+            if (!plCategory.isEmpty()) // the category-level Playlists folder -> drill its lists as a new root
+            {
+                themedXmbCatalogIndex_ = itemIdx;  // Back re-selects the Playlists row in the bucket column
+                themedXmbInCatalog_ = true;
+                themedXmbAutoOpened_ = false;       // a "catalog" nav level backs out to the bucket column
+                if (r) r->setProperty("catLoading", true); // spinner until the deferred open lands
+                // Defer the actual open one event-loop tick. openPlaylistsLevel fills the column SYNCHRONOUSLY
+                // (unlike a real catalog's async fetch); firing it inside this activation handler would race the
+                // QML nav model's own activate() transition and strand focus on the bucket column. A queued call
+                // lets the QML settle first, exactly mirroring how an async catalog's items arrive next tick.
+                QTimer::singleShot(0, this, [this, plCategory] {
+                    home_->openPlaylistsLevel(plCategory, /*asRoot*/ true);
+                    syncThemedLevels();
+                });
+                return;
+            }
+            const QString navKey = sel.value(QStringLiteral("navKey")).toString();
             if (navKey.isEmpty()) return;
             themedXmbCatalogIndex_ = itemIdx;       // remember the catalog, so Back re-selects it in the list
             themedXmbInCatalog_ = true;
