@@ -57,6 +57,22 @@ void PlayStats::addSession(const QString& identity, qint64 seconds)
     store().sync();
 }
 
+qint64 PlayStats::profileTotalSeconds()
+{
+    // Each game is a subgroup "playstats/<profile>/<sha1>" carrying last/total/sessions; sum every subgroup's
+    // /total. A profile with no play history has no subgroups -> 0. Per-profile via the active ProfileStore id.
+    const QString profile = ProfileStore::currentId();
+    const QString root = QStringLiteral("playstats/") + (profile.isEmpty() ? QStringLiteral("default") : profile);
+    QSettings& s = store();
+    s.beginGroup(root);
+    const QStringList games = s.childGroups();
+    qint64 total = 0;
+    for (const QString& g : games)
+        total += s.value(g + QStringLiteral("/total"), 0).toLongLong();
+    s.endGroup();
+    return total;
+}
+
 QString PlayStats::formatLastPlayed(qint64 epochSecs)
 {
     if (epochSecs <= 0) return QString();

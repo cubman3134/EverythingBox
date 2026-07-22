@@ -143,7 +143,13 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
         it.id = e.itemId; it.type = e.type; it.title = e.title; it.subtitle = e.subtitle;
         it.thumbnailUrl = e.thumbnailUrl; it.expandable = e.expandable;
         it.sourceAddonId = e.addonId; // per-entry addon resolution (mixed-source category playlists)
-        if (e.itemId.startsWith(QStringLiteral("steam:"))) it.mime = QStringLiteral("steamgame"); // launch natively
+        // Store-game entries mirror their console tiles so a game added to a playlist still LAUNCHES (dead before):
+        //   steam: / epic: — no url; the leaf-open builds the launcher URI from the id (steam://, com.epicgames…)
+        //   gog:          — a DRM-free exe; the resolved exe was persisted into the entry's path at add-time and
+        //                   rides back onto the tile's url, so the MONITORED launchPcExe path can run it.
+        if (e.itemId.startsWith(QStringLiteral("steam:")))     it.mime = QStringLiteral("steamgame"); // launch natively
+        else if (e.itemId.startsWith(QStringLiteral("epic:"))) it.mime = QStringLiteral("epicgame");  // launch via URI
+        else if (e.itemId.startsWith(QStringLiteral("gog:")))  { it.mime = QStringLiteral("goggame"); it.url = e.path; } // exe rides in path
         else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);
     }

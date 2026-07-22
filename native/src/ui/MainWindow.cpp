@@ -47,6 +47,7 @@
 #include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
 #include "../core/ItemMarks.h"
+#include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
 #include "ProfileDialog.h"
@@ -280,6 +281,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
+        // Consumption-stats category is NOT taken from mpv's isVideo here: an audio file with embedded cover art
+        // registers a video track (and the main MpvWidget displays it, so width>0 too), which would misfile a
+        // "listen" as a "watch". The session's kind is instead stamped by the APP at each open site (openVideoPath
+        // / playStream / IPTV queue = video; openAudio* = audio) — deterministic, no mpv cover-art quirk. See
+        // setSessionMediaKind() calls below.
         // Apply the resolved audio/subtitle sync offsets for this file (per-file override if saved, else the
         // global default). Every play path set syncKey_ beside its beginResume(); this is the single choke point
         // after load that covers them all. Re-applying each file also resets mpv's global audio-delay/sub-delay
@@ -732,6 +738,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         session_->setQueue(urls, 0, titles);
+        session_->setMediaVideo(true); // consumption-stats: kind AFTER setQueue (outgoing track flushes under its own kind)
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
                            QStringLiteral("video"), QString(), src });
     });
@@ -2290,6 +2297,7 @@ void MainWindow::openVideoPath(const QString& path)
     pdf_->persist();
     comic_->persist();
     session_->clearQueue();      // saves+clears any previous timed media (also clears syncKey_)
+    session_->setMediaVideo(true); // consumption-stats: a local video accrues "watch" seconds
     session_->beginResume(path); // track this video's position (and resume it if we've watched it before)
     syncKey_ = path;             // a local file keys its sync offsets by its own path
     stack_->setCurrentWidget(playerPage_);
@@ -2352,6 +2360,10 @@ void MainWindow::openAudio()
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(firstFi.completeBaseName(), QString(), localCoverFor(firstFi));
     session_->setQueue(sel, 0); // exactly the selected tracks, in the order the dialog returned them
+    // consumption-stats: set the kind AFTER setQueue — setQueue's internal playIndex→persistResume flushes the
+    // OUTGOING track's tail, which must accrue under ITS kind (not this audio's). No new-track heartbeat fires
+    // synchronously (mpv loads async), so the new track's first accrual still sees "audio".
+    session_->setMediaVideo(false);
     RecentStore::add({ first, firstFi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
@@ -2389,6 +2401,9 @@ void MainWindow::openAudioPath(const QString& path)
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(fi.completeBaseName(), QString(), localCoverFor(fi));
     session_->setQueue(queue, start);
+    // consumption-stats: kind AFTER setQueue — the outgoing track's flush (setQueue→playIndex→persistResume)
+    // must accrue under its own kind; the new audio track's first heartbeat (mpv loads async) still sees "audio".
+    session_->setMediaVideo(false);
     RecentStore::add({ fi.absoluteFilePath(), fi.completeBaseName(), QStringLiteral("audio"), QString() });
 }
 
@@ -2937,6 +2952,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     pdf_->persist();
     comic_->persist();
     session_->clearQueue();      // saves+clears any previous timed media
+    session_->setMediaVideo(true); // consumption-stats: a streamed video accrues "watch" seconds
     // Resume + Recent keyed by the stable id when given (a re-opened catalog stream), else by the link itself.
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
     session_->beginResume(rkey);
@@ -2968,6 +2984,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
+    session_->setMediaVideo(false); // consumption-stats: streamed audio/audiobook accrues "listen" seconds
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
     session_->setQueue({ url }, 0, { t }, rkey);
@@ -5064,6 +5081,8 @@ void MainWindow::chooseProfile(const QString& id)
     ProfileStore::setCurrent(id);
     ItemMarks::invalidate(); // drop the previous profile's marks cache NOW (no signal fires) so the fresh home
                              // filters/labels against the new profile's hidden/completion/tags, not the old one's
+    ConsumptionStats::invalidate(); // likewise drop the previous profile's stats cache so accrual/display key off
+                                    // the new profile from here on (stats are separately per-profile)
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
     // When this resolves the pre-home startup picker, showEvent already returned before its own
     // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,
@@ -6474,6 +6493,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         }
         notePlaybackStart();     // channel guard (built-in catalog play): keep the channel iff this is its pick
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
+        session_->setMediaVideo(true); // consumption-stats: a catalog movie/episode stream accrues "watch" seconds
         session_->beginResume(rkey);
         syncKey_ = rkey;         // catalog stream: key sync offsets by the stable id, not the volatile URL
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
@@ -7032,6 +7052,7 @@ void MainWindow::openSettingsHub()
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r;
         };
         act(QStringLiteral("general"),      tr("General"));
+        act(QStringLiteral("stats"),        tr("Stats"));
         act(QStringLiteral("appearance"),   tr("Appearance"));
         act(QStringLiteral("addons"),       tr("Add-ons"));
         act(QStringLiteral("downloads"),    tr("Downloads"));
@@ -7052,6 +7073,7 @@ void MainWindow::openSettingsHub()
             [this](const QString& id, const QString&) {
                 // Dispatch to the SAME handlers the classic hub connects (each routes themed/classic per mode).
                 if      (id == QStringLiteral("general"))    openGeneralSettings();
+                else if (id == QStringLiteral("stats"))      openStats();
                 else if (id == QStringLiteral("appearance")) openAppearance();
                 else if (id == QStringLiteral("addons"))     openLibrary();
                 else if (id == QStringLiteral("downloads"))  openDownloadManager();
@@ -7088,6 +7110,7 @@ void MainWindow::openSettingsHub()
             v->addWidget(b);
         };
         add(tr("General"),            [this] { openGeneralSettings(); });
+        add(tr("Stats"),              [this] { openStats(); });             // per-profile consumption stats
         add(tr("Appearance"),         [this] { openAppearance(); });        // the home theme picker
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Downloads"),          [this] { openDownloadManager(); });   // resume / retry / cancel stalled downloads
@@ -7104,6 +7127,92 @@ void MainWindow::openSettingsHub()
         add(tr("Uninstall My Media Vault…"), [this] { confirmUninstall(); }); // remove the app + all its data
     }, [this] {
         // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
+        if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
+        else stack_->setCurrentWidget(panelReturnTo_);
+    });
+}
+
+// Per-profile consumption stats (Settings ▸ Stats). Reads the ConsumptionStats rollups (watched/listened seconds,
+// pages reached) + PlayStats' games rollup (profileTotalSeconds — computed at display, PlayStats is NOT migrated),
+// then top-5 titles per media category. Per-profile by construction (both stores scope by the active profile), so
+// a profile switch shows different totals with no extra work. ONE row list feeds both surfaces: the themed
+// ThemedPanelHost present() (a hub child -> Back pops to the hub) and, in classic mode, a showPanel rendering the
+// same rows as labels. "Read" is furthest-page progress (the T1 high-water semantics), labelled as such.
+void MainWindow::openStats()
+{
+    // --- Shared row list (Info + Separator descriptors) both surfaces render -------------------------------
+    QVector<PanelRow> rows;
+    auto info = [&rows](const QString& id, const QString& label, const QString& value) {
+        PanelRow r; r.kind = PanelRow::Info; r.id = id; r.label = label; r.value = value; rows << r;
+    };
+    auto sep = [&rows](const QString& id, const QString& label) {
+        PanelRow r; r.kind = PanelRow::Separator; r.id = id; r.label = label; rows << r;
+    };
+    auto durOrNone = [](qint64 s) { return s > 0 ? PlayStats::formatDuration(s) : tr("None yet"); };
+
+    sep(QStringLiteral("stats.sep.totals"), tr("Totals"));
+    info(QStringLiteral("stats.watched"),  tr("Watched"),
+         durOrNone(ConsumptionStats::categorySeconds(QStringLiteral("video"))));
+    info(QStringLiteral("stats.listened"), tr("Listened"),
+         durOrNone(ConsumptionStats::categorySeconds(QStringLiteral("audio"))));
+    const qint64 pages = ConsumptionStats::categoryPages();
+    // "Read" is furthest-page progress (high-water pages reached), NOT pages-per-session — say so in the value.
+    info(QStringLiteral("stats.read"), tr("Read"),
+         pages > 0 ? tr("Pages reached: %1").arg(pages) : tr("None yet"));
+    info(QStringLiteral("stats.played"), tr("Played"), durOrNone(PlayStats::profileTotalSeconds()));
+
+    // Top-5 titles per media category (games live in PlayStats, no per-title join here — Playnite-parity totals).
+    auto topSection = [&](const QString& cat, const QString& heading, bool reading) {
+        const auto top = ConsumptionStats::topTitles(cat, 5);
+        if (top.isEmpty()) return;
+        sep(QStringLiteral("stats.sep.") + cat, heading);
+        int i = 0;
+        for (const auto& p : top) {
+            const QString v = reading ? tr("%n page(s)", "", int(p.second.pagesRead))
+                                      : PlayStats::formatDuration(p.second.mediaSeconds);
+            info(QStringLiteral("stats.top.") + cat + QString::number(i++),
+                 p.second.title.isEmpty() ? tr("(untitled)") : p.second.title, v);
+        }
+    };
+    topSection(QStringLiteral("video"),   tr("Most watched"),  false);
+    topSection(QStringLiteral("audio"),   tr("Most listened"), false);
+    topSection(QStringLiteral("reading"), tr("Most read"),     true);
+
+#ifdef MMV_HAVE_QML
+    // Themed mode: render the rows on the Nav Contract (ThemedPanelHost) — Info/Separator rows are non-focusable
+    // dividers, so the panel is read-only (Back pops to the hub). A hub child, exactly like openEmulatorManager.
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();   // settings-area boundary (lifetime model at openCloudSync's connect block)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        auto onBack = [this] { openSettingsHub(); };
+        if (themedPanelHost_->panelTitle() == tr("Stats"))
+            themedPanelHost_->replaceTop(tr("Stats"), rows, [](const QString&, const QString&) {}, onBack);
+        else
+            themedPanelHost_->present(tr("Stats"), rows, [](const QString&, const QString&) {}, onBack);
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        return;
+    }
+#endif
+
+    // Classic mode: the SAME rows as a scrollable label list (Separator = bold heading, Info = "label:   value").
+    // Plain text throughout (no HTML) — a QLabel only interprets entities when it heuristically detects rich text
+    // (needs a tag), so &nbsp; would render literally; real spaces + a bold QFont are unambiguous.
+    showPanel(tr("Stats"), [rows](QVBoxLayout* v) {
+        for (const PanelRow& r : rows) {
+            if (r.kind == PanelRow::Separator) {
+                auto* h = new QLabel(r.label);
+                QFont f = h->font(); f.setBold(true); h->setFont(f);
+                v->addWidget(h);
+            } else {
+                auto* lbl = new QLabel(r.value.isEmpty() ? r.label
+                                                         : r.label + QStringLiteral(":   ") + r.value);
+                lbl->setWordWrap(true);
+                v->addWidget(lbl);
+            }
+        }
+    }, [this] {
         if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
         else stack_->setCurrentWidget(panelReturnTo_);
     });

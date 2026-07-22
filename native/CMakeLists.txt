@@ -152,6 +152,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
         src/core/DownloadsStore.cpp src/core/DownloadsStore.h
@@ -272,6 +273,16 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
+
+    # ConsumptionStats store: per-profile media (watch/listen seconds) + reading (high-water pages) accrual, the
+    # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-
+    # only (a QSettings+JSON wrapper over the shared mymediavault.ini) so the probe links lean and runs under
+    # offscreen QPA. Needs ProfileStore.cpp (stats are namespaced by the active profile id).
+    add_executable(probe_stats tools/probe_stats.cpp
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_stats PRIVATE src src/core)
+    target_link_libraries(probe_stats PRIVATE Qt6::Core)
 
     # PlaylistStore category migration: the data-safety core of category-scoped playlists — a legacy
     # catalogKey-shaped blob folds to categoryKey (video/audio/game/reading via core/MediaCategories.h), one-shot
@@ -439,8 +450,10 @@ if(MYMEDIAVAULT_BUILD_APP)
 
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
-        src/media/PlaybackSession.cpp src/media/PlaybackSession.h)
-    target_include_directories(probe_playback PRIVATE src src/media)
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_playback PRIVATE src src/media src/core)
     target_link_libraries(probe_playback PRIVATE Qt6::Core)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.

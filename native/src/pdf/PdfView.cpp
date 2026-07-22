@@ -2,6 +2,7 @@
 
 #if !defined(Q_OS_ANDROID)
 #include "../core/AppPaths.h"
+#include "../core/ConsumptionStats.h"
 
 #include <QPdfDocument>
 #include <QPdfView>
@@ -178,10 +179,14 @@ void PdfView::fitWidth()
 void PdfView::updateLabel()
 {
     if (doc_->status() != QPdfDocument::Status::Ready) { pageLabel_->clear(); return; }
+    const int page1 = view_->pageNavigator()->currentPage() + 1; // 1-based current page
     pageLabel_->setText(tr("%1  —  Page %2 / %3")
                             .arg(QFileInfo(path_).fileName())
-                            .arg(view_->pageNavigator()->currentPage() + 1)
+                            .arg(page1)
                             .arg(doc_->pageCount()));
+    // Consumption stats: high-water page read (the store ignores revisits/regressions). Path-derived key +
+    // title, exactly as this reader already persists resume — the store owns the accrual math.
+    ConsumptionStats::addPagesRead(path_, page1, QFileInfo(path_).fileName());
     emit pageInfoChanged(); // mirror page moves (buttons + raw keys) into the themed chrome
 }
 

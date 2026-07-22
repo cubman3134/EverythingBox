@@ -49,7 +49,7 @@ jobs:
 
       # Build ONLY the probe harnesses (not the whole app) — this is a test job, so keep it quick.
       - name: Build probes
-        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_meta probe_gameagg probe_gamelist probe_notifier probe_m3u probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_playlists probe_importers
+        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_meta probe_gameagg probe_gamelist probe_notifier probe_m3u probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_stats probe_playlists probe_importers
 
       # Best-effort: grab a small real libretro core so the suite can prove the frontend can load one. If the
       # external buildbot is unavailable the suite just skips this check (it's advisory, never gates CI).

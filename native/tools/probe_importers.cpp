@@ -324,6 +324,49 @@ int main(int argc, char** argv)
         CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("gog:200")));
     }
 
+    // ==== PLAYLIST STORE-GAME BRANCHES (Task 2 ride-along) ================================================
+
+    // ---- 9. playlistItemsCatalog: a store game added to a playlist becomes a LAUNCHABLE tile ---------------
+    // The builder branch table: steam:/epic:/gog: entries mirror their console tiles (dead before this task);
+    // a path-only entry is a local game; an ordinary addon entry stays a plain drill item.
+    {
+        Playlist p;
+        p.name = QStringLiteral("Mixed");
+        auto add = [&](const QString& itemId, const QString& title, const QString& path, const QString& kind) {
+            PlaylistEntry e; e.itemId = itemId; e.title = title; e.type = QStringLiteral("game");
+            e.path = path; e.kind = kind; p.items.push_back(e);
+        };
+        add(QStringLiteral("steam:730"), QStringLiteral("CS"),      QString(),                     QString());
+        add(QStringLiteral("epic:Fortnite"), QStringLiteral("FN"),  QString(),                     QString());
+        add(QStringLiteral("gog:100"), QStringLiteral("Witcher"),   QStringLiteral("C:/G/w.exe"),  QString());
+        add(QStringLiteral("local-1"), QStringLiteral("Doom"),      QStringLiteral("C:/G/doom.exe"), QStringLiteral("pcgame"));
+        // A plain addon entry (no store prefix, no path) — stays a bare drill item, no launch mime.
+        { PlaylistEntry e; e.itemId = QStringLiteral("addon:movie1"); e.title = QStringLiteral("Movie");
+          e.type = QStringLiteral("movie"); p.items.push_back(e); }
+
+        const MediaCatalog cat = browse::playlistItemsCatalog(p);
+        CHECK(cat.items.size() == 5);
+
+        const MediaItem* steam = find(cat, QStringLiteral("steam:730"));
+        CHECK(steam && steam->mime == QStringLiteral("steamgame"));
+        CHECK(steam && steam->url.isEmpty());                    // launches by id (steam://), no url needed
+
+        const MediaItem* epic = find(cat, QStringLiteral("epic:Fortnite"));
+        CHECK(epic && epic->mime == QStringLiteral("epicgame"));
+        CHECK(epic && epic->url.isEmpty());                      // launches by id (com.epicgames.launcher://)
+
+        const MediaItem* gog = find(cat, QStringLiteral("gog:100"));
+        CHECK(gog && gog->mime == QStringLiteral("goggame"));
+        CHECK(gog && gog->url == QStringLiteral("C:/G/w.exe"));  // the persisted exe rides back onto the tile
+
+        const MediaItem* local = find(cat, QStringLiteral("local-1"));
+        CHECK(local && local->mime == QStringLiteral("localgame:pcgame"));
+        CHECK(local && local->url == QStringLiteral("C:/G/doom.exe"));
+
+        const MediaItem* addonItem = find(cat, QStringLiteral("addon:movie1"));
+        CHECK(addonItem && addonItem->mime.isEmpty() && addonItem->url.isEmpty()); // plain drill item, no launch
+    }
+
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }
     std::fprintf(stderr, "IMPORTERS: %d check(s) failed\n", failures);
     return 1;

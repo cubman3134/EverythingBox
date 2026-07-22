@@ -23,6 +23,10 @@ namespace PlayStats
     void markPlayed(const QString& identity);                  // stamp lastPlayed = now (call at launch)
     void addSession(const QString& identity, qint64 seconds);  // += seconds, ++sessions, lastPlayed = now
 
+    // Sum of totalSeconds across every game in the ACTIVE profile — the "Played" rollup the Stats panel shows
+    // (games are read from PlayStats at display; not migrated into ConsumptionStats). 0 when nothing was played.
+    qint64 profileTotalSeconds();
+
     QString formatLastPlayed(qint64 epochSecs); // "Today" / "Yesterday" / "3 days ago" / a date
     QString formatDuration(qint64 seconds);     // "45m" / "2h 15m" / "under a minute"
 }
