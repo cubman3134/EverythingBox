@@ -57,12 +57,11 @@ if(MYMEDIAVAULT_BUILD_APP)
     set(MMV_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSecrets.cmake")
 
-    # QML theme engine (declarative, fully themeable front end) - desktop-first. OPTIONAL so a Qt install
-    # without qtdeclarative still builds the app (the theme engine just isn't compiled). Gate its targets on
-    # TARGET Qt6::Quick. The Android build keeps the Qt-Widgets UI until QML is added to its provisioning.
-    if(NOT ANDROID)
-        find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
-    endif()
+    # QML theme engine (declarative, fully themeable front end). OPTIONAL so a Qt install without qtdeclarative
+    # still builds the app (the theme engine just isn't compiled). Gate its targets on TARGET Qt6::Quick. Runs
+    # for every platform (incl. Android) now that the kits provision qtdeclarative; a kit still missing it
+    # degrades gracefully via the STATUS message below.
+    find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
     if(TARGET Qt6::Quick AND TARGET Qt6::Qml AND TARGET Qt6::QuickWidgets)
         set(MMV_HAVE_QML ON)
         message(STATUS "MyMediaVault: QML theme engine enabled")
@@ -121,6 +120,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
         # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        # AssetBootstrap: QtCore-only first-run APK-asset extractor (D2 Task 2). UNCONDITIONAL — main.cpp
+        # calls it on Android and under the MMV_TEST_BOOTSTRAP_SRC desktop override; compiles in every config.
+        src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
@@ -237,9 +239,18 @@ if(MYMEDIAVAULT_BUILD_APP)
     # changed()-fires-once assert.
     add_executable(probe_formfactor tools/probe_formfactor.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-        src/core/Settings.cpp src/core/Settings.h)
+        src/core/Settings.cpp src/core/Settings.h
+        src/core/LifecyclePolicy.h)
     target_include_directories(probe_formfactor PRIVATE src src/theme2 src/core)
     target_link_libraries(probe_formfactor PRIVATE Qt6::Core Qt6::Test)
+
+    # Android asset bootstrap core: first-run extraction of the APK-bundled themes2/ + addons/ into the
+    # writable data dir (D2 Task 2). QtCore-only (no Quick/Widgets) like FormFactor, so the probe links lean
+    # and runs under offscreen QPA in CI. Desktop-verifiable: run() is a pure fn of (sourceRoot, dataDir, ver).
+    add_executable(probe_bootstrap tools/probe_bootstrap.cpp
+        src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h)
+    target_include_directories(probe_bootstrap PRIVATE src src/core)
+    target_link_libraries(probe_bootstrap PRIVATE Qt6::Core)
 
     # Console harness for the PDF -> reflow-text reader (needs QtPdf).
     add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
@@ -420,12 +431,31 @@ if(MYMEDIAVAULT_BUILD_APP)
     if(ANDROID)
         # versionCode is a monotonic integer: major*10000 + minor*100 + patch (0.2.0 -> 200).
         math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*10000 + ${PROJECT_VERSION_MINOR}*100 + ${PROJECT_VERSION_PATCH}")
+        # Stage the APK package-source overlay in the BUILD tree — never mutate the committed native/android/.
+        # We copy the committed overlay verbatim, then add assets/mmv/ = the stock themes2/ + every first-party
+        # addon dir. androiddeployqt reads QT_ANDROID_PACKAGE_SOURCE_DIR and bundles its assets/ into the APK's
+        # read-only assets; AssetBootstrap::run("assets:/mmv", ...) extracts them into the writable data dir on
+        # first launch (main.cpp). Staged at CONFIGURE time so a fresh configure always mirrors the current tree.
+        # NOTE: not testable locally (no Android toolchain) — inert on desktop; Task 4's CI run exercises it.
+        set(MMV_ANDROID_PKG_DIR "${CMAKE_CURRENT_BINARY_DIR}/android-package")
+        file(REMOVE_RECURSE "${MMV_ANDROID_PKG_DIR}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/android/" DESTINATION "${MMV_ANDROID_PKG_DIR}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/themes2" DESTINATION "${MMV_ANDROID_PKG_DIR}/assets/mmv")
+        # Ship every first-party addon dir under native/addons/ (each is a self-contained manifest.json + main.js).
+        file(GLOB _mmv_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
+        foreach(_addon ${_mmv_addon_dirs})
+            if(IS_DIRECTORY "${_addon}")
+                file(COPY "${_addon}" DESTINATION "${MMV_ANDROID_PKG_DIR}/assets/mmv/addons")
+            endif()
+        endforeach()
+        message(STATUS "Android assets staged at ${MMV_ANDROID_PKG_DIR}/assets/mmv (themes2 + first-party addons)")
+
         set_target_properties(mymediavault PROPERTIES
             QT_ANDROID_MIN_SDK_VERSION 24
             QT_ANDROID_TARGET_SDK_VERSION 34
             QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
             QT_ANDROID_VERSION_CODE "${MMV_ANDROID_VERSION_CODE}"
-            QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android") # custom manifest/res/assets overlay
+            QT_ANDROID_PACKAGE_SOURCE_DIR "${MMV_ANDROID_PKG_DIR}") # build-staged manifest/res/assets overlay
         # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). libmpv pulls
         # in its ffmpeg stack (libav*/libsw*), so bundle every .so sitting next to MPV_LIBRARY, not just it.
         if(MPV_LIBRARY)

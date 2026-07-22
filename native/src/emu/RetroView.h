@@ -45,6 +45,7 @@ public:
                   const QString& coreName = QString(), QString* error = nullptr);
     void stop();
     bool running() const { return running_; }
+    bool paused()  const { return paused_; }   // freeze state (Esc menu + OS-lifecycle pause query)
 
     // Quick save/load (F2/F4) to the current slot under <app>/states. Return false (with *error set) if the
     // core can't serialize, nothing is running, or file I/O fails.

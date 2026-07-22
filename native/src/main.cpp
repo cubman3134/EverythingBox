@@ -5,6 +5,7 @@
 #include <QtQml>
 #endif
 #include "core/AppPaths.h"
+#include "core/AssetBootstrap.h"
 #include <QIcon>
 #include <QFile>
 #include <QFileInfo>
@@ -184,6 +185,20 @@ int main(int argc, char** argv)
         "QListWidget::item,QListView::item{min-height:34px;}"
         "QScrollBar:vertical{width:14px;}QScrollBar:horizontal{height:14px;}"));
 
+    // First-run asset extraction (D2 Task 2). A fresh Android install boots into an empty AppPaths::dataDir()
+    // with the stock themes2/ + first-party addons/ only inside the read-only APK, so extract them before
+    // AddonManager/ThemeEngine (built by MainWindow below) read those dirs off disk. On desktop this is a
+    // no-op UNLESS MMV_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
+    // desktop-verifiable without an Android toolchain (see probe_bootstrap).
+#if defined(Q_OS_ANDROID)
+    AssetBootstrap::run(QStringLiteral("assets:/mmv"), AppPaths::dataDir(),
+                        QString::fromLatin1(kAppVersion));
+#else
+    if (qEnvironmentVariableIsSet("MMV_TEST_BOOTSTRAP_SRC"))
+        AssetBootstrap::run(qEnvironmentVariable("MMV_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
+                            QString::fromLatin1(kAppVersion));
+#endif
+
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
 
@@ -214,8 +229,18 @@ int main(int argc, char** argv)
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));
         qApp->installEventFilter(new FirstPaintProbe(&window));
     }
+#ifdef Q_OS_ANDROID
+    // Android has no windowed mode: the app is always fullscreen. showFullScreen() also drives Qt 6.8's
+    // QtActivityDelegate into sticky-immersive — it maps the top-level Qt::WindowFullScreen state onto the
+    // Android WindowInsetsController (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, API 30+) / the legacy
+    // SYSTEM_UI_FLAG_IMMERSIVE_STICKY, so the status + navigation bars stay hidden over video and the
+    // emulator and auto-re-hide after a swipe, with NO hand-rolled JNI and no custom manifest theme. See
+    // .superpowers/sdd/d2-task-3-report.md for the investigation.
+    window.showFullScreen();
+#else
     if (Settings::startFullscreen()) window.showFullScreen();
     else                             window.show();
+#endif
     // A zero-timer fires after the event loop's first pass (first paint), so startup.total spans launch->visible.
     QTimer::singleShot(0, [] { PerfTrace::end(QStringLiteral("startup.total")); });
     window.raise();

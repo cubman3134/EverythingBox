@@ -32,7 +32,7 @@ public:
     int     hitClamp(int basePx) const { return qMax(int(basePx * uiScale()), minHitPx()); }
 
     void    refresh();             // re-read Settings::displayMode(), re-resolve, emit changed() if different
-    static Mode resolveAuto();     // Phase 1: always Desktop on desktop platforms
+    static Mode resolveAuto();     // desktop->Desktop; Android->Tv(leanback)/Mobile(touch) via UiModeManager
 signals:
     void changed();
 private:

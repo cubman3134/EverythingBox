@@ -1,5 +1,9 @@
 #include "FormFactor.h"
 #include "../core/Settings.h"   // relative (matches ThemeEngine's ../core/… convention): resolves in the app build too
+#ifdef Q_OS_ANDROID
+#include <QCoreApplication>     // QNativeInterface::QAndroidApplication::context()
+#include <QJniObject>           // JNI call into Android's UiModeManager for leanback (TV) detection
+#endif
 
 // Mode -> adaptivity tokens (spec: subsystem D §1). The Desktop row is IDENTITY by contract — uiScale 1.0,
 // minHitPx 0, safeAreaFrac 0.0, density 1.0 — so every consumer that multiplies/insets by these is a
@@ -18,11 +22,39 @@ FormFactor& FormFactor::instance()
     return s;
 }
 
-// Phase 1: desktop builds always resolve Desktop. Android branches land in Phase 2 (this is the single
-// seam a platform-detection change touches).
+// Auto resolution (the single platform-detection seam):
+//   Desktop builds  -> always Desktop (identity tokens; probe_formfactor pins this).
+//   Android builds  -> ask Android's UiModeManager: UI_MODE_TYPE_TELEVISION (leanback) => Tv,
+//                      everything else (touchscreen phones/tablets) => Mobile.
+// QGuiApplication screen metrics / platform capabilities are NOT a reliable leanback signal, so we query
+// the platform service directly over JNI. If the context/service isn't reachable we fall back to Mobile —
+// the safe default on the only non-TV Android form factor (a phone/tablet).
 FormFactor::Mode FormFactor::resolveAuto()
 {
+#ifdef Q_OS_ANDROID
+    // Configuration.UI_MODE_TYPE_TELEVISION == 4 (stable Android API constant).
+    constexpr jint UI_MODE_TYPE_TELEVISION = 4;
+    QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (context.isValid())
+    {
+        QJniObject svcName = QJniObject::getStaticObjectField<jstring>(
+            "android/content/Context", "UI_MODE_SERVICE");
+        if (svcName.isValid())
+        {
+            QJniObject uiModeManager = context.callObjectMethod(
+                "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;", svcName.object<jstring>());
+            if (uiModeManager.isValid())
+            {
+                const jint modeType = uiModeManager.callMethod<jint>("getCurrentModeType");
+                if (modeType == UI_MODE_TYPE_TELEVISION)
+                    return Mode::Tv;
+            }
+        }
+    }
+    return Mode::Mobile; // touchscreen phone/tablet (or context not yet reachable) -> Mobile
+#else
     return Mode::Desktop;
+#endif
 }
 
 void FormFactor::refresh()

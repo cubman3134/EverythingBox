@@ -12,6 +12,7 @@
 #include <memory>
 #include <functional>
 #include "../addons/AddonModels.h"
+#include "../core/LifecyclePolicy.h"
 
 class MpvWidget;
 class RetroView;
@@ -79,7 +80,10 @@ private slots:
     void updateDownloadRow(const QString& id); // refresh one job's progress bar/label in place
     // Themed Downloads: a job's Progress row is activated to open a NavMenu action chooser (Pause/Resume/Retry/
     // Cancel/Remove per the SAME state logic classic uses for its per-job buttons), mirrored on the panel graph.
+    // Themed-only (its body uses the QML panel host); guarded so moc emits no metacall for it in a no-QML build.
+#ifdef MMV_HAVE_QML
     void showDownloadActionMenu(const QString& id);
+#endif
     // Window-level notification overlay for download/resolve progress + errors. A child-widget overlay owned by
     // Notifier, floating over the central area and raised above the current page so it shows over ANY view
     // (the QQuickWidget themed home and the libmpv QOpenGLWidget both composite with sibling widgets). Driven by
@@ -117,6 +121,12 @@ protected:
     void showEvent(QShowEvent* event) override;             // grab keyboard focus on first show
     void changeEvent(QEvent* event) override;               // re-focus the themed view when the window reactivates
     void closeEvent(QCloseEvent* event) override;           // push state to Drive on exit
+
+    // Android OS lifecycle: on backgrounding, freeze a running core / playing video; on foregrounding, resume
+    // ONLY what we froze (LifecyclePolicy). Left unguarded (a probe/test can call it directly); the connect
+    // in the ctor is gated on Q_OS_ANDROID so desktop app-state churn (alt-tab) never touches playback.
+    void onApplicationStateChanged(Qt::ApplicationState state);
+    mmv::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
 
 private:
     class DownloadManager* dm_ = nullptr;

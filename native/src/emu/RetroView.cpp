@@ -1614,7 +1614,10 @@ void RetroView::keyPressEvent(QKeyEvent* e)
     if (e->isAutoRepeat()) return;
 
     // Esc toggles the in-game pause menu; within the slot grid it steps back to the main page first.
-    if (e->key() == Qt::Key_Escape)
+    // Qt::Key_Back is Android's hardware/remote Back (TV remote, phone gesture): route it exactly like Esc so
+    // in-game Back opens the pause menu and, while the menu is up, closes it — never falls through to the game
+    // (where it would be a dead key) or gets swallowed by the modal-menu branch below.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back)
     {
         if (menu_ && menu_->isVisible() && slotsMode_) { showMainMenu(); return; }
         toggleMenu(); return;

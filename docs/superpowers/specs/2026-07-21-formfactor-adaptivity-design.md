@@ -1,7 +1,7 @@
 # Subsystem D: Form-Factor Adaptivity (TV + Mobile) — Design
 
 **Date:** 2026-07-21
-**Status:** Phase 1 complete: TV + Mobile modes on desktop; auto+override; touch on the contract. Phase 2 (Android provisioning) next.
+**Status:** Phase 2 built + emulator-verified: Android APKs (arm64 + x86_64) green in CI; themed home boots on Android (assets bootstrap proven), auto form-factor detection live, touch/OSK/Back/lifecycle smoke passed (x86_64 emulator). TV-DEVICE PASS PENDING (user-deferred) — leanback launcher/banner, TV auto-detect, remote walk, video+core playback on hardware remain unverified.
 **Origin:** The UI-refactor request's last clause — "All UI and Player UI should be
 intuitive on all systems such as tv or mobile" — after subsystems A (Nav Contract)
 and B (themed surfaces everywhere, themed default ON) closed.
@@ -199,3 +199,71 @@ Non-blocking items surfaced during Phase 1; carry into Phase 2 planning or a pol
 - **Mobile tap-interrupting-flick one-tap activation** — a tap that interrupts an
   in-progress flick may activate the item under the finger. Wants a real-device check with
   the Carousel left-edge item to confirm it doesn't mis-fire an activation.
+
+## Phase 2 follow-ups (deferred from Tasks 1–6 + emulator verification)
+
+Phase 2 built the Android provisioning and proved it on the x86_64 emulator (APKs green in
+CI on both ABIs; themed home boots, `assets:/mmv` extraction proven on-device, auto→Mobile,
+touch/OSK/Back/lifecycle smoke passed). The **TV-device pass is user-deferred** ("close it out
+for now until we can test more") — the items below carry the unverified surface and the
+structural debt into a later hardware session.
+
+**TV-device pass (deferred — the whole leanback path is unverified):**
+
+- **TV-device verification runbook (make it turnkey later).** No Android-TV **x86_64** system
+  image exists for any API (TV images are only `x86` 32-bit or `arm64-v8a`), so the emulator
+  can only run a TV-**res** phone image — the real leanback launcher/banner, TV auto-detect,
+  remote D-pad walk, and native video+core playback were never exercised. When TV hardware is
+  available: enable ADB debugging on the device → `adb connect <device-ip>:5555` (or USB) →
+  `adb install -r MyMediaVault-android-arm64.apk` (TV devices are arm64; the arm64 APK from the
+  green CI run is the artifact) → confirm the app appears in the **leanback launcher row** (the
+  320×180 banner + `LEANBACK_LAUNCHER` category are already in the manifest, Task 3) →
+  `FormFactor::resolveAuto()` should return **Tv** via `UiModeManager.getCurrentModeType() ==
+  UI_MODE_TYPE_TELEVISION` → full remote D-pad walk of the themed UI, one movie via libmpv, one
+  NES core with a physical controller. This is the Phase-2 success criterion that remains open.
+
+**Android structural / packaging debt (surfaced during Tasks 4–6):**
+
+- **SDL2 controller on Android (SDLActivity).** SDL2-for-Android (gamepad) is still omitted from
+  the APK (Task 4). Physical-controller input on Android needs the SDLActivity/JNI integration;
+  v1 relies on remote D-pad → Qt keys and the on-screen virtual pad. Wire SDL2 when a real pad
+  path is wanted on-device.
+- **APK release signing.** Both APKs are **debug (unsigned)** (Task 4). Release distribution
+  needs a keystore + signing config in `release.yml` before any non-dev install.
+- **SAF (Storage Access Framework) folder picking.** Android scoped storage means user library
+  folders should be chosen via SAF rather than raw filesystem paths; only the minimal storage
+  access needed to boot is in place. Out of scope for the emulator pass; needed for real
+  user-library use on-device.
+- **CloudSync desktop.ini path-rewrite hazard.** CloudSync's Windows `desktop.ini` path-rewrite
+  handling is a desktop artifact; validate/exclude it on the Android sync path so a Windows-only
+  hidden file is never written into `AppPaths::dataDir()` on Android.
+
+**Confirmed low-severity / robustness follow-ups:**
+
+- **Mobile "back-at-root" overlay clipped (LOW, emulator finding #5).** Pressing `KEYCODE_BACK`
+  at the home root brings up a right-anchored menu/confirm overlay that renders mostly clipped
+  beyond the right edge on the 1080×2400 phone aspect (only a sliver + one button visible; a
+  swipe did not pull it in). All primary screens lay out correctly — isolated overlay-positioning
+  bug in Mobile mode. Fold into the mobile-layout pass. Evidence:
+  `docs/superpowers/verification/2026-07-21-android/d2t6fix-menu.png`, `…-drawer.png`.
+- **`resolveAuto()` JNI missing exception check (defensive).** The `Q_OS_ANDROID` branch of
+  `FormFactor::resolveAuto()` calls `getSystemService` / `getCurrentModeType` via `QJniObject`
+  without a `QJniEnvironment::checkAndClearExceptions()` after the calls. It works (and falls
+  back to Mobile on an invalid object), but a pending JNI exception should be cleared defensively
+  so a later JNI call isn't tripped by a leftover pending exception.
+- **libc++ `find | head` fragility in `release.yml`.** The "Provide libmpv" step locates the NDK
+  runtime with `find "$ANDROID_NDK_ROOT" -path "*/$TRIPLE/libc++_shared.so" | head -1` to swap in
+  jdtech's newer libc++ (fix for the pre-main `__from_chars_floating_point` UnsatisfiedLinkError).
+  A `head -1` over an unordered `find` is order-fragile if the NDK layout ever ships more than one
+  match per triple; pin the expected path or assert a single match.
+- **Immersive re-assert after IME (Task 3).** Qt re-applies fullscreen system-UI on window focus;
+  if a specific device ROM drops the immersive flags after an IME/permission dialog, a re-assert
+  on `ApplicationActive` may be needed. Left out pending device evidence (avoid speculative JNI) —
+  revisit on the TV/phone hardware pass.
+- **Screenshot hygiene.** The Task-6 fix round committed 14 verification PNGs to the **repo root**;
+  they were relocated to `docs/superpowers/verification/2026-07-21-android/` (byte-identical
+  duplicates dropped) during close-out. Verification screenshots belong under
+  `docs/superpowers/verification/<date>-<topic>/`, never the repo root; earlier-phase `b2t*`/`d1t*`
+  root PNGs remain untracked session artifacts (left uncommitted).
+- **Play Store packaging — out of scope** (spec non-goal, unchanged): AAB packaging, Play signing,
+  and store metadata are explicitly not part of this subsystem.

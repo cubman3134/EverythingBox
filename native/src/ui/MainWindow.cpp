@@ -243,6 +243,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     player_ = new MpvWidget(this);
     retro_ = new RetroView(this);
     if (retro_->gamepad()) mwLog(QString::fromStdString(retro_->gamepad()->describeControllers()));
+
+    // Android OS lifecycle: when the app is backgrounded, freeze a running core / playing video (battery +
+    // audio focus), and resume ONLY what we froze on return (onApplicationStateChanged -> LifecyclePolicy).
+    // Android-only: on desktop, applicationStateChanged fires on every alt-tab, which must NOT pause playback.
+    // The handler itself is unguarded so a probe/test can drive it directly.
+#ifdef Q_OS_ANDROID
+    connect(qApp, &QGuiApplication::applicationStateChanged,
+            this, &MainWindow::onApplicationStateChanged);
+#endif
     book_ = new EbookView(this);
     pdf_ = new PdfView(this);
     comic_ = new ComicView(this);
@@ -266,7 +275,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         PerfTrace::end(QStringLiteral("open.audio"));
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
+#ifdef MMV_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
+#endif
         if (!subCtx_.active) return;
         subCtx_.active = false; // one-shot per open
         if (hasSub || !isVideo) return;
@@ -441,10 +452,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         QWidget* w = stack_->currentWidget();
         // The readers are wrapped in their themed chrome hosts, so the stack page is the host (or the bare
         // reader without QML) — treat both as content so full-screen memory works in either build.
-        const bool content = (w == retro_ || w == playerPage_ || w == emuPage_
-                              || w == book_ || w == pdf_ || w == comic_
-                              || (readerHost_ && w == readerHost_) || (pdfHost_ && w == pdfHost_)
-                              || (comicHost_ && w == comicHost_));
+        bool content = (w == retro_ || w == playerPage_ || w == emuPage_
+                        || w == book_ || w == pdf_ || w == comic_);
+#ifdef MMV_HAVE_QML
+        content = content || (readerHost_ && w == readerHost_) || (pdfHost_ && w == pdfHost_)
+                          || (comicHost_ && w == comicHost_);
+#endif
         if (content && !inContent_) fsBeforeContent_ = isFullScreen();
         inContent_ = content;
     });
@@ -720,7 +733,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         themedAudioCurrent_ = current;
         // Themed-mode audio: the QML now-playing page is the surface (mpv plays invisibly) — never show the
         // classic player page. VIDEO queues (IPTV) and classic-mode audio keep the playlist_ + player page.
+#ifdef MMV_HAVE_QML
         if (themedAudioSession_) { showThemedAudioPage(); pushThemedAudioQueue(); return; }
+#endif
         playlist_->clear();
         for (const QString& t : titles) playlist_->addItem(t);
         playlist_->setCurrentRow(current);
@@ -733,7 +748,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         playlist_->setCurrentRow(i);
         themedAudioCurrent_ = i;
         themedAudioPaused_ = false;                    // a new track auto-plays
+#ifdef MMV_HAVE_QML
         if (themedAudioSession_) pushThemedAudioQueue(); // move the highlighted queue row on the themed page
+#endif
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
     });
     connect(session_, &PlaybackSession::queueCleared, this,
@@ -1091,13 +1108,13 @@ void MainWindow::sendNavKey(int key)
     // 4.2. The themed settings-panel host is a QQuickWidget too — hand it the key; SettingsPanel.qml's Keys
     //      handler drives its NavGraph (arrows / Enter) AND its own Back (nav.back() pops one panel level).
     if (themedPanelHost_ && cur == themedPanelHost_) { deliver(themedPanelHost_->quickWidget(), key); return; }
-#endif
     // 4.5. The themed reader hosts: hand the key to the wrapped reader widget — its installed chrome event
     //      filter arbitrates (drive the graph while the chrome is visible, reveal on Up, else let the reader
     //      page/zoom). Back is caught by that same filter, so this covers the reader's Back rule too.
     if (readerHost_ && cur == readerHost_) { deliver(book_,  key); return; }
     if (pdfHost_    && cur == pdfHost_)    { deliver(pdf_,   key); return; }
     if (comicHost_  && cur == comicHost_)  { deliver(comic_, key); return; }
+#endif
     // 5. The one Back rule: the controller's Back (B) / Start map to Backspace / Escape, and both "go back"
     //    on every widget screen exactly like the keyboard does — previous screen, or the pause menu at the
     //    home root. (Overlays/popups/modals above already consumed their own Back.)
@@ -1134,6 +1151,30 @@ void MainWindow::sendNavKey(int key)
     deliver(w, key);
 }
 
+// Android OS lifecycle handler (connected only under Q_OS_ANDROID; see the ctor). Backgrounding the app must
+// freeze a running emulator core and any playing video so they don't burn battery / hold audio focus while
+// off-screen; returning to the foreground resumes ONLY what we froze. The remember-and-restore decision is
+// the pure LifecyclePolicy, so "a user-paused video stays paused on return" is enforced there (and pinned by
+// probe_formfactor). Unguarded so a probe/test can invoke it directly with any state.
+void MainWindow::onApplicationStateChanged(Qt::ApplicationState state)
+{
+    if (state == Qt::ApplicationActive)
+    {
+        const auto act = lifecycle_.onResume();
+        if (act.core  && retro_)  retro_->setPaused(false);
+        if (act.video && player_) player_->setPaused(false);
+        return;
+    }
+    // Suspended / Inactive / Hidden are all "leaving the foreground" on Android.
+    const bool coreRunning = retro_ && retro_->running();
+    const bool corePaused  = retro_ && retro_->paused();
+    const bool videoActive = stack_ && stack_->currentWidget() == playerPage_;
+    const bool videoPaused = player_ && player_->isPaused();
+    const auto act = lifecycle_.onSuspend(coreRunning, corePaused, videoActive, videoPaused);
+    if (act.core  && retro_)  retro_->setPaused(true);
+    if (act.video && player_) player_->setPaused(true);
+}
+
 // The one Back rule for the whole app: Escape, Backspace and the controller's Back all call this, so a
 // "go back" gesture behaves identically on every screen — it always takes you to the previous screen, and
 // only at the home root does it open the app pause menu (Resume / Exit). Anything layered on top (an
@@ -1149,8 +1190,10 @@ void MainWindow::goBack()
     // Themed (QML) home/browse: drive its NavGraph back stack, exactly as the QML's own nav.back() does. The
     // graph's levels (catalog + browse drills) unwind one at a time; its rootBack (empty stack) fires the
     // screen's root action (the pause menu on the home, the themed home from a browse view).
+#ifdef MMV_HAVE_QML
     if (cur == themedHome_ || cur == themedBrowse_)
         if (NavGraph* g = ThemeEngine::navGraph(cur)) { g->back(); return; }
+#endif
     // Classic home: pop a drill level, or (at the root) emit backRequested -> the pause menu.
     if (cur == home_) { home_->goBack(); return; }
     // Settings / dialog panels: their header Back = the previous panel or the screen we came from.
@@ -1197,8 +1240,11 @@ void MainWindow::goBack()
 void MainWindow::captureReaderOrigin()
 {
     QWidget* cur = stack_->currentWidget();
-    const bool inReader = (readerHost_ && cur == readerHost_) || (pdfHost_ && cur == pdfHost_)
-                       || (comicHost_ && cur == comicHost_) || cur == book_ || cur == pdf_ || cur == comic_;
+    bool inReader = (cur == book_ || cur == pdf_ || cur == comic_);
+#ifdef MMV_HAVE_QML
+    inReader = inReader || (readerHost_ && cur == readerHost_) || (pdfHost_ && cur == pdfHost_)
+                        || (comicHost_ && cur == comicHost_);
+#endif
     if (!inReader) readerOrigin_ = cur;
 }
 
@@ -1774,7 +1820,12 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // Backspace before this (so typing still deletes); its Escape reaching here still means "leave", which is
     // right. The subtitle overlay (handled just below) and the emulator (consumes Esc itself) are the
     // exceptions that manage their own Back. F11 still toggles full screen independently.
-    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace)
+    // Qt::Key_Back is Android's hardware/gesture Back: route it into the SAME unified Back so it lands on the
+    // previous screen and, at the home root, opens the exit-confirm pause menu — never an instant app kill. It
+    // is a distinct key from Backspace, so it never deletes text and is never treated as "typing" below. On
+    // desktop the media/browser Back key (VK_BROWSER_BACK on Windows, XF86Back on X11) also maps to Key_Back;
+    // handling it here as "go back" is the intended behavior, so this branch is not Android-only.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Back)
     {
         QWidget* fw = focusWidget();
         // Backspace belongs to a text widget only while it's actually being INTERACTED with (a live cursor,
@@ -1820,7 +1871,7 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         int idx = col.indexOf(fw);
         switch (e->key())
         {
-        case Qt::Key_Escape: case Qt::Key_Backspace: hideSubtitleMenu(); return;
+        case Qt::Key_Escape: case Qt::Key_Backspace: case Qt::Key_Back: hideSubtitleMenu(); return;
         case Qt::Key_Down: if (!col.isEmpty()) col[qMin(idx < 0 ? 0 : idx + 1, col.size() - 1)]->setFocus(Qt::TabFocusReason); return;
         case Qt::Key_Up:   if (!col.isEmpty()) col[qMax(idx < 0 ? 0 : idx - 1, 0)]->setFocus(Qt::TabFocusReason); return;
         case Qt::Key_Left: if (!subLeftCol_.isEmpty()) subLeftCol_[qBound(0, idx < 0 ? 0 : idx, subLeftCol_.size() - 1)]->setFocus(Qt::TabFocusReason); return;
@@ -6218,8 +6269,10 @@ void MainWindow::updateBackgroundMusic()
 {
     if (!bgm_) return;
     QWidget* w = stack_->currentWidget();
-    const bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_
-                       || w == themedPanelHost_);
+    bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
+#ifdef MMV_HAVE_QML
+    menu = menu || (w == themedPanelHost_);
+#endif
     bgm_->setActive(menu);
 }
 
@@ -6273,9 +6326,13 @@ void MainWindow::openSettingsHub()
     if (!parentalUnlock(tr("Enter the parental PIN to open Settings."))) return;
     // Entering the settings area from a real page: remember it so the top-level Back returns there. (Coming back
     // from a child panel — classic panelPage_ or the themed host — must NOT clobber the remembered return page.)
-    if (stack_->currentWidget() != panelPage_
-        && stack_->currentWidget() != static_cast<QWidget*>(themedPanelHost_))
-        panelReturnTo_ = stack_->currentWidget();
+    QWidget* cw = stack_->currentWidget();
+    bool fromPanel = (cw == panelPage_);
+#ifdef MMV_HAVE_QML
+    fromPanel = fromPanel || (cw == themedPanelHost_);
+#endif
+    if (!fromPanel)
+        panelReturnTo_ = cw;
 
 #ifdef MMV_HAVE_QML
     // Themed mode: render the hub on the Nav Contract (ThemedPanelHost) instead of the classic widget panel. The
@@ -8555,7 +8612,9 @@ void MainWindow::onInputCapturePadTick()
 bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
 {
     if (!remap_.active) return false;
-    if (e->key() == Qt::Key_Escape) { endInputCapture(/*cancelled*/ true); return true; }
+    // Esc cancels; Key_Back (Android/TV-remote Back, which has no Escape) is accepted as a cancel alias so a
+    // remote user can always back out of capture.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back) { endInputCapture(/*cancelled*/ true); return true; }
     if (remap_.keyboard)
     {
         Keymap* keys = retro_ ? retro_->keymap() : nullptr;
@@ -8615,7 +8674,9 @@ void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
     session_->setDuration(seconds);
+#ifdef MMV_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
+#endif
     // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
     // is essentially the end (treat a near-finished file as "watched" and start it fresh).
     const double at = session_->takeResumeSeek(); // one-shot
@@ -8633,11 +8694,13 @@ void MainWindow::onPosition(double seconds)
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
     // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.
+#ifdef MMV_HAVE_QML
     if (themedAudioSession_)
     {
         const int sec = int(seconds);
         if (sec != themedAudioPushSec_) { themedAudioPushSec_ = sec; updateThemedAudioProgress(); }
     }
+#endif
 }
 
 void MainWindow::onSeekReleased()
