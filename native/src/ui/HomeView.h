@@ -74,7 +74,11 @@ public:
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
     void requestThemedMeta(int browseIndex); // INSTANT: local (session cache / gamelist / MetaCache) art + facts
     void enrichThemedMeta();                  // DEBOUNCED: online scrape + achievements + addon /meta for that row
-    void playThemedLeaf(int browseIndex);
+    // routeHint (0=default, 1=force built-in, 2=force external) is a one-off external-player override from a
+    // detail action: for a catalog leaf it is stamped on the resolved MediaItem so it rides the async resolve
+    // chain leak-free (a failed resolve never emits the item); local/recents leaves resolve synchronously and
+    // are handled by MainWindow's consume-once member instead, so the hint is a no-op for them.
+    void playThemedLeaf(int browseIndex, int routeHint = 0);
     void downloadThemedLeaf(int browseIndex);      // resolve + queue the browse-item to download (no play)
     void favoriteThemedLeaf(int browseIndex);
     bool isThemedLeafFavorite(int browseIndex) const;

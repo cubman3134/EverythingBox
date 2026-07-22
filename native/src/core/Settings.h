@@ -109,6 +109,15 @@ namespace Settings
     QString inputScope();
     void setInputScope(const QString& systemId);
 
+    // External-player handoff (Stremio-style): which player takes over from the built-in libmpv one, as a
+    // stable id string — "builtin" (default) | "vlc" | "mpc" | "custom" | "android". Any unknown/empty value
+    // is treated as "builtin" by ExternalPlayer::configuredKind(). externalPlayerPath is the user-picked exe
+    // for the "custom" kind (ignored otherwise).
+    QString externalPlayer();                       // key "player/external", default "builtin"
+    void    setExternalPlayer(const QString& id);
+    QString externalPlayerPath();                   // key "player/externalPath"; custom-kind exe
+    void    setExternalPlayerPath(const QString& path);
+
     QString coreFor(const QString& systemId);                       // "" if the user hasn't chosen one
     void setCoreFor(const QString& systemId, const QString& core);
 

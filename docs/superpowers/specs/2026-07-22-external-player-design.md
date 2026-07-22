@@ -1,7 +1,7 @@
 # External Video Player Handoff (Stremio-style) — Design
 
 **Date:** 2026-07-22
-**Status:** Approved design (user chose Setting + per-play menu, Desktop + Android); plan next.
+**Status:** Complete: desktop verified (setting, one-off both directions, restricted gating, failure fallback); Android Intent code in place, device-unverified (rides the pending TV/emulator session).
 **Origin:** User request — "handling for external video player like in stremio, etc."
 
 ## Decisions (user-set via scoping questions)

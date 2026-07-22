@@ -123,6 +123,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
         src/core/SyncOffsets.cpp  src/core/SyncOffsets.h  # player audio/sub sync-offset store (Task 2 wires the card onto it)
+        src/core/ExternalPlayer.cpp src/core/ExternalPlayer.h # external-player handoff (VLC/MPC/custom/Android intent); Task 2 routes onto it
         # FormFactor: QtCore-only mode authority. UNCONDITIONAL — Settings.cpp + RetroView.cpp call
         # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
@@ -258,6 +259,18 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SyncOffsets.cpp src/core/SyncOffsets.h)
     target_include_directories(probe_sync PRIVATE src src/core)
     target_link_libraries(probe_sync PRIVATE Qt6::Core)
+
+    # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
+    # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire
+    # onto. QtCore-only (QProcess/QFileInfo/QSettings), so the probe links lean and runs under offscreen QPA.
+    # Needs Settings.cpp (externalPlayer()/externalPlayerPath() accessors); FormFactor.cpp because Settings.cpp
+    # references FormFactor::instance() (virtualPadEnabled).
+    add_executable(probe_extplayer tools/probe_extplayer.cpp
+        src/core/ExternalPlayer.cpp src/core/ExternalPlayer.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_extplayer PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_extplayer PRIVATE Qt6::Core)
 
     # Android asset bootstrap core: first-run extraction of the APK-bundled themes2/ + addons/ into the
     # writable data dir (D2 Task 2). QtCore-only (no Quick/Widgets) like FormFactor, so the probe links lean

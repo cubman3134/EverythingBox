@@ -11,6 +11,7 @@
 #include "../core/PcGameStore.h"
 #include "../core/PlayStats.h"
 #include "../core/ProfileStore.h"
+#include "../core/ExternalPlayer.h"
 #include "../core/FavoritesStore.h"
 #include "../core/PlaylistStore.h"
 #include "../core/Theme.h"
@@ -3107,15 +3108,39 @@ QVariantMap HomeView::themedDetailData(int idx)
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
+    // External-player one-off actions, only on leaves that resolve to VIDEO playback (audio/readers/games stay
+    // built-in per spec) and only when the profile isn't restricted. The two pills have DISTINCT gates:
+    //   * "Open in external player" — shown whenever a handoff target EXISTS at all (anyTarget(): a Custom path
+    //     set OR a player detected), REGARDLESS of the default. This is the core one-off: it must appear even
+    //     when the default is the built-in player (the Stremio hand-off case).
+    //   * "Play with built-in player" — the alternative, shown only when the default IS an external player
+    //     (available()), so you can override a single item back to built-in.
+    static const QSet<QString> kVideoTypes = {
+        QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"),
+        QStringLiteral("episode"), QStringLiteral("video"), QStringLiteral("link") };
+    const bool audioish = it.type == QStringLiteral("audiobook") || it.type == QStringLiteral("audio")
+                          || it.mime.toLower().startsWith(QStringLiteral("audio/"));
+    const bool isVideoLeaf = (gates.play || directOpen) && !gates.readable && !audioish
+                             && it.type != QStringLiteral("game")
+                             && (kVideoTypes.contains(it.type) || it.mime.toLower().startsWith(QStringLiteral("video/")));
+    if (isVideoLeaf && !ProfileStore::current().restricted)
+    {
+        if (ExternalPlayer::anyTarget()) verbs << QStringLiteral("external"); // one-off, any default
+        if (ExternalPlayer::available()) verbs << QStringLiteral("builtin");  // alternative, default IS external
+    }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
     return out;
 }
 
-void HomeView::playThemedLeaf(int idx)
+void HomeView::playThemedLeaf(int idx, int routeHint)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
-    const MediaItem it = items_[browseRowMap_[idx]]; // copy (async callbacks outlive items_)
+    MediaItem it = items_[browseRowMap_[idx]]; // copy (async callbacks outlive items_)
+    // A one-off external/built-in override rides the item through the async resolve chain, so a failed resolve
+    // can't leak it onto a later play. (Local/recents leaves below resolve synchronously — MainWindow's
+    // consume-once member covers them, so the hint is harmlessly ignored there.)
+    it.playRouteHint = routeHint;
     // Synthetic Recent/Downloaded folders hold already-local files (no addon to resolve through) - re-open
     // them like the classic list does, instead of trying to resolve them as catalog items via resolvePlay.
     if (atRecentsLevel() || atDownloadsLevel())

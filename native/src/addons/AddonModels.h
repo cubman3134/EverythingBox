@@ -138,6 +138,11 @@ struct MediaItem
     // rebrands like "Rockman"/"Mega Man" or "Probotector"/"Contra"). Used to retry a ROM/file-provider lookup
     // when the localized catalog title doesn't match the copy's original name. Not serialized.
     QStringList altNames;
+    // External-player one-off routing hint carried from a detail action THROUGH the async resolve chain to
+    // the play emit (rides the item, so a failed/abandoned resolve can't leak the force onto a later play):
+    // 0=default, 1=force built-in, 2=force external. Set only for a themed "Open in external player"/"Play with
+    // built-in player" one-off on a catalog leaf; read by MainWindow::openLibraryItem. Not serialized.
+    int playRouteHint = 0;
     // Extra artwork/videos/audio/metadata beyond the single grid `thumbnailUrl` (logo, box, fanart,
     // screenshots, preview clips, theme music, provider facts). Optional; filled by richer providers and the
     // game-metadata aggregator. Threaded into the themed item map so themes can bind selected.logo etc.
