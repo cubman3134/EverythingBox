@@ -1650,20 +1650,23 @@ void HomeView::showPlaylistMenu(const QString& playlistId)
 {
     Playlist p;
     if (!PlaylistStore::get(playlistId, p)) return; // deleted out from under us
-    const QStringList rows = {
-        tr("▶   Open"),
-        tr("🔀   Play random"),
-        tr("✎   Rename…"),
-        tr("🗑   Delete playlist"),
-    };
-    new NavMenu(p.name, rows, [this, playlistId](int row) {
-        switch (row)
-        {
-        case 0: openPlaylistLevel(playlistId); break;
-        case 1: playRandomFromPlaylist(playlistId); break;
-        case 2: renamePlaylistInteractive(playlistId); break;
-        case 3: deletePlaylistInteractive(playlistId); break;
-        }
+    // "Start channel" (shuffle-bag random autoplay) is offered ONLY for video/audio playlists — games play
+    // random but don't chain. The row's presence is gated on the playlist's categoryKey, so a games list simply
+    // has no channel row. It's inserted after Play random; the trailing indices shift when it's present.
+    const bool canChannel = (p.categoryKey == QStringLiteral("video") || p.categoryKey == QStringLiteral("audio"));
+    QStringList rows = { tr("▶   Open"), tr("🔀   Play random") };
+    if (canChannel) rows << tr("📺   Start channel");
+    rows << tr("✎   Rename…") << tr("🗑   Delete playlist");
+    new NavMenu(p.name, rows, [this, playlistId, canChannel](int row) {
+        // Map the chosen row to an action; the channel row (index 2) exists only when canChannel, so everything
+        // below it shifts up by one when it's absent.
+        enum { Open = 0, Random = 1 };
+        if (row == Open)   { openPlaylistLevel(playlistId); return; }
+        if (row == Random) { playRandomFromPlaylist(playlistId); return; }
+        if (canChannel && row == 2) { emit startChannelRequested(playlistId); return; }
+        const int tail = canChannel ? row - 1 : row; // 2 = Rename, 3 = Delete (in the no-channel numbering)
+        if (tail == 2) renamePlaylistInteractive(playlistId);
+        else if (tail == 3) deletePlaylistInteractive(playlistId);
     }, window());
 }
 
@@ -1677,6 +1680,19 @@ void HomeView::playRandomFromPlaylist(const QString& playlistId)
     auto cat = browse::playlistItemsCatalog(p); // exactly the rows the playlist level shows
     const int idx = int(QRandomGenerator::global()->bounded(cat.items.size()));
     openResolvedItem(cat.items[idx], /*levelAddon=*/nullptr); // playlist level is addon-less: entries self-resolve
+}
+
+// Air one channel pick: resolve + open the entry at `index` through the SAME per-entry path a row activation
+// uses (playlistItemsCatalog -> openResolvedItem), so a channel pick behaves byte-identically to opening that
+// row by hand. MainWindow owns the shuffle bag + the natural-end chain and calls this for each pick.
+QString HomeView::playChannelItem(const QString& playlistId, int index)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return QString();
+    auto cat = browse::playlistItemsCatalog(p);      // 1:1 with p.items, same order (see SyntheticCatalogs)
+    if (index < 0 || index >= cat.items.size()) return QString();
+    openResolvedItem(cat.items[index], /*levelAddon=*/nullptr);
+    return cat.items[index].title;
 }
 
 // Rename via the OSK, prefilled with the current name; PlaylistStore::rename persists it and we refresh the

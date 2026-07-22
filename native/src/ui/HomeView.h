@@ -63,6 +63,11 @@ public:
     // passes asRoot=true when the "playlistsCategory" row is activated. categoryKey = video|audio|game|reading.
     void openPlaylistsLevel(const QString& categoryKey, bool asRoot = false);
 
+    // Channel mode (driven by MainWindow, which owns the bag + the EOF-chain): air one playlist entry through
+    // the SAME per-entry open path a row activation / Play-random uses, so a channel pick resolves identically.
+    // Returns the entry's display title (for the "Next: …" interstitial), or empty if the index is out of range.
+    QString playChannelItem(const QString& playlistId, int index);
+
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
     QString browseTitle() const;             // the current level's title
@@ -150,6 +155,9 @@ signals:
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
+    // Start a channel over this (video/audio) playlist: MainWindow owns the shuffle bag + the EOF-chain, and
+    // calls back into playChannelItem() to air each pick through the same per-entry open path a row uses.
+    void startChannelRequested(const QString& playlistId);
     // At the home root there's nowhere further back -> the host opens the app pause menu (one Back rule).
     void backRequested();
     void settingsRequested();                  // the "Settings" button in the top bar

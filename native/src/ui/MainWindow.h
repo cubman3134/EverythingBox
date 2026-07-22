@@ -13,6 +13,7 @@
 #include <functional>
 #include "../addons/AddonModels.h"
 #include "../core/LifecyclePolicy.h"
+#include "../core/ShuffleBag.h"
 
 class MpvWidget;
 class RetroView;
@@ -480,6 +481,22 @@ private:
     // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
     void tryPlayNextEpisode();
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
+
+    // ---- Channel mode: shuffle-bag random autoplay over a video/audio playlist ------------------------------
+    // A "channel" turns a playlist into a personal TV network: it airs a random item, and on each NATURAL end
+    // (EOF only — the queueFinished seam is already EOF-gated) shows a cancelable countdown then airs the next
+    // bag pick. State is session-only. channelPlaylistId_ non-empty == a channel is live. The bag draws each
+    // item once before repeating; channelAirLatch_ marks the ONE play the channel itself drives so the manual-
+    // play guard (notePlaybackStart) doesn't mistake the channel's own pick for a user-initiated play.
+    QString    channelPlaylistId_;          // the playlist a live channel is airing; empty == no channel
+    ShuffleBag channelBag_;                  // the random sequencer (no repeat until exhausted)
+    bool       channelAirLatch_ = false;     // set while the channel drives its own pick into the play pipeline
+    bool channelActive() const { return !channelPlaylistId_.isEmpty(); }
+    void startChannel(const QString& playlistId); // build the bag, air the first pick, go live
+    void advanceChannel();                        // next bag pick -> countdown interstitial -> air it (or exit)
+    void airChannelPick(int index);               // drive playlist item `index` through the per-entry open path
+    void exitChannel();                           // clear channel state (every user-stop / manual-play path)
+    void notePlaybackStart();                     // a play sink reached: keep the channel iff this IS its pick
 
     // Casting the current stream to a Chromecast / DLNA device on the LAN. castUrl_ etc. hold the currently
     // playing stream so the picker can hand it to the chosen device.

@@ -20,6 +20,7 @@
 // id via ProfileStore::setCurrent, so ProfileStore::currentId() can't leak a developer's real profile.
 #include "PlaylistStore.h"
 #include "MediaCategories.h"
+#include "ShuffleBag.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
 
@@ -187,6 +188,49 @@ int main(int argc, char** argv)
         PlaylistStore::remove(id);
         CHECK(!PlaylistStore::get(id, p));                                            // gone
         CHECK(PlaylistStore::forCategory(QStringLiteral("video")).size() == videoBefore - 1);
+    }
+
+    // ---- 8. ShuffleBag: Channel mode's random sequencer (core/ShuffleBag.h) ---------------------------------
+    // A pure, header-only invariant net (no UI): (a) every bag pass is a permutation of 0..n-1 (no repeat until
+    // exhausted); (b) a reshuffle never immediately repeats the last item of the prior pass when n>1; (c) n==1
+    // is sane (always 0); (d) an empty bag yields -1. Uses the real global RNG, so we assert over many trials.
+    {
+        // (c) size-1: always 0, never crashes.
+        ShuffleBag one(1);
+        CHECK(one.valid() && one.size() == 1);
+        for (int i = 0; i < 50; ++i) CHECK(one.next() == 0);
+
+        // (d) empty bag: invalid, next() == -1.
+        ShuffleBag none(0);
+        CHECK(!none.valid());
+        CHECK(none.next() == -1);
+        ShuffleBag neg(-3);
+        CHECK(!neg.valid() && neg.next() == -1);
+
+        // (a)+(b): over many trials at several sizes, walk multiple full passes and check the invariants.
+        for (int n : { 2, 3, 5, 8 })
+        {
+            for (int trial = 0; trial < 400; ++trial)
+            {
+                ShuffleBag bag(n);
+                int prevPassLast = -1;
+                for (int pass = 0; pass < 4; ++pass)   // several reshuffles per trial
+                {
+                    QVector<int> seen;
+                    for (int d = 0; d < n; ++d)
+                    {
+                        const int idx = bag.next();
+                        CHECK(idx >= 0 && idx < n);        // always in range
+                        CHECK(!seen.contains(idx));        // (a) no repeat within a pass
+                        if (d == 0 && pass > 0)
+                            CHECK(idx != prevPassLast);    // (b) no immediate repeat across the boundary (n>1)
+                        seen.push_back(idx);
+                    }
+                    CHECK(seen.size() == n);               // (a) a full permutation of 0..n-1
+                    prevPassLast = seen.last();
+                }
+            }
+        }
     }
 
     if (failures == 0) { std::puts("PLAYLISTS-OK"); return 0; }

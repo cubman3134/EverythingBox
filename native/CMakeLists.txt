@@ -279,6 +279,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_playlists tools/probe_playlists.cpp
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/MediaCategories.h
+        src/core/ShuffleBag.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_playlists PRIVATE src src/core)
     target_link_libraries(probe_playlists PRIVATE Qt6::Core)
