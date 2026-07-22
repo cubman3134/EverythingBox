@@ -3697,7 +3697,10 @@ void MainWindow::runThemedDetailAction(const QString& verb)
 // updates in place. Back leaves the mark untouched.
 void MainWindow::themedDetailPickStatus()
 {
-    if (themedDetailKey_.isEmpty()) return;
+    // Snapshot the key into a LOCAL: NavMenu::pick is a modal nested loop, so bind the target once (read before
+    // AND written after the pick) rather than re-reading the member across the modality.
+    const QString key = themedDetailKey_;
+    if (key.isEmpty()) return;
     struct S { ItemMarks::Completion c; QString label; };
     const QVector<S> states = {
         { ItemMarks::Completion::None,       tr("None") },
@@ -3706,13 +3709,13 @@ void MainWindow::themedDetailPickStatus()
         { ItemMarks::Completion::Finished,   tr("Finished") },
         { ItemMarks::Completion::Abandoned,  tr("Abandoned") },
     };
-    const ItemMarks::Completion cur = ItemMarks::get(themedDetailKey_).completion;
+    const ItemMarks::Completion cur = ItemMarks::get(key).completion;
     QStringList rows;
     for (const S& s : states)
         rows << (s.c == cur ? QStringLiteral("✓  ") + s.label : QStringLiteral("     ") + s.label);
     const int pick = NavMenu::pick(tr("Set status"), rows, this);
     if (pick < 0 || pick >= states.size()) return;
-    ItemMarks::setCompletion(themedDetailKey_, states[pick].c);
+    ItemMarks::setCompletion(key, states[pick].c);
     // Re-push the completion token so the status pill relabels (ActionRow maps token -> label).
     static const char* tok[] = { "none", "planned", "inProgress", "finished", "abandoned" };
     QWidget* w = stack_->currentWidget();
@@ -3731,12 +3734,16 @@ void MainWindow::themedDetailPickStatus()
 // the pin row flips that tag's shelf-pin. Back exits the loop. All writes go through ItemMarks (per profile).
 void MainWindow::themedDetailEditTags()
 {
-    if (themedDetailKey_.isEmpty()) return;
+    // Snapshot the detail's marks key into a LOCAL up front: every step below re-enters a modal nested loop
+    // (NavMenu::pick / Osk::getText / NavConfirm::ask), so binding the target once makes it explicit that the
+    // whole flow acts on the item the detail was opened for, regardless of any member churn during modality.
+    const QString key = themedDetailKey_;
+    if (key.isEmpty()) return;
     QString selTag; // the tag a pin row (from the previous pass) targets — the last vocab row we acted on
     while (true)
     {
         const QStringList vocab = ItemMarks::tagVocab();
-        const QStringList onItem = ItemMarks::get(themedDetailKey_).tags;
+        const QStringList onItem = ItemMarks::get(key).tags;
         const QStringList pinned = ItemMarks::pinnedTags();
 
         QStringList rows;
@@ -3768,9 +3775,9 @@ void MainWindow::themedDetailEditTags()
                                               this, currentThemedGraph()).trimmed();
             if (!name.isEmpty())
             {
-                QStringList tags = ItemMarks::get(themedDetailKey_).tags;
+                QStringList tags = ItemMarks::get(key).tags;
                 if (!tags.contains(name)) tags << name;   // apply to the item (also unions into the vocab)
-                ItemMarks::setTags(themedDetailKey_, tags);
+                ItemMarks::setTags(key, tags);
                 selTag = name;
             }
             continue;
@@ -3782,7 +3789,14 @@ void MainWindow::themedDetailEditTags()
         }
         if (pick == delIdx)
         {
-            ItemMarks::removeTagEverywhere(selTag); // strips it from the vocab, every item, and any shelf pin
+            // Destructive + profile-wide: confirm before it strips the tag from EVERY item and any shelf pin
+            // (the confirmDeleteProfile card shape — Cancel focused, Back = Cancel). Decline → back to the loop.
+            const int c = NavConfirm::ask(tr("Delete tag"),
+                tr("Delete the tag “%1” from every item in this profile and unpin its shelf? "
+                   "This can't be undone.").arg(selTag),
+                { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c != 1) continue;                    // Cancel / Back -> re-present the tags loop unchanged
+            ItemMarks::removeTagEverywhere(selTag);  // strips it from the vocab, every item, and any shelf pin
             selTag.clear();                          // it no longer exists -> no selected-tag rows next pass
             continue;
         }
@@ -3790,9 +3804,9 @@ void MainWindow::themedDetailEditTags()
         if (pick >= 0 && pick < vocab.size())
         {
             const QString t = vocab[pick];
-            QStringList tags = ItemMarks::get(themedDetailKey_).tags;
+            QStringList tags = ItemMarks::get(key).tags;
             if (tags.contains(t)) tags.removeAll(t); else tags << t;
-            ItemMarks::setTags(themedDetailKey_, tags);
+            ItemMarks::setTags(key, tags);
             selTag = t;
         }
     }
