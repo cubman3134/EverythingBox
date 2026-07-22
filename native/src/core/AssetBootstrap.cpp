@@ -68,12 +68,31 @@ namespace AssetBootstrap
         // (or removed) must never be clobbered by an upgrade. Only addon dirs missing from disk get extracted.
         const QString srcAddons = sourceRoot + QStringLiteral("/addons");
         const QString dstAddons = dataDir + QStringLiteral("/addons");
+        QDir().mkpath(dstAddons);
+
+        // Crash-safety: extraction is a copy-into-tmp then atomic rename (below), so the ONLY way a "<name>"
+        // dir exists on disk is a fully-copied addon. But a process death mid-copy can leave a partial
+        // "<name>.extracting" sibling behind. Sweep those away first — otherwise a stale partial would block
+        // its own rename target and the addon would never install. (A bare "<name>" dir is trusted-complete.)
+        const QFileInfoList leftovers =
+            QDir(dstAddons).entryInfoList({ QStringLiteral("*.extracting") }, QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo& stale : leftovers)
+            QDir(stale.absoluteFilePath()).removeRecursively();
+
         const QFileInfoList addonDirs = QDir(srcAddons).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
         for (const QFileInfo& a : addonDirs)
         {
             const QString dstAddon = dstAddons + QLatin1Char('/') + a.fileName();
-            if (!QDir(dstAddon).exists())
-                copyTreeOverwrite(a.absoluteFilePath(), dstAddon);
+            if (QDir(dstAddon).exists())
+                continue; // copy-if-absent: a present dir is complete and user-owned — never touch it
+
+            // Extract into a temp sibling, then rename it into place as the final step. A crash before the
+            // rename leaves only "<name>.extracting" (swept next run); the final "<name>" only ever appears
+            // whole — no partial dir can masquerade as an installed addon.
+            const QString tmpAddon = dstAddon + QStringLiteral(".extracting");
+            QDir(tmpAddon).removeRecursively(); // paranoia: clear a same-name residue before writing
+            copyTreeOverwrite(a.absoluteFilePath(), tmpAddon);
+            QDir().rename(tmpAddon, dstAddon);
         }
 
         // Record the version we just extracted so the next same-version launch is a no-op.

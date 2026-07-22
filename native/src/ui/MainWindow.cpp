@@ -1822,8 +1822,9 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
     // exceptions that manage their own Back. F11 still toggles full screen independently.
     // Qt::Key_Back is Android's hardware/gesture Back: route it into the SAME unified Back so it lands on the
     // previous screen and, at the home root, opens the exit-confirm pause menu — never an instant app kill. It
-    // is a distinct key from Backspace, so it never deletes text and is never treated as "typing" below. No
-    // desktop key generates Key_Back, so this branch is inert off Android.
+    // is a distinct key from Backspace, so it never deletes text and is never treated as "typing" below. On
+    // desktop the media/browser Back key (VK_BROWSER_BACK on Windows, XF86Back on X11) also maps to Key_Back;
+    // handling it here as "go back" is the intended behavior, so this branch is not Android-only.
     if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Backspace || e->key() == Qt::Key_Back)
     {
         QWidget* fw = focusWidget();
@@ -8611,7 +8612,9 @@ void MainWindow::onInputCapturePadTick()
 bool MainWindow::inputCaptureKeyFilter(QKeyEvent* e)
 {
     if (!remap_.active) return false;
-    if (e->key() == Qt::Key_Escape) { endInputCapture(/*cancelled*/ true); return true; }
+    // Esc cancels; Key_Back (Android/TV-remote Back, which has no Escape) is accepted as a cancel alias so a
+    // remote user can always back out of capture.
+    if (e->key() == Qt::Key_Escape || e->key() == Qt::Key_Back) { endInputCapture(/*cancelled*/ true); return true; }
     if (remap_.keyboard)
     {
         Keymap* keys = retro_ ? retro_->keymap() : nullptr;

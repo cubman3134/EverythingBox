@@ -347,7 +347,13 @@ jobs:
           echo "--- Qt-bundled libav*/libsw*:"
           find "$KIT" \( -name 'libav*.so' -o -name 'libsw*.so' \) -print -delete || true
           echo "--- remaining ffmpeg artifacts in kit (expect none):"
-          find "$KIT" \( -name '*ffmpegmediaplugin*' -o -name 'libav*.so' -o -name 'libsw*.so' -o -path '*QFFmpegMediaPlugin*' \) -print || echo "(none)"
+          LEFT=$(find "$KIT" \( -name '*ffmpegmediaplugin*' -o -name 'libav*.so' -o -name 'libsw*.so' -o -path '*QFFmpegMediaPlugin*' \) -print)
+          if [ -n "$LEFT" ]; then
+            echo "$LEFT"
+            echo "FATAL: Qt FFmpeg artifacts survived the prune (would clash with libmpv's FFmpeg in the APK)"
+            exit 1
+          fi
+          echo "(none)"
 
       - name: Provide libmpv for Android
         env:
@@ -377,9 +383,30 @@ jobs:
           esac
           NDK_LIBCXX=$(find "$ANDROID_NDK_ROOT" -path "*/$TRIPLE/libc++_shared.so" | head -1)
           [ -n "$NDK_LIBCXX" ] || { echo "NDK libc++_shared.so not found for $TRIPLE"; exit 1; }
-          echo "Replacing NDK libc++ ($NDK_LIBCXX) with jdtech's newer build"
-          cp -f mpv-android/libs/libc++_shared.so "$NDK_LIBCXX"
-          rm -f mpv-android/libs/libc++_shared.so
+          # Assert the swap DIRECTION before clobbering the NDK runtime. __from_chars_floating_point is the
+          # discriminating symbol: libmpv imports it and the crash was the NDK's libc++_shared.so not exporting
+          # it. Decide from the symbol tables (llvm-nm -D, grep -a fallback) rather than assuming jdtech's is
+          # always newer:
+          #   - NDK already exports it        -> NDK libc++ is new enough; keep it, drop jdtech's copy.
+          #   - NDK lacks it, jdtech's has it -> replace the bundled NDK runtime with jdtech's newer build.
+          #   - neither exports it            -> assumption is stale; FAIL loudly instead of shipping a crash.
+          DISCRIM_SYM=__from_chars_floating_point
+          NM=$(find "$ANDROID_NDK_ROOT" \( -name 'llvm-nm' -o -name 'llvm-nm.exe' \) 2>/dev/null | head -1)
+          has_sym() { # $1 = path to a .so
+            if [ -n "$NM" ]; then "$NM" -D "$1" 2>/dev/null | grep -q "$DISCRIM_SYM"
+            else grep -aq "$DISCRIM_SYM" "$1"; fi
+          }
+          if has_sym "$NDK_LIBCXX"; then
+            echo "NDK libc++ ($NDK_LIBCXX) already exports $DISCRIM_SYM — no swap needed"
+            rm -f mpv-android/libs/libc++_shared.so
+          elif has_sym mpv-android/libs/libc++_shared.so; then
+            echo "NDK libc++ lacks $DISCRIM_SYM; jdtech's provides it — replacing NDK runtime ($NDK_LIBCXX)"
+            cp -f mpv-android/libs/libc++_shared.so "$NDK_LIBCXX"
+            rm -f mpv-android/libs/libc++_shared.so
+          else
+            echo "FATAL: neither the NDK nor jdtech's libc++_shared.so exports $DISCRIM_SYM — libc++ swap assumption is stale"
+            exit 1
+          fi
           ls -la mpv-android/libs
           for h in client.h render.h render_gl.h stream_cb.h; do
             curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/${MPV_HEADERS_TAG}/include/mpv/$h" \

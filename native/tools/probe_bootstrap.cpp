@@ -10,6 +10,9 @@
 //   3. bumped version           -> stock theme REFRESHED (overwritten back to source), an already-present
 //                                  addon LEFT ALONE (copy-if-absent), a user-added theme dir UNTOUCHED;
 //   4. missing sourceRoot        -> clean no-op (no dirs created, no stamp written).
+//   5. crash-safety             -> a leftover "<name>.extracting" (a killed mid-copy) is swept and the addon
+//                                  is completed cleanly from source; an already-installed addon beside the
+//                                  debris stays copy-if-absent-respected (user edit intact).
 //
 // Prints BOOTSTRAP-OK on success; any failure prints BOOTSTRAP-FAIL <cond> and exits non-zero.
 #include "AssetBootstrap.h"
@@ -104,6 +107,30 @@ int main(int argc, char** argv)
     CHECK(!QFileInfo::exists(data2 + "/themes2"));
     CHECK(!QFileInfo::exists(data2 + "/addons"));
     CHECK(!QFileInfo::exists(data2 + "/.assets-version"));
+
+    // --- 5. Crash-safety: complete a partial extract, respect a completed addon beside the debris. ---
+    const QString kAddonBSrc = QStringLiteral("{\"id\":\"b\",\"stock\":true}");
+    CHECK(writeFile(src + "/addons/b/manifest.json", kAddonBSrc));
+
+    QTemporaryDir dataDir3;
+    CHECK(dataDir3.isValid());
+    const QString data3 = dataDir3.path();
+
+    // Pre-seed the exact post-crash state: addon "a"'s FINAL dir is missing, but a half-written
+    // "a.extracting" leftover sits on disk (debris from a killed copy); addon "b" is already fully
+    // installed and carries a user edit.
+    CHECK(writeFile(data3 + "/addons/a.extracting/manifest.json", QStringLiteral("PARTIAL-GARBAGE")));
+    CHECK(writeFile(data3 + "/addons/a.extracting/half.bin",      QStringLiteral("half-written")));
+    CHECK(writeFile(data3 + "/addons/b/manifest.json",            QStringLiteral("USER-EDITED-ADDON-B")));
+
+    changed = AssetBootstrap::run(src, data3, QStringLiteral("1.0.0"));
+    CHECK(changed);
+    // addon a: completed cleanly from source; the leftover is gone and its garbage was NOT reused.
+    CHECK(readFile(data3 + "/addons/a/manifest.json") == kAddonSrc);
+    CHECK(!QFileInfo::exists(data3 + "/addons/a.extracting"));            // debris swept
+    CHECK(!QFileInfo::exists(data3 + "/addons/a/half.bin"));             // partial content NOT resurrected
+    // addon b: present -> copy-if-absent respected even next to the debris; user edit survives.
+    CHECK(readFile(data3 + "/addons/b/manifest.json") == QStringLiteral("USER-EDITED-ADDON-B"));
 
     if (failures == 0) { std::puts("BOOTSTRAP-OK"); return 0; }
     std::fprintf(stderr, "BOOTSTRAP: %d check(s) failed\n", failures);

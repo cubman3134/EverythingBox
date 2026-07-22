@@ -13,14 +13,13 @@ generated `assets/mmv/` never lands in git. `androiddeployqt` bundles `assets/` 
 extracts them into the writable data dir — stock themes are refreshed on a version bump, user-configured
 addons are copy-if-absent (never clobbered). See `AssetBootstrap.{h,cpp}` and `probe_bootstrap.cpp`.
 
+`AndroidManifest.xml` (app id/name/icon, `INTERNET`/storage-SAF permissions, `android.hardware.gamepad`,
+immersive full-screen, and the Android TV `LEANBACK_LAUNCHER` intent-filter + `android:banner` with the
+touchscreen/leanback `uses-feature` opt-outs) and `res/` (launcher icons, banner, strings) are **committed and
+wired**.
+
 Still to add here as the port is completed (see `../docs/android-port.md`):
 
-- `AndroidManifest.xml` — app id/name/icon, permissions (`INTERNET`, storage/SAF for ROM & media folders),
-  `android.hardware.gamepad`, immersive full-screen for video/RetroView. **Android TV:** add a
-  `LEANBACK_LAUNCHER` intent-filter + `android:banner` (320×180) so it appears on the TV home screen, and
-  declare `<uses-feature android:name="android.hardware.touchscreen" android:required="false"/>` and
-  `<uses-feature android:name="android.software.leanback" android:required="false"/>` so it installs on TVs.
-- `res/` — launcher icons, themes, strings.
 - `src/` — any Java/Kotlin glue (e.g. an `Activity` subclass, or an Intent helper to hand a ROM off to an
   installed Android emulator app as the replacement for the desktop external-emulator launcher).
 `assets/mmv/` is **already wired** (this task): CMake stages it and `AssetBootstrap` extracts it on first run —
