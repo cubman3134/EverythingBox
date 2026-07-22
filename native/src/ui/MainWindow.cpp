@@ -22,6 +22,7 @@
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
+#include "../core/SyncOffsets.h"
 #include "../core/BackgroundMusic.h"
 #include "../core/CoreManager.h"
 #include "../core/ArchiveRom.h"
@@ -273,6 +274,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
+        // Apply the resolved audio/subtitle sync offsets for this file (per-file override if saved, else the
+        // global default). Every play path set syncKey_ beside its beginResume(); this is the single choke point
+        // after load that covers them all. Re-applying each file also resets mpv's global audio-delay/sub-delay
+        // properties so an offset from the previous file never bleeds into an un-offset one.
+        const auto off = SyncOffsets::resolve(syncKey_);
+        player_->setAudioDelay(off.audio);
+        player_->setSubtitleDelay(off.sub);
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
 #ifdef MMV_HAVE_QML
@@ -754,7 +762,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
     });
     connect(session_, &PlaybackSession::queueCleared, this,
-            [this] { if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
+            [this] { syncKey_.clear();                     // left the media -> the card falls back to the globals
+                     if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
@@ -1616,6 +1625,13 @@ void MainWindow::updateUiTestServer()
             o.insert(QStringLiteral("mediaControls"), mediaControls_ && mediaControls_->isVisible());
             o.insert(QStringLiteral("playerPermille"), seek_ ? seek_->value() : 0);
             o.insert(QStringLiteral("playerDur"), duration_);
+            // Sync-controls automation (player/sync-controls Task 2): the live mpv offsets (seconds), the boost
+            // slider's value (0..200), the resume key the card writes offsets under, and whether the card is up.
+            o.insert(QStringLiteral("audioDelay"), player_->audioDelay());
+            o.insert(QStringLiteral("subDelay"), player_->subtitleDelay());
+            o.insert(QStringLiteral("volume"), volume_ ? volume_->value() : 0);
+            o.insert(QStringLiteral("syncKey"), syncKey_);
+            o.insert(QStringLiteral("subCard"), subOverlay_ && subOverlay_->isVisible());
         }
         o.insert(QStringLiteral("escMenu"), escMenuVisible());
         o.insert(QStringLiteral("fullscreen"), isFullScreen());
@@ -2202,8 +2218,9 @@ void MainWindow::openVideoPath(const QString& path)
     book_->persist();
     pdf_->persist();
     comic_->persist();
-    session_->clearQueue();      // saves+clears any previous timed media
+    session_->clearQueue();      // saves+clears any previous timed media (also clears syncKey_)
     session_->beginResume(path); // track this video's position (and resume it if we've watched it before)
+    syncKey_ = path;             // a local file keys its sync offsets by its own path
     stack_->setCurrentWidget(playerPage_);
     player_->play(path);
     revealMediaControls();
@@ -2693,6 +2710,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     // Resume + Recent keyed by the stable id when given (a re-opened catalog stream), else by the link itself.
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
     session_->beginResume(rkey);
+    syncKey_ = rkey;             // sync offsets follow the stable resume key (survives a re-resolved debrid URL)
     stack_->setCurrentWidget(playerPage_);
     player_->play(url);
     revealMediaControls();
@@ -2716,6 +2734,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     session_->clearQueue();      // saves+clears any previous timed media, then we build a one-track queue
     const QString t = !title.isEmpty() ? title : QUrl(url).fileName();
     const QString rkey = resumeKey.isEmpty() ? url : resumeKey;
+    syncKey_ = rkey;             // audio uses the same MpvWidget; set before setQueue kicks off playback (sub offset harmless)
     // Themed mode: this streamed audio shows the QML now-playing page (the catalog thumbnail is its cover art).
     themedAudioSession_ = themedHomeEnabled();
     themedAudioData_ = makeThemedAudioData(t, QString(), thumbnailUrl);
@@ -5389,6 +5408,16 @@ void MainWindow::hideSubtitleMenu()
 // The subtitle button opens a full-player overlay panel (Stremio-style) rather than a dropdown: a dimmed
 // scrim over the whole video with a centred card holding the track picker, sync/size adjusters, and the
 // load/download sources. Clicking the scrim, the ✕, or pressing Esc/Back closes it; it's arrow-navigable.
+// A signed millisecond readout for a sync offset (seconds): "+150 ms", "0 ms", "−100 ms" (U+2212 minus, so it
+// matches the − glyph on the step buttons). The label shows this re-read from mpv, never our own arithmetic.
+static QString formatMs(double secs)
+{
+    const long ms = qRound(secs * 1000.0);
+    if (ms == 0) return QStringLiteral("0 ms");
+    const QChar sign = ms > 0 ? QLatin1Char('+') : QChar(0x2212);
+    return QStringLiteral("%1%2 ms").arg(sign).arg(qAbs(ms));
+}
+
 void MainWindow::showSubtitleMenu()
 {
     if (subOverlay_) { hideSubtitleMenu(); return; } // second press on the button toggles it closed
@@ -5546,7 +5575,7 @@ void MainWindow::showSubtitleMenu()
     // --- RIGHT: sync + size adjusters (−/+ update live), then the source actions. ---
     // Close is the first right-column focus target (it sits top-right), so Up from the settings reaches it.
     subRightCol_ = { closeBtn };
-    rightCol->addWidget(sectionLabel(tr("TIMING & SIZE")));
+    rightCol->addWidget(sectionLabel(tr("SUBTITLE SIZE")));
     auto addAdjustRow = [this, card, rightCol](const QString& name, std::function<QString()> value,
                                                std::function<void()> minus, std::function<void()> plus) {
         auto* w = new QWidget(card);
@@ -5575,14 +5604,88 @@ void MainWindow::showSubtitleMenu()
         rightCol->addWidget(w);
         subRightCol_ << minusBtn << plusBtn;
     };
-    addAdjustRow(tr("Sync"),
-                 [this] { return tr("%1 s").arg(player_->subtitleDelay(), 0, 'f', 1); },
-                 [this] { player_->setSubtitleDelay(player_->subtitleDelay() - 0.1); },
-                 [this] { player_->setSubtitleDelay(player_->subtitleDelay() + 0.1); });
     addAdjustRow(tr("Size"),
                  [this] { return QStringLiteral("%1%").arg(qRound(player_->subtitleScale() * 100)); },
                  [this] { player_->setSubtitleScale(qMax(0.2, player_->subtitleScale() - 0.1)); },
                  [this] { player_->setSubtitleScale(qMin(4.0, player_->subtitleScale() + 0.1)); });
+
+    // AUDIO SYNC + SUBTITLE SYNC: one lambda builds both sections (DRY), parameterized on the axis + its live
+    // getter/setter. Compact so the whole card fits at TV scale without a (focus-trapping) scroll area: a readout
+    // + inline ∓50 ms steppers on one row (like the Size row above), then a Reset / Save-as-default row. The
+    // readout re-reads mpv after every change (shows mpv truth, never our arithmetic). Per-file steps persist via
+    // SyncOffsets keyed by syncKey_; Reset drops the per-file entry (revert to the global default); Save-as-default
+    // promotes the current value to the global. Every focusable button joins subRightCol_ + is hitClamp-sized.
+    auto addSyncSection = [this, card, rightCol, rowButton, sectionLabel](const QString& heading, SyncOffsets::Which w,
+                              std::function<double()> getter, std::function<void(double)> setter) {
+        FormFactor& ff = FormFactor::instance();
+        rightCol->addSpacing(6);
+        rightCol->addWidget(sectionLabel(heading));
+
+        // Row 1: live readout (mpv truth) + the ∓50 ms steppers, on one line.
+        auto* r1 = new QWidget(card);
+        auto* h1 = new QHBoxLayout(r1);
+        h1->setContentsMargins(0, 0, 0, 0);
+        h1->setSpacing(10);
+        auto* readout = new QLabel(formatMs(getter()), r1);
+        readout->setStyleSheet(QStringLiteral("font-size:15px;font-weight:bold;"));
+        h1->addWidget(readout, 1);
+        auto mkStep = [r1, &ff](const QString& t) {
+            auto* b = new QPushButton(t, r1);
+            b->setMinimumSize(ff.hitClamp(58), ff.hitClamp(34));
+            b->setAutoRepeat(true);                 // hold to keep nudging
+            b->setCursor(Qt::PointingHandCursor);
+            b->setStyleSheet(QStringLiteral(
+                "QPushButton { background:rgba(255,255,255,0.10); color:#e8e8e8; border:none; border-radius:8px;"
+                " font-size:14px;font-weight:bold; padding:0 6px; }"
+                "QPushButton:hover, QPushButton:focus { background:rgba(90,140,255,0.75); }"));
+            return b;
+        };
+        auto* minusBtn = mkStep(QString(QChar(0x2212)) + QStringLiteral("50"));
+        auto* plusBtn  = mkStep(QStringLiteral("+50"));
+        h1->addWidget(minusBtn);
+        h1->addWidget(plusBtn);
+        rightCol->addWidget(r1);
+
+        auto step = [this, w, getter, setter, readout](double delta) {
+            const double v = qBound(-10.0, getter() + delta, 10.0);
+            setter(v);
+            SyncOffsets::savePerFile(syncKey_, w, v);
+            readout->setText(formatMs(getter())); // re-read from mpv
+        };
+        connect(minusBtn, &QPushButton::clicked, this, [step] { step(-0.05); });
+        connect(plusBtn,  &QPushButton::clicked, this, [step] { step(+0.05); });
+        subRightCol_ << minusBtn << plusBtn;
+
+        // Row 2: Reset (revert to global) + Save as default (promote current to global), side by side.
+        auto* resetBtn = rowButton(tr("Reset"), false);
+        resetBtn->setMinimumHeight(ff.hitClamp(34));
+        connect(resetBtn, &QPushButton::clicked, this, [this, w, setter, readout] {
+            SyncOffsets::clearPerFile(syncKey_, w);
+            setter(SyncOffsets::globalDefault(w));
+            readout->setText(formatMs(w == SyncOffsets::Which::Audio ? player_->audioDelay()
+                                                                     : player_->subtitleDelay()));
+        });
+        auto* saveBtn = rowButton(tr("Save as default"), false);
+        saveBtn->setMinimumHeight(ff.hitClamp(34));
+        connect(saveBtn, &QPushButton::clicked, this, [this, w, getter] {
+            SyncOffsets::setGlobalDefault(w, getter());
+            notify(tr("Saved as the default sync offset."), 2500);
+        });
+        auto* r2 = new QWidget(card);
+        auto* h2 = new QHBoxLayout(r2);
+        h2->setContentsMargins(0, 0, 0, 0);
+        h2->setSpacing(10);
+        h2->addWidget(resetBtn);
+        h2->addWidget(saveBtn);
+        rightCol->addWidget(r2);
+        subRightCol_ << resetBtn << saveBtn;
+    };
+    addSyncSection(tr("AUDIO SYNC"), SyncOffsets::Which::Audio,
+                   [this] { return player_->audioDelay(); },
+                   [this](double v) { player_->setAudioDelay(v); });
+    addSyncSection(tr("SUBTITLE SYNC"), SyncOffsets::Which::Sub,
+                   [this] { return player_->subtitleDelay(); },
+                   [this](double v) { player_->setSubtitleDelay(v); });
 
     rightCol->addSpacing(6);
     rightCol->addWidget(sectionLabel(tr("SOURCE")));
@@ -5793,6 +5896,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // time it's resolved, so keying on the URL would lose your place and duplicate the Recent entry).
         const QString rkey = item.id.isEmpty() ? url : item.id;
         session_->beginResume(rkey);
+        syncKey_ = rkey;         // catalog stream: key sync offsets by the stable id, not the volatile URL
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
         castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened

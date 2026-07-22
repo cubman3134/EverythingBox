@@ -481,6 +481,10 @@ private:
     // within a column, Left/Right jump between them - so you reach the settings without walking the track list.
     QVector<QPushButton*> subLeftCol_;
     QVector<QPushButton*> subRightCol_;
+    // Resume key of the currently-playing media (raw, unhashed — SyncOffsets hashes internally). Set by each
+    // play path beside its beginResume() so the card's sync controls read/write the right per-file offsets;
+    // empty when nothing is playing (cleared on queueCleared, i.e. whenever we leave the media).
+    QString syncKey_;
 
     // External (standalone) emulators: the launch pipeline + process lifecycle lives in GameLauncher; this window
     // keeps only the in-app "playing in <emulator>" wait page it drives via signals, and the state to restore
