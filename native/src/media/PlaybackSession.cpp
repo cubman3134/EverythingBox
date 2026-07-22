@@ -1,8 +1,10 @@
 #include "PlaybackSession.h"
 #include "../core/AppPaths.h"
+#include "../core/ConsumptionStats.h"
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QDateTime>
+#include <algorithm>
 #include <cmath>
 
 // Stable, path-derived key prefix for one file's resume state (shared by video / audio / audiobooks).
@@ -94,6 +96,10 @@ void PlaybackSession::beginResume(const QString& path)
     resumeSeek_ = pos;       // applied once the duration is known (see onDuration)
     audioPos_ = 0.0;
     lastSavedPos_ = -100.0;
+    // Consumption stats: start accrual from the resume point so the resume jump itself never dumps time, and
+    // clear any carried remainder from the previous track (per-track reset).
+    lastAccruedPos_ = pos;
+    statsAccum_ = 0.0;
 }
 
 void PlaybackSession::persistResume()
@@ -106,6 +112,24 @@ void PlaybackSession::persistResume()
     store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
     store().sync();
     lastSavedPos_ = audioPos_;
+
+    // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
+    // a seek-forward can't dump minutes and a seek-backward accrues nothing. The exact float position drives the
+    // diff (seeks handled correctly, no runaway); a sub-second remainder carries in statsAccum_ so whole-second
+    // rounding never drifts. Keyed by the resume identity (its own per-profile store — NOT the global resume
+    // keys), category from the file's kind, title as the current resume title.
+    const double dpos = std::min(std::max(audioPos_ - lastAccruedPos_, 0.0), 30.0);
+    lastAccruedPos_ = audioPos_;
+    statsAccum_ += dpos;
+    const qint64 whole = qint64(statsAccum_);
+    if (whole > 0)
+    {
+        statsAccum_ -= double(whole);
+        ConsumptionStats::addMediaSeconds(resumePath_,
+            mediaIsVideo_ ? QStringLiteral("video") : QStringLiteral("audio"),
+            whole, QFileInfo(resumePath_).completeBaseName());
+    }
+
     emit resumeSaved(); // host schedules the cloud "continue watching" push (debounced)
 }
 
@@ -122,10 +146,12 @@ void PlaybackSession::finishResume()
 
 void PlaybackSession::clearQueue()
 {
-    persistResume();      // save where we left off before leaving this media
+    persistResume();      // save where we left off before leaving this media (also flushes final accrual)
     resumePath_.clear();
     resumeSeek_ = 0.0;
     lastSavedPos_ = -100.0;
+    lastAccruedPos_ = 0.0; // consumption-stats: per-track reset (next media starts a fresh accrual span)
+    statsAccum_ = 0.0;
     tracks_.clear();
     trackIndex_ = -1;
     emit queueCleared();

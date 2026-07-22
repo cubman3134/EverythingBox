@@ -3,6 +3,7 @@
 #include "MobiBook.h"
 #include "PdfTextBook.h"
 #include "../core/AppPaths.h"
+#include "../core/ConsumptionStats.h"
 
 #include <QFile>
 #include <QListWidget>
@@ -590,6 +591,10 @@ void EbookView::nextPage()
     else if (chapter_ < book_->chapterFiles().size() - 1)   loadChapter(chapter_ + 1);
     else                                                    return;
     updatePageLabel();
+    // Consumption stats: accrue at the forward page/chapter advance only (NOT updatePageLabel, which also fires
+    // on font repagination that would inflate the global page). High-water keyed by the book path + title; the
+    // store ignores any revisit/regression.
+    ConsumptionStats::addPagesRead(book_->sourcePath(), globalPage(), book_->title());
     persist();
 }
 

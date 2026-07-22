@@ -47,6 +47,7 @@
 #include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
 #include "../core/ItemMarks.h"
+#include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
 #include "ProfileDialog.h"
@@ -280,6 +281,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
+        // Consumption stats: tell the session this file's kind so the persistResume heartbeat accrues watch
+        // (video) vs listen (audio) seconds into the right category. Authoritative single choke point (fires
+        // after every load, video or audio) — before any 5s accrual heartbeat can run.
+        if (session_) session_->setMediaVideo(isVideo);
         // Apply the resolved audio/subtitle sync offsets for this file (per-file override if saved, else the
         // global default). Every play path set syncKey_ beside its beginResume(); this is the single choke point
         // after load that covers them all. Re-applying each file also resets mpv's global audio-delay/sub-delay
@@ -5064,6 +5069,8 @@ void MainWindow::chooseProfile(const QString& id)
     ProfileStore::setCurrent(id);
     ItemMarks::invalidate(); // drop the previous profile's marks cache NOW (no signal fires) so the fresh home
                              // filters/labels against the new profile's hidden/completion/tags, not the old one's
+    ConsumptionStats::invalidate(); // likewise drop the previous profile's stats cache so accrual/display key off
+                                    // the new profile from here on (stats are separately per-profile)
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
     // When this resolves the pre-home startup picker, showEvent already returned before its own
     // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,

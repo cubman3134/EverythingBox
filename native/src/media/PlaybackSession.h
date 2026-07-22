@@ -30,6 +30,10 @@ public:
     void persistResume();                       // save the current position (throttled / on leave / on exit)
     void finishResume();                        // played to the end -> drop the saved position
 
+    // Consumption stats: the host reports the loaded file's media kind (mpv's fileLoaded isVideo flag) so the
+    // persistResume heartbeat accrues watch (video) vs listen (audio) seconds into the right category.
+    void setMediaVideo(bool isVideo) { mediaIsVideo_ = isVideo; }
+
     void setPosition(double s); // fed from the host's mpv position callback
     void setDuration(double s); // fed from the host's mpv duration callback
 
@@ -58,6 +62,9 @@ private:
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known
     double audioPos_ = 0.0;        // last reported playback position
     double lastSavedPos_ = -100.0; // throttle resume writes
+    double lastAccruedPos_ = 0.0;  // consumption-stats: position through which watch/listen seconds were accrued
+    double statsAccum_ = 0.0;      // consumption-stats: sub-second remainder carried between heartbeats (no drift)
+    bool   mediaIsVideo_ = true;   // consumption-stats: the loaded file's kind (set by the host from mpv fileLoaded)
     double duration_ = 0.0;        // last reported duration (for the "dur" progress hint)
     QString settingsFile_;
     QSettings* settings_ = nullptr;

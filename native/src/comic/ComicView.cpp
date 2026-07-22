@@ -1,5 +1,6 @@
 #include "ComicView.h"
 #include "../core/AppPaths.h"
+#include "../core/ConsumptionStats.h"
 
 #include <QScrollArea>
 #include <QScrollBar>
@@ -200,6 +201,9 @@ void ComicView::showPage(int index)
     rescale();
     updateLabel();
     scroll_->verticalScrollBar()->setValue(0); // start each page at the top
+    // Consumption stats: high-water page read (revisits/backward turns don't accrue). Path-derived key + title,
+    // 1-based page to match the reader's own labels; the store owns the accrual math.
+    ConsumptionStats::addPagesRead(path_, current_ + 1, QFileInfo(path_).fileName());
     emit pageInfoChanged();                     // mirror the page move into the themed chrome
 }
 
