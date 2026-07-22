@@ -102,6 +102,31 @@ int main(int argc, char** argv)
     CHECK(eq(SyncOffsets::globalDefault(Which::Sub), -10.0));            // -99 clamped to -10
     CHECK(eq(SyncOffsets::resolve(QStringLiteral("k2")).sub, -10.0));    // and it flows to files via the global
 
+    // 7. Read-side safety for values written OUTSIDE the API (older build, hand-edited ini, corruption): an
+    // out-of-range global is clamped on read, a non-numeric (corrupt) one reads back as 0.0.
+    {
+        QSettings raw(iniPath, QSettings::IniFormat);
+        raw.setValue(QStringLiteral("sync/global/audio"), 500.0);                       // out of range
+        raw.setValue(QStringLiteral("sync/global/sub"), QStringLiteral("not-a-number")); // corrupt
+        raw.sync();
+    }
+    CHECK(eq(SyncOffsets::globalDefault(Which::Audio), 10.0));   // read-side clamp: 500 -> 10
+    CHECK(eq(SyncOffsets::globalDefault(Which::Sub), 0.0));      // corrupt string -> 0.0
+    SyncOffsets::setGlobalDefault(Which::Audio, 0.0);           // restore clean globals for the collision asserts
+    SyncOffsets::setGlobalDefault(Which::Sub, 0.0);
+
+    // 8. Opaque-key contract: real resume keys are paths/URLs — some with '/', '//', or trailing separators
+    // that QSettings would normalize into COLLIDING group paths. SyncOffsets hashes the key to a flat token
+    // first, so keys that differ only in empty/duplicate separators — and a URL-shaped key — resolve
+    // independently. (Against verbatim group nesting "a/b" and "a//b" alias to the same entry; this pins the
+    // hash.)
+    SyncOffsets::savePerFile(QStringLiteral("a/b"),  Which::Audio, 0.10);
+    SyncOffsets::savePerFile(QStringLiteral("a//b"), Which::Audio, 0.20);
+    SyncOffsets::savePerFile(QStringLiteral("https://x/y.mkv"), Which::Audio, 0.30);
+    CHECK(eq(SyncOffsets::resolve(QStringLiteral("a/b")).audio,  0.10));
+    CHECK(eq(SyncOffsets::resolve(QStringLiteral("a//b")).audio, 0.20));   // distinct from "a/b"
+    CHECK(eq(SyncOffsets::resolve(QStringLiteral("https://x/y.mkv")).audio, 0.30));
+
     if (failures == 0) { std::puts("SYNC-OK"); return 0; }
     std::fprintf(stderr, "SYNC: %d check(s) failed\n", failures);
     return 1;
