@@ -69,10 +69,12 @@ QString UiTestServer::handle(const QString& line)
             // Space: the nav ring passes it through (NavRing::handleKey default), so it reaches the focused
             // widget natively — e.g. toggles a QListWidget checkbox (the Library's per-source enable box).
             { QStringLiteral("space"), Qt::Key_Space },
-            // Themed-surface shortcuts: "I"/Info opens the detail view, "P" adds to a playlist, "/" searches.
+            // Themed-surface shortcuts: "I"/Info opens the detail view, "P" adds to a playlist, "/" searches,
+            // "F" opens the transient browse Filter menu (All/Favorites/status/tag).
             { QStringLiteral("info"), Qt::Key_I },      { QStringLiteral("i"), Qt::Key_I },
             { QStringLiteral("playlist"), Qt::Key_P },  { QStringLiteral("p"), Qt::Key_P },
             { QStringLiteral("search"), Qt::Key_Slash },{ QStringLiteral("slash"), Qt::Key_Slash },
+            { QStringLiteral("filter"), Qt::Key_F },    { QStringLiteral("f"), Qt::Key_F },
         };
         int k = keys.value(arg.toLower(), 0);
         if (!k) k = arg.toInt();                       // raw Qt::Key value for anything exotic

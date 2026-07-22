@@ -17,6 +17,7 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/SteamLibrary.h"
+#include "../core/ItemMarks.h"
 #include "CarouselView.h"
 #include "XmbView.h"
 #include <QHash>
@@ -93,6 +94,22 @@ static QSettings& settingsStore()
     static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
+}
+
+// The GLOBAL "show hidden items" override (Settings ▸ General): when on, hidden marks are ignored so hidden
+// items render everywhere they normally would. Off by default. Read live on every populate/render so a toggle
+// takes effect on the next refresh (no cached copy to go stale).
+static bool showHiddenItems()
+{
+    return settingsStore().value(QStringLiteral("library/showHidden"), false).toBool();
+}
+
+// A catalog item is dropped from the rows/search when it carries the per-profile `hidden` mark and the global
+// Show-hidden override is off. Synthetic rows (folders/headers, type starting '_' or "rechdr") have no marks
+// key and are never filtered — callers only pass real media items here.
+static bool isHiddenItem(const MediaItem& it)
+{
+    return !showHiddenItems() && ItemMarks::get(MetaCache::keyFor(it)).hidden;
 }
 
 // Resume progress (0..1) for a played media path/url, or -1 if none. Mirrors MainWindow's key scheme
@@ -1339,17 +1356,39 @@ QVariantList HomeView::browseItems()
 {
     browseRowMap_.clear();
     QVariantList out;
+    // Section headers ("rechdr") are emitted LAZILY: a divider is remembered and only flushed once a real item
+    // beneath it survives filtering. So a mid-session Hide (or the transient browse filter) that empties a group
+    // — dropping the last item between two dividers — takes its now-orphaned header with it instead of leaving a
+    // bare label lingering above the next group.
+    int pendingHeaderRow = -1;
     for (int r = 0; r < items_.size(); ++r)
     {
         const MediaItem& it = items_[r];
         if (it.type == QStringLiteral("_open") || it.type == QStringLiteral("info"))
             continue;
-        browseRowMap_ << r;
-        if (it.type == QStringLiteral("rechdr")) // a section divider ("★ Favorites", "Games", …) — non-selectable
+        if (it.type == QStringLiteral("rechdr")) // a section divider — defer; flush when its first item survives
         {
-            out << QVariantMap{ { QStringLiteral("title"), it.title }, { QStringLiteral("header"), true } };
+            pendingHeaderRow = r;
             continue;
         }
+        const bool realMedia = !it.type.startsWith(QLatin1Char('_'));
+        // An item hidden AFTER this level was populated is still sitting in items_ (populate only filters on a
+        // fresh load). Skip it here too so a mid-session Hide vanishes from the themed model on the next rebuild
+        // (browseItemsChanged) with no re-fetch. Synthetic folder rows (type starting '_') carry no marks key.
+        if (realMedia && isHiddenItem(it))
+            continue;
+        // The transient, level-scoped browse filter (All/Favorites/status/tag) narrows the presentation only.
+        if (realMedia && !passesBrowseFilter(it))
+            continue;
+        // A surviving real row (or a synthetic shelf/folder row) flushes any deferred header first.
+        if (pendingHeaderRow >= 0)
+        {
+            browseRowMap_ << pendingHeaderRow;
+            out << QVariantMap{ { QStringLiteral("title"), items_[pendingHeaderRow].title },
+                                { QStringLiteral("header"), true } };
+            pendingHeaderRow = -1;
+        }
+        browseRowMap_ << r;
         QVariantMap m{ { QStringLiteral("title"), it.title }, { QStringLiteral("subtitle"), it.subtitle },
                        // Offline-first: serve the locally cached copy of the tile art when we have one, so
                        // rows whose remote thumbnail is dead/unreachable (console SVGs especially) still
@@ -1364,6 +1403,34 @@ QVariantList HomeView::browseItems()
         out << m;
     }
     return out;
+}
+
+// Membership test for the transient browse filter. All -> everything; Favorites -> the profile's starred items
+// (FavoritesStore is keyed by the same id keyFor() yields); Status -> the item's completion mark; Tag -> the
+// item carries that tag. Marks are cache-backed (O(1)/item), so this is cheap to run over the whole level.
+bool HomeView::passesBrowseFilter(const MediaItem& it) const
+{
+    switch (browseFilterMode_)
+    {
+        case 1: return FavoritesStore::isFavorite(MetaCache::keyFor(it));
+        case 2: return static_cast<int>(ItemMarks::get(MetaCache::keyFor(it)).completion) == browseFilterComp_;
+        case 3: return ItemMarks::get(MetaCache::keyFor(it)).tags.contains(browseFilterTag_);
+        default: return true; // 0 = All
+    }
+}
+
+void HomeView::setBrowseFilter(int mode, int comp, const QString& tag)
+{
+    browseFilterMode_ = mode;
+    browseFilterComp_ = comp;
+    browseFilterTag_  = tag;
+}
+
+void HomeView::clearBrowseFilter()
+{
+    browseFilterMode_ = 0;
+    browseFilterComp_ = 0;
+    browseFilterTag_.clear();
 }
 
 QString HomeView::browseTitle() const
@@ -1681,6 +1748,59 @@ void HomeView::openFavoritesLevel(const QString& system)
 void HomeView::populateFavorites(const QString& system)
 { showSyntheticCatalog(browse::favoritesCatalog(FavoritesStore::list(), system)); }
 
+// The current level's real items that belong on a shelf: favorites (favshelf:), a pinned tag (tagshelf:<tag>),
+// or hidden (hiddenshelf:). Hidden items are excluded from the favorites/tag shelves (a hidden item stays
+// hidden everywhere unless Show-hidden is on, in which case isHiddenItem() is false and it can appear); the
+// hidden shelf is the one surface that lists them (and only shows while Show-hidden is on). Marks are
+// cache-backed, so this is O(1) per candidate.
+QVector<MediaItem> HomeView::shelfMatches(const MediaItem& folder) const
+{
+    QVector<MediaItem> out;
+    const QString& mime = folder.mime;
+    for (const MediaItem& it : items_)
+    {
+        if (it.type == QStringLiteral("rechdr") || it.type == QStringLiteral("info")
+            || it.type.startsWith(QLatin1Char('_')))
+            continue;
+        if (mime == QStringLiteral("hiddenshelf:"))
+        {
+            if (ItemMarks::get(MetaCache::keyFor(it)).hidden) out.push_back(it);
+            continue;
+        }
+        if (isHiddenItem(it)) continue; // fav/tag shelves never surface a hidden item
+        if (mime == QStringLiteral("favshelf:"))
+        {
+            if (FavoritesStore::isFavorite(MetaCache::keyFor(it))) out.push_back(it);
+        }
+        else if (mime.startsWith(QStringLiteral("tagshelf:")))
+        {
+            if (ItemMarks::get(MetaCache::keyFor(it)).tags.contains(mime.mid(9))) out.push_back(it);
+        }
+    }
+    return out;
+}
+
+// Drill a shelf folder: snapshot the intersection from the PARENT level's items into the pushed Level (so Back
+// re-shows it with no re-fetch), inheriting the parent's addon so an addon-catalog item still resolves on open.
+void HomeView::openShelfLevel(const MediaItem& folder)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    const QVector<MediaItem> matches = shelfMatches(folder);
+    Level lvl;
+    lvl.addon = stack_.isEmpty() ? nullptr : stack_.last().addon; // resolve item opens via the parent addon
+    lvl.detail = true;
+    lvl.title = folder.title;
+    lvl.item.id = folder.id;
+    lvl.item.type = folder.type;   // "_favshelf" | "_tagshelf" | "_hiddenshelf" (loadTop rebuilds from synthItems)
+    lvl.item.expandable = true;
+    lvl.item.mime = folder.mime;
+    lvl.synthItems = matches;
+    stack_.push_back(lvl);
+    MediaCatalog cat;
+    cat.items = matches;
+    showSyntheticCatalog(cat);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -1715,8 +1835,9 @@ void HomeView::renderRecents()
     // leads with what was recently played and favourites are their own section at the bottom.
     auto renderFavorites = [&]() {
         const QVector<FavoriteItem> favs = FavoritesStore::list();
-        if (favs.isEmpty()) return;
-        addHeader(tr("★ Favorites"));
+        // Build the (hidden-filtered) favourite rows first so the header is skipped when every favourite is
+        // hidden (an empty "★ Favorites" divider would otherwise linger).
+        QVector<MediaItem> favItems;
         for (const FavoriteItem& f : favs)
         {
             MediaItem it;
@@ -1727,8 +1848,14 @@ void HomeView::renderRecents()
             it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl); // offline-first artwork
             it.expandable = f.expandable;
             it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
+            if (isHiddenItem(it)) continue;               // hidden mark hides it from the Favorites shelf too
+            favItems.push_back(it);
+        }
+        if (favItems.isEmpty()) return;
+        addHeader(tr("★ Favorites"));
+        for (const MediaItem& it : favItems)
+        {
             items_.push_back(it);
-
             auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title, grid_);
             w->setSizeHint(QSize(0, 52));
             w->setIcon(defaultIcon(it.type, iconSz));
@@ -1749,7 +1876,9 @@ void HomeView::renderRecents()
 
     for (const QString& key : order)
     {
-        addHeader(recentGroupLabel(key));
+        // Map the group's recents to MediaItems and drop the hidden ones first, so a group whose every item is
+        // hidden contributes no orphan header (same rule as the Favorites section below).
+        QVector<MediaItem> rows;
         for (const RecentItem& r : groups[key])
         {
             MediaItem it;
@@ -1761,6 +1890,13 @@ void HomeView::renderRecents()
             // (saved when the item was downloaded) wins so the shelf renders offline.
             it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
+            if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
+            rows.push_back(it);
+        }
+        if (rows.isEmpty()) continue;
+        addHeader(recentGroupLabel(key));
+        for (const MediaItem& it : rows)
+        {
             items_.push_back(it);
 
             // "Continue watching": show a percentage in the row text and a resume bar on the (small) icon.
@@ -2048,6 +2184,11 @@ void HomeView::activateItem(int row)
     }
 
     stack_.last().childRow = row; // remember where we drilled in, so Back restores this position
+
+    // A marks shelf (Favorites / a pinned tag / Hidden) drills into this level's matching items.
+    if (it.type == QStringLiteral("_favshelf") || it.type == QStringLiteral("_tagshelf")
+        || it.type == QStringLiteral("_hiddenshelf"))
+        { openShelfLevel(it); return; }
 
     // The synthetic Steam console drills into the local library natively (not via the addon).
     if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
@@ -2565,6 +2706,10 @@ void HomeView::loadTop()
     // Returning to a console's synthetic Favorites level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_favorites"))
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
+    // Returning to a marks shelf level (Favorites / pinned tag / Hidden): re-show its snapshotted intersection.
+    if (top.detail && (top.item.type == QStringLiteral("_favshelf") || top.item.type == QStringLiteral("_tagshelf")
+                       || top.item.type == QStringLiteral("_hiddenshelf")))
+        { MediaCatalog c; c.items = top.synthItems; showSyntheticCatalog(c); return; }
     // Returning to a synthetic playlist level (Back out of a playlist / an item): rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_playlists"))
         { populatePlaylists(top.item.mime.mid(QStringLiteral("playlists:").size())); return; }
@@ -3003,6 +3148,23 @@ void HomeView::favoriteThemedLeaf(int idx)
     emit themedMetaReady(idx, m);
 }
 
+// The per-profile marks key for the browse-item at `idx` — the SAME MetaCache::keyFor the hidden filter and
+// the detail hide/status/tags verbs use, so a hide here matches the filter that drops it from the rows.
+QString HomeView::themedLeafKey(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return QString();
+    return MetaCache::keyFor(items_[browseRowMap_[idx]]);
+}
+
+// Re-apply the hidden filter after Show-hidden / a profile switch flipped it. The Home list rebuilds in place
+// (renderRecents re-reads the stores and re-runs the filter); a catalogue level re-issues its request so the
+// filter runs in populate() as the fresh items land. browseItemsChanged re-syncs any themed browse mirror.
+void HomeView::reloadForFilterChange()
+{
+    if (recentView_) { renderRecents(); emit browseItemsChanged(false); return; }
+    if (!stack_.isEmpty()) loadTop();
+}
+
 // A non-expandable info-page leaf (movie/series/book/comic/…): the themed grid browse opens the themed detail
 // view for it (replacing the classic info page) instead of drilling. Games/tracks are direct-open, not this.
 bool HomeView::isThemedInfoLeaf(int idx) const
@@ -3127,6 +3289,27 @@ QVariantMap HomeView::themedDetailData(int idx)
     {
         if (ExternalPlayer::anyTarget()) verbs << QStringLiteral("external"); // one-off, any default
         if (ExternalPlayer::available()) verbs << QStringLiteral("builtin");  // alternative, default IS external
+    }
+    // Library-management verbs (hidden / completion status / tags) on any REAL media item — gated off the
+    // synthetic folder/marker rows (type starting '_'), which carry no marks key. These act on the item's marks
+    // (ItemMarks, per profile) via MainWindow's dispatch; `hidden`/`completion` below drive the pill labels.
+    // Hidden is personal, not parental — offered on restricted profiles too (per spec).
+    if (!it.type.startsWith(QLatin1Char('_')))
+    {
+        verbs << QStringLiteral("hide") << QStringLiteral("status") << QStringLiteral("tags");
+        const ItemMarks::Marks marks = ItemMarks::get(metaKey);
+        out.insert(QStringLiteral("hidden"), marks.hidden);
+        // Stable completion token the action row maps to a label (mirrors ItemMarks' own token strings).
+        QString comp = QStringLiteral("none");
+        switch (marks.completion)
+        {
+            case ItemMarks::Completion::InProgress: comp = QStringLiteral("inProgress"); break;
+            case ItemMarks::Completion::Finished:   comp = QStringLiteral("finished");   break;
+            case ItemMarks::Completion::Abandoned:  comp = QStringLiteral("abandoned");  break;
+            case ItemMarks::Completion::Planned:    comp = QStringLiteral("planned");    break;
+            case ItemMarks::Completion::None:       break;
+        }
+        out.insert(QStringLiteral("completion"), comp);
     }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
@@ -3682,6 +3865,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         applyGridMode(/*recentList*/ false); // ensure the poster grid (recents may have left it in list mode)
         grid_->clear();
         items_.clear();
+        clearBrowseFilter(); // a fresh level load resets the transient browse filter (it never persists across levels)
         settingsStore().sync(); // fresh resume positions for the progress bars
         // Synthetic "folder" marker rows (Recent / Downloaded / Playlists / Favorites): each drills natively via
         // its mime marker and is shown only when `present`. id and type are the same tag in every case. The root
@@ -3700,6 +3884,38 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 items_.push_back(m);
             }
         };
+        // Marks shelves: after the store folders, one row per non-empty group of THIS catalog's items — a
+        // Favorites shelf (only at a catalogue root; the per-console block has its own system-scoped ★ folder),
+        // one per pinned tag whose members intersect the catalog, and a Hidden shelf (only while Show-hidden is
+        // on). Membership hashes each candidate's keyFor through the marks cache (O(1)/item). Drilling snapshots
+        // the intersection (openShelfLevel). `cat.items` is the freshly-arrived page — for a single-shot catalog
+        // (a games console) that is the whole library; a paged catalog only tests the loaded page here.
+        auto pushShelves = [this, &cat](bool favoritesShelf) {
+            auto add = [this](const QString& type, const QString& id, const QString& title, const QString& mime) {
+                MediaItem m; m.id = id; m.type = type; m.title = title; m.expandable = true; m.mime = mime;
+                items_.push_back(m);
+            };
+            auto any = [&cat](const std::function<bool(const MediaItem&)>& pred) {
+                for (const MediaItem& it : cat.items)
+                    if (it.type != QStringLiteral("rechdr") && it.type != QStringLiteral("info")
+                        && !it.type.startsWith(QLatin1Char('_')) && pred(it))
+                        return true;
+                return false;
+            };
+            if (favoritesShelf && any([](const MediaItem& it) {
+                    return !isHiddenItem(it) && FavoritesStore::isFavorite(MetaCache::keyFor(it)); }))
+                add(QStringLiteral("_favshelf"), QStringLiteral("_favshelf"), tr("★ Favorites"),
+                    QStringLiteral("favshelf:"));
+            for (const QString& tag : ItemMarks::pinnedTags())
+                if (any([&tag](const MediaItem& it) {
+                        return !isHiddenItem(it) && ItemMarks::get(MetaCache::keyFor(it)).tags.contains(tag); }))
+                    add(QStringLiteral("_tagshelf"), QStringLiteral("_tagshelf:") + tag, tag,
+                        QStringLiteral("tagshelf:") + tag);
+            if (showHiddenItems() && any([](const MediaItem& it) {
+                    return ItemMarks::get(MetaCache::keyFor(it)).hidden; }))
+                add(QStringLiteral("_hiddenshelf"), QStringLiteral("_hiddenshelf"), tr("Hidden"),
+                    QStringLiteral("hiddenshelf:"));
+        };
         // At a catalogue root (unfiltered, not Recents/detail): a "Recent" folder (this catalogue's recently
         // opened items, if any), a "Downloaded" folder (its fully-downloaded items — but NOT for games, which get
         // one per console below), and a "Playlists" folder (always shown; the saved playlists + a New entry).
@@ -3716,6 +3932,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
                 { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCatalogKey(),      true },
             });
+            { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }
         // Inside each games console folder: a "Recent", "★ Favorites" and "Downloaded" folder scoped to THIS
         // console, each shown only if its store has a matching item.
@@ -3747,6 +3964,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                     { QLatin1String("_favorites"), tr("★ Favorites"), QStringLiteral("favorites:") + system,                            hasFav },
                     { QLatin1String("_downloads"), tr("Downloaded"),  QStringLiteral("downloads:") + kind + QLatin1Char('|') + system, hasDown },
                 });
+                { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ false); } // per-console: ★ folder above already covers favorites
             }
         }
         // Lead with an "open a file of this type" item (with a + icon) instead of toolbar buttons.
@@ -3789,7 +4007,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     {
         from = items_.size();
     }
-    items_ += cat.items;
+    // Hidden-item filter: drop items the active profile has marked hidden (unless Show-hidden is on) BEFORE
+    // they enter items_, so they vanish from every surface this feeds — the poster grid/carousel/XMB here, the
+    // themed browse model (browseItems reads items_), AND search: both live in-catalog search and the cross-
+    // addon "search everything" ride populate() (SearchAggregator::resultsAppended -> populate). Synthetic
+    // folder/open rows were pushed above (not via cat.items) and are never marks-bearing, so they're untouched.
+    for (const MediaItem& it : cat.items)
+        if (!isHiddenItem(it)) items_.push_back(it);
 
     for (int i = from; i < items_.size(); ++i)
     {

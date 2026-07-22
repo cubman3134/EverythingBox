@@ -22,6 +22,16 @@ Item {
     readonly property var verbs: (sel && sel.actions && sel.actions.length) ? sel.actions : []
     readonly property bool favorited: !!(sel && sel.favorite)
     readonly property bool readable: !!(sel && sel.readable)
+    // Library-management state for the hide/status pills (supplied by themedDetailData).
+    readonly property bool hidden: !!(sel && sel.hidden)
+    readonly property string completion: (sel && sel.completion) ? sel.completion : "none"
+    function statusLabel(c) {
+        if (c === "inProgress") return "In progress"
+        if (c === "finished")   return "Finished"
+        if (c === "abandoned")  return "Abandoned"
+        if (c === "planned")    return "Planned"
+        return "Set status"
+    }
     // This row holds the nav cursor when the host parks the detail selection in the "actions" zone.
     readonly property bool zoneFocused: !!(host && host.detailZone === "actions")
     readonly property int focusIdx: (host ? host.detailActionIndex : 0)
@@ -37,6 +47,11 @@ Item {
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "external") return { label: "🔗  Open in external player",         color: "#7C5CFF", textColor: "#FFFFFF" }
         if (verb === "builtin")  return { label: "🖥  Play with built-in player",       color: "#E7EBF2", textColor: "#33405A" }
+        if (verb === "hide")     return { label: (hidden ? "🙈  Unhide" : "🙈  Hide"),
+                                          color: (hidden ? "#D8C7E8" : "#E7EBF2"), textColor: "#33405A" }
+        if (verb === "status")   return { label: "◐  " + statusLabel(completion),
+                                          color: (completion === "none" ? "#E7EBF2" : "#CFE3D2"), textColor: "#33405A" }
+        if (verb === "tags")     return { label: "🏷  Tags",                              color: "#E7EBF2", textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 

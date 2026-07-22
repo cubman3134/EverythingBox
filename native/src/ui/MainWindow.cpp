@@ -43,6 +43,7 @@
 #include "../core/RomLibrary.h"
 #include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
+#include "../core/ItemMarks.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
 #include "ProfileDialog.h"
@@ -3597,6 +3598,8 @@ void MainWindow::openThemedDetail(int browseIndex)
     if (data.isEmpty()) return; // a divider / synthetic / non-media row: nothing to detail
 
     themedDetailIndex_ = bi;
+    themedDetailKey_ = home_->themedLeafKey(bi); // marks key: hide/status/tags act on this, not the volatile index
+    themedDetailMarksDirty_ = false;             // set true by a Hide/Show in this detail -> rebuild rows on pop
     r->setProperty("detailData", data);
     r->setProperty("detailActionIndex", 0);
     r->setProperty("detailChildIndex", 0);
@@ -3606,7 +3609,20 @@ void MainWindow::openThemedDetail(int browseIndex)
     if (NavGraph* g = ThemeEngine::navGraph(cur))
         g->pushLevel(QStringLiteral("detail"), [this, cur, ret] {
             themedDetailIndex_ = -1;
-            if (QQuickItem* rr = ThemeEngine::rootItem(cur)) rr->setProperty("currentView", ret); // -> detail zones hidden
+            themedDetailKey_.clear();
+            QQuickItem* rr = ThemeEngine::rootItem(cur);
+            if (!rr) { themedDetailMarksDirty_ = false; return; }
+            rr->setProperty("currentView", ret); // -> detail zones hidden
+            // A Hide/Show toggle happened while this detail was open: rebuild the browse model NOW (browseItems
+            // re-applies the hidden filter) so returning to the list shows the row gone / back — no re-fetch. The
+            // nav graph's set-index clamp absorbs a removed row; we keep the cursor near where it was.
+            if (themedDetailMarksDirty_)
+            {
+                themedDetailMarksDirty_ = false;
+                const int keep = rr->property("currentIndex").toInt();
+                rr->setProperty("items", home_->browseItems());
+                rr->setProperty("currentIndex", keep); // clamped by the QML model if it now overshoots
+            }
         });
 }
 
@@ -3654,6 +3670,193 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             d.insert(QStringLiteral("favorite"), home_->isThemedLeafFavorite(idx));
             r->setProperty("detailData", d); // the action row re-reads selected.favorite -> ★/☆ flips in place
         }
+    }
+    // ---- Library-management verbs (act on themedDetailKey_ so a row-index shift can't misfire) ----
+    else if (verb == QStringLiteral("hide"))
+    {
+        if (themedDetailKey_.isEmpty()) return;
+        const bool nowHidden = !ItemMarks::get(themedDetailKey_).hidden;
+        ItemMarks::setHidden(themedDetailKey_, nowHidden);
+        themedDetailMarksDirty_ = true; // -> browse model rebuilt on detail pop (row vanishes / returns)
+        // Re-push detailData so the pill flips Hide<->Unhide in place (the favourite-branch idiom); the detail
+        // stays open on the item, and the underlying list refreshes when the user backs out.
+        QWidget* cur = stack_->currentWidget();
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+        {
+            QVariantMap d = r->property("detailData").toMap();
+            d.insert(QStringLiteral("hidden"), nowHidden);
+            r->setProperty("detailData", d);
+        }
+    }
+    else if (verb == QStringLiteral("status")) themedDetailPickStatus();
+    else if (verb == QStringLiteral("tags"))   themedDetailEditTags();
+}
+
+// The completion-status picker: a controller-navigable NavMenu over the five states, the current one marked
+// with a check. Picking one writes it (ItemMarks, per profile) and re-pushes detailData so the status pill
+// updates in place. Back leaves the mark untouched.
+void MainWindow::themedDetailPickStatus()
+{
+    // Snapshot the key into a LOCAL: NavMenu::pick is a modal nested loop, so bind the target once (read before
+    // AND written after the pick) rather than re-reading the member across the modality.
+    const QString key = themedDetailKey_;
+    if (key.isEmpty()) return;
+    struct S { ItemMarks::Completion c; QString label; };
+    const QVector<S> states = {
+        { ItemMarks::Completion::None,       tr("None") },
+        { ItemMarks::Completion::Planned,    tr("Planned") },
+        { ItemMarks::Completion::InProgress, tr("In progress") },
+        { ItemMarks::Completion::Finished,   tr("Finished") },
+        { ItemMarks::Completion::Abandoned,  tr("Abandoned") },
+    };
+    const ItemMarks::Completion cur = ItemMarks::get(key).completion;
+    QStringList rows;
+    for (const S& s : states)
+        rows << (s.c == cur ? QStringLiteral("✓  ") + s.label : QStringLiteral("     ") + s.label);
+    const int pick = NavMenu::pick(tr("Set status"), rows, this);
+    if (pick < 0 || pick >= states.size()) return;
+    ItemMarks::setCompletion(key, states[pick].c);
+    // Re-push the completion token so the status pill relabels (ActionRow maps token -> label).
+    static const char* tok[] = { "none", "planned", "inProgress", "finished", "abandoned" };
+    QWidget* w = stack_->currentWidget();
+    if (QQuickItem* r = ThemeEngine::rootItem(w))
+    {
+        QVariantMap d = r->property("detailData").toMap();
+        d.insert(QStringLiteral("completion"), QString::fromLatin1(tok[pick]));
+        r->setProperty("detailData", d);
+    }
+}
+
+// The tags picker LOOP: one NavMenu re-presented until Back. Rows are the profile's tag vocabulary — each shows
+// a ✓ when the item carries it and a 📌 when it's a pinned shelf — followed by "New tag…" and, when the loop is
+// re-entered after highlighting a real tag, a "Pin/Unpin shelf: <tag>" row for that tag. Picking a vocab tag
+// toggles it on the item and re-presents; "New tag…" prompts (Osk) for a name, applies it, and re-presents;
+// the pin row flips that tag's shelf-pin. Back exits the loop. All writes go through ItemMarks (per profile).
+void MainWindow::themedDetailEditTags()
+{
+    // Snapshot the detail's marks key into a LOCAL up front: every step below re-enters a modal nested loop
+    // (NavMenu::pick / Osk::getText / NavConfirm::ask), so binding the target once makes it explicit that the
+    // whole flow acts on the item the detail was opened for, regardless of any member churn during modality.
+    const QString key = themedDetailKey_;
+    if (key.isEmpty()) return;
+    QString selTag; // the tag a pin row (from the previous pass) targets — the last vocab row we acted on
+    while (true)
+    {
+        const QStringList vocab = ItemMarks::tagVocab();
+        const QStringList onItem = ItemMarks::get(key).tags;
+        const QStringList pinned = ItemMarks::pinnedTags();
+
+        QStringList rows;
+        for (const QString& t : vocab)
+        {
+            QString row = onItem.contains(t) ? QStringLiteral("✓ ") : QStringLiteral("   ");
+            row += t;
+            if (pinned.contains(t)) row += QStringLiteral("   📌");
+            rows << row;
+        }
+        const int newIdx = rows.size();            // "New tag…" row
+        rows << tr("➕ New tag…");
+        int pinIdx = -1, delIdx = -1;
+        if (!selTag.isEmpty() && vocab.contains(selTag))
+        {
+            pinIdx = rows.size();                  // "Pin/Unpin shelf: <selected>" row
+            rows << (pinned.contains(selTag) ? tr("📌 Unpin shelf: %1").arg(selTag)
+                                             : tr("📌 Pin as shelf: %1").arg(selTag));
+            delIdx = rows.size();                  // "Delete tag everywhere: <selected>" (vocab + all items + unpin)
+            rows << tr("🗑 Delete tag everywhere: %1").arg(selTag);
+        }
+
+        const int pick = NavMenu::pick(tr("Tags"), rows, this);
+        if (pick < 0) return;                       // Back exits the loop
+
+        if (pick == newIdx)
+        {
+            const QString name = Osk::getText(tr("New tag:"), QString(), QLineEdit::Normal,
+                                              this, currentThemedGraph()).trimmed();
+            if (!name.isEmpty())
+            {
+                QStringList tags = ItemMarks::get(key).tags;
+                if (!tags.contains(name)) tags << name;   // apply to the item (also unions into the vocab)
+                ItemMarks::setTags(key, tags);
+                selTag = name;
+            }
+            continue;
+        }
+        if (pick == pinIdx)
+        {
+            ItemMarks::setPinned(selTag, !ItemMarks::pinnedTags().contains(selTag));
+            continue;
+        }
+        if (pick == delIdx)
+        {
+            // Destructive + profile-wide: confirm before it strips the tag from EVERY item and any shelf pin
+            // (the confirmDeleteProfile card shape — Cancel focused, Back = Cancel). Decline → back to the loop.
+            const int c = NavConfirm::ask(tr("Delete tag"),
+                tr("Delete the tag “%1” from every item in this profile and unpin its shelf? "
+                   "This can't be undone.").arg(selTag),
+                { tr("Cancel"), tr("Delete") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c != 1) continue;                    // Cancel / Back -> re-present the tags loop unchanged
+            ItemMarks::removeTagEverywhere(selTag);  // strips it from the vocab, every item, and any shelf pin
+            selTag.clear();                          // it no longer exists -> no selected-tag rows next pass
+            continue;
+        }
+        // A vocab tag row: toggle it on the item, remember it as the pin-row target, re-present.
+        if (pick >= 0 && pick < vocab.size())
+        {
+            const QString t = vocab[pick];
+            QStringList tags = ItemMarks::get(key).tags;
+            if (tags.contains(t)) tags.removeAll(t); else tags << t;
+            ItemMarks::setTags(key, tags);
+            selTag = t;
+        }
+    }
+}
+
+// The browse Filter menu (triggered by "F" on the themed browse view): a NavMenu over All / Favorites / each
+// completion status, plus a "By tag…" sub-pick when the profile has any tags. The chosen mode is a TRANSIENT,
+// level-scoped presentation filter (HomeView::setBrowseFilter) — not persisted, cleared on the next level load.
+// After a pick we re-read browseItems() into the live view so the narrowed set (and any orphaned group header)
+// refreshes in place with no re-fetch.
+void MainWindow::runThemedBrowseFilter()
+{
+    // Target the current themed browse surface — the flat browse view, or the XMB home column while drilled
+    // into a catalog (mirrors the browseItemsChanged fan-out). Nothing to filter on any other surface.
+    QWidget* tgt = nullptr;
+    if (themedBrowse_ && stack_->currentWidget() == themedBrowse_) tgt = themedBrowse_;
+    else if (themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_ && stack_->currentWidget() == themedHome_)
+        tgt = themedHome_;
+    if (!tgt) return;
+    struct Opt { int mode; int comp; QString label; };
+    const QVector<Opt> opts = {
+        { 0, 0, tr("All") },
+        { 1, 0, tr("★ Favorites") },
+        { 2, static_cast<int>(ItemMarks::Completion::Planned),    tr("Planned") },
+        { 2, static_cast<int>(ItemMarks::Completion::InProgress), tr("In progress") },
+        { 2, static_cast<int>(ItemMarks::Completion::Finished),   tr("Finished") },
+        { 2, static_cast<int>(ItemMarks::Completion::Abandoned),  tr("Abandoned") },
+    };
+    const QStringList tags = ItemMarks::tagVocab();
+    QStringList rows;
+    for (const Opt& o : opts) rows << o.label;
+    int byTagIdx = -1;
+    if (!tags.isEmpty()) { byTagIdx = rows.size(); rows << tr("By tag…"); }
+
+    const int pick = NavMenu::pick(tr("Filter"), rows, this);
+    if (pick < 0) return; // Back leaves the current filter unchanged
+    if (pick == byTagIdx)
+    {
+        const int t = NavMenu::pick(tr("Filter by tag"), tags, this);
+        if (t < 0 || t >= tags.size()) return;
+        home_->setBrowseFilter(3, 0, tags[t]);
+    }
+    else
+    {
+        home_->setBrowseFilter(opts[pick].mode, opts[pick].comp, QString());
+    }
+    if (QQuickItem* r = ThemeEngine::rootItem(tgt))
+    {
+        r->setProperty("items", home_->browseItems()); // narrow the presentation (rebuilds the row map)
+        r->setProperty("currentIndex", home_->browseRestoreIndex());
     }
 }
 
@@ -4056,9 +4259,13 @@ void MainWindow::showThemedXmb()
         if (r) home_->addBrowseItemToPlaylist(r->property("currentIndex").toInt());
     };
 
+    // "F" inside an XMB catalog opens the transient browse Filter menu (a no-op at the XMB category root).
+    auto onButton = [this](const QString& v) {
+        if (v == QStringLiteral("filter") && themedXmbInCatalog_) runThemedBrowseFilter();
+    };
     QWidget* w = ThemeEngine::buildView(themeDir, QVariantList(), system, this,
                                         onActivated, onBack, onCycle, onSearch, onNearEnd, onCategory,
-                                        onSelect, onAction, onPlaylistAdd, /*onButton=*/{},
+                                        onSelect, onAction, onPlaylistAdd, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
@@ -4132,9 +4339,11 @@ void MainWindow::showThemedBrowse()
     // Selection neared the end -> pull the next page (if any). browseItemsChanged appends + keeps selection.
     auto onNearEnd = [this] { if (home_->browseHasMore()) home_->browseLoadMore(); };
 
+    // "F" on the browse view emits actionRequested("filter") -> open the transient browse Filter menu.
+    auto onButton = [this](const QString& v) { if (v == QStringLiteral("filter")) runThemedBrowseFilter(); };
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd, {}, {}, {}, {}, {},
+                                        onSearch, onNearEnd, {}, {}, {}, {}, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
@@ -4620,6 +4829,8 @@ void MainWindow::confirmDeleteProfile(const QString& profileId, bool mustChoose)
 void MainWindow::chooseProfile(const QString& id)
 {
     ProfileStore::setCurrent(id);
+    ItemMarks::invalidate(); // drop the previous profile's marks cache NOW (no signal fires) so the fresh home
+                             // filters/labels against the new profile's hidden/completion/tags, not the old one's
     openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
     // When this resolves the pre-home startup picker, showEvent already returned before its own
     // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,
@@ -7030,6 +7241,11 @@ void MainWindow::openGeneralSettings()
         // --- Display ---
         sep(tr("Display"));
         toggle(QStringLiteral("disp.fullscreen"), tr("Open in full screen on startup"), Settings::startFullscreen());
+        // --- Library ---
+        sep(tr("Library"));
+        // Global (not per-profile) override: reveal items any profile has marked hidden from the detail view.
+        toggle(QStringLiteral("lib.showhidden"), tr("Show hidden items"),
+               store().value(QStringLiteral("library/showHidden"), false).toBool());
         // --- Updates ---
         sep(tr("Updates"));
         info(QStringLiteral("update.version"), tr("Version"), AppUpdater::currentVersion());
@@ -7114,6 +7330,11 @@ void MainWindow::openGeneralSettings()
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
                     if (on) showFullScreen(); else if (isFullScreen()) leaveFullScreen();
+                }
+                else if (id == QStringLiteral("lib.showhidden")) {
+                    store().setValue(QStringLiteral("library/showHidden"), on);
+                    store().sync();                 // flush so HomeView's QSettings sees it on the refresh below
+                    home_->reloadForFilterChange(); // hidden rows appear/disappear on the live surface at once
                 }
                 else if (id == QStringLiteral("update.autocheck")) Settings::setCheckUpdatesOnStartup(on);
                 else if (id == QStringLiteral("update.check")) {
