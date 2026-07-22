@@ -98,6 +98,17 @@ void Settings::setOpenSubPassword(const QString& pass)
     store().setValue(QStringLiteral("subs/osPass"), pass); store().sync();
 }
 
+QString Settings::steamWebApiKey() { return store().value(QStringLiteral("steam/apikey")).toString(); }
+void Settings::setSteamWebApiKey(const QString& key)
+{
+    store().setValue(QStringLiteral("steam/apikey"), key.trimmed()); store().sync();
+}
+QString Settings::steamId() { return store().value(QStringLiteral("steam/steamid")).toString(); }
+void Settings::setSteamId(const QString& id)
+{
+    store().setValue(QStringLiteral("steam/steamid"), id.trimmed()); store().sync();
+}
+
 QString Settings::videoFilter() { return store().value(QStringLiteral("emu/videoFilter"), QStringLiteral("off")).toString(); }
 void Settings::setVideoFilter(const QString& id)
 {

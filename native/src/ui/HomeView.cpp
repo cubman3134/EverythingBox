@@ -18,6 +18,7 @@
 #include "../core/Theme.h"
 #include "../core/SystemCatalog.h"
 #include "../core/SteamLibrary.h"
+#include "../core/Settings.h"
 #include "../core/ItemMarks.h"
 #include "CarouselView.h"
 #include "XmbView.h"
@@ -1557,9 +1558,16 @@ void HomeView::openSteamConsole(const MediaItem& consoleItem)
 // (Re)build the Steam games grid/column natively from the local library (no addon request).
 void HomeView::populateSteamGames()
 {
-    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse).
+    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse/probe_importers).
     const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query));
+    // Owned-but-not-installed (creds-gated): a Steam Web API key + SteamID appends the owned library as "Not
+    // installed" tiles. No key/id -> empty -> installed-only (today's behavior). ownedGames() TTL-caches and
+    // returns {} silently on any failure, so the console never surfaces an error.
+    const QString key = Settings::steamWebApiKey();
+    const QString sid = Settings::steamId();
+    const QList<SteamGame> owned = (!key.isEmpty() && !sid.isEmpty())
+        ? SteamLibrary::ownedGames(key, sid) : QList<SteamGame>{};
+    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query, {}, owned));
 }
 
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
@@ -2906,7 +2914,10 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     if (it.mime == QStringLiteral("steamgame"))
     {
         MediaItem m = it;
-        m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
+        // An owned-not-installed tile already carries a steam://install/<appid> url — honor it; an installed
+        // tile has none, so build the run URL. Both ride the same MainWindow openUrl handoff.
+        if (m.url.isEmpty())
+            m.url = SteamLibrary::launchUrl(it.id.mid(QStringLiteral("steam:").size()));
         emit openItem(m); // MainWindow launches the steam:// URL
         return;
     }

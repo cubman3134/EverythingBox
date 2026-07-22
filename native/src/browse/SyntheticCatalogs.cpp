@@ -2,6 +2,7 @@
 #include "../core/MetaCache.h"
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QSet>
 
 namespace browse
 {
@@ -11,7 +12,8 @@ QString iconTypeForKind(const QString& kind)
     if (kind == QStringLiteral("video"))    return QStringLiteral("movie");
     if (kind == QStringLiteral("audio"))    return QStringLiteral("album");
     if (kind == QStringLiteral("document")) return QStringLiteral("book");
-    if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")) return QStringLiteral("game");
+    if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")
+        || kind == QStringLiteral("steamgame")) return QStringLiteral("game");
     return QString();
 }
 
@@ -24,9 +26,10 @@ MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
     MediaCatalog cat; cat.title = QObject::tr("Recent");
     for (const RecentItem& r : all)
     {
-        // PC games belong to the game catalogue's Recent view alongside emulated ones.
+        // PC + Steam games belong to the game catalogue's Recent view alongside emulated ones.
         const bool match = r.kind == kind
-                           || (kind == QStringLiteral("game") && r.kind == QStringLiteral("pcgame"));
+                           || (kind == QStringLiteral("game")
+                               && (r.kind == QStringLiteral("pcgame") || r.kind == QStringLiteral("steamgame")));
         if (!kind.isEmpty() && !match) continue;
         if (!system.isEmpty() && r.system != system) continue; // per-console scope
         MediaItem it;
@@ -147,21 +150,44 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
 }
 
 MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
-                               const std::function<QString(const SteamGame&)>& poster)
+                               const std::function<QString(const SteamGame&)>& poster,
+                               const QList<SteamGame>& owned)
 {
     // A search while in the Steam console scopes to the library: keep only games whose name matches.
     const QString q = query.trimmed();
     MediaCatalog cat;
     cat.title = q.isEmpty() ? QObject::tr("Steam") : QObject::tr("Steam · %1").arg(q);
+    auto posterFor = [&poster](const SteamGame& g) {
+        return poster ? poster(g) : SteamLibrary::posterUrl(g.appid);
+    };
+    QSet<QString> haveIds;
     for (const SteamGame& g : installed)
     {
+        haveIds.insert(g.appid);
         if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
         MediaItem it;
         it.id = QStringLiteral("steam:") + g.appid;
         it.type = QStringLiteral("game");
         it.title = g.name;
         it.mime = QStringLiteral("steamgame"); // no url -> clicking opens the info page; Play launches it
-        it.thumbnailUrl = poster ? poster(g) : SteamLibrary::posterUrl(g.appid);
+        it.thumbnailUrl = posterFor(g);
+        cat.items.push_back(it);
+    }
+    // Owned-but-not-installed (creds-gated): appended after the installed games, badged "Not installed", and
+    // carrying a steam://install/<appid> url so activation hands the install off to the Steam client (the same
+    // openUrl path a run uses). Skips anything already installed. Empty when no key/SteamID is configured.
+    for (const SteamGame& g : owned)
+    {
+        if (haveIds.contains(g.appid)) continue;                 // installed entries stay unchanged
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
+        MediaItem it;
+        it.id = QStringLiteral("steam:") + g.appid;
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.subtitle = QObject::tr("Not installed");             // the badge
+        it.mime = QStringLiteral("steamgame");
+        it.url = SteamLibrary::installUrl(g.appid);              // activation -> steam://install/<appid>
+        it.thumbnailUrl = posterFor(g);
         cat.items.push_back(it);
     }
     cat.hasMore = false;

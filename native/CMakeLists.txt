@@ -355,6 +355,19 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
+    # Headless test for the game-importers Task 1 (Steam gap-closure) pure logic: owned-games JSON parse +
+    # TTL semantics (SteamLibrary), the owned-not-installed console append (SyntheticCatalogs), and the
+    # Recent-kind dispatch table (RecentStore::relaunchFor) the app's openRecent switch mirrors. No network /
+    # registry / Steam install needed — all in-memory fixtures. RecentStore pulls ProfileStore (profile-namespaced
+    # recents) + MetaCache (SyntheticCatalogs' offline-art resolve) + AddonModels (MediaItem/Catalog).
+    add_executable(probe_importers tools/probe_importers.cpp
+        src/core/SteamLibrary.cpp src/core/SteamLibrary.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/MetaCache.cpp src/core/RecentStore.cpp
+        src/core/ProfileStore.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse)
+    target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
     # Headless test for the PerfTrace span harness (gating, format, overhead budget) plus the
     # component-budget asserts (browse builders, m3u parse, search dedup) — sources mirror
     # probe_browse's builder/search deps + StreamResolver for parseM3u.
