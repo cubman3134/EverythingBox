@@ -1,7 +1,13 @@
-// Per-profile, per-catalogue playlists: user-curated lists of catalog items. Each catalogue (keyed by its
-// source addon + catalog id + type) shows a "Playlists" folder at the top; a playlist is an ordered set of
-// items kept here. Stored as JSON in mymediavault.ini under the active profile, so each user has their own.
-// Enough of each item is kept (like a FavoriteItem) to display it and re-open/resolve it through its addon.
+// Per-profile, per-CATEGORY playlists: user-curated lists of catalog items. A playlist belongs to one of the
+// four inherent buckets (video / audio / game / reading — see core/MediaCategories.h), so e.g. a single Video
+// playlist can mix episodes and movies from any video catalogue. A "Playlists" folder shows at the category
+// level and at every catalogue root of that category. Stored as JSON in mymediavault.ini under the active
+// profile, so each user has their own. Enough of each item is kept (like a FavoriteItem) to display it and
+// re-open/resolve it through its addon (each entry carries its own addonId — playlists may be mixed-source).
+//
+// Migration: earlier builds keyed each playlist by a single catalogKey ("addonId|catalogId|catalogType").
+// migrateToCategories() folds that to categoryKey = mediaCategory(catalogType) once (stamped, idempotent),
+// preserving the original catalogKey in legacyKey; ids and items are never touched.
 #pragma once
 #include <QString>
 #include <QVector>
@@ -24,19 +30,25 @@ struct PlaylistEntry
 struct Playlist
 {
     QString id;           // unique (a uuid)
-    QString catalogKey;   // the catalogue this belongs to ("addonId|catalogId|catalogType")
+    QString categoryKey;  // the bucket this belongs to: "video" | "audio" | "game" | "reading"
+    QString legacyKey;    // pre-migration catalogKey ("addonId|catalogId|catalogType"), preserved for provenance
     QString name;
     QVector<PlaylistEntry> items;
 };
 
 namespace PlaylistStore
 {
-    QVector<Playlist> forCatalog(const QString& catalogKey); // this catalogue's playlists (active profile)
-    bool get(const QString& id, Playlist& out);              // false if no such playlist
-    QString create(const QString& catalogKey, const QString& name); // returns the new playlist's id
+    QVector<Playlist> forCategory(const QString& categoryKey); // this category's playlists (active profile)
+    bool get(const QString& id, Playlist& out);                // false if no such playlist
+    QString create(const QString& categoryKey, const QString& name); // returns the new playlist's id
     void rename(const QString& id, const QString& name);
     void remove(const QString& id);
     void addItem(const QString& id, const PlaylistEntry& item); // appended, de-duped by itemId
     void removeItem(const QString& id, const QString& itemId);
     bool contains(const QString& id, const QString& itemId);
+
+    // One-time (per profile), stamped, idempotent: fold any legacy catalogKey-scoped playlist to a
+    // categoryKey via mediaCategory(catalogType), preserving the original in legacyKey. Runs automatically on
+    // every store access; safe to call directly. Returns true if it wrote a migration this call.
+    bool migrateToCategories();
 }

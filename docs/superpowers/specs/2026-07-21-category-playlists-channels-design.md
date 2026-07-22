@@ -1,7 +1,7 @@
 # Category Playlists + Channels (personal TV network) — Design
 
 **Date:** 2026-07-21
-**Status:** Approved design; plan queues after the marks/shelves track.
+**Status:** Complete: category playlists + migration, action menu + Play random, Channel mode (shuffle-bag autoplay, countdown interstitial, detour-skip) shipped 2026-07-22.
 **Origin:** User request — playlists scoped per CATEGORY (one Video playlist mixes TV
 episodes + movies + anything), a random-pick function, and channel-style random
 AUTOPLAY: "functionally create a TV network where you can put what you want on there."
@@ -64,6 +64,33 @@ key on ONE catalog (`catalogKey = addonId|catalogId|catalogType`). The user's
   runs on the REAL ini — snapshot first, verify Weekend Picks entries identical,
   restore only if verification fails).
 - Suite + perf gates unchanged.
+
+## Follow-ups (recorded, not built)
+
+- **Smart playlists** — `Playlist` gains an optional `rule` field; manual playlists have
+  empty rules. Future; nothing in this track precludes it.
+- **Weighted / scheduled programming** ("prime time") — future channel polish
+  (weighted picks, time-of-day scheduling).
+- **Channel + external-player interaction** — a channel pick that routes to an external
+  player (`routePlay` handoff early-return) reports `Played` but skips `notePlaybackStart`,
+  which formerly left `channelAiring_` latched and let the next unrelated in-app play be
+  adopted as the channel's pick (a real leak). Fixed: `airChannelPick` /
+  `onChannelPickResolved` clear the latch unconditionally after the synchronous dispatch.
+  Residual, by design: a channel exits at an external handoff — it can't EOF-chain through
+  an external player (no in-app end-of-file to trigger the next pick).
+- **Local-video-to-playlist UI add path** — no in-app control yet adds a local video file
+  to a playlist (playlists resolve local entries but the add gesture is missing for local
+  video). Product gap.
+- **Channel / Play-random can air a HIDDEN item** — explicit playlist membership currently
+  wins over the hidden flag: a hidden entry added to a playlist still airs/picks. Treated as
+  intentional (membership is an explicit user act) pending a user preference; policy
+  decision deferred.
+- **Mid-channel item removal shifts bag indices** — the shuffle bag holds indices into the
+  playlist snapshot; removing an entry mid-channel can shift positions so one subsequent
+  pick lands on a different-but-valid item (never a crash / out-of-range — bounds are
+  re-checked). Rebuild the bag on a size change if it ever matters in practice.
+- **NavCountdown %-placeholder doc nit** — the countdown label's format string / placeholder
+  documentation should be tidied for clarity. Cosmetic doc cleanup.
 
 ## Non-goals
 

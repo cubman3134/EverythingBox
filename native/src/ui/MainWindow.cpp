@@ -54,6 +54,7 @@
 #include "nav/Nav.h"
 #include "nav/NavGraph.h"
 #include "nav/NavOverlay.h"
+#include "../core/PlaylistStore.h"
 #include "nav/Osk.h"
 #include "../theme2/FormFactor.h"
 #include <QSettings>
@@ -776,6 +777,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                      if (playlist_) { playlist_->clear(); playlist_->setVisible(false); } });
     connect(session_, &PlaybackSession::queueFinished, this, [this] {
         stopScrobble(); // a finished video scrobbles a stop at ~100% -> marked watched
+        // PRECEDENCE: an active channel OWNS the natural end and supersedes episode-autoplay. Both hang off this
+        // one EOF-gated seam (queueFinished fires ONLY on MPV_END_FILE_REASON_EOF — stop/seek are swallowed), so
+        // a channel running over a TV-show playlist advances by the shuffle bag, NOT by episode order. Deferred a
+        // turn so the countdown's nested event loop unwinds out of the mpv end-of-file callback first (the
+        // T2 QueuedConnection precedent), and so no stray goBack/openHome can clear the flag before we read it.
+        if (channelActive())
+        { QMetaObject::invokeMethod(this, [this] { advanceChannel(); }, Qt::QueuedConnection); return; }
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
     });
     connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
@@ -847,6 +855,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::toastHideRequested, this, &MainWindow::hideNotice);
     connect(home_, &HomeView::requestOpenFile, this, &MainWindow::onRequestOpenFile);
     connect(home_, &HomeView::openRecent, this, &MainWindow::openRecent);
+    connect(home_, &HomeView::startChannelRequested, this, &MainWindow::startChannel);
+    connect(home_, &HomeView::channelPickResolved, this, &MainWindow::onChannelPickResolved);
+    connect(home_, &HomeView::channelPickDetoured, this, &MainWindow::onChannelPickDetoured);
     connect(home_, &HomeView::switchProfileRequested, this, &MainWindow::onSwitchProfile);
     connect(home_, &HomeView::themeChanged, this, &MainWindow::onThemeChanged);
     connect(home_, &HomeView::settingsRequested, this, &MainWindow::openSettingsHub);
@@ -1239,7 +1250,9 @@ void MainWindow::goBack()
     if (cur == emuPage_) { if (emuStopBtn_) emuStopBtn_->click(); return; }
     // Split screen: leave it.
     if (splitMode_) { exitSplitScreen(); return; }
-    // Player (and any other content page): stop playback and return home.
+    // Player (and any other content page): stop playback and return home. A Back from the player is a user stop,
+    // so the channel ends here (also covered by openHome below — explicit for the trace, idempotent).
+    exitChannel();
     player_->stop();
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
@@ -2265,6 +2278,7 @@ void MainWindow::openVideoPath(const QString& path)
         RecentStore::add({ path, QFileInfo(path).completeBaseName(), QStringLiteral("video"), QString() });
         return;
     }
+    notePlaybackStart();               // channel guard: the channel's own pick keeps it alive; a manual play ends it
     subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     themedAudioSession_ = false;       // openVideoPath is VIDEO — keep the classic player page
@@ -2341,6 +2355,7 @@ void MainWindow::openAudio()
 void MainWindow::openAudioPath(const QString& path)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
+    notePlaybackStart();               // channel guard: keep the channel iff this is its own audio pick
     currentNextSourceCapable_ = false; // a local file/folder has no Allarr alternate source
     const QFileInfo fi(path);
     QStringList queue;
@@ -2421,6 +2436,151 @@ void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString&
     openLibraryItem(it); // plays it, and re-arms subCtx_ so the following episode auto-advances too
 }
 
+// ---- Channel mode ------------------------------------------------------------------------------------------
+// A channel turns a video/audio playlist into a personal shuffle-TV network: it airs a random item, and on each
+// NATURAL end (the EOF-gated queueFinished seam) shows a cancelable 5 s countdown then airs the next bag pick.
+// The bag draws every item once before repeating (no immediate repeat across a reshuffle). State is session-
+// only and is cleared on every user stop / Back / manual play (see exitChannel + notePlaybackStart).
+
+void MainWindow::startChannel(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p) || p.items.isEmpty())
+    { notify(tr("This playlist is empty."), kFeedbackShort); return; }
+    channelPlaylistId_ = playlistId;
+    channelBag_.reset(int(p.items.size())); // a fresh shuffled bag for this run
+    channelSkips_ = 0;
+    notify(tr("Channel started — playing “%1” on shuffle.").arg(p.name), kFeedbackStandard);
+    airChannelPick(channelBag_.next());      // air the first pick immediately (no interstitial before item one)
+}
+
+// After a pick ends naturally: draw the next bag index, confirm the playlist still exists, show the countdown
+// interstitial, and air the pick (or exit the channel on Cancel/Back). Runs deferred (queued) from the EOF seam.
+void MainWindow::advanceChannel()
+{
+    if (!channelActive()) return;            // a stop/Back between the EOF and this queued call already exited
+    Playlist p;
+    if (!PlaylistStore::get(channelPlaylistId_, p) || p.items.isEmpty())
+    { exitChannel(); openHome(); return; }   // playlist vanished under us -> end the channel, land on Home
+
+    // Draw the next pick, but SKIP any that would only open a detail page (an addon movie/episode, a container,
+    // a stream-less item) BEFORE the interstitial — so the countdown only ever names something that will really
+    // play (no interstitial for skips). If every remaining pick detours, nothing plays directly: stop with a
+    // notice. A remote leaf counts as playable here; a rare async-resolve miss is caught after airing.
+    int next = channelBag_.next();
+    for (int skipped = 0; !home_->channelItemPlaysDirectly(channelPlaylistId_, next); ++skipped)
+    {
+        if (skipped + 1 >= int(p.items.size()))
+        {
+            exitChannel();
+            notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
+            return;
+        }
+        next = channelBag_.next();
+    }
+    if (next < 0 || next >= p.items.size()) { exitChannel(); openHome(); return; }
+    const QString title = p.items[next].title.isEmpty() ? tr("the next item") : p.items[next].title;
+
+    // The interstitial: "Next: <title> — starting in N s", {Cancel, Play now}, focus + cancel on Cancel (the
+    // house-safe default), auto-accepting "Play now" (index 1) at zero. `%1` is pre-substituted with the title;
+    // NavCountdown fills the remaining `%2` with the live seconds each tick.
+    const QString msgTmpl = tr("Next: %1 — starting in %2 s").arg(title);
+    const int choice = NavCountdown::ask(tr("Channel"), msgTmpl, { tr("Cancel"), tr("Play now") },
+                                         /*seconds=*/5, /*acceptIndex=*/1, /*focusIndex=*/0,
+                                         /*cancelIndex=*/0, this);
+    if (choice != 1)                         // Cancel or Back: end the channel and return Home (least-surprising
+    { exitChannel(); openHome(); return; }   // resting place — the previous item already finished on the player)
+    if (!channelActive()) return;            // defensive: a stop path fired during the modal loop
+    airChannelPick(next);
+}
+
+// Drive one playlist entry through HomeView's per-entry open path (identical to activating that row). Sets the
+// synchronous latch so the play sink this pick reaches keeps the channel alive; a NEW gen tags any async result.
+// The pick can resolve three ways:
+//   * Played  (sync): a local file / already-resolved url -> the sink consumed the latch during this call.
+//   * Detoured(sync): an info-page/container/stream-less item would open a DETAIL page -> HomeView suppressed it;
+//                     the channel SKIPS to the next pick (no interstitial), never wedging on a detail surface.
+//   * Pending (async): a remote /stream resolve is in flight -> onChannelPickResolved / onChannelPickDetoured
+//                     decide later, gated on the gen so a superseded airing is dropped.
+void MainWindow::airChannelPick(int index)
+{
+    if (index < 0) { exitChannel(); return; }
+    channelAiring_ = true;
+    const int gen = ++channelAirGen_;               // this airing's identity (gates its async result)
+    const HomeView::ChannelAir r = home_->playChannelItem(channelPlaylistId_, index, gen);
+    // Clear the latch unconditionally now the synchronous dispatch has returned. A normal in-app play already
+    // consumed it in notePlaybackStart (this re-clear is a no-op). But an external-player divert also reports
+    // Played — its sink early-returns from routePlay BEFORE notePlaybackStart, leaving the latch SET. Without
+    // this clear the next unrelated in-app play (e.g. openAudioPath, no routePlay) would be adopted as the
+    // channel's pick. The divert is not distinguishable from a real in-app play here (both report Played), so
+    // the unconditional clear is the fix; a channel simply can't EOF-chain through an external player.
+    channelAiring_ = false;
+    if (r == HomeView::ChannelAir::Detoured) channelSkip(); // this pick can't play directly -> next pick, silently
+    // Played: the channel stays live (channelPlaylistId_ still set) so a natural in-app end chains to the next
+    //         pick; an external-divert Played leaves nothing to chain, which is the by-design channel exit.
+    // Pending: the gen-gated async slot decides.
+}
+
+// A pick detoured (a detail page / no stream). Skip to the next bag pick immediately — NO interstitial (skips are
+// silent) — until one plays. If every pick in the playlist skips (consecutive skips reach the playlist size),
+// nothing can play directly: stop the channel with a notice. channelSkips_ is reset to 0 by the next real play.
+void MainWindow::channelSkip()
+{
+    const int n = channelBag_.size();
+    if (n <= 0) { exitChannel(); return; }
+    if (++channelSkips_ >= n)
+    {
+        exitChannel();
+        notify(tr("Channel stopped — nothing in this playlist can play directly."), kFeedbackLong);
+        return;
+    }
+    airChannelPick(channelBag_.next());
+}
+
+// Async pick got a stream. If this airing is still the current one (gen match) and the channel is still live,
+// play it (arming the latch just before the sink so it's kept). A stale result — a manual play or exit bumped the
+// gen — is dropped, so a superseded pick never interrupts nor secretly revives the channel.
+void MainWindow::onChannelPickResolved(int gen, const MediaItem& item)
+{
+    if (gen != channelAirGen_ || !channelActive()) return; // superseded / channel gone -> drop
+    channelAiring_ = true;                                  // consumed synchronously by openLibraryItem's sink
+    openLibraryItem(item);
+    channelAiring_ = false;                                 // an external-player divert never reaches notePlaybackStart
+                                                            // (routePlay early-returns), leaving the latch set -> the next
+                                                            // in-app play would be adopted. Clear unconditionally; the
+                                                            // in-app Played case already consumed it (harmless re-clear).
+}
+
+// Async pick produced no stream. If still current, skip it like a sync detour; a stale result is dropped.
+void MainWindow::onChannelPickDetoured(int gen)
+{
+    if (gen != channelAirGen_ || !channelActive()) return;
+    channelAiring_ = false;
+    channelSkip();
+}
+
+// Every user-stop / Back / queue-clear-to-home path AND the start of any non-channel playback clears the channel,
+// so the next natural end after ANY exit does not chain. Bumping the gen invalidates any in-flight async pick.
+// Idempotent (safe when no channel is live).
+void MainWindow::exitChannel()
+{
+    channelPlaylistId_.clear();
+    channelAiring_ = false;
+    channelSkips_ = 0;
+    ++channelAirGen_;            // a pending async pick's result is now stale -> it will be dropped
+    channelBag_.reset(0);
+}
+
+// A play sink was reached. If the channel armed this play (its own pick, sync or a just-resolved async one),
+// consume the latch, reset the skip run, and keep the channel. Otherwise this is a user-initiated play, which
+// ends any live channel (a manual play kills it). Because channelAiring_ is only ever true across a synchronous
+// dispatch, a manual play interleaved during a pending async resolve sees it FALSE here and correctly exits.
+void MainWindow::notePlaybackStart()
+{
+    if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
+    if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
+}
+
 void MainWindow::openGame()
 {
     const QString rom = QFileDialog::getOpenFileName(
@@ -2435,6 +2595,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
                               const QString& key, const QString& systemHint)
 {
     PerfTrace::begin(QStringLiteral("open.game")); // ended in GameLauncher (libretro openGame or external runEmulator)
+    notePlaybackStart();  // a manual game launch is non-channel playback -> ends any idle channel (never airs games)
     if (splitTarget_) // run the ROM in the focused pane's own emulator instead of the full-screen one
     {
         const GameLauncher::CorePlan plan = launcher_->prepareCore(rom, systemHint);
@@ -2762,6 +2923,7 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
         RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
         return;
     }
+    notePlaybackStart();               // channel guard (built-in stream play): keep the channel iff this is its pick
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     themedAudioSession_ = false;       // playStream is VIDEO — keep the classic player page
     stopScrobble();                    // leaving whatever was playing
@@ -2793,6 +2955,7 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
+    notePlaybackStart();    // channel guard: keep the channel iff this is its own audio-stream pick
     subCtx_ = {};           // audio has no subtitles to fetch
     stopScrobble();         // leaving whatever video was playing
     retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
@@ -3342,6 +3505,8 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
 void MainWindow::openHome()
 {
     playRouteOverride_ = PlayRoute::Default; // defensive: a one-off armed but abandoned can't leak past home
+    exitChannel();      // returning Home is a hard channel stop — the shared choke for every stop/Back path that
+                        // lands on Home (goBack's player branch, the player stop buttons, waitPageDone, …)
     // Leaving whatever was open: stop playback/emulation, save reader positions.
     hideSubtitleMenu(); // dismiss the subtitle overlay if it was up
     stopScrobble();     // Trakt: close out the current watch
@@ -4125,12 +4290,20 @@ void MainWindow::showThemedXmb()
             return;
         }
         themedXmbCatalogs_ = (key == QStringLiteral("settings")) ? QVariantList() : home_->categoryCatalogs(key);
-        if (themedXmbCatalogs_.size() == 1) // single catalog -> open straight into its contents
+        // Count real catalogs (navKey-bearing): the trailing Playlists folder has none, so a lone-catalog bucket
+        // still auto-opens its single catalog rather than stranding on a two-row [catalog, Playlists] column.
+        int realCatalogs = 0; QString onlyNavKey;
+        for (const QVariant& v : themedXmbCatalogs_)
+        {
+            const QString nk = v.toMap().value(QStringLiteral("navKey")).toString();
+            if (!nk.isEmpty()) { ++realCatalogs; onlyNavKey = nk; }
+        }
+        if (realCatalogs == 1) // single catalog -> open straight into its contents
         {
             themedXmbInCatalog_ = true;
             themedXmbAutoOpened_ = true;
             if (r) { r->setProperty("items", QVariantList()); r->setProperty("currentIndex", 0); r->setProperty("catLoading", true); } // clear + spinner while it loads
-            home_->activateNav(themedXmbCatalogs_[0].toMap().value(QStringLiteral("navKey")).toString());
+            home_->activateNav(onlyNavKey);
             return;
         }
         themedXmbInCatalog_ = false;
@@ -4163,7 +4336,25 @@ void MainWindow::showThemedXmb()
         if (!themedXmbInCatalog_) // the column is the catalog list -> open the chosen catalog into its items
         {
             if (itemIdx < 0 || itemIdx >= themedXmbCatalogs_.size()) return;
-            const QString navKey = themedXmbCatalogs_[itemIdx].toMap().value(QStringLiteral("navKey")).toString();
+            const QVariantMap sel = themedXmbCatalogs_[itemIdx].toMap();
+            const QString plCategory = sel.value(QStringLiteral("playlistsCategory")).toString();
+            if (!plCategory.isEmpty()) // the category-level Playlists folder -> drill its lists as a new root
+            {
+                themedXmbCatalogIndex_ = itemIdx;  // Back re-selects the Playlists row in the bucket column
+                themedXmbInCatalog_ = true;
+                themedXmbAutoOpened_ = false;       // a "catalog" nav level backs out to the bucket column
+                if (r) r->setProperty("catLoading", true); // spinner until the deferred open lands
+                // Defer the actual open one event-loop tick. openPlaylistsLevel fills the column SYNCHRONOUSLY
+                // (unlike a real catalog's async fetch); firing it inside this activation handler would race the
+                // QML nav model's own activate() transition and strand focus on the bucket column. A queued call
+                // lets the QML settle first, exactly mirroring how an async catalog's items arrive next tick.
+                QTimer::singleShot(0, this, [this, plCategory] {
+                    home_->openPlaylistsLevel(plCategory, /*asRoot*/ true);
+                    syncThemedLevels();
+                });
+                return;
+            }
+            const QString navKey = sel.value(QStringLiteral("navKey")).toString();
             if (navKey.isEmpty()) return;
             themedXmbCatalogIndex_ = itemIdx;       // remember the catalog, so Back re-selects it in the list
             themedXmbInCatalog_ = true;
@@ -6188,6 +6379,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
             return;
         }
+        notePlaybackStart();     // channel guard (built-in catalog play): keep the channel iff this is its pick
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         session_->beginResume(rkey);
         syncKey_ = rkey;         // catalog stream: key sync offsets by the stable id, not the volatile URL

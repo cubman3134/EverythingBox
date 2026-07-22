@@ -57,6 +57,29 @@ public:
     static QString mediaCategory(const QString& type);  // "video" | "audio" | "game" | "reading"
     QVariantList categoryItems();
     QVariantList categoryCatalogs(const QString& categoryKey);
+    // Drill the Playlists folder for a category. Reached two ways: nested under a catalogue (asRoot=false, the
+    // default — stacks on the catalogue level), or straight from the category-level bucket column (asRoot=true —
+    // resets the browse stack so the list is the root, its Back returning to the bucket column). The themed home
+    // passes asRoot=true when the "playlistsCategory" row is activated. categoryKey = video|audio|game|reading.
+    void openPlaylistsLevel(const QString& categoryKey, bool asRoot = false);
+
+    // The outcome of resolving+opening one item (openResolvedItem / playChannelItem). A channel airing needs to
+    // know whether its pick actually PLAYED (chain continues), DETOURED to a detail page / stream-less dead end
+    // (the channel must SKIP it, not wedge), or is PENDING an async /stream resolve (the resolveStream callback
+    // reports the real outcome later, via channelPickResolved / channelPickDetoured).
+    enum class ChannelAir { Played, Detoured, Pending };
+
+    // Channel mode (driven by MainWindow, which owns the bag + the EOF-chain): air one playlist entry through
+    // the SAME per-entry open path a row activation / Play-random uses, so a channel pick resolves identically.
+    // `gen` tags this airing so a stale async result (superseded by a later pick / a manual play / channel exit)
+    // is dropped. Returns the SYNCHRONOUS outcome; Pending means the async signal decides.
+    ChannelAir playChannelItem(const QString& playlistId, int index, int gen);
+
+    // Would this entry reach actual playback (vs. detour to a detail page)? Mirrors openResolvedItem's routing:
+    // a local file / already-resolved url / an async-resolvable remote leaf plays; an info-page movie/episode,
+    // container, or stream-less item detours. Lets the channel skip a detour BEFORE naming it in the countdown
+    // (a remote leaf counts as "plays" — its rare async-resolve miss is caught after airing, not predictable here).
+    bool channelItemPlaysDirectly(const QString& playlistId, int index);
 
     // For the themed browse/gamelist: the current level's items as data, open/drill one, and go up a level.
     QVariantList browseItems();              // the loaded items as {title,subtitle,image,type,expandable}
@@ -145,6 +168,14 @@ signals:
     void requestOpenFile(const QString& kind); // "video" | "audio" | "document" | "game"
     void openRecent(const QString& path, const QString& kind, const QString& resumeKey,
                     const QString& title, const QString& thumb); // re-open a "Recent" tab entry
+    // Start a channel over this (video/audio) playlist: MainWindow owns the shuffle bag + the EOF-chain, and
+    // calls back into playChannelItem() to air each pick through the same per-entry open path a row uses.
+    void startChannelRequested(const QString& playlistId);
+    // Async outcome of a channel pick's /stream resolve (see openResolvedItem). `gen` lets MainWindow drop a
+    // result whose airing was superseded (a later pick, a manual play, or channel exit). Resolved carries the
+    // now-playable item; Detoured means it produced no stream (skip it).
+    void channelPickResolved(int gen, const MediaItem& item);
+    void channelPickDetoured(int gen);
     // At the home root there's nowhere further back -> the host opens the app pause menu (one Back rule).
     void backRequested();
     void settingsRequested();                  // the "Settings" button in the top bar
@@ -200,16 +231,28 @@ private:
     void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
     void populateSteamGames();                           // (re)build the Steam games list natively
 
-    // Playlists: every (unfiltered) catalogue root shows a "Playlists" folder; these drive its synthetic
-    // (addon-less) levels. catalogKey identifies the catalogue ("addonId|catalogId|catalogType").
+    // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
+    // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
+    // identifies a catalogue ("addonId|catalogId|catalogType"); currentCategoryKey() maps the current
+    // catalogue's type to its bucket (the key playlists actually filter/create on).
     QString currentCatalogKey() const;                   // key for the catalogue at the root of the browse stack
+    QString currentCategoryKey() const;                  // the bucket the current catalogue classifies into
     LoadedAddon* addonForKey(const QString& catalogKey) const; // the catalogue's source addon (null if native)
-    void openPlaylistsLevel(const QString& catalogKey);  // drill the Playlists folder -> the list of playlists
-    void populatePlaylists(const QString& catalogKey);   // (re)build that list (each playlist + a New entry)
+    void populatePlaylists(const QString& categoryKey);  // (re)build that list (each playlist + a New entry)
     void openPlaylistLevel(const QString& playlistId);   // drill a playlist -> its items
     void populatePlaylistItems(const QString& playlistId); // (re)build a playlist's items as openable rows
-    void createPlaylistInteractive(const QString& catalogKey); // prompt for a name + create, refresh the list
+    void createPlaylistInteractive(const QString& categoryKey); // prompt for a name + create, refresh the list
     void addItemToPlaylistInteractive(const MediaItem& it);    // pick/create a playlist, add this item to it
+    // A playlist row's action menu (Open / Play random / Rename / Delete) — the game-item-menu NavMenu precedent.
+    void showPlaylistMenu(const QString& playlistId);
+    void playRandomFromPlaylist(const QString& playlistId);    // uniform pick -> the shared per-entry open path
+    void renamePlaylistInteractive(const QString& playlistId); // OSK prefilled with the current name -> rename
+    void deletePlaylistInteractive(const QString& playlistId); // Cancel-focused confirm -> remove
+    // Open one item through the per-entry resolution path (shared by activateItem's tail + Play-random). When
+    // forChannel, a would-be detail-page open is SUPPRESSED and reported (Detoured / channelPickDetoured) so the
+    // channel skips the pick instead of dumping the viewer on an info page; channelGen tags the async result.
+    ChannelAir openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon,
+                                bool forChannel = false, int channelGen = 0);
 
     // Recents: every catalogue that has any matching recents shows a "Recent" folder at the top; opening a
     // row re-opens it at its saved position. The kind is the catalogue's bucket mapped to a RecentItem kind.

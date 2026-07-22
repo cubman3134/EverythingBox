@@ -1,6 +1,7 @@
 #include "HomeView.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
+#include "../core/MediaCategories.h"
 #include "../addons/AddonManager.h"
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
@@ -26,6 +27,7 @@
 #include <QPaintEvent>
 #include <QSet>
 #include <QListWidget>
+#include <QRandomGenerator>
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
@@ -1276,16 +1278,11 @@ void HomeView::selectType(LoadedAddon* addon, const QString& catalogId, const QS
 // catalog via activateNav(). Colours match the tabs (typeColor).
 // Classify a catalog/media type into one of the four inherent top-level categories. Unknown types fall back
 // to Video (the most common media kind), so a new addon type still lands somewhere sensible.
+// Delegates to the core oracle (core/MediaCategories.h) so PlaylistStore's category migration + probe_playlists
+// pin the exact same type->bucket mapping this UI uses. Keep this a thin forwarder — never fork the rules here.
 QString HomeView::mediaCategory(const QString& type)
 {
-    const QString t = type.toLower();
-    if (t == "album" || t == "track" || t == "music" || t == "song"
-        || t == "audiobook" || t == "podcast" || t == "podcast_episode") return QStringLiteral("audio");
-    if (t == "game" || t == "platform" || t == "rom" || t == "console")  return QStringLiteral("game");
-    if (t == "book" || t == "ebook" || t == "novel" || t == "comic" || t == "comic_issue"
-        || t == "manga" || t == "manga_chapter")                         return QStringLiteral("reading");
-    // movie, series, tv, livetv, livesport(s), channel, film, video, ... and anything unrecognised:
-    return QStringLiteral("video");
+    return core::mediaCategory(type);
 }
 
 // Static metadata for a bucket key: display name, accent colour, and the glyph the XMB draws.
@@ -1331,6 +1328,12 @@ QVariantList HomeView::categoryCatalogs(const QString& categoryKey)
                             { QStringLiteral("type"), t.type }, { QStringLiteral("catalog"), true },
                             { QStringLiteral("accent"), typeColor(t.type).name() } };
     }
+    // The category-level Playlists folder: opens this bucket's saved lists (mixed across its catalogues). Carries
+    // no navKey — the themed home routes it to openPlaylistsLevel via "playlistsCategory". Kept out of the
+    // single-catalog auto-open count (that keys off navKey), so a lone-catalog bucket still dives straight in.
+    if (!out.isEmpty())
+        out << QVariantMap{ { QStringLiteral("title"), tr("Playlists") }, { QStringLiteral("type"), QStringLiteral("_playlists") },
+                            { QStringLiteral("playlistsCategory"), categoryKey }, { QStringLiteral("accent"), QStringLiteral("#6A6E78") } };
     return out;
 }
 
@@ -1578,22 +1581,34 @@ LoadedAddon* HomeView::addonForKey(const QString& catalogKey) const
     return nullptr;
 }
 
-void HomeView::openPlaylistsLevel(const QString& catalogKey)
+// The bucket the current catalogue classifies into — the key playlists filter/create on (playlists widened
+// from per-catalogue to per-category). Segment 2 of the catalogKey is the catalogType the oracle maps.
+QString HomeView::currentCategoryKey() const
 {
+    return mediaCategory(currentCatalogKey().section(QLatin1Char('|'), 2, 2));
+}
+
+void HomeView::openPlaylistsLevel(const QString& categoryKey, bool asRoot)
+{
+    if (asRoot)
+    {
+        stack_.clear();      // opened from the bucket column: the list is the root (Back -> bucket column)
+        recentView_ = false; // leave the home recents view, else activateItem routes rows through its recents path
+    }
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
     lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Playlists");
     lvl.item.id = QStringLiteral("_playlists");
     lvl.item.type = QStringLiteral("_playlists");
     lvl.item.expandable = true;
-    lvl.item.mime = QStringLiteral("playlists:") + catalogKey; // so loadTop() repopulates on Back
+    lvl.item.mime = QStringLiteral("playlists:") + categoryKey; // so loadTop() repopulates on Back
     stack_.push_back(lvl);
-    populatePlaylists(catalogKey);
+    populatePlaylists(categoryKey);
 }
 
-void HomeView::populatePlaylists(const QString& catalogKey)
+void HomeView::populatePlaylists(const QString& categoryKey)
 {
-    showSyntheticCatalog(browse::playlistsCatalog(PlaylistStore::forCatalog(catalogKey), catalogKey));
+    showSyntheticCatalog(browse::playlistsCatalog(PlaylistStore::forCategory(categoryKey), categoryKey));
 }
 
 void HomeView::openPlaylistLevel(const QString& playlistId)
@@ -1602,7 +1617,10 @@ void HomeView::openPlaylistLevel(const QString& playlistId)
     if (!PlaylistStore::get(playlistId, p)) return;
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
-    lvl.addon = addonForKey(p.catalogKey); // the catalogue's addon, so items re-open/resolve as in the catalog
+    // The playlist level is addon-less: category playlists may be mixed-source, so each item resolves its OWN
+    // addon (playlistItemsCatalog stamps every row's sourceAddonId, which activateItem uses when the level has
+    // no addon). Local-file entries re-open by path regardless.
+    lvl.addon = nullptr;
     lvl.detail = true; lvl.title = p.name;
     lvl.item.id = QStringLiteral("pl:") + p.id;
     lvl.item.type = QStringLiteral("_playlist");
@@ -1618,20 +1636,113 @@ void HomeView::populatePlaylistItems(const QString& playlistId)
     showSyntheticCatalog(browse::playlistItemsCatalog(p));
 }
 
-void HomeView::createPlaylistInteractive(const QString& catalogKey)
+void HomeView::createPlaylistInteractive(const QString& categoryKey)
 {
     const QString name = Osk::getText(tr("Playlist name:"), QString(), QLineEdit::Normal, window()).trimmed();
     if (name.isEmpty()) return; // covers backed-out (null) too
-    PlaylistStore::create(catalogKey, name);
-    populatePlaylists(catalogKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
+    PlaylistStore::create(categoryKey, name);
+    populatePlaylists(categoryKey); // we're on the playlists level -> refresh it (also fires browseItemsChanged)
+}
+
+// A playlist row's action menu (the game-item-menu precedent): Open (default row, drills as before) / Play
+// random / Rename / Delete. An in-window NavMenu overlay — controller + keyboard + mouse, no separate window.
+void HomeView::showPlaylistMenu(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return; // deleted out from under us
+    // "Start channel" (shuffle-bag random autoplay) is offered ONLY for video/audio playlists — games play
+    // random but don't chain. The row's presence is gated on the playlist's categoryKey, so a games list simply
+    // has no channel row. It's inserted after Play random; the trailing indices shift when it's present.
+    const bool canChannel = (p.categoryKey == QStringLiteral("video") || p.categoryKey == QStringLiteral("audio"));
+    QStringList rows = { tr("▶   Open"), tr("🔀   Play random") };
+    if (canChannel) rows << tr("📺   Start channel");
+    rows << tr("✎   Rename…") << tr("🗑   Delete playlist");
+    new NavMenu(p.name, rows, [this, playlistId, canChannel](int row) {
+        // Map the chosen row to an action; the channel row (index 2) exists only when canChannel, so everything
+        // below it shifts up by one when it's absent.
+        enum { Open = 0, Random = 1 };
+        if (row == Open)   { openPlaylistLevel(playlistId); return; }
+        if (row == Random) { playRandomFromPlaylist(playlistId); return; }
+        if (canChannel && row == 2) { emit startChannelRequested(playlistId); return; }
+        const int tail = canChannel ? row - 1 : row; // 2 = Rename, 3 = Delete (in the no-channel numbering)
+        if (tail == 2) renamePlaylistInteractive(playlistId);
+        else if (tail == 3) deletePlaylistInteractive(playlistId);
+    }, window());
+}
+
+// Uniform-random pick over a playlist's entries, opened through the SAME per-entry path a row activation uses
+// (built via playlistItemsCatalog so the picked row is byte-identical to the one the grid would activate).
+void HomeView::playRandomFromPlaylist(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p) || p.items.isEmpty())
+    { showToast(tr("This playlist is empty."), kFeedbackShort); return; }
+    auto cat = browse::playlistItemsCatalog(p); // exactly the rows the playlist level shows
+    const int idx = int(QRandomGenerator::global()->bounded(cat.items.size()));
+    openResolvedItem(cat.items[idx], /*levelAddon=*/nullptr); // playlist level is addon-less: entries self-resolve
+}
+
+// Air one channel pick: resolve + open the entry at `index` through the SAME per-entry path a row activation
+// uses (playlistItemsCatalog -> openResolvedItem), so a channel pick behaves byte-identically to opening that
+// row by hand. MainWindow owns the shuffle bag + the natural-end chain and calls this for each pick.
+HomeView::ChannelAir HomeView::playChannelItem(const QString& playlistId, int index, int gen)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return ChannelAir::Detoured;   // gone -> MainWindow skips/exits
+    auto cat = browse::playlistItemsCatalog(p);      // 1:1 with p.items, same order (see SyntheticCatalogs)
+    if (index < 0 || index >= cat.items.size()) return ChannelAir::Detoured;
+    return openResolvedItem(cat.items[index], /*levelAddon=*/nullptr, /*forChannel=*/true, gen);
+}
+
+bool HomeView::channelItemPlaysDirectly(const QString& playlistId, int index)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return false;
+    auto cat = browse::playlistItemsCatalog(p);
+    if (index < 0 || index >= cat.items.size()) return false;
+    const MediaItem& it = cat.items[index];
+    if (it.mime.startsWith(QStringLiteral("localgame:"))) return true; // local file -> plays
+    if (!it.url.isEmpty()) return true;                                // already carries a url -> plays
+    LoadedAddon* addon = it.sourceAddonId.isEmpty() ? nullptr : mgr_->sourceById(it.sourceAddonId);
+    // A remote leaf that will async-resolve a /stream (same gate openResolvedItem uses to attempt a resolve).
+    if (!it.expandable && addon && addon->transport == LoadedAddon::RemoteHttp && !addon->stremio
+        && it.type != QStringLiteral("platform") && !isInfoPageType(it.type)) return true;
+    return false; // info-page movie/episode, container, or stream-less -> detail-page detour
+}
+
+// Rename via the OSK, prefilled with the current name; PlaylistStore::rename persists it and we refresh the
+// list we're standing on. Empty / unchanged name is a no-op (covers a backed-out OSK too).
+void HomeView::renamePlaylistInteractive(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return;
+    const QString name = Osk::getText(tr("Rename playlist:"), p.name, QLineEdit::Normal, window()).trimmed();
+    if (name.isEmpty() || name == p.name) return;
+    PlaylistStore::rename(playlistId, name);
+    populatePlaylists(p.categoryKey); // we're on the playlists level -> re-render with the new name
+}
+
+// Delete behind a Cancel-focused confirm (the house shape for a destructive action: Back / default focus is
+// the safe Cancel). Only the playlist bookkeeping is removed — files on disk are never touched.
+void HomeView::deletePlaylistInteractive(const QString& playlistId)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return;
+    const QString msg = tr("Delete “%1”? Its %n item(s) are removed from the playlist (files on disk are left in place).",
+                           "", int(p.items.size())).arg(p.name);
+    if (NavConfirm::ask(tr("Delete playlist"), msg, { tr("Delete"), tr("Cancel") },
+                        /*focusIndex=*/1, /*cancelIndex=*/1, window()) != 0)
+        return; // Cancel / Back
+    PlaylistStore::remove(playlistId);
+    populatePlaylists(p.categoryKey); // refresh the list we're standing on (the row disappears)
 }
 
 void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
 {
     if (it.type.startsWith(QLatin1Char('_'))) return; // a synthetic row (Playlists/New), not real media
     if (atRecentsLevel() || atDownloadsLevel()) { showToast(tr("Open a catalogue item to add it to a playlist."), kFeedbackLong); return; }
-    const QString key = currentCatalogKey();
-    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    const QString key = currentCategoryKey(); // the whole category's playlists are offered, not just this catalogue's
+    QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
     opts << tr("➕ New playlist…");
@@ -2209,12 +2320,36 @@ void HomeView::activateItem(int row)
     if (it.type == QStringLiteral("_playlists"))
         { openPlaylistsLevel(it.mime.mid(QStringLiteral("playlists:").size())); return; }
     if (it.type == QStringLiteral("_playlist"))
-        { openPlaylistLevel(it.mime.mid(QStringLiteral("playlist:").size())); return; }
+    {
+        // A playlist row opens an action menu (Open / Play random / Rename / Delete) rather than drilling
+        // straight in — Open (the default row) drills exactly as before. Deferred a turn so the themed QML
+        // view doesn't build the overlay from inside its own `activated` handler (the game-menu pattern).
+        const QString pid = it.mime.mid(QStringLiteral("playlist:").size());
+        QMetaObject::invokeMethod(this, [this, pid] { showPlaylistMenu(pid); }, Qt::QueuedConnection);
+        return;
+    }
     if (it.type == QStringLiteral("_newplaylist"))
         { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
 
-    LoadedAddon* addon = stack_.last().addon;
-    if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // cross-addon search result
+    // A generic leaf/container: resolve + open through the shared per-entry path (also reused by Play-random
+    // over a playlist, so a random pick resolves identically to activating that item's row).
+    openResolvedItem(it, stack_.last().addon);
+}
+
+// Open a single item through the per-entry resolution path — the generic tail of activateItem, shared with
+// Play-random. Local-file entries re-open by path; a remote leaf resolves its /stream and plays; info-page
+// types (movies/episodes, comics/books) and stream-less/container items open a detail page instead.
+HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon* levelAddon,
+                                                bool forChannel, int channelGen)
+{
+    // A local game/file entry (Recent/Downloaded item added to a playlist) re-opens by path.
+    if (it.mime.startsWith(QStringLiteral("localgame:")))
+    { emit openRecent(it.url, it.mime.mid(10), it.id, it.title, it.thumbnailUrl); return ChannelAir::Played; }
+    // A file is already associated (a local video/audio) -> the main window plays it directly.
+    if (!it.url.isEmpty()) { emit openItem(it); return ChannelAir::Played; }
+
+    LoadedAddon* addon = levelAddon;
+    if (!addon && !it.sourceAddonId.isEmpty()) addon = mgr_->sourceById(it.sourceAddonId); // per-entry / cross-addon
 
     // A remote leaf (a track, etc.) carries no url in the catalog - its source comes from the /stream
     // endpoint, fetched on open: resolve and open it directly. Movies/episodes (Play) and comics/manga/books
@@ -2227,16 +2362,29 @@ void HomeView::activateItem(int row)
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
-        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider](const QString& url, const QString& mime) {
-            if (!url.isEmpty()) { hideToast(); MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; emit openItem(m); }
-            else { hideToast(); openDetailLevel(addon, item); } // no stream -> show its metadata instead
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](const QString& url, const QString& mime) {
+            hideToast();
+            if (!url.isEmpty())
+            {
+                MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider;
+                if (forChannel) emit channelPickResolved(channelGen, m); // MainWindow gates on gen, then plays
+                else            emit openItem(m);
+            }
+            // No stream: a channel SKIPS this pick (never dumps the viewer on a detail page mid-channel); a
+            // normal open shows its metadata instead.
+            else if (forChannel) emit channelPickDetoured(channelGen);
+            else                 openDetailLevel(addon, item);
         });
-        return;
+        return ChannelAir::Pending;
     }
 
-    // No file yet: open a detail page. Its metadata header describes the item; for a container
-    // (TV show / season / album / console) the page also drills into its children below the header.
+    // No file yet: this opens a detail page (info-page movie/episode, container, stream-less item). For a
+    // channel that's a DETOUR, not playback — report it so the channel skips instead of stranding the viewer
+    // on an info page and wedging the chain.
+    if (forChannel) return ChannelAir::Detoured;
+    // Its metadata header describes the item; for a container (show/season/album/console) it also drills in.
     openDetailLevel(addon, it);
+    return ChannelAir::Detoured;
 }
 
 void HomeView::requestNextSource()
@@ -2467,8 +2615,8 @@ void HomeView::toggleGameFavorite(const MediaItem& it)
 
 void HomeView::addGameToPlaylistInteractive(const MediaItem& it)
 {
-    const QString key = currentCatalogKey();
-    QVector<Playlist> pls = PlaylistStore::forCatalog(key);
+    const QString key = currentCategoryKey(); // game-category playlists (offered across every games catalogue)
+    QVector<Playlist> pls = PlaylistStore::forCategory(key);
     QStringList opts;
     for (const Playlist& p : pls) opts << p.name;
     opts << tr("➕ New playlist…");
@@ -3930,7 +4078,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             pushFolders({
                 { QLatin1String("_recents"),   tr("Recent"),     QStringLiteral("recents:") + rkind,                      hasRecents },
                 { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
-                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCatalogKey(),      true },
+                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCategoryKey(),     true },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }

@@ -408,10 +408,10 @@ NavConfirm::NavConfirm(const QString& title, const QString& message, const QStri
     v->addWidget(t);
     if (!message.isEmpty())
     {
-        auto* m = new QLabel(message, panel());
-        m->setWordWrap(true);
-        m->setMaximumWidth(560);
-        v->addWidget(m);
+        message_ = new QLabel(message, panel());
+        message_->setWordWrap(true);
+        message_->setMaximumWidth(560);
+        v->addWidget(message_);
     }
     auto* row = new QHBoxLayout;
     row->setSpacing(10);
@@ -432,6 +432,41 @@ int NavConfirm::ask(const QString& title, const QString& message, const QStringL
                     int focusIndex, int cancelIndex, QWidget* window)
 {
     auto* card = new NavConfirm(title, message, buttons, focusIndex, window);
+    int result = cancelIndex;
+    QEventLoop loop;
+    QObject::connect(card, &NavOverlay::closed, &loop, [&](int r) {
+        result = (r < 0) ? cancelIndex : r;
+        loop.quit();
+    });
+    loop.exec(); // pad polling keeps running (timers fire inside the nested loop)
+    return result;
+}
+
+void NavConfirm::setMessage(const QString& message)
+{
+    if (message_) message_->setText(message);
+}
+
+NavCountdown::NavCountdown(const QString& title, const QString& messageTmpl, const QStringList& buttons,
+                          int seconds, int acceptIndex, int focusIndex, QWidget* window)
+    : NavConfirm(title, messageTmpl.arg(seconds), buttons, focusIndex, window)
+{
+    // A live 1 Hz timer: relabel the remaining seconds each tick and auto-accept at zero. It's a child of this
+    // overlay, so it dies with the card (Cancel / Play now / Back all dismiss the overlay, stopping the timer).
+    // The timer fires inside ask()'s nested loop (the scout-verified property), so this animates while blocked.
+    auto* timer = new QTimer(this);
+    connect(timer, &QTimer::timeout, this,
+            [this, timer, messageTmpl, acceptIndex, remaining = seconds]() mutable {
+        if (--remaining <= 0) { timer->stop(); dismiss(acceptIndex); return; } // auto-accept at zero
+        setMessage(messageTmpl.arg(remaining));                                 // relabel "… in N s"
+    });
+    timer->start(1000);
+}
+
+int NavCountdown::ask(const QString& title, const QString& messageTmpl, const QStringList& buttons,
+                      int seconds, int acceptIndex, int focusIndex, int cancelIndex, QWidget* window)
+{
+    auto* card = new NavCountdown(title, messageTmpl, buttons, seconds, acceptIndex, focusIndex, window);
     int result = cancelIndex;
     QEventLoop loop;
     QObject::connect(card, &NavOverlay::closed, &loop, [&](int r) {

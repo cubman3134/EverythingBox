@@ -271,6 +271,19 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
 
+    # PlaylistStore category migration: the data-safety core of category-scoped playlists — a legacy
+    # catalogKey-shaped blob folds to categoryKey (video/audio/game/reading via core/MediaCategories.h), one-shot
+    # + idempotent, preserving ids/items/legacyKey (the user's real "Weekend Picks" list must survive). QtCore-
+    # only (a QSettings+JSON wrapper) so it links lean and runs under offscreen QPA. Needs ProfileStore.cpp
+    # (playlists are namespaced by the active profile). MediaCategories.h is header-only (no source to add).
+    add_executable(probe_playlists tools/probe_playlists.cpp
+        src/core/PlaylistStore.cpp src/core/PlaylistStore.h
+        src/core/MediaCategories.h
+        src/core/ShuffleBag.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_playlists PRIVATE src src/core)
+    target_link_libraries(probe_playlists PRIVATE Qt6::Core)
+
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire
     # onto. QtCore-only (QProcess/QFileInfo/QSettings), so the probe links lean and runs under offscreen QPA.

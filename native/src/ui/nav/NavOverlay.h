@@ -139,4 +139,29 @@ public:
 
     static int ask(const QString& title, const QString& message, const QStringList& buttons,
                    int focusIndex = 0, int cancelIndex = -1, QWidget* window = nullptr);
+
+    // Live-update the message text (used by NavCountdown to relabel the remaining-seconds line each tick). No-op
+    // if the card was built with an empty message (no label was created).
+    void setMessage(const QString& message);
+
+protected:
+    QLabel* message_ = nullptr; // the message label, or null when the card was built message-less
+};
+
+// A NavConfirm that counts down: the message is relabeled once a second and the card auto-accepts (dismisses
+// with `acceptIndex`) when the timer reaches zero. Timers fire inside ask()'s nested event loop (the same loop
+// NavConfirm blocks in), so the live relabel + auto-dismiss work in-window with no separate OS window. Channel
+// mode's between-items interstitial uses it: "Next: <title> — starting in N s", {Cancel, Play now}.
+class NavCountdown : public NavConfirm
+{
+    Q_OBJECT
+public:
+    // messageTmpl must contain a single `%1` placeholder for the remaining whole seconds.
+    NavCountdown(const QString& title, const QString& messageTmpl, const QStringList& buttons,
+                 int seconds, int acceptIndex, int focusIndex = 0, QWidget* window = nullptr);
+
+    // Blocks in a nested loop (like NavConfirm::ask) and returns the chosen button index, `acceptIndex` on
+    // timeout, or `cancelIndex` when backed out (Cancel / Back).
+    static int ask(const QString& title, const QString& messageTmpl, const QStringList& buttons,
+                   int seconds, int acceptIndex, int focusIndex, int cancelIndex, QWidget* window = nullptr);
 };

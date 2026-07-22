@@ -13,6 +13,7 @@
 #include <functional>
 #include "../addons/AddonModels.h"
 #include "../core/LifecyclePolicy.h"
+#include "../core/ShuffleBag.h"
 
 class MpvWidget;
 class RetroView;
@@ -480,6 +481,33 @@ private:
     // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
     void tryPlayNextEpisode();
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
+
+    // ---- Channel mode: shuffle-bag random autoplay over a video/audio playlist ------------------------------
+    // A "channel" turns a playlist into a personal TV network: it airs a random item, and on each NATURAL end
+    // (EOF only — the queueFinished seam is already EOF-gated) shows a cancelable countdown then airs the next
+    // bag pick. State is session-only. channelPlaylistId_ non-empty == a channel is live. The bag draws each
+    // item once before repeating.
+    //
+    // Latch shape (no-leak): `channelAiring_` is a bool true ONLY across a SYNCHRONOUS play-dispatch span — from
+    // airChannelPick (or onChannelPickResolved) until the play sink consumes it — so no user input can interleave
+    // and be adopted. Continuity across the ONE async gap (a remote /stream resolve) is carried by the generation
+    // counter `channelAirGen_`: each airing tags its async result with the gen, and a result is dropped if its gen
+    // is stale (a later pick, a manual play, or channel exit each bump the gen). So a manual play can never be
+    // mistaken for the channel's pick, and a stale/superseded pick can never fire.
+    QString    channelPlaylistId_;          // the playlist a live channel is airing; empty == no channel
+    ShuffleBag channelBag_;                  // the random sequencer (no repeat until exhausted)
+    bool       channelAiring_ = false;       // true only within a synchronous play-dispatch of the channel's pick
+    int        channelAirGen_ = 0;           // bumped per airing / exit / manual play; gates async pick results
+    int        channelSkips_ = 0;            // consecutive picks that couldn't play directly (cap = playlist size)
+    bool channelActive() const { return !channelPlaylistId_.isEmpty(); }
+    void startChannel(const QString& playlistId); // build the bag, air the first pick, go live
+    void advanceChannel();                        // next bag pick -> countdown interstitial -> air it (or exit)
+    void airChannelPick(int index);               // drive playlist item `index` through the per-entry open path
+    void channelSkip();                           // a pick detoured (detail page / no stream): skip to next, or give up
+    void onChannelPickResolved(int gen, const MediaItem& item); // async pick got a stream -> play it (if gen current)
+    void onChannelPickDetoured(int gen);          // async pick had no stream -> skip it (if gen current)
+    void exitChannel();                           // clear channel state (every user-stop / manual-play path)
+    void notePlaybackStart();                     // a play sink reached: keep the channel iff this IS its pick
 
     // Casting the current stream to a Chromecast / DLNA device on the LAN. castUrl_ etc. hold the currently
     // playing stream so the picker can hand it to the chosen device.
