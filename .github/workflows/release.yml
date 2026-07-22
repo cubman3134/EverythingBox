@@ -362,9 +362,24 @@ jobs:
           curl -fL "$LIBMPV_AAR_URL" -o libmpv.aar
           mkdir -p mpv-android/libs mpv-android/include/mpv
           unzip -o -j libmpv.aar "jni/${JNI_ABI}/*.so" -d mpv-android/libs
-          # libplayer.so is jdtech's JNI wrapper (unused); libc++_shared.so is provided by the NDK/Qt - drop
-          # both so they aren't bundled twice. libmpv.so + the libav*/libsw* deps are kept and ride along.
-          rm -f mpv-android/libs/libplayer.so mpv-android/libs/libc++_shared.so
+          # libplayer.so is jdtech's JNI wrapper (unused) - drop it. libmpv.so + the libav*/libsw* deps ride along.
+          rm -f mpv-android/libs/libplayer.so
+          # libc++: jdtech built libmpv against a NEWER libc++ than Qt's NDK (r26b, LLVM 17) ships — libmpv.so
+          # imports std::__ndk1::__from_chars_floating_point<float>, absent from r26b's libc++_shared.so, which
+          # crashed the app at libmpv load (UnsatisfiedLinkError, before main). libc++ is forward-compatible and
+          # (verified against the built APK) jdtech's libc++ defines every libc++ symbol the Qt/app/mpv libs
+          # reference, so REPLACE the NDK runtime libc++_shared.so that androiddeployqt bundles with jdtech's.
+          # Then drop jdtech's from mpv-android/libs so EXTRA_LIBS doesn't also add it (same soname -> collision).
+          case "$JNI_ABI" in
+            x86_64)    TRIPLE=x86_64-linux-android ;;
+            arm64-v8a) TRIPLE=aarch64-linux-android ;;
+            *) echo "unknown ABI $JNI_ABI"; exit 1 ;;
+          esac
+          NDK_LIBCXX=$(find "$ANDROID_NDK_ROOT" -path "*/$TRIPLE/libc++_shared.so" | head -1)
+          [ -n "$NDK_LIBCXX" ] || { echo "NDK libc++_shared.so not found for $TRIPLE"; exit 1; }
+          echo "Replacing NDK libc++ ($NDK_LIBCXX) with jdtech's newer build"
+          cp -f mpv-android/libs/libc++_shared.so "$NDK_LIBCXX"
+          rm -f mpv-android/libs/libc++_shared.so
           ls -la mpv-android/libs
           for h in client.h render.h render_gl.h stream_cb.h; do
             curl -fsSL "https://raw.githubusercontent.com/mpv-player/mpv/${MPV_HEADERS_TAG}/include/mpv/$h" \
