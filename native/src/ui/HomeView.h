@@ -395,6 +395,7 @@ private:
         int attempt = 0;              // last ?n= used (0 = best)
     } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
+    int ownedFetchGen_ = 0;           // in-flight dedup for the async owned-games re-present (only the latest wins)
     // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
     int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
     int themedMetaIndex_ = -1;        // the currently-selected browse index (updated on every hover)

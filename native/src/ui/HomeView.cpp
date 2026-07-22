@@ -1583,8 +1583,23 @@ void HomeView::populateSteamGames()
     // reply timeout). On completion — ONLY if the Steam console is STILL the top level — re-present so the owned
     // entries append. A fresh cache / no key -> ownedGamesFetch no-ops (also what stops the re-present loop).
     // Failures stay silent + TTL-cached (the console never surfaces an error).
-    SteamLibrary::ownedGamesFetch(key, sid, this, [this](const QVector<SteamGame>&) {
-        if (atSteamConsole()) populateSteamGames();
+    // In-flight dedup: a generation stamp bumped on every populateSteamGames. A late reply from a superseded
+    // populate (rapid Back/re-enter or filter typing fires several) is dropped — only the latest fetch re-presents,
+    // so stale replies can't stack rebuilds or fight over the cursor. (The TTL cache separately breaks the
+    // re-present→fetch loop: after this fetch lands the cache is fresh, so the re-present's own fetch no-ops.)
+    const int gen = ++ownedFetchGen_;
+    SteamLibrary::ownedGamesFetch(key, sid, this, [this, gen](const QVector<SteamGame>&) {
+        if (gen != ownedFetchGen_ || !atSteamConsole()) return; // superseded / navigated away
+        // Cursor preserve: the owned tiles APPEND after the installed ones, so existing row indices are stable.
+        // Capture the selection before the re-present and restore it after so an async append never yanks the
+        // user back to the first tile mid-navigation.
+        const int keepRow = grid_ ? grid_->currentRow() : -1;
+        populateSteamGames();
+        if (keepRow > 0 && grid_ && keepRow < grid_->count())
+        {
+            grid_->setCurrentRow(keepRow);
+            grid_->scrollToItem(grid_->item(keepRow), QAbstractItemView::PositionAtCenter);
+        }
     });
 }
 
@@ -1816,10 +1831,21 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     else { plid = pls[row].id; plname = pls[row].name; }
     if (plid.isEmpty()) return;
     PlaylistEntry e;
+    // Stamp the source addon. Store games have no LoadedAddon; tag them by id prefix so the playlist tile knows
+    // its provenance (steam/epic/gog) — mirrors the steamgame add path, extended to epic:/gog:.
+    auto storeAddonForId = [](const QString& id) -> QString {
+        if (id.startsWith(QStringLiteral("steam:"))) return QStringLiteral("steam");
+        if (id.startsWith(QStringLiteral("epic:")))  return QStringLiteral("epic");
+        if (id.startsWith(QStringLiteral("gog:")))   return QStringLiteral("gog");
+        return QString();
+    };
     e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
-              : (it.id.startsWith(QStringLiteral("steam:")) ? QStringLiteral("steam") : QString());
+              : storeAddonForId(it.id);
     e.itemId = it.id; e.title = it.title; e.subtitle = it.subtitle;
     e.type = it.type; e.thumbnailUrl = it.thumbnailUrl; e.expandable = it.expandable;
+    // GOG tiles carry their resolved exe in `url`; persist it into the entry path so playlistItemsCatalog can
+    // ride it back onto the tile and the monitored launchPcExe path can run it (steam/epic launch by id, no url).
+    if (it.id.startsWith(QStringLiteral("gog:"))) e.path = it.url;
     PlaylistStore::addItem(plid, e);
     showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }

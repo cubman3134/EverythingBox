@@ -182,6 +182,32 @@ int main(int argc, char** argv)
         CHECK(ConsumptionStats::get(QStringLiteral("https://x/y.cbz")).pagesRead == 4);
     }
 
+    // ---- 8. Category flip: one key accrued as video THEN audio (cover-art misfile / re-open as the other kind)
+    // Defined coherent behavior: the per-category ROLLUPS accrue where the seconds were EARNED (video keeps its
+    // 10, audio keeps its 5 — an earned ledger, never moved by a later flip); the per-title blob keeps ONE
+    // lastCategory (the most recent) for display, so the title migrates to that category's topTitles and carries
+    // its whole lifetime total there. The rollup SUM stays coherent with the title's lifetime mediaSeconds — but
+    // a single category's topTitles-sum deliberately need NOT equal its rollup once a title has flipped (that is
+    // the earned-ledger vs. single-display-category decoupling this assert pins).
+    {
+        useProfile(QStringLiteral("probeFlip"));
+        ConsumptionStats::addMediaSeconds(QStringLiteral("flip:show"), QStringLiteral("video"), 10, QStringLiteral("Flip"));
+        ConsumptionStats::addMediaSeconds(QStringLiteral("flip:show"), QStringLiteral("audio"), 5,  QStringLiteral("Flip"));
+        // Rollups accrue where earned — neither is retro-moved by the flip.
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video")) == 10);
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("audio")) == 5);
+        // The title's lifetime total spans both kinds; the rollup sum stays coherent with it.
+        CHECK(ConsumptionStats::get(QStringLiteral("flip:show")).mediaSeconds == 15);
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video"))
+              + ConsumptionStats::categorySeconds(QStringLiteral("audio")) == 15);
+        // Per-title lastCategory = the most recent (audio): the title now shows under audio's topTitles (with its
+        // whole 15s total), and is ABSENT from video's — a single display category, not a per-category split.
+        CHECK(ConsumptionStats::topTitles(QStringLiteral("video"), 10).isEmpty());
+        const auto aud = ConsumptionStats::topTitles(QStringLiteral("audio"), 10);
+        CHECK(aud.size() == 1 && aud.value(0).second.title == QStringLiteral("Flip"));
+        CHECK(aud.value(0).second.mediaSeconds == 15);
+    }
+
     if (failures == 0) { std::puts("STATS-OK"); return 0; }
     std::fprintf(stderr, "STATS: %d check(s) failed\n", failures);
     return 1;

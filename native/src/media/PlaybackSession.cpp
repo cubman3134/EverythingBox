@@ -82,6 +82,10 @@ void PlaybackSession::prev()
 
 void PlaybackSession::handleTrackEnd()
 {
+    // Flush the final ≤5s accrual BEFORE clearing the resume mark: the last heartbeat window (up to the throttle
+    // interval of un-accrued playback) would otherwise be dropped when finishResume() forgets the file. Mirrors
+    // clearQueue's persist-then-clear ordering so a completed track's tail seconds land in ConsumptionStats.
+    persistResume();
     finishResume(); // the file played to the end -> drop its resume mark (next open starts fresh)
     // Auto-advance the audio queue when a track finishes (ignored for video / single files).
     if (trackIndex_ >= 0 && trackIndex_ + 1 < tracks_.size()) { playIndex(trackIndex_ + 1); return; }

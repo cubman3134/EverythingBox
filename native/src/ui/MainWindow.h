@@ -98,6 +98,7 @@ private slots:
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
     QVariantMap settingsPanelStyle() const; // the active theme's `settingsPanel` block (themed panels; B2)
     void openGeneralSettings(); // general playback options (subtitle defaults)
+    void openStats();           // per-profile consumption stats (Watched/Listened/Read/Played + top titles)
     void openCloudSync();     // Google Drive sign-in + sync panel
     void openCloudClientSetup(); // inline form to paste the Google OAuth client id/secret
     void cloudSyncNow();      // pull (if newer) then push the current state
