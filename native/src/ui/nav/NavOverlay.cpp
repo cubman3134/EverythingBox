@@ -162,18 +162,6 @@ bool NavOverlay::handleNavKey(int key)
 
 void NavOverlay::keyPressEvent(QKeyEvent* e)
 {
-#ifdef Q_OS_ANDROID
-    // Android/TV hardware Back over an open overlay must NOT be consumed here. Android 14's
-    // WindowOnBackDispatcher finishes the Activity unless the back is "handled", and Qt 6.8 measures that by
-    // whether the TOP-LEVEL window accepts the key — a keyboard-grabbing child overlay accepting it does not
-    // count, so a single Back from the onboarding OSK killed the whole app (F3; the app has no predictive-back
-    // callback, and enableOnBackInvokedCallback is inert on Qt 6.8.3). Ignore it so Qt propagates the
-    // unaccepted key up the grabber's parent chain to MainWindow::keyPressEvent, whose unified Back rule
-    // (goBack) dismisses THIS overlay AND accepts the key at the top level — closing the overlay instead of
-    // finishing the app. Desktop keeps handling Back inline below (this is the exact grab interaction the
-    // desktop path never hits).
-    if (e->key() == Qt::Key_Back) { e->ignore(); return; }
-#endif
     // Physical keyboard: the grab routes real key presses here; drive the same nav handler.
     switch (e->key())
     {

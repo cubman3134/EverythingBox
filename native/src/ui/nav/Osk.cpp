@@ -153,13 +153,6 @@ bool Osk::handleNavKey(int key)
 
 void Osk::keyPressEvent(QKeyEvent* e)
 {
-#ifdef Q_OS_ANDROID
-    // Android/TV hardware Back: don't cancel the OSK here (see NavOverlay::keyPressEvent). Consuming Back in
-    // this grabbing overlay lets Android's WindowOnBackDispatcher finish the whole Activity (F3); ignore it so
-    // it bubbles to MainWindow::keyPressEvent, whose goBack dismisses the topmost overlay (this OSK) AND
-    // accepts the key at the top level, so the app survives and the OSK simply closes.
-    if (e->key() == Qt::Key_Back) { e->ignore(); return; }
-#endif
     // Physical keyboard: type straight into the buffer.
     switch (e->key())
     {
