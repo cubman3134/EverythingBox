@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.0 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.1 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -537,8 +537,10 @@ if(MYMEDIAVAULT_BUILD_APP)
     # qt_add_executable already produces the shared library + APK target on Android.
     # -----------------------------------------------------------------------------------------------------
     if(ANDROID)
-        # versionCode is a monotonic integer: major*10000 + minor*100 + patch (0.2.0 -> 200).
-        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*10000 + ${PROJECT_VERSION_MINOR}*100 + ${PROJECT_VERSION_PATCH}")
+        # versionCode is a monotonic integer: major*1000000 + minor*10000 + patch (0.4.1 -> 4040001).
+        # Patch capacity 9999 — the per-commit auto-bump hook (native/tools/pre-commit-version-bump.sh)
+        # increments patch on every commit, so the old *100 formula would have overflowed into minor.
+        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*1000000 + ${PROJECT_VERSION_MINOR}*10000 + ${PROJECT_VERSION_PATCH}")
         # Stage the APK package-source overlay in the BUILD tree — never mutate the committed native/android/.
         # We copy the committed overlay verbatim, then add assets/mmv/ = the stock themes2/ + every first-party
         # addon dir. androiddeployqt reads QT_ANDROID_PACKAGE_SOURCE_DIR and bundles its assets/ into the APK's
