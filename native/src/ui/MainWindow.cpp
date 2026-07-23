@@ -6552,6 +6552,23 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), kFeedbackLong);
         return;
     }
+    // Local library prefer-local: if we own this item on disk, play the local file instead of resolving
+    // a stream. Guard on mime so the re-entry (with a filesystem url) doesn't recurse. Movies key on id;
+    // episodes key on imdbStreamId ("ttShow:season:episode", matches the OwnedIndex episode key).
+    if (item.mime != QStringLiteral("local:video"))
+    {
+        QString localPath = LocalLibrary::index().localPathFor(item.id);
+        if (localPath.isEmpty() && !item.imdbStreamId.isEmpty())
+            localPath = LocalLibrary::index().localPathFor(item.imdbStreamId);
+        if (!localPath.isEmpty() && QFileInfo::exists(localPath))
+        {
+            MediaItem local = item;
+            local.url = localPath;
+            local.mime = QStringLiteral("local:video");
+            openLibraryItem(local);   // re-enter: filesystem url + local:video mime -> mpv branch
+            return;
+        }
+    }
     // A GOG game: a DRM-free exe launched through the MONITORED path (launchPcExe records the "goggame" Recent
     // itself — do NOT re-record here). Its exe rides on item.url; id/title/thumb come from the tile.
     if (item.mime == QStringLiteral("goggame"))

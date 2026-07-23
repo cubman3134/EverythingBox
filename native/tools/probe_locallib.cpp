@@ -120,6 +120,17 @@ int main(int argc, char** argv)
     if (ep) CHECK(idx.localPathFor(QStringLiteral("tt2000000:1:2")) == ep->path);
     CHECK(!idx.ownsId(QStringLiteral("tt9999999")));                      // not owned
 
+    // Seam A/B decision surface (pure): movie id owned -> local path; series id owned -> episode count;
+    // episode key owned -> its file; unknown -> not owned. Pins the OwnedIndex contract Seam A (HomeView
+    // browse-row decoration) and Seam B (MainWindow prefer-local redirect) consume, so an index regression
+    // fails this probe, not just the UI.
+    CHECK(idx.ownsId(QStringLiteral("tt1375666")) == true);
+    CHECK(!idx.localPathFor(QStringLiteral("tt1375666")).isEmpty());
+    CHECK(idx.ownedEpisodes(QStringLiteral("tt2000000")) == 1);
+    CHECK(!idx.localPathFor(QStringLiteral("tt2000000:1:2")).isEmpty());
+    CHECK(idx.ownsId(QStringLiteral("tt0000001")) == false);
+    CHECK(idx.localPathFor(QStringLiteral("tt0000001")).isEmpty());
+
     if (inc) CHECK(LocalLibrary::displayTitle(*inc) == QStringLiteral("Inception (2010)"));
     if (ep)  CHECK(LocalLibrary::displayTitle(*ep)  == QStringLiteral("Show S01E02"));
 

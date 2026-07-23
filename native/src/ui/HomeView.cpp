@@ -1404,6 +1404,14 @@ QVariantList HomeView::browseItems()
                        { QStringLiteral("type"), it.type },
                        { QStringLiteral("accent"), typeColor(it.type).name() },
                        { QStringLiteral("expandable"), it.expandable } };
+        // Local library: if we own this catalog item on disk, flag it so the delegate shows an "On disk"
+        // badge (and the count for a series). Purely additive — un-owned tiles are untouched.
+        if (!it.id.isEmpty() && LocalLibrary::index().ownsId(it.id))
+        {
+            m[QStringLiteral("onDisk")] = true;
+            const int eps = LocalLibrary::index().ownedEpisodes(it.id);
+            if (eps > 0) m[QStringLiteral("onDiskCount")] = eps;
+        }
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
         it.art.writeInto(m);
