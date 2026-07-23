@@ -24,6 +24,7 @@ struct FavoriteItem
     QString path;          // absolute file path to re-open
     QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
     QString system;        // games: the SystemCatalog id (or "pc"), so favourites can be shown per-console
+    qint64  ts = 0;        // epoch seconds this favourite was added/last written (multi-device merge: newest-ts wins)
 };
 
 namespace FavoritesStore
@@ -36,6 +37,10 @@ namespace FavoritesStore
     // Identity keys (itemId + path) of EVERY profile's favourites, for image-cache pinning: a starred
     // item's art must never be evicted, whichever profile starred it.
     QSet<QString> allKeys();
+
+    // Multi-device sync trigger (mdsync T2): a change-callback fired after add/remove, set once by MainWindow
+    // to (re)arm the debounced Drive push. QtCore-clean (a std::function, not a Qt signal). Unset in probes.
+    void setChangeHook(std::function<void()> hook);
 
     // The SystemCatalog id for a local-game favourite, derived from what it re-opens as: PC games are
     // always "pc" (checked first — .exe is also a psx disc extension), emulated ROMs map by extension.

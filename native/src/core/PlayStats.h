@@ -2,6 +2,11 @@
 // launch (last-played) and on the game's exit (accumulated session time), stored in mymediavault.ini and
 // shown as facts in the info panel. Per-profile, keyed by a hash of the game's stable identity (its addon
 // item id when it has one, else the file/exe path — the same identity RecentStore de-dups on).
+//
+// DEVICE-NAMESPACED (mdsync T3): playstats/<profile>/<deviceId>/<hash>/{last,total,sessions}. Each device
+// writes only its own namespace so a multi-device sync unions namespaces verbatim (no double-count); the
+// readers SUM total/sessions across devices and take the MAX last-played. A one-time stamped migrate() folds
+// pre-upgrade un-namespaced keys into this device's namespace.
 #pragma once
 #include <QString>
 
@@ -29,4 +34,10 @@ namespace PlayStats
 
     QString formatLastPlayed(qint64 epochSecs); // "Today" / "Yesterday" / "3 days ago" / a date
     QString formatDuration(qint64 seconds);     // "45m" / "2h 15m" / "under a minute"
+
+    // One-time, stamped, idempotent migration (mdsync T3): fold the legacy un-namespaced game keys
+    // (playstats/<profile>/<hash>/...) into THIS device's namespace (playstats/<profile>/<deviceId>/<hash>/...)
+    // for EVERY profile. Guarded per profile by a playstats/<profile>/schema stamp; a second call is a no-op.
+    // Call once at startup, before any CloudMerge serialize; the get/write funnels also fold lazily.
+    void migrate();
 }

@@ -4,12 +4,26 @@
 #include <QSettings>
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QUuid>
 
 static QSettings& store()
 {
     static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
                        QSettings::IniFormat);
     return s;
+}
+
+QString Settings::deviceId()
+{
+    // Write-once: an already-minted id is returned verbatim and NEVER regenerated (a fresh UUID on every
+    // read would give this device a new identity each launch and defeat per-device namespacing). Only the
+    // very first call — when the key is absent/empty — mints and persists.
+    const QString existing = store().value(QStringLiteral("device/id")).toString();
+    if (!existing.isEmpty()) return existing;
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    store().setValue(QStringLiteral("device/id"), id);
+    store().sync();
+    return id;
 }
 
 bool Settings::subtitlesOnByDefault()

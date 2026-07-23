@@ -3,9 +3,11 @@
 #include "ProfileStore.h"
 #include "RecentStore.h"
 #include "DownloadsStore.h"
+#include "Tombstones.h"
 
 #include <QSettings>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -26,7 +28,20 @@ static QString favKey()
            + QStringLiteral("/items");
 }
 
+// Tombstone store namespace for THIS profile's favourites (mirrors favKey()'s per-profile shape). Keyed by
+// itemId — see Tombstones.h.
+static QString favTombstoneStore()
+{
+    const QString id = ProfileStore::currentId();
+    return QStringLiteral("favorites/") + (id.isEmpty() ? QStringLiteral("default") : id);
+}
+
 static void save(const QVector<FavoriteItem>& items);
+
+// Change-callback (mdsync T2): fired after a mutation to (re)arm the debounced Drive push; null in probes.
+static std::function<void()> g_changeHook;
+void FavoritesStore::setChangeHook(std::function<void()> hook) { g_changeHook = std::move(hook); }
+static void fireChanged() { if (g_changeHook) g_changeHook(); }
 
 QVector<FavoriteItem> FavoritesStore::list()
 {
@@ -47,6 +62,7 @@ QVector<FavoriteItem> FavoritesStore::list()
         it.path         = o.value(QStringLiteral("path")).toString();
         it.kind         = o.value(QStringLiteral("kind")).toString();
         it.system       = o.value(QStringLiteral("system")).toString();
+        it.ts           = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
         if (!it.itemId.isEmpty()) out.push_back(it);
     }
     // One-time (per profile per run) migration: local-game favourites saved before `system` was stamped
@@ -70,6 +86,10 @@ QVector<FavoriteItem> FavoritesStore::list()
 
 static void save(const QVector<FavoriteItem>& items)
 {
+    // save() is a pure persister: it writes each favourite's ts VERBATIM — no backfill. The stamp is set at
+    // the mutation site (add()), so a rewrite triggered by add/remove of ANOTHER item never bumps an existing
+    // favourite's ts. Legacy favourites written before the ts field keep ts==0 (= oldest), so the multi-device
+    // merge (T2) never lets a pre-sync item's rewrite beat a real deletion tombstone (no resurrection).
     QJsonArray arr;
     for (const FavoriteItem& it : items)
     {
@@ -84,6 +104,7 @@ static void save(const QVector<FavoriteItem>& items)
         if (!it.path.isEmpty()) o.insert(QStringLiteral("path"), it.path);
         if (!it.kind.isEmpty()) o.insert(QStringLiteral("kind"), it.kind);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
+        o.insert(QStringLiteral("ts"), static_cast<double>(it.ts));
         arr.append(o);
     }
     store().setValue(favKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
@@ -96,16 +117,25 @@ void FavoritesStore::add(const FavoriteItem& item)
     QVector<FavoriteItem> items = list();
     for (int i = items.size() - 1; i >= 0; --i)
         if (items[i].itemId == item.itemId) items.remove(i); // de-dup
-    items.prepend(item);                                     // newest first
+    // Stamp at the mutation site: a genuine star is dated NOW (a fresh add re-dates a re-star). save() then
+    // persists this ts verbatim. Callers construct FavoriteItem with the default ts==0; add() is the authority.
+    FavoriteItem stamped = item;
+    stamped.ts = QDateTime::currentSecsSinceEpoch();
+    items.prepend(stamped);                                  // newest first
     save(items);
+    fireChanged();
 }
 
 void FavoritesStore::remove(const QString& itemId)
 {
+    if (itemId.isEmpty()) return;
     QVector<FavoriteItem> items = list();
     for (int i = items.size() - 1; i >= 0; --i)
         if (items[i].itemId == itemId) items.remove(i);
     save(items);
+    // Tombstone the un-starred id so the merge (T2) doesn't resurrect it from a device that still has it.
+    Tombstones::record(favTombstoneStore(), itemId);
+    fireChanged();
 }
 
 QSet<QString> FavoritesStore::allKeys()

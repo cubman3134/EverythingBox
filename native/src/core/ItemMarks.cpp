@@ -1,9 +1,11 @@
 #include "ItemMarks.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "Tombstones.h"
 
 #include <QSettings>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -23,6 +25,11 @@ namespace {
 
 using ItemMarks::Completion;
 using ItemMarks::Marks;
+
+// Change-callback (mdsync T2): fired after every mutation to (re)arm the debounced Drive push. Set once by
+// MainWindow; null (a no-op) in headless probes.
+std::function<void()> g_changeHook;
+void fireChanged() { if (g_changeHook) g_changeHook(); }
 
 // Per-profile group root: "marks/<profileId>" (or "marks/default" when no profile is selected). Same
 // per-profile mechanic as FavoritesStore/PlaylistStore.
@@ -85,6 +92,7 @@ Marks marksFromJson(const QByteArray& json)
         const QString t = v.toString();
         if (!t.isEmpty()) m.tags.push_back(t);
     }
+    m.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return m;
 }
 
@@ -96,6 +104,7 @@ QByteArray marksToJson(const Marks& m)
     QJsonArray arr;
     for (const QString& t : m.tags) arr.append(t);
     o.insert(QStringLiteral("tags"), arr);
+    o.insert(QStringLiteral("updatedAt"), static_cast<double>(m.updatedAt));
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
@@ -113,11 +122,12 @@ QStringList readStringArray(const QString& key)
 
 void writeStringArray(const QString& key, const QStringList& list)
 {
-    if (list.isEmpty()) { store().remove(key); store().sync(); return; }
+    if (list.isEmpty()) { store().remove(key); store().sync(); fireChanged(); return; }
     QJsonArray arr;
     for (const QString& s : list) arr.append(s);
     store().setValue(key, QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
     store().sync();
+    fireChanged();
 }
 
 // ---- Lazy per-profile cache -------------------------------------------------------------------------------
@@ -170,13 +180,20 @@ Marks loadItem(const QString& hash)
     return marksFromJson(store().value(itemKey(hash)).toString().toUtf8());
 }
 
-// Persist one item's marks: an all-default blob is removed (never leave junk), else written. Invalidates.
-void saveItem(const QString& hash, const Marks& m)
+// Persist one item's marks: an all-default blob is removed (never leave junk), else written with a fresh
+// updatedAt stamp (the merge funnel — every content write bumps the item's timestamp). isDefault() ignores
+// updatedAt, so a marks-cleared item is still removed rather than left as a timestamp-only husk.
+void saveItem(const QString& hash, Marks m)
 {
-    if (isDefault(m)) store().remove(itemKey(hash));
-    else              store().setValue(itemKey(hash), QString::fromUtf8(marksToJson(m)));
+    if (isDefault(m)) { store().remove(itemKey(hash)); }
+    else
+    {
+        m.updatedAt = QDateTime::currentSecsSinceEpoch();
+        store().setValue(itemKey(hash), QString::fromUtf8(marksToJson(m)));
+    }
     store().sync();
     ItemMarks::invalidate();
+    fireChanged();
 }
 
 } // namespace
@@ -224,7 +241,14 @@ void ItemMarks::setTags(const QString& key, const QStringList& tags)
     QStringList vocab = readStringArray(vocabKey());
     bool grew = false;
     for (const QString& t : clean)
-        if (!vocab.contains(t)) { vocab.push_back(t); grew = true; }
+        if (!vocab.contains(t))
+        {
+            vocab.push_back(t);
+            grew = true;
+            // Re-creating a previously-retired tag clears its vocab tombstone, so the merge's
+            // union-minus-tombstoned pass doesn't strip this genuine re-add on the next pull.
+            Tombstones::remove(profileGroup() + QStringLiteral("/tagVocab"), t);
+        }
     if (grew) writeStringArray(vocabKey(), vocab);
 }
 
@@ -258,11 +282,22 @@ void ItemMarks::removeTagEverywhere(const QString& tag)
         if (m.tags.removeAll(tag) > 0)
         {
             if (isDefault(m)) s.remove(itemKey(h));
-            else              s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
+            else
+            {
+                m.updatedAt = QDateTime::currentSecsSinceEpoch(); // this direct-rewrite path is a write funnel too
+                s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
+            }
         }
     }
     s.sync();
+
+    // Tag deletion is a removal from the profile's tag VOCABULARY — tombstone the tag NAME in vocab space so
+    // the merge doesn't resurrect the retired tag from another device. (Hiding/unhiding an item is NOT a
+    // delete and records no tombstone.)
+    Tombstones::record(profileGroup() + QStringLiteral("/tagVocab"), tag);
+
     invalidate();
+    fireChanged();
 }
 
 QStringList ItemMarks::pinnedTags()
@@ -278,7 +313,14 @@ void ItemMarks::setPinned(const QString& tag, bool pinned)
     if (pinned && !has)  list.push_back(tag);
     else if (!pinned && has) list.removeAll(tag);
     else return; // no change
-    writeStringArray(pinnedKey(), list);
+    writeStringArray(pinnedKey(), list); // fires the change hook
+    // A bare unpin retires the SHELF without deleting the tag: tombstone it in PINNED space (not vocab space —
+    // that would delete the tag) so a peer still pinning can't resurrect the shelf on merge (union-minus-
+    // tombstoned). Re-pinning clears that tombstone so the genuine re-pin isn't self-suppressed on the next
+    // pull. (Tag DELETION — removeTagEverywhere — is what tombstones the vocab space; see there.)
+    const QString pinnedSpace = profileGroup() + QStringLiteral("/pinnedTags");
+    if (pinned) Tombstones::remove(pinnedSpace, tag);
+    else        Tombstones::record(pinnedSpace, tag);
 }
 
 QVector<QString> ItemMarks::itemKeysWithTag(const QString& tag)
@@ -304,4 +346,9 @@ void ItemMarks::invalidate()
     mCacheItemsGroup.clear();
     mCache.clear();
     mAnyHidden = false;
+}
+
+void ItemMarks::setChangeHook(std::function<void()> hook)
+{
+    g_changeHook = std::move(hook);
 }

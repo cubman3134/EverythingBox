@@ -50,6 +50,7 @@
 #include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
+#include "../core/CloudMerge.h"
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
@@ -797,6 +798,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         if (Settings::autoplayNextEpisode()) tryPlayNextEpisode();
     });
     connect(session_, &PlaybackSession::resumeSaved, this, &MainWindow::scheduleProgressSync);
+
+    // mdsync T2: mark/favourite/playlist mutations arm the SAME debounced progress push as a resume change.
+    // The stores stay QtCore-clean (no Qt signals) — each exposes a lightweight std::function change-hook we
+    // register once here. The hook marshals back onto this window's thread (a store write may originate off the
+    // GUI thread, e.g. an importer) before touching the QTimer, then (re)arms the 15s debounce.
+    auto armProgressSync = [this] {
+        QMetaObject::invokeMethod(this, [this] { scheduleProgressSync(); }, Qt::QueuedConnection);
+    };
+    ItemMarks::setChangeHook(armProgressSync);
+    FavoritesStore::setChangeHook(armProgressSync);
+    PlaylistStore::setChangeHook(armProgressSync);
 
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
@@ -8819,82 +8831,20 @@ void MainWindow::cloudSyncNow()
 // both already live in the ini; this syncs JUST those, in a small file pushed far more often than the heavy
 // state bundle, and MERGES on pull (by recency) so two devices' progress combine instead of clobbering.
 
+// The serialize/merge logic MOVED to core/CloudMerge (mdsync T2): a pure ini-in/json-out module that now
+// covers EVERY per-item store (resume, recents, marks, favourites, playlists) — merged by recency with
+// deletion tombstones — not just resume+recents. These two are thin wrappers so the existing push/pull
+// plumbing (pushProgressNow / pullAndMergeProgress, the 15s debounce, the startup pull) is unchanged.
 QByteArray MainWindow::serializeProgress() const
 {
-    QJsonObject resume, recent;
-    for (const QString& key : store().allKeys())
-    {
-        if (key.startsWith(QStringLiteral("resume/")))
-        {
-            const QString rest = key.mid(7);       // "<hash>/<field>"
-            const int slash = rest.indexOf(QLatin1Char('/'));
-            if (slash <= 0) continue;
-            const QString hash = rest.left(slash), field = rest.mid(slash + 1);
-            QJsonObject e = resume.value(hash).toObject();
-            if      (field == QStringLiteral("pos"))   e.insert(field, store().value(key).toDouble());
-            else if (field == QStringLiteral("dur"))   e.insert(field, store().value(key).toDouble());
-            else if (field == QStringLiteral("ts"))    e.insert(field, store().value(key).toDouble());
-            else if (field == QStringLiteral("title")) e.insert(field, store().value(key).toString());
-            resume.insert(hash, e);
-        }
-        else if (key.startsWith(QStringLiteral("recent/"))) // "recent/<profile>/items" -> the list JSON string
-        {
-            recent.insert(key.mid(7), store().value(key).toString());
-        }
-    }
-    return QJsonDocument(QJsonObject{ { QStringLiteral("resume"), resume }, { QStringLiteral("recent"), recent } })
-        .toJson(QJsonDocument::Compact);
+    QJsonObject root;
+    CloudMerge::serializeAll(root);
+    return QJsonDocument(root).toJson(QJsonDocument::Compact);
 }
 
 void MainWindow::mergeProgress(const QByteArray& json)
 {
-    const QJsonObject root = QJsonDocument::fromJson(json).object();
-
-    // Resume: for each item, keep whichever position was saved more recently (ts). Never delete a local entry.
-    const QJsonObject resume = root.value(QStringLiteral("resume")).toObject();
-    for (auto it = resume.begin(); it != resume.end(); ++it)
-    {
-        const QJsonObject re = it.value().toObject();
-        const QString prefix = QStringLiteral("resume/") + it.key() + QLatin1Char('/');
-        const double localTs = store().value(prefix + QStringLiteral("ts"), 0.0).toDouble();
-        const bool haveLocal = store().contains(prefix + QStringLiteral("pos"));
-        if (haveLocal && re.value(QStringLiteral("ts")).toDouble() <= localTs) continue; // local is newer/equal
-        if (re.contains(QStringLiteral("pos")))   store().setValue(prefix + QStringLiteral("pos"),   re.value(QStringLiteral("pos")).toDouble());
-        if (re.contains(QStringLiteral("dur")))   store().setValue(prefix + QStringLiteral("dur"),   re.value(QStringLiteral("dur")).toDouble());
-        if (re.contains(QStringLiteral("ts")))    store().setValue(prefix + QStringLiteral("ts"),    re.value(QStringLiteral("ts")).toDouble());
-        if (re.contains(QStringLiteral("title"))) store().setValue(prefix + QStringLiteral("title"), re.value(QStringLiteral("title")).toString());
-    }
-
-    // Recent: union the local + remote lists per profile by stable identity (key, else path), keeping the newest
-    // ts for each, sorted newest-first and capped.
-    const QJsonObject recent = root.value(QStringLiteral("recent")).toObject();
-    for (auto it = recent.begin(); it != recent.end(); ++it)
-    {
-        const QString localKey = QStringLiteral("recent/") + it.key();
-        QHash<QString, QJsonObject> byId;
-        auto ingest = [&byId](const QJsonArray& arr) {
-            for (const QJsonValue& v : arr)
-            {
-                const QJsonObject o = v.toObject();
-                const QString id = o.value(QStringLiteral("key")).toString().isEmpty()
-                                       ? o.value(QStringLiteral("path")).toString()
-                                       : o.value(QStringLiteral("key")).toString();
-                if (id.isEmpty()) continue;
-                if (!byId.contains(id) || o.value(QStringLiteral("ts")).toDouble() >= byId[id].value(QStringLiteral("ts")).toDouble())
-                    byId.insert(id, o);
-            }
-        };
-        ingest(QJsonDocument::fromJson(store().value(localKey).toString().toUtf8()).array()); // local first
-        ingest(QJsonDocument::fromJson(it.value().toString().toUtf8()).array());              // then remote
-        QList<QJsonObject> merged = byId.values();
-        std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {
-            return a.value(QStringLiteral("ts")).toDouble() > b.value(QStringLiteral("ts")).toDouble();
-        });
-        QJsonArray out;
-        for (int i = 0; i < merged.size() && i < 40; ++i) out.append(merged[i]); // cap matches RecentStore's
-        store().setValue(localKey, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
-    }
-    store().sync();
+    CloudMerge::mergeAll(QJsonDocument::fromJson(json).object());
 }
 
 void MainWindow::pushProgressNow()
@@ -8913,7 +8863,7 @@ void MainWindow::scheduleProgressSync()
         progressSyncTimer_->setSingleShot(true);
         connect(progressSyncTimer_, &QTimer::timeout, this, [this] { pushProgressNow(); });
     }
-    progressSyncTimer_->start(15000); // debounce: push ~15s after the last position change (i.e. shortly after you stop)
+    progressSyncTimer_->start(15000); // debounce: push ~15s after the last change (i.e. shortly after you stop)
 }
 
 void MainWindow::pullAndMergeProgress()

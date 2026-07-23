@@ -24,10 +24,12 @@
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
 #include "core/Settings.h"
+#include "core/ConsumptionStats.h" // mdsync T3: fold legacy accumulators into this device's namespace at startup
+#include "core/PlayStats.h"
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.4.0";
+static constexpr const char* kAppVersion = "0.4.7";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -202,6 +204,8 @@ int main(int argc, char** argv)
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
+    ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace
+    PlayStats::migrate();         // one-time: same for per-game playtime (before any CloudMerge serialize)
 
     // A profile must be active before the app is usable. One profile -> use it. With none or several, the
     // picker is shown inline once the window is up (chooseProfile); set a provisional current first so the

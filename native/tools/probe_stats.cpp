@@ -18,7 +18,9 @@
 // "stats" and "profiles" groups at start and SEED profile ids via ProfileStore::setCurrent, so currentId()
 // can't leak a developer's real profile into the asserts.
 #include "ConsumptionStats.h"
+#include "PlayStats.h"
 #include "ProfileStore.h"
+#include "Settings.h"
 #include "AppPaths.h"
 
 #include <QCoreApplication>
@@ -39,6 +41,20 @@ static QString hash(const QString& key)
         QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex());
 }
 
+// PlayStats keys games by SHA1 of the identity (not MD5), so the probe can address a game's raw ini slot.
+static QString sha1(const QString& key)
+{
+    return QString::fromLatin1(
+        QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Sha1).toHex());
+}
+
+// A ConsumptionStats item blob exactly as the store serializes it (entryFromJson reads these fields).
+static QString statsBlob(qint64 secs, qint64 pages, qint64 last, const QString& title, const QString& cat)
+{
+    return QStringLiteral("{\"mediaSeconds\":%1,\"pagesRead\":%2,\"lastActivity\":%3,\"title\":\"%4\",\"category\":\"%5\"}")
+        .arg(secs).arg(pages).arg(last).arg(title, cat);
+}
+
 static void useProfile(const QString& id)
 {
     ProfileStore::setCurrent(id);
@@ -53,10 +69,16 @@ int main(int argc, char** argv)
     {
         QSettings reset(iniPath, QSettings::IniFormat);
         reset.remove(QStringLiteral("stats"));
+        reset.remove(QStringLiteral("playstats"));
         reset.remove(QStringLiteral("profiles"));
         reset.sync();
     }
     ConsumptionStats::invalidate();
+
+    // This device's accumulator namespace (mdsync T3): every writer targets stats/<profile>/<dev>/... and
+    // playstats/<profile>/<dev>/...; the public readers SUM across device namespaces. Fixtures that poke the
+    // raw ini must address the device path.
+    const QString dev = Settings::deviceId();
 
     // ---- 1. Forward-only media accrual + the store's own non-positive floor ---------------------------------
     useProfile(QStringLiteral("probeA"));
@@ -148,8 +170,9 @@ int main(int argc, char** argv)
         ConsumptionStats::addPagesRead(QStringLiteral("k"), 4, QStringLiteral("K")); // writer invalidated
         CHECK(ConsumptionStats::get(QStringLiteral("k")).pagesRead == 4);            // primes cache
         {
-            // External write straight to the ini (bypasses the store, so no invalidate happens).
-            const QString ik = QStringLiteral("stats/probeCache/items/") + hash(QStringLiteral("k"));
+            // External write straight to the ini (bypasses the store, so no invalidate happens). Targets THIS
+            // device's namespace — the reader sums device namespaces, so a legacy-path write would be invisible.
+            const QString ik = QStringLiteral("stats/probeCache/") + dev + QStringLiteral("/items/") + hash(QStringLiteral("k"));
             QSettings raw(iniPath, QSettings::IniFormat);
             raw.setValue(ik, QStringLiteral("{\"mediaSeconds\":0,\"pagesRead\":99,\"lastActivity\":1,\"title\":\"K\",\"category\":\"reading\"}"));
             raw.sync();
@@ -167,9 +190,9 @@ int main(int argc, char** argv)
         CHECK(ConsumptionStats::get(QString()).mediaSeconds == 0);
         CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video")) == 0); // empty-key accrued nothing
         CHECK(ConsumptionStats::categoryPages() == 0);
-        // No empty-hash junk item key was written.
+        // No empty-hash junk item key was written (check THIS device's namespace, where writes land).
         QSettings ini(iniPath, QSettings::IniFormat);
-        ini.beginGroup(QStringLiteral("stats/probeJunk/items"));
+        ini.beginGroup(QStringLiteral("stats/probeJunk/") + dev + QStringLiteral("/items"));
         const QStringList itemKeys = ini.childKeys();
         ini.endGroup();
         CHECK(itemKeys.isEmpty());
@@ -206,6 +229,135 @@ int main(int argc, char** argv)
         const auto aud = ConsumptionStats::topTitles(QStringLiteral("audio"), 10);
         CHECK(aud.size() == 1 && aud.value(0).second.title == QStringLiteral("Flip"));
         CHECK(aud.value(0).second.mediaSeconds == 15);
+    }
+
+    // ========================================================================================================
+    //  mdsync T3 — device-namespaced accumulators. Writers target stats/<profile>/<dev>/... (playstats too);
+    //  readers SUM across device namespaces; a one-time stamped migration folds pre-upgrade un-namespaced keys.
+    // ========================================================================================================
+    auto setRaw = [&](const QString& key, const QString& val) {
+        QSettings raw(iniPath, QSettings::IniFormat); raw.setValue(key, val); raw.sync();
+    };
+    auto hasGroupKeys = [&](const QString& grp) {
+        QSettings raw(iniPath, QSettings::IniFormat); raw.beginGroup(grp);
+        const bool any = !raw.childKeys().isEmpty() || !raw.childGroups().isEmpty(); raw.endGroup(); return any;
+    };
+
+    // ---- 9. ConsumptionStats migration: legacy un-namespaced keys fold into THIS device's namespace, once ----
+    {
+        // Seed a pre-upgrade profile "mig" with un-namespaced items + category rollups (straight to the ini).
+        setRaw(QStringLiteral("stats/mig/items/") + hash(QStringLiteral("vid:V")), statsBlob(40, 0, 111, QStringLiteral("V"), QStringLiteral("video")));
+        setRaw(QStringLiteral("stats/mig/items/") + hash(QStringLiteral("book:B")), statsBlob(0, 7, 112, QStringLiteral("B"), QStringLiteral("reading")));
+        setRaw(QStringLiteral("stats/mig/cat/video/seconds"), QStringLiteral("40"));
+        setRaw(QStringLiteral("stats/mig/cat/reading/pages"), QStringLiteral("7"));
+
+        ProfileStore::setCurrent(QStringLiteral("mig"));
+        ConsumptionStats::migrate();               // fold (global; guarded per profile)
+
+        // Legacy roots gone; the data now lives under this device's namespace.
+        CHECK(!hasGroupKeys(QStringLiteral("stats/mig/items")));
+        CHECK(!hasGroupKeys(QStringLiteral("stats/mig/cat")));
+        CHECK(hasGroupKeys(QStringLiteral("stats/mig/") + dev + QStringLiteral("/items")));
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(raw.value(QStringLiteral("stats/mig/schema")).toInt() >= 1); // stamped
+        }
+        // Readers see the folded totals unchanged (the public contract is preserved through the fold).
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("vid:V")).mediaSeconds == 40);
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video")) == 40);
+        CHECK(ConsumptionStats::categoryPages() == 7);
+
+        // Idempotent: a second migrate() is a no-op (run twice == once — no doubling).
+        ConsumptionStats::migrate();
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("vid:V")).mediaSeconds == 40);
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video")) == 40);
+    }
+
+    // ---- 10. Three device namespaces -> the readers sum EXACTLY across them ---------------------------------
+    {
+        // Profile "multi" carries the SAME title X in three foreign device namespaces (A/B/C) + per-device
+        // category rollups. No local writes here, so the reader sees exactly A+B+C.
+        const QString hx = hash(QStringLiteral("vid:X"));
+        setRaw(QStringLiteral("stats/multi/A/items/") + hx, statsBlob(10, 0, 100, QStringLiteral("X"), QStringLiteral("video")));
+        setRaw(QStringLiteral("stats/multi/B/items/") + hx, statsBlob(20, 0, 300, QStringLiteral("X"), QStringLiteral("video")));
+        setRaw(QStringLiteral("stats/multi/C/items/") + hx, statsBlob(5,  0, 200, QStringLiteral("X"), QStringLiteral("video")));
+        setRaw(QStringLiteral("stats/multi/A/cat/video/seconds"), QStringLiteral("10"));
+        setRaw(QStringLiteral("stats/multi/B/cat/video/seconds"), QStringLiteral("20"));
+        setRaw(QStringLiteral("stats/multi/C/cat/video/seconds"), QStringLiteral("5"));
+
+        ProfileStore::setCurrent(QStringLiteral("multi"));
+        ConsumptionStats::invalidate();
+        CHECK(ConsumptionStats::get(QStringLiteral("vid:X")).mediaSeconds == 35);          // 10 + 20 + 5
+        CHECK(ConsumptionStats::categorySeconds(QStringLiteral("video")) == 35);           // rollups sum too
+        const auto top = ConsumptionStats::topTitles(QStringLiteral("video"), 10);
+        CHECK(top.size() == 1 && top[0].first == hx);
+        CHECK(top[0].second.mediaSeconds == 35);                                           // summed in topTitles
+        // The newest device's activity (B @300) owns the display title/category.
+        CHECK(ConsumptionStats::get(QStringLiteral("vid:X")).lastActivity == 300);
+    }
+
+    // ---- 11. PlayStats migration + aggregate readers (sum totals/sessions, MAX last-played) -----------------
+    {
+        const QString g = QStringLiteral("game:doom");
+        // Seed a pre-upgrade profile "pmig" with an un-namespaced game.
+        setRaw(QStringLiteral("playstats/pmig/") + sha1(g) + QStringLiteral("/total"),    QStringLiteral("100"));
+        setRaw(QStringLiteral("playstats/pmig/") + sha1(g) + QStringLiteral("/sessions"), QStringLiteral("2"));
+        setRaw(QStringLiteral("playstats/pmig/") + sha1(g) + QStringLiteral("/last"),     QStringLiteral("500"));
+
+        ProfileStore::setCurrent(QStringLiteral("pmig"));
+        PlayStats::migrate();
+
+        CHECK(!hasGroupKeys(QStringLiteral("playstats/pmig/") + sha1(g)));                 // legacy game folded away
+        CHECK(hasGroupKeys(QStringLiteral("playstats/pmig/") + dev + QStringLiteral("/") + sha1(g)));
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(raw.value(QStringLiteral("playstats/pmig/schema")).toInt() >= 1);
+        }
+        {
+            const PlayStats::Stat st = PlayStats::get(g);
+            CHECK(st.totalSeconds == 100 && st.sessions == 2 && st.lastPlayed == 500);     // folded verbatim
+        }
+        CHECK(PlayStats::profileTotalSeconds() == 100);
+        PlayStats::migrate();                                                              // idempotent
+        CHECK(PlayStats::get(g).totalSeconds == 100);
+        CHECK(PlayStats::profileTotalSeconds() == 100);
+    }
+
+    // ---- 12. PlayStats three device namespaces sum; the local writer targets ITS OWN namespace --------------
+    {
+        const QString g = QStringLiteral("game:quake");
+        const QString sg = sha1(g);
+        setRaw(QStringLiteral("playstats/pmulti/devA/") + sg + QStringLiteral("/total"),    QStringLiteral("10"));
+        setRaw(QStringLiteral("playstats/pmulti/devA/") + sg + QStringLiteral("/sessions"), QStringLiteral("1"));
+        setRaw(QStringLiteral("playstats/pmulti/devA/") + sg + QStringLiteral("/last"),     QStringLiteral("100"));
+        setRaw(QStringLiteral("playstats/pmulti/devB/") + sg + QStringLiteral("/total"),    QStringLiteral("20"));
+        setRaw(QStringLiteral("playstats/pmulti/devB/") + sg + QStringLiteral("/sessions"), QStringLiteral("2"));
+        setRaw(QStringLiteral("playstats/pmulti/devB/") + sg + QStringLiteral("/last"),     QStringLiteral("300"));
+        setRaw(QStringLiteral("playstats/pmulti/devC/") + sg + QStringLiteral("/total"),    QStringLiteral("5"));
+        setRaw(QStringLiteral("playstats/pmulti/devC/") + sg + QStringLiteral("/sessions"), QStringLiteral("1"));
+        setRaw(QStringLiteral("playstats/pmulti/devC/") + sg + QStringLiteral("/last"),     QStringLiteral("200"));
+
+        ProfileStore::setCurrent(QStringLiteral("pmulti"));
+        {
+            const PlayStats::Stat st = PlayStats::get(g);
+            CHECK(st.totalSeconds == 35);                       // 10 + 20 + 5
+            CHECK(st.sessions == 4);                            // 1 + 2 + 1
+            CHECK(st.lastPlayed == 300);                        // MAX(100, 300, 200)
+        }
+        CHECK(PlayStats::profileTotalSeconds() == 35);
+
+        // A local session writes ONLY this device's namespace; the aggregate then includes it (no double-count).
+        PlayStats::addSession(g, 7);
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(raw.value(QStringLiteral("playstats/pmulti/") + dev + QStringLiteral("/") + sg + QStringLiteral("/total")).toLongLong() == 7);
+        }
+        const PlayStats::Stat st2 = PlayStats::get(g);
+        CHECK(st2.totalSeconds == 42 && st2.sessions == 5);     // foreign 35 + local 7
+        CHECK(PlayStats::profileTotalSeconds() == 42);
+        CHECK(!PlayStats::formatLastPlayed(st2.lastPlayed).isEmpty());
     }
 
     if (failures == 0) { std::puts("STATS-OK"); return 0; }

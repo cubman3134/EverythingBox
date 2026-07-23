@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.0 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.7 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -152,6 +152,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
+        src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
+        src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
@@ -270,6 +272,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # under offscreen QPA. Needs ProfileStore.cpp (marks are namespaced by the active profile id).
     add_executable(probe_marks tools/probe_marks.cpp
         src/core/ItemMarks.cpp src/core/ItemMarks.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # removeTagEverywhere tombstones the retired tag name
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
@@ -278,10 +281,16 @@ if(MYMEDIAVAULT_BUILD_APP)
     # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-
     # only (a QSettings+JSON wrapper over the shared mymediavault.ini) so the probe links lean and runs under
     # offscreen QPA. Needs ProfileStore.cpp (stats are namespaced by the active profile id).
+    # mdsync T3: the accumulators are now device-namespaced (stats/<profile>/<deviceId>/...), so both stores
+    # need Settings::deviceId() (which drags FormFactor via Settings.cpp's virtualPadEnabled). PlayStats.cpp is
+    # pulled in too — its device-namespaced play history + migration are probed alongside ConsumptionStats.
     add_executable(probe_stats tools/probe_stats.cpp
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/PlayStats.cpp        src/core/PlayStats.h
+        src/core/Settings.cpp         src/core/Settings.h
+        src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_stats PRIVATE src src/core)
+    target_include_directories(probe_stats PRIVATE src src/core src/theme2)
     target_link_libraries(probe_stats PRIVATE Qt6::Core)
 
     # PlaylistStore category migration: the data-safety core of category-scoped playlists — a legacy
@@ -291,11 +300,38 @@ if(MYMEDIAVAULT_BUILD_APP)
     # (playlists are namespaced by the active profile). MediaCategories.h is header-only (no source to add).
     add_executable(probe_playlists tools/probe_playlists.cpp
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # PlaylistStore::remove tombstones the deleted playlist id
         src/core/MediaCategories.h
         src/core/ShuffleBag.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_playlists PRIVATE src src/core)
     target_link_libraries(probe_playlists PRIVATE Qt6::Core)
+
+    # Multi-device-sync foundation (mdsync T1): device identity (Settings::deviceId), the per-store write
+    # timestamps (ItemMarks updatedAt / FavoritesStore ts / PlaylistStore updatedAt), and the deletion
+    # tombstones (core/Tombstones) that the generalized CloudMerge pass (T2) reads. QtCore-only (QSettings +
+    # JSON over the shared mymediavault.ini) so it links lean and runs under offscreen QPA. Pulls the real
+    # stores + their deps: Settings (deviceId) needs FormFactor; FavoritesStore's one-time list() migration
+    # references RecentStore/DownloadsStore; every store is namespaced by ProfileStore.
+    add_executable(probe_cloudmerge tools/probe_cloudmerge.cpp
+        src/core/Settings.cpp        src/core/Settings.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
+        src/core/ItemMarks.cpp       src/core/ItemMarks.h
+        src/core/FavoritesStore.cpp  src/core/FavoritesStore.h
+        src/core/PlaylistStore.cpp   src/core/PlaylistStore.h
+        src/core/MediaCategories.h
+        src/core/ShuffleBag.h
+        src/core/RecentStore.cpp     src/core/RecentStore.h
+        src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
+        src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
+        src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
+        third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
+        src/core/ProfileStore.cpp    src/core/ProfileStore.h)
+    target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2 third_party)
+    target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire
@@ -452,8 +488,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_playback tools/probe_playback.cpp
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        # ConsumptionStats' device-namespaced accrual (mdsync T3) needs Settings::deviceId(), which drags
+        # FormFactor via Settings.cpp's virtualPadEnabled() — mirror probe_stats' link set.
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_playback PRIVATE src src/media src/core)
+    target_include_directories(probe_playback PRIVATE src src/media src/core src/theme2)
     target_link_libraries(probe_playback PRIVATE Qt6::Core)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.
@@ -511,8 +551,10 @@ if(MYMEDIAVAULT_BUILD_APP)
     # qt_add_executable already produces the shared library + APK target on Android.
     # -----------------------------------------------------------------------------------------------------
     if(ANDROID)
-        # versionCode is a monotonic integer: major*10000 + minor*100 + patch (0.2.0 -> 200).
-        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*10000 + ${PROJECT_VERSION_MINOR}*100 + ${PROJECT_VERSION_PATCH}")
+        # versionCode is a monotonic integer: major*1000000 + minor*10000 + patch (0.4.1 -> 4040001).
+        # Patch capacity 9999 — the per-commit auto-bump hook (native/tools/pre-commit-version-bump.sh)
+        # increments patch on every commit, so the old *100 formula would have overflowed into minor.
+        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*1000000 + ${PROJECT_VERSION_MINOR}*10000 + ${PROJECT_VERSION_PATCH}")
         # Stage the APK package-source overlay in the BUILD tree — never mutate the committed native/android/.
         # We copy the committed overlay verbatim, then add assets/mmv/ = the stock themes2/ + every first-party
         # addon dir. androiddeployqt reads QT_ANDROID_PACKAGE_SOURCE_DIR and bundles its assets/ into the APK's

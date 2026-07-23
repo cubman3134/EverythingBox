@@ -4,6 +4,13 @@
 
 namespace Settings
 {
+    // Stable per-install device identity (multi-device sync). Minted ONCE as a UUID on first read and
+    // persisted at key "device/id"; every later call returns the same string. Write-once: a non-empty stored
+    // value is never overwritten, so concurrent/repeated reads can never mint a second id. This id is
+    // device-LOCAL — the sync carve-out (T4) excludes "device/*" from the synced settings bundle, and it
+    // namespaces the per-device accumulators (T3) so two devices never double-count. Never empty on return.
+    QString deviceId();                       // key "device/id"; minted once, stable, device-local
+
     // General playback: auto-show subtitles on every video, and the preferred subtitle language (an ISO
     // 639 code like "eng"; empty = no preference / first available).
     bool subtitlesOnByDefault();

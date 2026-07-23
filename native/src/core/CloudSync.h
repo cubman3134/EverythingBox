@@ -23,6 +23,26 @@ public:
     bool isSignedIn() const;             // we hold a refresh token
     QString accountEmail() const;        // the signed-in Google account (cached), or empty
 
+    // ---- the device-local carve-out (mdsync T4) ----
+    // The ONE exclusion table for sync (applied in BOTH directions). A device-local key never travels in the
+    // synced settings.json (it's meaningful only to this machine — rom folders, emulator roots, the on-screen
+    // pad, this device's identity/cloud tokens, the local downloads/pc-games catalogs). Note the deliberate
+    // SIBLING carve-outs: sync/global/* and profiles/list and library/showHidden DO sync.
+    static bool isDeviceLocalKey(const QString& key);
+    // A per-item store key (resume/recent/marks/favorites/playlists/stats/playstats/deleted). The progress
+    // merge document (CloudMerge) owns these exclusively, so applyBundle must NEVER write them from the heavy
+    // bundle — a stale peer copy would clobber this device's live accumulator namespace and then propagate.
+    static bool isPerItemStoreKey(const QString& key);
+    // The bundle's settings.json content (device-local excluded) — the exact bytes buildBundle embeds. Exposed
+    // so the headless probe exercises the real carve-out without the zip/network.
+    static QByteArray buildSettingsJson();
+    // Apply a bundle's settings.json the way applyBundle does: write only keys that are neither device-local
+    // NOR per-item-store (the merge file owns those). Exposed for the probe's hands-off assertion.
+    static void applySettingsJson(const QByteArray& settingsJson);
+    // The sync fingerprint (checkStatus's localChanged gate). Excludes both the device-local carve-out and the
+    // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
+    static QByteArray stateFingerprint();
+
     void signIn();                       // run the browser consent flow; emits signedIn()/signInFailed()
     void signOut();                      // forget the tokens; emits signedOut()
 
