@@ -6,6 +6,14 @@
 
 namespace {
 
+// Registry values are Windows-style paths regardless of the host OS (QDir::fromNativeSeparators is a
+// no-op off-Windows), so convert backslashes explicitly.
+QString winPathToSlash(QString p)
+{
+    p.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return p;
+}
+
 // Read one GOG game's fields for id `id`, either from the fake-registry INI (regProbeRoot non-empty) or the
 // live 64-bit-view hive. The INI mirrors the registry shape: a [<id>] group with gameName/path/exe keys.
 GogGame readGame(const QString& regProbeRoot, const QString& id)
@@ -30,7 +38,7 @@ GogGame readGame(const QString& regProbeRoot, const QString& id)
         exe  = reg.value(QStringLiteral("exe")).toString();
 #endif
     }
-    return { id, name, QDir::fromNativeSeparators(exe), QDir::fromNativeSeparators(path) };
+    return { id, name, winPathToSlash(exe), winPathToSlash(path) };
 }
 
 // The set of registered game ids (registry subkeys under ...\GOG.com\Games, or the fake INI's groups).
