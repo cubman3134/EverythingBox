@@ -32,6 +32,11 @@ namespace, real totals preserved). See close-out below for the follow-ups + the 
      ONLY while both sides emit byte-identical canonical JSON (`QJsonDocument::Compact`, sorted keys)
      for the same logical value. Any future change to JSON emission must preserve this or the tie-break
      can diverge by merge order.
+   - *>30-day-offline resurrection window* — `Tombstones::compact(30)` (run at every merge) removes a
+     deletion tombstone once it is >30 days old. A peer that was offline the whole time and never saw
+     that tombstone still carries its copy of the deleted item; on reconnect, with the tombstone gone,
+     the item re-appears (a fresh union with no suppressor). Bounded and re-appear-not-lose — the worst
+     case is a stale favourite/playlist coming back, never silent data loss — so it is accepted.
 4. **Cadence fix (T5):** `stateHash` + `buildSettingsJson` now exclude `isPerItemStoreKey`, so per-item
    churn no longer bloats the bundle or flips its sync fingerprint (the merge doc owns per-item).
 **Origin:** The replace-everything roadmap's #1 — the user asked "does the Google Drive

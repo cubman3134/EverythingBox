@@ -350,7 +350,7 @@ void mergeFavorites(const QJsonObject& favorites)
         {
             const QJsonObject o = byId.value(id);
             const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
-            if (tombs.value(id, 0) >= ts) continue; // tombstone beats older/equal; a strictly-newer re-add wins
+            if (tombs.contains(id) && tombs.value(id) >= ts) continue; // a REAL tombstone (ts>0) beats older/equal; a strictly-newer re-add wins. "No tombstone" must NOT be conflated with a t=0 tombstone, else a legacy ts==0 favourite (no tombstone) would be dropped by 0>=0.
             out.append(o);
         }
         store().setValue(favKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
@@ -410,7 +410,7 @@ void mergePlaylists(const QJsonObject& playlists)
         {
             const QJsonObject o = byId.value(id);
             const qint64 ts = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
-            if (tombs.value(id, 0) >= ts) continue; // deleted unless a strictly-newer edit resurrects it
+            if (tombs.contains(id) && tombs.value(id) >= ts) continue; // deleted by a REAL tombstone (ts>0) unless a strictly-newer edit resurrects it. Absence of a tombstone must NOT read as t=0, else a legacy updatedAt==0 playlist would be dropped by 0>=0.
             out.append(o);
         }
         store().setValue(plKey(p), QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));

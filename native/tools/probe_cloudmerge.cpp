@@ -413,6 +413,47 @@ int main(int argc, char** argv)
         CHECK(plIds(QStringLiteral("p9")).contains(QStringLiteral("P")));
     }
 
+    // ---- 9L. LEGACY (ts==0, NO tombstone) SURVIVES a full serialize->merge round-trip, BOTH orders ----------
+    // Data-safety regression (mdsync Fable review): a pre-upgrade favourite/playlist has no ts/updatedAt field
+    // -> reads back as 0. With NO tombstone at all, QHash::value(id,0) ALSO defaults to 0, so the buggy
+    // `tombs.value(id,0) >= ts` suppressor evaluated 0>=0 -> TRUE and WIPED every legacy item on the 2nd launch
+    // of a single upgraded device (push doc w/ legacy items -> pull+merge own doc). The fix suppresses ONLY when
+    // a tombstone actually EXISTS (`tombs.contains(id) && tombs.value(id) >= ts`); a recorded tombstone ts is
+    // always > 0, so tombstone-beats-equal is preserved for REAL tombstones. Against the buggy `>= ts` the
+    // legacy-survives asserts below FAIL; with the fix they pass.
+    {
+        // Legacy favourite: itemId but NO ts field (pre-upgrade shape) injected raw.
+        const QString legFav = QStringLiteral("[{\"itemId\":\"L\",\"title\":\"L\"}]");
+        // Order 1: legacy is LOCAL, remote empty -> merge must keep L.
+        wipeStores(); const QJsonObject fEmpty = serializeNow();        // remote has no favourites at all
+        wipeStores(); setRaw(QStringLiteral("favorites/lf/items"), legFav); mergeDoc(fEmpty);
+        CHECK(favIds(QStringLiteral("lf")).contains(QStringLiteral("L"))); // legacy (ts==0, no tomb) survived
+        CHECK(favTs(QStringLiteral("lf"), QStringLiteral("L")) == 0);      // still the untouched legacy shape
+        // Order 2: legacy is REMOTE, local empty -> merge must keep L.
+        wipeStores(); setRaw(QStringLiteral("favorites/lf/items"), legFav); const QJsonObject fLeg = serializeNow();
+        wipeStores(); mergeDoc(fLeg);
+        CHECK(favIds(QStringLiteral("lf")).contains(QStringLiteral("L"))); // legacy survived from the remote doc too
+
+        // Legacy playlist: id/name but NO updatedAt field.
+        const QString legPl = QStringLiteral("[{\"id\":\"L\",\"name\":\"Leg\",\"categoryKey\":\"video\",\"items\":[]}]");
+        // Order 1: legacy is LOCAL, remote empty.
+        wipeStores(); const QJsonObject pEmpty = serializeNow();
+        wipeStores(); setRaw(QStringLiteral("playlists/lp/items"), legPl); mergeDoc(pEmpty);
+        CHECK(plIds(QStringLiteral("lp")).contains(QStringLiteral("L"))); // legacy playlist (updatedAt==0, no tomb) survived
+        // Order 2: legacy is REMOTE, local empty.
+        wipeStores(); setRaw(QStringLiteral("playlists/lp/items"), legPl); const QJsonObject pLeg = serializeNow();
+        wipeStores(); mergeDoc(pLeg);
+        CHECK(plIds(QStringLiteral("lp")).contains(QStringLiteral("L")));
+
+        // ...and the fix does NOT over-preserve: a REAL tombstone (ts>0) still suppresses a legacy (ts==0) item.
+        wipeStores(); injTomb(QStringLiteral("favorites/lf"), QStringLiteral("L"), T - 100); const QJsonObject fKill = serializeNow();
+        wipeStores(); setRaw(QStringLiteral("favorites/lf/items"), legFav); mergeDoc(fKill);
+        CHECK(!favIds(QStringLiteral("lf")).contains(QStringLiteral("L"))); // real tombstone (ts>0) still wins over ts==0
+        wipeStores(); injTomb(QStringLiteral("playlists/lp"), QStringLiteral("L"), T - 100); const QJsonObject pKill = serializeNow();
+        wipeStores(); setRaw(QStringLiteral("playlists/lp/items"), legPl); mergeDoc(pKill);
+        CHECK(!plIds(QStringLiteral("lp")).contains(QStringLiteral("L")));
+    }
+
     // ---- 10. Marks: items newest-updatedAt / never-delete; vocab+pinned union-minus-tombstoned -------------
     {
         // 10a item: newer updatedAt wins.
