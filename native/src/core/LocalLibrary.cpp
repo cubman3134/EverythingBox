@@ -1,4 +1,5 @@
 #include "LocalLibrary.h"
+#include "Settings.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -201,5 +202,12 @@ QString displayTitle(const VideoEntry& e)
             .arg(e.episode, 2, 10, QLatin1Char('0'));
     return e.year > 0 ? QStringLiteral("%1 (%2)").arg(e.title).arg(e.year) : e.title;
 }
+
+// Cached process-wide index (main-thread only): the async startup scan installs it, browse reads it.
+namespace { OwnedIndex g_index; }
+
+QString root() { return Settings::libraryFolder(); }
+void installIndex(OwnedIndex idx) { g_index = std::move(idx); }
+const OwnedIndex& index() { return g_index; }
 
 } // namespace LocalLibrary

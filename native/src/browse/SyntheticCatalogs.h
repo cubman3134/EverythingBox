@@ -13,6 +13,7 @@
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
+#include "../core/LocalLibrary.h"
 #include <functional>
 
 namespace browse
@@ -29,6 +30,10 @@ namespace browse
     // existence check; default {} uses QFileInfo::exists.
     MediaCatalog downloadsCatalog(const QList<DownloadedItem>& all, const QString& marker,
                                   const std::function<bool(const QString&)>& fileExists = {});
+
+    // Build a "Local Library" catalog from scanned local video entries. Each becomes a playable
+    // MediaItem (url = local path, mime = "local:video"); id = imdb id when known, else "local:<path>".
+    MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entries);
 
     // system scopes a games console (SystemCatalog id, or "pc"); empty system matches any. Only local-file
     // favourites (a path set) have a per-console home — streamed favourites are skipped.

@@ -6,6 +6,7 @@
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/LocalLibrary.h"
 #include "../core/RaBrowse.h"
 #include "../core/Achievements.h"
 #include "../core/SteamAchievements.h"
@@ -1927,6 +1928,33 @@ void HomeView::openDownloadsLevel(const QString& marker)
 void HomeView::populateDownloads(const QString& marker)
 { showSyntheticCatalog(browse::downloadsCatalog(DownloadsStore::list(), marker)); }
 
+void HomeView::openLocalLibraryLevel(const QString& marker)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Local Library");
+    lvl.item.id = QStringLiteral("_locallib");
+    lvl.item.type = QStringLiteral("_locallib");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("locallib:") + marker; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateLocalLibrary(marker);
+}
+
+void HomeView::populateLocalLibrary(const QString& /*marker*/)
+{ showSyntheticCatalog(browse::localLibraryCatalog(LocalLibrary::index().all())); }
+
+void HomeView::onLocalLibraryChanged()
+{
+    // If the Local Library level is currently showing, rebuild it so the newly-scanned videos appear.
+    // Otherwise re-evaluate the root's synthetic folders (the pushFolders present-checks) so the folder
+    // itself surfaces once the async scan lands. Cheap no-op when neither applies.
+    if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_locallib"))
+        populateLocalLibrary(stack_.last().item.mime.mid(QStringLiteral("locallib:").size()));
+    else
+        loadTop();  // re-evaluate the root's synthetic folders
+}
+
 void HomeView::openFavoritesLevel(const QString& system)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -2402,6 +2430,10 @@ void HomeView::activateItem(int row)
     // The synthetic Favorites folder (inside a console) drills into that console's favourited games.
     if (it.type == QStringLiteral("_favorites"))
         { openFavoritesLevel(it.mime.mid(QStringLiteral("favorites:").size())); return; }
+
+    // The synthetic Local Library folder drills into this machine's scanned local videos.
+    if (it.type == QStringLiteral("_locallib"))
+        { openLocalLibraryLevel(it.mime.mid(QStringLiteral("locallib:").size())); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -4190,10 +4222,12 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             bool hasDownloads = false;
             if (rkind != QStringLiteral("game"))
                 for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
+            const bool isVideo = (rkind == QStringLiteral("video"));
             pushFolders({
-                { QLatin1String("_recents"),   tr("Recent"),     QStringLiteral("recents:") + rkind,                      hasRecents },
-                { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
-                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCategoryKey(),     true },
+                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
+                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
+                { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
+                { QLatin1String("_playlists"), tr("Playlists"),     QStringLiteral("playlists:") + currentCategoryKey(),     true },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }

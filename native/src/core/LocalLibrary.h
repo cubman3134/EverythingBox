@@ -44,4 +44,9 @@ namespace LocalLibrary
     QVector<VideoEntry> scanFolder(const QString& root);
     OwnedIndex          buildIndex(const QVector<VideoEntry>& entries);
     QString             displayTitle(const VideoEntry& e);
+
+    // Cached process-wide index (main-thread only). root() reads Settings::libraryFolder().
+    QString            root();
+    void               installIndex(OwnedIndex idx);
+    const OwnedIndex&  index();
 }

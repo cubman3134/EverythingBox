@@ -2,6 +2,7 @@
 // Builds a hermetic QTemporaryDir fixture and asserts the parse/index matrix.
 // Prints LOCALLIB-OK on success; any failure prints LOCALLIB-FAIL <cond> (line) and exits non-zero.
 #include "LocalLibrary.h"
+#include "SyntheticCatalogs.h"
 
 #include <QCoreApplication>
 #include <QTemporaryDir>
@@ -121,6 +122,24 @@ int main(int argc, char** argv)
 
     if (inc) CHECK(LocalLibrary::displayTitle(*inc) == QStringLiteral("Inception (2010)"));
     if (ep)  CHECK(LocalLibrary::displayTitle(*ep)  == QStringLiteral("Show S01E02"));
+
+    // Browse builder: each VideoEntry -> a playable MediaItem (url=path, mime=local:video), stable id.
+    const MediaCatalog cat = browse::localLibraryCatalog(scanned);
+    CHECK(cat.items.size() == scanned.size());
+    {
+        const MediaItem* mi = nullptr;
+        for (const auto& x : cat.items) if (x.url.endsWith("Inception (2010).mkv")) mi = &x;
+        CHECK(mi != nullptr);
+        if (mi) {
+            CHECK(mi->mime == QStringLiteral("local:video"));
+            CHECK(mi->id == QStringLiteral("tt1375666"));          // known imdb id
+            CHECK(mi->title == QStringLiteral("Inception (2010)"));
+        }
+        const MediaItem* rnd = nullptr;
+        for (const auto& x : cat.items) if (x.url.endsWith("random.mkv")) rnd = &x;
+        CHECK(rnd != nullptr);
+        if (rnd) CHECK(rnd->id.startsWith(QStringLiteral("local:")));   // no imdb id -> local:<path> key
+    }
 
     // Empty / missing root => empty scan (feature-dormant contract).
     CHECK(LocalLibrary::scanFolder(QString()).isEmpty());

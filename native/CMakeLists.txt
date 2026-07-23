@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.17 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.18 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -457,7 +457,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_locallib tools/probe_locallib.cpp
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
-        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
     target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 

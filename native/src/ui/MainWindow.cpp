@@ -22,6 +22,7 @@
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
+#include "../core/LocalLibrary.h"
 #include "../core/SyncOffsets.h"
 #include "../core/BackgroundMusic.h"
 #include "../core/CoreManager.h"
@@ -83,6 +84,8 @@
 #include <QListWidget>
 #include <QFrame>
 #include <QTimer>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QEventLoop>
 #include <QCloseEvent>
 #include <QVBoxLayout>
@@ -1009,6 +1012,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
     // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
     QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
+
+    // Local video library: scan off-thread at startup, install the index + refresh the home on the main
+    // thread. Dormant (instant, empty) when no library/folder is configured.
+    {
+        auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+        connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
+            LocalLibrary::installIndex(w->result());
+            if (home_) home_->onLocalLibraryChanged();
+            w->deleteLater();
+        });
+        w->setFuture(QtConcurrent::run([] {
+            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(LocalLibrary::root()));
+        }));
+    }
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
