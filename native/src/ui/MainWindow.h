@@ -315,6 +315,7 @@ private:
     // ---- Themed Profiles picker (B2 Task 5): the ProfileDialog surface on the Nav Contract. mustChoose is the
     // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
     // (Back keeps the current profile). Both reuse ProfileStore data ops exactly. ----
+    void presentOnboardingChoice();                              // first-run: Restore-from-Drive vs. new-library choice screen
     void presentProfilePicker(bool mustChoose);                  // reset()+present() the root list (also for startup, pre-home)
     void presentProfileList(bool mustChoose, bool replace);      // (re)build the profile list rows; replace = in place
     void editProfilePanel(const QString& id, bool mustChoose);   // nested name(TextField)+icon(Choice) picker; id "" = create

@@ -43,6 +43,10 @@ public:
     // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
     static QByteArray stateFingerprint();
 
+    // Whether interactive Drive sign-in works on this platform: true on desktop, false under Q_OS_ANDROID (the
+    // OAuth-on-Android follow-up is pending). The onboarding Restore action stays VISIBLE everywhere and consults
+    // this on tap so an Android user gets a graceful "not available yet" decline, never a dead end.
+    static bool signInAvailable();
     void signIn();                       // run the browser consent flow; emits signedIn()/signInFailed()
     void signOut();                      // forget the tokens; emits signedOut()
 

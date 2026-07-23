@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.8 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.9 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -332,6 +332,20 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
+
+    # First-run onboarding router (onboarding/drive-restore T1): the pure mmv::onboardingRoute table plus
+    # CloudSync::signInAvailable()'s desktop-true / Android-false platform gate. OnboardingRoute.h is header-only,
+    # so the linkage is just CloudSync's TU (for signInAvailable) + its deps (Settings needs FormFactor;
+    # CloudSync's bundle zip needs miniz). Same lean Core/Network/Gui set as probe_cloudmerge.
+    add_executable(probe_onboarding tools/probe_onboarding.cpp
+        src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
+        src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
+        src/core/Settings.cpp        src/core/Settings.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
+        third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
+    target_include_directories(probe_onboarding PRIVATE src src/core src/theme2 third_party)
+    target_compile_definitions(probe_onboarding PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_onboarding PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire

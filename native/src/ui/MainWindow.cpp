@@ -46,6 +46,7 @@
 #include "../core/RomLibrary.h"
 #include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
+#include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
@@ -1995,7 +1996,22 @@ void MainWindow::showEvent(QShowEvent* event)
     activateWindow();
     QTimer::singleShot(0, this, [this] {
         activateWindow();
-        if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
+        if (startupChooseProfile_)
+        {
+            // First run offers Restore-from-Drive vs. a new library BEFORE the profile picker. The pure router
+            // (also pinned headlessly by probe_onboarding, and re-consulted by T2's restore flow) makes the call
+            // so the branch can never drift: no local profiles + nothing picked yet ⇒ ChoiceScreen; existing
+            // profiles ⇒ straight to the picker. onboarding/done short-circuits ahead of it so an already-onboarded
+            // (or existing) user is byte-for-byte today's behavior — the choice screen is a pure first-run prepend.
+            const bool hasLocal = !ProfileStore::list().isEmpty();
+            const auto route = mmv::onboardingRoute(hasLocal, /*restorePicked*/ false, /*signInOk*/ false,
+                                                    /*remoteHasProfiles*/ false, CloudSync::signInAvailable());
+            if (!Settings::onboardingDone() && route == mmv::OnboardingRoute::ChoiceScreen)
+                presentOnboardingChoice();
+            else
+                promptStartupProfile();                  // pick a user before anything else (unchanged path)
+            return;
+        }
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
         // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
         // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
@@ -4952,6 +4968,61 @@ void MainWindow::onSwitchProfile()
 // picker's second page is a nested panel level (name TextField via the OSK + icon Choice). Activating a profile
 // row opens a NavMenu chooser (Switch / Edit / Delete) — the themed analogue of the classic row's three buttons.
 // All data ops go through ProfileStore verbatim.
+
+// First-run onboarding choice screen (onboarding/drive-restore T1): a themed two-action panel presented pre-home
+// on the SAME ThemedPanelHost the startup picker uses, so it wears the picker's chrome and reads as the first
+// screen. It reuses presentProfileList's Action-row idiom (rows -> host->present) rather than a NavConfirm dialog
+// because a two-CHOICE landing reads cleanest as a rooted list, and it matches the picker that follows it exactly.
+//   • "Set up a new library" -> mark onboarding done, then the EXISTING promptStartupProfile()/presentProfilePicker
+//     fresh path, BYTE-UNCHANGED (a pure prepend — the create-a-profile flow is untouched).
+//   • "Restore from Google Drive" -> a T1 STUB (present + focusable now; the real signIn -> pull -> route flow is
+//     wired in T2). It just logs + notifies for now; onboarding/done is intentionally NOT set so a mistap can be
+//     retried from the same screen.
+// Back on the first screen has no escape (same as the picker) -> quit-confirm. A classic (non-themed) build has no
+// panel host for the choice screen, so it falls through to the fresh path directly (the choice screen is a
+// themed-home feature) — keeping the classic startup path unchanged.
+void MainWindow::presentOnboardingChoice()
+{
+#ifdef MMV_HAVE_QML
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
+        themedPanelHost_->reset();        // fresh ROOT presentation (also drops any stale panel levels)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        NavOverlay::setThemeColors(settingsPanelStyle());  // this screen's own menus/confirms match the theme
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("restore");
+          r.label = tr("☁   Restore from Google Drive"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("fresh");
+          r.label = tr("＋   Set up a new library"); rows << r; }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("fresh"))
+            {
+                Settings::setOnboardingDone(true);
+                promptStartupProfile();   // the EXISTING fresh path (presentProfilePicker(true)) — byte-unchanged
+            }
+            else if (id == QStringLiteral("restore"))
+            {
+                // T1 stub — the sign-in -> pull -> restored-picker flow lands in T2. Present + focusable now.
+                qInfo("[onboarding] Restore from Google Drive tapped (wired in T2)");
+                notify(tr("Drive restore is coming soon."));
+            }
+        };
+        auto onBack = [this] { quitConfirmFromStartup(); };  // first screen: no escape — confirm quit / re-present
+
+        themedPanelHost_->present(tr("Welcome to My Media Vault"), rows, onAct, onBack);
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+    // Classic (non-themed) build: no panel host for a choice screen -> go straight to the unchanged fresh path.
+    Settings::setOnboardingDone(true);
+    promptStartupProfile();
+}
 
 void MainWindow::presentProfilePicker(bool mustChoose)
 {

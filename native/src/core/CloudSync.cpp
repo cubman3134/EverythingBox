@@ -87,6 +87,18 @@ void CloudSync::signOut()
 
 // ---- OAuth loopback flow ----------------------------------------------------------------------------
 
+// Interactive sign-in uses the desktop loopback OAuth flow (a local QTcpServer + the system browser), which
+// isn't wired on Android yet — so the platform gate is compile-time. The onboarding layer consults this before
+// attempting signIn() so an unsupported platform declines gracefully instead of dead-ending.
+bool CloudSync::signInAvailable()
+{
+#ifdef Q_OS_ANDROID
+    return false;
+#else
+    return true;
+#endif
+}
+
 void CloudSync::signIn()
 {
     if (!isConfigured()) { emit signInFailed(tr("No Google sign-in client is configured yet.")); return; }
@@ -396,6 +408,7 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         QStringLiteral("netplay/relay"),          // this machine's relay endpoint
         QStringLiteral("display/mode"),           // TV / desktop / mobile form factor of THIS device
         QStringLiteral("display/tvPromptDone"),   // one-shot per-device onboarding flag
+        QStringLiteral("onboarding/done"),        // first-run choice resolved on THIS device (must not sync back)
         QStringLiteral("profiles/current"),       // the active profile is per-device (profiles/list SYNCS)
     };
     if (kExact.contains(key)) return true;
