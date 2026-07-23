@@ -1146,6 +1146,10 @@ static void runTouchAsserts()
             Settings::setDisplayMode(QStringLiteral("desktop"));
             FormFactor::instance().refresh();
             pump();
+            // The mobile flick above may still be decelerating (a real render loop runs the kinetic
+            // animation longer than a few pumps) — wait for it to settle or contentY drifts mid-check.
+            for (int i = 0; i < 300 && listv->property("moving").toBool(); ++i) { QTest::qWait(10); }
+            pump();
             const qreal dcy0 = listv->property("contentY").toReal();
             QTest::mousePress(pqw->quickWindow(), Qt::LeftButton, Qt::NoModifier, start);
             QTest::mouseMove(pqw->quickWindow(), QPoint(300, 240)); pump();

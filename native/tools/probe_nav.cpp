@@ -61,7 +61,7 @@ int main(int argc, char** argv)
         QVector<QPushButton*> rows;
         for (int i = 0; i < 4; ++i) { auto* b = new QPushButton(QStringLiteral("row%1").arg(i), page); v->addWidget(b); rows.push_back(b); }
         page->setGeometry(0, 0, 400, 400);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -111,7 +111,7 @@ int main(int argc, char** argv)
             for (int c = 0; c < 3; ++c)
             { cell[r][c] = new QPushButton(QStringLiteral("%1,%2").arg(r).arg(c), page); g->addWidget(cell[r][c], r, c); }
         page->setGeometry(0, 0, 400, 300);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -202,7 +202,7 @@ int main(int argc, char** argv)
         v->addWidget(edit);
         v->addWidget(new QPushButton(QStringLiteral("Go"), page));
         page->setGeometry(0, 0, 300, 120);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -276,7 +276,7 @@ int main(int argc, char** argv)
         auto* btn = new QPushButton(QStringLiteral("Apply"), page);
         v->addWidget(check); v->addWidget(combo); v->addWidget(slider); v->addWidget(spin); v->addWidget(btn);
         page->setGeometry(0, 0, 360, 320);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -358,7 +358,7 @@ int main(int argc, char** argv)
         scroll->setWidget(content);
         v->addWidget(scroll, 1);
         page->setGeometry(0, 0, 420, 340); // short enough that the rows actually scroll
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -411,7 +411,7 @@ int main(int argc, char** argv)
         v->addWidget(new QPushButton(QStringLiteral("Cancel"), page));
         v->addStretch(1);
         page->setGeometry(0, 0, 420, 460);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -432,13 +432,12 @@ int main(int argc, char** argv)
         ctx.routeKey(Qt::Key_Down); // Profile 0
         for (int i = 0; i < 5; ++i)
         {
-            const QString before = qobject_cast<QPushButton*>(QApplication::focusWidget())->text();
             ctx.routeKey(Qt::Key_Down);
             auto* now = qobject_cast<QPushButton*>(QApplication::focusWidget());
             CHECK(now && now->width() > 60, "Down stays on full-width rows (never a 36px side button)");
         }
-        CHECK(QApplication::focusWidget() == QApplication::focusWidget() // reached the bottom
-              && qobject_cast<QPushButton*>(QApplication::focusWidget())->text() == QStringLiteral("Cancel"),
+        auto* bottom = qobject_cast<QPushButton*>(QApplication::focusWidget()); // reached the bottom
+        CHECK(bottom && bottom->text() == QStringLiteral("Cancel"),
               "walking Down lands on Cancel and clamps there");
 
         ring.ensureSelection();
@@ -475,7 +474,7 @@ int main(int argc, char** argv)
         auto* v = new QVBoxLayout(page);
         for (int i = 0; i < 3; ++i) v->addWidget(new QPushButton(QStringLiteral("row%1").arg(i), page));
         page->setGeometry(0, 0, 300, 240);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
         NavRing ring(page);
         ctx.setActiveRing(&ring);
@@ -508,7 +507,7 @@ int main(int argc, char** argv)
         auto* bot = new QPushButton(QStringLiteral("Bottom"), page);
         v->addWidget(top); v->addWidget(edit); v->addWidget(display); v->addWidget(bot);
         page->setGeometry(0, 0, 320, 240);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -582,7 +581,7 @@ int main(int argc, char** argv)
         auto* bot = new QPushButton(QStringLiteral("Clear"), page);
         v->addWidget(top); v->addWidget(log, 1); v->addWidget(bot);
         page->setGeometry(0, 0, 360, 300);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -626,7 +625,7 @@ int main(int argc, char** argv)
         auto* bot = new QPushButton(QStringLiteral("Bottom"), page);
         v->addWidget(top); v->addWidget(combo); v->addWidget(bot);
         page->setGeometry(0, 0, 320, 200);
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         pump();
 
         NavRing ring(page);
@@ -672,7 +671,7 @@ int main(int argc, char** argv)
         page->setFocusPolicy(Qt::StrongFocus);
         FakeQuickRoot sceneRoot;
         page->setProperty("mmvQuickRoot", QVariant::fromValue<QObject*>(&sceneRoot));
-        page->show();
+        page->show(); page->activateWindow(); // offscreen QPA does not auto-activate subsequent windows
         page->setFocus();
         pump();
 
