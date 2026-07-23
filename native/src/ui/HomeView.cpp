@@ -2980,6 +2980,9 @@ void HomeView::loadTop()
     // Returning to a synthetic Downloaded level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_downloads"))
         { populateDownloads(top.item.mime.mid(QStringLiteral("downloads:").size())); return; }
+    // Returning to a synthetic Local Library level: rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_locallib"))
+        { populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size())); return; }
     // Returning to a console's synthetic Favorites level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_favorites"))
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }

@@ -1016,14 +1016,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Local video library: scan off-thread at startup, install the index + refresh the home on the main
     // thread. Dormant (instant, empty) when no library/folder is configured.
     {
+        const QString libRoot = LocalLibrary::root();   // read Settings on the MAIN thread
         auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
         connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
             LocalLibrary::installIndex(w->result());
             if (home_) home_->onLocalLibraryChanged();
             w->deleteLater();
         });
-        w->setFuture(QtConcurrent::run([] {
-            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(LocalLibrary::root()));
+        w->setFuture(QtConcurrent::run([libRoot] {
+            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot));
         }));
     }
 }
