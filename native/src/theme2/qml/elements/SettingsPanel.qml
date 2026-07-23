@@ -117,9 +117,11 @@ Rectangle {
         }
         Text {
             anchors.left: backBtn.right; anchors.leftMargin: 22
+            anchors.right: parent.right; anchors.rightMargin: 22
             anchors.verticalCenter: parent.verticalCenter
             text: (typeof panel !== "undefined" && panel) ? panel.title : ""
             color: root.cText; font.pixelSize: Math.round(26 * root.ffs); font.bold: true
+            elide: Text.ElideRight // a phone-width header can't fit every title
         }
         Rectangle {   // hairline under the header
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
