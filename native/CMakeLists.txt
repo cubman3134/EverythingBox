@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.8 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.9 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -51,6 +51,39 @@ if(MYMEDIAVAULT_BUILD_APP)
     endif()
     find_package(Qt6 REQUIRED COMPONENTS ${MMV_QT_COMPONENTS})
     qt_standard_project_setup()  # enables AUTOMOC etc.
+
+    # ---------------------------------------------------------------------------
+    # qt.conf beside the build output — so every probe/app exe finds Qt's platform
+    # plugins (qwindows / qoffscreen) WITHOUT anyone exporting QT_PLUGIN_PATH by hand.
+    #
+    # The bug this kills: a bare launch of probe_notifier / probe_nav / probe_navqml /
+    # any windowed probe died with
+    #   "This application failed to start because no Qt platform plugin could be
+    #    initialized."
+    # The plugins are NOT deployed beside the build-tree exes, so unless the caller had
+    # already `export`ed QT_PLUGIN_PATH=<Qt>/plugins Qt couldn't locate qwindows/qoffscreen
+    # and aborted. Qt reads a qt.conf sitting next to the exe and takes its [Paths] Plugins=
+    # as the plugin search root — the canonical fix, no per-probe source edits, no env var.
+    #
+    # QT6_INSTALL_PREFIX / QT6_INSTALL_PLUGINS come from Qt's own CMake package
+    # (QtInstallPaths.cmake) — i.e. exactly what `qmake -query QT_INSTALL_PLUGINS` reports —
+    # so this tracks whatever Qt configured this build and stays portable: this machine
+    # resolves to C:/Qt/6.8.3/msvc2022_64/plugins, the CI Linux runner resolves ITS own Qt's
+    # plugins dir. This only affects build-tree runs; the DEPLOYED app already has plugins
+    # deployed beside it, so the deploy path is left untouched.
+    #
+    # Multi-config (Visual Studio) puts exes in build/Release AND build/Debug, so emit one
+    # qt.conf per config dir via $<CONFIG>; single-config (Ninja/Make, e.g. CI Linux) drops
+    # exes straight in the build dir, so emit a single qt.conf there.
+    set(MMV_QT_PLUGINS_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
+    message(STATUS "MyMediaVault: qt.conf Plugins path = ${MMV_QT_PLUGINS_DIR}")
+    set(MMV_QT_CONF_CONTENT "[Paths]\nPlugins = ${MMV_QT_PLUGINS_DIR}\n")
+    get_property(_mmv_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_mmv_multi_config)
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/qt.conf" CONTENT "${MMV_QT_CONF_CONTENT}")
+    else()
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/qt.conf" CONTENT "${MMV_QT_CONF_CONTENT}")
+    endif()
 
     # Embedded provider dev credentials (FIRST configure_file in this repo). Reads the git-ignored
     # native/secrets/screenscraper.secrets, obfuscates it, and generates BuiltinSecrets.h into the

@@ -11,6 +11,12 @@
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
 #         CORE_SO=/path/to/some_libretro.so BUILD_DIR=build ./native/tools/run-headless-probes.sh
+#
+# Qt platform plugin: the build now generates a qt.conf next to the probe exes (see
+# native/CMakeLists.txt) whose [Paths] Plugins= points at Qt's plugins dir, so the probes
+# find qwindows/qoffscreen on their own — QT_PLUGIN_PATH no longer has to be exported for a
+# bare probe launch. Set QT_QPA_PLATFORM=offscreen in the env for the windowed probes to run
+# headless (qt.conf supplies the plugin PATH, not the platform CHOICE).
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
