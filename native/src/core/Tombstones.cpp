@@ -43,12 +43,28 @@ qint64 tsOf(const QString& jsonValue)
 
 void Tombstones::record(const QString& store, const QString& key)
 {
-    if (store.isEmpty() || key.isEmpty()) return;
+    record(store, key, QDateTime::currentSecsSinceEpoch());
+}
+
+void Tombstones::record(const QString& store, const QString& key, qint64 ts)
+{
+    if (store.isEmpty() || key.isEmpty() || ts <= 0) return;
+    const QString leaf = groupFor(store) + QLatin1Char('/') + hashLeaf(key);
+    // Never downgrade: a newer local tombstone (a later delete) always wins over an imported/older ts.
+    if (tsOf(store_().value(leaf).toString()) >= ts) return;
     QJsonObject o;
     o.insert(QStringLiteral("key"), key);
-    o.insert(QStringLiteral("ts"), static_cast<double>(QDateTime::currentSecsSinceEpoch()));
-    store_().setValue(groupFor(store) + QLatin1Char('/') + hashLeaf(key),
-                      QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+    o.insert(QStringLiteral("ts"), static_cast<double>(ts));
+    store_().setValue(leaf, QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+    store_().sync();
+}
+
+void Tombstones::remove(const QString& store, const QString& key)
+{
+    if (store.isEmpty() || key.isEmpty()) return;
+    const QString leaf = groupFor(store) + QLatin1Char('/') + hashLeaf(key);
+    if (!store_().contains(leaf)) return;
+    store_().remove(leaf);
     store_().sync();
 }
 

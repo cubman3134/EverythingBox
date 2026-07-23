@@ -11,6 +11,7 @@
 #pragma once
 #include <QString>
 #include <QVector>
+#include <functional>
 
 struct PlaylistEntry
 {
@@ -52,4 +53,9 @@ namespace PlaylistStore
     // categoryKey via mediaCategory(catalogType), preserving the original in legacyKey. Runs automatically on
     // every store access; safe to call directly. Returns true if it wrote a migration this call.
     bool migrateToCategories();
+
+    // Multi-device sync trigger (mdsync T2): a change-callback fired after every mutation, set once by
+    // MainWindow to (re)arm the debounced Drive push. QtCore-clean (a std::function, not a Qt signal). Unset
+    // in headless probes (fires nothing).
+    void setChangeHook(std::function<void()> hook);
 }

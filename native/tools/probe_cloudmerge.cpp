@@ -26,6 +26,7 @@
 #include "FavoritesStore.h"
 #include "PlaylistStore.h"
 #include "Tombstones.h"
+#include "CloudMerge.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
 
@@ -34,6 +35,12 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QStringList>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QVector>
+#include <QPair>
+#include <tuple>
 #include <cstdio>
 
 static int failures = 0;
@@ -263,6 +270,293 @@ int main(int argc, char** argv)
         CHECK(!PlaylistStore::get(pid, p));
         const QVector<Tombstones::Entry> pt = Tombstones::all(QStringLiteral("playlists/cmPl"));
         CHECK(pt.size() == 1 && pt.first().key == pid);            // remove tombstoned the playlist id
+    }
+
+    // ========================================================================================================
+    //  T2 — the generalized CloudMerge serialize/merge matrix. All pure ini-in/json-out: we inject a "remote"
+    //  device's ini state, serialize it to a document, wipe, inject the "local" device's state, merge the
+    //  remote document in, and assert the resulting local ini. Timestamps are anchored near `now` so the
+    //  30-day compaction that mergeAll() runs at its tail never drops the fixtures mid-test.
+    // ========================================================================================================
+    const qint64 T = QDateTime::currentSecsSinceEpoch();
+    auto setRaw = [&](const QString& key, const QString& val) {
+        QSettings raw(iniPath, QSettings::IniFormat); raw.setValue(key, val); raw.sync();
+    };
+    auto compact = [](const QJsonArray& a) { return QString::fromUtf8(QJsonDocument(a).toJson(QJsonDocument::Compact)); };
+    auto compactO = [](const QJsonObject& o) { return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)); };
+    auto wipeStores = [&]() {
+        QSettings raw(iniPath, QSettings::IniFormat);
+        for (const char* g : {"marks", "favorites", "playlists", "deleted", "resume", "recent"})
+            raw.remove(QLatin1String(g));
+        raw.sync();
+        ItemMarks::invalidate();
+    };
+    auto serializeNow = [&]() { QJsonObject r; CloudMerge::serializeAll(r); return r; };
+    auto mergeDoc = [&](const QJsonObject& doc) { CloudMerge::mergeAll(doc); };
+
+    // Injection helpers (raw ini, explicit ts).
+    auto injFavs = [&](const QString& p, const QVector<QPair<QString, qint64>>& items) {
+        QJsonArray a;
+        for (const auto& it : items) { QJsonObject o; o["itemId"] = it.first; o["title"] = it.first; o["ts"] = double(it.second); a.append(o); }
+        setRaw(QStringLiteral("favorites/") + p + QStringLiteral("/items"), compact(a));
+    };
+    // playlist: (id, name, updatedAt, itemCount)
+    auto injPlaylists = [&](const QString& p, const QVector<std::tuple<QString, QString, qint64, int>>& pls) {
+        QJsonArray a;
+        for (const auto& pl : pls) {
+            QJsonObject o; o["id"] = std::get<0>(pl); o["name"] = std::get<1>(pl);
+            o["categoryKey"] = QStringLiteral("video"); o["updatedAt"] = double(std::get<2>(pl));
+            QJsonArray items; for (int i = 0; i < std::get<3>(pl); ++i) { QJsonObject e; e["itemId"] = QStringLiteral("e") + QString::number(i); items.append(e); }
+            o["items"] = items; a.append(o);
+        }
+        setRaw(QStringLiteral("playlists/") + p + QStringLiteral("/items"), compact(a));
+    };
+    auto injMarkItem = [&](const QString& p, const QString& key, const QStringList& tags, qint64 upd) {
+        QJsonObject o; o["hidden"] = false; o["completion"] = QStringLiteral("none");
+        QJsonArray t; for (const QString& x : tags) t.append(x); o["tags"] = t; o["updatedAt"] = double(upd);
+        setRaw(QStringLiteral("marks/") + p + QStringLiteral("/items/") + md5(key), compactO(o));
+    };
+    auto injArr = [&](const QString& key, const QStringList& vals) {
+        QJsonArray a; for (const QString& v : vals) a.append(v); setRaw(key, compact(a));
+    };
+    auto injTomb = [&](const QString& tstore, const QString& key, qint64 ts) {
+        QJsonObject o; o["key"] = key; o["ts"] = double(ts);
+        setRaw(QStringLiteral("deleted/") + tstore + QLatin1Char('/') + md5(key), compactO(o));
+    };
+
+    // Readback helpers (fresh QSettings each time -> always current on disk).
+    auto favIds = [&](const QString& p) {
+        QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+        for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("favorites/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+            out << v.toObject().value(QStringLiteral("itemId")).toString();
+        out.sort(); return out;
+    };
+    auto favTs = [&](const QString& p, const QString& id) -> qint64 {
+        QSettings raw(iniPath, QSettings::IniFormat);
+        for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("favorites/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+        { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("itemId")).toString() == id) return qint64(o.value(QStringLiteral("ts")).toDouble()); }
+        return -1;
+    };
+    auto plField = [&](const QString& p, const QString& id) -> QPair<QString, qint64> {
+        QSettings raw(iniPath, QSettings::IniFormat);
+        for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("playlists/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+        { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("id")).toString() == id) return { o.value(QStringLiteral("name")).toString(), qint64(o.value(QStringLiteral("items")).toArray().size()) }; }
+        return { QString(), -1 };
+    };
+    auto plIds = [&](const QString& p) {
+        QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+        for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("playlists/") + p + QStringLiteral("/items")).toString().toUtf8()).array())
+            out << v.toObject().value(QStringLiteral("id")).toString();
+        out.sort(); return out;
+    };
+    auto readArr = [&](const QString& key) {
+        QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+        for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(key).toString().toUtf8()).array()) out << v.toString();
+        out.sort(); return out;
+    };
+    auto markTags = [&](const QString& p, const QString& key) {
+        QSettings raw(iniPath, QSettings::IniFormat); QStringList out;
+        const QJsonObject o = QJsonDocument::fromJson(raw.value(QStringLiteral("marks/") + p + QStringLiteral("/items/") + md5(key)).toString().toUtf8()).object();
+        for (const QJsonValue& v : o.value(QStringLiteral("tags")).toArray()) out << v.toString();
+        out.sort(); return out;
+    };
+
+    // ---- 8. Favourites: newer-wins each direction, union, tombstone beats older / loses to newer re-add -----
+    {
+        // 8a remote newer wins.
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 100}}); const QJsonObject remA = serializeNow();
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 500}}); mergeDoc(remA);
+        CHECK(favTs(QStringLiteral("f8"), QStringLiteral("X")) == T - 100);           // remote (newer) wins
+
+        // 8b local newer wins.
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 500}}); const QJsonObject remB = serializeNow();
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 100}}); mergeDoc(remB);
+        CHECK(favTs(QStringLiteral("f8"), QStringLiteral("X")) == T - 100);           // local (newer) wins
+
+        // 8c union of disjoint items.
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("A"), T - 100}}); const QJsonObject remC = serializeNow();
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("B"), T - 100}}); mergeDoc(remC);
+        CHECK(favIds(QStringLiteral("f8")) == (QStringList{QStringLiteral("A"), QStringLiteral("B")}));
+
+        // 8d tombstone beats an OLDER item (resurrection prevented): remote deleted X (newer); local still has X.
+        wipeStores(); injTomb(QStringLiteral("favorites/f8"), QStringLiteral("X"), T - 100); const QJsonObject remD = serializeNow();
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 500}}); mergeDoc(remD);
+        CHECK(!favIds(QStringLiteral("f8")).contains(QStringLiteral("X")));           // tombstone (newer) suppresses
+
+        // 8e tombstone LOSES to a newer re-add: remote re-added X (newer) than local's delete.
+        wipeStores(); injFavs(QStringLiteral("f8"), {{QStringLiteral("X"), T - 100}}); const QJsonObject remE = serializeNow();
+        wipeStores(); injTomb(QStringLiteral("favorites/f8"), QStringLiteral("X"), T - 500); mergeDoc(remE);
+        CHECK(favIds(QStringLiteral("f8")).contains(QStringLiteral("X")));            // strictly-newer re-add wins
+    }
+
+    // ---- 9. Playlists: WHOLE-OBJECT newest-updatedAt + tombstones -------------------------------------------
+    {
+        // 9a whole-object newest wins (remote's newer P replaces name AND item set wholesale — no entry merge).
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("New"), T - 100, 3}}); const QJsonObject rem9 = serializeNow();
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("Old"), T - 500, 1}}); mergeDoc(rem9);
+        CHECK(plField(QStringLiteral("p9"), QStringLiteral("P")) == (QPair<QString, qint64>{QStringLiteral("New"), 3})); // whole object
+
+        // 9b older whole-object loses (local newer kept).
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("Old"), T - 500, 1}}); const QJsonObject rem9b = serializeNow();
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("New"), T - 100, 3}}); mergeDoc(rem9b);
+        CHECK(plField(QStringLiteral("p9"), QStringLiteral("P")) == (QPair<QString, qint64>{QStringLiteral("New"), 3}));
+
+        // 9c tombstone beats an older playlist (delete honored, no resurrection).
+        wipeStores(); injTomb(QStringLiteral("playlists/p9"), QStringLiteral("P"), T - 100); const QJsonObject rem9c = serializeNow();
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("Old"), T - 500, 1}}); mergeDoc(rem9c);
+        CHECK(!plIds(QStringLiteral("p9")).contains(QStringLiteral("P")));
+
+        // 9d tombstone loses to a newer edit.
+        wipeStores(); injPlaylists(QStringLiteral("p9"), {{QStringLiteral("P"), QStringLiteral("Edited"), T - 100, 2}}); const QJsonObject rem9d = serializeNow();
+        wipeStores(); injTomb(QStringLiteral("playlists/p9"), QStringLiteral("P"), T - 500); mergeDoc(rem9d);
+        CHECK(plIds(QStringLiteral("p9")).contains(QStringLiteral("P")));
+    }
+
+    // ---- 10. Marks: items newest-updatedAt / never-delete; vocab+pinned union-minus-tombstoned -------------
+    {
+        // 10a item: newer updatedAt wins.
+        wipeStores(); injMarkItem(QStringLiteral("m10"), QStringLiteral("H"), {QStringLiteral("y")}, T - 100); const QJsonObject r10a = serializeNow();
+        wipeStores(); injMarkItem(QStringLiteral("m10"), QStringLiteral("H"), {QStringLiteral("x")}, T - 500); mergeDoc(r10a);
+        CHECK(markTags(QStringLiteral("m10"), QStringLiteral("H")) == (QStringList{QStringLiteral("y")}));
+
+        // 10b item: never delete (remote absent -> local survives).
+        wipeStores(); const QJsonObject r10bEmpty = serializeNow(); // remote has no marks at all
+        wipeStores(); injMarkItem(QStringLiteral("m10"), QStringLiteral("H"), {QStringLiteral("keep")}, T - 100); mergeDoc(r10bEmpty);
+        CHECK(markTags(QStringLiteral("m10"), QStringLiteral("H")) == (QStringList{QStringLiteral("keep")}));
+
+        // 10c vocab union.
+        wipeStores(); injArr(QStringLiteral("marks/m10/tagVocab"), {QStringLiteral("b")}); const QJsonObject r10c = serializeNow();
+        wipeStores(); injArr(QStringLiteral("marks/m10/tagVocab"), {QStringLiteral("a")}); mergeDoc(r10c);
+        CHECK(readArr(QStringLiteral("marks/m10/tagVocab")) == (QStringList{QStringLiteral("a"), QStringLiteral("b")}));
+
+        // 10d vocab minus tombstoned (a deleted tag stays gone, and drops from pinned too).
+        wipeStores(); injTomb(QStringLiteral("marks/m10/tagVocab"), QStringLiteral("b"), T - 100); const QJsonObject r10d = serializeNow();
+        wipeStores();
+        injArr(QStringLiteral("marks/m10/tagVocab"), {QStringLiteral("a"), QStringLiteral("b")});
+        injArr(QStringLiteral("marks/m10/pinnedTags"), {QStringLiteral("a"), QStringLiteral("b")});
+        mergeDoc(r10d);
+        CHECK(readArr(QStringLiteral("marks/m10/tagVocab")) == (QStringList{QStringLiteral("a")}));   // b deleted from vocab
+        CHECK(readArr(QStringLiteral("marks/m10/pinnedTags")) == (QStringList{QStringLiteral("a")})); // ...and from pinned
+
+        // 10e pinned union-minus-tombstoned: the UNPIN case. Local unpinned t (pinned-space tombstone); a peer
+        // still pinning t must NOT resurrect the shelf on merge.
+        wipeStores(); injArr(QStringLiteral("marks/m10/pinnedTags"), {QStringLiteral("s"), QStringLiteral("t")}); const QJsonObject r10e = serializeNow(); // peer still pins s,t
+        wipeStores();
+        injArr(QStringLiteral("marks/m10/pinnedTags"), {QStringLiteral("s")});   // local dropped t
+        injTomb(QStringLiteral("marks/m10/pinnedTags"), QStringLiteral("t"), T - 100); // local unpin tombstone
+        // t must NOT be in vocab-tombstone space -> the tag itself survives, only the shelf is retired.
+        injArr(QStringLiteral("marks/m10/tagVocab"), {QStringLiteral("s"), QStringLiteral("t")});
+        mergeDoc(r10e);
+        CHECK(readArr(QStringLiteral("marks/m10/pinnedTags")) == (QStringList{QStringLiteral("s")}));           // t stays unpinned
+        CHECK(readArr(QStringLiteral("marks/m10/tagVocab")) == (QStringList{QStringLiteral("s"), QStringLiteral("t")})); // tag t still exists
+    }
+
+    // ---- 10f. setPinned(unpin) records a pinned-space tombstone; re-pin clears it (store-owned) -------------
+    {
+        useProfile(QStringLiteral("m10f"));
+        ItemMarks::setPinned(QStringLiteral("shelf"), true);
+        ItemMarks::setPinned(QStringLiteral("shelf"), false); // the standalone unpin
+        bool tombed = false;
+        for (const Tombstones::Entry& e : Tombstones::all(QStringLiteral("marks/m10f/pinnedTags")))
+            if (e.key == QStringLiteral("shelf")) tombed = true;
+        CHECK(tombed);                                                            // unpin -> pinned-space tombstone
+        CHECK(Tombstones::all(QStringLiteral("marks/m10f/tagVocab")).isEmpty());  // NOT a vocab deletion
+        ItemMarks::setPinned(QStringLiteral("shelf"), true);                      // re-pin
+        bool stillTombed = false;
+        for (const Tombstones::Entry& e : Tombstones::all(QStringLiteral("marks/m10f/pinnedTags")))
+            if (e.key == QStringLiteral("shelf")) stillTombed = true;
+        CHECK(!stillTombed);                                                      // re-pin cleared the tombstone
+    }
+
+    // ---- 11. Resume never-delete + recents cap 40 ----------------------------------------------------------
+    {
+        // Resume: local newer kept; remote-only entry added; a local entry with no remote counterpart survives.
+        wipeStores();
+        setRaw(QStringLiteral("resume/h1/pos"), QStringLiteral("10")); setRaw(QStringLiteral("resume/h1/ts"), QString::number(T - 500));
+        setRaw(QStringLiteral("resume/h2/pos"), QStringLiteral("20")); setRaw(QStringLiteral("resume/h2/ts"), QString::number(T - 100));
+        const QJsonObject rres = serializeNow(); // remote: h1@older, h2@newer
+        wipeStores();
+        setRaw(QStringLiteral("resume/h1/pos"), QStringLiteral("99")); setRaw(QStringLiteral("resume/h1/ts"), QString::number(T - 100)); // local h1 newer
+        setRaw(QStringLiteral("resume/h3/pos"), QStringLiteral("30")); setRaw(QStringLiteral("resume/h3/ts"), QString::number(T - 100)); // local-only
+        mergeDoc(rres);
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            CHECK(raw.value(QStringLiteral("resume/h1/pos")).toDouble() == 99.0);  // local (newer) kept
+            CHECK(raw.value(QStringLiteral("resume/h2/pos")).toDouble() == 20.0);  // remote-only added
+            CHECK(raw.value(QStringLiteral("resume/h3/pos")).toDouble() == 30.0);  // local-only never deleted
+        }
+
+        // Recents cap: union of 25 local + 25 remote (disjoint ids) caps at 40, newest first.
+        wipeStores();
+        auto recArr = [&](int base, int n) { QJsonArray a; for (int i = 0; i < n; ++i) { QJsonObject o; o["key"] = QStringLiteral("r") + QString::number(base + i); o["ts"] = double(T - (base + i)); a.append(o); } return compact(a); };
+        setRaw(QStringLiteral("recent/rp/items"), recArr(100, 25)); // remote 25 (older ts range)
+        const QJsonObject rrec = serializeNow();
+        wipeStores();
+        setRaw(QStringLiteral("recent/rp/items"), recArr(0, 25));   // local 25 (newer ts range)
+        mergeDoc(rrec);
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            const QJsonArray got = QJsonDocument::fromJson(raw.value(QStringLiteral("recent/rp/items")).toString().toUtf8()).array();
+            CHECK(got.size() == 40);                                              // capped at 40 (of 50 unioned)
+            CHECK(got.first().toObject().value(QStringLiteral("key")).toString() == QStringLiteral("r0")); // newest first
+        }
+    }
+
+    // ---- 12. Three-way convergence: A-writes, B-writes, merge in BOTH orders -> identical final state -------
+    {
+        const QString p = QStringLiteral("conv");
+        // Build device A's ini state, capture docA.
+        auto buildA = [&]() {
+            wipeStores();
+            injFavs(p, {{QStringLiteral("X"), T - 900}, {QStringLiteral("Z"), T - 900}});
+            injPlaylists(p, {{QStringLiteral("P"), QStringLiteral("A"), T - 900, 1}});
+            injMarkItem(p, QStringLiteral("H"), {QStringLiteral("t1")}, T - 900);
+            injArr(QStringLiteral("marks/") + p + QStringLiteral("/tagVocab"), {QStringLiteral("t1")});
+            injArr(QStringLiteral("marks/") + p + QStringLiteral("/pinnedTags"), {QStringLiteral("t1")});
+        };
+        // Build device B's ini state (edits Z + P + H newer, deletes X, unpins t1), capture docB.
+        auto buildB = [&]() {
+            wipeStores();
+            injFavs(p, {{QStringLiteral("Y"), T - 400}, {QStringLiteral("Z"), T - 300}});
+            injTomb(QStringLiteral("favorites/") + p, QStringLiteral("X"), T - 350);
+            injPlaylists(p, {{QStringLiteral("P"), QStringLiteral("B"), T - 300, 2}});
+            injMarkItem(p, QStringLiteral("H"), {QStringLiteral("t2")}, T - 300);
+            injArr(QStringLiteral("marks/") + p + QStringLiteral("/tagVocab"), {QStringLiteral("t1"), QStringLiteral("t2")});
+            injTomb(QStringLiteral("marks/") + p + QStringLiteral("/pinnedTags"), QStringLiteral("t1"), T - 320);
+        };
+        buildA(); const QJsonObject docA = serializeNow();
+        buildB(); const QJsonObject docB = serializeNow();
+
+        // Order 1: local = A, merge docB.
+        buildA(); mergeDoc(docB);
+        const QStringList o1_favs = favIds(p);
+        const QPair<QString, qint64> o1_pl = plField(p, QStringLiteral("P"));
+        const QStringList o1_tags = markTags(p, QStringLiteral("H"));
+        const QStringList o1_vocab = readArr(QStringLiteral("marks/") + p + QStringLiteral("/tagVocab"));
+        const QStringList o1_pinned = readArr(QStringLiteral("marks/") + p + QStringLiteral("/pinnedTags"));
+
+        // Order 2: local = B, merge docA.
+        buildB(); mergeDoc(docA);
+        const QStringList o2_favs = favIds(p);
+        const QPair<QString, qint64> o2_pl = plField(p, QStringLiteral("P"));
+        const QStringList o2_tags = markTags(p, QStringLiteral("H"));
+        const QStringList o2_vocab = readArr(QStringLiteral("marks/") + p + QStringLiteral("/tagVocab"));
+        const QStringList o2_pinned = readArr(QStringLiteral("marks/") + p + QStringLiteral("/pinnedTags"));
+
+        // Convergent: both orders reach the SAME final state.
+        CHECK(o1_favs == o2_favs);
+        CHECK(o1_pl == o2_pl);
+        CHECK(o1_tags == o2_tags);
+        CHECK(o1_vocab == o2_vocab);
+        CHECK(o1_pinned == o2_pinned);
+
+        // ...and that state is the semantically-correct one (newest edits win; X deleted; t1 unpinned).
+        CHECK(o1_favs == (QStringList{QStringLiteral("Y"), QStringLiteral("Z")}));   // X tombstoned away
+        CHECK(favTs(p, QStringLiteral("Z")) == T - 300);                             // B's newer Z won
+        CHECK(o1_pl == (QPair<QString, qint64>{QStringLiteral("B"), 2}));            // B's newer whole-object P
+        CHECK(o1_tags == (QStringList{QStringLiteral("t2")}));                        // B's newer marks
+        CHECK(o1_vocab == (QStringList{QStringLiteral("t1"), QStringLiteral("t2")})); // vocab union
+        CHECK(o1_pinned.isEmpty());                                                   // t1 unpinned on B -> no shelf
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

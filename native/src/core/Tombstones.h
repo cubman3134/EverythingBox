@@ -33,6 +33,16 @@ namespace Tombstones
     // key or store is a no-op. Recording the same key again overwrites the timestamp (a later delete wins).
     void record(const QString& store, const QString& key);
 
+    // Record a tombstone with an EXPLICIT epoch-second ts — the import path CloudMerge uses to persist a remote
+    // device's tombstone faithfully (its own ts, not now). Never downgrades: if a newer local tombstone for the
+    // same key already exists, its ts is kept (max wins). An empty key/store or ts<=0 is a no-op.
+    void record(const QString& store, const QString& key, qint64 ts);
+
+    // Erase one tombstone (key) from <store> if present. Used when a deletion is UNDONE locally (a tag
+    // re-created via setTags, a shelf re-pinned) so the resurrected item is not self-suppressed on the next
+    // merge. No-op if the key/store is empty or no such tombstone exists.
+    void remove(const QString& store, const QString& key);
+
     // All live tombstones for <store>, as {original key, ts}. Empty when the store has none.
     QVector<Entry> all(const QString& store);
 

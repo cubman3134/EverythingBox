@@ -153,6 +153,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
+        src/core/CloudMerge.cpp   src/core/CloudMerge.h  # generalized per-item merge document serialize/merge (mdsync T2)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
@@ -317,6 +318,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/RecentStore.cpp     src/core/RecentStore.h
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
     target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core)

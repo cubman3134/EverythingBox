@@ -32,6 +32,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include <functional>
 
 namespace ItemMarks
 {
@@ -62,4 +63,9 @@ namespace ItemMarks
     bool anyHidden();                                    // fast: does the active profile have ANY hidden item
 
     void invalidate();                                  // drop the cache (profile switch / external change)
+
+    // Multi-device sync trigger (mdsync T2): a lightweight change-callback fired after every mutation, set once
+    // by MainWindow to (re)arm the debounced Drive push. QtCore-clean — a std::function, not a Qt signal, so the
+    // store keeps zero QObject/Quick/Widgets dependency. Unset in headless probes (fires nothing).
+    void setChangeHook(std::function<void()> hook);
 }

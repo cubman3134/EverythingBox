@@ -101,6 +101,11 @@ static QVector<Playlist> loadAllRaw()
     return out;
 }
 
+// Change-callback (mdsync T2): fired after a mutation to (re)arm the debounced Drive push; null in probes.
+static std::function<void()> g_changeHook;
+void PlaylistStore::setChangeHook(std::function<void()> hook) { g_changeHook = std::move(hook); }
+static void fireChanged() { if (g_changeHook) g_changeHook(); }
+
 static void saveAll(const QVector<Playlist>& all)
 {
     QJsonArray arr;
@@ -119,6 +124,7 @@ static void saveAll(const QVector<Playlist>& all)
     }
     store().setValue(plKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
     store().sync();
+    fireChanged(); // every playlist mutation funnels through here; (re)arm the debounced Drive push
 }
 
 bool PlaylistStore::migrateToCategories()

@@ -38,6 +38,11 @@ static QString favTombstoneStore()
 
 static void save(const QVector<FavoriteItem>& items);
 
+// Change-callback (mdsync T2): fired after a mutation to (re)arm the debounced Drive push; null in probes.
+static std::function<void()> g_changeHook;
+void FavoritesStore::setChangeHook(std::function<void()> hook) { g_changeHook = std::move(hook); }
+static void fireChanged() { if (g_changeHook) g_changeHook(); }
+
 QVector<FavoriteItem> FavoritesStore::list()
 {
     QVector<FavoriteItem> out;
@@ -118,6 +123,7 @@ void FavoritesStore::add(const FavoriteItem& item)
     stamped.ts = QDateTime::currentSecsSinceEpoch();
     items.prepend(stamped);                                  // newest first
     save(items);
+    fireChanged();
 }
 
 void FavoritesStore::remove(const QString& itemId)
@@ -129,6 +135,7 @@ void FavoritesStore::remove(const QString& itemId)
     save(items);
     // Tombstone the un-starred id so the merge (T2) doesn't resurrect it from a device that still has it.
     Tombstones::record(favTombstoneStore(), itemId);
+    fireChanged();
 }
 
 QSet<QString> FavoritesStore::allKeys()
