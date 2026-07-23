@@ -1,7 +1,9 @@
 #include "CloudSync.h"
 #include "AppPaths.h"
+#include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 
 #include <QCoreApplication>
+#include <QSet>
 #include <QSettings>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -377,21 +379,82 @@ static void zipAddDir(mz_zip_archive& z, const QString& dir, const QString& pref
     }
 }
 
+// ---- the ONE device-local carve-out (mdsync T4) -----------------------------------------------------
+// Applied in BOTH directions: buildBundle omits these from settings.json, applyBundle refuses to write them,
+// and stateHash leaves them out of the sync fingerprint (so a device-local edit never reads as an unsynced
+// change and never desyncs the cross-device baseline). Keep this the SINGLE source of truth for the list.
+bool CloudSync::isDeviceLocalKey(const QString& key)
+{
+    // Exact device-local keys. Each has a SIBLING that DOES sync (profiles/list, sync/global/*,
+    // library/showHidden) — so match the leaf exactly, never the group.
+    static const QSet<QString> kExact = {
+        QStringLiteral("roms/folder"),          // where THIS machine keeps its ROMs
+        QStringLiteral("emulators/root"),        // this machine's standalone-emulator install root
+        QStringLiteral("emulators/fullscreen"),  // per-machine display preference
+        QStringLiteral("player/externalPath"),   // this machine's external-player exe path
+        QStringLiteral("player/external"),        // this machine's external-player choice
+        QStringLiteral("netplay/relay"),          // this machine's relay endpoint
+        QStringLiteral("display/mode"),           // TV / desktop / mobile form factor of THIS device
+        QStringLiteral("display/tvPromptDone"),   // one-shot per-device onboarding flag
+        QStringLiteral("profiles/current"),       // the active profile is per-device (profiles/list SYNCS)
+    };
+    if (kExact.contains(key)) return true;
+    // Prefix families that are wholly device-local.
+    return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
+        || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
+        || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)
+        || key.startsWith(QStringLiteral("cloud/"))          // cloud/* (this device's OAuth tokens / client id)
+        || key.startsWith(QStringLiteral("downloads"))       // downloads* (this device's local download catalog)
+        || key.startsWith(QStringLiteral("pcgames/"));       // pcgames/* (this device's installed PC games)
+}
+
+// The per-item stores the progress merge document (CloudMerge) owns. applyBundle must never write these from
+// the heavy bundle (release-gating: a peer's stale copy of stats/<this-device>/... would clobber the live
+// accumulator namespace and then propagate on the next push).
+bool CloudSync::isPerItemStoreKey(const QString& key)
+{
+    return key.startsWith(QStringLiteral("resume/"))    || key.startsWith(QStringLiteral("recent/"))
+        || key.startsWith(QStringLiteral("marks/"))     || key.startsWith(QStringLiteral("favorites/"))
+        || key.startsWith(QStringLiteral("playlists/")) || key.startsWith(QStringLiteral("stats/"))
+        || key.startsWith(QStringLiteral("playstats/")) || key.startsWith(QStringLiteral("deleted/"));
+}
+
+QByteArray CloudSync::buildSettingsJson()
+{
+    // Every setting except the device-local carve-out (the SINGLE exclusion table, applied outbound here).
+    QJsonObject so;
+    for (const QString& k : store().allKeys())
+        if (!isDeviceLocalKey(k)) so.insert(k, store().value(k).toString());
+    return QJsonDocument(so).toJson(QJsonDocument::Compact);
+}
+
+void CloudSync::applySettingsJson(const QByteArray& settingsJson)
+{
+    const QJsonObject so = QJsonDocument::fromJson(settingsJson).object();
+    for (auto it = so.begin(); it != so.end(); ++it)
+    {
+        const QString& k = it.key();
+        // Inbound carve-out: never overwrite a device-local key, and never write a per-item store key (the
+        // merge document owns those — writing them here would clobber this device's live/merged state).
+        if (isDeviceLocalKey(k) || isPerItemStoreKey(k)) continue;
+        store().setValue(k, it.value().toString());
+    }
+    store().sync();
+}
+
 static QByteArray buildBundle()
 {
     mz_zip_archive z; std::memset(&z, 0, sizeof(z));
     mz_zip_writer_init_heap(&z, 0, 0);
 
     const QJsonObject meta{ { QStringLiteral("device"), QSysInfo::machineHostName() },
+                            { QStringLiteral("deviceId"), Settings::deviceId() }, // stable per-install id (mdsync T4)
                             { QStringLiteral("time"), QDateTime::currentDateTimeUtc().toString(Qt::ISODate) } };
     const QByteArray metaJson = QJsonDocument(meta).toJson(QJsonDocument::Compact);
     mz_zip_writer_add_mem(&z, "meta.json", metaJson.constData(), metaJson.size(), MZ_DEFAULT_COMPRESSION);
 
-    // All settings except the device-specific cloud auth (tokens / client id).
-    QJsonObject so;
-    for (const QString& k : store().allKeys())
-        if (!k.startsWith(QStringLiteral("cloud/"))) so.insert(k, store().value(k).toString());
-    const QByteArray sJson = QJsonDocument(so).toJson(QJsonDocument::Compact);
+    // All settings except the device-local carve-out (the ONE exclusion table).
+    const QByteArray sJson = CloudSync::buildSettingsJson();
     mz_zip_writer_add_mem(&z, "settings.json", sJson.constData(), sJson.size(), MZ_DEFAULT_COMPRESSION);
 
     const QString app = AppPaths::dataDir();
@@ -429,10 +492,8 @@ static bool applyBundle(const QByteArray& data)
 
         if (name == QStringLiteral("settings.json"))
         {
-            const QJsonObject so = QJsonDocument::fromJson(bytes).object();
-            for (auto it = so.begin(); it != so.end(); ++it)
-                if (!it.key().startsWith(QStringLiteral("cloud/"))) store().setValue(it.key(), it.value().toString());
-            store().sync();
+            // Device-local keys AND per-item store keys are held off here (the merge document owns per-item).
+            CloudSync::applySettingsJson(bytes);
         }
         else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/"))
                  || name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/")))
@@ -458,7 +519,9 @@ static QByteArray stateHash()
 {
     QCryptographicHash h(QCryptographicHash::Sha256);
     QStringList keys;
-    for (const QString& k : store().allKeys()) if (!k.startsWith(QStringLiteral("cloud/"))) keys << k;
+    // Same carve-out as buildBundle: a device-local key isn't synced, so it must not enter the fingerprint —
+    // otherwise a purely-local edit reads as an unsynced change and cross-device baselines never converge.
+    for (const QString& k : store().allKeys()) if (!CloudSync::isDeviceLocalKey(k)) keys << k;
     keys.sort();
     for (const QString& k : keys)
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }

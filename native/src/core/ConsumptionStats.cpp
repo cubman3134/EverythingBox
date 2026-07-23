@@ -206,6 +206,16 @@ void saveItem(const QString& h, const Entry& e)
     store().setValue(itemKey(h), QString::fromUtf8(entryToJson(e)));
 }
 
+// Per-namespace freshness stamp (mdsync T4). The OWNER device writes stats/<profile>/<deviceId>/lastWrite at
+// every accrual; the stamp is a plain scalar leaf, so it rides the existing verbatim serialize/merge path with
+// zero shape-specific coupling, is written ONLY by the owner and copied verbatim thereafter, and thus faithfully
+// orders any two copies of a namespace (fresh vs stale) — the newest-wins-per-namespace signal CloudMerge reads.
+// (It sits DIRECTLY under the device group, never under items/ or cat/, so no reader/rollup counts it.)
+void stampDeviceWrite()
+{
+    store().setValue(deviceGroup() + QStringLiteral("/lastWrite"), QDateTime::currentSecsSinceEpoch());
+}
+
 } // namespace
 
 void ConsumptionStats::addMediaSeconds(const QString& key, const QString& category, qint64 secs,
@@ -225,6 +235,7 @@ void ConsumptionStats::addMediaSeconds(const QString& key, const QString& catego
     // Category rollup (maintained incrementally; the probe checks it stays coherent with the per-title sum).
     const QString rk = catSecondsKey(category);
     store().setValue(rk, store().value(rk, 0).toLongLong() + secs);
+    stampDeviceWrite();   // freshness stamp for this device's namespace (mdsync T4)
     store().sync();
     invalidate();
 }
@@ -249,6 +260,7 @@ void ConsumptionStats::addPagesRead(const QString& key, int page, const QString&
 
     const QString rk = catPagesKey();
     store().setValue(rk, store().value(rk, 0).toLongLong() + delta);
+    stampDeviceWrite();   // freshness stamp for this device's namespace (mdsync T4)
     store().sync();
     invalidate();
 }

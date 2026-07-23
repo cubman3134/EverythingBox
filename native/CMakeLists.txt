@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.2 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.3 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -326,9 +326,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
+        src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
+        third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
-    target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2)
-    target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core)
+    target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2 third_party)
+    target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire
@@ -485,8 +488,12 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_playback tools/probe_playback.cpp
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        # ConsumptionStats' device-namespaced accrual (mdsync T3) needs Settings::deviceId(), which drags
+        # FormFactor via Settings.cpp's virtualPadEnabled() — mirror probe_stats' link set.
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_playback PRIVATE src src/media src/core)
+    target_include_directories(probe_playback PRIVATE src src/media src/core src/theme2)
     target_link_libraries(probe_playback PRIVATE Qt6::Core)
 
     # Console harness for the QtPdf renderer - round-trips a generated PDF through PDFium.

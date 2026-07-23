@@ -421,8 +421,14 @@ void mergePlaylists(const QJsonObject& playlists)
 // ---- device-namespaced accumulators (stats / playstats) — union VERBATIM, never arithmetic (mdsync T3) -----
 // Shape: rootPrefix/<profile>/<device>/<sub...>  serialized as { "<profile>": { "<device>": { "<sub>": val }}}.
 // A device's namespace is ONLY ever written by that device, so on merge each REMOTE namespace is copied
-// wholesale (verbatim replace — newest-file-wins per namespace is unnecessary) and the LOCAL device's own
-// namespace is never touched. Repeated merges therefore never double-count (replace, not add).
+// wholesale (verbatim replace, never arithmetic) and the LOCAL device's own namespace is never touched.
+// Repeated merges therefore never double-count (replace, not add).
+//
+// Per-namespace freshness (mdsync T4, from the T3 review): a peer can carry a STALE copy of a THIRD device's
+// namespace, so a blind verbatim replace would let that stale copy downgrade a locally-fresher one. Each owner
+// stamps a `lastWrite` scalar leaf in its namespace at accrual (ConsumptionStats/PlayStats), and that stamp
+// travels verbatim; mergeNamespaced replaces a foreign namespace only when the incoming lastWrite is strictly
+// NEWER than the local copy's (or the local copy is absent) — newest-wins per foreign namespace.
 
 void serializeNamespaced(const QString& rootPrefix, QJsonObject& out)
 {
@@ -462,8 +468,21 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
             const QString device = dit.key();
             if (device == localDevice) continue;            // never clobber our own live namespace
             const QString base = rootPrefix + QLatin1Char('/') + profile + QLatin1Char('/') + device;
-            s.remove(base);                                 // verbatim replace: drop the stale copy first
             const QJsonObject ns = dit.value().toObject();
+
+            // Freshness gate: keep a locally-fresher copy of this foreign namespace. lastWrite is stored as a
+            // decimal-string scalar leaf (owner-stamped, then carried verbatim), so read both via toLongLong.
+            const qint64 remoteLW = ns.value(QStringLiteral("lastWrite")).toString().toLongLong();
+            s.beginGroup(base);
+            const bool localPresent = !s.childKeys().isEmpty() || !s.childGroups().isEmpty();
+            s.endGroup();
+            if (localPresent)
+            {
+                const qint64 localLW = s.value(base + QStringLiteral("/lastWrite")).toString().toLongLong();
+                if (remoteLW <= localLW) continue;          // our copy is as-fresh-or-fresher -> keep it
+            }
+
+            s.remove(base);                                 // verbatim replace: drop the stale copy first
             for (auto kit = ns.begin(); kit != ns.end(); ++kit)
                 s.setValue(base + QLatin1Char('/') + kit.key(), kit.value().toString());
         }

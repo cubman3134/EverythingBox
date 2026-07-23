@@ -27,6 +27,7 @@
 #include "PlaylistStore.h"
 #include "Tombstones.h"
 #include "CloudMerge.h"
+#include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "ProfileStore.h"
 #include "AppPaths.h"
 
@@ -626,6 +627,116 @@ int main(int argc, char** argv)
         wipeStores(); injFav1(QStringLiteral("X"), QStringLiteral("beta"),  T); mergeDoc(fA); const QString t2 = favTitle(QStringLiteral("X"));
         CHECK(t1 == t2);                          // convergent
         CHECK(t1 == QStringLiteral("beta"));      // greater canon ("beta" > "alpha") wins in both orders
+    }
+
+    // ---- 15. Per-namespace freshness: newest-wins per FOREIGN namespace (three-device stale-copy) -----------
+    // mergeNamespaced must NOT verbatim-replace a foreign namespace with an OLDER copy. Owner device C stamps
+    // stats/<p>/C/lastWrite at accrual; that stamp travels verbatim. Scenario: local A already holds a FRESH
+    // copy of C; it merges peer B's document carrying a STALE copy of C -> A keeps its fresh C (no downgrade).
+    {
+        const QString localDev = Settings::deviceId();
+        auto wipeAcc = [&]() { QSettings raw(iniPath, QSettings::IniFormat); raw.remove(QStringLiteral("stats")); raw.remove(QStringLiteral("playstats")); raw.sync(); };
+        auto val = [&](const QString& key) { QSettings raw(iniPath, QSettings::IniFormat); return raw.value(key).toString(); };
+        const QString cCat = QStringLiteral("stats/pf/devC/cat/video/seconds");
+        const QString cLW  = QStringLiteral("stats/pf/devC/lastWrite");
+
+        // Peer B carries a STALE copy of device C (older lastWrite) -> must not clobber A's fresh C.
+        wipeAcc(); setRaw(cCat, QStringLiteral("50")); setRaw(cLW, QString::number(T - 500)); const QJsonObject docStaleC = serializeNow();
+        wipeAcc(); setRaw(cCat, QStringLiteral("100")); setRaw(cLW, QString::number(T)); mergeDoc(docStaleC);
+        CHECK(val(cCat) == QStringLiteral("100"));         // fresh C kept; the stale peer copy did NOT downgrade it
+        CHECK(val(cLW)  == QString::number(T));
+
+        // Symmetric: a strictly-FRESHER incoming C replaces a locally-stale copy.
+        wipeAcc(); setRaw(cCat, QStringLiteral("100")); setRaw(cLW, QString::number(T)); const QJsonObject docFreshC = serializeNow();
+        wipeAcc(); setRaw(cCat, QStringLiteral("50")); setRaw(cLW, QString::number(T - 500)); mergeDoc(docFreshC);
+        CHECK(val(cCat) == QStringLiteral("100"));         // newer incoming wins over the local stale copy
+        CHECK(val(cLW)  == QString::number(T));
+
+        // No local copy at all -> a brand-new foreign namespace is imported regardless of the freshness edge.
+        wipeAcc(); setRaw(cCat, QStringLiteral("77")); setRaw(cLW, QString::number(T - 900)); const QJsonObject docNewC = serializeNow();
+        wipeAcc(); mergeDoc(docNewC);
+        CHECK(val(cCat) == QStringLiteral("77"));          // absent local -> import
+    }
+
+    // ---- 16. T4 carve-out: device-local excluded BOTH ways; applyBundle hands off the per-item stores -------
+    {
+        const QString localDev = Settings::deviceId();
+        // Seed a representative ini: one key of every excluded shape + their SIBLING syncing counterparts + a
+        // plain synced key + per-item store keys. (device/id is already minted by Settings::deviceId.)
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles",
+                                  "emu", "sync", "downloads", "pcgames", "library", "stats", "marks", "resume"})
+                raw.remove(QLatin1String(g));
+            // device-local (excluded):
+            raw.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/roms"));
+            raw.setValue(QStringLiteral("emulators/root"), QStringLiteral("D:/emu"));
+            raw.setValue(QStringLiteral("emulators/fullscreen"), QStringLiteral("1"));
+            raw.setValue(QStringLiteral("player/externalPath"), QStringLiteral("C:/vlc.exe"));
+            raw.setValue(QStringLiteral("player/external"), QStringLiteral("vlc"));
+            raw.setValue(QStringLiteral("netplay/relay"), QStringLiteral("host:1"));
+            raw.setValue(QStringLiteral("display/mode"), QStringLiteral("tv"));
+            raw.setValue(QStringLiteral("display/tvPromptDone"), QStringLiteral("1"));
+            raw.setValue(QStringLiteral("profiles/current"), QStringLiteral("alice"));
+            raw.setValue(QStringLiteral("emu/virtualPadOpacity"), QStringLiteral("50"));
+            raw.setValue(QStringLiteral("sync/files/abc/audio"), QStringLiteral("3"));
+            raw.setValue(QStringLiteral("downloads/foo"), QStringLiteral("1"));
+            raw.setValue(QStringLiteral("pcgames/bar"), QStringLiteral("1"));
+            // SIBLING carve-outs that MUST still sync:
+            raw.setValue(QStringLiteral("profiles/list"), QStringLiteral("[alice,bob]"));
+            raw.setValue(QStringLiteral("sync/global/audio"), QStringLiteral("2"));
+            raw.setValue(QStringLiteral("library/showHidden"), QStringLiteral("true"));
+            // a plain synced key + a per-item store key (the latter travels IN the bundle but is not applied):
+            raw.setValue(QStringLiteral("display/theme"), QStringLiteral("dark"));
+            raw.setValue(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"), QStringLiteral("5"));
+            raw.sync();
+        }
+
+        // 16a. buildSettingsJson (outbound): every device-local key is ABSENT; siblings + plain + per-item PRESENT.
+        const QJsonObject b = QJsonDocument::fromJson(CloudSync::buildSettingsJson()).object();
+        for (const char* ex : {"roms/folder", "emulators/root", "emulators/fullscreen", "player/externalPath",
+                               "player/external", "netplay/relay", "display/mode", "display/tvPromptDone",
+                               "profiles/current", "emu/virtualPadOpacity", "sync/files/abc/audio",
+                               "device/id", "downloads/foo", "pcgames/bar"})
+            CHECK(!b.contains(QLatin1String(ex)));                    // device-local carved out of the bundle
+        CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs
+        CHECK(b.contains(QStringLiteral("sync/global/audio")));      // sync/global/* still syncs
+        CHECK(b.contains(QStringLiteral("library/showHidden")));     // library/showHidden still syncs
+        CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
+        CHECK(b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item IS in the bundle
+
+        // 16b. applySettingsJson (inbound): a peer's bundle must not overwrite device-local keys NOR write any
+        // per-item store key (release-gating hands-off); only plain synced keys land.
+        QJsonObject peer;
+        peer[QStringLiteral("roms/folder")]  = QStringLiteral("PEER/roms");   // device-local
+        peer[QStringLiteral("display/mode")] = QStringLiteral("desktop");     // device-local
+        peer[QStringLiteral("device/id")]    = QStringLiteral("PEER-DEVICE"); // device-local (identity)
+        peer[QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds")] = QStringLiteral("999"); // per-item: hands off
+        peer[QStringLiteral("marks/pX/items/deadbeef")] = QStringLiteral("{\"peer\":1}");                            // per-item: hands off
+        peer[QStringLiteral("display/theme")] = QStringLiteral("light");      // plain synced -> updates
+        peer[QStringLiteral("some/newKey")]   = QStringLiteral("hello");      // plain synced (new) -> added
+        CloudSync::applySettingsJson(QJsonDocument(peer).toJson(QJsonDocument::Compact));
+        {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            CHECK(raw.value(QStringLiteral("roms/folder")).toString() == QStringLiteral("D:/roms"));   // untouched
+            CHECK(raw.value(QStringLiteral("display/mode")).toString() == QStringLiteral("tv"));       // untouched
+            CHECK(raw.value(QStringLiteral("device/id")).toString() == localDev);                      // OUR id preserved
+            CHECK(raw.value(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds")).toString() == QStringLiteral("5")); // per-item untouched (release-gating)
+            CHECK(!raw.contains(QStringLiteral("marks/pX/items/deadbeef")));                           // per-item never written
+            CHECK(raw.value(QStringLiteral("display/theme")).toString() == QStringLiteral("light"));   // plain synced updated
+            CHECK(raw.value(QStringLiteral("some/newKey")).toString() == QStringLiteral("hello"));     // plain synced added
+        }
+
+        // Good-citizen cleanup: probes share this portable ini (all live in the same build dir), and the
+        // form-factor probes read emu/virtualPad* and display/mode as DEFAULTS. Leave none of our seeded
+        // device-local keys behind or a later run would inherit them.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
+                                  "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some"})
+                raw.remove(QLatin1String(g));
+            raw.sync();
+        }
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

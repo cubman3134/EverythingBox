@@ -42,6 +42,16 @@ static QString playSchemaKey(const QString& profile)
     return QStringLiteral("playstats/") + profile + QStringLiteral("/schema");
 }
 
+// Per-namespace freshness stamp (mdsync T4). The OWNER device writes playstats/<profile>/<deviceId>/lastWrite
+// at every accrual — a plain scalar leaf DIRECTLY under the device group (never a game subgroup), so it rides
+// the verbatim serialize/merge path uncounted by get()/profileTotalSeconds, and lets CloudMerge order a fresh
+// vs a stale copy of this namespace (newest-wins) without parsing any accumulator's internal shape.
+static void stampDeviceWrite()
+{
+    store().setValue(profileRoot() + QLatin1Char('/') + Settings::deviceId() + QStringLiteral("/lastWrite"),
+                     QDateTime::currentSecsSinceEpoch());
+}
+
 // Fold one profile's legacy un-namespaced games (playstats/<p>/<sha1>/{last,total,sessions}) into this
 // device's namespace, once (guarded by the per-profile schema stamp — the PlaylistStore precedent). A legacy
 // game subgroup carries the leaf keys directly; a device namespace carries game SUBGROUPS, so we only move
@@ -113,6 +123,7 @@ void PlayStats::markPlayed(const QString& identity)
     if (identity.isEmpty()) return;
     migratePlayProfile(resolvedProfileId());
     store().setValue(deviceGameKey(identity) + QStringLiteral("/last"), QDateTime::currentSecsSinceEpoch());
+    stampDeviceWrite();   // freshness stamp for this device's namespace (mdsync T4)
     store().sync();
 }
 
@@ -127,6 +138,7 @@ void PlayStats::addSession(const QString& identity, qint64 seconds)
     store().setValue(k + QStringLiteral("/total"), curTotal + seconds);
     store().setValue(k + QStringLiteral("/sessions"), curSessions + 1);
     store().setValue(k + QStringLiteral("/last"), QDateTime::currentSecsSinceEpoch());
+    stampDeviceWrite();   // freshness stamp for this device's namespace (mdsync T4)
     store().sync();
 }
 
