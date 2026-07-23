@@ -7,6 +7,7 @@
 #include "core/AppPaths.h"
 #include "core/AssetBootstrap.h"
 #include <QIcon>
+#include <QScreen>
 #include <QFile>
 #include <QFileInfo>
 #include <QSettings>
@@ -143,6 +144,14 @@ int main(int argc, char** argv)
     // libmpv requires the C numeric locale, otherwise option/number parsing breaks. Set it before Qt.
     std::setlocale(LC_NUMERIC, "C");
 
+#ifdef Q_OS_IOS
+    // iOS: flush the widget backingstore through Metal. The default raster flush goes through OpenGL ES,
+    // which fails in the simulator (and EAGL is deprecated on device) — the app ran fine but the screen
+    // stayed black. Must be set before the QApplication is constructed.
+    qputenv("QT_WIDGETS_RHI", "1");
+    qputenv("QT_WIDGETS_RHI_BACKEND", "metal");
+#endif
+
 #ifdef MMV_HAVE_QML
     // The themed home is a QQuickView embedded via createWindowContainer (see ThemeEngine), rendered with
     // Qt Quick's software backend. The app also drives libmpv through a QOpenGLWidget, and a GPU-accelerated
@@ -195,6 +204,11 @@ int main(int argc, char** argv)
 #if defined(Q_OS_ANDROID)
     AssetBootstrap::run(QStringLiteral("assets:/mmv"), AppPaths::dataDir(),
                         QString::fromLatin1(kAppVersion));
+#elif defined(Q_OS_IOS)
+    // iOS: the stock themes2/ + addons are staged at the bundle root as mmv/ (see the if(IOS) CMake block);
+    // extract them into the writable data dir exactly like the Android assets:/mmv flow.
+    AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/mmv"),
+                        AppPaths::dataDir(), QString::fromLatin1(kAppVersion));
 #else
     if (qEnvironmentVariableIsSet("MMV_TEST_BOOTSTRAP_SRC"))
         AssetBootstrap::run(qEnvironmentVariable("MMV_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
@@ -226,7 +240,15 @@ int main(int argc, char** argv)
 
     MainWindow window(chooseProfile);
     window.setWindowTitle(QStringLiteral("My Media Vault"));
+#ifdef Q_OS_IOS
+    // A phone screen is far narrower than the desktop layout's aggregate minimum width, and a fullscreen
+    // window can never shrink below its layout minimum — override it so fullscreen clamps to the real
+    // screen (an explicit minimum takes precedence over the layout-derived one).
+    window.setMinimumSize(1, 1);
+    if (QScreen* s = QGuiApplication::primaryScreen()) window.resize(s->geometry().size());
+#else
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
+#endif
     // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
     // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.
     if (PerfTrace::enabled())
@@ -234,8 +256,8 @@ int main(int argc, char** argv)
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));
         qApp->installEventFilter(new FirstPaintProbe(&window));
     }
-#ifdef Q_OS_ANDROID
-    // Android has no windowed mode: the app is always fullscreen. showFullScreen() also drives Qt 6.8's
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+    // Mobile has no windowed mode: the app is always fullscreen. On Android, showFullScreen() also drives Qt 6.8's
     // QtActivityDelegate into sticky-immersive — it maps the top-level Qt::WindowFullScreen state onto the
     // Android WindowInsetsController (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE, API 30+) / the legacy
     // SYSTEM_UI_FLAG_IMMERSIVE_STICKY, so the status + navigation bars stay hidden over video and the

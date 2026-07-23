@@ -1,7 +1,12 @@
 #include "MpvWidget.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
+#ifndef Q_OS_IOS
 #include <QOpenGLContext>
+#else
+#include <QPainter>
+#include <QPaintEvent>
+#endif
 #include <QMetaObject>
 #include <QLabel>
 #include <QTimer>
@@ -21,7 +26,7 @@ static void videoLog(const QString& msg)
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
 
-MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
+MpvWidget::MpvWidget(QWidget* parent) : MpvWidgetBase(parent)
 {
     mpv = mpv_create();
     if (!mpv)
@@ -66,6 +71,17 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
 
     mpv_set_wakeup_callback(mpv, onMpvWakeup, this);
 
+#ifdef Q_OS_IOS
+    // Software render context, created up-front (there is no initializeGL on the QWidget path).
+    mpv_render_param rparams[]{
+        { MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_SW) },
+        { MPV_RENDER_PARAM_INVALID, nullptr }
+    };
+    if (mpv_render_context_create(&mpv_gl, mpv, rparams) < 0)
+        throw std::runtime_error("failed to initialize mpv software render context");
+    mpv_render_context_set_update_callback(mpv_gl, onMpvRedraw, this);
+#endif
+
     // Audio-only "now playing" overlay (a child widget over the GL surface).
     nowPlaying_ = new QLabel(this);
     nowPlaying_->setAlignment(Qt::AlignCenter);
@@ -81,12 +97,50 @@ MpvWidget::MpvWidget(QWidget* parent) : QOpenGLWidget(parent)
 
 MpvWidget::~MpvWidget()
 {
+#ifndef Q_OS_IOS
     makeCurrent();
+#endif
     if (mpv_gl)
         mpv_render_context_free(mpv_gl);
     if (mpv)
         mpv_terminate_destroy(mpv);
 }
+
+#ifdef Q_OS_IOS
+
+void MpvWidget::renderSoftwareFrame()
+{
+    if (!mpv_gl) return;
+    const uint64_t flags = mpv_render_context_update(mpv_gl);
+    if (!(flags & MPV_RENDER_UPDATE_FRAME)) return;
+    const int w = qMax(1, int(width() * devicePixelRatioF()));
+    const int h = qMax(1, int(height() * devicePixelRatioF()));
+    if (frame_.width() != w || frame_.height() != h)
+        frame_ = QImage(w, h, QImage::Format_RGB32); // opaque; memory order matches mpv "bgr0"
+    int size[2]{ w, h };
+    size_t stride = size_t(frame_.bytesPerLine());
+    void* ptr = frame_.bits();
+    mpv_render_param params[]{
+        { MPV_RENDER_PARAM_SW_SIZE, size },
+        { MPV_RENDER_PARAM_SW_FORMAT, const_cast<char*>("bgr0") },
+        { MPV_RENDER_PARAM_SW_STRIDE, &stride },
+        { MPV_RENDER_PARAM_SW_POINTER, ptr },
+        { MPV_RENDER_PARAM_INVALID, nullptr }
+    };
+    if (mpv_render_context_render(mpv_gl, params) >= 0)
+        update();
+}
+
+void MpvWidget::paintEvent(QPaintEvent*)
+{
+    QPainter p(this);
+    p.fillRect(rect(), Qt::black);
+    if (frame_.isNull()) return;
+    frame_.setDevicePixelRatio(devicePixelRatioF());
+    p.drawImage(rect(), frame_);
+}
+
+#else
 
 void* MpvWidget::getProcAddress(void* ctx, const char* name)
 {
@@ -126,6 +180,8 @@ void MpvWidget::paintGL()
     mpv_render_context_render(mpv_gl, params);
 }
 
+#endif // Q_OS_IOS
+
 void MpvWidget::onMpvRedraw(void* ctx)
 {
     QMetaObject::invokeMethod(static_cast<MpvWidget*>(ctx), "maybeUpdate", Qt::QueuedConnection);
@@ -138,6 +194,11 @@ void MpvWidget::onMpvWakeup(void* ctx)
 
 void MpvWidget::maybeUpdate()
 {
+#ifdef Q_OS_IOS
+    // Software path: drain the ready frame into frame_ (which schedules the repaint itself). This also
+    // keeps mpv's frame queue draining while occluded — no GL context to juggle.
+    renderSoftwareFrame();
+#else
     // If the window is minimized, render off-screen so mpv's frame queue keeps draining.
     if (window()->isMinimized())
     {
@@ -150,6 +211,7 @@ void MpvWidget::maybeUpdate()
     {
         update();
     }
+#endif
 }
 
 void MpvWidget::onMpvEvents()
@@ -284,7 +346,7 @@ void MpvWidget::logVideoInfo()
 
 void MpvWidget::resizeEvent(QResizeEvent* e)
 {
-    QOpenGLWidget::resizeEvent(e);
+    MpvWidgetBase::resizeEvent(e);
     if (nowPlaying_) nowPlaying_->setGeometry(rect());
 }
 

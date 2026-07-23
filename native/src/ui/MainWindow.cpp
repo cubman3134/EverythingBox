@@ -5225,6 +5225,11 @@ static QString findGameExe(const QString& dir, const QString& title, bool titleM
 static bool extractPcArchive(const QString& archive, const QString& destDir, QString* err)
 {
     if (ArchiveRom::extractAll(archive, destDir, err)) return true;
+#ifdef Q_OS_IOS
+    // No QProcess on iOS — the built-in ArchiveRom extractors are the only option.
+    if (err && err->isEmpty()) *err = QObject::tr("no available extractor could read it");
+    return false;
+#else
     QDir().mkpath(destDir);
     struct Cmd { QString prog; QStringList args; };
     QList<Cmd> cmds;
@@ -5248,6 +5253,7 @@ static bool extractPcArchive(const QString& archive, const QString& destDir, QSt
     }
     if (err) *err = QObject::tr("no available extractor could read it");
     return false;
+#endif
 }
 
 // Fuzzy match a title against a folder / DisplayName (lowercase, alnum-only, containment either way). Guards
@@ -5584,11 +5590,17 @@ void MainWindow::launchPcExe(const QString& exe, const QString& id, const QStrin
     }
     mwLog(QStringLiteral("pcgame: ShellExecuteEx couldn't launch \"%1\" — falling back").arg(QFileInfo(exe).fileName()));
 #endif
+#ifdef Q_OS_IOS
+    // No QProcess on iOS; PC games can't launch here anyway (desktop-only feature).
+    Q_UNUSED(workDir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
+#else
     if (!QProcess::startDetached(exe, QStringList(), workDir))
     {
         mwLog(QStringLiteral("pcgame: startDetached failed for \"%1\" — falling back to shell open").arg(QFileInfo(exe).fileName()));
         QDesktopServices::openUrl(QUrl::fromLocalFile(exe));
     }
+#endif
 }
 
 // The launched game closed almost immediately: tell the user (it usually means missing redistributables or the
