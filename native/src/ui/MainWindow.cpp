@@ -5310,9 +5310,11 @@ void MainWindow::quitConfirmFromStartup()
 {
     // The onboarding choice screen borrows this same no-escape quit-confirm, but its Back must return to the CHOICE
     // screen (not the profile list) and its prompt is Restore-vs-new, not "choose a profile". onboardingDone() is the
-    // reliable discriminator: it's FALSE only on the first-run choice screen (onboardingToFresh sets it true before
-    // the profile picker ever shows), so a decline off the choice screen re-presents the right surface + message.
-    const bool onboarding = !Settings::onboardingDone();
+    // discriminator MUST match showEvent's router guard (onboardingRoute): the choice screen is first-run ONLY, i.e.
+    // no local profiles yet AND onboarding not marked done. An UPGRADE user (existing profiles, onboarding/done never
+    // written -> false) must NEVER see the choice screen — profiles-empty is what makes it genuinely first-run, so a
+    // Back on THEIR startup picker keeps today's create-picker/quit behavior, not the Restore-vs-new prompt.
+    const bool onboarding = !Settings::onboardingDone() && ProfileStore::list().isEmpty();
     const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
         onboarding ? tr("Choose Restore or a new library to continue.")
                    : tr("You need to choose a profile to continue."),
