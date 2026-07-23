@@ -81,10 +81,10 @@ QVector<FavoriteItem> FavoritesStore::list()
 
 static void save(const QVector<FavoriteItem>& items)
 {
-    // The write funnel stamps a timestamp per favourite: a fresh add (ts==0) is stamped now; an already-timed
-    // favourite keeps its stamp across rewrites (add/remove of OTHER items must not bump it). This is the ts
-    // the multi-device merge (T2) uses to pick the newest occurrence of an id across devices.
-    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    // save() is a pure persister: it writes each favourite's ts VERBATIM — no backfill. The stamp is set at
+    // the mutation site (add()), so a rewrite triggered by add/remove of ANOTHER item never bumps an existing
+    // favourite's ts. Legacy favourites written before the ts field keep ts==0 (= oldest), so the multi-device
+    // merge (T2) never lets a pre-sync item's rewrite beat a real deletion tombstone (no resurrection).
     QJsonArray arr;
     for (const FavoriteItem& it : items)
     {
@@ -99,7 +99,7 @@ static void save(const QVector<FavoriteItem>& items)
         if (!it.path.isEmpty()) o.insert(QStringLiteral("path"), it.path);
         if (!it.kind.isEmpty()) o.insert(QStringLiteral("kind"), it.kind);
         if (!it.system.isEmpty()) o.insert(QStringLiteral("system"), it.system);
-        o.insert(QStringLiteral("ts"), static_cast<double>(it.ts > 0 ? it.ts : now));
+        o.insert(QStringLiteral("ts"), static_cast<double>(it.ts));
         arr.append(o);
     }
     store().setValue(favKey(), QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
@@ -112,7 +112,11 @@ void FavoritesStore::add(const FavoriteItem& item)
     QVector<FavoriteItem> items = list();
     for (int i = items.size() - 1; i >= 0; --i)
         if (items[i].itemId == item.itemId) items.remove(i); // de-dup
-    items.prepend(item);                                     // newest first
+    // Stamp at the mutation site: a genuine star is dated NOW (a fresh add re-dates a re-star). save() then
+    // persists this ts verbatim. Callers construct FavoriteItem with the default ts==0; add() is the authority.
+    FavoriteItem stamped = item;
+    stamped.ts = QDateTime::currentSecsSinceEpoch();
+    items.prepend(stamped);                                  // newest first
     save(items);
 }
 

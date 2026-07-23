@@ -191,6 +191,45 @@ int main(int argc, char** argv)
         CHECK(ft.size() == 1 && ft.first().key == QStringLiteral("movie:matrix")); // removal tombstoned the id
     }
 
+    // ---- 6b. Legacy ts==0 is NEVER backfilled (the cross-device resurrection guard) ------------------------
+    // save() persists ts verbatim; the stamp is set at add(), not on every rewrite. A pre-upgrade favourite
+    // (no ts field) must stay ts==0 (= oldest) through unrelated saves, so its rewrite can never out-date a
+    // real deletion tombstone from another device and resurrect a deleted favourite.
+    {
+        useProfile(QStringLiteral("cmLegacy"));
+        // Inject a pre-upgrade favourite with NO ts field straight into the ini.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("favorites/cmLegacy/items"),
+                QStringLiteral("[{\"addonId\":\"a\",\"itemId\":\"legacy:F\",\"title\":\"F\",\"type\":\"movie\"}]"));
+            raw.sync();
+        }
+        {
+            const QVector<FavoriteItem> l = FavoritesStore::list();
+            CHECK(l.size() == 1 && l.first().ts == 0);          // legacy reads back as ts==0 (oldest)
+        }
+        // A save triggered by ADDING another favourite must not backfill the legacy item's ts.
+        FavoriteItem g; g.addonId = QStringLiteral("a"); g.itemId = QStringLiteral("new:G");
+        g.title = QStringLiteral("G"); g.type = QStringLiteral("movie");
+        FavoritesStore::add(g);
+        qint64 legacyTs = -1, gTs = -1;
+        for (const FavoriteItem& f : FavoritesStore::list())
+        {
+            if (f.itemId == QStringLiteral("legacy:F")) legacyTs = f.ts;
+            if (f.itemId == QStringLiteral("new:G"))     gTs = f.ts;
+        }
+        CHECK(legacyTs == 0);                                   // NOT backfilled by the unrelated save
+        CHECK(gTs > 0);                                         // the genuine add() stamped now
+        // Resurrection sequence: un-star the legacy F -> its tombstone (T1=now) is strictly newer than F's
+        // ts (0), so a newest-wins-vs-tombstone merge resolves DELETED — F cannot resurrect from its rewrite.
+        FavoritesStore::remove(QStringLiteral("legacy:F"));
+        qint64 tomb = -1;
+        for (const Tombstones::Entry& e : Tombstones::all(QStringLiteral("favorites/cmLegacy")))
+            if (e.key == QStringLiteral("legacy:F")) tomb = e.ts;
+        CHECK(tomb > 0);
+        CHECK(tomb > legacyTs);                                 // tombstone beats ts==0 -> stays deleted
+    }
+
     // ---- 7. PlaylistStore: every mutator stamps updatedAt; remove tombstones the id -------------------------
     {
         useProfile(QStringLiteral("cmPl"));
