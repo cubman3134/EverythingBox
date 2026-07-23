@@ -243,10 +243,16 @@ void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
         QNetworkReply* reply = nam_->get(req);
         connect(reply, &QNetworkReply::finished, this, [this, reply, cb] {
             reply->deleteLater();
+            // A network error on the folder list-GET must NOT be read as "no folder" — that would POST a DUPLICATE
+            // empty folder, and a subsequent findFile in that fresh-empty folder reads listReached=true/hasRemote=false
+            // ("proven-empty") -> Seed -> a later pushLocal (resolving the ORIGINAL folder) overwrites the real backup.
+            // Return no folder id (folderId.isEmpty() -> st.reached=false -> Retry): a query failure can't launder into
+            // a Seed, and no duplicate folder is ever minted on a transient error (fixes it for ALL sync paths).
+            if (reply->error() != QNetworkReply::NoError) { cb(QString()); return; }
             const QJsonArray files = QJsonDocument::fromJson(reply->readAll()).object()
                                          .value(QStringLiteral("files")).toArray();
             if (!files.isEmpty()) { cb(files.first().toObject().value(QStringLiteral("id")).toString()); return; }
-            // Not found -> create it.
+            // Not found (query succeeded, folder genuinely absent) -> create it.
             QNetworkRequest cr((QUrl(QString::fromLatin1(kDrive) + QStringLiteral("/files"))));
             cr.setRawHeader("Authorization", "Bearer " + accessToken_.toUtf8());
             cr.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
@@ -628,7 +634,10 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
         if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
         const QByteArray bundle = buildBundle();
         const QByteArray hash = stateHash();
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](bool, const QString& id, const QString&, const QString&) {
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](bool listOk, const QString& id, const QString&, const QString&) {
+            // A failed lookup returns an empty id; uploading with existingId="" would POST a DUPLICATE bundle instead
+            // of PATCHing the real one. Bail so the caller retries rather than fragmenting the backup into two files.
+            if (!listOk) { cb(false, tr("Couldn't reach Drive.")); return; }
             uploadFile(folderId, id, QString::fromLatin1(kBundleName), QStringLiteral("application/zip"), bundle,
                        QString::fromUtf8(hash),
                        [this, folderId, hash, cb](const QString& newId) {

@@ -9,7 +9,9 @@ consent, which also re-mints the currently-expired refresh token — the agent c
 Android "Restore" correctly declines pending the separate OAuth follow-up (a documented non-goal). The
 T2 findFile data-safety window (a Drive file-query network failure being read as "empty cloud" and
 seeding fresh over the real backup) is CLOSED in T3 (`Status::listReached` + pure `restorePullStage`,
-pinned in `probe_onboarding`).
+pinned in `probe_onboarding`) — closed at BOTH transport layers: `findFile`'s file-query AND
+`ensureFolder`'s folder list-GET now carry the same `reply->error()` guard, so a transient error mints no
+duplicate empty folder and can never launder into a "proven-empty" Seed on any sync path.
 **Origin:** User request — "change first startup to set up your Google Drive info instead
 of creating a profile, so you can potentially use your profiles from Google Drive."
 

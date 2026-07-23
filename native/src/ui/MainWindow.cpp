@@ -137,11 +137,15 @@
 
 #include "miniz.h"
 
+// PanelRow is a pure Qt-Core POD (no QML/Quick deps) and the SHARED row descriptor for both the themed panel
+// host AND the classic showPanel fallback (e.g. openStats), so its header must be visible in a no-QML build too —
+// keep this include OUTSIDE the MMV_HAVE_QML guard or the classic path fails to compile (pre-existing, fixed here).
+#include "../theme2/PanelModel.h"
+
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ReaderChromeHost.h"
 #include "../theme2/ThemedPanelHost.h"
-#include "../theme2/PanelModel.h"
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
@@ -4961,7 +4965,11 @@ void MainWindow::onSwitchProfile()
     }, [this] { openHome(); });
 }
 
-#ifdef MMV_HAVE_QML
+// NOTE (non-QML link safety): onboardingChoiceTitle / presentOnboardingChoice / onboardingToFresh below are
+// deliberately OUTSIDE the MMV_HAVE_QML guard (which resumes before onboardingChoiceIsTop) — showEvent() calls
+// presentOnboardingChoice() UNCONDITIONALLY, so a Qt-without-qtdeclarative build must still link them. Each one's
+// own inner #ifdef MMV_HAVE_QML supplies the classic (no panel host) fallback, so both worlds build.
+
 // ---- Themed Profiles picker (B2 Task 5) --------------------------------------------------------------------
 // The classic ProfileDialog (a QStackedWidget: list page + a name/icon picker page) becomes, in themed mode, a
 // ThemedPanelHost presentation: the list is the root panel (Action row per profile + "Create New Profile"); the
@@ -5032,6 +5040,7 @@ void MainWindow::onboardingToFresh()
     promptStartupProfile();
 }
 
+#ifdef MMV_HAVE_QML
 // "The onboarding choice/flow is still the active surface" — the restore flow's equivalent of themedPanelIsTop's
 // late-async gate (openCloudSync). While Restore is signing in / pulling, the choice screen panel stays presented
 // (only a notify overlays it), so its title being the live top panel means the user hasn't quit or navigated away.
@@ -5299,10 +5308,17 @@ void MainWindow::chooseProfile(const QString& id)
 // (the "you must pick a profile" contract), or re-present the list if the user chooses to keep choosing.
 void MainWindow::quitConfirmFromStartup()
 {
+    // The onboarding choice screen borrows this same no-escape quit-confirm, but its Back must return to the CHOICE
+    // screen (not the profile list) and its prompt is Restore-vs-new, not "choose a profile". onboardingDone() is the
+    // reliable discriminator: it's FALSE only on the first-run choice screen (onboardingToFresh sets it true before
+    // the profile picker ever shows), so a decline off the choice screen re-presents the right surface + message.
+    const bool onboarding = !Settings::onboardingDone();
     const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
-        tr("You need to choose a profile to continue."),
-        { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+        onboarding ? tr("Choose Restore or a new library to continue.")
+                   : tr("You need to choose a profile to continue."),
+        { onboarding ? tr("Go back") : tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
     if (choice == 1) { mwLog(QStringLiteral("quit: startup-picker quit-confirm")); QApplication::quit(); return; }
+    if (onboarding) { presentOnboardingChoice(); return; }       // re-present the choice screen (Back popped its level)
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
 #endif // MMV_HAVE_QML

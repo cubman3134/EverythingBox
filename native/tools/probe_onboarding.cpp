@@ -85,7 +85,9 @@ int main()
     //     Reached AND query succeeded AND a bundle exists -> download + apply it.
     CHECK(restorePullStage(/*reached*/ true, /*listReached*/ true,  /*hasRemote*/ true)  == RestorePullStage::HasBundle);
 
-    //     Folder unreachable at all -> Retry (never a seed), independent of the downstream flags.
+    //     Folder unreachable at all -> Retry (never a seed), independent of the downstream flags. reached==false is
+    //     precisely how a FAILED ensureFolder list-GET surfaces (its error guard returns an empty folder id, and a
+    //     transient error there no longer mints a duplicate empty folder that could later launder into a Seed).
     CHECK(restorePullStage(/*reached*/ false, /*listReached*/ false, /*hasRemote*/ false) == RestorePullStage::Retry);
     CHECK(restorePullStage(/*reached*/ false, /*listReached*/ true,  /*hasRemote*/ true)  == RestorePullStage::Retry);
 
