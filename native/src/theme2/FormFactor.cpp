@@ -52,6 +52,8 @@ FormFactor::Mode FormFactor::resolveAuto()
         }
     }
     return Mode::Mobile; // touchscreen phone/tablet (or context not yet reachable) -> Mobile
+#elif defined(Q_OS_IOS)
+    return Mode::Mobile; // iPhone/iPad are touch-first, same as Android phones/tablets
 #else
     return Mode::Desktop;
 #endif

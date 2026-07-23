@@ -2,16 +2,27 @@
 // (MKV/HEVC/AV1/AC3/DTS/...), streams large files, hardware-decoded - in a native window, no engine bridge.
 // Structure follows the canonical libmpv `qt_opengl` example.
 #pragma once
-#include <QOpenGLWidget>
 #include <QString>
 #include <QVector>
 #include <mpv/client.h>
+#ifdef Q_OS_IOS
+// iOS: OpenGL ES context creation fails in the simulator (and EAGL is deprecated on device), so render
+// through mpv's SOFTWARE render API into a QImage instead — same approach as theme2/MpvPreview. The
+// public API is identical; only the frame path differs.
+#include <QWidget>
+#include <QImage>
+#include <mpv/render.h>
+using MpvWidgetBase = QWidget;
+#else
+#include <QOpenGLWidget>
 #include <mpv/render_gl.h>
+using MpvWidgetBase = QOpenGLWidget;
+#endif
 
 class QLabel;
 class QTimer;
 
-class MpvWidget : public QOpenGLWidget
+class MpvWidget : public MpvWidgetBase
 {
     Q_OBJECT
 public:
@@ -59,8 +70,12 @@ signals:
     void fileLoaded(bool hasUsableSubtitle, bool isVideo);
 
 protected:
+#ifdef Q_OS_IOS
+    void paintEvent(QPaintEvent*) override;
+#else
     void initializeGL() override;
     void paintGL() override;
+#endif
     void resizeEvent(QResizeEvent*) override;
 
 private slots:
@@ -71,12 +86,18 @@ private slots:
 private:
     static void onMpvRedraw(void* ctx);                       // render-update callback (any thread)
     static void onMpvWakeup(void* ctx);                       // event wakeup callback (any thread)
+#ifndef Q_OS_IOS
     static void* getProcAddress(void* ctx, const char* name); // GL loader for mpv
+#endif
     void handleEvent(mpv_event* event);
     void logVideoInfo(); // append the loaded video's codec/resolution/pixfmt/hwdec to the debug log
 
     mpv_handle* mpv = nullptr;
-    mpv_render_context* mpv_gl = nullptr;
+    mpv_render_context* mpv_gl = nullptr; // GL render context (desktop) / SW render context (iOS)
+#ifdef Q_OS_IOS
+    void renderSoftwareFrame(); // drain a ready frame into frame_ and schedule a repaint
+    QImage frame_;
+#endif
 
     // "Now playing" overlay shown for audio-only files (no video track) so they aren't a black screen.
     QLabel* nowPlaying_ = nullptr;
