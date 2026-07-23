@@ -1,9 +1,11 @@
 #include "ItemMarks.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "Tombstones.h"
 
 #include <QSettings>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
@@ -85,6 +87,7 @@ Marks marksFromJson(const QByteArray& json)
         const QString t = v.toString();
         if (!t.isEmpty()) m.tags.push_back(t);
     }
+    m.updatedAt  = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
     return m;
 }
 
@@ -96,6 +99,7 @@ QByteArray marksToJson(const Marks& m)
     QJsonArray arr;
     for (const QString& t : m.tags) arr.append(t);
     o.insert(QStringLiteral("tags"), arr);
+    o.insert(QStringLiteral("updatedAt"), static_cast<double>(m.updatedAt));
     return QJsonDocument(o).toJson(QJsonDocument::Compact);
 }
 
@@ -170,11 +174,17 @@ Marks loadItem(const QString& hash)
     return marksFromJson(store().value(itemKey(hash)).toString().toUtf8());
 }
 
-// Persist one item's marks: an all-default blob is removed (never leave junk), else written. Invalidates.
-void saveItem(const QString& hash, const Marks& m)
+// Persist one item's marks: an all-default blob is removed (never leave junk), else written with a fresh
+// updatedAt stamp (the merge funnel — every content write bumps the item's timestamp). isDefault() ignores
+// updatedAt, so a marks-cleared item is still removed rather than left as a timestamp-only husk.
+void saveItem(const QString& hash, Marks m)
 {
-    if (isDefault(m)) store().remove(itemKey(hash));
-    else              store().setValue(itemKey(hash), QString::fromUtf8(marksToJson(m)));
+    if (isDefault(m)) { store().remove(itemKey(hash)); }
+    else
+    {
+        m.updatedAt = QDateTime::currentSecsSinceEpoch();
+        store().setValue(itemKey(hash), QString::fromUtf8(marksToJson(m)));
+    }
     store().sync();
     ItemMarks::invalidate();
 }
@@ -258,10 +268,20 @@ void ItemMarks::removeTagEverywhere(const QString& tag)
         if (m.tags.removeAll(tag) > 0)
         {
             if (isDefault(m)) s.remove(itemKey(h));
-            else              s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
+            else
+            {
+                m.updatedAt = QDateTime::currentSecsSinceEpoch(); // this direct-rewrite path is a write funnel too
+                s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
+            }
         }
     }
     s.sync();
+
+    // Tag deletion is a removal from the profile's tag VOCABULARY — tombstone the tag NAME in vocab space so
+    // the merge doesn't resurrect the retired tag from another device. (Hiding/unhiding an item is NOT a
+    // delete and records no tombstone.)
+    Tombstones::record(profileGroup() + QStringLiteral("/tagVocab"), tag);
+
     invalidate();
 }
 

@@ -42,6 +42,7 @@ namespace ItemMarks
         bool        hidden = false;
         Completion  completion = Completion::None;
         QStringList tags;
+        qint64      updatedAt = 0;  // epoch seconds of the last write (multi-device merge: newest-wins per item)
     };
 
     Marks get(const QString& key);                       // cached; empty/unknown key -> default {}

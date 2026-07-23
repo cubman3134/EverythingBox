@@ -34,6 +34,7 @@ struct Playlist
     QString legacyKey;    // pre-migration catalogKey ("addonId|catalogId|catalogType"), preserved for provenance
     QString name;
     QVector<PlaylistEntry> items;
+    qint64  updatedAt = 0; // epoch seconds of the last mutation (multi-device merge: whole-object newest-wins)
 };
 
 namespace PlaylistStore

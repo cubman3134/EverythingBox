@@ -152,6 +152,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
+        src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # per-profile media/reading accrual store (stats T1)
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
         src/core/PcGameStore.cpp  src/core/PcGameStore.h
@@ -270,6 +271,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # under offscreen QPA. Needs ProfileStore.cpp (marks are namespaced by the active profile id).
     add_executable(probe_marks tools/probe_marks.cpp
         src/core/ItemMarks.cpp src/core/ItemMarks.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # removeTagEverywhere tombstones the retired tag name
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_marks PRIVATE src src/core)
     target_link_libraries(probe_marks PRIVATE Qt6::Core)
@@ -291,11 +293,33 @@ if(MYMEDIAVAULT_BUILD_APP)
     # (playlists are namespaced by the active profile). MediaCategories.h is header-only (no source to add).
     add_executable(probe_playlists tools/probe_playlists.cpp
         src/core/PlaylistStore.cpp src/core/PlaylistStore.h
+        src/core/Tombstones.cpp src/core/Tombstones.h  # PlaylistStore::remove tombstones the deleted playlist id
         src/core/MediaCategories.h
         src/core/ShuffleBag.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_playlists PRIVATE src src/core)
     target_link_libraries(probe_playlists PRIVATE Qt6::Core)
+
+    # Multi-device-sync foundation (mdsync T1): device identity (Settings::deviceId), the per-store write
+    # timestamps (ItemMarks updatedAt / FavoritesStore ts / PlaylistStore updatedAt), and the deletion
+    # tombstones (core/Tombstones) that the generalized CloudMerge pass (T2) reads. QtCore-only (QSettings +
+    # JSON over the shared mymediavault.ini) so it links lean and runs under offscreen QPA. Pulls the real
+    # stores + their deps: Settings (deviceId) needs FormFactor; FavoritesStore's one-time list() migration
+    # references RecentStore/DownloadsStore; every store is namespaced by ProfileStore.
+    add_executable(probe_cloudmerge tools/probe_cloudmerge.cpp
+        src/core/Settings.cpp        src/core/Settings.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h
+        src/core/ItemMarks.cpp       src/core/ItemMarks.h
+        src/core/FavoritesStore.cpp  src/core/FavoritesStore.h
+        src/core/PlaylistStore.cpp   src/core/PlaylistStore.h
+        src/core/MediaCategories.h
+        src/core/ShuffleBag.h
+        src/core/RecentStore.cpp     src/core/RecentStore.h
+        src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
+        src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/ProfileStore.cpp    src/core/ProfileStore.h)
+    target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire

@@ -24,6 +24,7 @@ struct FavoriteItem
     QString path;          // absolute file path to re-open
     QString kind;          // "game" | "pcgame" | … (openRecent routing kind)
     QString system;        // games: the SystemCatalog id (or "pc"), so favourites can be shown per-console
+    qint64  ts = 0;        // epoch seconds this favourite was added/last written (multi-device merge: newest-ts wins)
 };
 
 namespace FavoritesStore

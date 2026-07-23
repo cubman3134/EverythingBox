@@ -2,8 +2,10 @@
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "MediaCategories.h"
+#include "Tombstones.h"
 
 #include <QSettings>
+#include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -34,6 +36,14 @@ static QString schemaKey()
     const QString id = ProfileStore::currentId();
     return QStringLiteral("playlists/") + (id.isEmpty() ? QStringLiteral("default") : id)
            + QStringLiteral("/schema");
+}
+
+// Tombstone store namespace for THIS profile's playlists (mirrors plKey()'s per-profile shape). Keyed by
+// playlist id — see Tombstones.h.
+static QString plTombstoneStore()
+{
+    const QString id = ProfileStore::currentId();
+    return QStringLiteral("playlists/") + (id.isEmpty() ? QStringLiteral("default") : id);
 }
 
 static PlaylistEntry entryFromJson(const QJsonObject& o)
@@ -83,6 +93,7 @@ static QVector<Playlist> loadAllRaw()
         p.legacyKey   = o.value(QStringLiteral("legacyKey")).toString();
         if (p.legacyKey.isEmpty()) p.legacyKey = o.value(QStringLiteral("catalogKey")).toString(); // v1 field
         p.name        = o.value(QStringLiteral("name")).toString();
+        p.updatedAt   = static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble());
         for (const QJsonValue& iv : o.value(QStringLiteral("items")).toArray())
             if (iv.isObject()) p.items.push_back(entryFromJson(iv.toObject()));
         if (!p.id.isEmpty()) out.push_back(p);
@@ -100,6 +111,7 @@ static void saveAll(const QVector<Playlist>& all)
         o.insert(QStringLiteral("categoryKey"), p.categoryKey);
         if (!p.legacyKey.isEmpty()) o.insert(QStringLiteral("legacyKey"), p.legacyKey); // provenance, if any
         o.insert(QStringLiteral("name"), p.name);
+        o.insert(QStringLiteral("updatedAt"), static_cast<double>(p.updatedAt));
         QJsonArray items;
         for (const PlaylistEntry& e : p.items) items.append(entryToJson(e));
         o.insert(QStringLiteral("items"), items);
@@ -153,6 +165,11 @@ bool PlaylistStore::get(const QString& id, Playlist& out)
     return false;
 }
 
+// Every mutator stamps the affected playlist's updatedAt (the merge clock for whole-object newest-wins) and
+// persists through the single setValue funnel (saveAll -> plKey). remove() has no surviving object to stamp,
+// so it records a tombstone instead.
+static qint64 nowSecs() { return QDateTime::currentSecsSinceEpoch(); }
+
 QString PlaylistStore::create(const QString& categoryKey, const QString& name)
 {
     QVector<Playlist> all = loadAll();
@@ -160,6 +177,7 @@ QString PlaylistStore::create(const QString& categoryKey, const QString& name)
     p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     p.categoryKey = categoryKey;
     p.name = name;
+    p.updatedAt = nowSecs();
     all.push_back(p);
     saveAll(all);
     return p.id;
@@ -168,15 +186,18 @@ QString PlaylistStore::create(const QString& categoryKey, const QString& name)
 void PlaylistStore::rename(const QString& id, const QString& name)
 {
     QVector<Playlist> all = loadAll();
-    for (Playlist& p : all) if (p.id == id) { p.name = name; break; }
+    for (Playlist& p : all) if (p.id == id) { p.name = name; p.updatedAt = nowSecs(); break; }
     saveAll(all);
 }
 
 void PlaylistStore::remove(const QString& id)
 {
+    if (id.isEmpty()) return;
     QVector<Playlist> all = loadAll();
     for (int i = 0; i < all.size(); ++i) if (all[i].id == id) { all.remove(i); break; }
     saveAll(all);
+    // Tombstone the deleted playlist so the merge (T2) doesn't resurrect it from a device that still has it.
+    Tombstones::record(plTombstoneStore(), id);
 }
 
 void PlaylistStore::addItem(const QString& id, const PlaylistEntry& item)
@@ -187,6 +208,7 @@ void PlaylistStore::addItem(const QString& id, const PlaylistEntry& item)
         {
             for (const PlaylistEntry& e : p.items) if (e.itemId == item.itemId) return; // already in it
             p.items.push_back(item);
+            p.updatedAt = nowSecs();
             break;
         }
     saveAll(all);
@@ -199,7 +221,7 @@ void PlaylistStore::removeItem(const QString& id, const QString& itemId)
         if (p.id == id)
         {
             for (int i = 0; i < p.items.size(); ++i)
-                if (p.items[i].itemId == itemId) { p.items.remove(i); break; }
+                if (p.items[i].itemId == itemId) { p.items.remove(i); p.updatedAt = nowSecs(); break; }
             break;
         }
     saveAll(all);
