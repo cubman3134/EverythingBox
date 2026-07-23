@@ -453,8 +453,12 @@ jobs:
         if: ${{ env.ANDROID_KEYSTORE_B64 != '' }}
         run: |
           echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mmv-release.keystore"
+          # QT_ANDROID_SIGN_APK is a *CMake configure* variable (not an env var) — passed to qt-cmake below via
+          # $QT_ANDROID_SIGN_CMAKE so the androiddeployqt build rule is generated with --sign. The keystore
+          # PATH/ALIAS/STORE_PASS/KEY_PASS are the env vars androiddeployqt reads at build time. Passwords come
+          # from secrets (auto-masked) and are alphanumeric, so the KEY=VALUE env-file lines are safe.
           {
-            echo "QT_ANDROID_SIGN_APK=1"
+            echo "QT_ANDROID_SIGN_CMAKE=-DQT_ANDROID_SIGN_APK=ON"
             echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/mmv-release.keystore"
             echo "QT_ANDROID_KEYSTORE_ALIAS=$ANDROID_KEY_ALIAS"
             echo "QT_ANDROID_KEYSTORE_STORE_PASS=$ANDROID_KEYSTORE_PASS"
@@ -470,8 +474,11 @@ jobs:
           chmod +x "$QT_ROOT_DIR/bin/"* 2>/dev/null || true
           # CMAKE_BUILD_TYPE=Release makes androiddeployqt build a *release* APK (the prerequisite for
           # QT_ANDROID_SIGN_APK to sign it; a Debug/unset build would emit a debug-signed APK instead).
+          # $QT_ANDROID_SIGN_CMAKE is '-DQT_ANDROID_SIGN_APK=ON' when the signing step ran (secrets present),
+          # and empty (expands to no argument) on forks/PRs without the keystore secret -> unsigned release build.
           "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \
             -DCMAKE_BUILD_TYPE=Release \
+            $QT_ANDROID_SIGN_CMAKE \
             -DQT_HOST_PATH="$QT_HOST_ROOT" \
             -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
             -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
