@@ -280,6 +280,11 @@ jobs:
     env:
       QT_ANDROID_ARCH: ${{ matrix.qt_arch }}
       NDK_VERSION: '26.1.10909125'   # Qt 6.8's recommended NDK (r26b)
+      # Release-signing secrets (empty on forks/PRs -> build stays unsigned). Mapped here so step-level
+      # `if` guards can test presence without referencing the secrets context directly.
+      ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+      ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
     steps:
       - uses: actions/checkout@v4
 
@@ -438,13 +443,35 @@ jobs:
           echo "--- bundling OpenSSL for $JNI_ABI:"; ls -la "$SSL_DIR"
           echo "OPENSSL_ANDROID_LIBS_DIR=$(realpath "$SSL_DIR")" >> "$GITHUB_ENV"
 
+      # Release signing (Qt 6.8 androiddeployqt env route): decode the persistent MyMediaVault release keystore
+      # to the runner and expose QT_ANDROID_SIGN_APK + keystore path/alias/store+key pass via $GITHUB_ENV, so the
+      # `apk` build target signs the release APK with the release key. Guarded on the secret being present — forks
+      # and PRs from forks (no secrets) skip this and still build an *unsigned* release APK. The passwords come
+      # from secrets, so GitHub auto-masks them in logs; the password is alphanumeric (no `=`/newline) so the
+      # KEY=VALUE env-file lines are safe.
+      - name: Set up release signing
+        if: ${{ env.ANDROID_KEYSTORE_B64 != '' }}
+        run: |
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mmv-release.keystore"
+          {
+            echo "QT_ANDROID_SIGN_APK=1"
+            echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/mmv-release.keystore"
+            echo "QT_ANDROID_KEYSTORE_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "QT_ANDROID_KEYSTORE_STORE_PASS=$ANDROID_KEYSTORE_PASS"
+            echo "QT_ANDROID_KEYSTORE_KEY_PASS=$ANDROID_KEYSTORE_PASS"
+          } >> "$GITHUB_ENV"
+          echo "Release signing enabled (alias: $ANDROID_KEY_ALIAS)."
+
       - name: Configure (qt-cmake)
         run: |
           # A freshly aqt-extracted Android kit (no prior cache — e.g. the armv7 ABI) can land qt-cmake
           # without its execute bit, so the wrapper dies with "Permission denied" (exit 126). Cached kits
           # keep perms from the tarball, so this is a no-op for them. Restore +x before invoking.
           chmod +x "$QT_ROOT_DIR/bin/"* 2>/dev/null || true
+          # CMAKE_BUILD_TYPE=Release makes androiddeployqt build a *release* APK (the prerequisite for
+          # QT_ANDROID_SIGN_APK to sign it; a Debug/unset build would emit a debug-signed APK instead).
           "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-android \
+            -DCMAKE_BUILD_TYPE=Release \
             -DQT_HOST_PATH="$QT_HOST_ROOT" \
             -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
             -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
@@ -461,10 +488,13 @@ jobs:
         env:
           ABI_NAME: ${{ matrix.name }}
         run: |
-          apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | head -n1)
+          # Prefer the SIGNED release APK; then a non-'unsigned' release/debug APK; then anything.
+          apk=$(find build-android -name '*-signed.apk' | head -n1)
+          [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | grep -vi 'unsigned' | head -n1)
           [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | head -n1)
           [ -n "$apk" ] || { echo "No APK produced"; find build-android -name '*.apk' -o -name '*.aab'; exit 1; }
           cp "$apk" "MyMediaVault-android-${ABI_NAME}.apk"
+          echo "Collected APK: $apk"
           ls -la "MyMediaVault-android-${ABI_NAME}.apk"
           # Sanity: the staged assets and the qtdeclarative/mpv .so's must actually be inside the APK.
           echo "=== APK assets/mmv (expect themes2 + addons) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'assets/mmv' | head -20 || true
