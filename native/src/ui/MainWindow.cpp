@@ -5086,8 +5086,10 @@ void MainWindow::beginOnboardingRestore()
 }
 
 // Signed in — run the shipped pull chain (the cloudPullAtStartup checkStatus+applyRemote chain, but async on the
-// GUI thread rather than a startup QEventLoop), then route. Distinguishes the empty cloud (reached, no bundle ->
-// this device seeds it: Fresh) from a network/pull failure after auth (couldn't reach Drive -> ChoiceScreen). The
+// GUI thread rather than a startup QEventLoop), then route. Distinguishes the PROVEN-empty cloud (reached AND the
+// bundle-query succeeded with no file -> this device seeds it: Fresh) from a network/pull failure after auth
+// (folder unreachable, the file-query itself errored, or applyRemote failed -> couldn't reach Drive -> ChoiceScreen,
+// never a fresh seed — a query failure must not be read as "empty" and clobber a real backup on exit-push). The
 // bundle carries the synced profiles/list, so ProfileStore::list() reflects the restored profiles once applyRemote
 // has applied it; the small per-item progress doc (marks/recents/resume) merges alongside via pullAndMergeProgress.
 void MainWindow::onboardingRestorePull()
@@ -5095,19 +5097,26 @@ void MainWindow::onboardingRestorePull()
     notify(tr("Restoring your library from Google Drive…"));
     cloud_->checkStatus([this](const CloudSync::Status& st) {
         if (!onboardingChoiceIsTop()) return;                 // navigated away mid-pull — drop
-        if (!st.reached) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
-        if (!st.hasRemote)                                    // reached Drive, but nothing pushed yet -> empty cloud
+        switch (mmv::restorePullStage(st.reached, st.listReached, st.hasRemote))
         {
+        case mmv::RestorePullStage::Retry:                    // unreachable OR the file-query failed: UNPROVEN empty.
+            // Route to the choice screen (token kept, done stays FALSE) — never seed fresh over a backup we merely
+            // couldn't read. This is the data-safety fix: a query failure must not be mistaken for an empty cloud.
+            finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false);
+            return;
+        case mmv::RestorePullStage::Seed:                     // reached AND query succeeded, no bundle -> proven-empty
             pullAndMergeProgress();                           // (no bundle, but any progress doc merges; no-ops if none)
             finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
             return;
+        case mmv::RestorePullStage::HasBundle:                // reached AND query succeeded AND a bundle exists -> apply
+            cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
+                if (!onboardingChoiceIsTop()) return;         // navigated away mid-apply — drop
+                if (!ok) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
+                pullAndMergeProgress();                       // merge the per-item stores the bundle doesn't carry
+                finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
+            });
+            return;
         }
-        cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
-            if (!onboardingChoiceIsTop()) return;             // navigated away mid-apply — drop
-            if (!ok) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
-            pullAndMergeProgress();                           // merge the per-item stores the bundle doesn't carry
-            finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
-        });
     });
 }
 

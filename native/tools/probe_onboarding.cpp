@@ -15,6 +15,8 @@
 
 using mmv::OnboardingRoute;
 using mmv::onboardingRoute;
+using mmv::RestorePullStage;
+using mmv::restorePullStage;
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -65,6 +67,36 @@ int main()
     CHECK(onboardingRoute(/*hasLocal*/true, false, false, false, true) == OnboardingRoute::Picker);
     CHECK(onboardingRoute(/*hasLocal*/true, true,  true,  false, true) == OnboardingRoute::Picker);
     CHECK(onboardingRoute(/*hasLocal*/true, true,  false, false, false) == OnboardingRoute::Picker);
+
+    // 6b. T3 DATA-SAFETY: the signed-in restore's pull-stage classifier over CloudSync::Status'
+    //     (reached, listReached, hasRemote). The findFile network-error window is closed here — a FAILED
+    //     bundle file-query (listReached==false) must be treated as UNPROVEN-empty and route to Retry (the
+    //     choice screen), NEVER to Seed. A Seed would let the exit-push clobber the user's real backup with a
+    //     fresh library. This is the exact decision onboardingRestorePull runs, pinned so it can't drift.
+
+    //     The critical case: reached, but the file-query itself errored (hasRemote is therefore false but UNPROVEN).
+    //     This must NOT seed a fresh library — it routes to Retry (the choice screen).
+    CHECK(restorePullStage(/*reached*/ true, /*listReached*/ false, /*hasRemote*/ false) == RestorePullStage::Retry);
+    CHECK(restorePullStage(/*reached*/ true, /*listReached*/ false, /*hasRemote*/ false) != RestorePullStage::Seed);
+
+    //     A PROVEN-empty cloud (query succeeded, no bundle) is the ONLY thing that seeds fresh.
+    CHECK(restorePullStage(/*reached*/ true, /*listReached*/ true,  /*hasRemote*/ false) == RestorePullStage::Seed);
+
+    //     Reached AND query succeeded AND a bundle exists -> download + apply it.
+    CHECK(restorePullStage(/*reached*/ true, /*listReached*/ true,  /*hasRemote*/ true)  == RestorePullStage::HasBundle);
+
+    //     Folder unreachable at all -> Retry (never a seed), independent of the downstream flags.
+    CHECK(restorePullStage(/*reached*/ false, /*listReached*/ false, /*hasRemote*/ false) == RestorePullStage::Retry);
+    CHECK(restorePullStage(/*reached*/ false, /*listReached*/ true,  /*hasRemote*/ true)  == RestorePullStage::Retry);
+
+    //     Exhaustive: across every (reached, listReached, hasRemote), Seed occurs iff all-proven-and-empty, so a
+    //     query failure (listReached==false) can NEVER reach Seed — the property the whole T3 fix defends.
+    for (int m = 0; m < 8; ++m) {
+        const bool reached = m & 4, listReached = m & 2, hasRemote = m & 1;
+        const RestorePullStage stage = restorePullStage(reached, listReached, hasRemote);
+        CHECK((stage == RestorePullStage::Seed) == (reached && listReached && !hasRemote));
+        if (!listReached) CHECK(stage == RestorePullStage::Retry); // no proof of emptiness -> never Seed/HasBundle
+    }
 
     // 7. signInAvailable(): true on desktop, false under Q_OS_ANDROID (the codebase platform-gate idiom). The
     //    compile-guard branch is exercised by the pure param above; here we pin the live static matches the

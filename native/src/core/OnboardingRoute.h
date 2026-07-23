@@ -38,4 +38,23 @@ inline OnboardingRoute onboardingRoute(bool hasLocalProfiles, bool restorePicked
     return remoteHasProfiles ? OnboardingRoute::Picker : OnboardingRoute::Fresh;
 }
 
+// The signed-in restore's pull-stage decision (onboarding/drive-restore T3). Given a CloudSync::Status' three
+// transport flags, decide how the restore proceeds. The critical DATA-SAFETY property: a FAILED bundle file-query
+// (listReached==false) is NOT the same as a proven-empty cloud — it must route to Retry (the choice screen), never
+// to Seed. Reading a query failure as "empty" would let onboardingToFresh() seed a fresh library whose exit-push
+// then PATCHes over the user's real backup. Pure + header-only so probe_onboarding pins it and onboardingRestorePull
+// can never drift from it (the same reason onboardingRoute above is pure).
+//
+//   Retry     — folder unreachable, OR the bundle file-query itself errored: "empty" is UNPROVEN -> ChoiceScreen
+//               (token kept, onboarding/done stays FALSE, NO seed). Also the sink for a later applyRemote failure.
+//   Seed      — reached AND the query SUCCEEDED with no bundle -> proven-empty cloud -> this device seeds Fresh.
+//   HasBundle — reached AND the query succeeded AND a bundle exists -> download + apply it (then pick/seed by profiles).
+enum class RestorePullStage { Retry, Seed, HasBundle };
+
+inline RestorePullStage restorePullStage(bool reached, bool listReached, bool hasRemote)
+{
+    if (!reached || !listReached) return RestorePullStage::Retry; // couldn't read the cloud: never seed over a backup
+    return hasRemote ? RestorePullStage::HasBundle : RestorePullStage::Seed; // proven state (query had no error)
+}
+
 } // namespace mmv

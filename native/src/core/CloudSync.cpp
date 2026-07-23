@@ -262,10 +262,10 @@ void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
 }
 
 void CloudSync::findFile(const QString& folderId, const QString& name,
-                         std::function<void(const QString&, const QString&, const QString&)> cb)
+                         std::function<void(bool, const QString&, const QString&, const QString&)> cb)
 {
     withAccessToken([this, folderId, name, cb](bool ok) {
-        if (!ok) { cb(QString(), QString(), QString()); return; }
+        if (!ok) { cb(false, QString(), QString(), QString()); return; } // token/auth failure — Drive not reached
         QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files"));
         QUrlQuery q;
         q.addQueryItem(QStringLiteral("q"), QStringLiteral("name='%1' and '%2' in parents and trashed=false")
@@ -279,13 +279,16 @@ void CloudSync::findFile(const QString& folderId, const QString& name,
         QNetworkReply* reply = nam_->get(req);
         connect(reply, &QNetworkReply::finished, this, [reply, cb] {
             reply->deleteLater();
+            // A network error here yields no file list. Surface it (listOk=false) so callers never mistake
+            // "couldn't reach Drive" for "the cloud is empty" — the latter would let a restore clobber the backup.
+            if (reply->error() != QNetworkReply::NoError) { cb(false, QString(), QString(), QString()); return; }
             const QJsonArray files = QJsonDocument::fromJson(reply->readAll()).object()
                                          .value(QStringLiteral("files")).toArray();
-            if (files.isEmpty()) { cb(QString(), QString(), QString()); return; }
+            if (files.isEmpty()) { cb(true, QString(), QString(), QString()); return; } // proven-empty (no error)
             const QJsonObject f = files.first().toObject();
             const QString hash = f.value(QStringLiteral("appProperties")).toObject()
                                      .value(QStringLiteral("stateHash")).toString();
-            cb(f.value(QStringLiteral("id")).toString(), f.value(QStringLiteral("modifiedTime")).toString(), hash);
+            cb(true, f.value(QStringLiteral("id")).toString(), f.value(QStringLiteral("modifiedTime")).toString(), hash);
         });
     });
 }
@@ -585,7 +588,8 @@ void CloudSync::checkStatus(std::function<void(const Status&)> cb)
         const QByteArray synced = store().value(QStringLiteral("cloud/syncedHash")).toByteArray();
         st.localChanged = (stateHash() != synced);
         findFile(folderId, QString::fromLatin1(kBundleName),
-                 [this, cb, st, synced](const QString& id, const QString& modIso, const QString& remoteHash) mutable {
+                 [this, cb, st, synced](bool listOk, const QString& id, const QString& modIso, const QString& remoteHash) mutable {
+            st.listReached = listOk;   // false => the file-query failed; "no bundle" is UNPROVEN, don't seed fresh
             st.hasRemote = !id.isEmpty();
             st.fileId = id;
             st.modifiedIso = modIso;
@@ -624,12 +628,12 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
         if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
         const QByteArray bundle = buildBundle();
         const QByteArray hash = stateHash();
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](const QString& id, const QString&, const QString&) {
+        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](bool, const QString& id, const QString&, const QString&) {
             uploadFile(folderId, id, QString::fromLatin1(kBundleName), QStringLiteral("application/zip"), bundle,
                        QString::fromUtf8(hash),
                        [this, folderId, hash, cb](const QString& newId) {
                 if (newId.isEmpty()) { cb(false, tr("Upload failed.")); return; }
-                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](const QString&, const QString& modIso, const QString&) {
+                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](bool, const QString&, const QString& modIso, const QString&) {
                     if (!modIso.isEmpty()) store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
                     store().setValue(QStringLiteral("cloud/syncedHash"), hash);
                     store().sync();
@@ -646,7 +650,7 @@ void CloudSync::pullProgress(std::function<void(bool, const QByteArray&)> cb)
 {
     ensureFolder([this, cb](const QString& folderId) {
         if (folderId.isEmpty()) { cb(false, QByteArray()); return; }
-        findFile(folderId, QString::fromLatin1(kProgressName), [this, cb](const QString& id, const QString&, const QString&) {
+        findFile(folderId, QString::fromLatin1(kProgressName), [this, cb](bool, const QString& id, const QString&, const QString&) {
             if (id.isEmpty()) { cb(true, QByteArray()); return; } // no progress file yet — a valid "nothing to merge"
             downloadFile(id, [cb](bool ok, const QByteArray& data) { cb(ok, data); });
         });
@@ -657,7 +661,7 @@ void CloudSync::pushProgress(const QByteArray& json, std::function<void(bool)> c
 {
     ensureFolder([this, json, cb](const QString& folderId) {
         if (folderId.isEmpty()) { cb(false); return; }
-        findFile(folderId, QString::fromLatin1(kProgressName), [this, folderId, json, cb](const QString& id, const QString&, const QString&) {
+        findFile(folderId, QString::fromLatin1(kProgressName), [this, folderId, json, cb](bool, const QString& id, const QString&, const QString&) {
             uploadFile(folderId, id, QString::fromLatin1(kProgressName), QStringLiteral("application/json"), json,
                        QString(), [cb](const QString& newId) { cb(!newId.isEmpty()); });
         });

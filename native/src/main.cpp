@@ -29,7 +29,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.4.10";
+static constexpr const char* kAppVersion = "0.4.11";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -66,6 +66,8 @@ static void cloudPullAtStartup()
     QEventLoop loop;
     QTimer::singleShot(8000, &loop, &QEventLoop::quit); // never hang startup on a slow/absent network
     cloud.checkStatus([&cloud, &loop](const CloudSync::Status& st) {
+        // A failed file-query lands here as !hasRemote and is harmless: we only decline to pull (no seed, no push,
+        // nothing written), so the findFile blindness cannot destroy data on this path. Behavior left unchanged.
         if (!st.reached || !st.hasRemote) { loop.quit(); return; }
         cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); }); // always take the cloud
     });
