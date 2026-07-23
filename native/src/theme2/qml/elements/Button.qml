@@ -157,6 +157,9 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: btn.label; color: btn.fg
                 font.bold: true; font.pixelSize: Math.max(10, cap.height * 0.30)
+                // The pill's width comes from the theme, not the text — elide labels that can't fit.
+                width: Math.min(implicitWidth, Math.max(0, btn.width - cap.height * 0.9))
+                elide: Text.ElideRight
             }
         }
         MouseArea {

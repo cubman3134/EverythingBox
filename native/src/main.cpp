@@ -250,6 +250,18 @@ int main(int argc, char** argv)
     if (QScreen* s = QGuiApplication::primaryScreen()) window.resize(s->geometry().size());
 #else
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
+    // Test-only seam (parity with MMV_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
+    // mobile layout can be exercised with the uitest channel on a desktop host (where the window could
+    // otherwise never go below the desktop layout's minimum). Never active in production.
+    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
+    {
+        const QStringList wh = qEnvironmentVariable("MMV_TEST_WINDOW").split(QLatin1Char('x'));
+        if (wh.size() == 2 && wh[0].toInt() > 0 && wh[1].toInt() > 0)
+        {
+            window.setMinimumSize(1, 1);
+            window.resize(wh[0].toInt(), wh[1].toInt());
+        }
+    }
 #endif
     // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
     // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.
