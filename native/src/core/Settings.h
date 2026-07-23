@@ -99,6 +99,11 @@ namespace Settings
     QString romsFolder();          // resolved path (never empty)
     void setRomsFolder(const QString& path);
 
+    // Root of the local VIDEO library (movies + TV), scanned by LocalLibrary. Empty stored value =>
+    // the default (<data>/library). Device-local (never synced): each machine points at its own disk.
+    QString libraryFolder();       // resolved path (never empty)
+    void setLibraryFolder(const QString& path);
+
     // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
     // default at a modest volume.
     bool bgmEnabled();
