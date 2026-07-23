@@ -85,7 +85,11 @@ static UInt32 Z7_FASTCALL Z7_CRC_UPDATE_T1_FUNC_NAME(UInt32 v, const void *data,
   #if (defined(__clang__) && (__clang_major__ >= 3)) \
      || defined(__GNUC__) && (__GNUC__ >= 6) && defined(MY_CPU_ARM64) \
      || defined(__GNUC__) && (__GNUC__ >= 8)
-      #if !defined(__ARM_FEATURE_CRC32)
+      // Apple clang: faking __ARM_FEATURE_CRC32 breaks <arm_acle.h> when the target CPU really
+      // lacks the crc feature (e.g. Xcode 15 targeting generic arm64 iOS devices) — its CRC
+      // inlines carry no target("crc") attribute there. When Apple's compiler doesn't advertise
+      // CRC32, use the table fallback; toolchains that default crc on still take the HW path.
+      #if !defined(__ARM_FEATURE_CRC32) && !defined(__APPLE__)
 //        #pragma message("!defined(__ARM_FEATURE_CRC32)")
 Z7_DIAGNOSTIC_IGNORE_BEGIN_RESERVED_MACRO_IDENTIFIER
         #define __ARM_FEATURE_CRC32 1

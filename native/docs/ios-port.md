@@ -45,11 +45,9 @@ xcodebuild -downloadPlatform iOS -buildVersion 26.5 -architectureVariant univers
 aqt install-qt mac desktop 6.8.3 clang_64 -m qtmultimedia qtpdf -O ~/Qt
 aqt install-qt mac ios     6.8.3 ios      -m qtmultimedia qtpdf -O ~/Qt
 
-# libmpv + its full static dependency stack from MPVKit (https://github.com/mpvkit/MPVKit):
-# download every *.xcframework.zip listed as a binary target in MPVKit's Package.swift for the
-# LGPL Libmpv target (Libmpv, Libav*, Libsw*, openssl, gnutls stack, libass stack, Libsmbclient,
-# Libbluray, Libuavs3d, Libdovi, MoltenVK, Libshaderc, lcms2, Libplacebo, Libdav1d, Libuchardet,
-# Libluajit) and unzip them all into one directory, e.g. ~/ios-deps/mpvkit/.
+# libmpv + its full static dependency stack from MPVKit (https://github.com/mpvkit/MPVKit) —
+# the fetch script downloads every xcframework the LGPL Libmpv target needs:
+./native/tools/fetch-mpvkit-ios.sh ~/ios-deps/mpvkit
 ```
 
 Configure + build (Xcode generator; x86_64 because that's Qt's simulator slice):
@@ -95,14 +93,35 @@ SIMCTL_CHILD_MMV_UITEST=1 SIMCTL_CHILD_MMV_UITEST_PIPE=/tmp/mmv-ios-uitest \
 MMV_UITEST_PIPE=mmv-ios-uitest python3 native/tools/uitest.py state
 ```
 
-## Device builds (untested)
+## Device builds / the release .ipa
 
-Configure with `-DCMAKE_OSX_SYSROOT=iphoneos -DCMAKE_OSX_ARCHITECTURES=arm64`, drop
-`CODE_SIGNING_ALLOWED=NO`, and set a development team
-(`-DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=<id>`). Qt's device slice is native arm64, and MPVKit's
-`ios-arm64` slices are used automatically. Expect follow-up work: signing/provisioning, the
-software video path's throughput on device (consider `hwdec=videotoolbox`), safe-area insets, and
-mobile type-scale polish (panel titles overflow a phone width).
+The **`ios` job in `.github/workflows/release.yml` builds an unsigned arm64 device `.ipa`** on every
+tagged release (and on manual workflow runs) and attaches it next to the other platforms'
+artifacts. iOS won't run unsigned binaries, so users sideload it with AltStore / Sideloadly, which
+re-sign the app with their own (free) Apple ID — the standard channel for open-source iOS apps
+outside the App Store.
+
+The same build locally (compiles + links verified):
+
+```sh
+DEV=~/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework
+~/Qt/6.8.3/ios/bin/qt-cmake -S native -B build-ios-dev -G Xcode \
+  -DMYMEDIAVAULT_BUILD_APP=ON \
+  -DQT_HOST_PATH="$HOME/Qt/6.8.3/macos" \
+  -DCMAKE_OSX_SYSROOT=iphoneos \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+  -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+  -DMPV_INCLUDE_DIR="$DEV/Headers" \
+  -DMPV_LIBRARY="$DEV/Libmpv" \
+  -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+cmake --build build-ios-dev --config Release
+```
+
+To run on your own device from Xcode instead, set a development team
+(`-DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=<id>`) and drop the two signing overrides. Expected
+follow-up on real hardware: the software video path's throughput (consider `hwdec=videotoolbox`),
+safe-area insets, and mobile type-scale polish (panel titles overflow a phone width).
 
 ## Remaining checklist
 
