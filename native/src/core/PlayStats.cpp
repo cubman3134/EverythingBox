@@ -1,11 +1,13 @@
 #include "PlayStats.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "Settings.h"           // deviceId() — the per-device namespace (mdsync T3)
 
 #include <QSettings>
 #include <QCryptographicHash>
 #include <QObject>
 #include <QDateTime>
+#include <algorithm>
 
 static QSettings& store()
 {
@@ -13,14 +15,69 @@ static QSettings& store()
     return s;
 }
 
-// Play history is per-profile (each user's playtime is their own), keyed by a hash of the game identity so
-// the (base64/punctuation-laden) id can't create bogus QSettings subgroups.
-static QString keyFor(const QString& identity)
+// Post-upgrade schema: 1 = device-namespaced (playstats/<profile>/<deviceId>/<hash>/...).
+static constexpr int kPlaySchema = 1;
+
+static QString resolvedProfileId()
 {
-    const QString profile = ProfileStore::currentId();
-    const QByteArray h = QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha1).toHex();
-    return QStringLiteral("playstats/") + (profile.isEmpty() ? QStringLiteral("default") : profile)
-           + QStringLiteral("/") + QString::fromLatin1(h);
+    const QString p = ProfileStore::currentId();
+    return p.isEmpty() ? QStringLiteral("default") : p;
+}
+
+static QString profileRoot()  { return QStringLiteral("playstats/") + resolvedProfileId(); }
+static QString sha1Of(const QString& identity)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(identity.toUtf8(), QCryptographicHash::Sha1).toHex());
+}
+
+// THIS device's slot for a game: "playstats/<profile>/<deviceId>/<sha1>". Writers target this; readers sum
+// across every device namespace.
+static QString deviceGameKey(const QString& identity)
+{
+    return profileRoot() + QLatin1Char('/') + Settings::deviceId() + QLatin1Char('/') + sha1Of(identity);
+}
+
+static QString playSchemaKey(const QString& profile)
+{
+    return QStringLiteral("playstats/") + profile + QStringLiteral("/schema");
+}
+
+// Fold one profile's legacy un-namespaced games (playstats/<p>/<sha1>/{last,total,sessions}) into this
+// device's namespace, once (guarded by the per-profile schema stamp — the PlaylistStore precedent). A legacy
+// game subgroup carries the leaf keys directly; a device namespace carries game SUBGROUPS, so we only move
+// groups that have a direct "total"/"last"/"sessions" leaf (never a device namespace). Move-then-remove is
+// exact at first migration (the device namespace is empty; every writer folds before it writes) and a second
+// call short-circuits on the stamp.
+static void migratePlayProfile(const QString& profile)
+{
+    QSettings& s = store();
+    if (s.value(playSchemaKey(profile)).toInt() >= kPlaySchema) return;
+
+    const QString dev  = Settings::deviceId();
+    const QString base = QStringLiteral("playstats/") + profile;
+
+    s.beginGroup(base);
+    const QStringList groups = s.childGroups();
+    s.endGroup();
+
+    for (const QString& g : groups)
+    {
+        if (g == dev) continue; // already this device's namespace
+        const QString gk = base + QLatin1Char('/') + g;
+        const bool isLegacyGame = s.contains(gk + QStringLiteral("/total"))
+                               || s.contains(gk + QStringLiteral("/last"))
+                               || s.contains(gk + QStringLiteral("/sessions"));
+        if (!isLegacyGame) continue; // a nested device namespace — leave it
+        const QString dst = base + QLatin1Char('/') + dev + QLatin1Char('/') + g;
+        for (const char* leaf : {"/total", "/last", "/sessions"})
+        {
+            const QString lk = gk + QLatin1String(leaf);
+            if (s.contains(lk)) s.setValue(dst + QLatin1String(leaf), s.value(lk));
+        }
+        s.remove(gk); // legacy game folded
+    }
+
+    if (s.status() == QSettings::NoError) { s.setValue(playSchemaKey(profile), kPlaySchema); s.sync(); }
 }
 
 QString PlayStats::identity(const QString& key, const QString& path)
@@ -32,45 +89,76 @@ PlayStats::Stat PlayStats::get(const QString& identity)
 {
     Stat st;
     if (identity.isEmpty()) return st;
-    const QString k = keyFor(identity);
-    st.lastPlayed   = store().value(k + QStringLiteral("/last"), 0).toLongLong();
-    st.totalSeconds = store().value(k + QStringLiteral("/total"), 0).toLongLong();
-    st.sessions     = store().value(k + QStringLiteral("/sessions"), 0).toInt();
+    migratePlayProfile(resolvedProfileId());
+
+    // Sum total/sessions across every device namespace for this game; last-played is the MAX.
+    const QString root = profileRoot();
+    const QString sha = sha1Of(identity);
+    QSettings& s = store();
+    s.beginGroup(root);
+    const QStringList devices = s.childGroups();
+    s.endGroup();
+    for (const QString& dev : devices)
+    {
+        const QString gk = root + QLatin1Char('/') + dev + QLatin1Char('/') + sha;
+        st.totalSeconds += s.value(gk + QStringLiteral("/total"), 0).toLongLong();
+        st.sessions     += s.value(gk + QStringLiteral("/sessions"), 0).toInt();
+        st.lastPlayed    = std::max(st.lastPlayed, s.value(gk + QStringLiteral("/last"), 0).toLongLong());
+    }
     return st;
 }
 
 void PlayStats::markPlayed(const QString& identity)
 {
     if (identity.isEmpty()) return;
-    store().setValue(keyFor(identity) + QStringLiteral("/last"), QDateTime::currentSecsSinceEpoch());
+    migratePlayProfile(resolvedProfileId());
+    store().setValue(deviceGameKey(identity) + QStringLiteral("/last"), QDateTime::currentSecsSinceEpoch());
     store().sync();
 }
 
 void PlayStats::addSession(const QString& identity, qint64 seconds)
 {
     if (identity.isEmpty() || seconds <= 0) return;
-    const QString k = keyFor(identity);
-    const Stat st = get(identity);
-    store().setValue(k + QStringLiteral("/total"), st.totalSeconds + seconds);
-    store().setValue(k + QStringLiteral("/sessions"), st.sessions + 1);
+    migratePlayProfile(resolvedProfileId());
+    // Read-modify-write THIS device's slot only (not the cross-device aggregate get() returns).
+    const QString k = deviceGameKey(identity);
+    const qint64 curTotal    = store().value(k + QStringLiteral("/total"), 0).toLongLong();
+    const int    curSessions = store().value(k + QStringLiteral("/sessions"), 0).toInt();
+    store().setValue(k + QStringLiteral("/total"), curTotal + seconds);
+    store().setValue(k + QStringLiteral("/sessions"), curSessions + 1);
     store().setValue(k + QStringLiteral("/last"), QDateTime::currentSecsSinceEpoch());
     store().sync();
 }
 
 qint64 PlayStats::profileTotalSeconds()
 {
-    // Each game is a subgroup "playstats/<profile>/<sha1>" carrying last/total/sessions; sum every subgroup's
-    // /total. A profile with no play history has no subgroups -> 0. Per-profile via the active ProfileStore id.
-    const QString profile = ProfileStore::currentId();
-    const QString root = QStringLiteral("playstats/") + (profile.isEmpty() ? QStringLiteral("default") : profile);
+    migratePlayProfile(resolvedProfileId());
+    // Each device namespace holds game subgroups carrying /total; sum every game's /total across all devices.
+    const QString root = profileRoot();
     QSettings& s = store();
     s.beginGroup(root);
-    const QStringList games = s.childGroups();
+    const QStringList devices = s.childGroups();
     qint64 total = 0;
-    for (const QString& g : games)
-        total += s.value(g + QStringLiteral("/total"), 0).toLongLong();
+    for (const QString& dev : devices)
+    {
+        s.beginGroup(dev);
+        for (const QString& g : s.childGroups())
+            total += s.value(g + QStringLiteral("/total"), 0).toLongLong();
+        s.endGroup();
+    }
     s.endGroup();
     return total;
+}
+
+void PlayStats::migrate()
+{
+    // Fold EVERY profile's legacy games into this device's namespace (guarded per profile). The child groups
+    // of "playstats" are the profile ids. Run once at startup before any CloudMerge serialize.
+    QSettings& s = store();
+    s.beginGroup(QStringLiteral("playstats"));
+    const QStringList profiles = s.childGroups();
+    s.endGroup();
+    for (const QString& p : profiles) migratePlayProfile(p);
 }
 
 QString PlayStats::formatLastPlayed(qint64 epochSecs)

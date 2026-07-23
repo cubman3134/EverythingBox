@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.1 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.2 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -281,10 +281,16 @@ if(MYMEDIAVAULT_BUILD_APP)
     # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-
     # only (a QSettings+JSON wrapper over the shared mymediavault.ini) so the probe links lean and runs under
     # offscreen QPA. Needs ProfileStore.cpp (stats are namespaced by the active profile id).
+    # mdsync T3: the accumulators are now device-namespaced (stats/<profile>/<deviceId>/...), so both stores
+    # need Settings::deviceId() (which drags FormFactor via Settings.cpp's virtualPadEnabled). PlayStats.cpp is
+    # pulled in too — its device-namespaced play history + migration are probed alongside ConsumptionStats.
     add_executable(probe_stats tools/probe_stats.cpp
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
+        src/core/PlayStats.cpp        src/core/PlayStats.h
+        src/core/Settings.cpp         src/core/Settings.h
+        src/theme2/FormFactor.cpp     src/theme2/FormFactor.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
-    target_include_directories(probe_stats PRIVATE src src/core)
+    target_include_directories(probe_stats PRIVATE src src/core src/theme2)
     target_link_libraries(probe_stats PRIVATE Qt6::Core)
 
     # PlaylistStore category migration: the data-safety core of category-scoped playlists — a legacy
@@ -319,6 +325,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
+        src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
     target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core)

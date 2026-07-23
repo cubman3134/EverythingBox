@@ -6,8 +6,14 @@
 //
 // Backed by the portable mymediavault.ini (same AppPaths::dataDir() posture as PlayStats/ItemMarks —
 // QtCore only, no Quick/Widgets), all namespaced by the active profile id (or "default"):
-//   stats/<profile>/items/<hash>  -> JSON { mediaSeconds, pagesRead, lastActivity, title }  (one blob/title)
-//   stats/<profile>/cat/<cat>/{seconds|pages}  -> per-category rollups (video|audio|reading), kept at accrual
+//   stats/<profile>/<deviceId>/items/<hash>  -> JSON { mediaSeconds, pagesRead, lastActivity, title }  (one blob/title)
+//   stats/<profile>/<deviceId>/cat/<cat>/{seconds|pages}  -> per-category rollups (video|audio|reading), kept at accrual
+//
+// Accumulators are DEVICE-NAMESPACED (mdsync T3): each device only ever WRITES its own <deviceId> namespace,
+// so a multi-device sync unions namespaces verbatim and can never double-count. The readers (get/rollups/
+// topTitles) SUM across every device namespace, so the public API contract is unchanged (one device sums to
+// exactly what the un-namespaced store used to hold). A one-time stamped migrate() folds pre-upgrade
+// un-namespaced keys into this device's namespace.
 //
 // Item keys are the SAME identities the seams already carry (media resume identity, reader path keys). They are
 // hashed (MD5-over-UTF8 hex — the ItemMarks/SyncOffsets lesson) BEFORE use as an ini group leaf so keys that
@@ -48,9 +54,16 @@ namespace ConsumptionStats
     // only max(0, page - highWater) — revisits/regressions never accrue or decrement. Empty key is a no-op.
     void addPagesRead(const QString& key, int page, const QString& title);
 
-    Totals  get(const QString& key);                 // cached; empty/unknown key -> default {}
-    qint64  categorySeconds(const QString& category); // "video" | "audio" rollup
-    qint64  categoryPages();                          // "reading" rollup (all readers)
+    Totals  get(const QString& key);                 // cached; empty/unknown key -> default {} (summed across devices)
+    qint64  categorySeconds(const QString& category); // "video" | "audio" rollup (summed across devices)
+    qint64  categoryPages();                          // "reading" rollup (all readers; summed across devices)
+
+    // One-time, stamped, idempotent migration (mdsync T3): fold the legacy un-namespaced accumulator keys
+    // (stats/<profile>/items/* and stats/<profile>/cat/*) into THIS device's namespace
+    // (stats/<profile>/<deviceId>/...) for EVERY profile. Guarded per profile by a stats/<profile>/schema
+    // stamp (the PlaylistStore precedent), so a second call is a no-op. Call once at startup, before any
+    // CloudMerge serialize; the read/write funnels also fold the current profile lazily.
+    void migrate();
 
     // Top-N titles for a category ("reading" | "video" | "audio"), sorted by the relevant metric (pagesRead for
     // reading, mediaSeconds for video/audio), descending. Returns <naturalKeyIsHashed?no — the HASHED key>,Totals.

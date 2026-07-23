@@ -1,6 +1,7 @@
 #include "ConsumptionStats.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "Settings.h"           // deviceId() — the accumulator namespace (mdsync T3)
 
 #include <QSettings>
 #include <QCryptographicHash>
@@ -35,12 +36,57 @@ struct Entry
     QString category; // "video" | "audio" | "reading"
 };
 
-// Per-profile group root: "stats/<profileId>" (or "stats/default" when no profile is selected). Same
-// per-profile mechanic as PlayStats/ItemMarks/FavoritesStore.
-QString profileGroup()
+// Post-upgrade accumulator schema: 1 = device-namespaced (stats/<profile>/<deviceId>/...). A profile whose
+// stats/<profile>/schema stamp is < this is still in the legacy un-namespaced shape and gets folded once.
+static constexpr int kStatsSchema = 1;
+
+// The active profile id, resolved ("default" when none is selected). Same per-profile mechanic as
+// PlayStats/ItemMarks/FavoritesStore.
+QString resolvedProfileId()
 {
     const QString id = ProfileStore::currentId();
-    return QStringLiteral("stats/") + (id.isEmpty() ? QStringLiteral("default") : id);
+    return id.isEmpty() ? QStringLiteral("default") : id;
+}
+
+// Per-profile group root: "stats/<profileId>".
+QString profileGroup() { return QStringLiteral("stats/") + resolvedProfileId(); }
+
+// This device's WRITE namespace under the active profile: "stats/<profileId>/<deviceId>" (mdsync T3). Every
+// writer targets this; the readers SUM across all sibling device namespaces.
+QString deviceGroup()  { return profileGroup() + QLatin1Char('/') + Settings::deviceId(); }
+
+QString statsSchemaKey(const QString& profile) { return QStringLiteral("stats/") + profile + QStringLiteral("/schema"); }
+
+// Fold a single profile's legacy un-namespaced keys into THIS device's namespace, once (guarded by the
+// per-profile schema stamp — the PlaylistStore precedent). At first migration the device namespace is empty
+// (namespacing is new) AND every writer folds before it writes, so a plain move-then-remove is exact; a second
+// call short-circuits on the stamp (and even un-stamped would find nothing left to fold). A failed write is
+// left UN-stamped so the next run retries (never stamp a lost migration).
+void migrateStatsProfile(const QString& profile)
+{
+    QSettings& s = store();
+    if (s.value(statsSchemaKey(profile)).toInt() >= kStatsSchema) return;
+
+    const QString dev  = Settings::deviceId();
+    const QString base = QStringLiteral("stats/") + profile;
+    const QString devB = base + QLatin1Char('/') + dev;
+
+    s.beginGroup(base + QStringLiteral("/items"));
+    const QStringList legacyItems = s.childKeys();
+    s.endGroup();
+    for (const QString& h : legacyItems)
+        s.setValue(devB + QStringLiteral("/items/") + h, s.value(base + QStringLiteral("/items/") + h).toString());
+
+    for (const char* leaf : {"video/seconds", "audio/seconds", "reading/pages"})
+    {
+        const QString ck = base + QStringLiteral("/cat/") + QLatin1String(leaf);
+        if (s.contains(ck)) s.setValue(devB + QStringLiteral("/cat/") + QLatin1String(leaf), s.value(ck));
+    }
+
+    s.remove(base + QStringLiteral("/items")); // legacy roots gone (folded); device namespace is disjoint
+    s.remove(base + QStringLiteral("/cat"));
+
+    if (s.status() == QSettings::NoError) { s.setValue(statsSchemaKey(profile), kStatsSchema); s.sync(); }
 }
 
 // MD5-hex token of the opaque caller key — flattens paths/URLs (which may carry '/', '//', or trailing
@@ -52,10 +98,10 @@ QString hashKey(const QString& key)
         QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex());
 }
 
-QString itemsGroup()               { return profileGroup() + QStringLiteral("/items"); }
+QString itemsGroup()               { return deviceGroup() + QStringLiteral("/items"); }
 QString itemKey(const QString& h)  { return itemsGroup() + QLatin1Char('/') + h; }
-QString catSecondsKey(const QString& cat) { return profileGroup() + QStringLiteral("/cat/") + cat + QStringLiteral("/seconds"); }
-QString catPagesKey()              { return profileGroup() + QStringLiteral("/cat/reading/pages"); }
+QString catSecondsKey(const QString& cat) { return deviceGroup() + QStringLiteral("/cat/") + cat + QStringLiteral("/seconds"); }
+QString catPagesKey()              { return deviceGroup() + QStringLiteral("/cat/reading/pages"); }
 
 bool isMediaCategory(const QString& c) { return c == QStringLiteral("video") || c == QStringLiteral("audio"); }
 
@@ -108,24 +154,46 @@ void ensureCache()
     const QString id = ProfileStore::currentId();
     if (mCacheBuilt && mCacheProfileId == id) return;
 
+    migrateStatsProfile(resolvedProfileId()); // fold legacy into this device's namespace before reading
+
     mCache.clear();
     mCatVideoSecs = mCatAudioSecs = mCatReadPages = 0;
     mCacheProfileId = id;
 
-    const QString grp = QStringLiteral("stats/") + (id.isEmpty() ? QStringLiteral("default") : id);
+    const QString grp = profileGroup();
     QSettings& s = store();
-    s.beginGroup(grp + QStringLiteral("/items"));
-    const QStringList hashes = s.childKeys();
-    for (const QString& h : hashes)
-    {
-        const Entry e = entryFromJson(s.value(h).toString().toUtf8());
-        mCache.insert(h, e);
-    }
+    // Every child GROUP of the profile is a per-device namespace (the "schema" stamp is a child KEY, excluded).
+    // Sum each device's items (per hash) and category rollups — the reader contract is the union total.
+    s.beginGroup(grp);
+    const QStringList devices = s.childGroups();
     s.endGroup();
 
-    mCatVideoSecs = s.value(grp + QStringLiteral("/cat/video/seconds"), 0).toLongLong();
-    mCatAudioSecs = s.value(grp + QStringLiteral("/cat/audio/seconds"), 0).toLongLong();
-    mCatReadPages = s.value(grp + QStringLiteral("/cat/reading/pages"), 0).toLongLong();
+    for (const QString& dev : devices)
+    {
+        const QString devGrp = grp + QLatin1Char('/') + dev;
+        s.beginGroup(devGrp + QStringLiteral("/items"));
+        const QStringList hashes = s.childKeys();
+        for (const QString& h : hashes)
+        {
+            const Entry e = entryFromJson(s.value(h).toString().toUtf8());
+            auto it = mCache.find(h);
+            if (it == mCache.end()) { mCache.insert(h, e); continue; }
+            Entry& c = it.value();
+            c.mediaSeconds += e.mediaSeconds;   // union total across devices
+            c.pagesRead    += e.pagesRead;
+            if (e.lastActivity >= c.lastActivity) // newest device's activity owns title/category for display
+            {
+                c.lastActivity = e.lastActivity;
+                if (!e.title.isEmpty()) c.title = e.title;
+                c.category = e.category;
+            }
+        }
+        s.endGroup();
+
+        mCatVideoSecs += s.value(devGrp + QStringLiteral("/cat/video/seconds"), 0).toLongLong();
+        mCatAudioSecs += s.value(devGrp + QStringLiteral("/cat/audio/seconds"), 0).toLongLong();
+        mCatReadPages += s.value(devGrp + QStringLiteral("/cat/reading/pages"), 0).toLongLong();
+    }
 
     mCacheBuilt = true;
 }
@@ -145,6 +213,7 @@ void ConsumptionStats::addMediaSeconds(const QString& key, const QString& catego
 {
     if (key.isEmpty() || secs <= 0 || !isMediaCategory(category)) return; // junk-free: no negative/zero/stray cat
 
+    migrateStatsProfile(resolvedProfileId()); // this device writes only its own namespace
     const QString h = hashKey(key);
     Entry e = loadItem(h);
     e.mediaSeconds += secs;
@@ -164,6 +233,7 @@ void ConsumptionStats::addPagesRead(const QString& key, int page, const QString&
 {
     if (key.isEmpty()) return;
 
+    migrateStatsProfile(resolvedProfileId()); // this device writes only its own namespace
     const QString h = hashKey(key);
     Entry e = loadItem(h);
     // High-water: pagesRead IS the max page index ever reached (the deltas telescope), so accrue only the new
@@ -230,4 +300,16 @@ void ConsumptionStats::invalidate()
     mCacheProfileId.clear();
     mCache.clear();
     mCatVideoSecs = mCatAudioSecs = mCatReadPages = 0;
+}
+
+void ConsumptionStats::migrate()
+{
+    // Fold EVERY profile's legacy accumulators into this device's namespace (guarded per profile). The child
+    // groups of "stats" are the profile ids. Run once at startup before any CloudMerge serialize.
+    QSettings& s = store();
+    s.beginGroup(QStringLiteral("stats"));
+    const QStringList profiles = s.childGroups();
+    s.endGroup();
+    for (const QString& p : profiles) migrateStatsProfile(p);
+    invalidate();
 }

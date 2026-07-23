@@ -73,7 +73,7 @@ int main(int argc, char** argv)
     // Reset every group we touch so a stale ini can't skew the asserts.
     {
         QSettings reset(iniPath, QSettings::IniFormat);
-        for (const char* g : {"device", "marks", "favorites", "playlists", "deleted", "profiles"})
+        for (const char* g : {"device", "marks", "favorites", "playlists", "deleted", "profiles", "stats", "playstats", "resume", "recent"})
             reset.remove(QLatin1String(g));
         reset.sync();
     }
@@ -557,6 +557,75 @@ int main(int argc, char** argv)
         CHECK(o1_tags == (QStringList{QStringLiteral("t2")}));                        // B's newer marks
         CHECK(o1_vocab == (QStringList{QStringLiteral("t1"), QStringLiteral("t2")})); // vocab union
         CHECK(o1_pinned.isEmpty());                                                   // t1 unpinned on B -> no shelf
+    }
+
+    // ---- 13. Device-namespaced accumulators: union VERBATIM on merge, never arithmetic, no double-count -----
+    {
+        const QString localDev = Settings::deviceId();
+        const QString hx = md5(QStringLiteral("vid:X"));
+        auto wipeAcc = [&]() { QSettings raw(iniPath, QSettings::IniFormat); raw.remove(QStringLiteral("stats")); raw.remove(QStringLiteral("playstats")); raw.sync(); };
+        auto val = [&](const QString& key) { QSettings raw(iniPath, QSettings::IniFormat); return raw.value(key).toString(); };
+        const QString remIt = QStringLiteral("stats/p13/remoteDev/items/") + hx;
+        const QString remCat = QStringLiteral("stats/p13/remoteDev/cat/video/seconds");
+        const QString locIt = QStringLiteral("stats/p13/") + localDev + QStringLiteral("/items/") + hx;
+        const QString locCat = QStringLiteral("stats/p13/") + localDev + QStringLiteral("/cat/video/seconds");
+
+        // A remote device's namespace serializes; merging it copies it verbatim while our namespace is untouched.
+        wipeAcc(); setRaw(remIt, QStringLiteral("R")); setRaw(remCat, QStringLiteral("20")); const QJsonObject docR = serializeNow();
+        wipeAcc(); setRaw(locIt, QStringLiteral("L")); setRaw(locCat, QStringLiteral("10")); mergeDoc(docR);
+        CHECK(val(locCat) == QStringLiteral("10") && val(locIt) == QStringLiteral("L")); // local namespace untouched
+        CHECK(val(remCat) == QStringLiteral("20") && val(remIt) == QStringLiteral("R")); // remote copied verbatim
+
+        // Repeated merge NEVER double-counts (verbatim replace, not arithmetic add).
+        mergeDoc(docR); mergeDoc(docR);
+        CHECK(val(remCat) == QStringLiteral("20"));   // still 20, not 40/60
+        CHECK(val(locCat) == QStringLiteral("10"));
+
+        // A remote doc carrying a STALE copy of OUR namespace must not clobber it.
+        wipeAcc(); setRaw(locCat, QStringLiteral("999")); setRaw(remCat, QStringLiteral("20")); const QJsonObject docStale = serializeNow();
+        wipeAcc(); setRaw(locCat, QStringLiteral("10")); mergeDoc(docStale);
+        CHECK(val(locCat) == QStringLiteral("10"));    // our live namespace wins over the peer's stale copy of it
+        CHECK(val(remCat) == QStringLiteral("20"));
+
+        // playstats travels the same generic path (the hash shape is irrelevant to the verbatim merge).
+        const QString sg = md5(QStringLiteral("game:g"));
+        const QString remTot = QStringLiteral("playstats/p13/remoteDev/") + sg + QStringLiteral("/total");
+        const QString locTot = QStringLiteral("playstats/p13/") + localDev + QStringLiteral("/") + sg + QStringLiteral("/total");
+        wipeAcc(); setRaw(remTot, QStringLiteral("50")); const QJsonObject docP = serializeNow();
+        wipeAcc(); setRaw(locTot, QStringLiteral("9")); mergeDoc(docP); mergeDoc(docP);
+        CHECK(val(locTot) == QStringLiteral("9") && val(remTot) == QStringLiteral("50")); // union verbatim, no double-count
+    }
+
+    // ---- 14. Equal-timestamp tie-break: same key, same ts, different values -> BOTH orders CONVERGE ---------
+    // The uniform order-independent comparator (greater canonical value bytes) supersedes the divergent legacy
+    // ties (four stores kept-local, recents `>=`). Proven on resume (a scalar) AND favourites (an object).
+    {
+        // resume: pos 10 vs 20 at the SAME ts.
+        wipeStores(); setRaw(QStringLiteral("resume/hX/pos"), QStringLiteral("10")); setRaw(QStringLiteral("resume/hX/ts"), QString::number(T)); const QJsonObject eqA = serializeNow();
+        wipeStores(); setRaw(QStringLiteral("resume/hX/pos"), QStringLiteral("20")); setRaw(QStringLiteral("resume/hX/ts"), QString::number(T)); const QJsonObject eqB = serializeNow();
+        auto resPos = [&]() { QSettings raw(iniPath, QSettings::IniFormat); return raw.value(QStringLiteral("resume/hX/pos")).toDouble(); };
+        wipeStores(); setRaw(QStringLiteral("resume/hX/pos"), QStringLiteral("10")); setRaw(QStringLiteral("resume/hX/ts"), QString::number(T)); mergeDoc(eqB); const double r1 = resPos();
+        wipeStores(); setRaw(QStringLiteral("resume/hX/pos"), QStringLiteral("20")); setRaw(QStringLiteral("resume/hX/ts"), QString::number(T)); mergeDoc(eqA); const double r2 = resPos();
+        CHECK(r1 == r2);          // convergent regardless of merge order
+        CHECK(r1 == 20.0);        // deterministic winner: greater canonical value bytes ("20" > "10")
+
+        // favourites: same itemId + ts, different title.
+        auto injFav1 = [&](const QString& id, const QString& title, qint64 ts) {
+            QJsonObject o; o[QStringLiteral("itemId")] = id; o[QStringLiteral("title")] = title; o[QStringLiteral("ts")] = double(ts);
+            QJsonArray a; a.append(o); setRaw(QStringLiteral("favorites/f14/items"), compact(a));
+        };
+        auto favTitle = [&](const QString& id) -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(QStringLiteral("favorites/f14/items")).toString().toUtf8()).array())
+            { const QJsonObject o = v.toObject(); if (o.value(QStringLiteral("itemId")).toString() == id) return o.value(QStringLiteral("title")).toString(); }
+            return QString();
+        };
+        wipeStores(); injFav1(QStringLiteral("X"), QStringLiteral("alpha"), T); const QJsonObject fA = serializeNow();
+        wipeStores(); injFav1(QStringLiteral("X"), QStringLiteral("beta"),  T); const QJsonObject fB = serializeNow();
+        wipeStores(); injFav1(QStringLiteral("X"), QStringLiteral("alpha"), T); mergeDoc(fB); const QString t1 = favTitle(QStringLiteral("X"));
+        wipeStores(); injFav1(QStringLiteral("X"), QStringLiteral("beta"),  T); mergeDoc(fA); const QString t2 = favTitle(QStringLiteral("X"));
+        CHECK(t1 == t2);                          // convergent
+        CHECK(t1 == QStringLiteral("beta"));      // greater canon ("beta" > "alpha") wins in both orders
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

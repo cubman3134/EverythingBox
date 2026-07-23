@@ -2,6 +2,8 @@
 #include "AppPaths.h"
 #include "Tombstones.h"
 #include "ItemMarks.h"
+#include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
+#include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
 
 #include <QSettings>
 #include <QJsonDocument>
@@ -25,6 +27,22 @@ static QSettings& store()
 namespace {
 
 // ---- small json helpers -----------------------------------------------------------------------------------
+
+// Canonical serialized bytes of a JSON object (QJsonObject stores keys sorted, so Compact output is stable and
+// device-independent). The order-independent equal-timestamp tie-break (mdsync T3, carried from the T2 review)
+// compares these bytes lexically.
+QByteArray canon(const QJsonObject& o) { return QJsonDocument(o).toJson(QJsonDocument::Compact); }
+
+// Should the remote value replace the local one? Newest timestamp wins; on EQUAL timestamps a deterministic
+// ORDER-INDEPENDENT decision — the lexically-greater canonical value bytes — so A-merges-B and B-merges-A pick
+// the SAME winner (identical values compare equal -> no replace -> a no-op anyway). This uniform rule
+// supersedes the divergent legacy ties (four stores kept-local, recents kept-remote via `>=`); that legacy
+// recents byte behaviour is DELIBERATELY superseded here.
+bool remoteReplaces(qint64 remoteTs, qint64 localTs, const QByteArray& remoteCanon, const QByteArray& localCanon)
+{
+    if (remoteTs != localTs) return remoteTs > localTs;
+    return remoteCanon > localCanon; // equal ts -> order-independent value tie-break
+}
 
 QJsonArray stringsToArray(const QStringList& list)
 {
@@ -123,14 +141,26 @@ void serializeResumeRecent(QJsonObject& resume, QJsonObject& recent)
 
 void mergeResume(const QJsonObject& resume)
 {
-    // For each item, keep whichever position was saved more recently (ts). Never delete a local entry.
+    // For each item, keep whichever position was saved more recently (ts). Never delete a local entry. On an
+    // EQUAL ts, the order-independent value tie-break decides (below), replacing the old keep-local-on-tie.
     for (auto it = resume.begin(); it != resume.end(); ++it)
     {
         const QJsonObject re = it.value().toObject();
         const QString prefix = QStringLiteral("resume/") + it.key() + QLatin1Char('/');
-        const double localTs = store().value(prefix + QStringLiteral("ts"), 0.0).toDouble();
         const bool haveLocal = store().contains(prefix + QStringLiteral("pos"));
-        if (haveLocal && re.value(QStringLiteral("ts")).toDouble() <= localTs) continue; // local is newer/equal
+        if (haveLocal)
+        {
+            const qint64 localTs  = static_cast<qint64>(store().value(prefix + QStringLiteral("ts"), 0.0).toDouble());
+            const qint64 remoteTs = static_cast<qint64>(re.value(QStringLiteral("ts")).toDouble());
+            // Rebuild the local entry in the SAME shape serializeResumeRecent emits, so its canonical bytes
+            // match this device's serialized form (a prerequisite for order-independence).
+            QJsonObject localObj;
+            if (store().contains(prefix + QStringLiteral("pos")))   localObj.insert(QStringLiteral("pos"),   store().value(prefix + QStringLiteral("pos")).toDouble());
+            if (store().contains(prefix + QStringLiteral("dur")))   localObj.insert(QStringLiteral("dur"),   store().value(prefix + QStringLiteral("dur")).toDouble());
+            if (store().contains(prefix + QStringLiteral("ts")))    localObj.insert(QStringLiteral("ts"),    store().value(prefix + QStringLiteral("ts")).toDouble());
+            if (store().contains(prefix + QStringLiteral("title"))) localObj.insert(QStringLiteral("title"), store().value(prefix + QStringLiteral("title")).toString());
+            if (!remoteReplaces(remoteTs, localTs, canon(re), canon(localObj))) continue;
+        }
         if (re.contains(QStringLiteral("pos")))   store().setValue(prefix + QStringLiteral("pos"),   re.value(QStringLiteral("pos")).toDouble());
         if (re.contains(QStringLiteral("dur")))   store().setValue(prefix + QStringLiteral("dur"),   re.value(QStringLiteral("dur")).toDouble());
         if (re.contains(QStringLiteral("ts")))    store().setValue(prefix + QStringLiteral("ts"),    re.value(QStringLiteral("ts")).toDouble());
@@ -146,6 +176,9 @@ void mergeRecent(const QJsonObject& recent)
     {
         const QString localKey = QStringLiteral("recent/") + it.key();
         QHash<QString, QJsonObject> byId;
+        // Dedup by id keeping the winner per remoteReplaces (newest ts; equal ts -> greater canonical bytes).
+        // The tie-break is order-independent, so which list is ingested first no longer changes the winner
+        // (the old `>=` made the second-ingested list win ties — an order-dependent divergence).
         auto ingest = [&byId](const QJsonArray& arr) {
             for (const QJsonValue& v : arr)
             {
@@ -154,15 +187,22 @@ void mergeRecent(const QJsonObject& recent)
                                        ? o.value(QStringLiteral("path")).toString()
                                        : o.value(QStringLiteral("key")).toString();
                 if (id.isEmpty()) continue;
-                if (!byId.contains(id) || o.value(QStringLiteral("ts")).toDouble() >= byId[id].value(QStringLiteral("ts")).toDouble())
+                auto cur = byId.constFind(id);
+                if (cur == byId.constEnd()
+                    || remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
+                                      static_cast<qint64>(cur.value().value(QStringLiteral("ts")).toDouble()),
+                                      canon(o), canon(cur.value())))
                     byId.insert(id, o);
             }
         };
         ingest(QJsonDocument::fromJson(store().value(localKey).toString().toUtf8()).array()); // local first
         ingest(QJsonDocument::fromJson(it.value().toString().toUtf8()).array());              // then remote
         QList<QJsonObject> merged = byId.values();
+        // Newest-first; ties broken by canonical bytes so the cap-40 cut is deterministic (order-independent).
         std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {
-            return a.value(QStringLiteral("ts")).toDouble() > b.value(QStringLiteral("ts")).toDouble();
+            const double at = a.value(QStringLiteral("ts")).toDouble(), bt = b.value(QStringLiteral("ts")).toDouble();
+            if (at != bt) return at > bt;
+            return canon(a) > canon(b);
         });
         QJsonArray out;
         for (int i = 0; i < merged.size() && i < 40; ++i) out.append(merged[i]); // cap matches RecentStore's
@@ -225,11 +265,11 @@ void mergeMarks(const QJsonObject& marks)
             const QByteArray localRaw = s.value(ikey).toString().toUtf8();
             if (!localRaw.isEmpty())
             {
-                const qint64 lTs = static_cast<qint64>(
-                    QJsonDocument::fromJson(localRaw).object().value(QStringLiteral("updatedAt")).toDouble());
-                if (rTs <= lTs) continue; // local is newer/equal
+                const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
+                const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
+                if (!remoteReplaces(rTs, lTs, canon(rblob), canon(lblob))) continue; // equal ts -> value tie-break
             }
-            s.setValue(ikey, QString::fromUtf8(QJsonDocument(rblob).toJson(QJsonDocument::Compact)));
+            s.setValue(ikey, QString::fromUtf8(canon(rblob)));
         }
 
         // Tombstones (merged + imported); then vocab/pinned = union MINUS tombstoned.
@@ -294,7 +334,9 @@ void mergeFavorites(const QJsonObject& favorites)
                 const QString id = o.value(QStringLiteral("itemId")).toString();
                 if (id.isEmpty()) continue;
                 if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
-                else if (o.value(QStringLiteral("ts")).toDouble() > byId[id].value(QStringLiteral("ts")).toDouble())
+                else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
+                                        static_cast<qint64>(byId[id].value(QStringLiteral("ts")).toDouble()),
+                                        canon(o), canon(byId[id]))) // equal ts -> order-independent value tie-break
                     byId.insert(id, o);
             }
         };
@@ -352,7 +394,9 @@ void mergePlaylists(const QJsonObject& playlists)
                 const QString id = o.value(QStringLiteral("id")).toString();
                 if (id.isEmpty()) continue;
                 if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
-                else if (o.value(QStringLiteral("updatedAt")).toDouble() > byId[id].value(QStringLiteral("updatedAt")).toDouble())
+                else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble()),
+                                        static_cast<qint64>(byId[id].value(QStringLiteral("updatedAt")).toDouble()),
+                                        canon(o), canon(byId[id]))) // equal updatedAt -> order-independent tie-break
                     byId.insert(id, o);
             }
         };
@@ -374,20 +418,76 @@ void mergePlaylists(const QJsonObject& playlists)
     }
 }
 
+// ---- device-namespaced accumulators (stats / playstats) — union VERBATIM, never arithmetic (mdsync T3) -----
+// Shape: rootPrefix/<profile>/<device>/<sub...>  serialized as { "<profile>": { "<device>": { "<sub>": val }}}.
+// A device's namespace is ONLY ever written by that device, so on merge each REMOTE namespace is copied
+// wholesale (verbatim replace — newest-file-wins per namespace is unnecessary) and the LOCAL device's own
+// namespace is never touched. Repeated merges therefore never double-count (replace, not add).
+
+void serializeNamespaced(const QString& rootPrefix, QJsonObject& out)
+{
+    QSettings& s = store();
+    const QString pfx = rootPrefix + QLatin1Char('/');
+    for (const QString& key : s.allKeys())
+    {
+        if (!key.startsWith(pfx)) continue;
+        const QString rest = key.mid(pfx.size());          // "<profile>/<device>/<sub...>"
+        const int s1 = rest.indexOf(QLatin1Char('/'));
+        if (s1 <= 0) continue;
+        const int s2 = rest.indexOf(QLatin1Char('/'), s1 + 1);
+        if (s2 <= s1) continue;                             // excludes the "<profile>/schema" stamp (one slash)
+        const QString profile = rest.left(s1);
+        const QString device  = rest.mid(s1 + 1, s2 - s1 - 1);
+        const QString sub     = rest.mid(s2 + 1);
+        // Defensive: a device id is a UUID, never these legacy-shape leaves — skip un-migrated stats so a
+        // pre-migration key can't be mis-serialized under a fake device (startup migrate() normally precludes).
+        if (device == QStringLiteral("items") || device == QStringLiteral("cat")) continue;
+        QJsonObject prof = out.value(profile).toObject();
+        QJsonObject dev  = prof.value(device).toObject();
+        dev.insert(sub, s.value(key).toString());
+        prof.insert(device, dev);
+        out.insert(profile, prof);
+    }
+}
+
+void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QString& localDevice)
+{
+    QSettings& s = store();
+    for (auto pit = in.begin(); pit != in.end(); ++pit)
+    {
+        const QString profile = pit.key();
+        const QJsonObject devices = pit.value().toObject();
+        for (auto dit = devices.begin(); dit != devices.end(); ++dit)
+        {
+            const QString device = dit.key();
+            if (device == localDevice) continue;            // never clobber our own live namespace
+            const QString base = rootPrefix + QLatin1Char('/') + profile + QLatin1Char('/') + device;
+            s.remove(base);                                 // verbatim replace: drop the stale copy first
+            const QJsonObject ns = dit.value().toObject();
+            for (auto kit = ns.begin(); kit != ns.end(); ++kit)
+                s.setValue(base + QLatin1Char('/') + kit.key(), kit.value().toString());
+        }
+    }
+}
+
 } // namespace
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, marks, favorites, playlists;
+    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats;
     serializeResumeRecent(resume, recent);
     serializeMarks(marks);
     serializeFavorites(favorites);
     serializePlaylists(playlists);
+    serializeNamespaced(QStringLiteral("stats"), stats);         // device-namespaced accumulators (mdsync T3)
+    serializeNamespaced(QStringLiteral("playstats"), playstats);
     root.insert(QStringLiteral("resume"), resume);
     root.insert(QStringLiteral("recent"), recent);
     root.insert(QStringLiteral("marks"), marks);
     root.insert(QStringLiteral("favorites"), favorites);
     root.insert(QStringLiteral("playlists"), playlists);
+    root.insert(QStringLiteral("stats"), stats);
+    root.insert(QStringLiteral("playstats"), playstats);
 }
 
 void CloudMerge::mergeAll(const QJsonObject& root)
@@ -397,7 +497,11 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeMarks(root.value(QStringLiteral("marks")).toObject());
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
+    const QString localDevice = Settings::deviceId();
+    mergeNamespaced(QStringLiteral("stats"),     root.value(QStringLiteral("stats")).toObject(),     localDevice);
+    mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
     store().sync();
     ItemMarks::invalidate();      // the merge wrote marks/* under the ini directly; drop the stale static cache
+    ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
 }

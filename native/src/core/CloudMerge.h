@@ -20,7 +20,9 @@
 //     "marks":   { "<profile>": { "items": {"<hash>": <blob>}, "tagVocab": [...], "pinnedTags": [...],
 //                                 "vocabTombs": [{key,ts}], "pinnedTombs": [{key,ts}] } },
 //     "favorites":{ "<profile>": { "items": [<fav>...], "tombs": [{key,ts}] } },
-//     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } }
+//     "playlists":{ "<profile>": { "items": [<playlist>...], "tombs": [{key,ts}] } },
+//     "stats":    { "<profile>": { "<device>": { "items/<hash>": <blob>, "cat/<cat>/..": <n> } } },
+//     "playstats":{ "<profile>": { "<device>": { "<hash>/total": <n>, "<hash>/last": <n>, ... } } }
 //   }
 //
 // Merge semantics (verbatim from the design table):
@@ -33,6 +35,13 @@
 //   * favorites  — union by itemId keep newest ts; a tombstone with ts >= the item's ts suppresses it (a
 //                  newer re-add — ts strictly greater — beats an older tombstone; resurrection prevented).
 //   * playlists  — WHOLE-OBJECT per id keep newest updatedAt; tombstone-vs-updatedAt as favourites.
+//   * stats/playstats — device-namespaced accumulators: UNION of namespaces, VERBATIM replace of each REMOTE
+//                  namespace (a device only ever writes its own), local namespace untouched — NEVER arithmetic,
+//                  so repeated merges can't double-count.
+// EQUAL-TIMESTAMP TIE-BREAK (mdsync T3, carried from the T2 review): where two devices edited the same key at
+// the same second, newest-wins is undecided; a UNIFORM order-independent comparator — the lexically-greater
+// canonical JSON value bytes — decides for resume/recents/marks/favorites/playlists, so both merge orders
+// converge (this deliberately supersedes the divergent legacy ties: four stores kept-local, recents `>=`).
 // Every merge imports the remote tombstones locally (faithful ts) so a device re-propagates a peer's deletion,
 // then Tombstones::compact(30) bounds the deleted/* footprint.
 #pragma once
