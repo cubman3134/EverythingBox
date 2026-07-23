@@ -43,15 +43,21 @@ public:
     // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
     static QByteArray stateFingerprint();
 
+    // Whether interactive Drive sign-in works on this platform: true on desktop, false under Q_OS_ANDROID (the
+    // OAuth-on-Android follow-up is pending). The onboarding Restore action stays VISIBLE everywhere and consults
+    // this on tap so an Android user gets a graceful "not available yet" decline, never a dead end.
+    static bool signInAvailable();
     void signIn();                       // run the browser consent flow; emits signedIn()/signInFailed()
     void signOut();                      // forget the tokens; emits signedOut()
 
     // ---- Drive primitives (callbacks fire on the GUI thread) ----
     // Find (or create) the "MyMediaVault" folder; returns its file id ("" on failure).
     void ensureFolder(std::function<void(const QString& folderId)> cb);
-    // Find a file by name inside a folder; cb gets {id, modifiedTimeIso, stateHash} ("" id if absent).
+    // Find a file by name inside a folder; cb gets {listOk, id, modifiedTimeIso, stateHash}. listOk is false
+    // when the query (or its token refresh) had a network error — the caller must NOT read an empty id as
+    // "no such file" in that case (it's "couldn't reach Drive"). "" id with listOk==true means genuinely absent.
     void findFile(const QString& folderId, const QString& name,
-                  std::function<void(const QString& id, const QString& modifiedIso, const QString& stateHash)> cb);
+                  std::function<void(bool listOk, const QString& id, const QString& modifiedIso, const QString& stateHash)> cb);
     // Create or update a file's binary content; stateHash is stamped into appProperties (may be empty).
     // cb gets the file id ("" on failure).
     void uploadFile(const QString& folderId, const QString& existingId, const QString& name,
@@ -61,7 +67,8 @@ public:
 
     // ---- sync ----
     struct Status {
-        bool reached = false;       // we could reach Drive
+        bool reached = false;       // we could reach Drive (folder query resolved)
+        bool listReached = false;   // the bundle file-query itself had NO network error (else "empty" is unproven)
         bool hasRemote = false;     // a bundle exists on Drive
         bool remoteChanged = false; // Drive's bundle differs from what we last applied (another device pushed)
         bool localChanged = false;  // local state differs from what we last synced (this device has edits)

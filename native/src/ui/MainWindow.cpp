@@ -46,6 +46,7 @@
 #include "../core/RomLibrary.h"
 #include "../core/BiosCatalog.h"
 #include "../core/ProfileStore.h"
+#include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
@@ -136,11 +137,15 @@
 
 #include "miniz.h"
 
+// PanelRow is a pure Qt-Core POD (no QML/Quick deps) and the SHARED row descriptor for both the themed panel
+// host AND the classic showPanel fallback (e.g. openStats), so its header must be visible in a no-QML build too —
+// keep this include OUTSIDE the MMV_HAVE_QML guard or the classic path fails to compile (pre-existing, fixed here).
+#include "../theme2/PanelModel.h"
+
 #ifdef MMV_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ReaderChromeHost.h"
 #include "../theme2/ThemedPanelHost.h"
-#include "../theme2/PanelModel.h"
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QQuickWindow>
@@ -1995,7 +2000,22 @@ void MainWindow::showEvent(QShowEvent* event)
     activateWindow();
     QTimer::singleShot(0, this, [this] {
         activateWindow();
-        if (startupChooseProfile_) { promptStartupProfile(); return; } // pick a user before anything else
+        if (startupChooseProfile_)
+        {
+            // First run offers Restore-from-Drive vs. a new library BEFORE the profile picker. The pure router
+            // (also pinned headlessly by probe_onboarding, and re-consulted by T2's restore flow) makes the call
+            // so the branch can never drift: no local profiles + nothing picked yet ⇒ ChoiceScreen; existing
+            // profiles ⇒ straight to the picker. onboarding/done short-circuits ahead of it so an already-onboarded
+            // (or existing) user is byte-for-byte today's behavior — the choice screen is a pure first-run prepend.
+            const bool hasLocal = !ProfileStore::list().isEmpty();
+            const auto route = mmv::onboardingRoute(hasLocal, /*restorePicked*/ false, /*signInOk*/ false,
+                                                    /*remoteHasProfiles*/ false, CloudSync::signInAvailable());
+            if (!Settings::onboardingDone() && route == mmv::OnboardingRoute::ChoiceScreen)
+                presentOnboardingChoice();
+            else
+                promptStartupProfile();                  // pick a user before anything else (unchanged path)
+            return;
+        }
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
         // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
         // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
@@ -4945,13 +4965,195 @@ void MainWindow::onSwitchProfile()
     }, [this] { openHome(); });
 }
 
-#ifdef MMV_HAVE_QML
+// NOTE (non-QML link safety): onboardingChoiceTitle / presentOnboardingChoice / onboardingToFresh below are
+// deliberately OUTSIDE the MMV_HAVE_QML guard (which resumes before onboardingChoiceIsTop) — showEvent() calls
+// presentOnboardingChoice() UNCONDITIONALLY, so a Qt-without-qtdeclarative build must still link them. Each one's
+// own inner #ifdef MMV_HAVE_QML supplies the classic (no panel host) fallback, so both worlds build.
+
 // ---- Themed Profiles picker (B2 Task 5) --------------------------------------------------------------------
 // The classic ProfileDialog (a QStackedWidget: list page + a name/icon picker page) becomes, in themed mode, a
 // ThemedPanelHost presentation: the list is the root panel (Action row per profile + "Create New Profile"); the
 // picker's second page is a nested panel level (name TextField via the OSK + icon Choice). Activating a profile
 // row opens a NavMenu chooser (Switch / Edit / Delete) — the themed analogue of the classic row's three buttons.
 // All data ops go through ProfileStore verbatim.
+
+// First-run onboarding choice screen (onboarding/drive-restore T1): a themed two-action panel presented pre-home
+// on the SAME ThemedPanelHost the startup picker uses, so it wears the picker's chrome and reads as the first
+// screen. It reuses presentProfileList's Action-row idiom (rows -> host->present) rather than a NavConfirm dialog
+// because a two-CHOICE landing reads cleanest as a rooted list, and it matches the picker that follows it exactly.
+//   • "Set up a new library" -> mark onboarding done, then the EXISTING promptStartupProfile()/presentProfilePicker
+//     fresh path, BYTE-UNCHANGED (a pure prepend — the create-a-profile flow is untouched).
+//   • "Restore from Google Drive" -> beginOnboardingRestore() (T2): the signInAvailable gate -> async signIn ->
+//     the pull chain -> the pure onboardingRoute (Picker on restored profiles, Fresh on an empty cloud). Every
+//     failure routes back HERE with a one-line notice — never a dead end — and onboarding/done stays FALSE so a
+//     mistap or a failed attempt can be retried from this same screen.
+// Back on the first screen has no escape (same as the picker) -> quit-confirm. A classic (non-themed) build has no
+// panel host for the choice screen, so it falls through to the fresh path directly (the choice screen is a
+// themed-home feature) — keeping the classic startup path unchanged.
+//
+// This screen is ALSO the landing spot the restore flow re-presents on failure, so its title doubles as the
+// "onboarding is still the active surface" gate (onboardingChoiceIsTop) that drops a late OAuth completion after
+// the user navigated away — hence the one title source, onboardingChoiceTitle().
+QString MainWindow::onboardingChoiceTitle() { return tr("Welcome to My Media Vault"); }
+
+void MainWindow::presentOnboardingChoice()
+{
+#ifdef MMV_HAVE_QML
+    if (themedHomeEnabled() && themedPanelHost_)
+    {
+        clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
+        themedPanelHost_->reset();        // fresh ROOT presentation (also drops any stale panel levels)
+        themedPanelHost_->setStyle(settingsPanelStyle());
+        NavOverlay::setThemeColors(settingsPanelStyle());  // this screen's own menus/confirms match the theme
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("restore");
+          r.label = tr("☁   Restore from Google Drive"); rows << r; }
+        { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("fresh");
+          r.label = tr("＋   Set up a new library"); rows << r; }
+
+        auto onAct = [this](const QString& id, const QString&) {
+            if (id == QStringLiteral("fresh"))
+                onboardingToFresh();          // mark done + the EXISTING fresh path — byte-unchanged (a pure prepend)
+            else if (id == QStringLiteral("restore"))
+                beginOnboardingRestore();     // T2: signInAvailable gate -> signIn -> pull -> onboardingRoute
+        };
+        auto onBack = [this] { quitConfirmFromStartup(); };  // first screen: no escape — confirm quit / re-present
+
+        themedPanelHost_->present(onboardingChoiceTitle(), rows, onAct, onBack);
+        stack_->setCurrentWidget(themedPanelHost_);
+        updateNavForPage();
+        updateBackgroundMusic();
+        return;
+    }
+#endif
+    // Classic (non-themed) build: no panel host for a choice screen -> go straight to the unchanged fresh path.
+    onboardingToFresh();
+}
+
+// The onboarding "fresh library" exit (onboarding/drive-restore T2): mark onboarding done, then the EXISTING
+// startup profile picker — the create-a-profile flow, BYTE-UNCHANGED. Shared by the choice screen's "Set up a new
+// library" action, the classic-build fallback, the Android/decline path, and the empty-cloud restore outcome.
+void MainWindow::onboardingToFresh()
+{
+    Settings::setOnboardingDone(true);
+    promptStartupProfile();
+}
+
+#ifdef MMV_HAVE_QML
+// "The onboarding choice/flow is still the active surface" — the restore flow's equivalent of themedPanelIsTop's
+// late-async gate (openCloudSync). While Restore is signing in / pulling, the choice screen panel stays presented
+// (only a notify overlays it), so its title being the live top panel means the user hasn't quit or navigated away.
+// Every async restore callback checks this FIRST and DROPS otherwise: a browser OAuth that completes minutes after
+// the user backed out (quit-confirm raises a NavConfirm overlay -> overlayAbove() -> gate false) must never present
+// a picker or re-present the choice screen over an unrelated surface. Classic builds never reach the flow (false).
+bool MainWindow::onboardingChoiceIsTop() const
+{
+    return themedPanelIsTop(onboardingChoiceTitle());
+}
+
+// "Restore from Google Drive" (onboarding/drive-restore T2). The signInAvailable gate, then the async sign-in whose
+// completion drives the shipped pull chain and the pure onboardingRoute. NO merge/transport changes — this is a UI
+// spine over CloudSync + the existing cloudPullAtStartup chain. Every failure has a non-dead-end route:
+//   • !signInAvailable (Android, until the OAuth follow-up) -> Decline -> the fresh path, with a notice.
+//   • signIn fails / is cancelled                            -> back to the choice screen (token/refresh KEPT; retry).
+//   • signed in, then a pull/network failure                 -> back to the choice screen ("Couldn't reach Drive").
+//   • signed in, empty cloud                                 -> the fresh path (this device seeds the cloud).
+//   • signed in, restored profiles                           -> the themed picker (restored profiles as rows).
+// onboarding/done is set ONLY on a terminal fresh/picker outcome — a failed attempt leaves it FALSE so the user
+// lands back on Restore-vs-new-library and can retry (the same signIn also re-mints an expired refresh token).
+void MainWindow::beginOnboardingRestore()
+{
+    // The pre-sign-in decision goes through the pure router too: Decline (sign-in unavailable) -> the fresh path.
+    if (mmv::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ false,
+                             /*remoteHasProfiles*/ false, CloudSync::signInAvailable())
+        == mmv::OnboardingRoute::Decline)
+    {
+        notify(tr("Drive sign-in isn't available on this device yet."));
+        onboardingToFresh();
+        return;
+    }
+
+    // cloud_ is eager (ctor) for push-on-exit, so it always exists here. Arm one-shot, top-gated completion
+    // handlers in the panelPageConns_ pool (the openCloudSync lifetime model): they are replaced wholesale the
+    // moment the flow re-presents ANY panel (the choice screen on failure, or the picker on success both clear
+    // the pool), so a stale handler can never outlive the surface it belongs to.
+    clearPanelPageConns();
+    panelPageConns_ << connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+        if (!onboardingChoiceIsTop()) return;                 // navigated away / quit before OAuth returned — drop
+        onboardingRestorePull();
+    });
+    panelPageConns_ << connect(cloud_.get(), &CloudSync::signInFailed, this, [this](const QString& e) {
+        if (!onboardingChoiceIsTop()) return;                 // late failure after navigating away — drop
+        qInfo("[onboarding] Drive sign-in failed/cancelled: %s", qUtf8Printable(e));
+        presentOnboardingChoice();                            // token/refresh KEPT; onboarding/done stays FALSE
+        notify(tr("Couldn't sign in to Google Drive — try again, or set up a new library."));
+    });
+
+    notify(tr("Opening your browser to sign in…"));
+    cloud_->signIn();                                         // async: emits signedIn(email) / signInFailed(error)
+}
+
+// Signed in — run the shipped pull chain (the cloudPullAtStartup checkStatus+applyRemote chain, but async on the
+// GUI thread rather than a startup QEventLoop), then route. Distinguishes the PROVEN-empty cloud (reached AND the
+// bundle-query succeeded with no file -> this device seeds it: Fresh) from a network/pull failure after auth
+// (folder unreachable, the file-query itself errored, or applyRemote failed -> couldn't reach Drive -> ChoiceScreen,
+// never a fresh seed — a query failure must not be read as "empty" and clobber a real backup on exit-push). The
+// bundle carries the synced profiles/list, so ProfileStore::list() reflects the restored profiles once applyRemote
+// has applied it; the small per-item progress doc (marks/recents/resume) merges alongside via pullAndMergeProgress.
+void MainWindow::onboardingRestorePull()
+{
+    notify(tr("Restoring your library from Google Drive…"));
+    cloud_->checkStatus([this](const CloudSync::Status& st) {
+        if (!onboardingChoiceIsTop()) return;                 // navigated away mid-pull — drop
+        switch (mmv::restorePullStage(st.reached, st.listReached, st.hasRemote))
+        {
+        case mmv::RestorePullStage::Retry:                    // unreachable OR the file-query failed: UNPROVEN empty.
+            // Route to the choice screen (token kept, done stays FALSE) — never seed fresh over a backup we merely
+            // couldn't read. This is the data-safety fix: a query failure must not be mistaken for an empty cloud.
+            finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false);
+            return;
+        case mmv::RestorePullStage::Seed:                     // reached AND query succeeded, no bundle -> proven-empty
+            pullAndMergeProgress();                           // (no bundle, but any progress doc merges; no-ops if none)
+            finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
+            return;
+        case mmv::RestorePullStage::HasBundle:                // reached AND query succeeded AND a bundle exists -> apply
+            cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
+                if (!onboardingChoiceIsTop()) return;         // navigated away mid-apply — drop
+                if (!ok) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
+                pullAndMergeProgress();                       // merge the per-item stores the bundle doesn't carry
+                finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
+            });
+            return;
+        }
+    });
+}
+
+// The single post-sign-in dispatch, driven entirely by the pure onboardingRoute so the decision can never drift
+// from probe_onboarding. restoreOk folds "auth AND the pull both completed" into the router's signInOk leg: a
+// pull/network failure after auth reuses the SAME ChoiceScreen row as a sign-in failure (token kept, retry), so no
+// new enum value is introduced. Picker/Fresh is the router's post-sign-in Picker-vs-Fresh branch (remote populated
+// vs. empty), already pinned in the probe. onboarding/done is set only on these two terminal outcomes.
+void MainWindow::finishOnboardingRestore(bool restoreOk, bool remoteHasProfiles)
+{
+    switch (mmv::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ restoreOk,
+                                 remoteHasProfiles, /*signInAvailable*/ true))
+    {
+    case mmv::OnboardingRoute::Picker:                        // restored profiles pulled down -> pick one (as rows)
+        Settings::setOnboardingDone(true);
+        presentProfilePicker(/*mustChoose*/ true);
+        break;
+    case mmv::OnboardingRoute::Fresh:                         // signed in, empty cloud -> this device seeds it
+        notify(tr("Nothing to restore yet — let's set up your library."));
+        onboardingToFresh();
+        break;
+    case mmv::OnboardingRoute::ChoiceScreen:                  // pull/network failure after auth -> retry (token kept)
+    default:
+        presentOnboardingChoice();                            // onboarding/done stays FALSE
+        notify(tr("Couldn't reach Drive — check your connection and try again."));
+        break;
+    }
+}
 
 void MainWindow::presentProfilePicker(bool mustChoose)
 {
@@ -5106,10 +5308,19 @@ void MainWindow::chooseProfile(const QString& id)
 // (the "you must pick a profile" contract), or re-present the list if the user chooses to keep choosing.
 void MainWindow::quitConfirmFromStartup()
 {
+    // The onboarding choice screen borrows this same no-escape quit-confirm, but its Back must return to the CHOICE
+    // screen (not the profile list) and its prompt is Restore-vs-new, not "choose a profile". onboardingDone() is the
+    // discriminator MUST match showEvent's router guard (onboardingRoute): the choice screen is first-run ONLY, i.e.
+    // no local profiles yet AND onboarding not marked done. An UPGRADE user (existing profiles, onboarding/done never
+    // written -> false) must NEVER see the choice screen — profiles-empty is what makes it genuinely first-run, so a
+    // Back on THEIR startup picker keeps today's create-picker/quit behavior, not the Restore-vs-new prompt.
+    const bool onboarding = !Settings::onboardingDone() && ProfileStore::list().isEmpty();
     const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
-        tr("You need to choose a profile to continue."),
-        { tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+        onboarding ? tr("Choose Restore or a new library to continue.")
+                   : tr("You need to choose a profile to continue."),
+        { onboarding ? tr("Go back") : tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
     if (choice == 1) { mwLog(QStringLiteral("quit: startup-picker quit-confirm")); QApplication::quit(); return; }
+    if (onboarding) { presentOnboardingChoice(); return; }       // re-present the choice screen (Back popped its level)
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
 #endif // MMV_HAVE_QML

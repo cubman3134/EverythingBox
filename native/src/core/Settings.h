@@ -69,6 +69,10 @@ namespace Settings
     // Whether the one-time "we detected a TV — switch to the TV layout?" prompt has already been shown.
     bool    tvPromptDone();                   // key "display/tvPromptDone", default false
     void    setTvPromptDone(bool done);
+    // Whether the one-time first-run onboarding choice (Restore-from-Drive vs. a new library) has been resolved.
+    // Device-local (carved out at CloudSync::isDeviceLocalKey) so a restored/synced peer never re-triggers it.
+    bool    onboardingDone();                 // key "onboarding/done", default false
+    void    setOnboardingDone(bool done);
 
     // On-screen virtual gamepad (touch form factors). Tri-state override stored as "auto"|"on"|"off":
     // "auto" (default) shows it only in the Mobile form factor, "on" always, "off" never. Opacity is 0..100

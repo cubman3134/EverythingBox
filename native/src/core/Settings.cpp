@@ -185,6 +185,12 @@ void Settings::setTvPromptDone(bool done)
     store().setValue(QStringLiteral("display/tvPromptDone"), done); store().sync();
 }
 
+bool Settings::onboardingDone() { return store().value(QStringLiteral("onboarding/done"), false).toBool(); }
+void Settings::setOnboardingDone(bool done)
+{
+    store().setValue(QStringLiteral("onboarding/done"), done); store().sync();
+}
+
 bool Settings::checkUpdatesOnStartup() { return store().value(QStringLiteral("general/checkUpdatesOnStartup"), true).toBool(); }
 void Settings::setCheckUpdatesOnStartup(bool on)
 {
