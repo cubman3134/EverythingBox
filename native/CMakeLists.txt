@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.15 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.16 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -196,6 +196,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SteamAchievements.cpp src/core/SteamAchievements.h
         src/core/PlayStats.cpp    src/core/PlayStats.h
         src/core/RomLibrary.cpp   src/core/RomLibrary.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
@@ -451,6 +452,14 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the local video library core (parse + NFO + scan + OwnedIndex).
+    add_executable(probe_locallib tools/probe_locallib.cpp
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
+    target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
+    target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the game-importers Task 1 (Steam gap-closure) pure logic: owned-games JSON parse +
     # TTL semantics (SteamLibrary), the owned-not-installed console append (SyntheticCatalogs), and the
