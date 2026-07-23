@@ -50,6 +50,16 @@ int main()
     CHECK(onboardingRoute(false, /*restore*/true, /*ok*/false, /*remote*/true, /*avail*/true)
           == OnboardingRoute::ChoiceScreen);
 
+    // 5b. T2 semantics: the restore flow feeds the WHOLE auth+pull leg into signInOk (finishOnboardingRestore's
+    //     `restoreOk`), so a pull/network failure AFTER a successful sign-in reuses the SAME ChoiceScreen row as a
+    //     sign-in failure — no new enum value. The distinction (retry the sign-in vs. retry the pull) is only in
+    //     the caller's notice text; the ROUTE is identical (back to the choice screen, token kept, done=false).
+    CHECK(onboardingRoute(false, /*restore*/true, /*ok(=auth&&pull)*/false, /*remote*/false, /*avail*/true)
+          == OnboardingRoute::ChoiceScreen);
+    //     And the post-sign-in Picker-vs-Fresh IS the router's remoteHasProfiles branch (restored rows vs. seed):
+    CHECK(onboardingRoute(false, true, /*ok*/true, /*remote*/true,  true) == OnboardingRoute::Picker);
+    CHECK(onboardingRoute(false, true, /*ok*/true, /*remote*/false, true) == OnboardingRoute::Fresh);
+
     // 6. Existing/returning user: local profiles already exist => straight to the picker, no choice screen,
     //    regardless of any restore inputs (the choice screen is first-run only).
     CHECK(onboardingRoute(/*hasLocal*/true, false, false, false, true) == OnboardingRoute::Picker);

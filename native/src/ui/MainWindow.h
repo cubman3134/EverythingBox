@@ -316,6 +316,14 @@ private:
     // startup variant (no Back escape — rootBack runs the quit-confirm path); !mustChoose is the Home switcher
     // (Back keeps the current profile). Both reuse ProfileStore data ops exactly. ----
     void presentOnboardingChoice();                              // first-run: Restore-from-Drive vs. new-library choice screen
+    // ---- Onboarding Restore flow (T2): signInAvailable gate -> async signIn -> the shipped pull chain -> the pure
+    // onboardingRoute. Every failure routes back to the choice screen or the fresh path (never a dead end). ----
+    static QString onboardingChoiceTitle();                      // the ONE choice-screen title (present + the late-async gate)
+    bool onboardingChoiceIsTop() const;                          // "onboarding is still the active surface" — drops late OAuth
+    void onboardingToFresh();                                    // setOnboardingDone(true) + the EXISTING fresh picker path
+    void beginOnboardingRestore();                               // Restore tapped: signInAvailable gate -> signIn (async)
+    void onboardingRestorePull();                                // signed in: checkStatus+applyRemote+pullAndMergeProgress
+    void finishOnboardingRestore(bool restoreOk, bool remoteHasProfiles); // pure-router dispatch: Picker/Fresh/ChoiceScreen
     void presentProfilePicker(bool mustChoose);                  // reset()+present() the root list (also for startup, pre-home)
     void presentProfileList(bool mustChoose, bool replace);      // (re)build the profile list rows; replace = in place
     void editProfilePanel(const QString& id, bool mustChoose);   // nested name(TextField)+icon(Choice) picker; id "" = create
