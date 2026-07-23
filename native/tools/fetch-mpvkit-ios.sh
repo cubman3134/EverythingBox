@@ -49,7 +49,8 @@ for u in "${URLS[@]}"; do
   fw="${f%.zip}"
   [ -d "$fw" ] && { echo "have  $fw"; continue; }
   echo "fetch $f"
-  curl -fsSLO "$u"
+  # --retry-all-errors: also retry transient connect failures (GH runners drop connections now and then)
+  curl -fsSLO --retry 5 --retry-delay 3 --retry-all-errors "$u"
   unzip -q -o "$f"
   rm -f "$f"
 done
