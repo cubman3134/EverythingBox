@@ -532,7 +532,9 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         scroll->setWidget(typeHost_);
         scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        scroll->setFixedHeight(kTopBtnHeight);
+        // No fixed height: stretch with the bar exactly like the bare typeHost_ does, so the tabs sit
+        // at the same vertical position as the rest of the chrome (a fixed 34px viewport clipped them).
+        scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
         QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
         topRow->addWidget(scroll, 1);
     }
