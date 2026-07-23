@@ -61,8 +61,25 @@
 
 ### Task 5: two-instance live verification + close-out + fable + merge
 
-- [ ] Live (the portable-build technique: the deployed app [instance A, real data, SNAPSHOT ini] + a portable build/Release copy in the scratchpad with its own data dir [instance B] — BOTH signed into the same Drive account; B seeds a fresh profile-set via first-run + pull): A marks/favorites/playlist-edit + watches 30s → push (or Sync now) → B pulls at launch → sees all of it merged; B deletes the favorite → A pulls → tombstone honored, no resurrection; stats accrue on both → A's panel totals = A+B sums; A's display/mode + roms/folder unchanged by B's pushes; the bundle round-trip leaves per-item stores alone (byte-inspect). Restore A's ini byte-identical EXCEPT sync-legitimate merged additions from the test (delete the test artifacts via the UI first, push, THEN restore-verify — leave zero test residue in the cloud copy either: final push after cleanup).
-- [ ] Spec status → complete (+ the Android-OAuth follow-up prominent); full suite + perf 3 runs; fable whole-branch (dimensions: merge convergence/edge ordering, the applyBundle hands-off completeness vs "always take cloud", accumulator migration safety on REAL data, exclusion-list completeness vs the ini's real key population, the trigger hooks' cost); fix rounds; merge+push+redeploy.
+- [x] Live (portable-build technique) — PARTIAL, blocked on an expired credential. Two portable
+  instances were built (A = a copy of the real deployed data + sign-in; B = fresh + account-level
+  cloud/* reuse); BOTH launched headless and were driven via uitest on separate pipes. **Verified
+  live:** dual-instance launch/drive, data-dir isolation, migration-on-real-data safety (playstats
+  folded to the device namespace, real totals 147/231 preserved), the clean-exit push PATH executing
+  (closeEvent → aboutToQuit) and the startup pull PATH executing. **BLOCKED:** the actual Drive
+  round-trip (merge-to-B / tombstone-to-A / stats-sum) — the account's refresh token returns
+  `invalid_grant` (HTTP 400), so no push/pull completes. Root-caused via temporary instrumentation
+  (reverted); it is an expired/revoked token needing user re-sign-in, NOT a code defect. The merge /
+  tombstone / stats-union / carve-out / bundle-hands-off / cadence semantics are all proven by
+  `probe_cloudmerge` (RED-first) instead. **Cleanup:** because every push failed, the cloud was never
+  written (zero residue); the real deployed `C:\MyMediaVault-app` was never launched (portable copies
+  used), so its ini is provably byte-identical (md5 `8817fa31…` verified) and both portable instances
+  were deleted.
+- [x] Spec status → complete (+ Android-OAuth follow-up + T2/T3 design-limitation notes + the
+  `invalid_grant` re-auth finding). Full headless suite GREEN (`ALL HEADLESS PROBES PASSED`, incl.
+  `probe_cloudmerge` §17 cadence). Perf baseline 3 runs (`docs/superpowers/perf/2026-07-23-mdsync-t5-baseline.md`):
+  startup.total in-band, **nav.select FLAT (avg 30–31 ms)**, change-hook cost noted (off every span).
+  Per this task's scope: committed on-branch only — fable/merge/push/redeploy intentionally deferred.
 
 ## Self-Review (done at write time)
 

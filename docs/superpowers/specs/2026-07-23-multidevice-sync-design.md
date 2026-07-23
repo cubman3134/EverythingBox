@@ -1,7 +1,39 @@
 # Multi-Device Sync Upgrade (snapshot → per-item merge) — Design
 
 **Date:** 2026-07-23
-**Status:** Approved design; plan next.
+**Status:** COMPLETE — shipped on `sync/multidevice` (T1–T5). Per-item merge, device-namespaced
+accumulators, tombstones, the device-local carve-out, and the bundle hands-off are all implemented
+and probe-verified (`probe_cloudmerge` RED-first, full merge matrix + carve-out + cadence §17;
+`probe_stats` namespace sums + migration idempotency). Live: dual-instance headless launch/drive +
+data-dir isolation verified; migration-on-real-data verified safe (playstats folded to the device
+namespace, real totals preserved). See close-out below for the follow-ups + the live-Drive blocker.
+
+## Close-out follow-ups (T5)
+
+1. **Android/TV OAuth (the recorded §5 limitation) — PROMINENT open follow-up.** The loopback OAuth
+   flow (QTcpServer + system browser) is desktop-shaped; signing in ON Android is untested and
+   likely needs a Custom-Tabs/app-link or device-code flow. Desktop↔desktop is the shipped scope;
+   Android instances join when their auth path lands.
+2. **Live two-instance Drive round-trip could NOT be exercised this session — the account's stored
+   Google refresh token returns `invalid_grant` (HTTP 400) on refresh.** The token is expired/revoked,
+   so the *deployed* app's Drive sync is currently non-functional until the user re-signs-in
+   (interactive browser consent — a user-only action). This is an account/credential state, NOT an
+   mdsync code defect: Google's endpoints are reachable, and every non-network layer verified clean.
+   The merge/transport wiring beyond the token is proven by the probe suite + the migration/launch
+   live checks. **Action: user re-authenticates Google Drive in the app** to restore sync.
+3. **Design limitations recorded (T2/T3 review):**
+   - *Tag-recreate window* — vocab/pinned merge is `union-minus-tombstoned` with no per-tag ts; a
+     cross-device conflict where one device re-creates a tag another deleted resolves deletion-wins
+     until the 30-day tombstone compacts. A local re-add clears its OWN tombstone (single-device
+     re-adds are never self-suppressed).
+   - *Re-pin window* — a bare unpin records a pinned-space tombstone (retires the shelf, keeps the
+     tag); re-pinning clears it. Same 30-day cross-device convergence window as above.
+   - *Canonical-JSON cross-build requirement* — the equal-timestamp tie-break is order-independent
+     ONLY while both sides emit byte-identical canonical JSON (`QJsonDocument::Compact`, sorted keys)
+     for the same logical value. Any future change to JSON emission must preserve this or the tie-break
+     can diverge by merge order.
+4. **Cadence fix (T5):** `stateHash` + `buildSettingsJson` now exclude `isPerItemStoreKey`, so per-item
+   churn no longer bloats the bundle or flips its sync fingerprint (the merge doc owns per-item).
 **Origin:** The replace-everything roadmap's #1 — the user asked "does the Google Drive
 sync not work for this?" — answer: it's a snapshot backup (last-writer-wins whole-file),
 not a merge; this track upgrades it on the same Drive transport.
