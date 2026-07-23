@@ -703,7 +703,13 @@ int main(int argc, char** argv)
         CHECK(b.contains(QStringLiteral("sync/global/audio")));      // sync/global/* still syncs
         CHECK(b.contains(QStringLiteral("library/showHidden")));     // library/showHidden still syncs
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
-        CHECK(b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item IS in the bundle
+        CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
+        for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/"})
+        {
+            bool anyPerItem = false;
+            for (const QString& bk : b.keys()) if (bk.startsWith(QLatin1String(pi))) { anyPerItem = true; break; }
+            CHECK(!anyPerItem);                                      // no per-item store rides the heavy bundle outbound
+        }
 
         // 16b. applySettingsJson (inbound): a peer's bundle must not overwrite device-local keys NOR write any
         // per-item store key (release-gating hands-off); only plain synced keys land.
@@ -734,6 +740,53 @@ int main(int argc, char** argv)
             QSettings raw(iniPath, QSettings::IniFormat);
             for (const char* g : {"roms", "emulators", "player", "netplay", "display", "profiles", "emu",
                                   "sync", "downloads", "pcgames", "library", "stats", "marks", "resume", "some"})
+                raw.remove(QLatin1String(g));
+            raw.sync();
+        }
+    }
+
+    // ---- 17. T5 cadence: per-item churn re-uploads NOTHING heavy (neither the bundle nor the stateHash gate) ---
+    {
+        const QString localDev = Settings::deviceId();
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const char* g : {"stats", "marks", "favorites", "playlists", "resume", "recent", "playstats", "deleted", "display"})
+                raw.remove(QLatin1String(g));
+            raw.setValue(QStringLiteral("display/theme"), QStringLiteral("dark")); // a genuinely bundle-synced key
+            raw.sync();
+        }
+        const QByteArray bundle0 = CloudSync::buildSettingsJson();
+        const QByteArray fp0 = CloudSync::stateFingerprint();
+
+        // Mutate EVERY per-item store family (the exact churn a live device generates while watching/marking).
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"), QStringLiteral("1234"));
+            raw.setValue(QStringLiteral("playstats/pX/") + localDev + QStringLiteral("/abc/total"), QStringLiteral("99"));
+            raw.setValue(QStringLiteral("marks/pX/items/deadbeef"), QStringLiteral("{\"updatedAt\":42}"));
+            raw.setValue(QStringLiteral("favorites/pX/items/f1"), QStringLiteral("{\"ts\":7}"));
+            raw.setValue(QStringLiteral("playlists/pX/p1"), QStringLiteral("{\"updatedAt\":9}"));
+            raw.setValue(QStringLiteral("resume/pX/r1"), QStringLiteral("{\"ts\":3}"));
+            raw.setValue(QStringLiteral("recent/pX/items"), QStringLiteral("[1,2]"));
+            raw.setValue(QStringLiteral("deleted/favorites/pX/xyz"), QStringLiteral("{\"ts\":5}"));
+            raw.sync();
+        }
+        CHECK(CloudSync::buildSettingsJson() == bundle0);   // per-item churn -> bundle bytes UNCHANGED
+        CHECK(CloudSync::stateFingerprint() == fp0);        // per-item churn -> localChanged gate stays FALSE (no heavy re-upload)
+
+        // A genuinely bundle-synced setting DOES still move the fingerprint (the merge-doc-only decoupling didn't
+        // silence real bundle changes).
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("display/theme"), QStringLiteral("light"));
+            raw.sync();
+        }
+        CHECK(CloudSync::buildSettingsJson() != bundle0);   // a real synced setting -> bundle changes
+        CHECK(CloudSync::stateFingerprint() != fp0);        // -> localChanged fires, bundle re-uploads (correct)
+
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const char* g : {"stats", "marks", "favorites", "playlists", "resume", "recent", "playstats", "deleted", "display"})
                 raw.remove(QLatin1String(g));
             raw.sync();
         }

@@ -421,10 +421,15 @@ bool CloudSync::isPerItemStoreKey(const QString& key)
 
 QByteArray CloudSync::buildSettingsJson()
 {
-    // Every setting except the device-local carve-out (the SINGLE exclusion table, applied outbound here).
+    // Every setting except the device-local carve-out AND the per-item stores (mdsync T5 cadence fix). The
+    // per-item stores are owned exclusively by the CloudMerge progress document, so they must NOT ride the
+    // heavy bundle: applyBundle already refuses to write them inbound, and carrying them outbound only made a
+    // per-item tick (a mark/favorite/playlist/stats accrual) flip the stateHash fingerprint and re-upload the
+    // whole zip. Excluding them here (and in stateHash) keeps the heavy bundle quiet on per-item churn while the
+    // lightweight merge doc still pushes on its own 15s debounce.
     QJsonObject so;
     for (const QString& k : store().allKeys())
-        if (!isDeviceLocalKey(k)) so.insert(k, store().value(k).toString());
+        if (!isDeviceLocalKey(k) && !isPerItemStoreKey(k)) so.insert(k, store().value(k).toString());
     return QJsonDocument(so).toJson(QJsonDocument::Compact);
 }
 
@@ -521,7 +526,12 @@ static QByteArray stateHash()
     QStringList keys;
     // Same carve-out as buildBundle: a device-local key isn't synced, so it must not enter the fingerprint —
     // otherwise a purely-local edit reads as an unsynced change and cross-device baselines never converge.
-    for (const QString& k : store().allKeys()) if (!CloudSync::isDeviceLocalKey(k)) keys << k;
+    // The per-item stores are ALSO excluded (mdsync T5): they're owned by the merge document, and if they
+    // entered this fingerprint every mark/favorite/playlist/stats tick would read as "local changed" and
+    // re-upload the heavy bundle. Keeping them out means per-item churn is served solely by the merge doc's
+    // own push cadence; the bundle only re-uploads when a genuinely bundle-synced setting or file changes.
+    for (const QString& k : store().allKeys())
+        if (!CloudSync::isDeviceLocalKey(k) && !CloudSync::isPerItemStoreKey(k)) keys << k;
     keys.sort();
     for (const QString& k : keys)
     { h.addData(k.toUtf8()); h.addData("="); h.addData(store().value(k).toString().toUtf8()); h.addData("\n"); }
@@ -548,6 +558,10 @@ static QByteArray stateHash()
     }
     return h.result().toHex();
 }
+
+// Test seam (mdsync T5): the same fingerprint the sync gate uses (checkStatus's st.localChanged). Exposed so
+// the headless probe can assert per-item churn no longer flips it (i.e. the heavy bundle stays quiet).
+QByteArray CloudSync::stateFingerprint() { return stateHash(); }
 
 void CloudSync::checkStatus(std::function<void(const Status&)> cb)
 {

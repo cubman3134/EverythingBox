@@ -39,6 +39,9 @@ public:
     // Apply a bundle's settings.json the way applyBundle does: write only keys that are neither device-local
     // NOR per-item-store (the merge file owns those). Exposed for the probe's hands-off assertion.
     static void applySettingsJson(const QByteArray& settingsJson);
+    // The sync fingerprint (checkStatus's localChanged gate). Excludes both the device-local carve-out and the
+    // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
+    static QByteArray stateFingerprint();
 
     void signIn();                       // run the browser consent flow; emits signedIn()/signInFailed()
     void signOut();                      // forget the tokens; emits signedOut()
