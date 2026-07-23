@@ -28,8 +28,9 @@ add_library(mymediavault_libretro STATIC src/libretro/LibretroCore.cpp)
 target_include_directories(mymediavault_libretro PUBLIC src/libretro)
 
 # A console probe that exercises the frontend (no Qt) - used for verification. Desktop-only: Android builds
-# the app as a shared library packaged into an APK, so standalone console executables don't fit.
-if(NOT ANDROID)
+# the app as a shared library packaged into an APK, and iOS builds an app bundle, so standalone console
+# executables don't fit either mobile platform.
+if(NOT ANDROID AND NOT IOS)
     add_executable(probe_core tools/probe_core.cpp)
     target_link_libraries(probe_core PRIVATE mymediavault_libretro)
 endif()
@@ -246,8 +247,8 @@ if(MYMEDIAVAULT_BUILD_APP)
     set_target_properties(mymediavault PROPERTIES WIN32_EXECUTABLE TRUE)
 
     # Console harnesses (desktop-only): standalone executables for headless verification - not built for
-    # Android, where the app is a shared lib + APK.
-    if(NOT ANDROID)
+    # Android (shared lib + APK) or iOS (app bundle).
+    if(NOT ANDROID AND NOT IOS)
     # Crash triage (Windows): symbolize a minidump's faulting-thread stack against the Release .pdb, since there's
     # no cdb/WinDbg on the box. No Qt — just DbgHelp. Usage: symbolize_dump <crash.dmp> C:\MyMediaVault-app
     if(WIN32)
@@ -655,5 +656,73 @@ if(MYMEDIAVAULT_BUILD_APP)
         endif()
         message(STATUS "Configuring Android APK target (ABI: ${CMAKE_ANDROID_ARCH_ABI}). "
                        "Cores download to the app data dir at runtime; external emulators are disabled.")
+    endif()
+
+    # -----------------------------------------------------------------------------------------------------
+    # iOS packaging. Mirrors the Android port: the media hub (video/audio via libmpv, readers, addons)
+    # ships; standalone emulators + downloaded libretro cores are gated off (iOS forbids JIT and dlopen of
+    # downloaded code). Configure with the Qt-for-iOS qt-cmake; libmpv comes from MPVKit's static
+    # xcframeworks (https://github.com/mpvkit/MPVKit) via -DMMV_IOS_MPV_DEPS_DIR=<dir of *.xcframework>,
+    # plus -DMPV_INCLUDE_DIR=<Libmpv.framework/Headers> -DMPV_LIBRARY=<Libmpv.framework/Libmpv>.
+    # -----------------------------------------------------------------------------------------------------
+    if(IOS)
+        set_target_properties(mymediavault PROPERTIES
+            MACOSX_BUNDLE_GUI_IDENTIFIER "com.mymediavault.app"
+            MACOSX_BUNDLE_BUNDLE_NAME "MyMediaVault"
+            MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+            MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+
+        # Stage the stock themes2/ + first-party addons into the bundle (iOS bundles are shallow — resources
+        # sit at the bundle root). AssetBootstrap extracts them into the writable data dir on first launch,
+        # exactly like the Android assets:/mmv flow (see main.cpp).
+        add_custom_command(TARGET mymediavault POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:mymediavault>/mmv"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory
+                    "${CMAKE_CURRENT_SOURCE_DIR}/themes2" "$<TARGET_BUNDLE_DIR:mymediavault>/mmv/themes2"
+            COMMENT "Staging themes2 + addons into the app bundle")
+        file(GLOB _mmv_ios_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
+        foreach(_addon ${_mmv_ios_addon_dirs})
+            if(IS_DIRECTORY "${_addon}")
+                get_filename_component(_addon_name "${_addon}" NAME)
+                add_custom_command(TARGET mymediavault POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                            "${_addon}" "$<TARGET_BUNDLE_DIR:mymediavault>/mmv/addons/${_addon_name}")
+            endif()
+        endforeach()
+
+        # MPVKit ships libmpv + its whole dependency stack (ffmpeg, libass, gnutls, libplacebo, MoltenVK, ...)
+        # as per-library STATIC xcframeworks. Link the slice matching the target (device vs simulator), plus
+        # the system frameworks/libs that stack expects.
+        if(MMV_IOS_MPV_DEPS_DIR)
+            if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
+                set(_mmv_ios_slices "ios-arm64_x86_64-simulator" "ios-arm64-simulator")
+            else()
+                set(_mmv_ios_slices "ios-arm64")
+            endif()
+            foreach(_slice ${_mmv_ios_slices})
+                file(GLOB _mmv_ios_fws "${MMV_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.framework")
+                foreach(_fw ${_mmv_ios_fws})
+                    get_filename_component(_fw_name "${_fw}" NAME_WE)
+                    if(EXISTS "${_fw}/${_fw_name}")
+                        target_link_libraries(mymediavault PRIVATE "${_fw}/${_fw_name}")
+                    endif()
+                endforeach()
+                # Some deps ship a bare static lib in the slice instead of a framework (e.g. MoltenVK).
+                file(GLOB _mmv_ios_libs "${MMV_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.a")
+                foreach(_lib ${_mmv_ios_libs})
+                    target_link_libraries(mymediavault PRIVATE "${_lib}")
+                endforeach()
+            endforeach()
+            target_link_libraries(mymediavault PRIVATE
+                "-framework AudioToolbox" "-framework AVFoundation" "-framework CoreAudio"
+                "-framework CoreMedia" "-framework CoreVideo" "-framework VideoToolbox"
+                "-framework Metal" "-framework MetalKit" "-framework CoreImage" "-framework QuartzCore"
+                "-framework IOSurface" "-framework Security" "-framework SystemConfiguration"
+                "-framework CoreText" "-framework UIKit"
+                iconv bz2 z c++ resolv xml2)
+            message(STATUS "iOS: linking MPVKit static stack from ${MMV_IOS_MPV_DEPS_DIR}")
+        endif()
+        message(STATUS "Configuring iOS app bundle. Downloaded libretro cores + external emulators are "
+                       "disabled on this platform.")
     endif()
 endif()

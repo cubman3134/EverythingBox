@@ -23,6 +23,25 @@
 #include "CoreManager.h"
 #include "BiosCatalog.h"
 
+#ifdef Q_OS_IOS
+// iOS: standalone external emulators are impossible here — there is no QProcess, and iOS can't launch
+// downloaded executables. The class keeps its API so callers link unchanged; every operation reports
+// unavailability (mirroring how the feature is gated off the Android build).
+EmulatorManager::EmulatorManager(QObject* parent) : QObject(parent) {}
+QString EmulatorManager::emulatorsRoot() { return QDir(AppPaths::dataDir()).filePath(QStringLiteral("emulators")); }
+void EmulatorManager::setEmulatorsRoot(const QString&) {}
+QString EmulatorManager::installDir(const ExternalEmulator& em) { return QDir(emulatorsRoot()).filePath(em.id); }
+QString EmulatorManager::resolveBinary(const ExternalEmulator&) { return QString(); }
+bool EmulatorManager::launchFullscreen() { return true; }
+void EmulatorManager::setLaunchFullscreen(bool) {}
+void EmulatorManager::play(const ExternalEmulator&, const QString&)
+{ emit failed(tr("Standalone emulators aren't available on iOS.")); }
+void EmulatorManager::install(const ExternalEmulator&)
+{ emit failed(tr("Standalone emulators aren't available on iOS.")); }
+void EmulatorManager::terminateGame() {}
+void EmulatorManager::closeGame() {}
+#else
+
 // Some download hosts (e.g. richwhitehouse.com / BigPEmu) block non-browser requests via Mod_Security, so
 // present a normal browser User-Agent. GitHub and Dolphin accept it too (they just require a non-empty UA).
 static const QString kBrowserUA = QStringLiteral(
@@ -1192,3 +1211,5 @@ void EmulatorManager::startGameProcess(const QString& program, const QStringList
     });
     game_->start(program, args);
 }
+
+#endif // Q_OS_IOS

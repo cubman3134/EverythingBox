@@ -260,6 +260,10 @@ bool ExternalPlayer::launchExe(const QString& urlOrPath, const QString& exe)
 #ifdef Q_OS_ANDROID
     Q_UNUSED(exe);
     return launch(urlOrPath); // Android has no exe target; the ACTION_VIEW intent is the handoff
+#elif defined(Q_OS_IOS)
+    // iOS: no QProcess and no exe handoff target — external players are unavailable (in-app libmpv only).
+    Q_UNUSED(urlOrPath); Q_UNUSED(exe);
+    return false;
 #else
     if (exe.isEmpty()) return false;
     return QProcess::startDetached(exe, QStringList{ urlOrPath });
