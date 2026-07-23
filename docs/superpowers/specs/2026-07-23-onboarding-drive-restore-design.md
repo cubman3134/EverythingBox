@@ -1,7 +1,15 @@
 # First-Run Onboarding: Google Drive Restore — Design
 
 **Date:** 2026-07-23
-**Status:** Approved design; queues behind the multi-device sync merge.
+**Status:** COMPLETE (T1–T3, 2026-07-23). Desktop code-verified through the entire flow up to the
+credential boundary: the choice screen, the `signInAvailable` gate, the real OAuth sign-in launch, and
+the signed-in `checkStatus`→pull→route chain. The full restore round-trip (real Google consent → Drive
+pull → restored-profiles picker → populated library) awaits the user's one-time interactive Google
+consent, which also re-mints the currently-expired refresh token — the agent cannot enter credentials.
+Android "Restore" correctly declines pending the separate OAuth follow-up (a documented non-goal). The
+T2 findFile data-safety window (a Drive file-query network failure being read as "empty cloud" and
+seeding fresh over the real backup) is CLOSED in T3 (`Status::listReached` + pure `restorePullStage`,
+pinned in `probe_onboarding`).
 **Origin:** User request — "change first startup to set up your Google Drive info instead
 of creating a profile, so you can potentially use your profiles from Google Drive."
 
