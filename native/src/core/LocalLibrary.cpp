@@ -22,6 +22,9 @@ namespace
     {
         s.replace(QLatin1Char('.'), QLatin1Char(' '));
         s.replace(QLatin1Char('_'), QLatin1Char(' '));
+        s = s.simplified();
+        while (s.endsWith(QLatin1Char('-')) || s.endsWith(QLatin1Char(':')))
+            s.chop(1);
         return s.simplified();
     }
 
@@ -95,11 +98,32 @@ VideoEntry parseFile(const QString& path)
         return e;
     }
 
-    static const QRegularExpression reYear(QStringLiteral("^(.*?)[ ._]*\\(?(19\\d{2}|20\\d{2})\\)?"));
-    const QRegularExpressionMatch my = reYear.match(base);
+    // Movie. Prefer a parenthesized (YYYY); else a dot/underscore-delimited bare year (scene-release
+    // convention "Title.YEAR.quality"). A SPACE-delimited trailing number is treated as part of the
+    // title (e.g. "Blade Runner 2049", "2001 A Space Odyssey"), never as the year.
     e.kind = Kind::Movie;
-    if (my.hasMatch()) { e.title = cleanName(my.captured(1)); e.year = my.captured(2).toInt(); }
-    else               { e.title = cleanName(base); e.year = 0; }
+    static const QRegularExpression reParenYear(QStringLiteral("\\((19\\d{2}|20\\d{2})\\)"));
+    static const QRegularExpression reSceneYear(QStringLiteral("[._](19\\d{2}|20\\d{2})(?:[._]|$)"));
+    QRegularExpressionMatch py = reParenYear.match(base);
+    if (py.hasMatch())
+    {
+        e.year = py.captured(1).toInt();
+        e.title = cleanName(base.left(py.capturedStart(0)));
+    }
+    else
+    {
+        QRegularExpressionMatch sy = reSceneYear.match(base);
+        if (sy.hasMatch())
+        {
+            e.year = sy.captured(1).toInt();
+            e.title = cleanName(base.left(sy.capturedStart(0)));
+        }
+        else
+        {
+            e.title = cleanName(base);
+            e.year = 0;
+        }
+    }
     return e;
 }
 

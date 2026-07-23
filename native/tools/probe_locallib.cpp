@@ -46,8 +46,17 @@ int main(int argc, char** argv)
     writeFile(root + "/junk/random.mkv");                            // no year, no SxxEyy
     writeFile(root + "/Show/notes.txt", "ignore me");               // non-video
 
+    writeFile(root + "/Blade Runner 2049/Blade Runner 2049.mkv");   // space-delimited trailing number = title, not year
+    writeFile(root + "/2001 A Space Odyssey (1968)/2001 A Space Odyssey (1968).mkv");
+    writeFile(root + "/Dune (2021)/Dune (2021).mkv");
+    writeFile(root + "/Dune (2021)/movie.nfo",                       // folder movie.nfo fallback (no sidecar)
+              "<movie><uniqueid type=\"imdb\">1160419</uniqueid></movie>");  // non-tt id -> normalized to tt1160419
+    writeFile(root + "/Heat (1995)/Heat (1995).mkv");
+    writeFile(root + "/Heat (1995)/Heat (1995).nfo",                 // uniqueid(imdb) must WIN over <imdbid>
+              "<movie><imdbid>tt0000001</imdbid><uniqueid type=\"imdb\">tt0113277</uniqueid></movie>");
+
     const QVector<LocalLibrary::VideoEntry> scanned = LocalLibrary::scanFolder(root);
-    CHECK(scanned.size() == 4);   // 3 mkv + 1 mp4; txt ignored
+    CHECK(scanned.size() == 8);   // 4 existing video files + 4 new; txt ignored
 
     const auto* inc = findByPathSuffix(scanned, "Inception (2010).mkv");
     CHECK(inc != nullptr);
@@ -85,8 +94,24 @@ int main(int argc, char** argv)
         CHECK(rnd->year == 0);
     }
 
+    const auto* br = findByPathSuffix(scanned, "Blade Runner 2049.mkv");
+    CHECK(br != nullptr);
+    if (br) { CHECK(br->kind == LocalLibrary::Kind::Movie); CHECK(br->title == QStringLiteral("Blade Runner 2049")); CHECK(br->year == 0); }
+
+    const auto* od = findByPathSuffix(scanned, "2001 A Space Odyssey (1968).mkv");
+    CHECK(od != nullptr);
+    if (od) { CHECK(od->title == QStringLiteral("2001 A Space Odyssey")); CHECK(od->year == 1968); }
+
+    const auto* dune = findByPathSuffix(scanned, "Dune (2021).mkv");
+    CHECK(dune != nullptr);
+    if (dune) { CHECK(dune->year == 2021); CHECK(dune->imdbId == QStringLiteral("tt1160419")); }  // movie.nfo fallback + non-tt normalization
+
+    const auto* heat = findByPathSuffix(scanned, "Heat (1995).mkv");
+    CHECK(heat != nullptr);
+    if (heat) { CHECK(heat->imdbId == QStringLiteral("tt0113277")); }  // uniqueid(imdb) wins over <imdbid>
+
     const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex(scanned);
-    CHECK(idx.all().size() == 4);
+    CHECK(idx.all().size() == 8);
     CHECK(idx.ownsId(QStringLiteral("tt1375666")));                       // movie
     if (inc) CHECK(idx.localPathFor(QStringLiteral("tt1375666")) == inc->path);
     CHECK(idx.ownsId(QStringLiteral("tt2000000")));                       // series (by count)
