@@ -176,6 +176,78 @@ jobs:
           files: MyMediaVault-macos-arm64.dmg
           generate_release_notes: true
 
+  # -------------------------------------------------------------------- iOS ---
+  # Unsigned device build (arm64) packaged as an .ipa — iOS has no sideload-an-unsigned-binary path
+  # like Android, so users re-sign it with their own Apple ID via AltStore / Sideloadly (standard for
+  # open-source iOS apps distributed outside the App Store). libmpv + its static dependency stack come
+  # from MPVKit's prebuilt xcframeworks (fetch-mpvkit-ios.sh). Toolchain notes: native/docs/ios-port.md.
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      # Host (desktop) Qt first — qt-cmake for iOS chains to its build tools via QT_HOST_PATH.
+      - name: Install Qt (host, macOS)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: desktop
+          arch: clang_64
+          cache: true
+
+      - name: Remember host Qt path
+        run: echo "QT_HOST_DIR=$QT_ROOT_DIR" >> "$GITHUB_ENV"
+
+      - name: Install Qt (iOS)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: mac
+          target: ios
+          modules: 'qtmultimedia qtpdf'
+          cache: true
+
+      - name: Fetch libmpv static stack (MPVKit)
+        run: bash native/tools/fetch-mpvkit-ios.sh "$HOME/ios-deps/mpvkit"
+
+      - name: Configure (device arm64, unsigned)
+        run: |
+          DEV="$HOME/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework"
+          "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-ios -G Xcode \
+            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DQT_HOST_PATH="$QT_HOST_DIR" \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DMPV_INCLUDE_DIR="$DEV/Headers" \
+            -DMPV_LIBRARY="$DEV/Libmpv" \
+            -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+
+      - name: Build
+        run: cmake --build build-ios --config Release
+
+      - name: Package (.ipa, unsigned)
+        run: |
+          APP=$(find build-ios -maxdepth 3 -name 'MyMediaVault.app' -path '*iphoneos*' | head -n1)
+          if [ -z "$APP" ]; then echo "No .app bundle produced"; find build-ios -maxdepth 3 | head -50; exit 1; fi
+          mkdir -p ipa/Payload
+          cp -R "$APP" ipa/Payload/
+          (cd ipa && zip -qry ../MyMediaVault-ios-arm64.ipa Payload)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MyMediaVault-ios-arm64
+          path: MyMediaVault-ios-arm64.ipa
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MyMediaVault-ios-arm64.ipa
+          generate_release_notes: true
+
   # ------------------------------------------------------------------ Linux ---
   linux:
     runs-on: ubuntu-22.04
