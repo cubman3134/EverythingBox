@@ -30,6 +30,14 @@ static QString manifestsDir(const QString& manifestsRoot)
     return manifestsRoot.isEmpty() ? defaultManifestsRoot() : manifestsRoot;
 }
 
+// Manifest paths are Windows-style regardless of the host OS (QDir::fromNativeSeparators is a no-op
+// off-Windows), so convert backslashes explicitly.
+static QString winPathToSlash(QString p)
+{
+    p.replace(QLatin1Char('\\'), QLatin1Char('/'));
+    return p;
+}
+
 EpicGame EpicLibrary::parseManifest(const QByteArray& json)
 {
     const QJsonDocument doc = QJsonDocument::fromJson(json);
@@ -55,7 +63,7 @@ EpicGame EpicLibrary::parseManifest(const QByteArray& json)
         if (c.toString().compare(QStringLiteral("games"), Qt::CaseInsensitive) == 0) { isGame = true; break; }
     if (!isGame) return {};
 
-    return { appName, display, QDir::fromNativeSeparators(install) };
+    return { appName, display, winPathToSlash(install) };
 }
 
 bool EpicLibrary::isAvailable(const QString& manifestsRoot)
