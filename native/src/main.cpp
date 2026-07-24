@@ -165,6 +165,12 @@ int main(int argc, char** argv)
 #endif
 
     QApplication app(argc, argv);
+    // AGAIN, after the QApplication: on Unix its constructor re-applies the environment's locale
+    // (setlocale(LC_ALL, "")), clobbering the early call above — and libmpv REFUSES to create a
+    // context under a non-C LC_NUMERIC ("Non-C locale detected", then mpv_create returns null).
+    // Only reproducible when launched from a terminal with LANG set; Finder launches carry no locale.
+    // This placement is Qt's documented remedy (QCoreApplication "Locale Settings").
+    std::setlocale(LC_NUMERIC, "C");
     capLogAtStartup();                      // trim a runaway log before we start appending to it
     qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
     QApplication::setApplicationName(QStringLiteral("My Media Vault"));
