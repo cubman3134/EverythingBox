@@ -1954,13 +1954,17 @@ void HomeView::populateLocalLibrary(const QString& /*marker*/)
 
 void HomeView::onLocalLibraryChanged()
 {
-    // If the Local Library level is currently showing, rebuild it so the newly-scanned videos appear.
-    // Otherwise re-evaluate the root's synthetic folders (the pushFolders present-checks) so the folder
-    // itself surfaces once the async scan lands. Cheap no-op when neither applies.
-    if (!stack_.isEmpty() && stack_.last().item.type == QStringLiteral("_locallib"))
-        populateLocalLibrary(stack_.last().item.mime.mid(QStringLiteral("locallib:").size()));
-    else
-        loadTop();  // re-evaluate the root's synthetic folders
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_locallib")) {
+        populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size()));
+        return;
+    }
+    // Only a catalogue root shows the synthetic folders; refresh there so the newly-non-empty library
+    // surfaces its folder. Anywhere else (detail/search/other), the folder appears on the next navigation
+    // to a root (the present-check runs on every populate) — do NOT reload the user's current level.
+    if (!top.detail && top.query.isEmpty() && !recentView_)
+        loadTop();
 }
 
 void HomeView::openFavoritesLevel(const QString& system)
@@ -3043,6 +3047,21 @@ void HomeView::loadTop()
 void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QString& parentTitle,
                            const QString& console, const QString& imdbId, const QString& imdbType)
 {
+    // Local library prefer-local: if we own this catalog item on disk, play the local file directly and
+    // SKIP stream resolution (spec: owned items must play offline, no round-trip). Movies key on id (tt...),
+    // episodes on imdbStreamId (tt...:S:E, unpadded — matches OwnedIndex::buildIndex).
+    {
+        QString lp = LocalLibrary::index().localPathFor(it.id);
+        if (lp.isEmpty() && !it.imdbStreamId.isEmpty())
+            lp = LocalLibrary::index().localPathFor(it.imdbStreamId);
+        if (!lp.isEmpty() && QFileInfo::exists(lp)) {
+            MediaItem local = it;
+            local.url = lp;
+            local.mime = QStringLiteral("local:video");
+            emit openItem(local);
+            return;
+        }
+    }
     if (it.mime == QStringLiteral("steamgame"))
     {
         MediaItem m = it;

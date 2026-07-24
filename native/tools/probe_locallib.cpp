@@ -56,8 +56,16 @@ int main(int argc, char** argv)
     writeFile(root + "/Heat (1995)/Heat (1995).nfo",                 // uniqueid(imdb) must WIN over <imdbid>
               "<movie><imdbid>tt0000001</imdbid><uniqueid type=\"imdb\">tt0113277</uniqueid></movie>");
 
+    writeFile(root + "/Broken (2015)/Broken (2015).mkv");
+    writeFile(root + "/Broken (2015)/Broken (2015).nfo", "<movie><uniqueid type=\"imd");  // truncated/garbage
+    writeFile(root + "/Show2/Season 02/Show2.2x05.mkv");             // NxNN episode form (reX regex)
+    writeFile(root + "/Show2/tvshow.nfo", "<tvshow><uniqueid type=\"imdb\">tt3000000</uniqueid></tvshow>");
+    writeFile(root + "/Poster Movie (2018)/Poster Movie (2018).mkv");
+    writeFile(root + "/Poster Movie (2018)/Poster Movie (2018).nfo",
+              "<movie><uniqueid type=\"imdb\">tt4000000</uniqueid><thumb>poster.jpg</thumb></movie>");
+
     const QVector<LocalLibrary::VideoEntry> scanned = LocalLibrary::scanFolder(root);
-    CHECK(scanned.size() == 8);   // 4 existing video files + 4 new; txt ignored
+    CHECK(scanned.size() == 11);  // 4 existing + 4 (Blade/Odyssey/Dune/Heat) + 3 (Broken/Show2 ep/Poster); non-video ignored
 
     const auto* inc = findByPathSuffix(scanned, "Inception (2010).mkv");
     CHECK(inc != nullptr);
@@ -111,8 +119,39 @@ int main(int argc, char** argv)
     CHECK(heat != nullptr);
     if (heat) { CHECK(heat->imdbId == QStringLiteral("tt0113277")); }  // uniqueid(imdb) wins over <imdbid>
 
+    // Malformed/garbage .nfo: the scan must not crash; the entry is present with an EMPTY imdbId and a
+    // filename-derived title/year (the truncated XML yields nothing useful, so readNfo leaves the entry).
+    const auto* broken = findByPathSuffix(scanned, "Broken (2015).mkv");
+    CHECK(broken != nullptr);
+    if (broken) {
+        CHECK(broken->kind == LocalLibrary::Kind::Movie);
+        CHECK(broken->title == QStringLiteral("Broken"));
+        CHECK(broken->year == 2015);
+        CHECK(broken->imdbId.isEmpty());
+    }
+
+    // NxNN episode form (the reX regex, previously uncovered): "Show2.2x05" -> season 2, episode 5, and the
+    // series imdb id from Show2/tvshow.nfo one level up from the "Season 02" folder.
+    const auto* ep2 = findByPathSuffix(scanned, "Show2.2x05.mkv");
+    CHECK(ep2 != nullptr);
+    if (ep2) {
+        CHECK(ep2->kind == LocalLibrary::Kind::Episode);
+        CHECK(ep2->season == 2);
+        CHECK(ep2->episode == 5);
+        CHECK(ep2->seriesImdbId == QStringLiteral("tt3000000"));
+    }
+
+    // Relative <thumb> resolved against the nfo's directory -> an ABSOLUTE path ending in "poster.jpg".
+    const auto* poster = findByPathSuffix(scanned, "Poster Movie (2018).mkv");
+    CHECK(poster != nullptr);
+    if (poster) {
+        CHECK(poster->imdbId == QStringLiteral("tt4000000"));
+        CHECK(QFileInfo(poster->thumbPath).isAbsolute());
+        CHECK(poster->thumbPath.endsWith(QStringLiteral("poster.jpg")));
+    }
+
     const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex(scanned);
-    CHECK(idx.all().size() == 8);
+    CHECK(idx.all().size() == 11);
     CHECK(idx.ownsId(QStringLiteral("tt1375666")));                       // movie
     if (inc) CHECK(idx.localPathFor(QStringLiteral("tt1375666")) == inc->path);
     CHECK(idx.ownsId(QStringLiteral("tt2000000")));                       // series (by count)

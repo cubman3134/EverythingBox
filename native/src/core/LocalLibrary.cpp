@@ -180,14 +180,20 @@ OwnedIndex buildIndex(const QVector<VideoEntry>& entries)
     for (const VideoEntry& e : entries)
     {
         if (e.kind == Kind::Movie && !e.imdbId.isEmpty())
-            idx.pathById.insert(e.imdbId, e.path);
+        {
+            if (!idx.pathById.contains(e.imdbId))          // first copy wins (spec: "first playable")
+                idx.pathById.insert(e.imdbId, e.path);
+        }
         else if (e.kind == Kind::Episode && !e.seriesImdbId.isEmpty())
         {
             const QString epKey = e.seriesImdbId + QStringLiteral(":")
                                 + QString::number(e.season) + QStringLiteral(":")
                                 + QString::number(e.episode);
-            idx.pathById.insert(epKey, e.path);
-            idx.seriesCount[e.seriesImdbId] += 1;
+            if (!idx.pathById.contains(epKey))             // distinct episode: count once, first copy wins
+            {
+                idx.pathById.insert(epKey, e.path);
+                idx.seriesCount[e.seriesImdbId] += 1;
+            }
         }
     }
     return idx;

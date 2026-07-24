@@ -1025,10 +1025,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 void MainWindow::rescanLocalLibrary()
 {
     const QString libRoot = LocalLibrary::root();               // read Settings on the MAIN thread
+    const quint64 gen = ++libScanGen_;                          // main thread only (rescan is main-thread)
     auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
-    connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
-        LocalLibrary::installIndex(w->result());
-        if (home_) home_->onLocalLibraryChanged();
+    connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+        if (gen == libScanGen_) {                               // ignore a scan superseded by a newer rescan
+            LocalLibrary::installIndex(w->result());
+            if (home_) home_->onLocalLibraryChanged();
+        }
         w->deleteLater();
     });
     w->setFuture(QtConcurrent::run([libRoot] {

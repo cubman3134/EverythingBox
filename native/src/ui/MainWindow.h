@@ -407,6 +407,7 @@ private:
     void updateThemedNowPlaying();      // push the current BGM track name into the themed home (Triple theme)
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
+    quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
     // explicit stored `false` still selects classic). showHomeScreen() routes Home to it or the classic
