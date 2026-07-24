@@ -1,7 +1,45 @@
 # Local Library Network ID-Resolver (movies) — Design
 
 **Date:** 2026-07-24
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/id-resolver` (T1–T5 + a Fable whole-branch round). `CatalogMatch`
+(pure, probe-locked), `LocalResolveCache` (persisted device-local JSON), and `CatalogResolver` (async,
+throttled, over `requestSearch`/`catalogReady`) are wired; `buildIndex` indexes resolved ids; the
+`resolveOnline` toggle + "Re-match" action are live. **Live-verified (the payoff the shipped local-library
+track could not produce):** on a portable throwaway with the real `aiocatalog` addon + TMDB key, a fixture
+"Interstellar (2014)" (no NFO) resolved live via aiocatalog's TMDB search → `tmdb:movie:157336` cached in
+`localresolve.json` → the **real aiocatalog tile lit the "On disk" badge** (`resolver-badge.png`); sibling
+Interstellar-named tiles correctly did not. Toggle-off (no resolution) / Re-match verified. Perf flat
+(`nav.select` ≤1 ms; resolution is off-thread + debounced). Real deployed app untouched.
+
+## Close-out record — deviations, residual risk, and follow-ups
+
+**Two plan-time deviations (from the addon-search reality):**
+- **No year in matching.** Search-result `MediaItem`s carry no year field, so `bestMatch` = unique-normalized-title
+  + IMDB cross-check (+ a skip for a `tt…` candidate that *contradicts* a known NFO imdb). A same-title film
+  with ≥2 candidates → conservative −1.
+- **No `getMeta`.** Searching every installed movie-catalog source already yields each catalog's own tile-id
+  space; the winner's id is stored directly.
+
+**Residual mis-match risk (recorded honestly — the earlier "safety is preserved" was too strong):** when a
+catalog's search returns only ONE film sharing the local title but of a *different year* (a partial-coverage
+catalog that has the wrong "Solaris" but not yours), and the local file has no NFO imdb, the single title hit
+is accepted → the wrong tile badges and Seam B would play the wrong local file. Bounded to same-title-different-
+year + partial catalog + no NFO. The **getMeta per-candidate year check is the follow-up that closes it**; the
+contradicted-`tt` skip already prevents the Cinemeta-id variant.
+
+**Follow-ups (recorded, not built):**
+- **Owned ⇒ offer "Play" regardless of stream provider (strong follow-up).** A metadata-only catalog tile
+  (aiocatalog with no stream/debrid addon) offers no Play action, so Seam B prefer-local can't be triggered
+  from it even when the file is owned — the badge shows but the tile can't play locally. With a stream provider
+  present (any setup that can play aiocatalog at all) Play appears and Seam B redirects to the local file, so
+  this is an enhancement, not a break. Surfacing Play whenever the item is owned makes owned-but-unstreamable
+  films playable from their tile.
+- getMeta year-verification (closes the residual above); diacritic-insensitive `normalizeTitle` (Amélie ≠
+  Amelie today — a missed badge, never a wrong one); `clearCacheAndRequeue` skip-in-flight (avoid a redundant
+  double-queue); prune cache entries for vanished files (currently monotonic — harmless, buildIndex only reads
+  scanned paths).
+
+**Original status:** Draft — approved through brainstorming; user-reviewed before plan.
 **Origin:** The recorded highest-value follow-up from the local video library (roadmap #2, shipped v0.5.1).
 The shipped merge (Seam A badge + Seam B prefer-local) fires only when a browsed catalog tile's `id`
 matches an `OwnedIndex` key. NFO-first matching supplies bare IMDB `tt…` keys, but the user's real catalog

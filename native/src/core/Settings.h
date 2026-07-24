@@ -104,6 +104,11 @@ namespace Settings
     QString libraryFolder();       // resolved path (never empty)
     void setLibraryFolder(const QString& path);
 
+    // Resolve local-library movie ids online: search installed movie-catalog addons per movie and record the
+    // matched catalog ids (CatalogResolver). Off => the library is indexed by NFO ids only. Default on.
+    bool resolveOnline();          // key "library/resolveOnline", default true
+    void setResolveOnline(bool on);
+
     // Menu background music (RetroBat-style): play tracks dropped in <data>/music while browsing. On by
     // default at a modest volume.
     bool bgmEnabled();

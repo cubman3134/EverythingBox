@@ -173,16 +173,20 @@ QVector<VideoEntry> scanFolder(const QString& root)
     return out;
 }
 
-OwnedIndex buildIndex(const QVector<VideoEntry>& entries)
+OwnedIndex buildIndex(const QVector<VideoEntry>& entries,
+                      const QHash<QString, QStringList>& extraMovieIdsByPath)
 {
     OwnedIndex idx;
     idx.entries = entries;
     for (const VideoEntry& e : entries)
     {
-        if (e.kind == Kind::Movie && !e.imdbId.isEmpty())
+        if (e.kind == Kind::Movie)
         {
-            if (!idx.pathById.contains(e.imdbId))          // first copy wins (spec: "first playable")
+            if (!e.imdbId.isEmpty() && !idx.pathById.contains(e.imdbId))   // first copy wins (spec: "first playable")
                 idx.pathById.insert(e.imdbId, e.path);
+            for (const QString& rid : extraMovieIdsByPath.value(e.path))   // resolved catalog ids
+                if (!rid.isEmpty() && !idx.pathById.contains(rid))
+                    idx.pathById.insert(rid, e.path);
         }
         else if (e.kind == Kind::Episode && !e.seriesImdbId.isEmpty())
         {

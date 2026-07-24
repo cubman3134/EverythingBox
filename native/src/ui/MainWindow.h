@@ -28,6 +28,8 @@ class HomeView;
 class AddonManager;
 class CatalogPrefetcher;
 class CloudSync;
+class LocalResolveCache;
+class CatalogResolver;
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -480,6 +482,10 @@ private:
     bool splitMode_ = false;                 // currently showing the split screen
     class Achievements* ach_ = nullptr;      // RetroAchievements client (full-screen emulator)
     std::unique_ptr<AddonManager> addons_;
+    // Local Library ID-resolver: the on-disk match cache + the background resolver that fills it. Constructed
+    // after addons_ (its search source) and before the first rescan; the resolver's resolved() rebuilds the index.
+    std::unique_ptr<LocalResolveCache> resolveCache_;
+    std::unique_ptr<CatalogResolver> resolver_;
     CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
     std::unique_ptr<CloudSync> cloud_;
     // "Continue watching" cloud sync: a small resume+recent JSON file, pulled+merged on startup and pushed

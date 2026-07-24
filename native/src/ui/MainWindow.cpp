@@ -23,6 +23,8 @@
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
 #include "../core/LocalLibrary.h"
+#include "../core/LocalResolveCache.h"
+#include "../core/CatalogResolver.h"
 #include "../core/SyncOffsets.h"
 #include "../core/BackgroundMusic.h"
 #include "../core/CoreManager.h"
@@ -379,6 +381,30 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
     connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
+
+    // Local Library ID-resolver: own the on-disk match cache + the background resolver (searches addons_).
+    // Constructed after addons_/home_ and before the first rescanLocalLibrary(); resolved() progressively
+    // rebuilds the index off-thread from the current scan + the now-richer cache, then refreshes the home.
+    resolveCache_ = std::make_unique<LocalResolveCache>(AppPaths::dataDir() + QStringLiteral("/localresolve.json"));
+    resolveCache_->load();
+    resolver_ = std::make_unique<CatalogResolver>(addons_.get(), resolveCache_.get(), this);
+    connect(resolver_.get(), &CatalogResolver::resolved, this, [this] {
+        // A batch of movies resolved: rebuild the index from the current scan + the now-richer cache, then refresh.
+        const QString libRoot = LocalLibrary::root();
+        const auto extra = resolveCache_->matchedIdsByPath();       // snapshot on the MAIN thread (thread-safe by value)
+        const quint64 gen = libScanGen_;                            // READ (do not ++) — a refresh, not a superseding scan
+        auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+        connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+            if (gen == libScanGen_) {                               // a newer folder-change rescan invalidates this stale rebuild
+                LocalLibrary::installIndex(w->result());
+                if (home_) home_->onLocalLibraryChanged();
+            }
+            w->deleteLater();
+        });
+        w->setFuture(QtConcurrent::run([libRoot, extra] {
+            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra);
+        }));
+    });
 
     // The player page pairs the libmpv surface with a playlist panel (shown only for audio queues).
     playlist_ = new QListWidget(this);
@@ -1026,16 +1052,21 @@ void MainWindow::rescanLocalLibrary()
 {
     const QString libRoot = LocalLibrary::root();               // read Settings on the MAIN thread
     const quint64 gen = ++libScanGen_;                          // main thread only (rescan is main-thread)
+    // Snapshot the resolver's cached matches on the MAIN thread (QHash by value → thread-safe in the worker) so
+    // the freshly rebuilt index already carries any previously-resolved online IDs; new movies resolve below.
+    const QHash<QString, QStringList> extra = resolveCache_ ? resolveCache_->matchedIdsByPath()
+                                                            : QHash<QString, QStringList>{};
     auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
     connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
         if (gen == libScanGen_) {                               // ignore a scan superseded by a newer rescan
             LocalLibrary::installIndex(w->result());
             if (home_) home_->onLocalLibraryChanged();
+            if (resolver_) resolver_->enqueue(LocalLibrary::index().all());   // resolve uncached movies in the background
         }
         w->deleteLater();
     });
-    w->setFuture(QtConcurrent::run([libRoot] {
-        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot));
+    w->setFuture(QtConcurrent::run([libRoot, extra] {
+        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra);
     }));
 }
 
@@ -7940,6 +7971,9 @@ void MainWindow::openGeneralSettings()
         info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
         action(QStringLiteral("library.change"), tr("Change Local Library folder…"));
         action(QStringLiteral("library.rescan"), tr("Rescan Local Library"));
+        toggle(QStringLiteral("library.resolveonline"), tr("Match local files to online catalogs"),
+               Settings::resolveOnline());
+        action(QStringLiteral("library.rematch"), tr("Re-match Local Library online"));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -8074,6 +8108,21 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("library.rescan")) {
                     rescanLocalLibrary();
                     statusBar()->showMessage(tr("Rescanning your Local Library…"), 4000);
+                }
+                else if (id == QStringLiteral("library.resolveonline")) {
+                    Settings::setResolveOnline(on);
+                    if (on && resolver_) resolver_->enqueue(LocalLibrary::index().all());
+                }
+                else if (id == QStringLiteral("library.rematch")) {
+                    // With resolveOnline off, clearing the cache then enqueue() (which no-ops) would
+                    // wipe every resolved id on the next rebuild and never re-resolve — badges vanish.
+                    // Require the toggle on before clearing.
+                    if (!Settings::resolveOnline()) {
+                        statusBar()->showMessage(tr("Turn on \"Match local files to online catalogs\" first."), 4000);
+                    } else {
+                        if (resolver_) resolver_->clearCacheAndRequeue(LocalLibrary::index().all());
+                        statusBar()->showMessage(tr("Re-matching your Local Library online…"), 4000);
+                    }
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);

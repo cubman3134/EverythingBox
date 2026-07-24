@@ -5,6 +5,7 @@
 // index convenience layer (Task 3) reads Settings and is main-thread only.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 #include <QHash>
 
@@ -42,7 +43,8 @@ namespace LocalLibrary
     // Pure (probe-tested), root explicit.
     VideoEntry          parseFile(const QString& path);
     QVector<VideoEntry> scanFolder(const QString& root);
-    OwnedIndex          buildIndex(const QVector<VideoEntry>& entries);
+    OwnedIndex          buildIndex(const QVector<VideoEntry>& entries,
+                                   const QHash<QString, QStringList>& extraMovieIdsByPath = {});
     QString             displayTitle(const VideoEntry& e);
 
     // Cached process-wide index (main-thread only). root() reads Settings::libraryFolder().
