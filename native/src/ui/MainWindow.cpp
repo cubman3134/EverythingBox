@@ -1014,19 +1014,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
 
     // Local video library: scan off-thread at startup, install the index + refresh the home on the main
-    // thread. Dormant (instant, empty) when no library/folder is configured.
-    {
-        const QString libRoot = LocalLibrary::root();   // read Settings on the MAIN thread
-        auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
-        connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
-            LocalLibrary::installIndex(w->result());
-            if (home_) home_->onLocalLibraryChanged();
-            w->deleteLater();
-        });
-        w->setFuture(QtConcurrent::run([libRoot] {
-            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot));
-        }));
-    }
+    // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
+    // site with the Settings folder-picker / Rescan action.
+    rescanLocalLibrary();
+}
+
+// Read the configured library root on the MAIN thread (QSettings is not thread-safe — a prior review caught
+// a race from reading it inside the worker), capture it by value, then scan off-thread and install the
+// rebuilt index + refresh the home on completion. Called from startup and the Settings picker / Rescan.
+void MainWindow::rescanLocalLibrary()
+{
+    const QString libRoot = LocalLibrary::root();               // read Settings on the MAIN thread
+    auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+    connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
+        LocalLibrary::installIndex(w->result());
+        if (home_) home_->onLocalLibraryChanged();
+        w->deleteLater();
+    });
+    w->setFuture(QtConcurrent::run([libRoot] {
+        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot));
+    }));
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
@@ -8287,6 +8294,39 @@ void MainWindow::openGeneralSettings()
                                   "other EmulationStation/RetroBat frontends. Existing gamelist data is always read."));
         connect(keepScrape, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepScrapedData(c); });
         v->addWidget(keepScrape);
+        v->addSpacing(10);
+
+        // --- Local Library (movies + TV): a folder of local video files surfaced under the video category. ---
+        auto* llHeading = new QLabel(tr("Local Library"));
+        llHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(llHeading);
+        auto* llNote = new QLabel(tr("Point this at a folder of your own movies + TV episodes. They then appear "
+            "under “Local Library” in the video category. Use “Rescan” after adding or removing files."));
+        llNote->setWordWrap(true); llNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(llNote);
+        auto* llRow = new QHBoxLayout();
+        auto* llPath = new QLineEdit(Settings::libraryFolder());
+        llPath->setMinimumHeight(34);
+        llPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        llRow->addWidget(llPath, 1);
+        auto* llBrowse = new QPushButton(tr("Change…"));
+        llRow->addWidget(llBrowse);
+        auto* llRescan = new QPushButton(tr("Rescan"));
+        llRow->addWidget(llRescan);
+        v->addLayout(llRow);
+        connect(llBrowse, &QPushButton::clicked, this, [this, llPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your local video library folder"),
+                                                                  Settings::libraryFolder());
+            if (dir.isEmpty()) return;
+            Settings::setLibraryFolder(dir);
+            llPath->setText(dir);
+            rescanLocalLibrary();
+            statusBar()->showMessage(tr("Local Library folder set to %1 — rescanning…").arg(dir), 6000);
+        });
+        connect(llRescan, &QPushButton::clicked, this, [this] {
+            rescanLocalLibrary();
+            statusBar()->showMessage(tr("Rescanning your local library…"), 4000);
+        });
         v->addSpacing(10);
 
         auto* pbHeading = new QLabel(tr("Playback"));

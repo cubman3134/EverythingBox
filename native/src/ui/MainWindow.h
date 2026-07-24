@@ -71,6 +71,9 @@ private slots:
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
+    // Local video library: read the configured root on the MAIN thread, then scan off-thread and install
+    // the rebuilt index + refresh the home on completion. Single async-scan site (startup + settings picker).
+    void rescanLocalLibrary();
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
