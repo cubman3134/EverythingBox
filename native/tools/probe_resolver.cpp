@@ -2,9 +2,12 @@
 // Prints RESOLVER-OK on success; any failure prints RESOLVER-FAIL <cond> (line) and exits non-zero.
 #include "CatalogMatch.h"
 #include "LocalLibrary.h"
+#include "LocalResolveCache.h"
 #include "AddonModels.h"
 
 #include <QCoreApplication>
+#include <QTemporaryDir>
+#include <QDateTime>
 #include <cstdio>
 
 static int failures = 0;
@@ -56,6 +59,38 @@ int main(int argc, char** argv)
     // No candidates / empty title → -1.
     CHECK(CatalogMatch::bestMatch(movie("Inception", 2010), {}) == -1);
     CHECK(CatalogMatch::bestMatch(movie("", 0), { mi("tt1", "x") }) == -1);
+
+    QTemporaryDir tmp; CHECK(tmp.isValid());
+    const QString cachePath = tmp.path() + QStringLiteral("/localresolve.json");
+    const qint64 now = 1000000;
+    {
+        LocalResolveCache c(cachePath);
+        c.load();
+        CHECK(!c.has("/movies/Inception.mkv"));
+        c.putMatched("/movies/Inception.mkv", 100, 200, { "tmdb:movie:27205", "tt1375666" }, now);
+        c.putNoMatch("/movies/Unknown.mkv", 50, 60, now);
+        CHECK(c.isFresh("/movies/Inception.mkv", 100, 200, now));
+        CHECK(!c.isFresh("/movies/Inception.mkv", 100, 999, now));           // mtime changed → stale
+        CHECK(c.isFresh("/movies/Unknown.mkv", 50, 60, now));               // nomatch within window
+        CHECK(!c.isFresh("/movies/Unknown.mkv", 50, 60, now + 15LL*86400)); // nomatch past 14d → stale (retry)
+        c.save();
+    }
+    {
+        LocalResolveCache c(cachePath); c.load();                          // persistence round-trip
+        CHECK(c.entry("/movies/Inception.mkv").ids.contains("tmdb:movie:27205"));
+        CHECK(c.matchedIdsByPath().value("/movies/Inception.mkv").contains("tt1375666"));
+        CHECK(!c.matchedIdsByPath().contains("/movies/Unknown.mkv"));       // nomatch not in the snapshot
+    }
+    // buildIndex indexes the resolved ids → the movie's path, alongside the NFO id.
+    {
+        LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie; e.path = "/m/Inception.mkv";
+        e.title = "Inception"; e.imdbId = "tt1375666";
+        QHash<QString, QStringList> extra; extra.insert(e.path, { "tmdb:movie:27205" });
+        const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex({ e }, extra);
+        CHECK(idx.ownsId("tt1375666"));                 // NFO id (existing behavior)
+        CHECK(idx.ownsId("tmdb:movie:27205"));          // resolved id (new)
+        CHECK(idx.localPathFor("tmdb:movie:27205") == e.path);
+    }
 
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
     std::fprintf(stderr, "RESOLVER: %d check(s) failed\n", failures);
