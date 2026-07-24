@@ -449,6 +449,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites).
     add_executable(probe_browse tools/probe_browse.cpp
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
+        src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
