@@ -3695,6 +3695,22 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         emit openItem(it);
         return;
     }
+    // Prefer-local: an owned catalog item plays its on-disk file directly, WITHOUT the meta-fetch/stream-
+    // provider detour below (a metadata-only catalog otherwise dead-ends at "No stream source" though the file
+    // is on disk). Mirrors resolvePlay's head + the classic Play route.
+    {
+        QString lp = LocalLibrary::index().localPathFor(it.id);
+        if (lp.isEmpty() && !it.imdbStreamId.isEmpty())
+            lp = LocalLibrary::index().localPathFor(it.imdbStreamId);
+        if (!lp.isEmpty() && QFileInfo::exists(lp))
+        {
+            MediaItem local = it;
+            local.url = lp;
+            local.mime = QStringLiteral("local:video");
+            emit openItem(local);
+            return;
+        }
+    }
     LoadedAddon* addon = stack_.last().addon;
     const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
     QString console;
@@ -3776,7 +3792,13 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     // ROM, found by bridging "<game> <console>" to its retro-games search. The console is the parent platform.
     const bool isBridgedGame = canBridge && item.type == QStringLiteral("game");
     g.readable = isReadableChapter(item.type) || isRemoteReadable || isBridgedReadable;
-    g.play = isSteam || isRemotePlayable || g.readable || isBridgedAudio || isBridgedGame;
+    // Owned local file: offer Play even when no stream/debrid provider can resolve this catalog item, so the
+    // on-disk copy plays from its tile. Use localPathFor (the Seam B short-circuit's own precondition), NOT
+    // ownsId — ownsId is true for a series CONTAINER (owns episodes), which has no directly-playable file.
+    const bool ownedPlayable =
+           !LocalLibrary::index().localPathFor(item.id).isEmpty()
+        || (!item.imdbStreamId.isEmpty() && !LocalLibrary::index().localPathFor(item.imdbStreamId).isEmpty());
+    g.play = isSteam || isRemotePlayable || g.readable || isBridgedAudio || isBridgedGame || ownedPlayable;
     // Downloadable: a resolvable leaf (anything but a Steam launch or a page-based manga chapter), or a
     // container we can crawl (a series/season -> episodes, a comic volume -> issues).
     const bool dlLeaf = !item.expandable
