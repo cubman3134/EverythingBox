@@ -1,7 +1,13 @@
 # Owned ⇒ Offer "Play" (regardless of stream provider) — Design
 
 **Date:** 2026-07-24
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/owned-play` (two `HomeView.cpp` edits: the shared-gate `ownedPlayable`
+term + the `playThemedLeaf` prefer-local early-return). Per-task Opus review traced container-safety,
+gate⟺short-circuit parity, and idempotence (no separate Fable pass — this branch IS its own whole diff).
+**Live-verified** on a portable throwaway (aiocatalog metadata-only, NO stream/debrid provider): an owned
+catalog movie's themed detail now shows **Play** → activating opens the on-disk `.mkv` (`mime=local:video`, no
+"No stream source" toast); a **non-owned** movie shows no Play, and a **TV series container** shows no Play
+(the `localPathFor`-not-`ownsId` safety, confirmed live). Real deployed app untouched.
 **Origin:** The strong follow-up recorded at the id-resolver close-out (`2026-07-24-local-library-id-resolver-design.md`).
 The resolver makes an owned local movie's "On disk" badge light up on a catalog tile, but a **metadata-only
 catalog (aiocatalog with no stream/debrid addon) offers no "Play" action** on the detail — so Seam B
