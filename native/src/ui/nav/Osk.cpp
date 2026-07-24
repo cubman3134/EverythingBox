@@ -3,13 +3,55 @@
 
 #include <QAbstractSpinBox>
 #include <QApplication>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QGridLayout>
+#include <QGuiApplication>
+#include <QInputMethod>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QTimer>
 #include <QVBoxLayout>
+
+// True where the OS provides its own virtual keyboard (iOS/Android): text entry pops THAT instead of
+// the controller-oriented key grid — native typing is what touch users expect, and the grid is wider
+// than a phone screen anyway. Desktop/TV keep the grid (their input is a pad/remote, not a screen).
+static bool nativeKeyboardPreferred()
+{
+#if defined(Q_OS_IOS) || defined(Q_OS_ANDROID)
+    return true;
+#else
+    return false;
+#endif
+}
+
+// The native-input drop-in for the OSK on mobile: a minimal modal sheet holding a REAL QLineEdit —
+// giving it focus summons the system keyboard (Qt's platform input context handles show/hide).
+// Blocking like Osk::getText's nested loop; a null return means cancelled.
+static QString nativeTextPrompt(const QString& title, const QString& initial,
+                                QLineEdit::EchoMode echo, QWidget* window)
+{
+    QDialog dlg(window);
+    dlg.setWindowTitle(title);
+    auto* v = new QVBoxLayout(&dlg);
+    auto* label = new QLabel(title, &dlg);
+    label->setWordWrap(true);
+    v->addWidget(label);
+    auto* edit = new QLineEdit(initial, &dlg);
+    edit->setEchoMode(echo);
+    v->addWidget(edit);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    QObject::connect(edit, &QLineEdit::returnPressed, &dlg, &QDialog::accept);
+    v->addWidget(buttons);
+    edit->setFocus();
+    edit->selectAll();
+    if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->show();
+    return dlg.exec() == QDialog::Accepted ? edit->text() : QString();
+}
 
 // The letter pages (lowercase; shift uppercases) and the symbols page, laid out per row.
 // Both pages are exactly 10 keys per row — relabel() maps key -> caption by position, so the tables
@@ -181,6 +223,8 @@ void Osk::keyPressEvent(QKeyEvent* e)
 QString Osk::getText(const QString& title, const QString& initial, QLineEdit::EchoMode echo, QWidget* window,
                      NavGraph* graph)
 {
+    if (nativeKeyboardPreferred())
+        return nativeTextPrompt(title, initial, echo, window);
     QString result;   // null = cancelled
     QEventLoop loop;
     auto* osk = new Osk(title, initial, echo,
@@ -201,6 +245,13 @@ void NavOverlay::editSpinBox(QAbstractSpinBox* spin)
 {
     if (!spin) return;
     const QString initial = spin->property("value").toString();
+    if (nativeKeyboardPreferred())
+    {
+        const QString t = nativeTextPrompt(QStringLiteral("Enter a value"), initial,
+                                           QLineEdit::Normal, spin->window());
+        if (!t.trimmed().isEmpty()) spin->setProperty("value", t.trimmed());
+        return;
+    }
     QPointer<QAbstractSpinBox> target(spin);
     new Osk(QStringLiteral("Enter a value"), initial, QLineEdit::Normal, [target](const QString& t, bool ok) {
         if (!ok || !target || t.trimmed().isEmpty()) return;
@@ -213,6 +264,15 @@ void NavOverlay::editLineEdit(QLineEdit* edit)
     if (!edit) return;
     const QString title = edit->placeholderText().isEmpty()
                               ? QStringLiteral("Enter text") : edit->placeholderText();
+    if (nativeKeyboardPreferred())
+    {
+        const QString t = nativeTextPrompt(title, edit->text(), edit->echoMode(), edit->window());
+        if (t.isNull()) return; // cancelled
+        edit->setText(t);
+        QKeyEvent press(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+        QApplication::sendEvent(edit, &press);
+        return;
+    }
     QPointer<QLineEdit> target(edit);
     new Osk(title, edit->text(), edit->echoMode(), [target](const QString& t, bool ok) {
         if (!ok || !target) return;

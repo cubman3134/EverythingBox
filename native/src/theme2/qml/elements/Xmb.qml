@@ -130,6 +130,9 @@ Item {
                 anchors.top: parent.bottom; anchors.topMargin: xmb.height * 0.02
                 text: (cat.modelData && cat.modelData.title) ? cat.modelData.title : ""
                 color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(12, xmb.height * 0.03)
+                // Long bucket names elide instead of spilling past the screen edges on a phone.
+                width: Math.min(implicitWidth, xmb.width * 0.6)
+                elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter
             }
             // Loading spinner under the selected category while its column is being fetched: the cross scrolls
             // to the category right away and this shows the content is on the way (instead of an empty column).
@@ -215,6 +218,9 @@ Item {
                 text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
                 color: xmb.descColor; font.bold: true
                 font.pixelSize: Math.max(10, xmb.height * 0.018); font.capitalization: Font.AllUppercase
+                // The divider reads past its tile by design, but must still stop before the screen edge.
+                width: Math.min(implicitWidth, xmb.width - row.x - 16)
+                elide: Text.ElideRight
             }
 
             Rectangle {
