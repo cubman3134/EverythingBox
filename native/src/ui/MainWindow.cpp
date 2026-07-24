@@ -8114,8 +8114,15 @@ void MainWindow::openGeneralSettings()
                     if (on && resolver_) resolver_->enqueue(LocalLibrary::index().all());
                 }
                 else if (id == QStringLiteral("library.rematch")) {
-                    if (resolver_) resolver_->clearCacheAndRequeue(LocalLibrary::index().all());
-                    statusBar()->showMessage(tr("Re-matching your Local Library online…"), 4000);
+                    // With resolveOnline off, clearing the cache then enqueue() (which no-ops) would
+                    // wipe every resolved id on the next rebuild and never re-resolve — badges vanish.
+                    // Require the toggle on before clearing.
+                    if (!Settings::resolveOnline()) {
+                        statusBar()->showMessage(tr("Turn on \"Match local files to online catalogs\" first."), 4000);
+                    } else {
+                        if (resolver_) resolver_->clearCacheAndRequeue(LocalLibrary::index().all());
+                        statusBar()->showMessage(tr("Re-matching your Local Library online…"), 4000);
+                    }
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);

@@ -56,6 +56,16 @@ int main(int argc, char** argv)
         QVector<MediaItem> c{ mi("tt111", "Fargo", "series") };
         CHECK(CatalogMatch::bestMatch(movie("Fargo", 1996), c) == -1);
     }
+    // A contradicted "tt…" candidate (KNOWN imdb id ≠ NFO imdb) must never win on title.
+    {
+        QVector<MediaItem> c{ mi("tt9999999", "Inception") };
+        CHECK(CatalogMatch::bestMatch(movie("Inception", 2010, "tt1375666"), c) == -1);
+    }
+    // Positive control: a non-tt candidate with the same title still matches (not contradicted).
+    {
+        QVector<MediaItem> c{ mi("tmdb:movie:27205", "Inception") };
+        CHECK(CatalogMatch::bestMatch(movie("Inception", 2010, "tt1375666"), c) == 0);
+    }
     // No candidates / empty title → -1.
     CHECK(CatalogMatch::bestMatch(movie("Inception", 2010), {}) == -1);
     CHECK(CatalogMatch::bestMatch(movie("", 0), { mi("tt1", "x") }) == -1);

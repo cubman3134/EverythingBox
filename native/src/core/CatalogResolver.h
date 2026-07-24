@@ -33,6 +33,7 @@ private:
         qint64 size = 0, mtime = 0;
         QSet<int> outstanding;      // in-flight search reqIds
         QStringList matchedIds;     // one per source that matched
+        bool issued = false;        // at least one search was actually dispatched
         QTimer* timer = nullptr;
     };
     void pump();

@@ -29,6 +29,12 @@ int bestMatch(const LocalLibrary::VideoEntry& want, const QVector<MediaItem>& ca
     {
         const MediaItem& c = candidates[i];
         if (!c.type.isEmpty() && c.type != QStringLiteral("movie")) continue; // not a same-named series/etc.
+        // A candidate with a KNOWN imdb id ("tt…") that differs from the NFO's imdb is an
+        // affirmatively-wrong film sharing the title — never accept it via the title path.
+        // (An exact imdb match was already accepted at the top of this function.)
+        if (!want.imdbId.isEmpty()
+            && c.id.startsWith(QStringLiteral("tt"), Qt::CaseInsensitive)
+            && c.id.compare(want.imdbId, Qt::CaseInsensitive) != 0) continue;
         if (normalizeTitle(c.title) != wt) continue;
         if (hit != -1) return -1;   // ambiguous: more than one title match
         hit = i;

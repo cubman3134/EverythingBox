@@ -58,6 +58,9 @@ void CatalogResolver::clearCacheAndRequeue(const QVector<LocalLibrary::VideoEntr
 
 void CatalogResolver::pump()
 {
+    // "Off ⇒ zero network" literally: toggling resolveOnline off drains queued work and issues
+    // no further searches (enqueue already gates NEW work; this covers already-queued jobs).
+    if (!Settings::resolveOnline()) { pending_.clear(); return; }
     while (jobs_.size() < maxActive_ && !pending_.isEmpty())
         startJob(pending_.takeFirst());
 }
@@ -69,7 +72,7 @@ void CatalogResolver::startJob(const QSharedPointer<Job>& job)
     {
         if (!isMovieCatalogSource(addons_, s)) continue;
         const int reqId = addons_->requestSearch(s, job->movie.title);
-        if (reqId >= 0) { job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+        if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
     }
     if (job->outstanding.isEmpty()) { const quint64 id = job->id; QTimer::singleShot(0, this, [this, id]{ finishJob(id); }); return; }
     job->timer = new QTimer(this); job->timer->setSingleShot(true);
@@ -101,9 +104,19 @@ void CatalogResolver::finishJob(quint64 id)
     if (job->timer) { job->timer->stop(); job->timer->deleteLater(); job->timer = nullptr; }
     for (int r : job->outstanding) reqToJob_.remove(r);   // drop lingering (timeout path)
     const qint64 now = QDateTime::currentSecsSinceEpoch();
-    if (!job->matchedIds.isEmpty()) cache_->putMatched(job->movie.path, job->size, job->mtime, job->matchedIds, now);
-    else                            cache_->putNoMatch(job->movie.path, job->size, job->mtime, now);
-    cacheDirty_ = true;
+    if (!job->matchedIds.isEmpty()) {
+        cache_->putMatched(job->movie.path, job->size, job->mtime, job->matchedIds, now);
+        cacheDirty_ = true;
+    }
+    // Only stamp a 14-day nomatch when we genuinely "searched everywhere and found nothing":
+    // at least one search was issued AND all issued searches replied (outstanding drained).
+    // A timeout (outstanding still non-empty) or a no-source/offline run (nothing issued) must
+    // leave the entry UNCACHED so the next scan/launch retries — seen_ already blocks a same-session
+    // requeue, so we won't spin this session. This keeps offline/no-addon from poisoning the cache.
+    else if (job->issued && job->outstanding.isEmpty()) {
+        cache_->putNoMatch(job->movie.path, job->size, job->mtime, now);
+        cacheDirty_ = true;
+    }
     scheduleResolvedSignal();
     pump();
 }
