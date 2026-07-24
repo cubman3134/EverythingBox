@@ -7932,6 +7932,11 @@ void MainWindow::openGeneralSettings()
         action(QStringLiteral("roms.open"), tr("Open ROMs folder"));
         toggle(QStringLiteral("roms.keepscrape"), tr("Keep scraped data in the ROMs folder (gamelist.xml)"),
                Settings::keepScrapedData());
+        // --- Local Library (movies + TV) ---
+        sep(tr("Local Library"));
+        info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
+        action(QStringLiteral("library.change"), tr("Change Local Library folder…"));
+        action(QStringLiteral("library.rescan"), tr("Rescan Local Library"));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -8053,6 +8058,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.open")) {
                     RomLibrary::ensureStructure();
                     QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
+                }
+                else if (id == QStringLiteral("library.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your local video library folder"),
+                                                                          Settings::libraryFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setLibraryFolder(dir);
+                    setInfo(QStringLiteral("library.path"), dir, QString());
+                    rescanLocalLibrary();
+                    statusBar()->showMessage(tr("Local Library folder set to %1 — rescanning…").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("library.rescan")) {
+                    rescanLocalLibrary();
+                    statusBar()->showMessage(tr("Rescanning your Local Library…"), 4000);
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
