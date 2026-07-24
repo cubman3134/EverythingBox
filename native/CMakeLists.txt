@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.3 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.4 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -198,6 +198,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/RomLibrary.cpp   src/core/RomLibrary.h
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/CatalogMatch.cpp src/core/CatalogMatch.h  # pure local-library id-resolver matcher (id-resolver T1)
+        src/core/LocalResolveCache.cpp src/core/LocalResolveCache.h  # persisted resolved-id cache (id-resolver T2)
+        src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
@@ -216,7 +218,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
-    target_include_directories(mymediavault PRIVATE src third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
+    target_include_directories(mymediavault PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
     target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})

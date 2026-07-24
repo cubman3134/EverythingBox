@@ -222,6 +222,12 @@ void Settings::setLibraryFolder(const QString& path)
     store().setValue(QStringLiteral("library/folder"), path); store().sync();
 }
 
+bool Settings::resolveOnline() { return store().value(QStringLiteral("library/resolveOnline"), true).toBool(); }
+void Settings::setResolveOnline(bool on)
+{
+    store().setValue(QStringLiteral("library/resolveOnline"), on); store().sync();
+}
+
 bool Settings::bgmEnabled() { return store().value(QStringLiteral("bgm/enabled"), true).toBool(); }
 void Settings::setBgmEnabled(bool on) { store().setValue(QStringLiteral("bgm/enabled"), on); store().sync(); }
 int  Settings::bgmVolume() { return store().value(QStringLiteral("bgm/volume"), 35).toInt(); }

@@ -17,6 +17,8 @@ public:
     void putMatched(const QString& path, qint64 size, qint64 mtime, const QStringList& ids, qint64 nowSecs);
     void putNoMatch(const QString& path, qint64 size, qint64 mtime, qint64 nowSecs);
     QHash<QString, QStringList> matchedIdsByPath() const;
+    // Drop every entry and persist the empty cache (the "Re-match online" action clears then re-resolves all).
+    void clear() { byPath_.clear(); save(); }
 
 private:
     QString file_;

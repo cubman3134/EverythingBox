@@ -81,6 +81,15 @@ int main(int argc, char** argv)
         CHECK(c.matchedIdsByPath().value("/movies/Inception.mkv").contains("tt1375666"));
         CHECK(!c.matchedIdsByPath().contains("/movies/Unknown.mkv"));       // nomatch not in the snapshot
     }
+    // clear() empties the cache (the "Re-match online" path) and persists the empty file.
+    {
+        LocalResolveCache c(cachePath); c.load();
+        CHECK(c.has("/movies/Inception.mkv"));                             // present before clear
+        c.clear();
+        CHECK(!c.has("/movies/Inception.mkv"));                            // gone after clear
+        LocalResolveCache c2(cachePath); c2.load();
+        CHECK(!c2.has("/movies/Inception.mkv"));                           // and the empty state persisted
+    }
     // buildIndex indexes the resolved ids → the movie's path, alongside the NFO id.
     {
         LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie; e.path = "/m/Inception.mkv";
@@ -90,6 +99,15 @@ int main(int argc, char** argv)
         CHECK(idx.ownsId("tt1375666"));                 // NFO id (existing behavior)
         CHECK(idx.ownsId("tmdb:movie:27205"));          // resolved id (new)
         CHECK(idx.localPathFor("tmdb:movie:27205") == e.path);
+    }
+    // A NFO-LESS movie (no imdbId) still gets indexed by its resolved catalog id (T2 review Minor).
+    {
+        LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie; e.path = "/m/NoNfo.mkv";
+        e.title = "No Nfo"; e.imdbId = QString();       // no NFO id at all
+        QHash<QString, QStringList> extra; extra.insert(e.path, { "tmdb:movie:999" });
+        const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex({ e }, extra);
+        CHECK(idx.ownsId("tmdb:movie:999"));            // resolved id indexed despite empty imdbId
+        CHECK(idx.localPathFor("tmdb:movie:999") == e.path);
     }
 
     if (failures == 0) { std::puts("RESOLVER-OK"); return 0; }
