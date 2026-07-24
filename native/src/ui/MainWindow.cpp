@@ -392,10 +392,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // A batch of movies resolved: rebuild the index from the current scan + the now-richer cache, then refresh.
         const QString libRoot = LocalLibrary::root();
         const auto extra = resolveCache_->matchedIdsByPath();       // snapshot on the MAIN thread (thread-safe by value)
+        const quint64 gen = libScanGen_;                            // READ (do not ++) — a refresh, not a superseding scan
         auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
-        connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w] {
-            LocalLibrary::installIndex(w->result());
-            if (home_) home_->onLocalLibraryChanged();
+        connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+            if (gen == libScanGen_) {                               // a newer folder-change rescan invalidates this stale rebuild
+                LocalLibrary::installIndex(w->result());
+                if (home_) home_->onLocalLibraryChanged();
+            }
             w->deleteLater();
         });
         w->setFuture(QtConcurrent::run([libRoot, extra] {
