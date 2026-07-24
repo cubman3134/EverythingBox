@@ -1,4 +1,7 @@
 #include "HomeView.h"
+#include "../theme2/FormFactor.h"
+#include <QScrollArea>
+#include <QScroller>
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J06/J07)
 #include "../core/AppPaths.h"
 #include "../core/MediaCategories.h"
@@ -518,7 +521,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     typeHost_->setObjectName(QStringLiteral("typeHost"));
     typeBar_ = new QHBoxLayout(typeHost_);
     typeBar_->setContentsMargins(0, 0, 0, 0);
-    topRow->addWidget(typeHost_, 1);
+    if (FormFactor::instance().mode() == FormFactor::Mode::Mobile)
+    {
+        // A phone width can't seat every media-type tab beside the rest of the chrome — QHBoxLayout
+        // would clip them mid-text. Pan the tabs in a horizontal scroller instead (touch-draggable;
+        // widgetResizable never sizes the host below its minimum, so nothing clips).
+        auto* scroll = new QScrollArea(this);
+        scroll->setObjectName(QStringLiteral("typeScroll"));
+        scroll->setFrameShape(QFrame::NoFrame);
+        scroll->setWidgetResizable(true);
+        scroll->setWidget(typeHost_);
+        scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        // No fixed height: stretch with the bar exactly like the bare typeHost_ does, so the tabs sit
+        // at the same vertical position as the rest of the chrome (a fixed 34px viewport clipped them).
+        scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        QScroller::grabGesture(scroll->viewport(), QScroller::LeftMouseButtonGesture);
+        topRow->addWidget(scroll, 1);
+    }
+    else
+        topRow->addWidget(typeHost_, 1);
 
     search_ = new QLineEdit(this);
     search_->setPlaceholderText(tr("Search…"));
@@ -794,7 +816,16 @@ void HomeView::refresh()
         const Profile me = ProfileStore::current();
         profileBtn_->setIcon(avatarIcon(me.icon, me.name, 26));
         profileBtn_->setIconSize(QSize(26, 26));
-        profileBtn_->setText(me.name.isEmpty() ? tr("Profile") : me.name);
+        // The top bar shares one row with Back/search/Settings, and QPushButton's minimum size hint
+        // enforces its full icon+text width — a long name overflows the bar and gets clipped. Mobile:
+        // avatar only (the standard phone pattern). Desktop/TV: elide the name to a sane cap. The full
+        // name always survives in the tooltip.
+        const QString name = me.name.isEmpty() ? tr("Profile") : me.name;
+        if (FormFactor::instance().mode() == FormFactor::Mode::Mobile)
+            profileBtn_->setText(QString());
+        else
+            profileBtn_->setText(QFontMetrics(profileBtn_->font()).elidedText(name, Qt::ElideRight, 160));
+        profileBtn_->setToolTip(name);
     }
 
     // Rebuild the registry of addon-declared media-type visuals (colour/icon/open-kind/layout per type).

@@ -165,6 +165,12 @@ int main(int argc, char** argv)
 #endif
 
     QApplication app(argc, argv);
+    // AGAIN, after the QApplication: on Unix its constructor re-applies the environment's locale
+    // (setlocale(LC_ALL, "")), clobbering the early call above — and libmpv REFUSES to create a
+    // context under a non-C LC_NUMERIC ("Non-C locale detected", then mpv_create returns null).
+    // Only reproducible when launched from a terminal with LANG set; Finder launches carry no locale.
+    // This placement is Qt's documented remedy (QCoreApplication "Locale Settings").
+    std::setlocale(LC_NUMERIC, "C");
     capLogAtStartup();                      // trim a runaway log before we start appending to it
     qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
     QApplication::setApplicationName(QStringLiteral("My Media Vault"));
@@ -250,6 +256,18 @@ int main(int argc, char** argv)
     if (QScreen* s = QGuiApplication::primaryScreen()) window.resize(s->geometry().size());
 #else
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
+    // Test-only seam (parity with MMV_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
+    // mobile layout can be exercised with the uitest channel on a desktop host (where the window could
+    // otherwise never go below the desktop layout's minimum). Never active in production.
+    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
+    {
+        const QStringList wh = qEnvironmentVariable("MMV_TEST_WINDOW").split(QLatin1Char('x'));
+        if (wh.size() == 2 && wh[0].toInt() > 0 && wh[1].toInt() > 0)
+        {
+            window.setMinimumSize(1, 1);
+            window.resize(wh[0].toInt(), wh[1].toInt());
+        }
+    }
 #endif
     // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
     // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.

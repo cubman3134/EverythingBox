@@ -169,9 +169,11 @@ Rectangle {
             // Separator = a section header (no card; dim, spaced label).
             Text {
                 visible: del.isSep
-                anchors.left: parent.left; anchors.bottom: parent.bottom; anchors.bottomMargin: 6
+                anchors.left: parent.left; anchors.right: parent.right
+                anchors.bottom: parent.bottom; anchors.bottomMargin: 6
                 text: (del.rowData ? del.rowData.label : "").toUpperCase()
                 color: root.cSep; font.pixelSize: 13; font.bold: true; font.letterSpacing: 1.5
+                elide: Text.ElideRight // a phone-width panel can't fit every section header
             }
 
             // Every other kind = a card row.
@@ -264,12 +266,22 @@ Rectangle {
                             }
                         }
 
-                        // Choice: current option + a ▾ affordance.
-                        Text {
+                        // Choice: current option + a ▾ affordance. The value is width-capped (long option
+                        // names elide on a phone) while the ▾ stays its own item so it never elides away.
+                        Row {
                             visible: del.kind === root.kChoice
                             anchors.verticalCenter: parent.verticalCenter
-                            text: (del.rowData ? (del.rowData.value + "  ▾") : "")
-                            color: root.cAccent; font.pixelSize: 16
+                            spacing: 6
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(implicitWidth, Math.round(del.width * 0.45))
+                                text: del.rowData ? del.rowData.value : ""
+                                color: root.cAccent; font.pixelSize: 16; elide: Text.ElideRight
+                            }
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: "▾"; color: root.cAccent; font.pixelSize: 16
+                            }
                         }
 
                         // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
@@ -283,6 +295,9 @@ Rectangle {
                                                  : del.rowData.value)
                             color: has ? root.cText : root.cDim
                             font.pixelSize: 16; elide: Text.ElideRight
+                            // elide needs an explicit width to act on — cap so long values can't push the
+                            // right-side group over the label (or off a phone-width card entirely).
+                            width: Math.min(implicitWidth, Math.round(del.width * 0.5))
                         }
 
                         // Info / Progress: static right value (dim). For a Progress row (a Downloads job) this is
@@ -298,6 +313,10 @@ Rectangle {
                             anchors.topMargin: del.kind === root.kProgress ? 10 : 0
                             text: del.rowData ? del.rowData.value : ""
                             color: root.cDim; font.pixelSize: del.kind === root.kProgress ? 14 : 16
+                            // Same width cap as the TextField value: long paths / status lines elide
+                            // instead of overrunning the label on a phone-width card.
+                            width: Math.min(implicitWidth, Math.round(del.width * 0.5))
+                            elide: Text.ElideRight
                         }
 
                         // Action: a chevron. Ride-along (B2 Task 5): an activatable Progress row (a Downloads

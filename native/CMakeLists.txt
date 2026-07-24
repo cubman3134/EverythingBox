@@ -476,9 +476,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/EpicLibrary.cpp src/core/EpicLibrary.h
         src/core/GogLibrary.cpp src/core/GogLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
+        src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/RecentStore.cpp
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp)
-    target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse)
+    target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the PerfTrace span harness (gating, format, overhead budget) plus the
