@@ -30,7 +30,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.4.25";
+static constexpr const char* kAppVersion = "0.5.1";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -258,6 +258,17 @@ int main(int argc, char** argv)
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));
         qApp->installEventFilter(new FirstPaintProbe(&window));
     }
+#ifdef Q_OS_IOS
+    // The window spans the whole screen but Qt insets the layout by the safe areas (notch / home
+    // indicator) via contents margins — those margin strips render the top-level's palette Window
+    // color, which defaults to white. Paint them the themed dark background so the chrome is seamless.
+    {
+        QPalette pal = window.palette();
+        pal.setColor(QPalette::Window, QColor(0x0F, 0x12, 0x16)); // themes' default `background`
+        window.setPalette(pal);
+        window.setAutoFillBackground(true);
+    }
+#endif
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     // Mobile has no windowed mode: the app is always fullscreen. On Android, showFullScreen() also drives Qt 6.8's
     // QtActivityDelegate into sticky-immersive — it maps the top-level Qt::WindowFullScreen state onto the
