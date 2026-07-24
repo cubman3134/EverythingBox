@@ -134,6 +134,26 @@ GridView {
                     elide: Text.ElideRight; maximumLineCount: 2; wrapMode: Text.WordWrap
                 }
             }
+
+            // "On disk" badge for locally-owned items (LocalLibrary Seam A). browseItems() sets modelData.onDisk
+            // (and onDiskCount for a series) when OwnedIndex owns the tile's id; un-owned tiles never carry it.
+            Rectangle {
+                visible: !!(modelData && modelData.onDisk)
+                anchors { top: parent.top; right: parent.right; margins: 4 }
+                radius: 3
+                color: Qt.rgba(0, 0, 0, 0.65)
+                implicitWidth: badgeText.implicitWidth + 10
+                implicitHeight: badgeText.implicitHeight + 4
+                width: implicitWidth; height: implicitHeight
+                Text {
+                    id: badgeText
+                    anchors.centerIn: parent
+                    text: (modelData && modelData.onDiskCount) ? ("● " + modelData.onDiskCount) : "● ON DISK"
+                    color: "white"
+                    font.pixelSize: 10
+                    font.bold: true
+                }
+            }
         }
     }
 }

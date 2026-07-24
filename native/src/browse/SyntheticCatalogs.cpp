@@ -76,6 +76,26 @@ MediaCatalog downloadsCatalog(const QList<DownloadedItem>& all, const QString& m
     return cat;
 }
 
+MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entries)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Local Library");
+    for (const LocalLibrary::VideoEntry& e : entries)
+    {
+        MediaItem it;
+        it.url = e.path;
+        it.mime = QStringLiteral("local:video");
+        it.type = QStringLiteral("movie");                 // both movies and episodes render as video tiles
+        it.id = e.imdbId.isEmpty() ? (QStringLiteral("local:") + e.path) : e.imdbId;
+        it.title = LocalLibrary::displayTitle(e);
+        it.subtitle = e.plot;
+        // Offline-first: a local NFO <thumb> is a file path; MetaCache::displayImage serves it if present.
+        it.thumbnailUrl = MetaCache::displayImage(it.id, e.thumbPath);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
 MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& system)
 {
     MediaCatalog cat; cat.title = QObject::tr("Favorites");

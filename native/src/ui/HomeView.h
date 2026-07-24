@@ -160,6 +160,10 @@ public:
     void showToast(const QString& text, int ms = 4500); // ms <= 0 = sticky (no auto-hide)
     void hideToast();                                   // dismiss it now (e.g. the content view takes over)
 
+    // The async local-library scan (MainWindow, at startup) installed a fresh index: refresh the current
+    // level so the "Local Library" folder appears / updates. Cheap no-op if that root isn't showing.
+    void onLocalLibraryChanged();
+
 signals:
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
     void toastHideRequested();                        // ask MainWindow to dismiss it
@@ -268,6 +272,9 @@ private:
     // marker = "downloads:<kind>|<system>" (system empty for non-games, a SystemCatalog id / "pc" for games).
     void openDownloadsLevel(const QString& marker);      // drill it -> the matching downloads
     void populateDownloads(const QString& marker);       // (re)build that list as re-openable rows
+    // The synthetic "Local Library" folder (video category only): this machine's scanned local videos.
+    void openLocalLibraryLevel(const QString& marker);   // drill it -> the scanned local videos
+    void populateLocalLibrary(const QString& marker);    // (re)build that list from the cached index
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT

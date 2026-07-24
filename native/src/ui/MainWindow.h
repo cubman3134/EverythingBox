@@ -71,6 +71,9 @@ private slots:
     void onThemeChanged(const QColor& background, const QColor& accent); // match the home view's theme
     void openLibrary();
     void openLibraryItem(const MediaItem& item); // route an addon catalog item to the right view
+    // Local video library: read the configured root on the MAIN thread, then scan off-thread and install
+    // the rebuilt index + refresh the home on completion. Single async-scan site (startup + settings picker).
+    void rescanLocalLibrary();
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
@@ -404,6 +407,7 @@ private:
     void updateThemedNowPlaying();      // push the current BGM track name into the themed home (Triple theme)
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
+    quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
     // explicit stored `false` still selects classic). showHomeScreen() routes Home to it or the classic

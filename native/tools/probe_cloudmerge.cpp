@@ -743,6 +743,10 @@ int main(int argc, char** argv)
         CHECK(b.contains(QStringLiteral("profiles/list")));          // sibling still syncs
         CHECK(b.contains(QStringLiteral("sync/global/audio")));      // sync/global/* still syncs
         CHECK(b.contains(QStringLiteral("library/showHidden")));     // library/showHidden still syncs
+        // Local video library folder is device-local (each machine points at its own disk); the
+        // library/showHidden sibling is a user preference and DOES sync (leaf-exact match, not group).
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/folder")) == true);
+        CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("library/showHidden")) == false);
         CHECK(b.value(QStringLiteral("display/theme")).toString() == QStringLiteral("dark"));
         CHECK(!b.contains(QStringLiteral("stats/pX/") + localDev + QStringLiteral("/cat/video/seconds"))); // per-item now CARVED OUT of the bundle (mdsync T5 cadence fix)
         for (const char* pi : {"resume/", "recent/", "marks/", "favorites/", "playlists/", "stats/", "playstats/", "deleted/"})

@@ -22,6 +22,7 @@
 #include "../addons/CatalogPrefetcher.h"
 #include "../core/SystemCatalog.h"
 #include "../core/Settings.h"
+#include "../core/LocalLibrary.h"
 #include "../core/SyncOffsets.h"
 #include "../core/BackgroundMusic.h"
 #include "../core/CoreManager.h"
@@ -83,6 +84,8 @@
 #include <QListWidget>
 #include <QFrame>
 #include <QTimer>
+#include <QFutureWatcher>
+#include <QtConcurrent>
 #include <QEventLoop>
 #include <QCloseEvent>
 #include <QVBoxLayout>
@@ -1009,6 +1012,31 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
     // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
     QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
+
+    // Local video library: scan off-thread at startup, install the index + refresh the home on the main
+    // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
+    // site with the Settings folder-picker / Rescan action.
+    rescanLocalLibrary();
+}
+
+// Read the configured library root on the MAIN thread (QSettings is not thread-safe — a prior review caught
+// a race from reading it inside the worker), capture it by value, then scan off-thread and install the
+// rebuilt index + refresh the home on completion. Called from startup and the Settings picker / Rescan.
+void MainWindow::rescanLocalLibrary()
+{
+    const QString libRoot = LocalLibrary::root();               // read Settings on the MAIN thread
+    const quint64 gen = ++libScanGen_;                          // main thread only (rescan is main-thread)
+    auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
+    connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
+        if (gen == libScanGen_) {                               // ignore a scan superseded by a newer rescan
+            LocalLibrary::installIndex(w->result());
+            if (home_) home_->onLocalLibraryChanged();
+        }
+        w->deleteLater();
+    });
+    w->setFuture(QtConcurrent::run([libRoot] {
+        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot));
+    }));
 }
 
 MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
@@ -6534,6 +6562,23 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title), kFeedbackLong);
         return;
     }
+    // Local library prefer-local: if we own this item on disk, play the local file instead of resolving
+    // a stream. Guard on mime so the re-entry (with a filesystem url) doesn't recurse. Movies key on id;
+    // episodes key on imdbStreamId ("ttShow:season:episode", matches the OwnedIndex episode key).
+    if (item.mime != QStringLiteral("local:video"))
+    {
+        QString localPath = LocalLibrary::index().localPathFor(item.id);
+        if (localPath.isEmpty() && !item.imdbStreamId.isEmpty())
+            localPath = LocalLibrary::index().localPathFor(item.imdbStreamId);
+        if (!localPath.isEmpty() && QFileInfo::exists(localPath))
+        {
+            MediaItem local = item;
+            local.url = localPath;
+            local.mime = QStringLiteral("local:video");
+            openLibraryItem(local);   // re-enter: filesystem url + local:video mime -> mpv branch
+            return;
+        }
+    }
     // A GOG game: a DRM-free exe launched through the MONITORED path (launchPcExe records the "goggame" Recent
     // itself — do NOT re-record here). Its exe rides on item.url; id/title/thumb come from the tile.
     if (item.mime == QStringLiteral("goggame"))
@@ -7890,6 +7935,11 @@ void MainWindow::openGeneralSettings()
         action(QStringLiteral("roms.open"), tr("Open ROMs folder"));
         toggle(QStringLiteral("roms.keepscrape"), tr("Keep scraped data in the ROMs folder (gamelist.xml)"),
                Settings::keepScrapedData());
+        // --- Local Library (movies + TV) ---
+        sep(tr("Local Library"));
+        info(QStringLiteral("library.path"), Settings::libraryFolder(), QString());
+        action(QStringLiteral("library.change"), tr("Change Local Library folder…"));
+        action(QStringLiteral("library.rescan"), tr("Rescan Local Library"));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -8011,6 +8061,19 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("roms.open")) {
                     RomLibrary::ensureStructure();
                     QDesktopServices::openUrl(QUrl::fromLocalFile(RomLibrary::root()));
+                }
+                else if (id == QStringLiteral("library.change")) {
+                    const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your local video library folder"),
+                                                                          Settings::libraryFolder());
+                    if (dir.isEmpty()) return;
+                    Settings::setLibraryFolder(dir);
+                    setInfo(QStringLiteral("library.path"), dir, QString());
+                    rescanLocalLibrary();
+                    statusBar()->showMessage(tr("Local Library folder set to %1 — rescanning…").arg(dir), 6000);
+                }
+                else if (id == QStringLiteral("library.rescan")) {
+                    rescanLocalLibrary();
+                    statusBar()->showMessage(tr("Rescanning your Local Library…"), 4000);
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
@@ -8252,6 +8315,39 @@ void MainWindow::openGeneralSettings()
                                   "other EmulationStation/RetroBat frontends. Existing gamelist data is always read."));
         connect(keepScrape, &QCheckBox::toggled, this, [](bool c) { Settings::setKeepScrapedData(c); });
         v->addWidget(keepScrape);
+        v->addSpacing(10);
+
+        // --- Local Library (movies + TV): a folder of local video files surfaced under the video category. ---
+        auto* llHeading = new QLabel(tr("Local Library"));
+        llHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(llHeading);
+        auto* llNote = new QLabel(tr("Point this at a folder of your own movies + TV episodes. They then appear "
+            "under “Local Library” in the video category. Use “Rescan” after adding or removing files."));
+        llNote->setWordWrap(true); llNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(llNote);
+        auto* llRow = new QHBoxLayout();
+        auto* llPath = new QLineEdit(Settings::libraryFolder());
+        llPath->setMinimumHeight(34);
+        llPath->setReadOnly(true); // chosen via the picker, so it's always a real folder
+        llRow->addWidget(llPath, 1);
+        auto* llBrowse = new QPushButton(tr("Change…"));
+        llRow->addWidget(llBrowse);
+        auto* llRescan = new QPushButton(tr("Rescan"));
+        llRow->addWidget(llRescan);
+        v->addLayout(llRow);
+        connect(llBrowse, &QPushButton::clicked, this, [this, llPath] {
+            const QString dir = QFileDialog::getExistingDirectory(this, tr("Choose your local video library folder"),
+                                                                  Settings::libraryFolder());
+            if (dir.isEmpty()) return;
+            Settings::setLibraryFolder(dir);
+            llPath->setText(dir);
+            rescanLocalLibrary();
+            statusBar()->showMessage(tr("Local Library folder set to %1 — rescanning…").arg(dir), 6000);
+        });
+        connect(llRescan, &QPushButton::clicked, this, [this] {
+            rescanLocalLibrary();
+            statusBar()->showMessage(tr("Rescanning your local library…"), 4000);
+        });
         v->addSpacing(10);
 
         auto* pbHeading = new QLabel(tr("Playback"));

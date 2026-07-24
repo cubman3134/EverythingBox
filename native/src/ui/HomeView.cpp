@@ -6,6 +6,7 @@
 #include "../addons/GameMetaAggregator.h"
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
+#include "../core/LocalLibrary.h"
 #include "../core/RaBrowse.h"
 #include "../core/Achievements.h"
 #include "../core/SteamAchievements.h"
@@ -1403,6 +1404,14 @@ QVariantList HomeView::browseItems()
                        { QStringLiteral("type"), it.type },
                        { QStringLiteral("accent"), typeColor(it.type).name() },
                        { QStringLiteral("expandable"), it.expandable } };
+        // Local library: if we own this catalog item on disk, flag it so the delegate shows an "On disk"
+        // badge (and the count for a series). Purely additive — un-owned tiles are untouched.
+        if (!it.id.isEmpty() && LocalLibrary::index().ownsId(it.id))
+        {
+            m[QStringLiteral("onDisk")] = true;
+            const int eps = LocalLibrary::index().ownedEpisodes(it.id);
+            if (eps > 0) m[QStringLiteral("onDiskCount")] = eps;
+        }
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
         it.art.writeInto(m);
@@ -1927,6 +1936,37 @@ void HomeView::openDownloadsLevel(const QString& marker)
 void HomeView::populateDownloads(const QString& marker)
 { showSyntheticCatalog(browse::downloadsCatalog(DownloadsStore::list(), marker)); }
 
+void HomeView::openLocalLibraryLevel(const QString& marker)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("Local Library");
+    lvl.item.id = QStringLiteral("_locallib");
+    lvl.item.type = QStringLiteral("_locallib");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("locallib:") + marker; // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateLocalLibrary(marker);
+}
+
+void HomeView::populateLocalLibrary(const QString& /*marker*/)
+{ showSyntheticCatalog(browse::localLibraryCatalog(LocalLibrary::index().all())); }
+
+void HomeView::onLocalLibraryChanged()
+{
+    if (stack_.isEmpty()) return;
+    const auto& top = stack_.last();
+    if (top.item.type == QStringLiteral("_locallib")) {
+        populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size()));
+        return;
+    }
+    // Only a catalogue root shows the synthetic folders; refresh there so the newly-non-empty library
+    // surfaces its folder. Anywhere else (detail/search/other), the folder appears on the next navigation
+    // to a root (the present-check runs on every populate) — do NOT reload the user's current level.
+    if (!top.detail && top.query.isEmpty() && !recentView_)
+        loadTop();
+}
+
 void HomeView::openFavoritesLevel(const QString& system)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
@@ -2402,6 +2442,10 @@ void HomeView::activateItem(int row)
     // The synthetic Favorites folder (inside a console) drills into that console's favourited games.
     if (it.type == QStringLiteral("_favorites"))
         { openFavoritesLevel(it.mime.mid(QStringLiteral("favorites:").size())); return; }
+
+    // The synthetic Local Library folder drills into this machine's scanned local videos.
+    if (it.type == QStringLiteral("_locallib"))
+        { openLocalLibraryLevel(it.mime.mid(QStringLiteral("locallib:").size())); return; }
 
     // Synthetic playlist navigation (no addon): the Playlists folder, a playlist, or the New-playlist entry.
     if (it.type == QStringLiteral("_playlists"))
@@ -2948,6 +2992,9 @@ void HomeView::loadTop()
     // Returning to a synthetic Downloaded level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_downloads"))
         { populateDownloads(top.item.mime.mid(QStringLiteral("downloads:").size())); return; }
+    // Returning to a synthetic Local Library level: rebuild it natively.
+    if (top.detail && top.item.type == QStringLiteral("_locallib"))
+        { populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size())); return; }
     // Returning to a console's synthetic Favorites level: rebuild it natively.
     if (top.detail && top.item.type == QStringLiteral("_favorites"))
         { populateFavorites(top.item.mime.mid(QStringLiteral("favorites:").size())); return; }
@@ -3000,6 +3047,21 @@ void HomeView::loadTop()
 void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QString& parentTitle,
                            const QString& console, const QString& imdbId, const QString& imdbType)
 {
+    // Local library prefer-local: if we own this catalog item on disk, play the local file directly and
+    // SKIP stream resolution (spec: owned items must play offline, no round-trip). Movies key on id (tt...),
+    // episodes on imdbStreamId (tt...:S:E, unpadded — matches OwnedIndex::buildIndex).
+    {
+        QString lp = LocalLibrary::index().localPathFor(it.id);
+        if (lp.isEmpty() && !it.imdbStreamId.isEmpty())
+            lp = LocalLibrary::index().localPathFor(it.imdbStreamId);
+        if (!lp.isEmpty() && QFileInfo::exists(lp)) {
+            MediaItem local = it;
+            local.url = lp;
+            local.mime = QStringLiteral("local:video");
+            emit openItem(local);
+            return;
+        }
+    }
     if (it.mime == QStringLiteral("steamgame"))
     {
         MediaItem m = it;
@@ -3592,6 +3654,14 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
     if (atRecentsLevel() || atDownloadsLevel())
     {
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+        return;
+    }
+    // A Local Library leaf is an already-local video file (its level has no addon to resolve through) — open it
+    // directly, exactly as the classic list does (openItemAt's generic url path). Without this the themed inline
+    // Play falls through to resolvePlay, which has no local:video branch and dead-ends at "Nothing to play".
+    if (it.mime == QStringLiteral("local:video") && !it.url.isEmpty())
+    {
+        emit openItem(it);
         return;
     }
     LoadedAddon* addon = stack_.last().addon;
@@ -4190,10 +4260,12 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             bool hasDownloads = false;
             if (rkind != QStringLiteral("game"))
                 for (const DownloadedItem& d : DownloadsStore::list()) if (d.kind == rkind) { hasDownloads = true; break; }
+            const bool isVideo = (rkind == QStringLiteral("video"));
             pushFolders({
-                { QLatin1String("_recents"),   tr("Recent"),     QStringLiteral("recents:") + rkind,                      hasRecents },
-                { QLatin1String("_downloads"), tr("Downloaded"), QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
-                { QLatin1String("_playlists"), tr("Playlists"),  QStringLiteral("playlists:") + currentCategoryKey(),     true },
+                { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
+                { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
+                { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
+                { QLatin1String("_playlists"), tr("Playlists"),     QStringLiteral("playlists:") + currentCategoryKey(),     true },
             });
             { PERF_SPAN("marks.shelves"); pushShelves(/*favoritesShelf*/ true); } // Favorites + pinned-tag + (toggle) Hidden shelves
         }

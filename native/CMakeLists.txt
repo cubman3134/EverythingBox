@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.4.14 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.4.25 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -196,6 +196,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SteamAchievements.cpp src/core/SteamAchievements.h
         src/core/PlayStats.cpp    src/core/PlayStats.h
         src/core/RomLibrary.cpp   src/core/RomLibrary.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
@@ -452,6 +453,16 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_browse PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_browse PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
+    # Headless test for the local video library core (parse + NFO + scan + OwnedIndex).
+    add_executable(probe_locallib tools/probe_locallib.cpp
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h
+        src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
+        src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)       # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
+    target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
+    target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
     # Headless test for the game-importers Task 1 (Steam gap-closure) pure logic: owned-games JSON parse +
     # TTL semantics (SteamLibrary), the owned-not-installed console append (SyntheticCatalogs), and the
     # Recent-kind dispatch table (RecentStore::relaunchFor) the app's openRecent switch mirrors. No network /
@@ -473,6 +484,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_perf tools/probe_perf.cpp
         src/core/PerfTrace.cpp src/core/PerfTrace.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
+        src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/media/StreamResolver.cpp src/media/StreamResolver.h)
     target_include_directories(probe_perf PRIVATE src src/core src/addons src/browse src/media)

@@ -1,7 +1,39 @@
 # Local Media Library Manager (video: movies + TV) — Design
 
 **Date:** 2026-07-23
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/video-library` (T1–T6, 6 tasks + a Fable whole-branch round).
+`LocalLibrary` pure core (parse + Kodi `.nfo` + scan + `OwnedIndex`) is probe-locked (`probe_locallib`,
+RED-first, incl. the year-heuristic + garbage-nfo + `NxNN` + relative-thumb cases); the cached index scans
+off-thread at startup; the "Local Library" synthetic folder, the Seam A on-disk badge, and Seam B
+prefer-local playback are wired and reviewed. Prefer-local now **short-circuits before stream resolution**
+(`HomeView::resolvePlay`), so owned Stremio/IMDB items play offline with no round-trip (the spec's
+merge-target). Perf: `nav.select` flat (avg 27–41 ms vs 28 ms reference), startup flat/improved (scan is
+off-thread). **Live-verified** (portable throwaway copy of the deployed app, cloud-stripped, fixture
+library — real app never touched): the themed Settings section, the browse folder, the drill listing, and
+local-file playback reaching mpv. **Recorded honestly as not live-inducible here:** the Seam A badge — the
+test machine's enabled movie catalog keys tiles on **TMDB** ids while owned ids are **IMDB**, so no live
+tile could match (badge stays covered by `probe_locallib`'s decision assertions + code-walk).
+
+## Post-ship follow-ups (Fable round + live-smoke)
+
+- **The badge/merge lights up only for IMDB-keyed catalogs (Cinemeta/Stremio).** A TMDB-keyed catalog
+  tile (owned id is IMDB) won't badge or prefer-local at the tile until an id bridge exists — this is the
+  same limitation the deliberately-seamed **network id-resolver** follow-up closes (it would also fill in
+  the missing IMDB ids for TMDB tiles). Highest-value next step for merge coverage.
+- **Prefer-local `imdbId`-param path (Minor).** `resolvePlay`'s short-circuit checks `it.id` +
+  `it.imdbStreamId` but not the separately-carried `imdbId` param on the TMDB-bridged play paths
+  (classic detail Play, `onMetaReady`). Owned items from non-Stremio catalogs still go local via the
+  `openLibraryItem` backstop after a stream resolves (correct, just not round-trip-free). One-line fold-in.
+- **Badge renders only in `theme2/qml/elements/Grid.qml`** — the classic/XMB/carousel delegates receive
+  `onDisk`/`onDiskCount` but don't draw it.
+- **Resume-key split** for an episode owned via `tvshow.nfo` with no own sidecar: addon route keys
+  `tt:S:E`, browse-folder route keys `local:<path>` — progress doesn't transfer between the two entry
+  points (NFO'd movies are fine, both key on the tt id).
+- **Season-folder-only classification:** an episode file with no `SxxEyy`/`NxNN` marker in its name (only
+  the `Show/Season NN/` folder layout) degrades safely to a local-only movie tile.
+- **"Malformed nfo logged once"** (spec §edge table) not implemented — a bad nfo degrades silently.
+
+**Original status:** Draft — approved through brainstorming; user-reviewed before plan.
 **Origin:** The replace-everything roadmap's #2 — "Local media library (folder scan → matched
 metadata, NFO import)." The Plex/Jellyfin half of the app: make files on disk first-class catalog
 content alongside addon (Stremio-style) catalogs.
