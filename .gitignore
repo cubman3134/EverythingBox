@@ -1,8 +1,13 @@
 # Build output (CMake)
 /build/
 /build-clean/
+/build-ios/
+/build-ios-dev/
 /native/build/
 /native/**/build/
+
+# Claude Code local session settings
+/.claude/
 
 # IDE / editor
 .vs/
