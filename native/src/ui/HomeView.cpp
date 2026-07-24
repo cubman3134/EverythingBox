@@ -3637,6 +3637,14 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
+    // A Local Library leaf is an already-local video file (its level has no addon to resolve through) — open it
+    // directly, exactly as the classic list does (openItemAt's generic url path). Without this the themed inline
+    // Play falls through to resolvePlay, which has no local:video branch and dead-ends at "Nothing to play".
+    if (it.mime == QStringLiteral("local:video") && !it.url.isEmpty())
+    {
+        emit openItem(it);
+        return;
+    }
     LoadedAddon* addon = stack_.last().addon;
     const QString parentTitle = stack_.last().item.title.trimmed(); // the level this leaf hangs under
     QString console;
