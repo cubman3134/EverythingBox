@@ -6630,11 +6630,19 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // This must sit ABOVE the url.isEmpty() bail below — the coded route is precisely the url-less case.
     if (item.mime == QStringLiteral("battlenetgame"))
     {
-        if (item.url.isEmpty())   // coded game: the tile id is "bnet:<code>"
+        // The coded route: either a console tile (no url — the id is "bnet:<code>") or a row that already
+        // carries the battlenet:// URI. Testing the SCHEME as well as emptiness keeps this safe by
+        // construction: a coded Recent records the URI, and any surface that stamps that onto a tile's url
+        // (a playlist entry, say) must still take the URI arm, never hand "battlenet://wow" to launchPcExe.
+        const bool codedRoute = item.url.isEmpty() || item.url.startsWith(QStringLiteral("battlenet://"));
+        if (codedRoute)
         {
             const QString code = item.id.startsWith(QStringLiteral("bnet:"))
                                      ? item.id.mid(QStringLiteral("bnet:").size()) : item.id;
-            const QString uri = BattleNetLibrary::launchUri(code);
+            // Prefer an already-formed URI over rebuilding it from the id (a name-keyed code-less id would
+            // otherwise produce battlenet://<DisplayName>, which is not a product code).
+            const QString uri = item.url.startsWith(QStringLiteral("battlenet://"))
+                                     ? item.url : BattleNetLibrary::launchUri(code);
             if (uri.isEmpty())
             {
                 statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title),
