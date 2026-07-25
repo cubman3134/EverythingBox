@@ -154,12 +154,32 @@ void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, c
 // Try tier `i`; on a miss, recurse to `i+1`. Deliberately a NAMED member rather than a self-referencing
 // std::function: a lambda captured inside the shared_ptr that owns it forms a reference cycle and leaks the
 // function object plus its captures on every call. Here the shared_ptr holds only DATA.
+// Which tier a query belongs to, for the log. ("parent_imdb_id=" contains "imdb_id=", so episodes land on
+// "imdb" too — correct, it is the same tier.) The chain used to be silent about WHICH tier produced the
+// .srt, and the tiers differ in kind: moviehash matches THIS rip frame-for-frame, while title matches a
+// name. A title-tier hit on the wrong cut therefore looks exactly like an exact match in the log — during
+// live verification the only way to tell them apart was to compare the subtitle's runtime against the
+// video's. Naming the tier turns that inference into a fact.
+static QString tierName(const QString& q)
+{
+    if (q.contains(QStringLiteral("moviehash="))) return QStringLiteral("moviehash");
+    if (q.contains(QStringLiteral("imdb_id=")))   return QStringLiteral("imdb");
+    return QStringLiteral("title");
+}
+
 void SubtitleFetcher::stepFetch(std::shared_ptr<QStringList> queries, int i, const QString& lang,
                                 std::function<void(const QString&)> cb)
 {
     if (i >= queries->size()) { emit log(QStringLiteral("subs: no match")); cb(QString()); return; }
-    searchQuery(queries->at(i), lang, [this, queries, i, lang, cb](qint64 fileId) {
-        if (fileId > 0) { download(fileId, lang, cb); return; }
+    const QString tier = tierName(queries->at(i));
+    searchQuery(queries->at(i), lang, [this, queries, i, lang, tier, cb](qint64 fileId) {
+        if (fileId > 0)
+        {
+            emit log(QStringLiteral("subs: matched on the %1 tier").arg(tier));
+            download(fileId, lang, cb);
+            return;
+        }
+        emit log(QStringLiteral("subs: no %1 match, trying the next tier").arg(tier));
         stepFetch(queries, i + 1, lang, cb);
     });
 }
@@ -192,9 +212,16 @@ void SubtitleFetcher::searchList(const QString& imdbStreamId, const QString& tit
 void SubtitleFetcher::stepSearch(std::shared_ptr<QStringList> queries, int i,
                                  std::function<void(const QVector<SubtitleCandidate>&)> cb)
 {
-    if (i >= queries->size()) { cb({}); return; }
-    searchCandidates(queries->at(i), [this, queries, i, cb](const QVector<SubtitleCandidate>& list) {
-        if (!list.isEmpty()) { cb(list); return; }
+    if (i >= queries->size()) { emit log(QStringLiteral("subs: no candidates on any tier")); cb({}); return; }
+    const QString tier = tierName(queries->at(i));
+    searchCandidates(queries->at(i), [this, queries, i, tier, cb](const QVector<SubtitleCandidate>& list) {
+        if (!list.isEmpty())
+        {
+            emit log(QStringLiteral("subs: %1 candidates on the %2 tier").arg(list.size()).arg(tier));
+            cb(list);
+            return;
+        }
+        emit log(QStringLiteral("subs: no %1 candidates, trying the next tier").arg(tier));
         stepSearch(queries, i + 1, cb);
     });
 }
@@ -308,11 +335,10 @@ void SubtitleFetcher::searchCandidates(const QString& query,
         std::sort(out.begin(), out.end(), [](const SubtitleCandidate& a, const SubtitleCandidate& b) {
             return a.downloads > b.downloads;                       // most-downloaded first
         });
-        // NavMenu shows every row and never scrolls (NavOverlay.cpp: ScrollBarAlwaysOff + a fixed height
-        // clamped to the window), so an unbounded API page — /subtitles returns up to 50, and word-wrapped
-        // release names take 2+ lines each — would push rows off-screen where the ring can still reach them,
-        // which is exactly the defect NavOverlay::clippedTexts() (the probe_nav contract) reports. Keep the
-        // top slice; the list is sorted most-downloaded-first, so the tail is the part nobody picks.
+        // /subtitles returns up to 50 rows per page. The picker scrolls, so this is NOT a display bound —
+        // it is a "nobody scrolls to row 43" bound: the list is sorted most-downloaded-first, and past the
+        // top handful the rows are near-duplicate re-uploads of the same rip. Keeping the top slice also
+        // keeps the parse and the widget cheap on the file-loaded path.
         constexpr int kMaxCandidates = 20;
         if (out.size() > kMaxCandidates) out.resize(kMaxCandidates);
         done(out);

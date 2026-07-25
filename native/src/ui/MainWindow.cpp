@@ -6708,8 +6708,11 @@ void MainWindow::showSubtitleMenu()
 // an in-window CHILD of the main window, so it renders over the video with no separate OS window, it owns
 // input while open (keyboard grab + NavContext routing), and Back closes it. Deliberately NOT a QDialog and
 // not another hand-rolled scrim-and-card: the nav kit forbids top-level windows, and unlike the subtitle
-// panel's own fixed two-column card this list is DYNAMIC (0..n rows of unknown width), which is exactly the
-// shape NavMenu's scrollable, ring-navigable QListWidget already handles.
+// panel's own fixed two-column card this list is DYNAMIC (0..n rows of unknown width and count). That is
+// what made this the FIRST caller to overflow NavMenu: every other one is a short fixed menu, so NavMenu
+// summed its rows and never scrolled, and a 20-row list simply ran off the panel — rows the ring could
+// select but nobody could see. NavMenu now clamps and scrolls (NavOverlay.cpp), so the count below is a
+// quota/parse bound, NOT a display bound; it is not load-bearing for legibility.
 void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang,
                                            const QString& cacheKey)
 {

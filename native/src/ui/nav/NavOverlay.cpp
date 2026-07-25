@@ -14,6 +14,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QStyle>     // PM_ScrollBarExtent, when a long NavMenu has to scroll
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -337,21 +338,49 @@ NavMenu::NavMenu(const QString& title, const QStringList& items,
     list_->addItems(items);
     list_->setFocusPolicy(Qt::NoFocus);       // the overlay drives it; no Qt focus fights
     list_->setSelectionMode(QAbstractItemView::SingleSelection);
-    list_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list_->setWordWrap(true);                 // an over-long row wraps rather than eliding
     list_->setUniformItemSizes(false);
-    // Width: fit the longest row (and give the title room), capped to the window; every row shown in
-    // full, no scrolling. Heights are measured AFTER the width is fixed so wrapped rows count fully.
+    // Width: fit the longest row (and give the title room), capped to the window. Heights are measured
+    // AFTER the width is fixed so wrapped rows count fully.
     const int cap = qMax(320, parentWidget()->width() - 200);
     int w = qMax(280, list_->sizeHintForColumn(0) + 44);
     w = qMax(w, qMin(t->fontMetrics().horizontalAdvance(title) + 24, 520));
     w = qMin(w, cap);
     list_->setFixedWidth(w);
     t->setMaximumWidth(w);
-    int h = list_->frameWidth() * 2;
-    for (int i = 0; i < list_->count(); ++i) h += list_->sizeHintForRow(i) + 2;
-    list_->setFixedHeight(h + 6);
+
+    // Height: show every row when they fit, and SCROLL when they don't. The short fixed menus this
+    // primitive was written for (esc menu, XMB game menu, Downloads chooser) always fit, so it used to set
+    // the full summed height unconditionally — but the panel clamps ITSELF to the window
+    // (setFixedHeight(qMin(h + 6, qMax(200, height() - 80))) above), so an over-tall list was simply cut
+    // off at the panel edge: the ring still walked onto rows that were not on screen. That clipping
+    // happened one level UP from the list, which is why clippedTexts() — it measures rows against the
+    // LIST's own viewport, and the list claimed to be tall enough — never reported it. Clamping here puts
+    // the overflow back inside the list, where a real scrollbar handles it and the probe can see it.
+    auto measure = [this] {
+        int h = list_->frameWidth() * 2;
+        for (int i = 0; i < list_->count(); ++i) h += list_->sizeHintForRow(i) + 2;
+        return h + 6;
+    };
+    const int titleH = qMax(t->sizeHint().height(), t->heightForWidth(w));
+    // Mirror the panel's own budget: window - 80, less this layout's margins (18+18), spacing (10+10)
+    // and the title. Never shrink below a few rows, however small the window gets.
+    const int availH = qMax(140, parentWidget()->height() - 80 - (18 + 18 + 20 + titleH));
+    if (measure() > availH)
+    {
+        // Re-fit the width for the scrollbar the rows now have to share with, then re-measure: a narrower
+        // viewport wraps more rows, so the old height would be an undercount.
+        list_->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        const int sb = list_->style()->pixelMetric(QStyle::PM_ScrollBarExtent, nullptr, list_);
+        list_->setFixedWidth(qMin(w + sb, cap));
+        list_->setFixedHeight(qMin(measure(), availH));
+    }
+    else
+    {
+        list_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        list_->setFixedHeight(measure());
+    }
     list_->setCurrentRow(0);
     // Mouse path: a click chooses the row directly (same flow as controller Enter).
     connect(list_, &QListWidget::itemClicked, this, [this](QListWidgetItem*) { handleNavKey(Qt::Key_Return); });
@@ -362,8 +391,16 @@ bool NavMenu::handleNavKey(int key)
 {
     switch (key)
     {
-    case Qt::Key_Up:     list_->setCurrentRow(qMax(0, list_->currentRow() - 1)); return true;
-    case Qt::Key_Down:   list_->setCurrentRow(qMin(list_->count() - 1, list_->currentRow() + 1)); return true;
+    // scrollToItem: the list scrolls when the rows don't fit (see the ctor), and the ring must drag the
+    // viewport with it — otherwise the highlight walks off-screen and the menu looks frozen.
+    case Qt::Key_Up:
+        list_->setCurrentRow(qMax(0, list_->currentRow() - 1));
+        list_->scrollToItem(list_->currentItem());
+        return true;
+    case Qt::Key_Down:
+        list_->setCurrentRow(qMin(list_->count() - 1, list_->currentRow() + 1));
+        list_->scrollToItem(list_->currentItem());
+        return true;
     case Qt::Key_Return: case Qt::Key_Enter:
     {
         const int row = list_->currentRow();
