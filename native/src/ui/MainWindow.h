@@ -571,7 +571,10 @@ private:
     void hideSubtitleMenu();
     // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
     // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
-    void presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang);
+    // cacheKey is PINNED by the caller at request time (subCtx_ is rewritten by every media open, and the
+    // download is a further round-trip), so a late reply can never cache under the wrong video's key.
+    void presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang,
+                                   const QString& cacheKey);
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

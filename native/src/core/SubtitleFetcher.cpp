@@ -308,6 +308,13 @@ void SubtitleFetcher::searchCandidates(const QString& query,
         std::sort(out.begin(), out.end(), [](const SubtitleCandidate& a, const SubtitleCandidate& b) {
             return a.downloads > b.downloads;                       // most-downloaded first
         });
+        // NavMenu shows every row and never scrolls (NavOverlay.cpp: ScrollBarAlwaysOff + a fixed height
+        // clamped to the window), so an unbounded API page — /subtitles returns up to 50, and word-wrapped
+        // release names take 2+ lines each — would push rows off-screen where the ring can still reach them,
+        // which is exactly the defect NavOverlay::clippedTexts() (the probe_nav contract) reports. Keep the
+        // top slice; the list is sorted most-downloaded-first, so the tail is the part nobody picks.
+        constexpr int kMaxCandidates = 20;
+        if (out.size() > kMaxCandidates) out.resize(kMaxCandidates);
         done(out);
     });
 }
