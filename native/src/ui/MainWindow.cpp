@@ -6649,23 +6649,45 @@ void MainWindow::showSubtitleMenu()
             hideSubtitleMenu();
             notify(tr("Searching OpenSubtitles…"), 0);   // sticky: replaced by the result / the picker
             const QString lang = Settings::subtitleLanguage();
+            // Compose the cache key HERE — the one moment subCtx_ is definitionally the video the user is
+            // asking about. Search + download are two network round-trips, and subCtx_ is rewritten by every
+            // media open (armSubtitleFetch / openVideoPath / link / audio); a callback that read the live
+            // member would file this .srt under whatever video happens to be open when the reply lands, and
+            // the cache short-circuits before the network, so that mis-file would replay forever. Same shape
+            // as the auto-fetch path above: key first, captured by value.
+            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                   subCtx_.localPath);
+            const QString key = SubtitleCache::keyFor(ident, lang);
             subFetcher_->searchList(subCtx_.imdbStreamId, subCtx_.title, lang, subCtx_.localPath,
-                                    [this, lang](const QVector<SubtitleCandidate>& list) {
+                                    [this, lang, key](const QVector<SubtitleCandidate>& list) {
                 if (list.isEmpty()) { notify(tr("No subtitles found on OpenSubtitles."), kFeedbackLong); return; }
-                presentSubtitleCandidates(list, lang);
+                presentSubtitleCandidates(list, lang, key);
             });
         });
         rightCol->addWidget(pickBtn);
         subRightCol_ << pickBtn;
     }
-    else
+    else if (!SubtitleFetcher::configured())
     {
         // Unconfigured: the whole OpenSubtitles block above is absent, so the feature would be INVISIBLE —
         // nothing tells you it exists or what it wants. A non-interactive hint row says both. It uses the
         // panel's existing info-label primitive (the same styling as the "No subtitle tracks…" line on the
         // left) rather than a disabled rowButton: a disabled QPushButton can't take focus, so parking one in
         // subRightCol_ would put a dead stop in the arrow ring. A QLabel is never in the ring by construction.
+        // This arm is now guarded on `configured()` alone: the composite guard above ALSO fails for a
+        // perfectly configured user opening a plain local file (openVideoPath clears subCtx_, so there is no
+        // title/IMDB id), and telling them to add credentials they already have is wrong advice.
         auto* hint = new QLabel(tr("🔎  Search subtitles… (add OpenSubtitles credentials in Settings)"), card);
+        hint->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
+        hint->setWordWrap(true);
+        rightCol->addWidget(hint);
+    }
+    else
+    {
+        // Configured, but this video carries no title/IMDB id to match on (a plain file opened straight from
+        // disk). Neither button can do anything useful, so say WHY in the same info-label idiom rather than
+        // showing credential advice that doesn't apply — and "Load from file…" above is still the live route.
+        auto* hint = new QLabel(tr("🔎  Search subtitles… (this video has no title or IMDB id to match on)"), card);
         hint->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
         hint->setWordWrap(true);
         rightCol->addWidget(hint);
@@ -6688,8 +6710,14 @@ void MainWindow::showSubtitleMenu()
 // not another hand-rolled scrim-and-card: the nav kit forbids top-level windows, and unlike the subtitle
 // panel's own fixed two-column card this list is DYNAMIC (0..n rows of unknown width), which is exactly the
 // shape NavMenu's scrollable, ring-navigable QListWidget already handles.
-void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang)
+void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang,
+                                           const QString& cacheKey)
 {
+    // The click handler raised a STICKY "Searching OpenSubtitles…" (notify(…, 0) never expires — Notifier
+    // only starts its timer for ms > 0). The picker is that search's result, so clear it here: otherwise the
+    // notice sits under the menu, and on Back it would stay on screen forever.
+    if (notifier_) notifier_->hideNotice();
+
     QStringList rows;
     rows.reserve(list.size());
     for (const SubtitleCandidate& c : list)
@@ -6711,18 +6739,31 @@ void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& lis
     // No setNavGraph(): this opens over the classic video-player page, which has no themed NavGraph to mirror
     // a level onto (the graph mirroring exists for overlays raised from a themed panel screen).
     const QVector<SubtitleCandidate> picks = list;
-    new NavMenu(tr("Choose a subtitle"), rows, [this, picks, lang](int row) {
-        if (row < 0 || row >= picks.size()) return;                    // backed out
+    new NavMenu(tr("Choose a subtitle"), rows, [this, picks, lang, cacheKey](int row) {
+        if (row < 0 || row >= picks.size())
+        {
+            if (notifier_) notifier_->hideNotice();   // backed out: nothing will replace the sticky notice
+            return;
+        }
         const SubtitleCandidate c = picks.at(row);
         notify(tr("Downloading subtitle…"), 0);                        // sticky until the result lands
-        subFetcher_->downloadChoice(c.fileId, lang, [this, lang](const QString& srt) {
+        subFetcher_->downloadChoice(c.fileId, lang, [this, lang, cacheKey](const QString& srt) {
             if (srt.isEmpty()) { notify(tr("Couldn't download that subtitle."), kFeedbackLong); return; }
-            player_->addSubtitle(srt);
             // Overwrite the cache entry for this (identifier, language): the user's correction WINS over
-            // whatever the auto-pick chose, and it sticks on every replay of this video.
-            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
-                                                                   subCtx_.localPath);
-            if (subCache_) subCache_->put(SubtitleCache::keyFor(ident, lang), srt);
+            // whatever the auto-pick chose, and it sticks on every replay of this video. The key was PINNED
+            // when the search was requested — subCtx_ is deliberately not read here, because a download that
+            // lands after the user backed out and opened something else would otherwise file this .srt under
+            // the new video's key (or the degenerate "title:" of a cleared context) and poison it for good.
+            if (subCache_) subCache_->put(cacheKey, srt);
+            // Attaching is a separate question from caching. The download is valid for the video it was
+            // requested for, so it is always cached; but pasting it onto whatever is playing NOW would be
+            // wrong if that is a different video. Re-compose the CURRENT key and attach only if it still
+            // matches the pinned one — same context ⇒ same key. If it drifted, the .srt is already cached and
+            // will load on that video's next play, so nothing is lost by staying quiet.
+            const QString nowIdent = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                      subCtx_.localPath);
+            if (SubtitleCache::keyFor(nowIdent, lang) != cacheKey) { if (notifier_) notifier_->hideNotice(); return; }
+            player_->addSubtitle(srt);
             notify(tr("Subtitle added."), 3000);
         });
     }, this);
