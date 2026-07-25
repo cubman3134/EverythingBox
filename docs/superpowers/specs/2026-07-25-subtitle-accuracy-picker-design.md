@@ -1,7 +1,7 @@
 # Subtitle Accuracy + Picker (roadmap #5 gap-fill) — Design
 
 **Date:** 2026-07-25
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** Complete — live-verified against the user's real OpenSubtitles account (2026-07-25).
 **Origin:** Roadmap #5 ("subtitle auto-download"). A scout found **most of #5 is already shipped**, so this is a
 targeted gap-fill, not a build.
 
@@ -132,6 +132,37 @@ cache → hash → imdb → title → `sub-add`. Manual → "Search subtitles…
   candidate → it loads and **sticks** on replay. **Gated on the user's OpenSubtitles credentials being
   configured** — if they are not, verify the dormant path + fixtures and record the live pass as user-gated.
 - Suite + app compile. No perf run (fetching is off the render path, on the file-loaded event).
+
+## Live verification outcome (2026-07-25)
+
+Everything under "Verification" ran against the real API with the user's credentials; **nothing was deferred**.
+Two OpenSubtitles downloads were spent, the agreed budget.
+
+- Auto-fetch fell through the moviehash tier to the IMDB tier and attached the `.srt`. ✅
+- Replay hit the cache with **zero network**. ✅
+- The picker downloaded a **non-default** candidate and that choice **survived a replay** (the overwrite works). ✅
+- The sticky "Searching…" notice cleared on Back. ✅
+- A plain `Open Video…` file showed the "no title or IMDB id to match on" wording — not misleading credential advice. ✅
+
+**Two defects the code reviews could not see, both found here:**
+
+1. **The picker's rows were not all on screen.** `kMaxCandidates = 20` was chosen as a *display* bound on the
+   belief that NavMenu shows every row; in fact NavMenu never scrolled, so only 12 of 20 rendered at
+   1280×760 while the ring walked invisibly to row 20. Fixed in the nav kit itself (NavMenu now clamps and
+   scrolls) rather than by guessing a smaller cap — the cap is now only a quota/parse bound. Re-verified
+   live at 1280×760, 1204×583 and 980×620; short menus are byte-for-byte unchanged in appearance.
+2. **The log never named the matching tier**, so a title-tier hit on the wrong cut was indistinguishable
+   from an exact moviehash match without comparing subtitle runtime to video runtime by hand. The chain now
+   logs the tier it matched on and each tier it skipped.
+
+**Known gap (not a regression — recorded as follow-up):** the picker is only armed on the
+`openLibraryItem` route. Reaching a video through **Recents** goes via `openVideoPath`, which clears
+`subCtx_`, so the panel reports "no title or IMDB id to match on" even for a file that has both. The message
+is honest about the state but the state is avoidable.
+
+**Cosmetic, accepted:** with the list scrolled to the top, the bottom-most partially-visible row sits flush
+with the card's inner edge. This is ordinary scroll-viewport behaviour and doubles as a "more below" cue;
+rounding to whole rows is not well-defined here because rows word-wrap to variable heights.
 
 ## Non-goals
 
