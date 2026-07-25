@@ -1,7 +1,47 @@
 # Battle.net Game Importer — Design
 
 **Date:** 2026-07-25
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/battlenet-importer` (T1–T3 + two review rounds).
+`BattleNetLibrary` detects Blizzard games from the Uninstall hive (INI-fixture probe seam, pure
+`parseUninstallEntry` discriminator, bounded depth-2 exe scan); eight UI touch-points clone the GOG console
+(catalog builder, `battlenetgame` mime, `battlenet:console` injection/drill/open/back/search, Recent kind,
+two-route launch, `relaunchBattleNetGame`), plus the playlist `bnet:` prefix.
+
+**Live-verified (what IS verifiable here):** DORMANCY — the Games root shows Recent/Playlists/Steam/GOG/retro
+consoles and **no Battle.net tile** (zero Blizzard games ⇒ empty scan). NO-REGRESSION — GOG and Steam still
+drill and list; the Steam detail row still renders ▶ Play (the generalized store-launch gate didn't regress
+Steam/Epic). **Detection sanity, and a real validation:** the live hive DOES carry one Blizzard-published row —
+the Battle.net **client itself, with a non-empty InstallLocation** — which the title gate correctly rejects.
+Without that gate the client would have shipped as a tile launching its embedded browser, so the scan is a
+genuine filter exercise, returning empty with no errors, no hang, no lag.
+
+**NOT verified (user-gated):** every Battle.net console/tile/launch path — this machine has the client but
+**zero Blizzard games**. Installing any Blizzard title lights the console; that pass will confirm or correct
+the real registry field names, the curated codes, and which launch route works.
+
+## Close-out record — findings worth keeping
+
+- **A fix-vs-fix interaction:** the depth-2 exe recursion (added so nested binaries like `_retail_/Game.exe`
+  are launchable) partially *undid* the incomplete-entry filter — the client's row has an InstallLocation and
+  the recursion reaches its `BlizzardBrowser.exe`, clearing the "has a launch route" gate. Closed by rejecting
+  the client/agent **by title** (`contains("battle net")`, not `startsWith` — "Blizzard Battle.net Update
+  Agent" starts with "blizzard"; a probe assertion caught the wrong rule).
+- **Unverifiable product codes were dropped, not guessed.** A wrong non-empty code *suppresses* the exe
+  fallback, so it is strictly worse than no code. The `diablo iv`/`diablo ii resurrected` collision row and the
+  unreachable Activision-published `call of duty` row were deleted; the nine remaining codes are inherited and
+  still unconfirmed against a real install. The table is longest-prefix-first (load-bearing: `starcraft ii`
+  must precede `starcraft`) and pinned by probe assertions.
+- **Two pre-existing bugs surfaced and fixed:** `classicActionGates` only treated `steamgame` as a
+  store-launch, so **Epic's coded tiles had no Play button on the classic surface** — generalized to
+  `steamgame|epicgame|battlenetgame`. And the plan's branch placement would have made the URI route dead code
+  (a url-less tile *is* the coded route); the implementer correctly moved it above the empty-url guard.
+
+## Follow-ups (recorded, not built)
+
+- EA / Ubisoft / Xbox importers — same pattern, deferred (not installed; Xbox needs elevation).
+- `openFavorite`'s url-less store special case knows `steam:`/`epic:` but not `bnet:` (GOG equally unhandled).
+- `product.db` protobuf detection as a registry alternative.
+- Confirm the nine curated codes + the registry fields against a real Blizzard install.
 **Origin:** Roadmap #6 (importers round-out). The game-importers track shipped Steam/Epic/GOG and flagged
 Xbox/EA/Ubisoft/Battle.net as "same Steam pattern, later if asked." A runtime scout found none of the four
 has installed games on this machine; **Battle.net is the only candidate whose launcher is already installed**,
