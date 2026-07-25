@@ -173,8 +173,24 @@ QVector<VideoEntry> scanFolder(const QString& root)
     return out;
 }
 
+QString composeEpisodeId(const QString& seriesTileId, int season, int episode)
+{
+    if (seriesTileId.startsWith(QStringLiteral("tmdb:tv:")))
+        return QStringLiteral("tmdb:episode:") + seriesTileId.mid(8)   // strip "tmdb:tv:" → bare numeric id
+             + QStringLiteral(":") + QString::number(season) + QStringLiteral(":") + QString::number(episode);
+    if (seriesTileId.startsWith(QStringLiteral("tt")))
+        return seriesTileId + QStringLiteral(":") + QString::number(season) + QStringLiteral(":") + QString::number(episode);
+    return QString();   // unknown catalog shape → no episode key (series tile still badges via seriesCount)
+}
+
+QString showKeyFor(const VideoEntry& e)
+{
+    return !e.seriesImdbId.isEmpty() ? e.seriesImdbId : (QStringLiteral("name:") + e.show.toLower());
+}
+
 OwnedIndex buildIndex(const QVector<VideoEntry>& entries,
-                      const QHash<QString, QStringList>& extraMovieIdsByPath)
+                      const QHash<QString, QStringList>& extraMovieIdsByPath,
+                      const QHash<QString, QStringList>& seriesTileIdsByShow)
 {
     OwnedIndex idx;
     idx.entries = entries;
@@ -188,15 +204,27 @@ OwnedIndex buildIndex(const QVector<VideoEntry>& entries,
                 if (!rid.isEmpty() && !idx.pathById.contains(rid))
                     idx.pathById.insert(rid, e.path);
         }
-        else if (e.kind == Kind::Episode && !e.seriesImdbId.isEmpty())
+        else if (e.kind == Kind::Episode)
         {
-            const QString epKey = e.seriesImdbId + QStringLiteral(":")
-                                + QString::number(e.season) + QStringLiteral(":")
-                                + QString::number(e.episode);
-            if (!idx.pathById.contains(epKey))             // distinct episode: count once, first copy wins
+            if (!e.seriesImdbId.isEmpty())                                   // existing NFO/Cinemeta keying (unchanged)
             {
-                idx.pathById.insert(epKey, e.path);
-                idx.seriesCount[e.seriesImdbId] += 1;
+                const QString epKey = e.seriesImdbId + QStringLiteral(":")
+                                    + QString::number(e.season) + QStringLiteral(":") + QString::number(e.episode);
+                if (!idx.pathById.contains(epKey))         // distinct episode: count once, first copy wins
+                {
+                    idx.pathById.insert(epKey, e.path);
+                    idx.seriesCount[e.seriesImdbId] += 1;
+                }
+            }
+            // Resolved catalog series tiles (this track): compose each owned episode's catalog id and index it,
+            // and badge the resolved series tile (e.g. tmdb:tv:N) with the owned-episode count.
+            const QString sk = showKeyFor(e);
+            for (const QString& seriesTileId : seriesTileIdsByShow.value(sk))
+            {
+                const QString cid = composeEpisodeId(seriesTileId, e.season, e.episode);
+                if (cid.isEmpty() || idx.pathById.contains(cid)) continue;   // unknown shape or dup → skip
+                idx.pathById.insert(cid, e.path);
+                idx.seriesCount[seriesTileId] += 1;                          // distinct owned episode → count once
             }
         }
     }

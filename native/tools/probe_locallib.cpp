@@ -170,6 +170,33 @@ int main(int argc, char** argv)
     CHECK(idx.ownsId(QStringLiteral("tt0000001")) == false);
     CHECK(idx.localPathFor(QStringLiteral("tt0000001")).isEmpty());
 
+    // composeEpisodeId: aiocatalog tmdb + Cinemeta tt shapes, unpadded; unknown shape → empty.
+    CHECK(LocalLibrary::composeEpisodeId("tmdb:tv:1396", 1, 2) == QStringLiteral("tmdb:episode:1396:1:2"));
+    CHECK(LocalLibrary::composeEpisodeId("tt0903747", 2, 5) == QStringLiteral("tt0903747:2:5"));
+    CHECK(LocalLibrary::composeEpisodeId("kitsu:42", 1, 1).isEmpty());
+    // buildIndex composes resolved episode keys + badges the resolved series tile with the owned count.
+    {
+        LocalLibrary::VideoEntry e1; e1.kind = LocalLibrary::Kind::Episode; e1.path = "/tv/S01E01.mkv";
+        e1.show = "Breaking Bad"; e1.seriesImdbId = "tt0903747"; e1.season = 1; e1.episode = 1;
+        LocalLibrary::VideoEntry e2 = e1; e2.path = "/tv/S01E02.mkv"; e2.episode = 2;
+        QHash<QString, QStringList> byShow; byShow.insert("tt0903747", { "tmdb:tv:1396", "tt0903747" });
+        const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex({ e1, e2 }, {}, byShow);
+        CHECK(idx.localPathFor("tmdb:episode:1396:1:2") == QStringLiteral("/tv/S01E02.mkv"));  // composed tmdb ep
+        CHECK(idx.localPathFor("tt0903747:1:1") == QStringLiteral("/tv/S01E01.mkv"));          // existing tt ep
+        CHECK(idx.ownsId("tmdb:tv:1396"));                                                     // resolved series tile
+        CHECK(idx.ownedEpisodes("tmdb:tv:1396") == 2);                                         // owned count on the tmdb tile
+        CHECK(idx.ownedEpisodes("tt0903747") == 2);                                            // and on the tt series id
+    }
+    // A show with NO seriesImdbId still composes via the name-key group.
+    {
+        LocalLibrary::VideoEntry n; n.kind = LocalLibrary::Kind::Episode; n.path = "/tv/x.mkv";
+        n.show = "The Wire"; n.season = 1; n.episode = 3;  // seriesImdbId empty
+        QHash<QString, QStringList> byShow; byShow.insert(LocalLibrary::showKeyFor(n), { "tmdb:tv:1438" });
+        const LocalLibrary::OwnedIndex idx = LocalLibrary::buildIndex({ n }, {}, byShow);
+        CHECK(idx.localPathFor("tmdb:episode:1438:1:3") == QStringLiteral("/tv/x.mkv"));
+        CHECK(idx.ownedEpisodes("tmdb:tv:1438") == 1);
+    }
+
     if (inc) CHECK(LocalLibrary::displayTitle(*inc) == QStringLiteral("Inception (2010)"));
     if (ep)  CHECK(LocalLibrary::displayTitle(*ep)  == QStringLiteral("Show S01E02"));
 

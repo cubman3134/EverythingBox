@@ -41,4 +41,28 @@ int bestMatch(const LocalLibrary::VideoEntry& want, const QVector<MediaItem>& ca
     }
     return hit;
 }
+
+int bestSeriesMatch(const QString& showTitle, const QString& seriesImdbId, const QVector<MediaItem>& candidates)
+{
+    if (!seriesImdbId.isEmpty())
+        for (int i = 0; i < candidates.size(); ++i)
+            if (candidates[i].id.compare(seriesImdbId, Qt::CaseInsensitive) == 0) return i;
+
+    const QString wt = normalizeTitle(showTitle);
+    if (wt.isEmpty()) return -1;
+
+    int hit = -1;
+    for (int i = 0; i < candidates.size(); ++i)
+    {
+        const MediaItem& c = candidates[i];
+        if (c.type != QStringLiteral("series") && c.type != QStringLiteral("tv")) continue; // series only
+        if (!seriesImdbId.isEmpty()
+            && c.id.startsWith(QStringLiteral("tt"), Qt::CaseInsensitive)
+            && c.id.compare(seriesImdbId, Qt::CaseInsensitive) != 0) continue;              // contradicted tt
+        if (normalizeTitle(c.title) != wt) continue;
+        if (hit != -1) return -1;                                                           // ambiguous
+        hit = i;
+    }
+    return hit;
+}
 }
