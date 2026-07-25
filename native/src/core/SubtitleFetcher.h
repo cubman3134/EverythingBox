@@ -12,6 +12,7 @@
 #include <QStringList>
 #include <QVector>
 #include <functional>
+#include <memory>        // std::shared_ptr (the tier walkers)
 
 class QNetworkAccessManager;
 
@@ -74,6 +75,13 @@ private:
                           std::function<void(const QVector<SubtitleCandidate>&)> done);
     void download(qint64 fileId, const QString& lang,
                   std::function<void(const QString& srtPath)> done);
+    // Tier walkers. NAMED members, not self-referencing std::functions: a lambda captured inside the
+    // shared_ptr that owns it is a reference cycle and leaks on every call. The shared_ptr here holds
+    // only the query list (plain data), so each async hop keeps it alive without any cycle.
+    void stepFetch(std::shared_ptr<QStringList> queries, int i, const QString& lang,
+                   std::function<void(const QString& srtPath)> cb);
+    void stepSearch(std::shared_ptr<QStringList> queries, int i,
+                    std::function<void(const QVector<SubtitleCandidate>&)> cb);
 
     QNetworkAccessManager* nam_ = nullptr;
     QString token_;   // login token (in-memory; re-fetched on expiry / 401)

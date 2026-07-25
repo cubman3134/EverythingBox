@@ -133,18 +133,23 @@ void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, c
     const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
     if (queries.isEmpty()) { cb(QString()); return; }
 
-    ensureLogin([this, queries, lang, cb](bool ok) {
+    auto walk = std::make_shared<QStringList>(queries);
+    ensureLogin([this, walk, lang, cb](bool ok) {
         if (!ok) { cb(QString()); return; }
-        // Walk the queries in precision order; the first one that yields a file id wins.
-        auto step = std::make_shared<std::function<void(int)>>();
-        *step = [this, queries, lang, cb, step](int i) {
-            if (i >= queries.size()) { emit log(QStringLiteral("subs: no match")); cb(QString()); return; }
-            searchQuery(queries.at(i), lang, [this, lang, cb, step, i](qint64 fileId) {
-                if (fileId > 0) { download(fileId, lang, cb); return; }
-                (*step)(i + 1);
-            });
-        };
-        (*step)(0);
+        stepFetch(walk, 0, lang, cb);   // walk the tiers in precision order; the first file id wins
+    });
+}
+
+// Try tier `i`; on a miss, recurse to `i+1`. Deliberately a NAMED member rather than a self-referencing
+// std::function: a lambda captured inside the shared_ptr that owns it forms a reference cycle and leaks the
+// function object plus its captures on every call. Here the shared_ptr holds only DATA.
+void SubtitleFetcher::stepFetch(std::shared_ptr<QStringList> queries, int i, const QString& lang,
+                                std::function<void(const QString&)> cb)
+{
+    if (i >= queries->size()) { emit log(QStringLiteral("subs: no match")); cb(QString()); return; }
+    searchQuery(queries->at(i), lang, [this, queries, i, lang, cb](qint64 fileId) {
+        if (fileId > 0) { download(fileId, lang, cb); return; }
+        stepFetch(queries, i + 1, lang, cb);
     });
 }
 
@@ -164,18 +169,22 @@ void SubtitleFetcher::searchList(const QString& imdbStreamId, const QString& tit
     const QString lang = apiLang(langCode);
     const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
     if (queries.isEmpty()) { cb({}); return; }
-    ensureLogin([this, queries, cb](bool ok) {
+    auto walk = std::make_shared<QStringList>(queries);
+    ensureLogin([this, walk, cb](bool ok) {
         if (!ok) { cb({}); return; }
         // Same precision order as fetch(); the first tier with ANY row is the one the user picks from.
-        auto step = std::make_shared<std::function<void(int)>>();
-        *step = [this, queries, cb, step](int i) {
-            if (i >= queries.size()) { cb({}); return; }
-            searchCandidates(queries.at(i), [cb, step, i](const QVector<SubtitleCandidate>& list) {
-                if (!list.isEmpty()) { cb(list); return; }
-                (*step)(i + 1);
-            });
-        };
-        (*step)(0);
+        stepSearch(walk, 0, cb);
+    });
+}
+
+// The searchList counterpart of stepFetch — same no-self-owning-function rule (see stepFetch's comment).
+void SubtitleFetcher::stepSearch(std::shared_ptr<QStringList> queries, int i,
+                                 std::function<void(const QVector<SubtitleCandidate>&)> cb)
+{
+    if (i >= queries->size()) { cb({}); return; }
+    searchCandidates(queries->at(i), [this, queries, i, cb](const QVector<SubtitleCandidate>& list) {
+        if (!list.isEmpty()) { cb(list); return; }
+        stepSearch(queries, i + 1, cb);
     });
 }
 
