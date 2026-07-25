@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.25 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.26 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -472,12 +472,17 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_locallib PRIVATE src src/core src/addons src/browse)
     target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
-    # Headless test for the subtitle accuracy cores (OSDb hash + download cache).
+    # Headless test for the subtitle accuracy cores (OSDb hash + match chain + cache identifier + download
+    # cache). SubtitleFetcher is linked in for its two PURE statics (buildQueries/cacheIdentifier); that pulls
+    # QtNetwork (QNetworkAccessManager) and Settings (the API credentials) -> FormFactor, as probe_locallib does.
     add_executable(probe_subs tools/probe_subs.cpp
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h
-        src/core/SubtitleCache.cpp src/core/SubtitleCache.h)
-    target_include_directories(probe_subs PRIVATE src src/core)
-    target_link_libraries(probe_subs PRIVATE Qt6::Core)
+        src/core/SubtitleCache.cpp src/core/SubtitleCache.h
+        src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
+        src/core/Settings.cpp src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
+    target_include_directories(probe_subs PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_subs PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
     add_executable(probe_resolver tools/probe_resolver.cpp

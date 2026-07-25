@@ -2526,8 +2526,12 @@ void MainWindow::onTrackEnded()
 }
 
 // Resolve and play the episode after the one that just finished. The current episode's id is "ttShow:s:e";
-// try same-season ep+1 first, then next-season ep1 (best-effort: the stream resolver is the source of truth
-// for whether an episode exists / is available). No-op for anything that isn't a TV episode.
+// try same-season ep+1 first, then next-season ep1. LOCAL FIRST at each rung: an episode we already own on
+// disk plays straight from the file — no network at all. That matters because local-library episodes now
+// carry an imdbStreamId (they need one for subtitle matching), which is exactly the OwnedIndex episode key;
+// without this branch an entirely OFFLINE library would fire a stream resolve at every EOF and then announce
+// "that looks like the finale" while the very next episode sits on disk. Beyond local, the stream resolver
+// stays the source of truth for whether an episode exists / is available. No-op for anything that isn't TV.
 void MainWindow::tryPlayNextEpisode()
 {
     if (stack_->currentWidget() != playerPage_) return;      // only while a video is on screen
@@ -2539,11 +2543,23 @@ void MainWindow::tryPlayNextEpisode()
 
     const QString nextEp = QStringLiteral("%1:%2:%3").arg(show).arg(s).arg(e + 1);
     const QString nextSeason = QStringLiteral("%1:%2:%3").arg(show).arg(s + 1).arg(1);
+    // The OwnedIndex episode key is "<seriesImdbId>:<season>:<episode>", UNPADDED — the same shape composed
+    // above, so these ids can be looked up as-is. Plays through the exact path a local-library tile uses
+    // (filesystem url + the "local:video" mime → the mpv branch of openLibraryItem).
+    const auto playLocalIfOwned = [this](const QString& epId) {
+        const QString path = LocalLibrary::index().localPathFor(epId);
+        if (path.isEmpty() || !QFileInfo::exists(path)) return false;
+        playResolvedEpisode(epId, path, QStringLiteral("local:video"));
+        return true;
+    };
+    if (playLocalIfOwned(nextEp)) return;                    // owned ⇒ zero network, zero false finale
+
     notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
-        [this, nextEp, nextSeason](const QString& url, const QString& mime) {
+        [this, nextEp, nextSeason, playLocalIfOwned](const QString& url, const QString& mime) {
         if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
-        // End of season? Try the first episode of the next one before giving up.
+        // End of season? Try the first episode of the next one — again local before network.
+        if (playLocalIfOwned(nextSeason)) return;
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
             [this, nextSeason](const QString& url2, const QString& mime2) {
             if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
@@ -6902,7 +6918,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
         castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened
-        startScrobble(item.imdbStreamId); // Trakt: begin tracking this movie/episode
+        // Trakt: begin tracking this movie/episode. NOTE: local-library items now carry an imdbStreamId too
+        // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
+        // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
+        startScrobble(item.imdbStreamId);
         stack_->setCurrentWidget(playerPage_);
         player_->play(url);
         revealMediaControls();
