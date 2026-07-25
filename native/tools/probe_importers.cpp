@@ -350,6 +350,14 @@ int main(int argc, char** argv)
         // uninstall row (Blizzard publisher, real DisplayName, nothing to list or launch).
         CHECK(parseUninstallEntry(QStringLiteral("Battle.net"), QStringLiteral("Blizzard Entertainment"),
                                   QString()).name.isEmpty());
+        // …and the client is rejected BY TITLE even when its row DOES carry an InstallLocation — the depth-2
+        // exe scan can otherwise reach Battle.net/<build>/BlizzardBrowser.exe, clearing the launch-route gate
+        // and shipping a tile that opens an embedded browser. Same rule catches the update agent.
+        CHECK(parseUninstallEntry(QStringLiteral("Battle.net"), QStringLiteral("Blizzard Entertainment"),
+                                  QStringLiteral("C:\\Program Files (x86)\\Battle.net")).name.isEmpty());
+        CHECK(parseUninstallEntry(QStringLiteral("Blizzard Battle.net Update Agent"),
+                                  QStringLiteral("Blizzard Entertainment"),
+                                  QStringLiteral("C:\\ProgramData\\Battle.net\\Agent")).name.isEmpty());
         // The publisher gate is a startsWith, so "Blizzard Entertainment, Inc." passes …
         CHECK(!parseUninstallEntry(QStringLiteral("Hearthstone"),
                                    QStringLiteral("Blizzard Entertainment, Inc."),
@@ -440,6 +448,39 @@ int main(int argc, char** argv)
                 CHECK(arcade->code.isEmpty());                                   // no curated code ⇒ exe launch
                 CHECK(arcade->exe.endsWith(QStringLiteral("_retail_/Arcade.exe")));  // nested binary found
             }
+
+            // The launch-route gate: a codeless Blizzard title whose install dir holds NO usable exe must not
+            // ship as a dead tile. (Only plumbing binaries here, all skipped by name.)
+            const QString dead = tmp.path() + QStringLiteral("/DeadInstall");
+            QDir().mkpath(dead);
+            put(dead + QStringLiteral("/Uninstall.exe"), 2000);
+            QSettings s3(ini, QSettings::IniFormat);
+            s3.setValue(QStringLiteral("Dead/DisplayName"), QStringLiteral("Blizzard Something Uncurated"));
+            s3.setValue(QStringLiteral("Dead/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s3.setValue(QStringLiteral("Dead/InstallLocation"), dead);
+            s3.sync();
+            const QVector<BattleNetGame> afterDead = BattleNetLibrary::installedGames(ini);
+            for (const BattleNetGame& g : afterDead)
+                CHECK(g.name != QStringLiteral("Blizzard Something Uncurated"));   // no code + no exe ⇒ dropped
+
+            // The exe scan is BOUNDED at root+2: a depth-2 binary is found, a depth-3 one is not (else a
+            // multi-GB install would be walked on every Games-root render).
+            const QString deep = tmp.path() + QStringLiteral("/DeepInstall");
+            QDir().mkpath(deep + QStringLiteral("/Game/bin"));
+            QDir().mkpath(deep + QStringLiteral("/a/b/c"));
+            put(deep + QStringLiteral("/Game/bin/Deep.exe"), 5000);   // depth 2 ⇒ found
+            put(deep + QStringLiteral("/a/b/c/TooDeep.exe"), 90000);  // depth 3 ⇒ never seen, despite being bigger
+            QSettings s4(ini, QSettings::IniFormat);
+            s4.setValue(QStringLiteral("Deep/DisplayName"), QStringLiteral("Blizzard Deep Title"));
+            s4.setValue(QStringLiteral("Deep/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s4.setValue(QStringLiteral("Deep/InstallLocation"), deep);
+            s4.sync();
+            const QVector<BattleNetGame> afterDeep = BattleNetLibrary::installedGames(ini);
+            const BattleNetGame* deepG = nullptr;
+            for (const BattleNetGame& g : afterDeep)
+                if (g.name == QStringLiteral("Blizzard Deep Title")) deepG = &g;
+            CHECK(deepG != nullptr);
+            if (deepG) CHECK(deepG->exe.endsWith(QStringLiteral("Game/bin/Deep.exe")));
         }
     }
 
