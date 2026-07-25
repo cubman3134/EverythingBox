@@ -8,6 +8,8 @@
 
 namespace SubtitleHash
 {
+    // NOT THREAD-SAFE: ofFile memoises its last result (the same file is hashed twice per open) in
+    // unsynchronised file-statics. GUI-thread use only — moving this to a worker thread needs a lock first.
     QString ofFile(const QString& path);
     // Pure core (probe-tested): head and tail must each be exactly 65536 bytes (any other length returns an
     // empty QString rather than a hash no server could match); size is the true file size.
