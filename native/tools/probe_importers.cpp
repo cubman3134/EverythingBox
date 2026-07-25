@@ -14,7 +14,10 @@
 //     installed appended (badge "Not installed", url steam://install/<appid>), already-installed owned skipped,
 //     the in-console query scoping both sets, and a pure injected poster so it stays I/O-free;
 //   * RecentStore::relaunchFor — the Recent-kind dispatch table the app's openRecent switch mirrors;
-//   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon.
+//   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon;
+//   * browse::battleNetGamesCatalog — the two-route tile split (a coded title keys on its code and carries NO
+//     url ⇒ battlenet:// launch; a code-less one keys on its name and carries its exe ⇒ launchPcExe), plus the
+//     in-console query scoping and the empty/dormant case.
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
@@ -22,6 +25,7 @@
 #include "SteamLibrary.h"
 #include "EpicLibrary.h"
 #include "GogLibrary.h"
+#include "BattleNetLibrary.h"
 #include "RecentStore.h"
 #include "../src/browse/SyntheticCatalogs.h"
 
@@ -186,11 +190,13 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QStringLiteral("game"))      == RL::Game);
     CHECK(RecentStore::relaunchFor(QStringLiteral("bogus"))     == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
+    CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
 
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("epicgame"))  == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("goggame"))   == QStringLiteral("game"));
+    CHECK(browse::iconTypeForKind(QStringLiteral("battlenetgame")) == QStringLiteral("game"));
 
     // ==== EPIC (Task 2) ====================================================================================
 
@@ -324,6 +330,202 @@ int main(int argc, char** argv)
         CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("gog:200")));
     }
 
+    // ---- Battle.net: pure entry parse + INI-fixture registry scan --------------------------------
+    {
+        using BattleNetLibrary::parseUninstallEntry;
+        // A Blizzard entry is kept, its code resolved from the title.
+        const BattleNetGame wow = parseUninstallEntry(QStringLiteral("World of Warcraft"),
+            QStringLiteral("Blizzard Entertainment"), QStringLiteral("C:\\Games\\World of Warcraft"));
+        CHECK(wow.name == QStringLiteral("World of Warcraft"));
+        CHECK(wow.code == QStringLiteral("wow"));
+        CHECK(wow.installDir == QStringLiteral("C:/Games/World of Warcraft"));   // separators normalized
+        // A non-Blizzard publisher is filtered (empty name ⇒ callers drop it).
+        CHECK(parseUninstallEntry(QStringLiteral("Some App"), QStringLiteral("Acme Inc"),
+                                  QStringLiteral("C:\\Acme")).name.isEmpty());
+        // A Blizzard title with no known code still parses — code empty ⇒ exe-launch fallback.
+        const BattleNetGame unk = parseUninstallEntry(QStringLiteral("Blizzard Arcade Collection"),
+            QStringLiteral("Blizzard Entertainment"), QStringLiteral("C:\\Games\\Arcade"));
+        CHECK(!unk.name.isEmpty());
+        CHECK(unk.code.isEmpty());
+        // An entry with NO InstallLocation is incomplete and dropped — this is the Battle.net CLIENT's own
+        // uninstall row (Blizzard publisher, real DisplayName, nothing to list or launch).
+        CHECK(parseUninstallEntry(QStringLiteral("Battle.net"), QStringLiteral("Blizzard Entertainment"),
+                                  QString()).name.isEmpty());
+        // …and the client is rejected BY TITLE even when its row DOES carry an InstallLocation — the depth-2
+        // exe scan can otherwise reach Battle.net/<build>/BlizzardBrowser.exe, clearing the launch-route gate
+        // and shipping a tile that opens an embedded browser. Same rule catches the update agent.
+        CHECK(parseUninstallEntry(QStringLiteral("Battle.net"), QStringLiteral("Blizzard Entertainment"),
+                                  QStringLiteral("C:\\Program Files (x86)\\Battle.net")).name.isEmpty());
+        CHECK(parseUninstallEntry(QStringLiteral("Blizzard Battle.net Update Agent"),
+                                  QStringLiteral("Blizzard Entertainment"),
+                                  QStringLiteral("C:\\ProgramData\\Battle.net\\Agent")).name.isEmpty());
+        // The publisher gate is a startsWith, so "Blizzard Entertainment, Inc." passes …
+        CHECK(!parseUninstallEntry(QStringLiteral("Hearthstone"),
+                                   QStringLiteral("Blizzard Entertainment, Inc."),
+                                   QStringLiteral("C:\\Games\\HS")).name.isEmpty());
+        // … while an unrelated publisher that merely mentions Blizzard does not.
+        CHECK(parseUninstallEntry(QStringLiteral("Blizzard Fan Tool"), QStringLiteral("Acme (for Blizzard)"),
+                                  QStringLiteral("C:\\Acme")).name.isEmpty());
+        // Case/spacing-insensitive title→code.
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("  diablo   III  ")) == QStringLiteral("d3"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("Totally Not A Blizzard Game")).isEmpty());
+        CHECK(BattleNetLibrary::launchUri(QStringLiteral("wow")) == QStringLiteral("battlenet://wow"));
+        // The code table is LONGEST-PREFIX-FIRST: reordering "starcraft ii" after "starcraft" would send
+        // every SC2 title to s1. Pin the one order-dependent pair, plus the prefix match and a dropped row.
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("StarCraft II: Wings of Liberty")) == QStringLiteral("s2"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("StarCraft: Remastered")) == QStringLiteral("s1"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("World of Warcraft Classic")) == QStringLiteral("wow"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("Diablo IV")).isEmpty());   // dropped row ⇒ exe fallback
+
+        // Fake-registry INI: groups = Uninstall subkeys, keys mirror the registry value names.
+        // The SUBKEY order deliberately contradicts the DISPLAY-NAME order (AAA = "World of Warcraft",
+        // ZZZ = "Overwatch") so the sort-by-name assertion below cannot pass vacuously — childGroups()
+        // hands them back in subkey order.
+        QTemporaryDir tmp; CHECK(tmp.isValid());
+        const QString ini = tmp.path() + QStringLiteral("/bnet.ini");
+        {
+            QSettings s(ini, QSettings::IniFormat);
+            s.setValue(QStringLiteral("AAA/DisplayName"), QStringLiteral("World of Warcraft"));
+            s.setValue(QStringLiteral("AAA/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("AAA/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
+            s.setValue(QStringLiteral("ZZZ/DisplayName"), QStringLiteral("Overwatch"));
+            s.setValue(QStringLiteral("ZZZ/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("ZZZ/InstallLocation"), QStringLiteral("C:\\Games\\OW"));
+            // Same title under a DIFFERENT subkey — the 64-bit and WOW6432Node views both carrying it.
+            s.setValue(QStringLiteral("MMM_OtherView/DisplayName"), QStringLiteral("World of Warcraft"));
+            s.setValue(QStringLiteral("MMM_OtherView/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("MMM_OtherView/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
+            // Blizzard publisher but a BLANK DisplayName — incomplete, dropped.
+            s.setValue(QStringLiteral("BlankName/DisplayName"), QString());
+            s.setValue(QStringLiteral("BlankName/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("BlankName/InstallLocation"), QStringLiteral("C:\\Games\\Blank"));
+            // Blizzard publisher, real DisplayName, NO InstallLocation — the client's own row, dropped.
+            s.setValue(QStringLiteral("NoInstallDir/DisplayName"), QStringLiteral("Battle.net"));
+            s.setValue(QStringLiteral("NoInstallDir/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("Notepadpp/DisplayName"), QStringLiteral("Notepad++"));
+            s.setValue(QStringLiteral("Notepadpp/Publisher"), QStringLiteral("Don Ho"));
+            s.setValue(QStringLiteral("Notepadpp/InstallLocation"), QStringLiteral("C:\\npp"));
+            s.sync();
+        }
+        const QVector<BattleNetGame> games = BattleNetLibrary::installedGames(ini);
+        // 6 groups in, 2 out: non-Blizzard filtered, blank-name dropped, no-InstallLocation dropped,
+        // duplicate title deduped.
+        CHECK(games.size() == 2);
+        CHECK(games[0].name == QStringLiteral("Overwatch"));         // sorted by NAME, not by subkey
+        CHECK(games[1].name == QStringLiteral("World of Warcraft"));
+        CHECK(games[1].code == QStringLiteral("wow"));
+        CHECK(BattleNetLibrary::isAvailable(ini));
+        CHECK(!BattleNetLibrary::isAvailable(tmp.path() + QStringLiteral("/missing.ini")));  // dormant
+
+        // The exe fallback must find a NESTED binary: Blizzard titles routinely ship it under _retail_/ or
+        // x64/, and a code-less title with only a top-level scan would list but never launch. Bounded to
+        // root+2 levels, skipping asset dirs, preferring the largest real (non-plumbing) exe.
+        {
+            const QString game = tmp.path() + QStringLiteral("/ArcadeInstall");
+            QDir().mkpath(game + QStringLiteral("/_retail_"));
+            QDir().mkpath(game + QStringLiteral("/Data"));          // asset dir: must NOT be descended
+            const auto put = [](const QString& p, int bytes) {
+                QFile f(p); f.open(QIODevice::WriteOnly); f.write(QByteArray(bytes, 'x')); f.close();
+            };
+            put(game + QStringLiteral("/Battle.net Launcher.exe"), 4000);   // plumbing: skipped by name
+            put(game + QStringLiteral("/Uninstall.exe"), 3000);             // plumbing: skipped by name
+            put(game + QStringLiteral("/_retail_/Arcade.exe"), 9000);       // the real (nested) binary
+            put(game + QStringLiteral("/Data/huge.exe"), 99000);            // in an asset dir: never chosen
+
+            QSettings s2(ini, QSettings::IniFormat);
+            s2.setValue(QStringLiteral("Arcade/DisplayName"), QStringLiteral("Blizzard Arcade Collection"));
+            s2.setValue(QStringLiteral("Arcade/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s2.setValue(QStringLiteral("Arcade/InstallLocation"), game);
+            s2.sync();
+
+            const QVector<BattleNetGame> withNested = BattleNetLibrary::installedGames(ini);
+            CHECK(withNested.size() == 3);        // the two kept above, plus the code-less Arcade entry
+            const BattleNetGame* arcade = nullptr;
+            for (const BattleNetGame& g : withNested)
+                if (g.name == QStringLiteral("Blizzard Arcade Collection")) arcade = &g;
+            CHECK(arcade != nullptr);
+            if (arcade)
+            {
+                CHECK(arcade->code.isEmpty());                                   // no curated code ⇒ exe launch
+                CHECK(arcade->exe.endsWith(QStringLiteral("_retail_/Arcade.exe")));  // nested binary found
+            }
+
+            // The launch-route gate: a codeless Blizzard title whose install dir holds NO usable exe must not
+            // ship as a dead tile. (Only plumbing binaries here, all skipped by name.)
+            const QString dead = tmp.path() + QStringLiteral("/DeadInstall");
+            QDir().mkpath(dead);
+            put(dead + QStringLiteral("/Uninstall.exe"), 2000);
+            QSettings s3(ini, QSettings::IniFormat);
+            s3.setValue(QStringLiteral("Dead/DisplayName"), QStringLiteral("Blizzard Something Uncurated"));
+            s3.setValue(QStringLiteral("Dead/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s3.setValue(QStringLiteral("Dead/InstallLocation"), dead);
+            s3.sync();
+            const QVector<BattleNetGame> afterDead = BattleNetLibrary::installedGames(ini);
+            for (const BattleNetGame& g : afterDead)
+                CHECK(g.name != QStringLiteral("Blizzard Something Uncurated"));   // no code + no exe ⇒ dropped
+
+            // The exe scan is BOUNDED at root+2: a depth-2 binary is found, a depth-3 one is not (else a
+            // multi-GB install would be walked on every Games-root render).
+            const QString deep = tmp.path() + QStringLiteral("/DeepInstall");
+            QDir().mkpath(deep + QStringLiteral("/Game/bin"));
+            QDir().mkpath(deep + QStringLiteral("/a/b/c"));
+            put(deep + QStringLiteral("/Game/bin/Deep.exe"), 5000);   // depth 2 ⇒ found
+            put(deep + QStringLiteral("/a/b/c/TooDeep.exe"), 90000);  // depth 3 ⇒ never seen, despite being bigger
+            QSettings s4(ini, QSettings::IniFormat);
+            s4.setValue(QStringLiteral("Deep/DisplayName"), QStringLiteral("Blizzard Deep Title"));
+            s4.setValue(QStringLiteral("Deep/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s4.setValue(QStringLiteral("Deep/InstallLocation"), deep);
+            s4.sync();
+            const QVector<BattleNetGame> afterDeep = BattleNetLibrary::installedGames(ini);
+            const BattleNetGame* deepG = nullptr;
+            for (const BattleNetGame& g : afterDeep)
+                if (g.name == QStringLiteral("Blizzard Deep Title")) deepG = &g;
+            CHECK(deepG != nullptr);
+            if (deepG) CHECK(deepG->exe.endsWith(QStringLiteral("Game/bin/Deep.exe")));
+        }
+    }
+
+    // ---- Battle.net console builder: the TWO-ROUTE tile split (the whole point of the mime) ---------------
+    // A coded title gets id "bnet:<code>" and NO url — MainWindow reads the empty url as "launch by
+    // battlenet:// URI". A code-less one carries its exe in `url` and rides the monitored launchPcExe path,
+    // exactly like a GOG tile. Swapping either half silently breaks one of the two launch routes.
+    {
+        QList<BattleNetGame> installed;
+        BattleNetGame a; a.name = QStringLiteral("World of Warcraft"); a.code = QStringLiteral("wow");
+        a.installDir = QStringLiteral("C:/Games/WoW"); a.exe = QStringLiteral("C:/Games/WoW/Wow.exe");
+        BattleNetGame b; b.name = QStringLiteral("Arcade");            // no code ⇒ exe route
+        b.installDir = QStringLiteral("C:/Games/Arcade"); b.exe = QStringLiteral("C:/Games/Arcade/arcade.exe");
+        installed << a << b;
+
+        const MediaCatalog c = browse::battleNetGamesCatalog(installed, QString());
+        CHECK(c.items.size() == 2);
+        const MediaItem* wow = find(c, QStringLiteral("bnet:wow"));    // keyed by CODE, not name
+        CHECK(wow && wow->mime == QStringLiteral("battlenetgame"));
+        CHECK(wow && wow->type == QStringLiteral("game"));
+        CHECK(wow && wow->title == QStringLiteral("World of Warcraft"));
+        CHECK(wow && wow->systemHint == QStringLiteral("Battle.net"));
+        CHECK(wow && wow->url.isEmpty());       // coded ⇒ URI launch: the tile must carry NO url
+        const MediaItem* arc = find(c, QStringLiteral("bnet:Arcade")); // code-less ⇒ keyed by NAME
+        CHECK(arc && arc->mime == QStringLiteral("battlenetgame"));
+        CHECK(arc && arc->url == QStringLiteral("C:/Games/Arcade/arcade.exe")); // the exe rides the tile
+
+        // Query scopes by name (the in-console search path).
+        const MediaCatalog scoped = browse::battleNetGamesCatalog(installed, QStringLiteral("arca"));
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("bnet:Arcade")));
+        CHECK(browse::battleNetGamesCatalog(QList<BattleNetGame>(), QString()).items.isEmpty()); // dormant
+    }
+
+    // ---- A Battle.net Recent groups under the games catalogue's Recent (like steam/epic/gog) --------------
+    {
+        QList<RecentItem> all;
+        RecentItem r; r.path = QStringLiteral("battlenet://wow"); r.title = QStringLiteral("WoW");
+        r.kind = QStringLiteral("battlenetgame"); r.key = QStringLiteral("bnet:wow");
+        all << r;
+        const MediaCatalog cat = browse::recentsCatalog(all, QStringLiteral("game"));
+        CHECK(cat.items.size() == 1);
+        CHECK(cat.items[0].mime == QStringLiteral("battlenetgame"));
+    }
+
     // ==== PLAYLIST STORE-GAME BRANCHES (Task 2 ride-along) ================================================
 
     // ---- 9. playlistItemsCatalog: a store game added to a playlist becomes a LAUNCHABLE tile ---------------
@@ -340,12 +542,16 @@ int main(int argc, char** argv)
         add(QStringLiteral("epic:Fortnite"), QStringLiteral("FN"),  QString(),                     QString());
         add(QStringLiteral("gog:100"), QStringLiteral("Witcher"),   QStringLiteral("C:/G/w.exe"),  QString());
         add(QStringLiteral("local-1"), QStringLiteral("Doom"),      QStringLiteral("C:/G/doom.exe"), QStringLiteral("pcgame"));
+        // Both Battle.net routes ride the ONE gog-shaped branch: a coded entry was added with an empty url so its
+        // path is empty (launch builds battlenet://), a code-less one persisted its exe.
+        add(QStringLiteral("bnet:wow"), QStringLiteral("WoW"),      QString(),                     QString());
+        add(QStringLiteral("bnet:Hearthstone"), QStringLiteral("HS"), QStringLiteral("C:/G/hs.exe"), QString());
         // A plain addon entry (no store prefix, no path) — stays a bare drill item, no launch mime.
         { PlaylistEntry e; e.itemId = QStringLiteral("addon:movie1"); e.title = QStringLiteral("Movie");
           e.type = QStringLiteral("movie"); p.items.push_back(e); }
 
         const MediaCatalog cat = browse::playlistItemsCatalog(p);
-        CHECK(cat.items.size() == 5);
+        CHECK(cat.items.size() == 7);
 
         const MediaItem* steam = find(cat, QStringLiteral("steam:730"));
         CHECK(steam && steam->mime == QStringLiteral("steamgame"));
@@ -358,6 +564,14 @@ int main(int argc, char** argv)
         const MediaItem* gog = find(cat, QStringLiteral("gog:100"));
         CHECK(gog && gog->mime == QStringLiteral("goggame"));
         CHECK(gog && gog->url == QStringLiteral("C:/G/w.exe"));  // the persisted exe rides back onto the tile
+
+        const MediaItem* bnetCoded = find(cat, QStringLiteral("bnet:wow"));
+        CHECK(bnetCoded && bnetCoded->mime == QStringLiteral("battlenetgame"));
+        CHECK(bnetCoded && bnetCoded->url.isEmpty());            // coded: launches by battlenet:// URI, no url
+
+        const MediaItem* bnetExe = find(cat, QStringLiteral("bnet:Hearthstone"));
+        CHECK(bnetExe && bnetExe->mime == QStringLiteral("battlenetgame"));
+        CHECK(bnetExe && bnetExe->url == QStringLiteral("C:/G/hs.exe")); // code-less: the persisted exe rides back
 
         const MediaItem* local = find(cat, QStringLiteral("local-1"));
         CHECK(local && local->mime == QStringLiteral("localgame:pcgame"));
