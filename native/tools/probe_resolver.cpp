@@ -8,6 +8,7 @@
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QDateTime>
+#include <QFile>
 #include <cstdio>
 
 static int failures = 0;
@@ -114,6 +115,36 @@ int main(int argc, char** argv)
         LocalResolveCache c2(cachePath); c2.load();
         CHECK(!c2.has("/movies/Inception.mkv"));                           // and the empty state persisted
     }
+    // Show-level store: matched (never expires) vs nomatch (retry window), round-trip, and clear().
+    {
+        LocalResolveCache c(cachePath); c.load();
+        CHECK(!c.isShowFresh("tt0903747", now));
+        c.putShowMatched("tt0903747", { "tmdb:tv:1396", "tt0903747" }, now);
+        c.putShowNoMatch("name:the wire", now);
+        CHECK(c.isShowFresh("tt0903747", now));                                  // matched
+        CHECK(c.isShowFresh("name:the wire", now));                              // nomatch within window
+        CHECK(!c.isShowFresh("name:the wire", now + 15LL*86400));                // nomatch past 14d → stale
+        c.save();
+    }
+    {
+        LocalResolveCache c(cachePath); c.load();                               // round-trip
+        CHECK(c.seriesIdsByShow().value("tt0903747").contains("tmdb:tv:1396"));
+        CHECK(!c.seriesIdsByShow().contains("name:the wire"));                   // nomatch not in the snapshot
+        c.clear();
+        CHECK(!c.isShowFresh("tt0903747", now));                                // clear() drops shows too
+    }
+    // Backward-compat: a legacy FLAT movie cache (no "paths"/"shows" keys) still loads its path entries.
+    {
+        const QString legacyPath = tmp.path() + QStringLiteral("/legacy.json");
+        QFile lf(legacyPath);
+        CHECK(lf.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        lf.write("{\"/movies/Legacy.mkv\":{\"size\":100,\"mtime\":200,\"matched\":true,\"ts\":1000000,\"ids\":[\"tmdb:movie:42\",\"tt7777777\"]}}");
+        lf.close();
+        LocalResolveCache c(legacyPath); c.load();
+        CHECK(c.has("/movies/Legacy.mkv"));                                     // legacy flat root treated as paths
+        CHECK(c.matchedIdsByPath().value("/movies/Legacy.mkv").contains("tmdb:movie:42"));
+    }
+
     // buildIndex indexes the resolved ids → the movie's path, alongside the NFO id.
     {
         LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie; e.path = "/m/Inception.mkv";
