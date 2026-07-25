@@ -180,7 +180,8 @@ QString composeEpisodeId(const QString& seriesTileId, int season, int episode)
              + QStringLiteral(":") + QString::number(season) + QStringLiteral(":") + QString::number(episode);
     if (seriesTileId.startsWith(QStringLiteral("tt")))
         return seriesTileId + QStringLiteral(":") + QString::number(season) + QStringLiteral(":") + QString::number(episode);
-    return QString();   // unknown catalog shape → no episode key (series tile still badges via seriesCount)
+    return QString();   // unknown catalog shape → no episode key AND no badge: buildIndex skips seriesCount
+                        // too (safe full fallback — never badge a series whose episodes can't be wired to local)
 }
 
 QString showKeyFor(const VideoEntry& e)
@@ -217,7 +218,9 @@ OwnedIndex buildIndex(const QVector<VideoEntry>& entries,
                 }
             }
             // Resolved catalog series tiles (this track): compose each owned episode's catalog id and index it,
-            // and badge the resolved series tile (e.g. tmdb:tv:N) with the owned-episode count.
+            // and badge the resolved series tile (e.g. tmdb:tv:N) with the owned-episode count. An unknown-shape
+            // catalog (composeEpisodeId → "") neither indexes an episode key NOR increments seriesCount — it
+            // falls back entirely (no badge, no prefer-local), never a wrong key.
             const QString sk = showKeyFor(e);
             for (const QString& seriesTileId : seriesTileIdsByShow.value(sk))
             {

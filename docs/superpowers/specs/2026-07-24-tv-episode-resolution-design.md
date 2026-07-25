@@ -16,8 +16,9 @@ only NFO'd Cinemeta shows.
   show yields everything — no drill. (Rejected: DRILL — format-agnostic but heavy for aiocatalog, a two-level
   crawl series → seasons → episodes, N `getDetail` calls per show; buys nothing composition doesn't for the
   two catalogs the user runs.) Tradeoff accepted: a small per-catalog episode-id-shape table (two entries,
-  scout-verified); a third catalog with an unknown shape degrades safely (series tile still badges from its
-  real searched id; its episodes fall back to normal resolution).
+  scout-verified); a third catalog with an unknown shape degrades safely (it neither
+  badges nor prefers-local — `composeEpisodeId` returns "" so `buildIndex` skips both the episode key and the
+  series count — a full, safe fallback that never risks a wrong key or a misleading badge).
 
 ## Scope reality (scout, 2026-07-24)
 
@@ -100,7 +101,7 @@ only NFO'd Cinemeta shows.
 | Show with no `tvshow.nfo` | Grouped by name, resolved by title; gains `tt…` and/or `tmdb:tv:{N}` keys per matched catalog. New win over today. |
 | Same-name show collision / show-vs-movie same title | `bestSeriesMatch` requires `type` series/tv + unique title → conservative reject; no mis-badge. |
 | Own some episodes, not all | Count = owned only; only owned episodes get keys; un-owned episode tiles untouched. |
-| Third catalog, unknown episode-id shape | Series tile still badges (real searched id); episodes fall back to normal resolution — safe degradation, never a wrong key. |
+| Third catalog, unknown episode-id shape | `composeEpisodeId` returns "" → `buildIndex` skips BOTH the episode key AND `seriesCount`, so the series tile does NOT badge and its episodes fall back to normal resolution — full, safe degradation (under-badge is deliberate: never badge a series whose episodes can't be wired to local). |
 | Offline / no catalog source / `resolveOnline` off | No resolution; NFO'd Cinemeta shows still work; zero network (movie-track behavior). |
 | Season packs / duplicate episode files | Keyed per distinct `(s,e)`; existing first-copy-wins + distinct-episode count carry over. |
 | Contradicted `tt` (tvshow.nfo id ≠ a candidate's `tt`) | That candidate skipped (never wins on title) — the movie matcher's contradicted-`tt` guard, reused. |

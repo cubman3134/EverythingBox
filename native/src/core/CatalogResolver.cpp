@@ -59,6 +59,7 @@ void CatalogResolver::enqueue(const QVector<LocalLibrary::VideoEntry>& entries)
         }
         else if (e.kind == LocalLibrary::Kind::Episode)
         {
+            if (e.show.trimmed().isEmpty()) continue;   // M1: no cleaned show title → an empty search returns junk
             const QString sk = LocalLibrary::showKeyFor(e);
             const QString seenKey = QStringLiteral("show:") + sk;     // disjoint from movie paths
             if (showsThisCall.contains(sk) || seen_.contains(seenKey)) continue;
@@ -97,8 +98,26 @@ void CatalogResolver::startJob(const QSharedPointer<Job>& job)
     {
         const bool ok = job->isShow ? isSeriesCatalogSource(addons_, s) : isMovieCatalogSource(addons_, s);
         if (!ok) continue;
-        const int reqId = addons_->requestSearch(s, query);
-        if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+        if (job->isShow)
+        {
+            // A show TITLE must be searched against a SERIES/TV catalog. requestSearch sends an UNTYPED
+            // query, which aiocatalog's getCatalog defaults to its MOVIES catalog (`cat = a.catalog || "movies"`)
+            // — so a show search returns movie-typed rows that bestSeriesMatch rejects (C1). Instead, query
+            // each of the source's series/tv/mixed catalogs by id: aiocatalog's "tv" catalog runs TMDB
+            // /search/tv (series-typed, id tmdb:tv:{N}); a Stremio source builds /catalog/series/<id>/search=<q>.json.
+            for (const AddonCatalog& c : addons_->catalogs(s))
+            {
+                if (c.type != QStringLiteral("series") && c.type != QStringLiteral("tv")
+                    && c.type != QStringLiteral("mixed")) continue;
+                const int reqId = addons_->requestCatalog(s, c.id, query, 1);
+                if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+            }
+        }
+        else
+        {
+            const int reqId = addons_->requestSearch(s, query);   // movie jobs: untyped search defaults to movies — correct
+            if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+        }
     }
     if (job->outstanding.isEmpty()) { const quint64 id = job->id; QTimer::singleShot(0, this, [this, id]{ finishJob(id); }); return; }
     job->timer = new QTimer(this); job->timer->setSingleShot(true);
