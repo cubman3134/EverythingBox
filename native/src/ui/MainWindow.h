@@ -31,6 +31,7 @@ class CloudSync;
 class LocalResolveCache;
 class CatalogResolver;
 class SubtitleCache;
+struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -568,6 +569,9 @@ private:
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.
     void showSubtitleMenu();
     void hideSubtitleMenu();
+    // The manual picker's second half: show the OpenSubtitles search results as a controller-navigable
+    // NavMenu (an in-window overlay — never a QDialog), and download + cache whichever row the user picks.
+    void presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang);
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
