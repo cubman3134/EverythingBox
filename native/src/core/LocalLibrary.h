@@ -44,8 +44,16 @@ namespace LocalLibrary
     VideoEntry          parseFile(const QString& path);
     QVector<VideoEntry> scanFolder(const QString& root);
     OwnedIndex          buildIndex(const QVector<VideoEntry>& entries,
-                                   const QHash<QString, QStringList>& extraMovieIdsByPath = {});
+                                   const QHash<QString, QStringList>& extraMovieIdsByPath = {},
+                                   const QHash<QString, QStringList>& seriesTileIdsByShow = {});
     QString             displayTitle(const VideoEntry& e);
+
+    // Compose an owned episode's catalog id from a resolved series tile id: tmdb:tv:N → tmdb:episode:N:s:e;
+    // tt… → tt…:s:e; any other shape → "" (no episode key — and buildIndex then skips seriesCount too, so the
+    // series tile does NOT badge: an unknown-shape catalog falls back fully, never a misleading badge).
+    QString             composeEpisodeId(const QString& seriesTileId, int season, int episode);
+    // Group key for an episode's show: the series imdb id when known, else "name:"+lowercased show title.
+    QString             showKeyFor(const VideoEntry& e);
 
     // Cached process-wide index (main-thread only). root() reads Settings::libraryFolder().
     QString            root();

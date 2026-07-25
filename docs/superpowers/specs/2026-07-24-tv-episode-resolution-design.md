@@ -1,7 +1,21 @@
 # TV / Episode ID-Resolution — Design
 
 **Date:** 2026-07-24
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/tv-resolution` (T1–T3 + a whole-branch C1 fix). Series matcher +
+`composeEpisodeId` + `buildIndex` TV keys + a show-level cache + group-by-show resolution. **The whole-branch
+review + live verify caught a Critical the three green per-task reviews structurally missed:** show jobs first
+reused the movie track's untyped `requestSearch`, which aiocatalog defaults to a *movie* search — so no show
+ever matched (dead end-to-end). Fixed to a **type-scoped `requestCatalog(source, seriesCatalogId, showTitle)`**
+(aiocatalog TMDB `/search/tv`; Cinemeta a well-formed `/catalog/series/…/search`). **Live-verified** (portable
+throwaway, aiocatalog): a no-NFO "Breaking Bad" resolved to `tmdb:tv:1396`, the **series tile badged "● 2"**,
+and an owned episode **played the local file** via the composed id `tmdb:episode:1396:1:1`. Real app untouched.
+
+## Close-out follow-up
+
+- **Hermetic show-orchestration test.** The async show-job path has no machine test (pure cores are
+  probe-covered; the C1 bug lived in the transport seam, invisible to every pure probe). A small
+  `catalogReady`-stub test driving a show job through the typed dispatch would pin this seam against
+  regression. Not a gate (the live aiocatalog pass covers it now), but worthwhile.
 **Origin:** The recorded follow-up from the movies-only id-resolver
 (`2026-07-24-local-library-id-resolver-design.md`). That track lit the "On disk" badge on aiocatalog MOVIE
 tiles; TV was deferred. This extends resolution to shows so **series tiles badge "On disk (N)"** and **owned
@@ -16,8 +30,9 @@ only NFO'd Cinemeta shows.
   show yields everything — no drill. (Rejected: DRILL — format-agnostic but heavy for aiocatalog, a two-level
   crawl series → seasons → episodes, N `getDetail` calls per show; buys nothing composition doesn't for the
   two catalogs the user runs.) Tradeoff accepted: a small per-catalog episode-id-shape table (two entries,
-  scout-verified); a third catalog with an unknown shape degrades safely (series tile still badges from its
-  real searched id; its episodes fall back to normal resolution).
+  scout-verified); a third catalog with an unknown shape degrades safely (it neither
+  badges nor prefers-local — `composeEpisodeId` returns "" so `buildIndex` skips both the episode key and the
+  series count — a full, safe fallback that never risks a wrong key or a misleading badge).
 
 ## Scope reality (scout, 2026-07-24)
 
@@ -100,7 +115,7 @@ only NFO'd Cinemeta shows.
 | Show with no `tvshow.nfo` | Grouped by name, resolved by title; gains `tt…` and/or `tmdb:tv:{N}` keys per matched catalog. New win over today. |
 | Same-name show collision / show-vs-movie same title | `bestSeriesMatch` requires `type` series/tv + unique title → conservative reject; no mis-badge. |
 | Own some episodes, not all | Count = owned only; only owned episodes get keys; un-owned episode tiles untouched. |
-| Third catalog, unknown episode-id shape | Series tile still badges (real searched id); episodes fall back to normal resolution — safe degradation, never a wrong key. |
+| Third catalog, unknown episode-id shape | `composeEpisodeId` returns "" → `buildIndex` skips BOTH the episode key AND `seriesCount`, so the series tile does NOT badge and its episodes fall back to normal resolution — full, safe degradation (under-badge is deliberate: never badge a series whose episodes can't be wired to local). |
 | Offline / no catalog source / `resolveOnline` off | No resolution; NFO'd Cinemeta shows still work; zero network (movie-track behavior). |
 | Season packs / duplicate episode files | Keyed per distinct `(s,e)`; existing first-copy-wins + distinct-episode count carry over. |
 | Contradicted `tt` (tvshow.nfo id ≠ a candidate's `tt`) | That candidate skipped (never wins on title) — the movie matcher's contradicted-`tt` guard, reused. |
