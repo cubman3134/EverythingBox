@@ -1,5 +1,6 @@
 #include "SubtitleFetcher.h"
 #include "Settings.h"
+#include "SubtitleHash.h"
 
 #include <QCoreApplication>
 #include <QNetworkAccessManager>
@@ -15,6 +16,9 @@
 #include <QStandardPaths>
 #include <QCryptographicHash>
 #include <QHash>
+#include <algorithm>
+#include <memory>
+#include <utility>
 
 namespace {
 constexpr const char* kDefaultHost = "api.opensubtitles.com";
@@ -67,53 +71,123 @@ static QNetworkRequest makeRequest(const QString& host, const QString& path, boo
     return rq;
 }
 
-void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, const QString& langCode,
-                            std::function<void(const QString&)> cb)
+// Ordered search queries for this request, most precise first: OSDb moviehash (exact release — only when we
+// have local bytes), then IMDB id (+season/episode), then a title query. Each already carries languages=.
+QStringList SubtitleFetcher::buildQueries(const QString& imdbStreamId, const QString& title,
+                                          const QString& lang, const QString& localPath)
 {
-    if (!configured()) { cb(QString()); return; }
-    if (!nam_) nam_ = new QNetworkAccessManager(this);
-    const QString lang = apiLang(langCode);
-
-    // Build the primary search query from the IMDB id (precise), with a title query as fallback.
+    QStringList out;
+    if (!localPath.isEmpty())
+    {
+        const QString h = SubtitleHash::ofFile(localPath);
+        if (!h.isEmpty())
+        {
+            QUrlQuery q; q.addQueryItem(QStringLiteral("moviehash"), h);
+            q.addQueryItem(QStringLiteral("languages"), lang);
+            out << q.toString(QUrl::FullyEncoded);
+        }
+    }
     // "tt123"          -> a movie:   imdb_id=123
     // "ttShow:s:e"     -> an episode: parent_imdb_id=Show, season_number=s, episode_number=e
-    QUrlQuery primary, fallback;
     if (!imdbStreamId.isEmpty())
     {
         const QStringList parts = imdbStreamId.split(QLatin1Char(':'));
         const QString num = QString(parts.value(0)).remove(QStringLiteral("tt"));
+        QUrlQuery q;
         if (parts.size() >= 3)
         {
-            primary.addQueryItem(QStringLiteral("parent_imdb_id"), num);
-            primary.addQueryItem(QStringLiteral("season_number"), parts.value(1));
-            primary.addQueryItem(QStringLiteral("episode_number"), parts.value(2));
+            q.addQueryItem(QStringLiteral("parent_imdb_id"), num);
+            q.addQueryItem(QStringLiteral("season_number"), parts.value(1));
+            q.addQueryItem(QStringLiteral("episode_number"), parts.value(2));
         }
-        else if (!num.isEmpty())
-        {
-            primary.addQueryItem(QStringLiteral("imdb_id"), num);
-        }
+        else if (!num.isEmpty()) q.addQueryItem(QStringLiteral("imdb_id"), num);
+        if (!q.isEmpty()) { q.addQueryItem(QStringLiteral("languages"), lang); out << q.toString(QUrl::FullyEncoded); }
     }
     if (!title.trimmed().isEmpty())
-        fallback.addQueryItem(QStringLiteral("query"), title.trimmed());
-    if (primary.isEmpty()) { primary = fallback; fallback.clear(); }
-    if (primary.isEmpty()) { cb(QString()); return; }
-    primary.addQueryItem(QStringLiteral("languages"), lang);
-    if (!fallback.isEmpty()) fallback.addQueryItem(QStringLiteral("languages"), lang);
+    {
+        QUrlQuery q; q.addQueryItem(QStringLiteral("query"), title.trimmed());
+        q.addQueryItem(QStringLiteral("languages"), lang);
+        out << q.toString(QUrl::FullyEncoded);
+    }
+    return out;
+}
 
-    const QString primaryStr = primary.toString(QUrl::FullyEncoded);
-    const QString fallbackStr = fallback.isEmpty() ? QString() : fallback.toString(QUrl::FullyEncoded);
+QString SubtitleFetcher::cacheIdentifier(const QString& imdbStreamId, const QString& title,
+                                         const QString& localPath)
+{
+    if (!localPath.isEmpty())
+    {
+        const QString h = SubtitleHash::ofFile(localPath);
+        if (!h.isEmpty()) return QStringLiteral("hash:") + h;
+    }
+    if (!imdbStreamId.isEmpty()) return imdbStreamId;
+    return QStringLiteral("title:") + title.trimmed();
+}
 
-    ensureLogin([this, primaryStr, fallbackStr, lang, cb](bool ok) {
+void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, const QString& langCode,
+                            const QString& localPath, std::function<void(const QString&)> cb)
+{
+    if (!configured()) { cb(QString()); return; }
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    const QString lang = apiLang(langCode);
+    const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
+    if (queries.isEmpty()) { cb(QString()); return; }
+
+    ensureLogin([this, queries, lang, cb](bool ok) {
         if (!ok) { cb(QString()); return; }
-        searchQuery(primaryStr, lang, [this, fallbackStr, lang, cb](qint64 fileId) {
-            if (fileId > 0) { download(fileId, lang, cb); return; }
-            if (fallbackStr.isEmpty()) { emit log(QStringLiteral("subs: no match")); cb(QString()); return; }
-            // Primary (IMDB) found nothing; try the title query.
-            searchQuery(fallbackStr, lang, [this, lang, cb](qint64 fid2) {
-                if (fid2 > 0) { download(fid2, lang, cb); return; }
-                emit log(QStringLiteral("subs: no match")); cb(QString());
+        // Walk the queries in precision order; the first one that yields a file id wins.
+        auto step = std::make_shared<std::function<void(int)>>();
+        *step = [this, queries, lang, cb, step](int i) {
+            if (i >= queries.size()) { emit log(QStringLiteral("subs: no match")); cb(QString()); return; }
+            searchQuery(queries.at(i), lang, [this, lang, cb, step, i](qint64 fileId) {
+                if (fileId > 0) { download(fileId, lang, cb); return; }
+                (*step)(i + 1);
             });
-        });
+        };
+        (*step)(0);
+    });
+}
+
+// Streaming callers (no bytes on disk) keep the old 4-arg shape: the chain simply starts at the IMDB tier.
+void SubtitleFetcher::fetch(const QString& imdbStreamId, const QString& title, const QString& langCode,
+                            std::function<void(const QString&)> cb)
+{
+    fetch(imdbStreamId, title, langCode, QString(), std::move(cb));
+}
+
+void SubtitleFetcher::searchList(const QString& imdbStreamId, const QString& title, const QString& langCode,
+                                 const QString& localPath,
+                                 std::function<void(const QVector<SubtitleCandidate>&)> cb)
+{
+    if (!configured()) { cb({}); return; }
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    const QString lang = apiLang(langCode);
+    const QStringList queries = buildQueries(imdbStreamId, title, lang, localPath);
+    if (queries.isEmpty()) { cb({}); return; }
+    ensureLogin([this, queries, cb](bool ok) {
+        if (!ok) { cb({}); return; }
+        // Same precision order as fetch(); the first tier with ANY row is the one the user picks from.
+        auto step = std::make_shared<std::function<void(int)>>();
+        *step = [this, queries, cb, step](int i) {
+            if (i >= queries.size()) { cb({}); return; }
+            searchCandidates(queries.at(i), [cb, step, i](const QVector<SubtitleCandidate>& list) {
+                if (!list.isEmpty()) { cb(list); return; }
+                (*step)(i + 1);
+            });
+        };
+        (*step)(0);
+    });
+}
+
+void SubtitleFetcher::downloadChoice(qint64 fileId, const QString& langCode,
+                                     std::function<void(const QString&)> cb)
+{
+    if (!configured() || fileId <= 0) { cb(QString()); return; }
+    if (!nam_) nam_ = new QNetworkAccessManager(this);
+    const QString lang = apiLang(langCode);
+    ensureLogin([this, fileId, lang, cb](bool ok) {
+        if (!ok) { cb(QString()); return; }
+        download(fileId, lang, cb);
     });
 }
 
@@ -175,6 +249,46 @@ void SubtitleFetcher::searchQuery(const QString& query, const QString& lang,
             if (dl > bestDownloads) { bestDownloads = dl; bestId = fid; }
         }
         done(bestId != 0 ? bestId : anyId);
+    });
+}
+
+// The picker's search: identical GET to searchQuery(), but every usable row is kept (most-downloaded first)
+// so the user can override the auto-pick. Language filtering already happened server-side via languages=.
+void SubtitleFetcher::searchCandidates(const QString& query,
+                                       std::function<void(const QVector<SubtitleCandidate>&)> done)
+{
+    QNetworkRequest rq = makeRequest(apiHost_, QStringLiteral("/subtitles?") + query, true, token_);
+    QNetworkReply* reply = nam_->get(rq);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, done] {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError)
+        {
+            emit log(QStringLiteral("subs: search failed (%1)").arg(reply->errorString()));
+            done({});
+            return;
+        }
+        const QJsonArray data = QJsonDocument::fromJson(reply->readAll()).object()
+                                    .value(QStringLiteral("data")).toArray();
+        QVector<SubtitleCandidate> out;
+        for (const QJsonValue& v : data)
+        {
+            const QJsonObject a = v.toObject().value(QStringLiteral("attributes")).toObject();
+            const QJsonArray files = a.value(QStringLiteral("files")).toArray();
+            if (files.isEmpty()) continue;
+            SubtitleCandidate c;
+            c.fileId = files.first().toObject().value(QStringLiteral("file_id")).toVariant().toLongLong();
+            if (c.fileId <= 0) continue;
+            c.language = a.value(QStringLiteral("language")).toString();
+            c.release = a.value(QStringLiteral("release")).toString();
+            if (c.release.isEmpty())
+                c.release = files.first().toObject().value(QStringLiteral("file_name")).toString();
+            c.downloads = a.value(QStringLiteral("download_count")).toInt();
+            out.push_back(c);
+        }
+        std::sort(out.begin(), out.end(), [](const SubtitleCandidate& a, const SubtitleCandidate& b) {
+            return a.downloads > b.downloads;                       // most-downloaded first
+        });
+        done(out);
     });
 }
 

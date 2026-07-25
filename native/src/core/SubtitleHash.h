@@ -9,6 +9,7 @@
 namespace SubtitleHash
 {
     QString ofFile(const QString& path);
-    // Pure core (probe-tested): head and tail are each exactly 65536 bytes; size is the true file size.
+    // Pure core (probe-tested): head and tail must each be exactly 65536 bytes (any other length returns an
+    // empty QString rather than a hash no server could match); size is the true file size.
     QString ofBytes(const QByteArray& head, const QByteArray& tail, qint64 size);
 }

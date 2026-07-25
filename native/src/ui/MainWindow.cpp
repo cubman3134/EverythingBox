@@ -34,6 +34,7 @@
 #include "../core/EmulatorManager.h"
 #include "../core/AppUpdater.h"
 #include "../core/SubtitleFetcher.h"
+#include "../core/SubtitleCache.h"
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
@@ -290,6 +291,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 
     subFetcher_ = new SubtitleFetcher(this);
     connect(subFetcher_, &SubtitleFetcher::log, this, [this](const QString& line) { mwLog(line); });
+    // The download cache lives here, beside the other stores: the fetcher is pure transport, the app decides
+    // when a network call is even needed. A hit means a replay costs no OpenSubtitles daily quota at all.
+    subCache_ = std::make_unique<SubtitleCache>(AppPaths::dataDir() + QStringLiteral("/subtitles.json"));
+    subCache_->load();
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
@@ -314,9 +319,22 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         subCtx_.active = false; // one-shot per open
         if (hasSub || !isVideo) return;
         if (subCtx_.imdbStreamId.isEmpty() && subCtx_.title.isEmpty()) return;
-        subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, Settings::subtitleLanguage(),
-                           [this](const QString& srt) {
-            if (!srt.isEmpty()) player_->addSubtitle(srt);
+        // Key on whichever match tier will actually be used (hash > imdb > title), then check the cache BEFORE
+        // touching the network: a previously downloaded .srt for this exact video+language is reused as-is.
+        const QString lang = Settings::subtitleLanguage();
+        const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                               subCtx_.localPath);
+        const QString key = SubtitleCache::keyFor(ident, lang);
+        if (subCache_)
+        {
+            const QString hit = subCache_->lookup(key);
+            if (!hit.isEmpty()) { player_->addSubtitle(hit); return; }   // cached ⇒ zero network, zero quota
+        }
+        subFetcher_->fetch(subCtx_.imdbStreamId, subCtx_.title, lang, subCtx_.localPath,
+                           [this, key](const QString& srt) {
+            if (srt.isEmpty()) return;
+            player_->addSubtitle(srt);
+            if (subCache_) subCache_->put(key, srt);
         });
     });
 
@@ -6200,6 +6218,9 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
     // the automatic-on-load fetch when the feature is enabled, configured, and we have something to match on.
     subCtx_.imdbStreamId = item.imdbStreamId;
     subCtx_.title = item.title;
+    // A local file gives us the bytes, so the OSDb moviehash tier (an exact-rip match) becomes available;
+    // a stream has no path and simply starts the chain one tier down.
+    subCtx_.localPath = (item.mime == QStringLiteral("local:video")) ? item.url : QString();
     subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }

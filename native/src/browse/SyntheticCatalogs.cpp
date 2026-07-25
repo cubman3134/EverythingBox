@@ -88,6 +88,13 @@ MediaCatalog localLibraryCatalog(const QVector<LocalLibrary::VideoEntry>& entrie
         it.mime = QStringLiteral("local:video");
         it.type = QStringLiteral("movie");                 // both movies and episodes render as video tiles
         it.id = e.imdbId.isEmpty() ? (QStringLiteral("local:") + e.path) : e.imdbId;
+        // Give subtitle matching an exact IMDB key (armSubtitleFetch reads imdbStreamId, not id): a movie's
+        // own tt id, or "<seriesTt>:<season>:<episode>" for an episode — the format SubtitleFetcher parses
+        // into parent_imdb_id/season_number/episode_number. Empty when unknown ⇒ the title-query fallback.
+        if (e.kind == LocalLibrary::Kind::Movie) it.imdbStreamId = e.imdbId;
+        else if (!e.seriesImdbId.isEmpty())
+            it.imdbStreamId = e.seriesImdbId + QStringLiteral(":")
+                            + QString::number(e.season) + QStringLiteral(":") + QString::number(e.episode);
         it.title = LocalLibrary::displayTitle(e);
         it.subtitle = e.plot;
         // Offline-first: a local NFO <thumb> is a file path; MetaCache::displayImage serves it if present.
