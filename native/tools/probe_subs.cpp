@@ -62,6 +62,12 @@ int main(int argc, char** argv)
         }
         // Size participates.
         CHECK(SubtitleHash::ofBytes(head, tail, size + 1) != SubtitleHash::ofBytes(head, tail, size));
+        // Precondition guard: a window that is not exactly 64 KiB has NO valid hash (a short read must not
+        // produce a plausible-looking digest that the server can never match).
+        CHECK(SubtitleHash::ofBytes(head.left(W - 8), tail, size).isEmpty());
+        CHECK(SubtitleHash::ofBytes(head, tail.left(W - 8), size).isEmpty());
+        CHECK(SubtitleHash::ofBytes(QByteArray(), QByteArray(), size).isEmpty());
+        CHECK(SubtitleHash::ofBytes(head + QByteArray(8, '\0'), tail, size).isEmpty());   // too LONG, too
     }
 
     // --- OSDb hash: file path wrapper ------------------------------------------------------------------

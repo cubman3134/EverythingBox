@@ -21,6 +21,9 @@ namespace SubtitleHash
 {
 QString ofBytes(const QByteArray& head, const QByteArray& tail, qint64 size)
 {
+    // Documented precondition, now enforced: a short window would silently yield a hash the server can never
+    // match. ofFile already checks this; the guard covers every other caller (buildQueries/cacheIdentifier).
+    if (head.size() != kWindow || tail.size() != kWindow) return QString();
     quint64 h = quint64(size);
     addWords(h, head);
     addWords(h, tail);

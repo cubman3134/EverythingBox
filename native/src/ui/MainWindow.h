@@ -30,6 +30,7 @@ class CatalogPrefetcher;
 class CloudSync;
 class LocalResolveCache;
 class CatalogResolver;
+class SubtitleCache;
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -508,8 +509,12 @@ private:
     // Auto-subtitle download (OpenSubtitles): when a movie/episode video loads with no subtitle in the
     // preferred language, fetch one and load it into the player. subCtx_ holds the current video's match
     // hints, set only for eligible opens and consumed once by the MpvWidget::fileLoaded handler.
+    // subCache_ (app-owned, the fetcher stays pure transport) remembers the .srt already downloaded for an
+    // (identifier, language) so a replay costs zero network and zero OpenSubtitles quota.
     class SubtitleFetcher* subFetcher_ = nullptr;
-    struct SubContext { QString imdbStreamId; QString title; bool active = false; } subCtx_;
+    std::unique_ptr<SubtitleCache> subCache_;
+    // localPath: the video file on disk when this open is a local one — enables the exact-rip OSDb hash tier.
+    struct SubContext { QString imdbStreamId; QString title; QString localPath; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
     // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
     void tryPlayNextEpisode();
