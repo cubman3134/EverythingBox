@@ -194,6 +194,11 @@ private:
     // Re-open a GOG game from a Recent (kind "goggame"): re-resolve its exe from the registry by id, falling
     // back to the exact path the Recent recorded, then run it through launchPcExe with the "goggame" kind.
     void relaunchGogGame(const QString& id, const QString& title, const QString& thumb, const QString& recordedPath);
+    // Re-open a CODE-LESS Battle.net game from a Recent (kind "battlenetgame", key "bnet:<DisplayName>"): the
+    // same shape as relaunchGogGame — re-resolve the exe from the registry by display name, fall back to the
+    // recorded path, else notify instead of failing silently. A coded game re-launches from its battlenet:// URI.
+    void relaunchBattleNetGame(const QString& id, const QString& title, const QString& thumb,
+                               const QString& recordedPath);
     // (The full-screen emulator / external-emulator play-time tracking lives in GameLauncher now. PC games are
     // still timed separately in launchPcExe, off their own process handle.)
     // The launched game closed within a few seconds (it didn't really open - often missing redistributables,

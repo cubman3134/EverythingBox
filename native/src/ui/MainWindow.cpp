@@ -4968,7 +4968,8 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
             // Two shapes under one kind, told apart by what the Recent recorded. A coded game recorded its
             // battlenet:// URI: re-launch fire-and-forget and re-record so it moves to the front (the Epic
             // shape). A code-less game recorded its exe: re-open through the monitored path (the GOG shape —
-            // launchPcExe re-records the "battlenetgame" Recent itself).
+            // relaunchBattleNetGame re-resolves the exe from the registry first, and launchPcExe re-records the
+            // "battlenetgame" Recent itself).
             if (path.startsWith(QStringLiteral("battlenet://")))
             {
                 QDesktopServices::openUrl(QUrl(path));
@@ -4976,7 +4977,7 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
                 statusBar()->showMessage(tr("Launching “%1” via Battle.net…").arg(title), 5000);
                 return;
             }
-            launchPcExe(path, resumeKey, title, thumb, QStringLiteral("battlenetgame"));
+            relaunchBattleNetGame(resumeKey, title, thumb, path);
             return;
         }
         // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path this
@@ -6151,6 +6152,22 @@ void MainWindow::relaunchGogGame(const QString& id, const QString& title, const 
     if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath))
     { launchPcExe(recordedPath, id, title, thumb, QStringLiteral("goggame")); return; }
     notify(tr("Couldn't find “%1”. It may have been uninstalled from GOG.").arg(title), kFeedbackLong);
+}
+
+// Re-open a code-less Battle.net game from a Recent (kind "battlenetgame", key "bnet:<DisplayName>"): prefer the
+// registry's CURRENT exe (survives a game update/move), then the exact exe the Recent recorded, then give up
+// with a notice rather than failing silently. Mirrors relaunchGogGame; a CODED game never reaches here (it
+// re-launches from its recorded battlenet:// URI).
+void MainWindow::relaunchBattleNetGame(const QString& id, const QString& title, const QString& thumb,
+                                       const QString& recordedPath)
+{
+    const QString name = id.startsWith(QStringLiteral("bnet:")) ? id.mid(QStringLiteral("bnet:").size()) : id;
+    for (const BattleNetGame& g : BattleNetLibrary::installedGames())
+        if (g.name.compare(name, Qt::CaseInsensitive) == 0 && !g.exe.isEmpty() && QFileInfo::exists(g.exe))
+        { launchPcExe(g.exe, id, title, thumb, QStringLiteral("battlenetgame")); return; }
+    if (!recordedPath.isEmpty() && QFileInfo::exists(recordedPath))
+    { launchPcExe(recordedPath, id, title, thumb, QStringLiteral("battlenetgame")); return; }
+    notify(tr("Couldn't find “%1”. It may have been uninstalled from Battle.net.").arg(title), kFeedbackLong);
 }
 
 void MainWindow::startScrobble(const QString& imdbStreamId)
