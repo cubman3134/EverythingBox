@@ -71,6 +71,7 @@
 #include <QSettings>
 #include <QSet>
 #include <QLineEdit>
+#include <QLocale>          // group-separated download counts in the subtitle picker rows
 #include <QUrl>
 #include <QDesktopServices>
 #include <QCheckBox>
@@ -6640,6 +6641,34 @@ void MainWindow::showSubtitleMenu()
         });
         rightCol->addWidget(dlBtn);
         subRightCol_ << dlBtn;
+
+        // …and the MANUAL picker beside it: when the auto-pick grabbed the wrong rip (out-of-sync, a different
+        // cut), this lists every row the best-matching tier returned so the user chooses the right one.
+        auto* pickBtn = rowButton(tr("🔎  Search subtitles…"), false);
+        connect(pickBtn, &QPushButton::clicked, this, [this] {
+            hideSubtitleMenu();
+            notify(tr("Searching OpenSubtitles…"), 0);   // sticky: replaced by the result / the picker
+            const QString lang = Settings::subtitleLanguage();
+            subFetcher_->searchList(subCtx_.imdbStreamId, subCtx_.title, lang, subCtx_.localPath,
+                                    [this, lang](const QVector<SubtitleCandidate>& list) {
+                if (list.isEmpty()) { notify(tr("No subtitles found on OpenSubtitles."), kFeedbackLong); return; }
+                presentSubtitleCandidates(list, lang);
+            });
+        });
+        rightCol->addWidget(pickBtn);
+        subRightCol_ << pickBtn;
+    }
+    else
+    {
+        // Unconfigured: the whole OpenSubtitles block above is absent, so the feature would be INVISIBLE —
+        // nothing tells you it exists or what it wants. A non-interactive hint row says both. It uses the
+        // panel's existing info-label primitive (the same styling as the "No subtitle tracks…" line on the
+        // left) rather than a disabled rowButton: a disabled QPushButton can't take focus, so parking one in
+        // subRightCol_ would put a dead stop in the arrow ring. A QLabel is never in the ring by construction.
+        auto* hint = new QLabel(tr("🔎  Search subtitles… (add OpenSubtitles credentials in Settings)"), card);
+        hint->setStyleSheet(QStringLiteral("color:#999;font-size:13px;padding:2px 4px;"));
+        hint->setWordWrap(true);
+        rightCol->addWidget(hint);
     }
     rightCol->addStretch(1);
 
@@ -6650,6 +6679,53 @@ void MainWindow::showSubtitleMenu()
     subOverlay_->show();
     subOverlay_->raise();
     initial->setFocus(Qt::TabFocusReason); // land on the current track (or Off)
+}
+
+// The manual picker's result list. It is a NavMenu — the app's ONE list-of-choices overlay (the esc menu, the
+// XMB game menu, the Downloads action chooser and the completion-status picker are all this same primitive):
+// an in-window CHILD of the main window, so it renders over the video with no separate OS window, it owns
+// input while open (keyboard grab + NavContext routing), and Back closes it. Deliberately NOT a QDialog and
+// not another hand-rolled scrim-and-card: the nav kit forbids top-level windows, and unlike the subtitle
+// panel's own fixed two-column card this list is DYNAMIC (0..n rows of unknown width), which is exactly the
+// shape NavMenu's scrollable, ring-navigable QListWidget already handles.
+void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang)
+{
+    QStringList rows;
+    rows.reserve(list.size());
+    for (const SubtitleCandidate& c : list)
+    {
+        // "en · Blade.Runner.1982.Final.Cut.1080p · 12,431 downloads" — language, the release name you
+        // recognise the rip by, and the popularity that usually separates a good sync from a bad one.
+        // The count is locale-grouped (QLocale), because a bare "12431" is harder to compare at a glance.
+        const QString downloads = c.downloads == 1
+            ? tr("1 download")
+            : tr("%1 downloads").arg(QLocale().toString(qlonglong(c.downloads)));
+        rows << QStringLiteral("%1 · %2 · %3")
+                    .arg(c.language.isEmpty() ? tr("?") : c.language,
+                         c.release.isEmpty()  ? tr("(unnamed)") : c.release,
+                         downloads);
+    }
+
+    // Copy the candidates into the callback: it runs after the overlay closes, long after `list` (a temporary
+    // owned by the fetcher's reply handler) is gone.
+    // No setNavGraph(): this opens over the classic video-player page, which has no themed NavGraph to mirror
+    // a level onto (the graph mirroring exists for overlays raised from a themed panel screen).
+    const QVector<SubtitleCandidate> picks = list;
+    new NavMenu(tr("Choose a subtitle"), rows, [this, picks, lang](int row) {
+        if (row < 0 || row >= picks.size()) return;                    // backed out
+        const SubtitleCandidate c = picks.at(row);
+        notify(tr("Downloading subtitle…"), 0);                        // sticky until the result lands
+        subFetcher_->downloadChoice(c.fileId, lang, [this, lang](const QString& srt) {
+            if (srt.isEmpty()) { notify(tr("Couldn't download that subtitle."), kFeedbackLong); return; }
+            player_->addSubtitle(srt);
+            // Overwrite the cache entry for this (identifier, language): the user's correction WINS over
+            // whatever the auto-pick chose, and it sticks on every replay of this video.
+            const QString ident = SubtitleFetcher::cacheIdentifier(subCtx_.imdbStreamId, subCtx_.title,
+                                                                   subCtx_.localPath);
+            if (subCache_) subCache_->put(SubtitleCache::keyFor(ident, lang), srt);
+            notify(tr("Subtitle added."), 3000);
+        });
+    }, this);
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)

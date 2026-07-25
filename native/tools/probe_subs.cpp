@@ -126,6 +126,9 @@ int main(int argc, char** argv)
         // The API's imdb ids are NUMERIC: the "tt" prefix goes AND the zero padding goes with it. Most
         // pre-2000 titles are zero-padded, so leaving the padding on would blunt the imdb tier for them.
         CHECK(!e.at(0).contains(QStringLiteral("parent_imdb_id=0")));
+        // The language filter rides EVERY tier, episodes included — a tier that dropped it would answer with
+        // subtitles in some other language and the auto-pick would load them.
+        for (const QString& q : e) CHECK(q.contains(QStringLiteral("languages=en")));
         CHECK(SubtitleFetcher::buildQueries(QStringLiteral("tt0110912"), QString(), QStringLiteral("en"),
                   QString()).at(0).contains(QStringLiteral("imdb_id=110912")));
         // Nothing to search on ⇒ no queries at all (no blind, unmatchable request).
@@ -137,6 +140,9 @@ int main(int argc, char** argv)
         CHECK(h.at(0).contains(QStringLiteral("moviehash=")));
         CHECK(h.at(1).contains(QStringLiteral("imdb_id=")));
         CHECK(h.at(2).contains(QStringLiteral("query=Inception")));
+        // …and on all three tiers of the hashable case, the moviehash tier especially (it is the one built
+        // from a different branch, so it is the one that could silently lose the filter).
+        for (const QString& q : h) CHECK(q.contains(QStringLiteral("languages=en")));
         // An UNHASHABLE local file (< 128 KiB) must NOT emit a hash tier — a bogus hash matches nothing.
         const QStringList u = SubtitleFetcher::buildQueries(QStringLiteral("tt1375666"),
                                   QStringLiteral("Inception"), QStringLiteral("en"), smallPath);
@@ -157,6 +163,10 @@ int main(int argc, char** argv)
                   == QStringLiteral("title:T"));                                // neither ⇒ title
         CHECK(SubtitleFetcher::cacheIdentifier(QStringLiteral("tt1"), QStringLiteral("T"), smallPath)
                   == QStringLiteral("tt1"));                                    // unhashable ⇒ falls to imdb
+        // The last rung: an unhashable path AND no imdb id ⇒ all the way down to the title. (A "hash:" here
+        // would key on a digest no search ever used; an empty key would collide across every such video.)
+        CHECK(SubtitleFetcher::cacheIdentifier(QString(), QStringLiteral("T"), smallPath)
+                  == QStringLiteral("title:T"));
     }
 
     // --- SubtitleCache --------------------------------------------------------------------------------
