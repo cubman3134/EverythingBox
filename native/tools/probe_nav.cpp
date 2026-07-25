@@ -15,9 +15,11 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QListView>
+#include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QSlider>
 #include <QSpinBox>
 #include <QTimer>
@@ -252,6 +254,33 @@ int main(int argc, char** argv)
             nullptr, &win);
         fits(menu, "menu(long title+rows)");
         menu->dismiss(-1);
+        pump();
+
+        // A menu with MORE ROWS THAN FIT — the subtitle picker's shape (0..n API results), and the case
+        // every other NavMenu caller avoids by being a short fixed menu. NavMenu used to size itself to the
+        // sum of its rows and never scroll, so the surplus ran off the bottom of the panel, which clamps
+        // itself to the window: the ring walked onto rows that were not on screen. clippedTexts() missed it
+        // because it measures rows against the LIST's viewport and the list claimed to be tall enough — so
+        // this case asserts the ring DIRECTLY, not just the clip report.
+        QStringList many;
+        for (int i = 0; i < 20; ++i)
+            many << QStringLiteral("en · Some.Movie.1982.Final.Cut.2160p.UHD.BluRay.x265-GROUP.v%1 · %2 downloads")
+                        .arg(i + 1).arg(9000 - i * 37);
+        auto* longMenu = new NavMenu(QStringLiteral("Choose a subtitle"), many, nullptr, &win);
+        fits(longMenu, "menu(20 rows)");
+        auto* lv = longMenu->findChild<QListWidget*>();
+        CHECK(lv != nullptr, "the long menu has a list");
+        if (lv)
+        {
+            CHECK(lv->verticalScrollBar()->isVisible(), "a menu too tall to fit scrolls");
+            for (int i = 0; i < 19; ++i) ctx.routeKey(Qt::Key_Down);
+            pump();
+            CHECK(lv->currentRow() == 19, "the ring reaches the last row");
+            // The real defect: selectable but INVISIBLE. The current row must be inside the viewport.
+            CHECK(lv->viewport()->rect().intersects(lv->visualItemRect(lv->currentItem())),
+                  "the selected row is actually on screen");
+        }
+        longMenu->dismiss(-1);
         pump();
 
         // The on-screen keyboard itself.
