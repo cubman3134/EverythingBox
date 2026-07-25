@@ -70,6 +70,20 @@ int main(int argc, char** argv)
     CHECK(CatalogMatch::bestMatch(movie("Inception", 2010), {}) == -1);
     CHECK(CatalogMatch::bestMatch(movie("", 0), { mi("tt1", "x") }) == -1);
 
+    // bestSeriesMatch: series/tv type filter + unique title + tt cross-check + contradicted-tt skip.
+    {
+        QVector<MediaItem> c{ mi("tmdb:tv:1396","Breaking Bad","series"), mi("tmdb:movie:1","Breaking Bad","movie") };
+        CHECK(CatalogMatch::bestSeriesMatch("Breaking Bad", QString(), c) == 0);          // picks the series, not the movie
+        QVector<MediaItem> c2{ mi("tt0903747","Breaking Bad","series") };
+        CHECK(CatalogMatch::bestSeriesMatch("breaking bad", "tt0903747", c2) == 0);       // exact tt wins
+        QVector<MediaItem> c3{ mi("tt9999999","Breaking Bad","series") };
+        CHECK(CatalogMatch::bestSeriesMatch("Breaking Bad", "tt0903747", c3) == -1);      // contradicted tt skipped
+        QVector<MediaItem> c4{ mi("tmdb:tv:1","The Office","series"), mi("tmdb:tv:2","The Office","series") };
+        CHECK(CatalogMatch::bestSeriesMatch("The Office", QString(), c4) == -1);          // ambiguous → -1
+        QVector<MediaItem> c5{ mi("tmdb:movie:1","Fargo","movie") };
+        CHECK(CatalogMatch::bestSeriesMatch("Fargo", QString(), c5) == -1);               // no series candidate
+    }
+
     QTemporaryDir tmp; CHECK(tmp.isValid());
     const QString cachePath = tmp.path() + QStringLiteral("/localresolve.json");
     const qint64 now = 1000000;
