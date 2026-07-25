@@ -29,7 +29,9 @@ private slots:
 private:
     struct Job {
         quint64 id = 0;
-        LocalLibrary::VideoEntry movie;
+        bool isShow = false;
+        LocalLibrary::VideoEntry movie;             // movie jobs
+        QString showKey, showTitle, seriesImdbId;   // show jobs
         qint64 size = 0, mtime = 0;
         QSet<int> outstanding;      // in-flight search reqIds
         QStringList matchedIds;     // one per source that matched

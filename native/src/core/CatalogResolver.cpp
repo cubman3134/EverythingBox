@@ -29,22 +29,47 @@ static bool isMovieCatalogSource(AddonManager* m, LoadedAddon* s)
     return false;
 }
 
+static bool isSeriesCatalogSource(AddonManager* m, LoadedAddon* s)
+{
+    if (!s || !s->isMediaSource()) return false;
+    for (const AddonCatalog& c : m->catalogs(s))
+        if (c.type == QStringLiteral("series") || c.type == QStringLiteral("tv") || c.type == QStringLiteral("mixed"))
+            return true;
+    return false;
+}
+
 void CatalogResolver::enqueue(const QVector<LocalLibrary::VideoEntry>& entries)
 {
     if (!Settings::resolveOnline()) return;
     const qint64 now = QDateTime::currentSecsSinceEpoch();
+    QSet<QString> showsThisCall;   // dedup distinct shows within this enqueue
     for (const LocalLibrary::VideoEntry& e : entries)
     {
-        if (e.kind != LocalLibrary::Kind::Movie) continue;         // movies only this track
-        if (seen_.contains(e.path)) continue;
-        const QFileInfo fi(e.path);
-        const qint64 size = fi.size();
-        const qint64 mtime = fi.lastModified().toSecsSinceEpoch();
-        if (cache_->isFresh(e.path, size, mtime, now)) continue;   // already resolved / nomatch-in-window
-        seen_.insert(e.path);
-        auto job = QSharedPointer<Job>::create();
-        job->id = nextId_++; job->movie = e; job->size = size; job->mtime = mtime;
-        pending_.append(job);
+        if (e.kind == LocalLibrary::Kind::Movie)
+        {
+            if (seen_.contains(e.path)) continue;
+            const QFileInfo fi(e.path);
+            const qint64 size = fi.size();
+            const qint64 mtime = fi.lastModified().toSecsSinceEpoch();
+            if (cache_->isFresh(e.path, size, mtime, now)) continue;   // already resolved / nomatch-in-window
+            seen_.insert(e.path);
+            auto job = QSharedPointer<Job>::create();
+            job->id = nextId_++; job->movie = e; job->size = size; job->mtime = mtime;
+            pending_.append(job);
+        }
+        else if (e.kind == LocalLibrary::Kind::Episode)
+        {
+            if (e.show.trimmed().isEmpty()) continue;   // M1: no cleaned show title → an empty search returns junk
+            const QString sk = LocalLibrary::showKeyFor(e);
+            const QString seenKey = QStringLiteral("show:") + sk;     // disjoint from movie paths
+            if (showsThisCall.contains(sk) || seen_.contains(seenKey)) continue;
+            if (cache_->isShowFresh(sk, now)) continue;               // resolved / nomatch-in-window
+            showsThisCall.insert(sk); seen_.insert(seenKey);
+            auto job = QSharedPointer<Job>::create();
+            job->id = nextId_++; job->isShow = true; job->showKey = sk;
+            job->showTitle = e.show; job->seriesImdbId = e.seriesImdbId;
+            pending_.append(job);
+        }
     }
     pump();
 }
@@ -68,11 +93,31 @@ void CatalogResolver::pump()
 void CatalogResolver::startJob(const QSharedPointer<Job>& job)
 {
     jobs_.insert(job->id, job);
+    const QString query = job->isShow ? job->showTitle : job->movie.title;
     for (LoadedAddon* s : addons_->sources())
     {
-        if (!isMovieCatalogSource(addons_, s)) continue;
-        const int reqId = addons_->requestSearch(s, job->movie.title);
-        if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+        const bool ok = job->isShow ? isSeriesCatalogSource(addons_, s) : isMovieCatalogSource(addons_, s);
+        if (!ok) continue;
+        if (job->isShow)
+        {
+            // A show TITLE must be searched against a SERIES/TV catalog. requestSearch sends an UNTYPED
+            // query, which aiocatalog's getCatalog defaults to its MOVIES catalog (`cat = a.catalog || "movies"`)
+            // — so a show search returns movie-typed rows that bestSeriesMatch rejects (C1). Instead, query
+            // each of the source's series/tv/mixed catalogs by id: aiocatalog's "tv" catalog runs TMDB
+            // /search/tv (series-typed, id tmdb:tv:{N}); a Stremio source builds /catalog/series/<id>/search=<q>.json.
+            for (const AddonCatalog& c : addons_->catalogs(s))
+            {
+                if (c.type != QStringLiteral("series") && c.type != QStringLiteral("tv")
+                    && c.type != QStringLiteral("mixed")) continue;
+                const int reqId = addons_->requestCatalog(s, c.id, query, 1);
+                if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+            }
+        }
+        else
+        {
+            const int reqId = addons_->requestSearch(s, query);   // movie jobs: untyped search defaults to movies — correct
+            if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+        }
     }
     if (job->outstanding.isEmpty()) { const quint64 id = job->id; QTimer::singleShot(0, this, [this, id]{ finishJob(id); }); return; }
     job->timer = new QTimer(this); job->timer->setSingleShot(true);
@@ -90,7 +135,9 @@ void CatalogResolver::onCatalogReady(int reqId, const MediaCatalog& catalog)
     if (j == jobs_.constEnd()) return;
     const QSharedPointer<Job> job = j.value();
     job->outstanding.remove(reqId);
-    const int idx = CatalogMatch::bestMatch(job->movie, catalog.items);
+    const int idx = job->isShow
+        ? CatalogMatch::bestSeriesMatch(job->showTitle, job->seriesImdbId, catalog.items)
+        : CatalogMatch::bestMatch(job->movie, catalog.items);
     if (idx >= 0) { const QString id = catalog.items[idx].id; if (!id.isEmpty() && !job->matchedIds.contains(id)) job->matchedIds << id; }
     if (job->outstanding.isEmpty()) finishJob(jobId);
 }
@@ -105,7 +152,8 @@ void CatalogResolver::finishJob(quint64 id)
     for (int r : job->outstanding) reqToJob_.remove(r);   // drop lingering (timeout path)
     const qint64 now = QDateTime::currentSecsSinceEpoch();
     if (!job->matchedIds.isEmpty()) {
-        cache_->putMatched(job->movie.path, job->size, job->mtime, job->matchedIds, now);
+        if (job->isShow) cache_->putShowMatched(job->showKey, job->matchedIds, now);
+        else             cache_->putMatched(job->movie.path, job->size, job->mtime, job->matchedIds, now);
         cacheDirty_ = true;
     }
     // Only stamp a 14-day nomatch when we genuinely "searched everywhere and found nothing":
@@ -114,7 +162,8 @@ void CatalogResolver::finishJob(quint64 id)
     // leave the entry UNCACHED so the next scan/launch retries — seen_ already blocks a same-session
     // requeue, so we won't spin this session. This keeps offline/no-addon from poisoning the cache.
     else if (job->issued && job->outstanding.isEmpty()) {
-        cache_->putNoMatch(job->movie.path, job->size, job->mtime, now);
+        if (job->isShow) cache_->putShowNoMatch(job->showKey, now);
+        else             cache_->putNoMatch(job->movie.path, job->size, job->mtime, now);
         cacheDirty_ = true;
     }
     scheduleResolvedSignal();

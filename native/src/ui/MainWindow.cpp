@@ -392,6 +392,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // A batch of movies resolved: rebuild the index from the current scan + the now-richer cache, then refresh.
         const QString libRoot = LocalLibrary::root();
         const auto extra = resolveCache_->matchedIdsByPath();       // snapshot on the MAIN thread (thread-safe by value)
+        const auto shows = resolveCache_->seriesIdsByShow();        // show snapshot on the MAIN thread (thread-safe by value)
         const quint64 gen = libScanGen_;                            // READ (do not ++) — a refresh, not a superseding scan
         auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
         connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
@@ -401,8 +402,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             }
             w->deleteLater();
         });
-        w->setFuture(QtConcurrent::run([libRoot, extra] {
-            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra);
+        w->setFuture(QtConcurrent::run([libRoot, extra, shows] {
+            return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra, shows);
         }));
     });
 
@@ -1056,6 +1057,8 @@ void MainWindow::rescanLocalLibrary()
     // the freshly rebuilt index already carries any previously-resolved online IDs; new movies resolve below.
     const QHash<QString, QStringList> extra = resolveCache_ ? resolveCache_->matchedIdsByPath()
                                                             : QHash<QString, QStringList>{};
+    const QHash<QString, QStringList> shows = resolveCache_ ? resolveCache_->seriesIdsByShow()
+                                                            : QHash<QString, QStringList>{};
     auto* w = new QFutureWatcher<LocalLibrary::OwnedIndex>(this);
     connect(w, &QFutureWatcher<LocalLibrary::OwnedIndex>::finished, this, [this, w, gen] {
         if (gen == libScanGen_) {                               // ignore a scan superseded by a newer rescan
@@ -1065,8 +1068,8 @@ void MainWindow::rescanLocalLibrary()
         }
         w->deleteLater();
     });
-    w->setFuture(QtConcurrent::run([libRoot, extra] {
-        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra);
+    w->setFuture(QtConcurrent::run([libRoot, extra, shows] {
+        return LocalLibrary::buildIndex(LocalLibrary::scanFolder(libRoot), extra, shows);
     }));
 }
 
