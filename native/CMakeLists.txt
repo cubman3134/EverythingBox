@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.14 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.15 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -205,6 +205,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
         src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
+        src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -489,6 +490,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
         src/core/EpicLibrary.cpp src/core/EpicLibrary.h
         src/core/GogLibrary.cpp src/core/GogLibrary.h
+        src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()

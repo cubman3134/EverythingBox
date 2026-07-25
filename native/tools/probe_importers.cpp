@@ -22,6 +22,7 @@
 #include "SteamLibrary.h"
 #include "EpicLibrary.h"
 #include "GogLibrary.h"
+#include "BattleNetLibrary.h"
 #include "RecentStore.h"
 #include "../src/browse/SyntheticCatalogs.h"
 
@@ -186,11 +187,15 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QStringLiteral("game"))      == RL::Game);
     CHECK(RecentStore::relaunchFor(QStringLiteral("bogus"))     == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
+    // (Task 2) un-comment once RecentStore::Relaunch::BattleNetGame + the "battlenetgame" kind land.
+    // CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
 
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("epicgame"))  == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("goggame"))   == QStringLiteral("game"));
+    // (Task 2) un-comment once browse::iconTypeForKind maps the "battlenetgame" kind.
+    // CHECK(browse::iconTypeForKind(QStringLiteral("battlenetgame")) == QStringLiteral("game"));
 
     // ==== EPIC (Task 2) ====================================================================================
 
@@ -322,6 +327,53 @@ int main(int argc, char** argv)
         CHECK(alpha && alpha->url == QStringLiteral("C:/G/Alpha/a.exe")); // the exe rides on the tile
         const MediaCatalog scoped = browse::gogGamesCatalog(installed, QStringLiteral("brav"));
         CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("gog:200")));
+    }
+
+    // ---- Battle.net: pure entry parse + INI-fixture registry scan --------------------------------
+    {
+        using BattleNetLibrary::parseUninstallEntry;
+        // A Blizzard entry is kept, its code resolved from the title.
+        const BattleNetGame wow = parseUninstallEntry(QStringLiteral("World of Warcraft"),
+            QStringLiteral("Blizzard Entertainment"), QStringLiteral("C:\\Games\\World of Warcraft"));
+        CHECK(wow.name == QStringLiteral("World of Warcraft"));
+        CHECK(wow.code == QStringLiteral("wow"));
+        CHECK(wow.installDir == QStringLiteral("C:/Games/World of Warcraft"));   // separators normalized
+        // A non-Blizzard publisher is filtered (empty name ⇒ callers drop it).
+        CHECK(parseUninstallEntry(QStringLiteral("Some App"), QStringLiteral("Acme Inc"),
+                                  QStringLiteral("C:\\Acme")).name.isEmpty());
+        // A Blizzard title with no known code still parses — code empty ⇒ exe-launch fallback.
+        const BattleNetGame unk = parseUninstallEntry(QStringLiteral("Blizzard Arcade Collection"),
+            QStringLiteral("Blizzard Entertainment"), QStringLiteral("C:\\Games\\Arcade"));
+        CHECK(!unk.name.isEmpty());
+        CHECK(unk.code.isEmpty());
+        // Case/spacing-insensitive title→code.
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("  diablo   III  ")) == QStringLiteral("d3"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("Totally Not A Blizzard Game")).isEmpty());
+        CHECK(BattleNetLibrary::launchUri(QStringLiteral("wow")) == QStringLiteral("battlenet://wow"));
+
+        // Fake-registry INI: groups = Uninstall subkeys, keys mirror the registry value names.
+        QTemporaryDir tmp; CHECK(tmp.isValid());
+        const QString ini = tmp.path() + QStringLiteral("/bnet.ini");
+        {
+            QSettings s(ini, QSettings::IniFormat);
+            s.setValue(QStringLiteral("WorldOfWarcraft/DisplayName"), QStringLiteral("World of Warcraft"));
+            s.setValue(QStringLiteral("WorldOfWarcraft/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("WorldOfWarcraft/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
+            s.setValue(QStringLiteral("Overwatch/DisplayName"), QStringLiteral("Overwatch"));
+            s.setValue(QStringLiteral("Overwatch/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("Overwatch/InstallLocation"), QStringLiteral("C:\\Games\\OW"));
+            s.setValue(QStringLiteral("Notepadpp/DisplayName"), QStringLiteral("Notepad++"));
+            s.setValue(QStringLiteral("Notepadpp/Publisher"), QStringLiteral("Don Ho"));
+            s.setValue(QStringLiteral("Notepadpp/InstallLocation"), QStringLiteral("C:\\npp"));
+            s.sync();
+        }
+        const QVector<BattleNetGame> games = BattleNetLibrary::installedGames(ini);
+        CHECK(games.size() == 2);                                    // the non-Blizzard entry is filtered
+        CHECK(games[0].name == QStringLiteral("Overwatch"));         // sorted by name
+        CHECK(games[1].name == QStringLiteral("World of Warcraft"));
+        CHECK(games[1].code == QStringLiteral("wow"));
+        CHECK(BattleNetLibrary::isAvailable(ini));
+        CHECK(!BattleNetLibrary::isAvailable(tmp.path() + QStringLiteral("/missing.ini")));  // dormant
     }
 
     // ==== PLAYLIST STORE-GAME BRANCHES (Task 2 ride-along) ================================================
