@@ -46,22 +46,59 @@ const QVector<QPair<QString, QString>>& codeTable()
     return t;
 }
 
-// Best-effort: the largest top-level .exe under installDir that isn't an updater/uninstaller/launcher.
+// True for an .exe that is plumbing (installer/updater/launcher/crash handler), never the game itself.
+bool isNotAGameExe(const QString& fileName)
+{
+    const QString n = fileName.toLower();
+    return n.contains(QStringLiteral("uninstall")) || n.contains(QStringLiteral("unins"))
+        || n.contains(QStringLiteral("launcher"))  || n.contains(QStringLiteral("updater"))
+        || n.contains(QStringLiteral("battle.net")) || n.contains(QStringLiteral("crash"))
+        || n.contains(QStringLiteral("setup"))     || n.contains(QStringLiteral("redist"))
+        || n.contains(QStringLiteral("vcredist")) || n.contains(QStringLiteral("helper"));
+}
+
+// Directories that never hold the game binary but can hold tens of thousands of files — never descend into
+// them, so the scan stays cheap on a multi-GB install.
+bool isAssetDir(const QString& dirName)
+{
+    const QString n = dirName.toLower();
+    return n == QStringLiteral("data") || n == QStringLiteral("assets") || n == QStringLiteral("cache")
+        || n == QStringLiteral("logs") || n == QStringLiteral("errors") || n == QStringLiteral("interface")
+        || n == QStringLiteral("wtf")  || n == QStringLiteral("screenshots")
+        || n.startsWith(QLatin1Char('.'));
+}
+
+// Best-effort largest non-plumbing .exe under installDir, searched to a BOUNDED depth (the install root plus
+// two levels). Blizzard titles routinely nest the binary — World of Warcraft ships it under `_retail_/`, others
+// under `x64/` or `bin/` — so a top-level-only scan would leave a code-less title listed but unlaunchable. The
+// depth cap + asset-dir skip keep this from walking a multi-GB game directory: only the launch FALLBACK needs
+// it (a title with a curated battlenet:// code never consults the exe at all).
+QString findGameExeAt(const QDir& d, int depthLeft)
+{
+    QString best; qint64 bestSize = -1;
+    for (const QFileInfo& fi : d.entryInfoList(QStringList{ QStringLiteral("*.exe") }, QDir::Files))
+    {
+        if (isNotAGameExe(fi.fileName())) continue;
+        if (fi.size() > bestSize) { bestSize = fi.size(); best = fi.absoluteFilePath(); }
+    }
+    if (depthLeft <= 0) return best;
+    for (const QFileInfo& sub : d.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot))
+    {
+        if (isAssetDir(sub.fileName())) continue;
+        const QString nested = findGameExeAt(QDir(sub.absoluteFilePath()), depthLeft - 1);
+        if (nested.isEmpty()) continue;
+        const qint64 sz = QFileInfo(nested).size();
+        if (sz > bestSize) { bestSize = sz; best = nested; }   // deeper-but-bigger wins (the real binary)
+    }
+    return best;
+}
+
 QString findGameExe(const QString& installDir)
 {
     if (installDir.isEmpty()) return QString();
     QDir d(installDir);
     if (!d.exists()) return QString();
-    QString best; qint64 bestSize = -1;
-    for (const QFileInfo& fi : d.entryInfoList(QStringList{ QStringLiteral("*.exe") }, QDir::Files))
-    {
-        const QString n = fi.fileName().toLower();
-        if (n.contains(QStringLiteral("uninstall")) || n.contains(QStringLiteral("unins"))
-            || n.contains(QStringLiteral("launcher")) || n.contains(QStringLiteral("updater"))
-            || n.contains(QStringLiteral("battle.net"))) continue;
-        if (fi.size() > bestSize) { bestSize = fi.size(); best = fi.absoluteFilePath(); }
-    }
-    return best;
+    return findGameExeAt(d, 2);   // root + 2 levels: covers _retail_/, x64/, bin/, Game/bin/
 }
 
 // One uninstall subkey's fields, from the fake-registry INI or the live hive (both 64-bit and WOW6432Node

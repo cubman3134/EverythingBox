@@ -374,6 +374,39 @@ int main(int argc, char** argv)
         CHECK(games[1].code == QStringLiteral("wow"));
         CHECK(BattleNetLibrary::isAvailable(ini));
         CHECK(!BattleNetLibrary::isAvailable(tmp.path() + QStringLiteral("/missing.ini")));  // dormant
+
+        // The exe fallback must find a NESTED binary: Blizzard titles routinely ship it under _retail_/ or
+        // x64/, and a code-less title with only a top-level scan would list but never launch. Bounded to
+        // root+2 levels, skipping asset dirs, preferring the largest real (non-plumbing) exe.
+        {
+            const QString game = tmp.path() + QStringLiteral("/ArcadeInstall");
+            QDir().mkpath(game + QStringLiteral("/_retail_"));
+            QDir().mkpath(game + QStringLiteral("/Data"));          // asset dir: must NOT be descended
+            const auto put = [](const QString& p, int bytes) {
+                QFile f(p); f.open(QIODevice::WriteOnly); f.write(QByteArray(bytes, 'x')); f.close();
+            };
+            put(game + QStringLiteral("/Battle.net Launcher.exe"), 4000);   // plumbing: skipped by name
+            put(game + QStringLiteral("/Uninstall.exe"), 3000);             // plumbing: skipped by name
+            put(game + QStringLiteral("/_retail_/Arcade.exe"), 9000);       // the real (nested) binary
+            put(game + QStringLiteral("/Data/huge.exe"), 99000);            // in an asset dir: never chosen
+
+            QSettings s2(ini, QSettings::IniFormat);
+            s2.setValue(QStringLiteral("Arcade/DisplayName"), QStringLiteral("Blizzard Arcade Collection"));
+            s2.setValue(QStringLiteral("Arcade/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s2.setValue(QStringLiteral("Arcade/InstallLocation"), game);
+            s2.sync();
+
+            const QVector<BattleNetGame> withNested = BattleNetLibrary::installedGames(ini);
+            const BattleNetGame* arcade = nullptr;
+            for (const BattleNetGame& g : withNested)
+                if (g.name == QStringLiteral("Blizzard Arcade Collection")) arcade = &g;
+            CHECK(arcade != nullptr);
+            if (arcade)
+            {
+                CHECK(arcade->code.isEmpty());                                   // no curated code ⇒ exe launch
+                CHECK(arcade->exe.endsWith(QStringLiteral("_retail_/Arcade.exe")));  // nested binary found
+            }
+        }
     }
 
     // ==== PLAYLIST STORE-GAME BRANCHES (Task 2 ride-along) ================================================
