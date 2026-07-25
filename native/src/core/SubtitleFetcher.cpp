@@ -42,6 +42,17 @@ QString apiLang(const QString& code)
     };
     return m.value(c, c.left(2));
 }
+
+// "tt0903747" -> "903747". The API's imdb_id/parent_imdb_id are NUMERIC, and most pre-2000 titles carry a
+// zero-padded id, so the padding has to go (an id is not a fixed-width string on the wire). Strips the "tt"
+// PREFIX only — a plain remove("tt") would also eat a "tt" anywhere later in the string.
+QString imdbNum(const QString& ttId)
+{
+    QString n = ttId.trimmed();
+    if (n.startsWith(QStringLiteral("tt"), Qt::CaseInsensitive)) n = n.mid(2);
+    while (n.size() > 1 && n.startsWith(QLatin1Char('0'))) n.remove(0, 1);
+    return n;
+}
 } // namespace
 
 SubtitleFetcher::SubtitleFetcher(QObject* parent)
@@ -92,7 +103,7 @@ QStringList SubtitleFetcher::buildQueries(const QString& imdbStreamId, const QSt
     if (!imdbStreamId.isEmpty())
     {
         const QStringList parts = imdbStreamId.split(QLatin1Char(':'));
-        const QString num = QString(parts.value(0)).remove(QStringLiteral("tt"));
+        const QString num = imdbNum(parts.value(0));
         QUrlQuery q;
         if (parts.size() >= 3)
         {

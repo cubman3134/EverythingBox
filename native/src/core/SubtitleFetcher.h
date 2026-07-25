@@ -59,13 +59,17 @@ public:
     static QString cacheIdentifier(const QString& imdbStreamId, const QString& title,
                                    const QString& localPath);
 
+    // The ordered search queries for one request, most precise first (moviehash → imdb → title). PUBLIC for
+    // probe coverage: this is the heart of the match chain (tier ORDER + which tiers are even emitted), it is
+    // pure (strings in, strings out — the only I/O is hashing the file it is handed), so probe_subs asserts it
+    // directly rather than through the network transport.
+    static QStringList buildQueries(const QString& imdbStreamId, const QString& title,
+                                    const QString& lang, const QString& localPath);
+
 signals:
     void log(const QString& line); // status for the debug log; credentials are never included
 
 private:
-    // The ordered search queries for one request, most precise first (moviehash → imdb → title).
-    static QStringList buildQueries(const QString& imdbStreamId, const QString& title,
-                                    const QString& lang, const QString& localPath);
     void ensureLogin(std::function<void(bool ok)> done);
     // Run a /subtitles GET with the given query string (already URL-encoded); parse the best file id.
     void searchQuery(const QString& query, const QString& lang,
