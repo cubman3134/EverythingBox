@@ -13,6 +13,7 @@
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
+#include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
 #include <functional>
 
@@ -82,4 +83,12 @@ namespace browse
     // empty (no local capsule; title-keyed scrapers fill art later).
     MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& query,
                                  const std::function<QString(const GogGame&)>& poster = {});
+
+    // The Battle.net console grid, built natively from the Uninstall registry. Each BattleNetGame -> a MediaItem
+    // (id "bnet:<code-or-name>", mime "battlenetgame"). TWO launch routes ride on one tile shape: a title with a
+    // known product code carries NO url and launches the client by battlenet://<code> (fire-and-forget, like
+    // Epic); a code-less title carries its resolved exe in `url` and runs through the MONITORED launchPcExe path
+    // (the GOG mechanic). A non-empty query scopes by name. poster defaults to empty (no local capsule).
+    MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
+                                       const std::function<QString(const BattleNetGame&)>& poster = {});
 }

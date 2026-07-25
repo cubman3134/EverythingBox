@@ -120,6 +120,7 @@ RecentStore::Relaunch RecentStore::relaunchFor(const QString& kind)
     if (kind == QStringLiteral("steamgame")) return Relaunch::SteamGame;
     if (kind == QStringLiteral("epicgame"))  return Relaunch::EpicGame;
     if (kind == QStringLiteral("goggame"))   return Relaunch::GogGame;
+    if (kind == QStringLiteral("battlenetgame")) return Relaunch::BattleNetGame;
     if (kind == QStringLiteral("pcgame"))    return Relaunch::PcGame;
     if (kind == QStringLiteral("video"))     return Relaunch::Video;
     if (kind == QStringLiteral("audio"))     return Relaunch::Audio;

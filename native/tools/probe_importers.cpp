@@ -14,7 +14,10 @@
 //     installed appended (badge "Not installed", url steam://install/<appid>), already-installed owned skipped,
 //     the in-console query scoping both sets, and a pure injected poster so it stays I/O-free;
 //   * RecentStore::relaunchFor — the Recent-kind dispatch table the app's openRecent switch mirrors;
-//   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon.
+//   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon;
+//   * browse::battleNetGamesCatalog — the two-route tile split (a coded title keys on its code and carries NO
+//     url ⇒ battlenet:// launch; a code-less one keys on its name and carries its exe ⇒ launchPcExe), plus the
+//     in-console query scoping and the empty/dormant case.
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
@@ -187,15 +190,13 @@ int main(int argc, char** argv)
     CHECK(RecentStore::relaunchFor(QStringLiteral("game"))      == RL::Game);
     CHECK(RecentStore::relaunchFor(QStringLiteral("bogus"))     == RL::Unknown);
     CHECK(RecentStore::relaunchFor(QString())                   == RL::Unknown);
-    // (Task 2) un-comment once RecentStore::Relaunch::BattleNetGame + the "battlenetgame" kind land.
-    // CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
+    CHECK(RecentStore::relaunchFor(QStringLiteral("battlenetgame")) == RL::BattleNetGame);
 
     // ---- 6. Marks-sanity foundation: game Recents draw the game icon (keyFor keys are <store>:<id>) --------
     CHECK(browse::iconTypeForKind(QStringLiteral("steamgame")) == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("epicgame"))  == QStringLiteral("game"));
     CHECK(browse::iconTypeForKind(QStringLiteral("goggame"))   == QStringLiteral("game"));
-    // (Task 2) un-comment once browse::iconTypeForKind maps the "battlenetgame" kind.
-    // CHECK(browse::iconTypeForKind(QStringLiteral("battlenetgame")) == QStringLiteral("game"));
+    CHECK(browse::iconTypeForKind(QStringLiteral("battlenetgame")) == QStringLiteral("game"));
 
     // ==== EPIC (Task 2) ====================================================================================
 
@@ -482,6 +483,47 @@ int main(int argc, char** argv)
             CHECK(deepG != nullptr);
             if (deepG) CHECK(deepG->exe.endsWith(QStringLiteral("Game/bin/Deep.exe")));
         }
+    }
+
+    // ---- Battle.net console builder: the TWO-ROUTE tile split (the whole point of the mime) ---------------
+    // A coded title gets id "bnet:<code>" and NO url — MainWindow reads the empty url as "launch by
+    // battlenet:// URI". A code-less one carries its exe in `url` and rides the monitored launchPcExe path,
+    // exactly like a GOG tile. Swapping either half silently breaks one of the two launch routes.
+    {
+        QList<BattleNetGame> installed;
+        BattleNetGame a; a.name = QStringLiteral("World of Warcraft"); a.code = QStringLiteral("wow");
+        a.installDir = QStringLiteral("C:/Games/WoW"); a.exe = QStringLiteral("C:/Games/WoW/Wow.exe");
+        BattleNetGame b; b.name = QStringLiteral("Arcade");            // no code ⇒ exe route
+        b.installDir = QStringLiteral("C:/Games/Arcade"); b.exe = QStringLiteral("C:/Games/Arcade/arcade.exe");
+        installed << a << b;
+
+        const MediaCatalog c = browse::battleNetGamesCatalog(installed, QString());
+        CHECK(c.items.size() == 2);
+        const MediaItem* wow = find(c, QStringLiteral("bnet:wow"));    // keyed by CODE, not name
+        CHECK(wow && wow->mime == QStringLiteral("battlenetgame"));
+        CHECK(wow && wow->type == QStringLiteral("game"));
+        CHECK(wow && wow->title == QStringLiteral("World of Warcraft"));
+        CHECK(wow && wow->systemHint == QStringLiteral("Battle.net"));
+        CHECK(wow && wow->url.isEmpty());       // coded ⇒ URI launch: the tile must carry NO url
+        const MediaItem* arc = find(c, QStringLiteral("bnet:Arcade")); // code-less ⇒ keyed by NAME
+        CHECK(arc && arc->mime == QStringLiteral("battlenetgame"));
+        CHECK(arc && arc->url == QStringLiteral("C:/Games/Arcade/arcade.exe")); // the exe rides the tile
+
+        // Query scopes by name (the in-console search path).
+        const MediaCatalog scoped = browse::battleNetGamesCatalog(installed, QStringLiteral("arca"));
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("bnet:Arcade")));
+        CHECK(browse::battleNetGamesCatalog(QList<BattleNetGame>(), QString()).items.isEmpty()); // dormant
+    }
+
+    // ---- A Battle.net Recent groups under the games catalogue's Recent (like steam/epic/gog) --------------
+    {
+        QList<RecentItem> all;
+        RecentItem r; r.path = QStringLiteral("battlenet://wow"); r.title = QStringLiteral("WoW");
+        r.kind = QStringLiteral("battlenetgame"); r.key = QStringLiteral("bnet:wow");
+        all << r;
+        const MediaCatalog cat = browse::recentsCatalog(all, QStringLiteral("game"));
+        CHECK(cat.items.size() == 1);
+        CHECK(cat.items[0].mime == QStringLiteral("battlenetgame"));
     }
 
     // ==== PLAYLIST STORE-GAME BRANCHES (Task 2 ride-along) ================================================

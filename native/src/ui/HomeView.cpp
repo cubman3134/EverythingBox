@@ -24,6 +24,7 @@
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
+#include "../core/BattleNetLibrary.h"
 #include "../core/Settings.h"
 #include "../core/ItemMarks.h"
 #include "CarouselView.h"
@@ -1675,6 +1676,22 @@ void HomeView::populateGogGames()
     showSyntheticCatalog(browse::gogGamesCatalog(GogLibrary::installedGames(), query));
 }
 
+// Drill into the synthetic "Battle.net" console (mirrors openGogConsole): list the local Blizzard library.
+void HomeView::openBattleNetConsole(const MediaItem& consoleItem)
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Battle.net");
+    stack_.push_back(lvl);
+    populateBattleNetGames();
+}
+
+void HomeView::populateBattleNetGames()
+{
+    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
+    showSyntheticCatalog(browse::battleNetGamesCatalog(BattleNetLibrary::installedGames(), query));
+}
+
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
 
 // A stable key for the catalogue at the root of the browse stack (its source addon + catalog id + type).
@@ -2235,7 +2252,8 @@ QString HomeView::openKindForView() const
     if (top.detail)
     {
         if (top.item.mime == QStringLiteral("steam:console") || top.item.mime == QStringLiteral("epic:console")
-            || top.item.mime == QStringLiteral("gog:console")) return QString(); // store games aren't ROM files
+            || top.item.mime == QStringLiteral("gog:console")
+            || top.item.mime == QStringLiteral("battlenet:console")) return QString(); // store games aren't ROM files
         return (top.item.type == QStringLiteral("platform")) ? QStringLiteral("game") : QString(); // games per-console
     }
     const QString& t = top.catalogType;
@@ -2461,6 +2479,7 @@ void HomeView::activateItem(int row)
     if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
     if (it.mime == QStringLiteral("epic:console"))  { openEpicConsole(it);  return; }
     if (it.mime == QStringLiteral("gog:console"))   { openGogConsole(it);   return; }
+    if (it.mime == QStringLiteral("battlenet:console")) { openBattleNetConsole(it); return; }
 
     // The synthetic Recent folder drills into this catalogue's recently-opened items.
     if (it.type == QStringLiteral("_recents"))
@@ -2619,7 +2638,8 @@ void HomeView::dlResolveLeaf(const DlNode& node)
     const MediaItem it = node.item;
     // Can't pull as a single file: a store-launcher game (Steam/Epic/GOG), or a page-based manga chapter.
     if (it.mime == QStringLiteral("steamgame") || it.mime == QStringLiteral("epicgame")
-        || it.mime == QStringLiteral("goggame") || isReadableChapter(it.type)) { dlNext(); return; }
+        || it.mime == QStringLiteral("goggame") || it.mime == QStringLiteral("battlenetgame")
+        || isReadableChapter(it.type)) { dlNext(); return; }
 
     const bool localBridge = node.addon && node.addon->transport != LoadedAddon::RemoteHttp
         && (it.type == QStringLiteral("comic_issue") || it.type == QStringLiteral("book")
@@ -2929,7 +2949,8 @@ void HomeView::doSearch()
     if (cur.detail && (cur.item.type == QStringLiteral("platform")
                        || cur.item.mime == QStringLiteral("steam:console")
                        || cur.item.mime == QStringLiteral("epic:console")
-                       || cur.item.mime == QStringLiteral("gog:console")))
+                       || cur.item.mime == QStringLiteral("gog:console")
+                       || cur.item.mime == QStringLiteral("battlenet:console")))
     {
         cur.query = q;
         cur.childRow = -1;
@@ -3014,6 +3035,7 @@ void HomeView::loadTop()
     if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
     if (top.detail && top.item.mime == QStringLiteral("epic:console"))  { populateEpicGames();  return; }
     if (top.detail && top.item.mime == QStringLiteral("gog:console"))   { populateGogGames();   return; }
+    if (top.detail && top.item.mime == QStringLiteral("battlenet:console")) { populateBattleNetGames(); return; }
     // Returning to a cross-addon search (Back out of a result): re-run the fan-out.
     if (top.detail && top.item.type == QStringLiteral("_search"))
         { startSearch(top.item.mime.mid(QStringLiteral("search:").size())); return; }
@@ -3115,6 +3137,13 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
     {
         // GOG games are DRM-free exes: the tile already carries the resolved exe in `url`. Hand it to
         // MainWindow, which runs it through the MONITORED launchPcExe path (recording a "goggame" Recent).
+        emit openItem(it);
+        return;
+    }
+    if (it.mime == QStringLiteral("battlenetgame"))
+    {
+        // Either route — URI (no url on the tile) or exe (url set) — is decided by MainWindow::openLibraryItem,
+        // which owns the whole battlenetgame branch. Hand the tile over untouched.
         emit openItem(it);
         return;
     }
@@ -4414,6 +4443,18 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 gog.expandable = true;
                 gog.mime = QStringLiteral("gog:console");
                 items_.push_back(gog);
+            }
+            // Battle.net rides the same rule: shown only when the Blizzard library is non-empty (so this machine,
+            // with no Blizzard titles installed, sees NO extra console). Its tiles carry BOTH launch routes.
+            if (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
+            {
+                MediaItem bnet;
+                bnet.id = QStringLiteral("battlenet:console");
+                bnet.type = QStringLiteral("platform");
+                bnet.title = tr("Battle.net");
+                bnet.expandable = true;
+                bnet.mime = QStringLiteral("battlenet:console");
+                items_.push_back(bnet);
             }
         }
         from = 0;

@@ -239,6 +239,8 @@ private:
     void populateEpicGames();                            // (re)build the Epic games list natively
     void openGogConsole(const MediaItem& consoleItem);   // drill the synthetic GOG console -> local games
     void populateGogGames();                             // (re)build the GOG games list natively
+    void openBattleNetConsole(const MediaItem& consoleItem); // drill the synthetic Battle.net console
+    void populateBattleNetGames();                           // (re)build the Blizzard games list natively
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey

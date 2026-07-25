@@ -10,6 +10,7 @@ struct RecentItem
     QString path;   // absolute file path / URL to re-open
     QString title;  // display label
     QString kind;   // "video" | "audio" | "document" | "game" | "pcgame" | "steamgame" | "epicgame" | "goggame"
+                    // | "battlenetgame"
                     // A "steamgame" is a native Steam launch: path is the steam://rungameid/<appid> URL, key is
                     // "steam:<appid>", thumb is the vertical capsule; re-opening hands the URL back to Steam.
                     // An "epicgame" is the same fire-and-forget shape for the Epic launcher: path is the
@@ -17,6 +18,10 @@ struct RecentItem
                     // A "goggame" is a DRM-free GOG exe: path IS the resolved exe, key is "gog:<id>". It re-opens
                     // through the MONITORED launchPcExe path (the pcgame LAUNCH MECHANICS) but keeps its own
                     // "goggame" KIND so it groups under the GOG console and never double-records as a pcgame.
+                    // A "battlenetgame" is EITHER shape, decided per title: a game with a known product code
+                    // records path = battlenet://<code> and re-opens fire-and-forget (the epicgame shape); a
+                    // code-less one records path = its exe and re-opens through launchPcExe (the goggame shape).
+                    // Key is "bnet:<code>" (coded) or "bnet:<DisplayName>" (code-less).
     QString thumb;  // optional poster image (path or http url); empty -> a type placeholder is drawn
     QString key;    // stable identity for resume + de-dup (e.g. an addon item id); empty -> use path. A
                     // streamed item's URL changes each session, so resume/de-dup key on this instead.
@@ -36,6 +41,6 @@ namespace RecentStore
     // How a Recent of a given kind is re-launched (the pure dispatch table). "steamgame"/"pcgame" relaunch
     // through their native launchers; the media kinds re-open their recorded file/URL. MainWindow::openRecent
     // switches on this so the app and the headless probe share one definition of the dispatch.
-    enum class Relaunch { SteamGame, EpicGame, GogGame, PcGame, Video, Audio, Document, Game, Unknown };
+    enum class Relaunch { SteamGame, EpicGame, GogGame, BattleNetGame, PcGame, Video, Audio, Document, Game, Unknown };
     Relaunch relaunchFor(const QString& kind);
 }
