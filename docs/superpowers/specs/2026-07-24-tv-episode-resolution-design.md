@@ -1,7 +1,21 @@
 # TV / Episode ID-Resolution — Design
 
 **Date:** 2026-07-24
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/tv-resolution` (T1–T3 + a whole-branch C1 fix). Series matcher +
+`composeEpisodeId` + `buildIndex` TV keys + a show-level cache + group-by-show resolution. **The whole-branch
+review + live verify caught a Critical the three green per-task reviews structurally missed:** show jobs first
+reused the movie track's untyped `requestSearch`, which aiocatalog defaults to a *movie* search — so no show
+ever matched (dead end-to-end). Fixed to a **type-scoped `requestCatalog(source, seriesCatalogId, showTitle)`**
+(aiocatalog TMDB `/search/tv`; Cinemeta a well-formed `/catalog/series/…/search`). **Live-verified** (portable
+throwaway, aiocatalog): a no-NFO "Breaking Bad" resolved to `tmdb:tv:1396`, the **series tile badged "● 2"**,
+and an owned episode **played the local file** via the composed id `tmdb:episode:1396:1:1`. Real app untouched.
+
+## Close-out follow-up
+
+- **Hermetic show-orchestration test.** The async show-job path has no machine test (pure cores are
+  probe-covered; the C1 bug lived in the transport seam, invisible to every pure probe). A small
+  `catalogReady`-stub test driving a show job through the typed dispatch would pin this seam against
+  regression. Not a gate (the live aiocatalog pass covers it now), but worthwhile.
 **Origin:** The recorded follow-up from the movies-only id-resolver
 (`2026-07-24-local-library-id-resolver-design.md`). That track lit the "On disk" badge on aiocatalog MOVIE
 tiles; TV was deferred. This extends resolution to shows so **series tiles badge "On disk (N)"** and **owned
