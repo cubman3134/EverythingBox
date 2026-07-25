@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QByteArray>
 #include <cstdio>
+#include <utility>   // std::swap
 
 static int failures = 0;
 #define CHECK(cond) do { \
@@ -49,6 +50,16 @@ int main(int argc, char** argv)
         for (int i = 0; i + 8 <= swapped.size(); i += 8)
             for (int k = 0; k < 4; ++k) std::swap(swapped[i + k], swapped[i + 7 - k]);
         CHECK(SubtitleHash::ofBytes(swapped, tail, size) != SubtitleHash::ofBytes(head, tail, size));
+        // KNOWN-ANSWER vector — the only assertion here that pins the little-endian CONVENTION rather than
+        // mere within-word order sensitivity. refHash above is a structural twin of the implementation, so a
+        // shared endianness mistake would satisfy every comparison-based check; this one would not. A single
+        // word 01..08 with everything else zero must read back LSB-first.
+        {
+            QByteArray h8(W, '\0'), t0(W, '\0');
+            for (int i = 0; i < 8; ++i) h8[i] = char(i + 1);       // bytes 01 02 03 04 05 06 07 08
+            // little-endian => 0x0807060504030201 ; a big-endian impl would yield "0102030405060708".
+            CHECK(SubtitleHash::ofBytes(h8, t0, 0) == QStringLiteral("0807060504030201"));
+        }
         // Size participates.
         CHECK(SubtitleHash::ofBytes(head, tail, size + 1) != SubtitleHash::ofBytes(head, tail, size));
     }

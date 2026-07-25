@@ -3,6 +3,7 @@
 // matched: the OSDb hash, the IMDB stream id, or the title. Device-local JSON; never synced (it points at
 // local cache paths).
 #pragma once
+#include <utility>   // std::move (do not rely on a transitive Qt include)
 #include <QHash>
 #include <QString>
 
