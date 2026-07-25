@@ -7,6 +7,7 @@ class LocalResolveCache
 {
 public:
     struct Entry { qint64 size = 0; qint64 mtime = 0; QStringList ids; bool matched = false; qint64 ts = 0; };
+    struct ShowEntry { QStringList ids; bool matched = false; qint64 ts = 0; };
 
     explicit LocalResolveCache(QString filePath) : file_(std::move(filePath)) {}
     void load();
@@ -17,10 +18,18 @@ public:
     void putMatched(const QString& path, qint64 size, qint64 mtime, const QStringList& ids, qint64 nowSecs);
     void putNoMatch(const QString& path, qint64 size, qint64 mtime, qint64 nowSecs);
     QHash<QString, QStringList> matchedIdsByPath() const;
+
+    // Show-level store: keyed by a show key (imdb tt… or "name:<normalized>"); holds resolved series tile ids.
+    bool isShowFresh(const QString& showKey, qint64 nowSecs, qint64 retryDays = 14) const;
+    void putShowMatched(const QString& showKey, const QStringList& seriesTileIds, qint64 nowSecs);
+    void putShowNoMatch(const QString& showKey, qint64 nowSecs);
+    QHash<QString, QStringList> seriesIdsByShow() const;   // matched shows only
+
     // Drop every entry and persist the empty cache (the "Re-match online" action clears then re-resolves all).
-    void clear() { byPath_.clear(); save(); }
+    void clear() { byPath_.clear(); byShow_.clear(); save(); }
 
 private:
     QString file_;
     QHash<QString, Entry> byPath_;
+    QHash<QString, ShowEntry> byShow_;
 };
