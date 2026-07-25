@@ -19,6 +19,9 @@ static int failures = 0;
 static MediaItem mi(const QString& id, const QString& title, const QString& type = QStringLiteral("movie"))
 { MediaItem it; it.id = id; it.title = title; it.type = type; return it; }
 
+static MediaItem miY(const QString& id, const QString& title, const QString& subtitle)
+{ MediaItem it; it.id = id; it.title = title; it.type = QStringLiteral("movie"); it.subtitle = subtitle; return it; }
+
 static LocalLibrary::VideoEntry movie(const QString& title, int year, const QString& imdb = QString())
 { LocalLibrary::VideoEntry e; e.kind = LocalLibrary::Kind::Movie; e.title = title; e.year = year; e.imdbId = imdb; return e; }
 
@@ -29,8 +32,9 @@ int main(int argc, char** argv)
     // normalizeTitle
     CHECK(CatalogMatch::normalizeTitle(QStringLiteral("The Matrix")) == QStringLiteral("matrix"));
     CHECK(CatalogMatch::normalizeTitle(QStringLiteral("WALL·E!")) == QStringLiteral("wall e"));
-    CHECK(CatalogMatch::normalizeTitle(QStringLiteral("Amélie")) == CatalogMatch::normalizeTitle(QStringLiteral("amelie"))
-          || true);  // diacritics best-effort; do not over-assert
+    CHECK(CatalogMatch::normalizeTitle(QStringLiteral("Amélie")) == QStringLiteral("amelie"));
+    CHECK(CatalogMatch::normalizeTitle(QStringLiteral("Pokémon")) == QStringLiteral("pokemon"));
+    CHECK(CatalogMatch::normalizeTitle(QStringLiteral("WALL·E")) == QStringLiteral("wall e")); // · is punct → space
 
     // IMDB cross-check wins outright.
     {
@@ -70,6 +74,25 @@ int main(int argc, char** argv)
     // No candidates / empty title → -1.
     CHECK(CatalogMatch::bestMatch(movie("Inception", 2010), {}) == -1);
     CHECK(CatalogMatch::bestMatch(movie("", 0), { mi("tt1", "x") }) == -1);
+
+    // subtitle-year disambiguation (movies): the year is in the aiocatalog search row's subtitle.
+    {
+        // Local Solaris (2002); catalog offers only the 1972 film → year disagrees → no match.
+        QVector<MediaItem> c{ miY("tmdb:movie:1","Solaris","1972") };
+        CHECK(CatalogMatch::bestMatch(movie("Solaris", 2002), c) == -1);
+        // Both films present → the wrong year is skipped, the right one is the unique hit.
+        QVector<MediaItem> c2{ miY("tmdb:movie:1","Solaris","1972"), miY("tmdb:movie:2","Solaris","2002") };
+        CHECK(CatalogMatch::bestMatch(movie("Solaris", 2002), c2) == 1);
+        // ±1 tolerance accepted.
+        QVector<MediaItem> c3{ miY("tmdb:movie:9","Some Film","2001") };
+        CHECK(CatalogMatch::bestMatch(movie("Some Film", 2002), c3) == 0);
+        // No subtitle year on the candidate → falls back to title match (unchanged behavior).
+        QVector<MediaItem> c4{ mi("tmdb:movie:3","Inception","movie") };
+        CHECK(CatalogMatch::bestMatch(movie("Inception", 2010), c4) == 0);
+        // Local year unknown (0) → year check inert, title match as before.
+        QVector<MediaItem> c5{ miY("tmdb:movie:1","Solaris","1972") };
+        CHECK(CatalogMatch::bestMatch(movie("Solaris", 0), c5) == 0);
+    }
 
     // bestSeriesMatch: series/tv type filter + unique title + tt cross-check + contradicted-tt skip.
     {
