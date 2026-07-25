@@ -49,6 +49,10 @@ const QVector<QPair<QString, QString>>& codeTable()
 }
 
 // True for an .exe that is plumbing (installer/updater/launcher/crash handler), never the game itself.
+// NB: "crash" is a substring match, so it would also eat a game whose binary is named e.g. CrashBandicoot.exe.
+// Harmless while membership is gated on a Blizzard publisher (the Crash titles are Activision-published and
+// never reach here) — but if that gate is ever widened to the Activision-published Battle.net titles, make
+// this term anchored ("crashhandler"/"crashreport") first.
 bool isNotAGameExe(const QString& fileName)
 {
     const QString n = fileName.toLower();
@@ -56,7 +60,8 @@ bool isNotAGameExe(const QString& fileName)
         || n.contains(QStringLiteral("launcher"))  || n.contains(QStringLiteral("updater"))
         || n.contains(QStringLiteral("battle.net")) || n.contains(QStringLiteral("crash"))
         || n.contains(QStringLiteral("setup"))     || n.contains(QStringLiteral("redist"))
-        || n.contains(QStringLiteral("vcredist")) || n.contains(QStringLiteral("helper"));
+        || n.contains(QStringLiteral("vcredist")) || n.contains(QStringLiteral("helper"))
+        || n.contains(QStringLiteral("blizzardbrowser"));   // the client's embedded CEF browser
 }
 
 // Directories that never hold the game binary but can hold tens of thousands of files — never descend into
@@ -210,6 +215,12 @@ BattleNetGame BattleNetLibrary::parseUninstallEntry(const QString& displayName, 
     if (!publisher.trimmed().startsWith(QStringLiteral("Blizzard Entertainment"), Qt::CaseInsensitive)) return g;
     if (displayName.trimmed().isEmpty()) return g;
     if (installLocation.trimmed().isEmpty()) return g;   // no install dir ⇒ nothing to list or launch
+    // The CLIENT is not a game. Its own Uninstall row is Blizzard-published WITH an InstallLocation, and the
+    // depth-2 exe scan can reach Battle.net/Battle.net.<build>/BlizzardBrowser.exe — enough to clear the
+    // "has a launch route" gate and ship a tile that opens an embedded browser. Reject the client and its
+    // helpers by title. CONTAINS, not startsWith: the agent registers as "Blizzard Battle.net Update Agent",
+    // which starts with "blizzard". No Blizzard GAME carries "battle net" in its title, so this can't eat one.
+    if (titleKey(displayName).contains(QStringLiteral("battle net"))) return g;
     g.name = displayName.trimmed();
     g.code = codeForTitle(g.name);
     g.installDir = winPathToSlash(installLocation);
