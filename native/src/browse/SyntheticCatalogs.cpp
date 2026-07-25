@@ -14,7 +14,8 @@ QString iconTypeForKind(const QString& kind)
     if (kind == QStringLiteral("document")) return QStringLiteral("book");
     if (kind == QStringLiteral("game") || kind == QStringLiteral("pcgame")
         || kind == QStringLiteral("steamgame") || kind == QStringLiteral("epicgame")
-        || kind == QStringLiteral("goggame")) return QStringLiteral("game");
+        || kind == QStringLiteral("goggame")
+        || kind == QStringLiteral("battlenetgame")) return QStringLiteral("game");
     return QString();
 }
 
@@ -31,7 +32,8 @@ MediaCatalog recentsCatalog(const QList<RecentItem>& all, const QString& marker)
         const bool match = r.kind == kind
                            || (kind == QStringLiteral("game")
                                && (r.kind == QStringLiteral("pcgame") || r.kind == QStringLiteral("steamgame")
-                                   || r.kind == QStringLiteral("epicgame") || r.kind == QStringLiteral("goggame")));
+                                   || r.kind == QStringLiteral("epicgame") || r.kind == QStringLiteral("goggame")
+                                   || r.kind == QStringLiteral("battlenetgame")));
         if (!kind.isEmpty() && !match) continue;
         if (!system.isEmpty() && r.system != system) continue; // per-console scope
         MediaItem it;
@@ -258,6 +260,32 @@ MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& que
         it.title = g.name;
         it.mime = QStringLiteral("goggame"); // launched through the monitored launchPcExe path
         it.url = g.exe;                       // the resolved exe rides the tile (MainWindow runs it)
+        if (poster) it.thumbnailUrl = poster(g);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
+MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
+                                   const std::function<QString(const BattleNetGame&)>& poster)
+{
+    const QString q = query.trimmed();
+    MediaCatalog cat;
+    cat.title = q.isEmpty() ? QObject::tr("Battle.net") : QObject::tr("Battle.net · %1").arg(q);
+    for (const BattleNetGame& g : installed)
+    {
+        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
+        MediaItem it;
+        // A coded title keys on its launch code (stable across a reinstall/move); a code-less one on its name.
+        it.id = QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code);
+        it.type = QStringLiteral("game");
+        it.title = g.name;
+        it.mime = QStringLiteral("battlenetgame");
+        it.systemHint = QStringLiteral("Battle.net");
+        // The two-route split: a coded game launches by battlenet:// URI and carries NO url (so clicking opens
+        // the info page and Play builds the URI); a code-less one rides its exe like a GOG tile.
+        if (g.code.isEmpty()) it.url = g.exe;
         if (poster) it.thumbnailUrl = poster(g);
         cat.items.push_back(it);
     }

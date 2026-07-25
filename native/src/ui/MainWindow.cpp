@@ -40,6 +40,7 @@
 #include "../core/SteamLibrary.h"
 #include "../core/EpicLibrary.h"
 #include "../core/GogLibrary.h"
+#include "../core/BattleNetLibrary.h"
 #include "../core/ExternalPlayer.h"
 #include "../core/PcGameStore.h"
 #include "../core/DownloadsStore.h"
@@ -4962,6 +4963,22 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         case RecentStore::Relaunch::GogGame:
             relaunchGogGame(resumeKey, title, thumb, path);
             return;
+        case RecentStore::Relaunch::BattleNetGame:
+        {
+            // Two shapes under one kind, told apart by what the Recent recorded. A coded game recorded its
+            // battlenet:// URI: re-launch fire-and-forget and re-record so it moves to the front (the Epic
+            // shape). A code-less game recorded its exe: re-open through the monitored path (the GOG shape —
+            // launchPcExe re-records the "battlenetgame" Recent itself).
+            if (path.startsWith(QStringLiteral("battlenet://")))
+            {
+                QDesktopServices::openUrl(QUrl(path));
+                RecentStore::add({ path, title, QStringLiteral("battlenetgame"), thumb, resumeKey });
+                statusBar()->showMessage(tr("Launching “%1” via Battle.net…").arg(title), 5000);
+                return;
+            }
+            launchPcExe(path, resumeKey, title, thumb, QStringLiteral("battlenetgame"));
+            return;
+        }
         // A PC game re-opens through its remembered install (exe from PcGameStore) - even when the exact path this
         // Recent entry recorded (e.g. its one-time installer) is stale or gone.
         case RecentStore::Relaunch::PcGame:
@@ -5802,7 +5819,7 @@ QString MainWindow::locateInstalledGameExe(const QString& title, const QString& 
 }
 
 // Run a resolved local-game exe and record it in Recent so re-opening from Home relaunches this exact
-// executable. `kind` ("pcgame" default, or "goggame") is the Recent routing kind — the launch MECHANICS below
+// executable. `kind` ("pcgame" default, or "goggame"/"battlenetgame") is the Recent routing kind — the MECHANICS below
 // are identical for both (GOG games are DRM-free processes, just like a downloaded PC repack). The kind-vs-
 // mechanics split: a GOG game records the "goggame" kind (so it groups on the GOG console and re-opens via the
 // GogGame dispatch) but rides this pcgame monitor path; and it is NOT added to the PC-console Downloads (it's
@@ -6590,6 +6607,32 @@ void MainWindow::openLibraryItem(const MediaItem& item)
               .arg(item.title, item.type.isEmpty() ? QStringLiteral("?") : item.type,
                    item.mime.isEmpty() ? QStringLiteral("-") : item.mime, logSafeUrl(item.url),
                    splitTarget_ ? QStringLiteral(" [->split pane]") : QString()));
+    // A Battle.net game: TWO routes on one mime, decided by whether the tile carries a url. A title with a known
+    // product code carries NO url and launches the client by battlenet://<code> (fire-and-forget, the Epic shape);
+    // a code-less title carries its resolved exe and runs through the MONITORED launchPcExe path (the GOG shape).
+    // This must sit ABOVE the url.isEmpty() bail below — the coded route is precisely the url-less case.
+    if (item.mime == QStringLiteral("battlenetgame"))
+    {
+        if (item.url.isEmpty())   // coded game: the tile id is "bnet:<code>"
+        {
+            const QString code = item.id.startsWith(QStringLiteral("bnet:"))
+                                     ? item.id.mid(QStringLiteral("bnet:").size()) : item.id;
+            const QString uri = BattleNetLibrary::launchUri(code);
+            if (uri.isEmpty())
+            {
+                statusBar()->showMessage(tr("No playable file is associated with “%1” yet.").arg(item.title),
+                                         kFeedbackLong);
+                return;
+            }
+            QDesktopServices::openUrl(QUrl(uri));
+            RecentStore::add({ uri, item.title, QStringLiteral("battlenetgame"), item.thumbnailUrl, item.id });
+            statusBar()->showMessage(tr("Launching “%1” via Battle.net…").arg(item.title), 5000);
+            return;
+        }
+        // Code-less: launchPcExe records the "battlenetgame" Recent ITSELF — do NOT re-record here.
+        launchPcExe(item.url, item.id, item.title, item.thumbnailUrl, QStringLiteral("battlenetgame"));
+        return;
+    }
     if (item.url.isEmpty())
     {
         // Catalog metadata with no file associated yet (movies/games/episodes/tracks).
