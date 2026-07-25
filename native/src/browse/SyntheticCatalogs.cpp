@@ -169,9 +169,13 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
         //   steam: / epic: — no url; the leaf-open builds the launcher URI from the id (steam://, com.epicgames…)
         //   gog:          — a DRM-free exe; the resolved exe was persisted into the entry's path at add-time and
         //                   rides back onto the tile's url, so the MONITORED launchPcExe path can run it.
+        //   bnet:         — BOTH Battle.net routes take the GOG-shaped line: a code-less game's exe rides in the
+        //                   path, and a coded game's url was empty at add-time so the emptiness rides back too
+        //                   (an empty url is exactly what the battlenet:// URI launch expects).
         if (e.itemId.startsWith(QStringLiteral("steam:")))     it.mime = QStringLiteral("steamgame"); // launch natively
         else if (e.itemId.startsWith(QStringLiteral("epic:"))) it.mime = QStringLiteral("epicgame");  // launch via URI
         else if (e.itemId.startsWith(QStringLiteral("gog:")))  { it.mime = QStringLiteral("goggame"); it.url = e.path; } // exe rides in path
+        else if (e.itemId.startsWith(QStringLiteral("bnet:"))) { it.mime = QStringLiteral("battlenetgame"); it.url = e.path; } // exe (code-less) or empty (coded)
         else if (!e.path.isEmpty()) { it.url = e.path; it.mime = QStringLiteral("localgame:") + e.kind; } // local game -> re-open by path
         cat.items.push_back(it);
     }
@@ -267,6 +271,9 @@ MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& que
     return cat;
 }
 
+// NB: keep this builder free of any BattleNetLibrary:: call. Several probes compile SyntheticCatalogs.cpp
+// WITHOUT BattleNetLibrary.cpp (probe_browse/probe_locallib/probe_perf), so introducing one here turns into a
+// CI-only link break — this repo has been bitten by exactly that twice.
 MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
                                    const std::function<QString(const BattleNetGame&)>& poster)
 {

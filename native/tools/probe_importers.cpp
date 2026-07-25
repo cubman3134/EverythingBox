@@ -542,12 +542,16 @@ int main(int argc, char** argv)
         add(QStringLiteral("epic:Fortnite"), QStringLiteral("FN"),  QString(),                     QString());
         add(QStringLiteral("gog:100"), QStringLiteral("Witcher"),   QStringLiteral("C:/G/w.exe"),  QString());
         add(QStringLiteral("local-1"), QStringLiteral("Doom"),      QStringLiteral("C:/G/doom.exe"), QStringLiteral("pcgame"));
+        // Both Battle.net routes ride the ONE gog-shaped branch: a coded entry was added with an empty url so its
+        // path is empty (launch builds battlenet://), a code-less one persisted its exe.
+        add(QStringLiteral("bnet:wow"), QStringLiteral("WoW"),      QString(),                     QString());
+        add(QStringLiteral("bnet:Hearthstone"), QStringLiteral("HS"), QStringLiteral("C:/G/hs.exe"), QString());
         // A plain addon entry (no store prefix, no path) — stays a bare drill item, no launch mime.
         { PlaylistEntry e; e.itemId = QStringLiteral("addon:movie1"); e.title = QStringLiteral("Movie");
           e.type = QStringLiteral("movie"); p.items.push_back(e); }
 
         const MediaCatalog cat = browse::playlistItemsCatalog(p);
-        CHECK(cat.items.size() == 5);
+        CHECK(cat.items.size() == 7);
 
         const MediaItem* steam = find(cat, QStringLiteral("steam:730"));
         CHECK(steam && steam->mime == QStringLiteral("steamgame"));
@@ -560,6 +564,14 @@ int main(int argc, char** argv)
         const MediaItem* gog = find(cat, QStringLiteral("gog:100"));
         CHECK(gog && gog->mime == QStringLiteral("goggame"));
         CHECK(gog && gog->url == QStringLiteral("C:/G/w.exe"));  // the persisted exe rides back onto the tile
+
+        const MediaItem* bnetCoded = find(cat, QStringLiteral("bnet:wow"));
+        CHECK(bnetCoded && bnetCoded->mime == QStringLiteral("battlenetgame"));
+        CHECK(bnetCoded && bnetCoded->url.isEmpty());            // coded: launches by battlenet:// URI, no url
+
+        const MediaItem* bnetExe = find(cat, QStringLiteral("bnet:Hearthstone"));
+        CHECK(bnetExe && bnetExe->mime == QStringLiteral("battlenetgame"));
+        CHECK(bnetExe && bnetExe->url == QStringLiteral("C:/G/hs.exe")); // code-less: the persisted exe rides back
 
         const MediaItem* local = find(cat, QStringLiteral("local-1"));
         CHECK(local && local->mime == QStringLiteral("localgame:pcgame"));

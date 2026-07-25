@@ -1894,6 +1894,7 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
         if (id.startsWith(QStringLiteral("steam:"))) return QStringLiteral("steam");
         if (id.startsWith(QStringLiteral("epic:")))  return QStringLiteral("epic");
         if (id.startsWith(QStringLiteral("gog:")))   return QStringLiteral("gog");
+        if (id.startsWith(QStringLiteral("bnet:")))  return QStringLiteral("battlenet");
         return QString();
     };
     e.addonId = (!stack_.isEmpty() && stack_.last().addon) ? stack_.last().addon->manifest.id
@@ -1902,7 +1903,9 @@ void HomeView::addItemToPlaylistInteractive(const MediaItem& it)
     e.type = it.type; e.thumbnailUrl = it.thumbnailUrl; e.expandable = it.expandable;
     // GOG tiles carry their resolved exe in `url`; persist it into the entry path so playlistItemsCatalog can
     // ride it back onto the tile and the monitored launchPcExe path can run it (steam/epic launch by id, no url).
-    if (it.id.startsWith(QStringLiteral("gog:"))) e.path = it.url;
+    // A Battle.net tile takes the SAME line for both of its routes: a code-less tile carries its exe in `url`
+    // (the GOG shape), and a coded one has an EMPTY url, so this propagates emptiness and the builder restores it.
+    if (it.id.startsWith(QStringLiteral("gog:")) || it.id.startsWith(QStringLiteral("bnet:"))) e.path = it.url;
     PlaylistStore::addItem(plid, e);
     showToast(tr("Added “%1” to “%2”.").arg(it.title, plname), kFeedbackShort);
 }
@@ -3795,7 +3798,11 @@ void HomeView::downloadThemedLeaf(int idx)
 HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
 {
     ActionGates g;
-    const bool isSteam = (item.mime == QStringLiteral("steamgame"));
+    // A store game launched by URI (steam:// / com.epicgames.launcher:// / battlenet://) carries no url and no
+    // addon — the launch is a client handoff in openLibraryItem, so Play must be offered on its mime alone.
+    const bool isStoreLaunch = (item.mime == QStringLiteral("steamgame"))
+                            || (item.mime == QStringLiteral("epicgame"))
+                            || (item.mime == QStringLiteral("battlenetgame"));
     const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
         && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
     const bool isRemotePlayable = remoteLeaf
@@ -3827,7 +3834,7 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     const bool ownedPlayable =
            !LocalLibrary::index().localPathFor(item.id).isEmpty()
         || (!item.imdbStreamId.isEmpty() && !LocalLibrary::index().localPathFor(item.imdbStreamId).isEmpty());
-    g.play = isSteam || isRemotePlayable || g.readable || isBridgedAudio || isBridgedGame || ownedPlayable;
+    g.play = isStoreLaunch || isRemotePlayable || g.readable || isBridgedAudio || isBridgedGame || ownedPlayable;
     // Downloadable: a resolvable leaf (anything but a Steam launch or a page-based manga chapter), or a
     // container we can crawl (a series/season -> episodes, a comic volume -> issues).
     const bool dlLeaf = !item.expandable
