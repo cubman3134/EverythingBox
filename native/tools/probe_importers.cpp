@@ -346,30 +346,63 @@ int main(int argc, char** argv)
             QStringLiteral("Blizzard Entertainment"), QStringLiteral("C:\\Games\\Arcade"));
         CHECK(!unk.name.isEmpty());
         CHECK(unk.code.isEmpty());
+        // An entry with NO InstallLocation is incomplete and dropped — this is the Battle.net CLIENT's own
+        // uninstall row (Blizzard publisher, real DisplayName, nothing to list or launch).
+        CHECK(parseUninstallEntry(QStringLiteral("Battle.net"), QStringLiteral("Blizzard Entertainment"),
+                                  QString()).name.isEmpty());
+        // The publisher gate is a startsWith, so "Blizzard Entertainment, Inc." passes …
+        CHECK(!parseUninstallEntry(QStringLiteral("Hearthstone"),
+                                   QStringLiteral("Blizzard Entertainment, Inc."),
+                                   QStringLiteral("C:\\Games\\HS")).name.isEmpty());
+        // … while an unrelated publisher that merely mentions Blizzard does not.
+        CHECK(parseUninstallEntry(QStringLiteral("Blizzard Fan Tool"), QStringLiteral("Acme (for Blizzard)"),
+                                  QStringLiteral("C:\\Acme")).name.isEmpty());
         // Case/spacing-insensitive title→code.
         CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("  diablo   III  ")) == QStringLiteral("d3"));
         CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("Totally Not A Blizzard Game")).isEmpty());
         CHECK(BattleNetLibrary::launchUri(QStringLiteral("wow")) == QStringLiteral("battlenet://wow"));
+        // The code table is LONGEST-PREFIX-FIRST: reordering "starcraft ii" after "starcraft" would send
+        // every SC2 title to s1. Pin the one order-dependent pair, plus the prefix match and a dropped row.
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("StarCraft II: Wings of Liberty")) == QStringLiteral("s2"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("StarCraft: Remastered")) == QStringLiteral("s1"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("World of Warcraft Classic")) == QStringLiteral("wow"));
+        CHECK(BattleNetLibrary::codeForTitle(QStringLiteral("Diablo IV")).isEmpty());   // dropped row ⇒ exe fallback
 
         // Fake-registry INI: groups = Uninstall subkeys, keys mirror the registry value names.
+        // The SUBKEY order deliberately contradicts the DISPLAY-NAME order (AAA = "World of Warcraft",
+        // ZZZ = "Overwatch") so the sort-by-name assertion below cannot pass vacuously — childGroups()
+        // hands them back in subkey order.
         QTemporaryDir tmp; CHECK(tmp.isValid());
         const QString ini = tmp.path() + QStringLiteral("/bnet.ini");
         {
             QSettings s(ini, QSettings::IniFormat);
-            s.setValue(QStringLiteral("WorldOfWarcraft/DisplayName"), QStringLiteral("World of Warcraft"));
-            s.setValue(QStringLiteral("WorldOfWarcraft/Publisher"), QStringLiteral("Blizzard Entertainment"));
-            s.setValue(QStringLiteral("WorldOfWarcraft/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
-            s.setValue(QStringLiteral("Overwatch/DisplayName"), QStringLiteral("Overwatch"));
-            s.setValue(QStringLiteral("Overwatch/Publisher"), QStringLiteral("Blizzard Entertainment"));
-            s.setValue(QStringLiteral("Overwatch/InstallLocation"), QStringLiteral("C:\\Games\\OW"));
+            s.setValue(QStringLiteral("AAA/DisplayName"), QStringLiteral("World of Warcraft"));
+            s.setValue(QStringLiteral("AAA/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("AAA/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
+            s.setValue(QStringLiteral("ZZZ/DisplayName"), QStringLiteral("Overwatch"));
+            s.setValue(QStringLiteral("ZZZ/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("ZZZ/InstallLocation"), QStringLiteral("C:\\Games\\OW"));
+            // Same title under a DIFFERENT subkey — the 64-bit and WOW6432Node views both carrying it.
+            s.setValue(QStringLiteral("MMM_OtherView/DisplayName"), QStringLiteral("World of Warcraft"));
+            s.setValue(QStringLiteral("MMM_OtherView/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("MMM_OtherView/InstallLocation"), QStringLiteral("C:\\Games\\WoW"));
+            // Blizzard publisher but a BLANK DisplayName — incomplete, dropped.
+            s.setValue(QStringLiteral("BlankName/DisplayName"), QString());
+            s.setValue(QStringLiteral("BlankName/Publisher"), QStringLiteral("Blizzard Entertainment"));
+            s.setValue(QStringLiteral("BlankName/InstallLocation"), QStringLiteral("C:\\Games\\Blank"));
+            // Blizzard publisher, real DisplayName, NO InstallLocation — the client's own row, dropped.
+            s.setValue(QStringLiteral("NoInstallDir/DisplayName"), QStringLiteral("Battle.net"));
+            s.setValue(QStringLiteral("NoInstallDir/Publisher"), QStringLiteral("Blizzard Entertainment"));
             s.setValue(QStringLiteral("Notepadpp/DisplayName"), QStringLiteral("Notepad++"));
             s.setValue(QStringLiteral("Notepadpp/Publisher"), QStringLiteral("Don Ho"));
             s.setValue(QStringLiteral("Notepadpp/InstallLocation"), QStringLiteral("C:\\npp"));
             s.sync();
         }
         const QVector<BattleNetGame> games = BattleNetLibrary::installedGames(ini);
-        CHECK(games.size() == 2);                                    // the non-Blizzard entry is filtered
-        CHECK(games[0].name == QStringLiteral("Overwatch"));         // sorted by name
+        // 6 groups in, 2 out: non-Blizzard filtered, blank-name dropped, no-InstallLocation dropped,
+        // duplicate title deduped.
+        CHECK(games.size() == 2);
+        CHECK(games[0].name == QStringLiteral("Overwatch"));         // sorted by NAME, not by subkey
         CHECK(games[1].name == QStringLiteral("World of Warcraft"));
         CHECK(games[1].code == QStringLiteral("wow"));
         CHECK(BattleNetLibrary::isAvailable(ini));
@@ -397,6 +430,7 @@ int main(int argc, char** argv)
             s2.sync();
 
             const QVector<BattleNetGame> withNested = BattleNetLibrary::installedGames(ini);
+            CHECK(withNested.size() == 3);        // the two kept above, plus the code-less Arcade entry
             const BattleNetGame* arcade = nullptr;
             for (const BattleNetGame& g : withNested)
                 if (g.name == QStringLiteral("Blizzard Arcade Collection")) arcade = &g;
