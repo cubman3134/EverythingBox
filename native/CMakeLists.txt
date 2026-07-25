@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.13 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.14 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -610,6 +610,20 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_gameagg PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
+
+    # Hermetic integration probe for the CatalogResolver SHOW-dispatch seam (the TV-resolution C1 bug): stands
+    # up a REAL AddonManager + Duktape JS engine on a JsLocal series fixture (zero network) and drives a show
+    # job through the typed requestCatalog dispatch to the cache. Same addon/JS/miniz set as probe_addon PLUS
+    # the resolver/core sources (CatalogResolver/CatalogMatch/LocalResolveCache/LocalLibrary/Settings/FormFactor).
+    add_executable(probe_showdispatch tools/probe_showdispatch.cpp
+        src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
+        src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
+        src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
+        third_party/duktape/duktape.c third_party/miniz.c)
+    target_include_directories(probe_showdispatch PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
+    target_compile_definitions(probe_showdispatch PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_showdispatch PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
     endif() # NOT ANDROID (console probes)
 
     # Gamepad support via SDL2 (optional). Install SDL2 and pass CMAKE_PREFIX_PATH, or
