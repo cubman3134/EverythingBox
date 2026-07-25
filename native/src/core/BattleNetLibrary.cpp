@@ -25,23 +25,25 @@ QString titleKey(const QString& t)
     return s.simplified();
 }
 
-// The curated Battle.net product codes. Keys are titleKey()-normalized DisplayName prefixes; a title that
-// starts with a key takes its code (so "World of Warcraft Classic" resolves to wow). Unknown => empty code,
-// which routes the launch to the install-dir exe instead of a battlenet:// URI.
+// Curated Battle.net product codes, LONGEST-PREFIX-FIRST (order is load-bearing: "starcraft ii" MUST precede
+// "starcraft", else every SC2 title silently resolves to s1 and launches StarCraft Remastered).
+// Keys are titleKey()-normalized DisplayName prefixes; a title that starts with a key takes its code (so
+// "World of Warcraft Classic" resolves to wow).
+// Only codes we are confident of live here. A title with NO row falls back to launching its install-dir exe,
+// which is the SAFE path — a WRONG code is worse than none, because a non-empty code suppresses that fallback.
+// New rows must be confirmed against a real Battle.net install before being added.
 const QVector<QPair<QString, QString>>& codeTable()
 {
     static const QVector<QPair<QString, QString>> t = {
-        { QStringLiteral("world of warcraft"),   QStringLiteral("wow")  },
-        { QStringLiteral("diablo iv"),           QStringLiteral("osi")  },
-        { QStringLiteral("diablo iii"),          QStringLiteral("d3")   },
-        { QStringLiteral("diablo ii resurrected"), QStringLiteral("osi") },
-        { QStringLiteral("overwatch"),           QStringLiteral("pro")  },
-        { QStringLiteral("hearthstone"),         QStringLiteral("wtcg") },
-        { QStringLiteral("starcraft ii"),        QStringLiteral("s2")   },
-        { QStringLiteral("starcraft"),           QStringLiteral("s1")   },
-        { QStringLiteral("warcraft iii"),        QStringLiteral("w3")   },
-        { QStringLiteral("heroes of the storm"), QStringLiteral("hero") },
-        { QStringLiteral("call of duty"),        QStringLiteral("cod")  },
+        { QStringLiteral("world of warcraft"),     QStringLiteral("wow")  },
+        { QStringLiteral("diablo iii"),            QStringLiteral("d3")   },
+        { QStringLiteral("diablo ii resurrected"), QStringLiteral("osi")  },
+        { QStringLiteral("overwatch"),             QStringLiteral("pro")  },
+        { QStringLiteral("hearthstone"),           QStringLiteral("wtcg") },
+        { QStringLiteral("starcraft ii"),          QStringLiteral("s2")   },
+        { QStringLiteral("starcraft"),             QStringLiteral("s1")   },
+        { QStringLiteral("warcraft iii"),          QStringLiteral("w3")   },
+        { QStringLiteral("heroes of the storm"),   QStringLiteral("hero") },
     };
     return t;
 }
@@ -151,6 +153,38 @@ QVector<QPair<QString, QString>> entryKeys(const QString& regProbeRoot)
     return out;
 }
 
+// The one registry walk, shared by installedGames() and isAvailable(). stopAtFirst returns as soon as one
+// launchable game is accepted: isAvailable only needs existence, and a full scan enumerates both HKLM
+// Uninstall views (500-1500 subkeys, a QSettings each) plus a filesystem probe per match — a caller doing
+// `isAvailable() && !installedGames().isEmpty()` would otherwise pay for all of that twice. Under
+// stopAtFirst a non-empty code is launch route enough, so the disk is only touched when the code is empty.
+QVector<BattleNetGame> scan(const QString& regProbeRoot, bool stopAtFirst)
+{
+    QVector<BattleNetGame> out;
+    for (const auto& hk : entryKeys(regProbeRoot))
+    {
+        const RawEntry r = readEntry(regProbeRoot, hk.first, hk.second);
+        BattleNetGame g = BattleNetLibrary::parseUninstallEntry(r.displayName, r.publisher, r.installLocation);
+        if (g.name.isEmpty()) continue;                                   // not Blizzard / incomplete
+        bool dup = false;
+        for (const BattleNetGame& e : out) if (e.name.compare(g.name, Qt::CaseInsensitive) == 0) dup = true;
+        if (dup) continue;                                                // same title in both hive views
+        if (stopAtFirst)
+        {
+            if (g.code.isEmpty() && findGameExe(g.installDir).isEmpty()) continue;  // no launch route
+            out.push_back(g);
+            return out;                                                   // existence answered; no sort needed
+        }
+        g.exe = findGameExe(g.installDir);
+        if (g.code.isEmpty() && g.exe.isEmpty()) continue;   // no launch route ⇒ don't list a dead tile
+        out.push_back(g);
+    }
+    std::sort(out.begin(), out.end(), [](const BattleNetGame& a, const BattleNetGame& b) {
+        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
 } // namespace
 
 QString BattleNetLibrary::codeForTitle(const QString& displayName)
@@ -171,8 +205,11 @@ BattleNetGame BattleNetLibrary::parseUninstallEntry(const QString& displayName, 
                                                     const QString& installLocation)
 {
     BattleNetGame g;
-    if (!publisher.contains(QStringLiteral("Blizzard"), Qt::CaseInsensitive)) return g; // empty name => filtered
+    // startsWith, not contains: still matches "Blizzard Entertainment, Inc." while rejecting an unrelated
+    // publisher whose string merely mentions Blizzard.
+    if (!publisher.trimmed().startsWith(QStringLiteral("Blizzard Entertainment"), Qt::CaseInsensitive)) return g;
     if (displayName.trimmed().isEmpty()) return g;
+    if (installLocation.trimmed().isEmpty()) return g;   // no install dir ⇒ nothing to list or launch
     g.name = displayName.trimmed();
     g.code = codeForTitle(g.name);
     g.installDir = winPathToSlash(installLocation);
@@ -181,25 +218,10 @@ BattleNetGame BattleNetLibrary::parseUninstallEntry(const QString& displayName, 
 
 QVector<BattleNetGame> BattleNetLibrary::installedGames(const QString& regProbeRoot)
 {
-    QVector<BattleNetGame> out;
-    for (const auto& hk : entryKeys(regProbeRoot))
-    {
-        const RawEntry r = readEntry(regProbeRoot, hk.first, hk.second);
-        BattleNetGame g = parseUninstallEntry(r.displayName, r.publisher, r.installLocation);
-        if (g.name.isEmpty()) continue;                                   // not Blizzard / incomplete
-        bool dup = false;
-        for (const BattleNetGame& e : out) if (e.name.compare(g.name, Qt::CaseInsensitive) == 0) dup = true;
-        if (dup) continue;                                                // same title in both hive views
-        g.exe = findGameExe(g.installDir);
-        out.push_back(g);
-    }
-    std::sort(out.begin(), out.end(), [](const BattleNetGame& a, const BattleNetGame& b) {
-        return a.name.compare(b.name, Qt::CaseInsensitive) < 0;
-    });
-    return out;
+    return scan(regProbeRoot, /*stopAtFirst*/false);
 }
 
 bool BattleNetLibrary::isAvailable(const QString& regProbeRoot)
 {
-    return !installedGames(regProbeRoot).isEmpty();
+    return !scan(regProbeRoot, /*stopAtFirst*/true).isEmpty();
 }
