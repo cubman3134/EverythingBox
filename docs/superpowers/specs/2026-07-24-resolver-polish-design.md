@@ -1,7 +1,15 @@
 # Local-Library Resolver Polish — Design
 
 **Date:** 2026-07-24
-**Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
+**Status:** COMPLETE — shipped on `local/resolver-polish`. (1) `normalizeTitle` folds diacritics (NFKD +
+drop combining marks) so "Amélie"→"amelie"; (2) `bestMatch` adds subtitle-year disambiguation (the year is in
+the aiocatalog search row's subtitle) — a strictly-narrowing check that closes the same-title-different-year
+residual (Solaris 1972 vs 2002) with no new request; (3) a new suite-gated integration probe
+`probe_showdispatch` machine-pins the `CatalogResolver` typed show-dispatch seam (real `AddonManager` + JsLocal
+series fixture, zero network) — the exact C1-class seam a pure probe can't reach; a pre-C1 binary fails it.
+Per-task Opus reviews clean (only-narrows verified; genuine C1 reproduction verified). No separate Fable pass
+(small, low-risk: T1 isolated pure change, T2 test-only, no cross-task seam); the combined-tree suite
+(`probe_resolver` + `probe_showdispatch`) is the integration gate.
 **Origin:** The recorded follow-ups from the shipped resolver tracks (movie id-resolver + TV resolution): close
 the same-title-different-year mis-match residual, fix diacritic-insensitive matching, and add a machine test
 for the async show-dispatch seam where the TV-resolution C1 bug lived (invisible to every pure probe).
