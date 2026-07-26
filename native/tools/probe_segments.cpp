@@ -3,6 +3,7 @@
 // Prints SEGMENTS-OK on success; any failure prints SEGMENTS-FAIL <what> and exits non-zero.
 #include "MediaSegments.h"
 
+#include <QByteArray>
 #include <QCoreApplication>
 #include <cstdio>
 
@@ -58,40 +59,57 @@ int main(int argc, char** argv)
             "\n"
             "garbage\n"
             "200 abc 3\n"    // unparseable end time
-            "300 250 3\n"    // end <= start
+            "300 250 3\n"    // inverted — rejected by the minimum-length check, which subsumes end <= start
             "400 402 3\n");  // shorter than kMinSegmentS
         const QVector<Segment> v = parseEdl(edl, 3600.0, 25.0);
-        CHECK(v.size() == 2, "only cut+commercial survive; junk, mute, marker, inverted and tiny all drop");
+        // NAME the survivors, not just how many: a count alone survives swapping which actions are skips.
+        CHECK(has(v, SegmentType::Intro, 10.0, 40.0), "action 0 (cut) is a skip, and is the first Intro");
+        CHECK(has(v, SegmentType::Commercial, 130.0, 160.0), "action 3 (commercial break) is a skip");
+        CHECK(v.size() == 2, "and nothing else: junk, mute, marker, inverted and tiny all drop");
     }
 
     // ---------------------------------------------------------------- 3. parseEdl: position typing
     {
-        // Credits: ends within kCreditsTailS of duration.
+        // Credits: ends within kCreditsTailS of duration. Every NEGATIVE below also names the type the range
+        // DID receive — "not Intro" alone is satisfied by the range being dropped entirely.
         CHECK(countOf(parseEdl(QStringLiteral("3500 3560 3\n"), 3600.0, 0.0), SegmentType::Credits) == 1,
               "a range ending 40s before the end is Credits");
-        CHECK(countOf(parseEdl(QStringLiteral("3400 3530 3\n"), 3600.0, 0.0), SegmentType::Credits) == 0,
-              "a range ending 70s before the end is NOT Credits");
+        // ON the boundary, so the comparison operator itself is pinned (>=, not >).
+        CHECK(countOf(parseEdl(QStringLiteral("3480 3540 3\n"), 3600.0, 0.0), SegmentType::Credits) == 1,
+              "a range ending exactly kCreditsTailS before the end is still Credits");
+        const QVector<Segment> nearTail = parseEdl(QStringLiteral("3400 3530 3\n"), 3600.0, 0.0);
+        CHECK(countOf(nearTail, SegmentType::Credits) == 0 && has(nearTail, SegmentType::Commercial, 3400.0, 3530.0),
+              "a range ending 70s before the end is Commercial, not Credits");
 
         // Intro window boundary: starts before kIntroWindowS.
         CHECK(countOf(parseEdl(QStringLiteral("899 950 3\n"), 3600.0, 0.0), SegmentType::Intro) == 1,
               "starting at 899s is inside the intro window");
-        CHECK(countOf(parseEdl(QStringLiteral("901 950 3\n"), 3600.0, 0.0), SegmentType::Intro) == 0,
-              "starting at 901s is outside the intro window");
+        const QVector<Segment> atWindow = parseEdl(QStringLiteral("900 950 3\n"), 3600.0, 0.0);
+        CHECK(countOf(atWindow, SegmentType::Intro) == 0 && has(atWindow, SegmentType::Commercial, 900.0, 950.0),
+              "starting at exactly kIntroWindowS is OUTSIDE the window (start < window, not <=)");
+        const QVector<Segment> pastWindow = parseEdl(QStringLiteral("901 950 3\n"), 3600.0, 0.0);
+        CHECK(countOf(pastWindow, SegmentType::Intro) == 0 && has(pastWindow, SegmentType::Commercial, 901.0, 950.0),
+              "starting at 901s is outside the intro window, and stays Commercial");
 
         // Intro length boundary: <= kIntroMaxLenS.
         CHECK(countOf(parseEdl(QStringLiteral("10 309 3\n"), 3600.0, 0.0), SegmentType::Intro) == 1,
               "a 299s range is short enough to be an intro");
-        CHECK(countOf(parseEdl(QStringLiteral("10 311 3\n"), 3600.0, 0.0), SegmentType::Intro) == 0,
-              "a 301s range is too long to be an intro");
+        CHECK(countOf(parseEdl(QStringLiteral("10 310 3\n"), 3600.0, 0.0), SegmentType::Intro) == 1,
+              "a range of exactly kIntroMaxLenS is still an intro (length <=, not <)");
+        const QVector<Segment> tooLong = parseEdl(QStringLiteral("10 311 3\n"), 3600.0, 0.0);
+        CHECK(countOf(tooLong, SegmentType::Intro) == 0 && has(tooLong, SegmentType::Commercial, 10.0, 311.0),
+              "a 301s range is too long to be an intro, and stays Commercial");
 
         // Only the FIRST qualifying range is the intro.
         const QVector<Segment> two = parseEdl(QStringLiteral("10 40 3\n60 90 3\n"), 3600.0, 0.0);
-        CHECK(countOf(two, SegmentType::Intro) == 1, "only the first qualifying range is the Intro");
+        CHECK(countOf(two, SegmentType::Intro) == 1 && has(two, SegmentType::Intro, 10.0, 40.0),
+              "only the first qualifying range is the Intro");
+        CHECK(has(two, SegmentType::Commercial, 60.0, 90.0), "…and the second survives as a Commercial");
 
         // THE OVERLAP CASE. In a short file one range satisfies both rules. Credits must win: typing it as
         // an Intro would make the chip offer to skip the entire rest of the episode.
         const QVector<Segment> overlap = parseEdl(QStringLiteral("30 100 3\n"), 120.0, 0.0);
-        CHECK(countOf(overlap, SegmentType::Credits) == 1 && countOf(overlap, SegmentType::Intro) == 0,
+        CHECK(has(overlap, SegmentType::Credits, 30.0, 100.0) && countOf(overlap, SegmentType::Intro) == 0,
               "a range satisfying both rules types as Credits, never Intro");
     }
 
@@ -110,6 +128,25 @@ int main(int argc, char** argv)
         CHECK(has(v, SegmentType::Intro, 45.0, 135.0), "\"Opening Credits\" is an Intro, not Credits");
         CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "the last chapter runs to duration");
         CHECK(countOf(v, SegmentType::Intro) == 1 && v.size() == 3, "\"Part One\" matches nothing");
+
+        // THE OTHER ORDERING TRAP. "End Titles" and "Closing Titles" — the conventional BBC/ITV chapter
+        // names — contain the bare intro token "titles". Explicit END cues are therefore tested BEFORE the
+        // intro phrases: typing one as an Intro hands the caller a skip covering the rest of the episode.
+        for (const char* endCue : { "End Titles", "Closing Titles", "End Credits", "Closing Credits" })
+        {
+            const QVector<Segment> v2 = fromChapters({ { 0.0,    QStringLiteral("Part One") },
+                                                       { 2700.0, QString::fromLatin1(endCue) } }, 2760.0);
+            CHECK(has(v2, SegmentType::Credits, 2700.0, 2760.0) && countOf(v2, SegmentType::Intro) == 0,
+                  (QByteArray("\"") + endCue + "\" is Credits, never an Intro at 2700s").constData());
+        }
+        // …while the openings, which the END cues must not swallow, still type as Intro.
+        for (const char* openCue : { "Opening Credits", "Opening Titles", "Theme", "Intro" })
+        {
+            const QVector<Segment> v2 = fromChapters({ { 0.0,  QString::fromLatin1(openCue) },
+                                                       { 90.0, QStringLiteral("Part One") } }, 2760.0);
+            CHECK(has(v2, SegmentType::Intro, 0.0, 90.0) && countOf(v2, SegmentType::Credits) == 0,
+                  (QByteArray("\"") + openCue + "\" is an Intro, not Credits").constData());
+        }
 
         // Word-boundary matching, not substring. Without it every documentary gets a phantom intro.
         const QVector<Segment> introduction =
@@ -154,6 +191,12 @@ int main(int argc, char** argv)
         CHECK(keyFor(QString(), QStringLiteral("D:/Movies/Blade Runner (1982).mkv")).seriesKey.isEmpty(),
               "a movie has no series key");
         CHECK(keyFor(QString(), QString()).seriesKey.isEmpty(), "nothing in, nothing out");
+
+        // SHAPE, not arity. "tmdb:tv:1396" is a real 3-part tile id; keying it would make seriesKey "tmdb"
+        // and collapse every TMDB-catalogued show into one learned bucket, offering one show's intro in
+        // another. An id that is not the "tt…:S:E" contract must leave the learn tier unavailable.
+        const Key tmdb = keyFor(QStringLiteral("tmdb:tv:1396"), QString());
+        CHECK(tmdb.seriesKey.isEmpty(), "a 3-part non-IMDB id yields NO series key");
     }
 
     // ---------------------------------------------------------------- 7. Tracker
