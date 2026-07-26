@@ -178,8 +178,18 @@ video. The nav-kit rule targets dialogs and top-level windows; the precedent fol
 
 ### 5. Learning flow
 
-An entry in the player's Esc menu (a `NavMenu` — modal is correct, the user invoked it): **"Mark intro…"**
-and **"Mark credits start"**.
+The **`I` key** during playback opens a "Skip segments" `NavMenu` (modal is correct here — the user invoked
+it) offering **"Mark intro start"** / **"Mark intro end"**, **"Mark credits start"**, and **"Forget marks for
+this season"**.
+
+**Not the Esc menu.** `showEscMenu` (`MainWindow.cpp:1163`) is the *app-level* pause menu raised from
+`HomeView::backRequested`; during playback Escape falls through to the unified `goBack()` and exits to home
+(`MainWindow.cpp:2054`). There is no player Esc menu to hang this on. `I` is free (the player binds only
+Left/Right/Up/Down/Enter/Space/F12/`[`/`]`) and is mnemonic; `M` was rejected because mute is the near-
+universal meaning of that key in a video player and MMV would be surprising to anyone who reached for it.
+
+Because a bare keystroke is undiscoverable, the Playback settings section also carries a static `info` row
+naming both keys — that is the row's whole job, so the feature is findable where its toggles already are.
 
 - Intro: "Mark intro start" at the current position, then the menu reopens offering "Mark intro end"; on the
   second mark the range is stored and `playerNotice` confirms *"Intro remembered for Season 2"*.
@@ -190,9 +200,9 @@ and **"Mark credits start"**.
 ### 6. Settings (both builders)
 
 `Settings::skipSegments()` (default **on**) and `Settings::skipSegmentsAuto()` (default **off** = show the
-chip). Added to the **Playback** section of the themed builder (`MainWindow.cpp:8208-8221`, where
-`pb.autonext` lives) **and** the classic QWidget Playback block (`:8633-8640`). A setting added only to the
-QWidget builder is unreachable for default users.
+chip), plus the `info` row naming the `S` and `I` keys. Added to the **Playback** section of the themed
+builder (`MainWindow.cpp:8208-8221`, where `pb.autonext` lives) **and** the classic QWidget Playback block
+(`:8633-8640`). A setting added only to the QWidget builder is unreachable for default users.
 
 ## Data flow
 
