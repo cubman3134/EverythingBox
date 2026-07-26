@@ -676,6 +676,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* stop = new QPushButton(tr("⏹"), mediaControls_);
     speedBtn_ = new QPushButton(tr("1×"), mediaControls_);
     auto* subsBtn = new QPushButton(tr("CC"), mediaControls_);
+    // The learn tier's pointer-and-remote entry point. Its only other way in is the literal 'I' key, which a TV
+    // remote does not have — so on this app's primary surface the whole marks feature was unreachable. In the bar
+    // it inherits the row's styling and, via playerButtons_ below, its Left/Right focus ring.
+    auto* marksBtn = new QPushButton(tr("✂"), mediaControls_);
     auto* shotBtn = new QPushButton(tr("📷"), mediaControls_);
     auto* castBtn = new QPushButton(tr("📡"), mediaControls_);
     auto* fullScreen = new QPushButton(tr("⛶"), mediaControls_);
@@ -687,6 +691,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stop->setToolTip(tr("Stop"));
     speedBtn_->setToolTip(tr("Playback speed (click to cycle; [ and ] to adjust)"));
     subsBtn->setToolTip(tr("Audio & subtitles — pick tracks, sync, size, load or download"));
+    marksBtn->setToolTip(tr("Skip segments (I) — mark this show's intro or credits"));
     shotBtn->setToolTip(tr("Screenshot (F12) — save the current frame"));
     castBtn->setToolTip(tr("Cast to a TV (Chromecast / DLNA)"));
     fullScreen->setToolTip(tr("Toggle full screen (F11)"));
@@ -715,12 +720,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     mc->addWidget(volume_);
     mc->addWidget(speedBtn_);
     mc->addWidget(subsBtn);
+    mc->addWidget(marksBtn);
     mc->addWidget(shotBtn);
     mc->addWidget(castBtn);
     mc->addWidget(fullScreen);
     mediaControls_->hide();
     // Order for Left/Right arrow navigation across the transport (chapter buttons skipped while hidden).
-    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn, shotBtn, castBtn, fullScreen };
+    // (skipChip_ joins and leaves this ring with its own visibility — see showSkipChip/hideSkipChip.)
+    playerButtons_ = { prevChap, rewind, playPause, fastFwd, nextChap, stop, muteBtn_, speedBtn_, subsBtn,
+                       marksBtn, shotBtn, castBtn, fullScreen };
 
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
@@ -1052,6 +1060,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(fullScreen, &QPushButton::clicked, this, [this] { toggleFullScreen(); revealMediaControls(); });
     connect(speedBtn_, &QPushButton::clicked, this, [this] { cyclePlaybackSpeed(+1); revealMediaControls(); });
     connect(subsBtn, &QPushButton::clicked, this, [this] { showSubtitleMenu(); });
+    connect(marksBtn, &QPushButton::clicked, this, [this] { showSegmentMarksMenu(); });   // same menu the 'I' key opens
     connect(shotBtn, &QPushButton::clicked, this, [this] { captureVideoScreenshot(); revealMediaControls(); });
     connect(castBtn, &QPushButton::clicked, this, [this, castBtn] { showCastMenu(castBtn); });
     connect(player_, &MpvWidget::endReached, this, &MainWindow::onTrackEnded);
@@ -2233,6 +2242,9 @@ void MainWindow::applyFormFactorWidgets()
     for (QPushButton* b : playerButtons_) if (b) b->setMinimumSize(floorSz);
     if (videoBack_)     videoBack_->setMinimumSize(floorSz);
     if (streamIssueBtn_) streamIssueBtn_->setMinimumSize(floorSz);
+    // Set here and not via the playerButtons_ loop above: the chip joins that ring only while it is visible, so
+    // it is usually absent when the form factor changes — and it is now remote-focusable, so it needs the floor.
+    if (skipChip_)      skipChip_->setMinimumSize(floorSz);
     if (seek_) seek_->setMinimumHeight(hit); // desktop: 0 (no change); mobile: a grabbable track
 
     // Split-screen pane bars (only if the split view has been built): floor the pause/close hit targets.
@@ -2846,7 +2858,13 @@ void MainWindow::resetSegmentState()
     segTracker_.reset({});
     segGathered_ = false;
     hideSkipChip();         // the previous file's offer dies with it — never inherited by the new one
+    skipChipSeg_ = {};      // …including the range it was holding: stale per-playback state, cleared like the rest
     segIntroStart_ = -1.0;  // and so does a half-finished mark (a start with no end yet)
+    // The marks menu reads BOTH of these live ("where am I now", "how long is this file"), and mpv reports
+    // neither until well after the open. Left standing, pressing I in that window marked a range built from the
+    // PREVIOUS file's position and length — against the new file's season.
+    duration_ = 0.0;
+    lastPos_  = 0.0;
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
 }
@@ -10378,15 +10396,29 @@ void MainWindow::gatherSegments()
         }
     }
 
-    // 2. Named chapters. 3. What the user taught us for this season.
+    // 2. Named chapters. 3. What the user taught us — SPLIT in two, because the two halves rank differently
+    // (see MediaSegments::resolve): a mark made against THIS season is an explicit correction of what the
+    // detectors offered and outranks them; a mark inherited from a neighbouring season is a guess and stays
+    // below this file's own chapters. lookup() returns the season's own rows first and fills the types it is
+    // silent about from the nearest other season, so "inherited" is exactly lookup() minus the exact rows.
     const QVector<MediaSegments::Segment> chapters =
         MediaSegments::fromChapters(player_->chapters(), duration_);
-    const QVector<MediaSegments::Segment> learned =
-        segStore_ ? segStore_->lookup(segCtx_.seriesKey, segCtx_.season) : QVector<MediaSegments::Segment>{};
+    const QVector<MediaSegments::Segment> learnedExact =
+        segStore_ ? segStore_->lookupExact(segCtx_.seriesKey, segCtx_.season) : QVector<MediaSegments::Segment>{};
+    QVector<MediaSegments::Segment> learnedInherited;
+    if (segStore_)
+        for (const MediaSegments::Segment& s : segStore_->lookup(segCtx_.seriesKey, segCtx_.season))
+        {
+            bool exact = false;
+            for (const MediaSegments::Segment& e : learnedExact) if (e.type == s.type) { exact = true; break; }
+            if (!exact) learnedInherited.push_back(s);
+        }
 
-    const QVector<MediaSegments::Segment> resolved = MediaSegments::resolve(edl, chapters, learned);
-    mwLog(QStringLiteral("segments: armed %1 (edl %2, chapters %3, learned %4) for \"%5\" s%6")
-              .arg(resolved.size()).arg(edl.size()).arg(chapters.size()).arg(learned.size())
+    const QVector<MediaSegments::Segment> resolved =
+        MediaSegments::resolve(learnedExact, edl, chapters, learnedInherited);
+    mwLog(QStringLiteral("segments: armed %1 (marked %2, edl %3, chapters %4, inherited %5) for \"%6\" s%7")
+              .arg(resolved.size()).arg(learnedExact.size()).arg(edl.size()).arg(chapters.size())
+              .arg(learnedInherited.size())
               .arg(segCtx_.seriesKey.isEmpty() ? QStringLiteral("—") : segCtx_.seriesKey).arg(segCtx_.season));
     segTracker_.reset(resolved);
 }
@@ -10417,9 +10449,14 @@ void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
 // auto path already falls back to the seek for exactly that reason. Deliberately NOT gated on
 // Settings::autoplayNextEpisode() the way the auto path is — pressing the chip IS the request, and a user who
 // turned automatic advance off has not asked to be refused a manual one.
+// The nextEpPending_ term is the same one tryPlayNextEpisode() applies first: a hand-off already in flight owns
+// this file's ending and the call would early-return. Without it the button reads "Next Episode", the press does
+// nothing at all, and the user is left pressing a dead control under an "Up next…" notice — precisely the failure
+// a single shared predicate exists to make impossible. With it, the chip falls back to "Skip Credits" and seeks,
+// which is both honest and useful while the resolve is still running.
 bool MainWindow::skipChipHandsOff(const MediaSegments::Segment& seg) const
 {
-    return seg.type == MediaSegments::SegmentType::Credits && canPlayNextEpisode();
+    return seg.type == MediaSegments::SegmentType::Credits && !nextEpPending_ && canPlayNextEpisode();
 }
 
 void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
@@ -10433,6 +10470,11 @@ void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
     skipChip_->show();                // before positionMediaControls: it lays out only a VISIBLE chip
     positionMediaControls();
     skipChip_->raise();
+    // Join the Left/Right transport ring for as long as it is up. This app's primary surface is a TV remote,
+    // which has no 'S' key and cannot click: without this the chip took focus ONLY from a mouse, so the whole
+    // skip affordance was dark on a remote. Appended (never inserted) so the transport's own order is unchanged,
+    // and removed again in hideSkipChip so stepPlayerFocus can never walk onto a hidden widget.
+    if (!playerButtons_.contains(skipChip_)) playerButtons_.push_back(skipChip_);
     skipChipTimer_->start(kChipMs);
 }
 
@@ -10440,8 +10482,14 @@ void MainWindow::hideSkipChip()
 {
     if (!skipChip_) return;
     skipChipTimer_->stop();
-    // Do not strand focus on a widget that is about to vanish.
-    if (skipChip_->hasFocus() && videoBack_) videoBack_->setFocus(Qt::OtherFocusReason);
+    playerButtons_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
+    // Do not strand focus on a widget that is about to vanish — and do not MOVE it either. Parking it on
+    // videoBack_ was unsound because videoBack_ is usually HIDDEN by now (the chip's 8s outlives the chrome's
+    // 4s, and the hover filter deliberately does not re-reveal the chrome), so focus landed on an invisible
+    // QAbstractButton that keyPressEvent then click()s on Enter — the user pressing Enter for play/pause exited
+    // the player instead. hideMediaControls() and NavOverlay::dismiss() both already refuse to do this; follow
+    // hideMediaControls and simply clear, so the next arrow press re-reveals the chrome and re-enters the ring.
+    if (skipChip_->hasFocus()) skipChip_->clearFocus();
     skipChip_->hide();
 }
 
@@ -10463,7 +10511,24 @@ void MainWindow::showSegmentMarksMenu()
     if (!player_ || stack_->currentWidget() != playerPage_) return;
 
     const bool canLearn = !segCtx_.seriesKey.isEmpty();
-    const double at = lastPos_;              // set in onPosition — MpvWidget exposes no position accessor
+    // EVERYTHING the callback needs is pinned HERE, at the moment the menu opens — the commit-a94e995 shape from
+    // the subtitle picker ("pin the cache key at request time"). A NavOverlay grabs the keyboard but does NOT
+    // pause mpv, so the file underneath keeps running while the menu sits open and can be REPLACED under it: at
+    // EOF with autoplay on, the hand-off opens the next episode, resetSegmentState() re-arms segCtx_ for the new
+    // season and onDuration overwrites duration_. A callback reading those live then wrote a season-1 timing
+    // against SEASON 2 — and SegmentStore::lookup would inherit that wrong range into every unmarked season of
+    // the show. `at` was already pinned; seriesKey, season and duration are the rest of the same epoch.
+    const QString  seriesKey = segCtx_.seriesKey;
+    const int      season    = segCtx_.season;
+    const double   duration  = duration_;
+    const double   at        = lastPos_;     // set in onPosition — MpvWidget exposes no position accessor
+    // Pinning alone still marks against an episode that is no longer playing, which is not what the user asked
+    // for either. nextEpGen_ is bumped by resetSegmentState() on every open, so a mismatch is exactly "the
+    // playback epoch changed while this menu was up" — drop the whole callback and say so.
+    const int      gen       = nextEpGen_;
+    // The menu is reachable (and marks are stored) even with skipping switched off, so the notices must not
+    // claim an effect the user will not get. Pinned like the rest: the setting can change under an open menu.
+    const bool     skipOn    = Settings::skipSegments();
 
     QStringList rows;
     rows << (canLearn ? tr("Mark intro start here") : tr("Mark intro — unavailable, no series information"))
@@ -10471,13 +10536,24 @@ void MainWindow::showSegmentMarksMenu()
          << (canLearn ? tr("Mark credits start here") : tr("Mark credits — unavailable"))
          << tr("Forget marks for this season");
 
-    new NavMenu(tr("Skip segments"), rows, [this, canLearn, at](int row) {
+    new NavMenu(tr("Skip segments"), rows,
+                [this, canLearn, at, seriesKey, season, duration, gen, skipOn](int row) {
         if (row < 0 || !segStore_) return;
+        if (gen != nextEpGen_)
+        {
+            notifier_->playerNotice(tr("The episode changed while the menu was open, so nothing was marked."), 4000);
+            return;
+        }
         if (!canLearn)
         {
             notifier_->playerNotice(tr("No series information for this file, so there is nothing to mark against."), 4000);
             return;
         }
+        // Appended to every SUCCESS notice: with skipping off the mark is stored and inherited correctly but is
+        // never armed (gatherSegments returns before the tracker), so "Intro remembered" on its own promises
+        // something that visibly does not happen.
+        const QString offNote = skipOn ? QString()
+                                       : tr(" Skipping is turned off in Settings, so nothing will be skipped yet.");
         // Every put()/forget() below is pre-validated here (non-empty seriesKey via canLearn, a forwards range via
         // the guards), so the store rejecting the INPUT is already impossible: a false return can only mean the
         // save failed. The mark is still live in memory for this playback — say exactly that rather than claim a
@@ -10492,28 +10568,43 @@ void MainWindow::showSegmentMarksMenu()
         {
             if (segIntroStart_ < 0.0)
             { notifier_->playerNotice(tr("Mark the intro's START first."), 3000); return; }
+            // BEHIND the start and merely CLOSE to it are different mistakes and need different sentences: the
+            // shared "too close to the intro's start" told a user who had seeked backwards to move further from
+            // a point they were already before, which is unfollowable advice.
+            if (at <= segIntroStart_)
+            { notifier_->playerNotice(tr("That is before the intro's start — mark the end AFTER it."), 3000); return; }
             if (at - segIntroStart_ < MediaSegments::kMinSegmentS)
             { notifier_->playerNotice(tr("That is too close to the intro's start to be an intro."), 3000); return; }
-            const bool ok = segStore_->put(segCtx_.seriesKey, segCtx_.season,
+            const bool ok = segStore_->put(seriesKey, season,
                                            { segIntroStart_, at, MediaSegments::SegmentType::Intro });
             segIntroStart_ = -1.0;
-            notifier_->playerNotice(ok ? tr("Intro remembered for season %1.").arg(segCtx_.season)
-                                       : tr("Couldn't save the intro mark — it applies to this playback only."), 3000);
+            notifier_->playerNotice((ok ? tr("Intro remembered for season %1.").arg(season)
+                                        : tr("Couldn't save the intro mark — it applies to this playback only."))
+                                    + offNote, 3000);
             regatherSegments();    // the new mark applies to the rest of THIS episode too
             return;
         }
         if (row == 2)
         {
-            if (duration_ - at < MediaSegments::kMinSegmentS)
+            if (duration - at < MediaSegments::kMinSegmentS)
             { notifier_->playerNotice(tr("That is too close to the end of the file to mark the credits."), 3000); return; }
-            const bool ok = segStore_->put(segCtx_.seriesKey, segCtx_.season,
-                                           { at, duration_, MediaSegments::SegmentType::Credits });
-            notifier_->playerNotice(ok ? tr("Credits remembered for season %1.").arg(segCtx_.season)
-                                       : tr("Couldn't save the credits mark — it applies to this playback only."), 3000);
+            // …and the LOWER bound the learned tier otherwise has none of. The detector tiers get one for free
+            // (kCreditsTailS is measured back from the end); "mark credits start here" takes whatever position
+            // the user happens to be at, so one mis-press at 2:00 of a 45-minute episode stored {120, 2700} as
+            // Credits — which lookup() then inherits into every unmarked season, making every episode of the
+            // show jump from 2:00 to the end with auto-skip on. See kCreditsEarliestFrac for the threshold.
+            if (duration > 0.0 && at < duration * MediaSegments::kCreditsEarliestFrac)
+            { notifier_->playerNotice(tr("That is too early in the episode to be the credits — play on to where they "
+                                         "actually start, then mark it."), 4000); return; }
+            const bool ok = segStore_->put(seriesKey, season,
+                                           { at, duration, MediaSegments::SegmentType::Credits });
+            notifier_->playerNotice((ok ? tr("Credits remembered for season %1.").arg(season)
+                                        : tr("Couldn't save the credits mark — it applies to this playback only."))
+                                    + offNote, 3000);
             regatherSegments();
             return;
         }
-        const bool ok = segStore_->forget(segCtx_.seriesKey, segCtx_.season);
+        const bool ok = segStore_->forget(seriesKey, season);
         segIntroStart_ = -1.0;     // a half-finished mark against marks that no longer exist is nonsense
         notifier_->playerNotice(ok ? tr("Marks for this season forgotten.")
                                    : tr("Marks cleared for this playback, but they couldn't be removed from disk."), 3000);
@@ -10529,6 +10620,13 @@ void MainWindow::regatherSegments()
 {
     segGathered_ = false;
     gatherSegments();
+    // …and re-apply the ONE piece of tracker state a re-arm would otherwise throw away. gatherSegments() calls
+    // Tracker::reset(), which clears consumed_ — so without this, marking the credits while still sitting inside
+    // the intro re-offers the intro the user dismissed a moment ago (intros run 60-90s and the chip lives 8s, so
+    // the two overlap easily), and with auto-skip ON the freshly armed range fires on the very next position tick
+    // instead: marking the credits from inside them would seek straight to the end of the file. Nothing the user
+    // is ALREADY INSIDE may be offered by a re-gather; ranges still ahead are untouched and fire normally.
+    segTracker_.consumeContaining(lastPos_);
 }
 
 void MainWindow::onDuration(double seconds)

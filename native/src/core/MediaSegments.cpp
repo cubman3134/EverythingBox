@@ -164,15 +164,18 @@ QVector<MediaSegments::Segment> MediaSegments::fromChapters(const QVector<Chapte
     return out;
 }
 
-QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& edl,
+QVector<MediaSegments::Segment> MediaSegments::resolve(const QVector<Segment>& exactLearned,
+                                                       const QVector<Segment>& edl,
                                                        const QVector<Segment>& chapters,
-                                                       const QVector<Segment>& learned)
+                                                       const QVector<Segment>& inheritedLearned)
 {
     QVector<Segment> out;
     for (const SegmentType t : { SegmentType::Intro, SegmentType::Credits,
                                  SegmentType::Recap, SegmentType::Commercial })
     {
-        for (const QVector<Segment>* tier : { &edl, &chapters, &learned })
+        // See the header: an explicit mark for THIS season outranks every detector; a mark inherited from
+        // another season is only a guess and stays below all of them.
+        for (const QVector<Segment>* tier : { &exactLearned, &edl, &chapters, &inheritedLearned })
         {
             bool found = false;
             for (const Segment& s : *tier) if (s.type == t) { out.push_back(s); found = true; }
@@ -251,4 +254,18 @@ std::optional<MediaSegments::Segment> MediaSegments::Tracker::onPosition(double 
         }
     }
     return hit;
+}
+
+int MediaSegments::Tracker::consumeContaining(double t)
+{
+    int n = 0;
+    for (int i = 0; i < segs_.size(); ++i)
+    {
+        const Segment& s = segs_[i];
+        const size_t ix = static_cast<size_t>(i);
+        // The SAME containment test onPosition uses, so "already inside" here and "would be offered" there can
+        // never disagree — including the half-open end, so a position exactly at s.end is not inside anything.
+        if (!consumed_[ix] && t >= s.start && t < s.end) { consumed_[ix] = true; ++n; }
+    }
+    return n;
 }
