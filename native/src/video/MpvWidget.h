@@ -4,6 +4,7 @@
 #pragma once
 #include <QString>
 #include <QVector>
+#include "../core/MediaSegments.h"   // MediaSegments::Chapter — declared in core so it needs no libmpv
 #include <mpv/client.h>
 #ifdef Q_OS_IOS
 // iOS: OpenGL ES context creation fails in the simulator (and EAGL is deprecated on device), so render
@@ -42,6 +43,11 @@ public:
 
     // One audio or subtitle track in the current file, for building a picker menu.
     struct Track { int id = 0; QString title; QString lang; bool selected = false; };
+    // The current file's chapters, with their titles — the raw material for chapter-derived skip segments.
+    // (nextChapter()/prevChapter() below are relative jumps and cannot answer "is chapter 2 called Intro?".)
+    QVector<MediaSegments::Chapter> chapters() const;
+    // Container frame rate, 0 when unknown. Only needed to convert a Kodi .edl's "#<frame>" time form.
+    double fps() const;
     QVector<Track> subtitleTracks() const;    // sub tracks in the current file (empty if none)
     QVector<Track> audioTracks() const;       // audio tracks in the current file (empty if none)
     void setSubtitleTrack(int id);            // select subtitle track id; id < 0 turns subtitles off

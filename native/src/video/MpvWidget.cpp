@@ -521,6 +521,39 @@ static QVector<MpvWidget::Track> tracksOfType(mpv_handle* mpv, const char* wantT
 QVector<MpvWidget::Track> MpvWidget::subtitleTracks() const { return tracksOfType(mpv, "sub"); }
 QVector<MpvWidget::Track> MpvWidget::audioTracks() const { return tracksOfType(mpv, "audio"); }
 
+// The current file's chapters WITH their titles — chapterCountChanged only ever carried the count, which
+// cannot tell a caller that chapter 2 is called "Opening Credits". Indexed-property reads, exactly like
+// tracksOfType above.
+QVector<MediaSegments::Chapter> MpvWidget::chapters() const
+{
+    QVector<MediaSegments::Chapter> out;
+    if (!mpv) return out;
+    int64_t count = 0;
+    mpv_get_property(mpv, "chapter-list/count", MPV_FORMAT_INT64, &count);
+    for (int64_t i = 0; i < count; ++i)
+    {
+        char key[80];
+        auto field = [&](const char* name) {
+            std::snprintf(key, sizeof key, "chapter-list/%lld/%s", static_cast<long long>(i), name);
+            return key;
+        };
+        MediaSegments::Chapter c;
+        mpv_get_property(mpv, field("time"), MPV_FORMAT_DOUBLE, &c.time);
+        char* ti = mpv_get_property_string(mpv, field("title"));
+        if (ti) { c.title = QString::fromUtf8(ti); mpv_free(ti); }
+        out.push_back(c);
+    }
+    return out;
+}
+
+double MpvWidget::fps() const
+{
+    if (!mpv) return 0.0;
+    double f = 0.0;
+    mpv_get_property(mpv, "container-fps", MPV_FORMAT_DOUBLE, &f);
+    return f > 0.0 ? f : 0.0;
+}
+
 void MpvWidget::setSubtitleTrack(int id)
 {
     if (!mpv) return;

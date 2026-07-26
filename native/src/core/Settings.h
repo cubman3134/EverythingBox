@@ -22,6 +22,14 @@ namespace Settings
     bool autoplayNextEpisode();
     void setAutoplayNextEpisode(bool on);
 
+    // Skip an episode's intro / end credits when one is known (default on). skipSegmentsAuto seeks silently
+    // instead of offering the on-screen chip (default off — a wrong learned range is recoverable when it is
+    // a button you ignored, and invisible when it is a seek that already happened).
+    bool skipSegments();
+    void setSkipSegments(bool on);
+    bool skipSegmentsAuto();
+    void setSkipSegmentsAuto(bool on);
+
     // Parental PIN (stored as a salted hash, never in the clear). Gates leaving a restricted "kids" profile.
     bool hasParentalPin();
     void setParentalPin(const QString& pin); // empty pin clears it
