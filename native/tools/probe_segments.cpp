@@ -282,9 +282,89 @@ int main(int argc, char** argv)
         CHECK(has(both, SegmentType::Intro, 12.0, 42.0), "the same type overwrites in place");
         CHECK(has(both, SegmentType::Credits, 900.0, 1000.0), "the new type is added");
 
-        // forget clears the season but leaves the series fallback intact.
+        // ---- The fallback is PER TYPE, exactly like resolve(). THE bug this pins: season 1 is inheriting an
+        // intro skip that works; the user then marks season 1's credits. Whole-list fallback sees a non-empty
+        // season entry, returns the Credits alone, and the intro skip that worked five minutes ago silently
+        // stops — put() never clobbered it in storage, lookup() just made it unreachable, which to the user
+        // is the same thing. Each type must be answered independently: the season's own row when it has one,
+        // the series-level row for every type it is silent about.
+        {
+            SegmentStore mix(QDir(tmp.path()).filePath(QStringLiteral("mix.json")));
+            mix.load();
+            mix.put(QStringLiteral("tt7"), 1, Segment{ 10.0, 40.0, SegmentType::Intro });
+            mix.put(QStringLiteral("tt7"), 2, Segment{ 12.0, 42.0, SegmentType::Intro });    // bare Intro moves on
+            mix.put(QStringLiteral("tt7"), 2, Segment{ 900.0, 1000.0, SegmentType::Credits });
+            const QVector<Segment> perType = mix.lookup(QStringLiteral("tt7"), 1);
+            CHECK(perType.size() == 2, "a non-empty season entry does not suppress the types it lacks");
+            CHECK(has(perType, SegmentType::Intro, 10.0, 40.0), "the season's OWN Intro beats the fallback's");
+            CHECK(has(perType, SegmentType::Credits, 900.0, 1000.0), "…and the missing type is still inherited");
+
+            // The reverse direction, which is the failure verbatim: mark season 3's credits, keep the intro.
+            mix.put(QStringLiteral("tt7"), 3, Segment{ 800.0, 900.0, SegmentType::Credits });
+            const QVector<Segment> s3 = mix.lookup(QStringLiteral("tt7"), 3);
+            CHECK(has(s3, SegmentType::Intro, 12.0, 42.0), "marking credits does not retire an INHERITED intro");
+            CHECK(has(s3, SegmentType::Credits, 800.0, 900.0), "…while the freshly marked credits win");
+        }
+
+        // ---- forget, one season only: the mark is genuinely GONE. put() wrote the bare series key too, so
+        // dropping just "tt1|s2" would leave a byte-identical copy that lookup's fallback resurrects — a
+        // wrong range the user can never clear, because no public call sequence reaches that copy.
         re.forget(QStringLiteral("tt1"), 2);
-        CHECK(re.lookup(QStringLiteral("tt1"), 2).size() > 0, "forget falls back to the series entry");
+        CHECK(re.lookup(QStringLiteral("tt1"), 2).isEmpty(), "forgetting the only marked season leaves NOTHING");
+        CHECK(re.lookup(QStringLiteral("tt1"), 9).isEmpty(), "…and there is no series-level ghost to inherit");
+        {   // the season key itself is gone from the file, not merely shadowed by an empty lookup
+            QFile f(path);
+            CHECK(f.open(QIODevice::ReadOnly), "re-read the store file");
+            const QByteArray raw = f.readAll();
+            CHECK(!raw.contains("tt1|s2"), "the season key is erased on disk, not just emptied in memory");
+            CHECK(!raw.contains("900"), "and the forgotten range is nowhere in the file");
+        }
+        SegmentStore reloaded(path);
+        reloaded.load();
+        CHECK(reloaded.lookup(QStringLiteral("tt1"), 2).isEmpty(), "the forget survives a reload");
+
+        // ---- forget, two marked seasons: season 1 goes and season 1 then INHERITS season 2's mark. That is
+        // the documented fallback doing its job — season 1 is now unmarked — and is distinguishable from the
+        // bug above only because the inherited range is season 2's, not the one just deleted.
+        const QString twoPath = QDir(tmp.path()).filePath(QStringLiteral("two.json"));
+        {
+            SegmentStore two(twoPath);
+            two.load();
+            CHECK(two.put(QStringLiteral("tt3"), 1, Segment{ 10.0, 40.0, SegmentType::Intro }), "put reports success");
+            two.put(QStringLiteral("tt3"), 2, Segment{ 20.0, 50.0, SegmentType::Intro });
+        }
+        SegmentStore two(twoPath);
+        two.load();                                        // via disk, so the "src" field is exercised
+        CHECK(two.forget(QStringLiteral("tt3"), 1), "forget reports success");
+        const QVector<Segment> inherited = two.lookup(QStringLiteral("tt3"), 1);
+        CHECK(inherited.size() == 1 && has(inherited, SegmentType::Intro, 20.0, 50.0),
+              "a forgotten season inherits the OTHER season's mark");
+        CHECK(!has(inherited, SegmentType::Intro, 10.0, 40.0), "…never the range that was just forgotten");
+        const QVector<Segment> s2Still = two.lookup(QStringLiteral("tt3"), 2);
+        CHECK(s2Still.size() == 1 && has(s2Still, SegmentType::Intro, 20.0, 50.0), "season 2 is untouched");
+
+        // ---- Rows from a file written before provenance existed carry no "src". They load as season 0, so
+        // no forget matches them: an unknown origin is never guessed at and deleted.
+        const QString oldPath = QDir(tmp.path()).filePath(QStringLiteral("old.json"));
+        {
+            QFile f(oldPath);
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "write the pre-provenance file");
+            f.write("{\"tt5\":[{\"s\":10,\"e\":40,\"t\":\"intro\"}],"
+                    "\"tt5|s1\":[{\"s\":10,\"e\":40,\"t\":\"intro\"}]}");
+        }
+        SegmentStore legacy(oldPath);
+        legacy.load();
+        CHECK(has(legacy.lookup(QStringLiteral("tt5"), 1), SegmentType::Intro, 10.0, 40.0),
+              "a file with no \"src\" still loads");
+        legacy.forget(QStringLiteral("tt5"), 1);
+        CHECK(has(legacy.lookup(QStringLiteral("tt5"), 1), SegmentType::Intro, 10.0, 40.0),
+              "an unknown-provenance fallback row survives forget rather than being guessed away");
+
+        // ---- A save that cannot happen is reported, not swallowed: this file is the only copy of ranges the
+        // user hand-marked, so a caller must be able to tell the mark did not stick.
+        SegmentStore unwritable(QDir(tmp.path()).filePath(QStringLiteral("no/such/dir/segments.json")));
+        CHECK(!unwritable.put(QStringLiteral("tt6"), 1, Segment{ 10.0, 40.0, SegmentType::Intro }),
+              "put returns false when the file cannot be written");
 
         // A season of 0 (unknown) keys the bare series entry, not "|s0".
         CHECK(SegmentStore::keyFor(QStringLiteral("tt1"), 0) == QStringLiteral("tt1"),
@@ -315,6 +395,17 @@ int main(int argc, char** argv)
         // next load — the round-trip above cannot see it, a collision only shows up as a lost token.
         CHECK(tokens.size() == 4, "each type has its own token");
 
+        // …and the LITERALS, because every assertion above is expressed through typeToString itself and so
+        // pins only the bijection, not the wire format. Renaming a token in typeToString and typeFromString
+        // together — precisely what a tidy-up refactor does — keeps all of them green while orphaning every
+        // file already on disk: load() skips the now-unknown token and every learned mark vanishes silently,
+        // with no error anywhere. MediaSegments.h calls these "Stable tokens"; these four lines are what
+        // makes that true.
+        CHECK(typeToString(SegmentType::Intro)      == QStringLiteral("intro"),      "the Intro token is \"intro\"");
+        CHECK(typeToString(SegmentType::Credits)    == QStringLiteral("credits"),    "the Credits token is \"credits\"");
+        CHECK(typeToString(SegmentType::Recap)      == QStringLiteral("recap"),      "the Recap token is \"recap\"");
+        CHECK(typeToString(SegmentType::Commercial) == QStringLiteral("commercial"), "the Commercial token is \"commercial\"");
+
         // Unknown text is an absence, never a default. If it fell back to Intro, a token from a newer build
         // would come back as a skippable opening at whatever timestamp that other segment happened to hold.
         CHECK(!typeFromString(QStringLiteral("sponsor")).has_value(), "an unknown token is nullopt, not Intro");
@@ -328,8 +419,10 @@ int main(int argc, char** argv)
         {
             QFile f(path);
             CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "write the forward-compat file");
+            // The token is HARDCODED, not typeToString(Intro): this fixture stands in for a file already on
+            // a user's disk, so it must break if the token is renamed — that is the whole point of it.
             f.write("{\"tt9|s1\":["
-                    "{\"s\":10,\"e\":40,\"t\":\"" + typeToString(SegmentType::Intro).toUtf8() + "\"},"
+                    "{\"s\":10,\"e\":40,\"t\":\"intro\"},"
                     "{\"s\":500,\"e\":600,\"t\":\"sponsor\"}]}");
         }
         SegmentStore newer(path);
