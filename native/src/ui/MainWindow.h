@@ -530,6 +530,10 @@ private:
     // can't re-open an episode after the user moved on. Both are cleared/bumped in resetSegmentState().
     bool nextEpPending_ = false;
     int  nextEpGen_ = 0;
+    // The gate both async resolve callbacks pass through. Answers "is this result still ours?" AND, when it is
+    // not, unlatches + hides the "Up next…" notice — a dropped callback is the hand-off dying, and nothing else
+    // in this file would ever clear either one before the next open.
+    bool nextEpHandoffStillOurs(int gen);
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
 
     // Intro/credits skipping. A SEPARATE context from subCtx_ on purpose: subCtx_ is the subtitle system's
