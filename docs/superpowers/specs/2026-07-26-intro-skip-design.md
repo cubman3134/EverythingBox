@@ -42,7 +42,7 @@ fingerprints server-side as a scheduled batch job over the library, and MMV is a
 
 | Question | Decision |
 |---|---|
-| Detection | Three providers, precedence **`.edl` sidecar → chapters → learned** |
+| Detection | Three providers. Precedence as designed was **`.edl` → chapters → learned**; **as shipped it is `exact-season learned` → `.edl` → chapters → `inherited learned`** — see "Tier order, revised during implementation" below |
 | Action | A timed on-screen chip; a setting flips it to silent auto-skip |
 | Types acted on in v1 | **Intro and Credits** (Recap/Commercial are stored, not acted on) |
 | Learned-range scope | **Per season, falling back to the series' most recent mark** |
@@ -78,9 +78,12 @@ namespace MediaSegments
     // --- combination ---
     // Per-TYPE precedence: for each type, the first list that supplies one wins. NOT whole-list precedence,
     // which would let an .edl carrying only a commercial break suppress a chapter-derived Intro.
-    QVector<Segment> resolve(const QVector<Segment>& edl,
+    // Tier order revised during implementation — see the section below on why exactLearned is FIRST and
+    // inheritedLearned is LAST.
+    QVector<Segment> resolve(const QVector<Segment>& exactLearned,
+                             const QVector<Segment>& edl,
                              const QVector<Segment>& chapters,
-                             const QVector<Segment>& learned);
+                             const QVector<Segment>& inheritedLearned);
 
     // --- identity ---
     // imdbStreamId ("tt…:S:E") first; else the filename via LocalLibrary::parseFile + showKeyFor.
@@ -139,15 +142,28 @@ public:
     explicit SegmentStore(QString filePath);
     void load();  void save() const;
 
-    // "<seriesKey>|s<N>" first, then bare "<seriesKey>". Empty when nothing is learned.
+    // This season's marks, else the DERIVED nearest-season fallback. Empty when nothing is learned.
     QVector<MediaSegments::Segment> lookup(const QString& seriesKey, int season) const;
-    // Writes BOTH the season key and the bare series key, so the next unmarked season inherits this mark.
-    void put(const QString& seriesKey, int season, const MediaSegments::Segment&);
-    void forget(const QString& seriesKey, int season);
+    // Only this season's marks, never the fallback — what makes an explicit mark outrank a detector.
+    QVector<MediaSegments::Segment> lookupExact(const QString& seriesKey, int season) const;
+    // Writes exactly ONE key. See below: the original "write a bare copy too" design broke forget().
+    bool put(const QString& seriesKey, int season, const MediaSegments::Segment&);
+    bool forget(const QString& seriesKey, int season);
 };
 ```
 `put` replaces any existing segment **of the same type** at that scope and leaves other types alone, so
-marking credits never clobbers a learned intro.
+marking credits never clobbers a learned intro. Both mutators return `false` on a failed disk write; the
+caller reports that rather than claiming the mark was saved.
+
+**Revised during implementation — the store writes one key and derives the fallback.** The original design
+had `put` write both the season key *and* a bare series key meaning "most recent mark". That made `forget`
+impossible: it removed only the season key, and `lookup` served the bare copy straight back, so there was no
+call sequence that cleared a mark. A first attempt tagged each row with the season that wrote it; that in
+turn regressed inheritance, because forgetting the season that happened to write last wiped the entry other
+seasons were relying on. The shipped store keeps **only** `"<seriesKey>|s<N>"` entries and computes the
+fallback at lookup time from the **nearest** season — largest below the requested one, else smallest above,
+with a season-unknown mark ranking last. Nearest rather than highest because if seasons 1-3 share an opening
+and season 5 changed it, an unmarked season 2 should inherit season 1's mark, not season 5's.
 
 ### 3. `MpvWidget::chapters()`
 
@@ -204,6 +220,28 @@ chip), plus the `info` row naming the `S` and `I` keys. Added to the **Playback*
 builder (`MainWindow.cpp:8208-8221`, where `pb.autonext` lives) **and** the classic QWidget Playback block
 (`:8633-8640`). A setting added only to the QWidget builder is unreachable for default users.
 
+### Tier order, revised during implementation
+
+The design above put the learned tier **last**, on the reasoning that the cheapest and most exact sources
+should win. Implementation review showed that makes a user's own mark **inert on any chaptered file**, while
+the app reports it as saved: the chip offers a chapter-derived intro, the user judges the range wrong and
+marks their own, the notice says "Intro remembered for season 1", the re-resolve still returns the chapter
+range — and nothing they can see changes. Worse, they are then re-offered the same wrong range.
+
+The shipped order splits the learned tier in two:
+
+```
+exact-season learned  →  .edl  →  chapters  →  inherited learned
+```
+
+- A mark **for the season being watched** outranks everything. It is the most explicit signal available, it
+  is the only tier the user can correct, and it is always aimed at a specific detector's mistake.
+- A mark **inherited** from another season via the nearest-season fallback stays last, so one season's
+  hand-mark can never override another season's perfectly good chapters.
+
+`SegmentStore::lookupExact` (this season only) and `lookup` (with fallback) back the split; the caller
+derives the inherited set as "lookup minus the types lookupExact supplies".
+
 ## Data flow
 
 ```
@@ -237,7 +275,8 @@ streams have no sidecar. Gathering happens once per file load, not per tick.
 | Chip ignored until it expires | Hides; does not nag again for that segment this playback |
 | Backward seek to before a consumed segment | Re-arms it, so scrubbing back and replaying re-offers the skip |
 | Auto-skip on a wrong learned range | `playerNotice` names what was skipped, so the cause is visible and the setting is findable |
-| Two providers disagree | Per-**type** precedence (`.edl` > chapters > learned); never a merge |
+| Two providers disagree | Per-**type** precedence (exact-season learned > `.edl` > chapters > inherited learned); never a merge |
+| A user marks a range on a file that already has chapters | The mark wins — see "Tier order, revised during implementation" |
 | Credits chip with no next episode | `tryPlayNextEpisode` already handles the finale case with its own notice |
 
 ## Verification
