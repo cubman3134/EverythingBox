@@ -2,9 +2,14 @@
 // series-key derivation, and the tracker's enter/consume/re-arm behaviour. Pure — no player, no video file.
 // Prints SEGMENTS-OK on success; any failure prints SEGMENTS-FAIL <what> and exits non-zero.
 #include "MediaSegments.h"
+#include "SegmentStore.h"
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QSet>
+#include <QTemporaryDir>
 #include <cstdio>
 
 static int failures = 0;
@@ -242,6 +247,96 @@ int main(int argc, char** argv)
 
         Tracker empty;
         CHECK(empty.empty() && !empty.onPosition(10.0).has_value(), "an empty tracker never offers");
+    }
+
+    // ---------------------------------------------------------------- 8. SegmentStore
+    {
+        QTemporaryDir tmp;
+        CHECK(tmp.isValid(), "temp dir for the store");
+        const QString path = QDir(tmp.path()).filePath(QStringLiteral("segments.json"));
+
+        SegmentStore st(path);
+        st.load();
+        CHECK(st.lookup(QStringLiteral("tt1"), 1).isEmpty(), "an empty store has nothing");
+
+        st.put(QStringLiteral("tt1"), 2, Segment{ 10.0, 40.0, SegmentType::Intro });
+
+        // Round-trip through disk: a fresh store on the same file sees it.
+        SegmentStore re(path);
+        re.load();
+        const QVector<Segment> s2 = re.lookup(QStringLiteral("tt1"), 2);
+        CHECK(s2.size() == 1 && has(s2, SegmentType::Intro, 10.0, 40.0), "the season mark round-trips");
+
+        // The series-level fallback: season 3 was never marked, so it inherits the most recent mark.
+        const QVector<Segment> s3 = re.lookup(QStringLiteral("tt1"), 3);
+        CHECK(s3.size() == 1 && has(s3, SegmentType::Intro, 10.0, 40.0), "an unmarked season falls back");
+
+        // A different show gets nothing.
+        CHECK(re.lookup(QStringLiteral("tt2"), 2).isEmpty(), "the fallback does not leak across series");
+
+        // Same type overwrites; a different type coexists.
+        re.put(QStringLiteral("tt1"), 2, Segment{ 12.0, 42.0, SegmentType::Intro });
+        re.put(QStringLiteral("tt1"), 2, Segment{ 900.0, 1000.0, SegmentType::Credits });
+        const QVector<Segment> both = re.lookup(QStringLiteral("tt1"), 2);
+        CHECK(both.size() == 2, "marking credits does not clobber the learned intro");
+        CHECK(has(both, SegmentType::Intro, 12.0, 42.0), "the same type overwrites in place");
+        CHECK(has(both, SegmentType::Credits, 900.0, 1000.0), "the new type is added");
+
+        // forget clears the season but leaves the series fallback intact.
+        re.forget(QStringLiteral("tt1"), 2);
+        CHECK(re.lookup(QStringLiteral("tt1"), 2).size() > 0, "forget falls back to the series entry");
+
+        // A season of 0 (unknown) keys the bare series entry, not "|s0".
+        CHECK(SegmentStore::keyFor(QStringLiteral("tt1"), 0) == QStringLiteral("tt1"),
+              "season 0 keys the bare series");
+        CHECK(SegmentStore::keyFor(QStringLiteral("tt1"), 2) == QStringLiteral("tt1|s2"), "season key shape");
+
+        // A missing file is a clean empty store, not a crash.
+        SegmentStore missing(QDir(tmp.path()).filePath(QStringLiteral("nope.json")));
+        missing.load();
+        CHECK(missing.lookup(QStringLiteral("tt1"), 1).isEmpty(), "a missing file loads as empty");
+    }
+
+    // ------------------------------------------------- 9. the JSON type tokens, in BOTH directions
+    // typeToString/typeFromString are exercised nowhere else: section 8's round-trip would still pass if
+    // every type collapsed onto one token, so pin the mapping itself rather than trusting it incidentally.
+    {
+        QSet<QString> tokens;
+        for (const SegmentType t : { SegmentType::Intro, SegmentType::Credits,
+                                     SegmentType::Recap,  SegmentType::Commercial })
+        {
+            const QString tok = typeToString(t);
+            tokens.insert(tok);
+            const std::optional<SegmentType> back = typeFromString(tok);
+            const QByteArray what = QByteArray("\"") + tok.toUtf8() + "\" survives to/from";
+            CHECK(!tok.isEmpty() && back.has_value() && *back == t, what.constData());
+        }
+        // DISTINCT tokens: two types sharing one would silently rewrite a learned Credits as an Intro on the
+        // next load — the round-trip above cannot see it, a collision only shows up as a lost token.
+        CHECK(tokens.size() == 4, "each type has its own token");
+
+        // Unknown text is an absence, never a default. If it fell back to Intro, a token from a newer build
+        // would come back as a skippable opening at whatever timestamp that other segment happened to hold.
+        CHECK(!typeFromString(QStringLiteral("sponsor")).has_value(), "an unknown token is nullopt, not Intro");
+        CHECK(!typeFromString(QString()).has_value(), "an empty token is nullopt, not Intro");
+
+        // …and end to end: a file written by a hypothetical newer build loads its known rows and DROPS the
+        // rest, rather than crashing or admitting a bogus Intro.
+        QTemporaryDir tmp;
+        CHECK(tmp.isValid(), "temp dir for the forward-compat file");
+        const QString path = QDir(tmp.path()).filePath(QStringLiteral("newer.json"));
+        {
+            QFile f(path);
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "write the forward-compat file");
+            f.write("{\"tt9|s1\":["
+                    "{\"s\":10,\"e\":40,\"t\":\"" + typeToString(SegmentType::Intro).toUtf8() + "\"},"
+                    "{\"s\":500,\"e\":600,\"t\":\"sponsor\"}]}");
+        }
+        SegmentStore newer(path);
+        newer.load();
+        const QVector<Segment> v = newer.lookup(QStringLiteral("tt9"), 1);
+        CHECK(v.size() == 1 && has(v, SegmentType::Intro, 10.0, 40.0), "the known row loads");
+        CHECK(!has(v, SegmentType::Intro, 500.0, 600.0), "the unknown row is skipped, not read as an Intro");
     }
 
     if (failures) { std::fprintf(stderr, "SEGMENTS-FAIL %d check(s) failed\n", failures); return 1; }
