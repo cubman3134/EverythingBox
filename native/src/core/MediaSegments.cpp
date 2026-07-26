@@ -61,33 +61,48 @@ bool matchAny(const QString& norm, std::initializer_list<const char*> phrases)
     return false;
 }
 
-// FOUR stages, and the order of all four is load-bearing.
+// Five stages, and the order is load-bearing.
 //
 // Intro must be tested before the GENERIC "credits", or "Opening Credits" — which contains "credits" — would
-// type every anime and drama opening as end credits. But the intro list owns the bare tokens "titles" and
-// "theme", and "End Titles" / "Closing Titles" (the conventional BBC/ITV chapter names) contain "titles". So
-// the EXPLICIT end cues are tested first of all: they are unambiguous, and letting them fall through to the
-// intro stage would hand a caller an "Intro" at 2700s of a 2760s episode — an offer to skip the rest of the
-// episode, the same failure parseEdl's credits-first rule exists to prevent.
+// type every anime and drama opening as end credits. But the intro stage owns the bare segment nouns
+// "titles"/"title"/"theme", and "End Titles" / "Closing Titles" (the conventional BBC/ITV chapter names)
+// contain "titles". So the end cues are tested first of all: letting one fall through to the intro stage
+// would hand a caller an "Intro" at 2700s of a 2760s episode — an offer to skip the rest of the episode, the
+// same failure parseEdl's credits-first rule exists to prevent.
 //
-// Phrases whose match is already implied by a shorter phrase in the SAME list are omitted, not listed for
-// documentation: "opening credits"/"opening titles" can never out-match "opening", nor "previously on"
-// "previously", so listing them would read as a live rule that can never decide anything.
+// Stage 1 is COMPOSITIONAL — any END QUALIFIER next to any SEGMENT NOUN — rather than a flat list of the
+// spelled-out pairs. A flat list is unfixable by construction: it enumerates a cross product, so every pair
+// nobody thought to write down is a live bug. "Closing Theme" was exactly that — no "closing theme" entry,
+// so it fell to the intro stage, matched the bare "theme", and typed as an Intro; so did "End Theme",
+// "Final Titles" and the singular "End Title". The product closes the whole class at once.
+//
+// Matching stays WORD-BOUNDARY (hasPhrase) throughout: on substrings "Introduction" would be an intro and
+// "op"/"ed" would fire inside ordinary words.
+//
+// Phrases whose match is already implied by a shorter phrase in the SAME stage are omitted, not listed for
+// documentation: "previously on" can never out-match "previously", so listing it would read as a live rule
+// that can never decide anything.
 std::optional<MediaSegments::SegmentType> typeForTitle(const QString& title)
 {
     using T = MediaSegments::SegmentType;
     const QString n = normalizeTitle(title);
     if (n.isEmpty()) return std::nullopt;
-    // 1. Explicit END cues, before the intro list can claim their bare "titles".
-    if (matchAny(n, { "end credits", "end titles", "closing credits", "closing titles", "ending", "outro", "ed" }))
+    // 1. An END QUALIFIER × a SEGMENT NOUN: "End Titles", "Closing Theme", "Final Titles", "End Credits"…
+    //    Note "opening" is deliberately NOT a qualifier here, so "Opening Credits" misses this stage and is
+    //    caught as an Intro at stage 3.
+    if (matchAny(n, { "end", "ending", "closing", "final" }) &&
+        matchAny(n, { "credits", "credit", "titles", "title", "theme" }))
         return T::Credits;
-    // 2. Intro, before the generic "credits" below can claim "Opening Credits".
-    if (matchAny(n, { "intro", "opening", "titles", "theme", "op" }))
+    // 2. Standalone end markers, which name the end with no segment noun at all.
+    if (matchAny(n, { "outro", "ed", "ending" }))
+        return T::Credits;
+    // 3. Intro, before the generic "credits" below can claim "Opening Credits".
+    if (matchAny(n, { "intro", "opening", "titles", "title", "theme", "op" }))
         return T::Intro;
     if (matchAny(n, { "recap", "previously" }))
         return T::Recap;
-    // 4. Generic: a bare "Credits" with no opening/closing qualifier is the end credits.
-    if (hasPhrase(n, "credits"))
+    // 5. Generic: a bare "Credits" with no opening/closing qualifier is the end credits.
+    if (matchAny(n, { "credits", "credit" }))
         return T::Credits;
     return std::nullopt;
 }
