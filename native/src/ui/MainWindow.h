@@ -521,6 +521,15 @@ private:
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
     // When a TV episode finishes, resolve + play the next one (same season ep+1, then next season ep1).
     void tryPlayNextEpisode();
+    // The preconditions tryPlayNextEpisode() itself applies, factored out so the credits-skip branch can ask
+    // "will the hand-off actually happen?" instead of merely "is autoplay on?" — the two cannot drift.
+    bool canPlayNextEpisode() const;
+    // Hand-off latching, same shape as the channel's (channelAiring_ + channelAirGen_): the bool stops a second
+    // hand-off starting while one is in flight (credits-skip starts one, EOF would start another because the
+    // credits branch doesn't seek), and the generation gates the async resolve's late callback so a stale result
+    // can't re-open an episode after the user moved on. Both are cleared/bumped in resetSegmentState().
+    bool nextEpPending_ = false;
+    int  nextEpGen_ = 0;
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
 
     // Intro/credits skipping. A SEPARATE context from subCtx_ on purpose: subCtx_ is the subtitle system's
@@ -529,9 +538,19 @@ private:
     struct SegmentCtx { QString seriesKey; int season = 0; QString localPath; };
     SegmentCtx               segCtx_;
     MediaSegments::Tracker   segTracker_;
-    SegmentStore*            segStore_ = nullptr;
+    std::unique_ptr<SegmentStore> segStore_;
+    // gatherSegments() is once-per-open: mpv re-emits `duration` on every observed change, and a second run
+    // would reset() the tracker and wipe its consumed_ set — re-offering a segment the user already passed
+    // (duplicate seek + duplicate notice) and repeating the synchronous .edl disk read on the GUI thread.
+    bool                     segGathered_ = false;
     void gatherSegments();
     void onSegmentEntered(const MediaSegments::Segment& seg);
+    // The per-open reset of every segment/hand-off latch. notePlaybackStart() calls it, but two mpv-open routes
+    // (openAudio's multi-select branch, the StreamResolver::playQueue lambda) go straight to setQueue and never
+    // reach notePlaybackStart — they call this directly so a previous episode's learned intro can't be armed
+    // against a music track. Kept separate from notePlaybackStart() because those routes don't want its
+    // channel-guard work.
+    void resetSegmentState();
 
     // ---- Channel mode: shuffle-bag random autoplay over a video/audio playlist ------------------------------
     // A "channel" turns a playlist into a personal TV network: it airs a random item, and on each NATURAL end

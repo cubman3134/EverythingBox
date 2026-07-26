@@ -298,7 +298,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     subCache_->load();
     // The learned intro/credits ranges, beside the other stores: detection and action live in MainWindow,
     // storage stays a plain device-local file the user's marks accumulate into.
-    segStore_ = new SegmentStore(QDir(AppPaths::dataDir()).filePath(QStringLiteral("segments.json")));
+    segStore_ = std::make_unique<SegmentStore>(QDir(AppPaths::dataDir()).filePath(QStringLiteral("segments.json")));
     segStore_->load();
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
@@ -796,6 +796,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
         currentNextSourceCapable_ = false;
         themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
+        // This route drives setQueue directly and never reaches notePlaybackStart, so clear the previous
+        // file's segment state here or an IPTV channel inherits the last episode's learned intro.
+        resetSegmentState();
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
         session_->setQueue(urls, 0, titles);
         session_->setMediaVideo(true); // consumption-stats: kind AFTER setQueue (outgoing track flushes under its own kind)
@@ -2473,6 +2476,9 @@ void MainWindow::openAudio()
 
     if (sel.size() == 1) { openAudioPath(sel.first()); return; } // folder queue starting at this track
 
+    // The multi-select branch drives setQueue directly and never reaches notePlaybackStart, so clear the
+    // previous file's segment state here — otherwise an episode's learned intro stays armed against track 1.
+    resetSegmentState();
     retro_->stop();
     book_->persist();
     pdf_->persist();
@@ -2541,14 +2547,28 @@ void MainWindow::onTrackEnded()
 // without this branch an entirely OFFLINE library would fire a stream resolve at every EOF and then announce
 // "that looks like the finale" while the very next episode sits on disk. Beyond local, the stream resolver
 // stays the source of truth for whether an episode exists / is available. No-op for anything that isn't TV.
+// Can a next-episode hand-off actually run right now? tryPlayNextEpisode() applies exactly this and nothing
+// else before it commits, and the credits-skip branch asks the same question — one predicate, so the two can't
+// drift apart into "autoplay is on" meaning "the hand-off happened".
+bool MainWindow::canPlayNextEpisode() const
+{
+    if (stack_->currentWidget() != playerPage_) return false; // only while a video is on screen
+    const QStringList parts = subCtx_.imdbStreamId.split(QLatin1Char(':'));
+    if (parts.size() < 3) return false;                       // not "ttShow:season:episode" (a movie / local file)
+    return !parts.value(0).isEmpty() && parts.value(1).toInt() > 0 && parts.value(2).toInt() > 0;
+}
+
 void MainWindow::tryPlayNextEpisode()
 {
-    if (stack_->currentWidget() != playerPage_) return;      // only while a video is on screen
+    // A hand-off already in flight owns this file's ending. The credits branch calls us WITHOUT seeking, so
+    // playback runs on through the credits to EOF — which calls us again. If the first call started an async
+    // resolve that outlives the credits, the second starts an independent one: two "Up next" notices, two
+    // playResolvedEpisode calls, and a late stale callback re-opening an episode after the user moved on.
+    if (nextEpPending_) return;
+    if (!canPlayNextEpisode()) return;
     const QStringList parts = subCtx_.imdbStreamId.split(QLatin1Char(':'));
-    if (parts.size() < 3) return;                            // not "ttShow:season:episode"
     const QString show = parts.value(0);
     const int s = parts.value(1).toInt(), e = parts.value(2).toInt();
-    if (show.isEmpty() || s <= 0 || e <= 0) return;
 
     const QString nextEp = QStringLiteral("%1:%2:%3").arg(show).arg(s).arg(e + 1);
     const QString nextSeason = QStringLiteral("%1:%2:%3").arg(show).arg(s + 1).arg(1);
@@ -2563,14 +2583,20 @@ void MainWindow::tryPlayNextEpisode()
     };
     if (playLocalIfOwned(nextEp)) return;                    // owned ⇒ zero network, zero false finale
 
+    // Past this point the hand-off is asynchronous: latch it, and tag the result with this hand-off's identity
+    // so a superseded one is dropped (the channel's channelAirGen_ precedent). Both are reset per open.
+    nextEpPending_ = true;
+    const int gen = nextEpGen_;
     notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
-        [this, nextEp, nextSeason, playLocalIfOwned](const QString& url, const QString& mime) {
+        [this, gen, nextEp, nextSeason, playLocalIfOwned](const QString& url, const QString& mime) {
+        if (gen != nextEpGen_ || !canPlayNextEpisode()) return; // superseded, or the user navigated away
         if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
         // End of season? Try the first episode of the next one — again local before network.
         if (playLocalIfOwned(nextSeason)) return;
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
-            [this, nextSeason](const QString& url2, const QString& mime2) {
+            [this, gen, nextSeason](const QString& url2, const QString& mime2) {
+            if (gen != nextEpGen_ || !canPlayNextEpisode()) return;
             if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
             else { notifier_->hidePlayerNotice(); notify(tr("No next episode found — that looks like the finale."), kFeedbackLong); }
         });
@@ -2731,14 +2757,24 @@ void MainWindow::exitChannel()
 // consume the latch, reset the skip run, and keep the channel. Otherwise this is a user-initiated play, which
 // ends any live channel (a manual play kills it). Because channelAiring_ is only ever true across a synchronous
 // dispatch, a manual play interleaved during a pending async resolve sees it FALSE here and correctly exits.
-void MainWindow::notePlaybackStart()
+// Intro/credits: a new open invalidates the previous file's segment identity, its armed ranges, the
+// once-per-open gather latch, and any next-episode hand-off left in flight. Its own function because two
+// mpv-open routes (openAudio multi-select, the playQueue lambda) drive setQueue directly and never reach
+// notePlaybackStart — without this they would inherit the previous episode's learned intro and auto-skip
+// 45 s into an MP3. The two routes that CAN name a series — armSubtitleFetch and openVideoPath — re-arm
+// segCtx_ right after notePlaybackStart returns.
+void MainWindow::resetSegmentState()
 {
-    // Intro/credits: a new open invalidates the previous file's segment identity AND its armed ranges. Cleared
-    // HERE, at the one hook every play sink already reaches, so a route that cannot name a series (audio, a
-    // pasted link, an IPTV channel) can never inherit the previous episode's learned intro and jump mid-track.
-    // The two routes that CAN name one — armSubtitleFetch and openVideoPath — re-arm segCtx_ right after this.
     segCtx_ = {};
     segTracker_.reset({});
+    segGathered_ = false;
+    nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
+    ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
+}
+
+void MainWindow::notePlaybackStart()
+{
+    resetSegmentState();   // every play sink reaches this hook
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -10215,8 +10251,17 @@ void MainWindow::refreshInputButtonRows()
 // Runs ONCE per file (from onDuration, because credits classification needs the length), never per tick.
 void MainWindow::gatherSegments()
 {
+    if (segGathered_ || duration_ <= 0.0) return; // once per open, and only once the length is actually known
+                                                  // (credits classification is relative to it)
+    segGathered_ = true;
     segTracker_.reset({});
     if (!Settings::skipSegments() || !player_) return;
+    // VIDEO ONLY. The chapter tier needs no series identity, so clearing segCtx_ does not protect audio at all:
+    // podcasts and audiobooks routinely ship a chapter literally titled "Intro" that types as Intro and clears
+    // the minimum length, and auto-skip would jump past the first chapter of a podcast. The session's kind is
+    // the authority (stamped by the app at every open site, synchronously, before mpv loads) — not mpv's
+    // fileLoaded isVideo, which is async and calls cover-art audio "video".
+    if (!session_ || !session_->mediaIsVideo()) return;
 
     // 1. Kodi .edl sidecar, local files only — a stream has no sidecar.
     QVector<MediaSegments::Segment> edl;
@@ -10225,8 +10270,20 @@ void MainWindow::gatherSegments()
         const QFileInfo fi(segCtx_.localPath);
         const QString edlPath = fi.dir().filePath(fi.completeBaseName() + QStringLiteral(".edl"));
         QFile f(edlPath);
+        // Logged on all three outcomes: when a user's hand-written .edl does nothing, the log is the only
+        // thread to pull ("no sidecar" vs. "found but every line unusable" are very different fixes).
         if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+        {
             edl = MediaSegments::parseEdl(QString::fromUtf8(f.readAll()), duration_, player_->fps());
+            mwLog(edl.isEmpty()
+                      ? QStringLiteral("segments: .edl \"%1\" parsed 0 usable ranges").arg(QFileInfo(edlPath).fileName())
+                      : QStringLiteral("segments: .edl \"%1\" -> %2 range(s)")
+                            .arg(QFileInfo(edlPath).fileName()).arg(edl.size()));
+        }
+        else
+        {
+            mwLog(QStringLiteral("segments: no .edl sidecar beside \"%1\"").arg(fi.fileName()));
+        }
     }
 
     // 2. Named chapters. 3. What the user taught us for this season.
@@ -10235,7 +10292,11 @@ void MainWindow::gatherSegments()
     const QVector<MediaSegments::Segment> learned =
         segStore_ ? segStore_->lookup(segCtx_.seriesKey, segCtx_.season) : QVector<MediaSegments::Segment>{};
 
-    segTracker_.reset(MediaSegments::resolve(edl, chapters, learned));
+    const QVector<MediaSegments::Segment> resolved = MediaSegments::resolve(edl, chapters, learned);
+    mwLog(QStringLiteral("segments: armed %1 (edl %2, chapters %3, learned %4) for \"%5\" s%6")
+              .arg(resolved.size()).arg(edl.size()).arg(chapters.size()).arg(learned.size())
+              .arg(segCtx_.seriesKey.isEmpty() ? QStringLiteral("—") : segCtx_.seriesKey).arg(segCtx_.season));
+    segTracker_.reset(resolved);
 }
 
 // A segment was just entered. Task 5 replaces the else branch with the on-screen chip.
@@ -10246,7 +10307,12 @@ void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
                                                                             // not acted on
     if (!Settings::skipSegmentsAuto()) return;                              // Task 5: show the chip instead
 
-    if (isCredits && Settings::autoplayNextEpisode()) { tryPlayNextEpisode(); return; }
+    // Hand the credits to episode-autoplay ONLY when a hand-off will actually happen. Gating on the setting
+    // alone (it defaults to ON) made this branch swallow the skip for every movie and every local-file play:
+    // tryPlayNextEpisode() early-returns when subCtx_.imdbStreamId isn't "ttShow:s:e", the `return` here ate
+    // the seek and the notice, and the tracker had already marked the segment consumed — so nothing happened,
+    // once, silently. Fall through to the seek whenever the hand-off can't run.
+    if (isCredits && Settings::autoplayNextEpisode() && canPlayNextEpisode()) { tryPlayNextEpisode(); return; }
     player_->setPosition(seg.end);
     // Name what was skipped: an auto-skip from a slightly wrong learned range is otherwise an unexplained
     // jump, and the user needs a thread to pull to find the setting.

@@ -33,6 +33,10 @@ public:
     // Consumption stats: the host reports the loaded file's media kind (mpv's fileLoaded isVideo flag) so the
     // persistResume heartbeat accrues watch (video) vs listen (audio) seconds into the right category.
     void setMediaVideo(bool isVideo) { mediaIsVideo_ = isVideo; }
+    // The same app-stamped kind, readable. Every open site stamps it SYNCHRONOUSLY (mpv loads async), so it is
+    // already settled when the host's duration callback runs — unlike mpv's own fileLoaded isVideo flag, which
+    // is an async event with no ordering guarantee against `duration` and mis-reports cover-art audio as video.
+    bool mediaIsVideo() const { return mediaIsVideo_; }
 
     void setPosition(double s); // fed from the host's mpv position callback
     void setDuration(double s); // fed from the host's mpv duration callback
