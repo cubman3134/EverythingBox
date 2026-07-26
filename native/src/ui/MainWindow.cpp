@@ -801,7 +801,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         "#skipChip:focus { background: rgba(90,140,255,0.80); border:2px solid #fff; }"));
     skipChip_->setCursor(Qt::PointingHandCursor);
     skipChip_->hide();
-    skipChip_->installEventFilter(this);   // hovering it keeps it alive (see eventFilter)
+    // Hover keep-alive needs an input path that actually fires. A QPushButton gets NO MouseMove unless a button is
+    // held down (only player_ sets mouse tracking), so the old MouseMove filter was inert — the chip vanished from
+    // under the cursor mid-decision and the click landed on bare video. Hover events are what the :hover rule above
+    // already runs on; WA_Hover is stated explicitly rather than relied on as a stylesheet side effect.
+    skipChip_->setAttribute(Qt::WA_Hover, true);
+    skipChip_->installEventFilter(this);   // hover/focus keep it alive (see eventFilter)
     connect(skipChip_, &QPushButton::clicked, this, &MainWindow::activateSkipChip);
 
     // Its OWN timer, not the shared 4s controlsHideTimer_: the chip must outlive a chrome hide.
@@ -1170,11 +1175,28 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                            || event->type() == QEvent::TouchEnd))
         return handlePlayerTouch(static_cast<QTouchEvent*>(event));
 
-    // Hovering the skip chip keeps it alive — it is a click target with a bounded life, and it must not vanish
-    // out from under a cursor that is on its way to it. Deliberately NOT in the reveal list below: revealing the
-    // transport repositions the chip upward (it clears the bar), i.e. straight out from under that cursor.
-    if (obj == skipChip_ && event->type() == QEvent::MouseMove && skipChip_->isVisible())
-        skipChipTimer_->start(kChipMs);
+    // Reaching for the chip keeps it alive — it is a click/press target with a bounded life, and it must not
+    // vanish out from under a user who is mid-decision. BOTH input paths count, and both were dark before:
+    //   * pointer — Hover, not MouseMove: an untracked QPushButton only gets MouseMove while a button is HELD, so
+    //     the old MouseMove clause never ran and the chip hid under the cursor at 8s, dropping the click on video.
+    //   * remote/keyboard — while the chip HOLDS FOCUS the countdown is suspended entirely, not merely restarted:
+    //     nothing else was stopping it, so it could fire on a focused chip, and hideSkipChip()'s clearFocus() then
+    //     turned an Enter already in flight into "nothing focused" -> toggle pause. Focus is a standing intent to
+    //     press it; the 8s budget is for the UNTOUCHED case, so FocusOut re-arms a full one.
+    // Deliberately NOT in the reveal list below: revealing the transport repositions the chip upward (it clears
+    // the bar), i.e. straight out from under that cursor.
+    if (obj == skipChip_ && skipChip_->isVisible())
+    {
+        switch (event->type())
+        {
+        case QEvent::HoverEnter:
+        case QEvent::HoverMove:
+        case QEvent::MouseMove:  skipChipTimer_->start(kChipMs); break;
+        case QEvent::FocusIn:    skipChipTimer_->stop();         break;
+        case QEvent::FocusOut:   skipChipTimer_->start(kChipMs); break;
+        default: break;
+        }
+    }
 
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
@@ -2291,12 +2313,18 @@ void MainWindow::revealMediaControls()
 {
     if (stack_->currentWidget() != playerPage_) return; // only over an open media item
     player_->unsetCursor();                              // cursor visible again whenever controls show
-    positionMediaControls();
+    positionMediaControls();                             // bar geometry first, so it never flashes at a stale one
     mediaControls_->show();
     mediaControls_->raise();
     videoBack_->show();
     videoBack_->raise();
     if (currentNextSourceCapable_) { streamIssueBtn_->show(); streamIssueBtn_->raise(); }
+    // AFTER the show()+raise() above, never before: the chip's "lift clear of the bar" branch reads
+    // mediaControls_->isVisible(), which was still FALSE at the positionMediaControls() call above. Revealing the
+    // chrome while the chip was already up therefore left the chip in the bottom band and then raised the bar over
+    // it — a focused, reachable, INVISIBLE button (its focus ring showing through from behind the transport). The
+    // re-raise inside positionSkipChip() puts it back on top of the bar it now sits above.
+    positionSkipChip();
     controlsHideTimer_->start(4000); // a comfortable "few seconds" of grace before fading out
 }
 
@@ -2313,14 +2341,22 @@ void MainWindow::positionMediaControls()
     streamIssueBtn_->move(margin + videoBack_->width() + 10, margin); // just right of Back
     notifier_->reposition();
     if (subOverlay_) subOverlay_->setGeometry(player_->rect()); // keep the subtitle scrim covering the player
-    // The skip chip: bottom-right, lifted clear of the transport bar whenever the bar is up.
-    if (skipChip_ && skipChip_->isVisible())
-    {
-        const int m = 24;
-        const int above = mediaControls_ && mediaControls_->isVisible() ? mediaControls_->height() + m : m;
-        skipChip_->move(player_->width() - skipChip_->width() - m,
-                        player_->height() - skipChip_->height() - above);
-    }
+    positionSkipChip();
+}
+
+// The skip chip: bottom-right, lifted clear of the transport bar whenever the bar is up — and always stacked
+// ABOVE that bar, because both are plain children of player_ and the bar's own raise() would otherwise win.
+void MainWindow::positionSkipChip()
+{
+    if (!skipChip_ || !skipChip_->isVisible()) return;
+    const int m = 24;
+    const int above = mediaControls_ && mediaControls_->isVisible() ? mediaControls_->height() + m : m;
+    skipChip_->move(player_->width() - skipChip_->width() - m,
+                    player_->height() - skipChip_->height() - above);
+    skipChip_->raise();
+    // …but never above the subtitle panel: that scrim covers the whole player and owns the screen while it is
+    // open, so restore it to the top after the chip's raise (this is the order showSubtitleMenu establishes).
+    if (subOverlay_) subOverlay_->raise();
 }
 
 void MainWindow::notify(const QString& text, int ms)
@@ -2339,6 +2375,9 @@ void MainWindow::hideMediaControls()
     if (mediaControls_) mediaControls_->hide();
     if (videoBack_) videoBack_->hide();
     if (streamIssueBtn_) streamIssueBtn_->hide();
+    // The chip outlives the chrome (8s vs 4s). With the bar gone the lift it was given is a gap, so drop it back
+    // into the bottom band — the same place showSkipChip() puts it when the bar was never up.
+    positionSkipChip();
     if (isFullScreen() && stack_->currentWidget() == playerPage_ && !subOverlay_)
         player_->setCursor(Qt::BlankCursor);
 }
@@ -2860,11 +2899,14 @@ void MainWindow::resetSegmentState()
     hideSkipChip();         // the previous file's offer dies with it — never inherited by the new one
     skipChipSeg_ = {};      // …including the range it was holding: stale per-playback state, cleared like the rest
     segIntroStart_ = -1.0;  // and so does a half-finished mark (a start with no end yet)
-    // The marks menu reads BOTH of these live ("where am I now", "how long is this file"), and mpv reports
-    // neither until well after the open. Left standing, pressing I in that window marked a range built from the
-    // PREVIOUS file's position and length — against the new file's season.
-    duration_ = 0.0;
-    lastPos_  = 0.0;
+    // duration_/lastPos_ are deliberately NOT zeroed here. They are the PLAYER's live transport state, not this
+    // feature's, and this runs from notePlaybackStart() — the TOP of every play sink, before success is known.
+    // openGamePath() has error early-returns after it, so a failed game launch over a still-playing video zeroed
+    // the length of a file that never stopped: frozen seek slider, "12:34 / 0:00", segments dead for the rest of
+    // the file. mpv overwrites both on the next real open anyway. The window this zeroing was closing — the marks
+    // menu reading the previous file's position/length before mpv's first callback — is closed instead by the
+    // ++nextEpGen_ below: durGen_/posGen_ still name the OLD epoch until mpv reports, and gatherSegments() and the
+    // marks menu both refuse a number whose epoch is not the current one.
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
 }
@@ -10362,8 +10404,11 @@ void MainWindow::gatherSegments()
     // segIntroStart_ is deliberately NOT cleared here — a pending intro start must survive marking the credits,
     // which re-gathers.
     hideSkipChip();
-    if (duration_ <= 0.0) return;                 // length still unknown: no gather consumed, we'll be called
-                                                  // again (credits classification is relative to it)
+    // Length still unknown for THIS file: no gather consumed, we'll be called again (credits classification is
+    // relative to it). The epoch term is what the removed `duration_ = 0` in resetSegmentState() used to buy —
+    // duration_ now survives an open, so "length known" alone would let a re-gather arm credits computed from the
+    // PREVIOUS file's runtime, and the segGathered_ latch would then swallow the real onDuration gather.
+    if (duration_ <= 0.0 || durGen_ != nextEpGen_) return;
     segGathered_ = true;
     if (!Settings::skipSegments() || !player_) return;
     // VIDEO ONLY. The chapter tier needs no series identity, so clearing segCtx_ does not protect audio at all:
@@ -10467,9 +10512,8 @@ void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
     skipChip_->setText(skipChipHandsOff(seg) ? tr("Next Episode")
                                              : (isCredits ? tr("Skip Credits") : tr("Skip Intro")));
     skipChip_->adjustSize();
-    skipChip_->show();                // before positionMediaControls: it lays out only a VISIBLE chip
-    positionMediaControls();
-    skipChip_->raise();
+    skipChip_->show();                // before positionSkipChip: it lays out only a VISIBLE chip
+    positionSkipChip();               // places it for the bar's CURRENT visibility, and raises it above the bar
     // Join the Left/Right transport ring for as long as it is up. This app's primary surface is a TV remote,
     // which has no 'S' key and cannot click: without this the chip took focus ONLY from a mouse, so the whole
     // skip affordance was dark on a remote. Appended (never inserted) so the transport's own order is unchanged,
@@ -10481,7 +10525,6 @@ void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
 void MainWindow::hideSkipChip()
 {
     if (!skipChip_) return;
-    skipChipTimer_->stop();
     playerButtons_.removeAll(skipChip_);   // out of the ring the moment it stops being reachable
     // Do not strand focus on a widget that is about to vanish — and do not MOVE it either. Parking it on
     // videoBack_ was unsound because videoBack_ is usually HIDDEN by now (the chip's 8s outlives the chrome's
@@ -10491,6 +10534,8 @@ void MainWindow::hideSkipChip()
     // hideMediaControls and simply clear, so the next arrow press re-reveals the chrome and re-enters the ring.
     if (skipChip_->hasFocus()) skipChip_->clearFocus();
     skipChip_->hide();
+    skipChipTimer_->stop();  // LAST: the clearFocus() above emits FocusOut on a still-visible chip, whose filter
+                             // re-arms this timer. Stopping first would leave it running on a hidden chip.
 }
 
 void MainWindow::activateSkipChip()
@@ -10526,6 +10571,12 @@ void MainWindow::showSegmentMarksMenu()
     // for either. nextEpGen_ is bumped by resetSegmentState() on every open, so a mismatch is exactly "the
     // playback epoch changed while this menu was up" — drop the whole callback and say so.
     const int      gen       = nextEpGen_;
+    // …and the OTHER half of the same epoch question, pinned with the values it qualifies: has mpv reported this
+    // file's length/position YET? duration_/lastPos_ are no longer zeroed on an open (that zeroing also wiped the
+    // transport of a file that a FAILED play attempt never stopped), so in the window between the open and mpv's
+    // first callback they still hold the PREVIOUS file's numbers. durGen_/posGen_ name the epoch each was reported
+    // for; a mismatch means "not my file's number", which is exactly the mark this window used to produce.
+    const bool     haveTime  = (durGen_ == gen && posGen_ == gen);
     // The menu is reachable (and marks are stored) even with skipping switched off, so the notices must not
     // claim an effect the user will not get. Pinned like the rest: the setting can change under an open menu.
     const bool     skipOn    = Settings::skipSegments();
@@ -10537,7 +10588,7 @@ void MainWindow::showSegmentMarksMenu()
          << tr("Forget marks for this season");
 
     new NavMenu(tr("Skip segments"), rows,
-                [this, canLearn, at, seriesKey, season, duration, gen, skipOn](int row) {
+                [this, canLearn, at, seriesKey, season, duration, gen, haveTime, skipOn](int row) {
         if (row < 0 || !segStore_) return;
         if (gen != nextEpGen_)
         {
@@ -10547,6 +10598,14 @@ void MainWindow::showSegmentMarksMenu()
         if (!canLearn)
         {
             notifier_->playerNotice(tr("No series information for this file, so there is nothing to mark against."), 4000);
+            return;
+        }
+        // Rows 0-2 all build a timing out of `at` (and rows 1-2 out of `duration`). "Forget marks" (row 3) needs
+        // neither, so it stays available: refusing the whole menu until mpv reports would block it for as long as
+        // a slow network open takes.
+        if (row <= 2 && !haveTime)
+        {
+            notifier_->playerNotice(tr("This file hasn't reported its position yet — give it a moment, then mark."), 4000);
             return;
         }
         // Appended to every SUCCESS notice: with skipping off the mark is stored and inherited correctly but is
@@ -10632,6 +10691,7 @@ void MainWindow::regatherSegments()
 void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
+    durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
 #ifdef MMV_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
@@ -10654,6 +10714,7 @@ void MainWindow::onPosition(double seconds)
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
 
     lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
+    posGen_  = nextEpGen_;   // …and which file it is a position IN — see resetSegmentState()
     if (const auto seg = segTracker_.onPosition(seconds)) onSegmentEntered(*seg);
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
