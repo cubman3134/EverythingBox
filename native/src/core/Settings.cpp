@@ -54,6 +54,13 @@ void Settings::setAutoplayNextEpisode(bool on)
     store().setValue(QStringLiteral("playback/autoplayNext"), on); store().sync();
 }
 
+// Read-and-write only, so single-line — but they sync() like every other setter in this file, so a crash
+// before the next flush cannot lose the user's choice.
+bool Settings::skipSegments() { return store().value(QStringLiteral("playback/skipSegments"), true).toBool(); }
+void Settings::setSkipSegments(bool on) { store().setValue(QStringLiteral("playback/skipSegments"), on); store().sync(); }
+bool Settings::skipSegmentsAuto() { return store().value(QStringLiteral("playback/skipSegmentsAuto"), false).toBool(); }
+void Settings::setSkipSegmentsAuto(bool on) { store().setValue(QStringLiteral("playback/skipSegmentsAuto"), on); store().sync(); }
+
 // The PIN is stored as SHA-256(salt + pin) — enough to keep it out of the ini in the clear and deter a
 // casual child; it isn't a cryptographic secret store.
 static QString pinHash(const QString& pin)

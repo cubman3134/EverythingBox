@@ -8208,6 +8208,12 @@ void MainWindow::openGeneralSettings()
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
+        // Offer to skip an episode's opening and end credits when one is known; "Skip automatically" seeks
+        // past them without asking, instead of showing a button.
+        toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
+        toggle(QStringLiteral("pb.skipsegauto"), tr("Skip automatically"), Settings::skipSegmentsAuto());
+        info(QStringLiteral("pb.skipseghint"), tr("While a video is playing"),
+             tr("S skips the offered segment, I marks where one starts and ends."));
         // Videos play in the built-in player by default, or hand off to an installed/custom external player.
         // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
         if (!ProfileStore::current().restricted)
@@ -8357,6 +8363,8 @@ void MainWindow::openGeneralSettings()
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
                 else if (id == QStringLiteral("pb.autonext")) Settings::setAutoplayNextEpisode(on);
+                else if (id == QStringLiteral("pb.skipseg")) Settings::setSkipSegments(on);
+                else if (id == QStringLiteral("pb.skipsegauto")) Settings::setSkipSegmentsAuto(on);
                 else if (id == QStringLiteral("player.external")) {
                     QString key = val;                              // map the picked display back to the stored key
                     for (const auto& p : playerOptPairs) if (p.first == val) { key = p.second; break; }
@@ -8638,6 +8646,25 @@ void MainWindow::openGeneralSettings()
         autoNext->setChecked(Settings::autoplayNextEpisode());
         connect(autoNext, &QCheckBox::toggled, this, [](bool c) { Settings::setAutoplayNextEpisode(c); });
         v->addWidget(autoNext);
+
+        // Same Settings keys/setters as the themed panel — one write path, no drift.
+        auto* skipSeg = new QCheckBox(tr("Skip intros and credits"));
+        skipSeg->setStyleSheet(QStringLiteral("font-size:15px;"));
+        skipSeg->setChecked(Settings::skipSegments());
+        connect(skipSeg, &QCheckBox::toggled, this, [](bool c) { Settings::setSkipSegments(c); });
+        v->addWidget(skipSeg);
+
+        auto* skipAuto = new QCheckBox(tr("Skip them automatically (no button)"));
+        skipAuto->setStyleSheet(QStringLiteral("font-size:15px;"));
+        skipAuto->setChecked(Settings::skipSegmentsAuto());
+        connect(skipAuto, &QCheckBox::toggled, this, [](bool c) { Settings::setSkipSegmentsAuto(c); });
+        v->addWidget(skipAuto);
+
+        auto* skipHint = new QLabel(tr("While a video is playing: S skips the offered segment, "
+                                       "I marks where one starts and ends."));
+        skipHint->setStyleSheet(QStringLiteral("font-size:13px;color:#999;"));
+        skipHint->setWordWrap(true);
+        v->addWidget(skipHint);
 
         // Play videos with: the built-in player, a detected desktop player (VLC/MPC), or a custom program.
         // Same Settings keys/setters as the themed panel — one write path, no drift. Hidden entirely for a
