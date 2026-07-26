@@ -35,6 +35,15 @@ public:
     // inheriting and working. See the .cpp for why the fallback is the nearest season and not the highest.
     QVector<MediaSegments::Segment> lookup(const QString& seriesKey, int season) const;
 
+    // Only what THIS season was actually marked with — no nearest-season fallback, ever. lookup() deliberately
+    // cannot tell its caller which of its rows were the season's own and which were inherited, and the two carry
+    // very different authority: a mark the user made while watching this season is an explicit correction of
+    // whatever the detectors offered and outranks them (MediaSegments::resolve's top tier), whereas an inherited
+    // mark is a guess that this season's opening matches another's and must stay below this file's own chapters.
+    // Callers that just want "the best ranges we know for this season", with no need to rank them against other
+    // tiers, keep using lookup() unchanged.
+    QVector<MediaSegments::Segment> lookupExact(const QString& seriesKey, int season) const;
+
     // Replaces any segment of the SAME type for that season and leaves other types alone, so marking credits
     // never clobbers a learned intro. Writes exactly ONE key — keyFor(seriesKey, season). Returns false
     // either because the input was rejected (empty seriesKey, or a range that does not run forwards), in

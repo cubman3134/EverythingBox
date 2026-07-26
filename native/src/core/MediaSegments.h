@@ -39,6 +39,16 @@ namespace MediaSegments
                                       "inverted and zero-length ranges; a zero minimum would let them through");
     // A range ending within this of the end of the file is the credits.
     constexpr double kCreditsTailS  = 60.0;
+    // The earliest point, as a fraction of the file, at which a HAND-MARKED credits range may start. The
+    // detector tiers get their lower bound for free (kCreditsTailS is measured from the end), but the learned
+    // tier's "mark credits start here" takes whatever position the user is sitting at — and a mis-press stores
+    // {now, duration}, which SegmentStore then inherits into every unmarked season of the show, so with
+    // auto-skip on every episode jumps from that timestamp to the end. 0.6 is deliberately loose rather than
+    // tight: real end credits start at ~90-97% of an episode, so 60% refuses only presses that cannot plausibly
+    // be credits, while still accepting an unusually long tail (a post-credits scene, a "next week on…" trailer,
+    // or a double-length episode whose credits run several minutes). Anything stricter would start refusing
+    // legitimate marks, which is the worse failure: the user can see a mis-press, but not a rejected good one.
+    constexpr double kCreditsEarliestFrac = 0.6;
     // An intro starts before this, and runs no longer than kIntroMaxLenS.
     constexpr double kIntroWindowS  = 900.0;
     constexpr double kIntroMaxLenS  = 300.0;
@@ -57,9 +67,23 @@ namespace MediaSegments
     // Per-TYPE precedence: for each type independently, the first tier supplying that type wins. NOT
     // whole-list precedence, which would let an .edl carrying only a commercial break suppress a
     // chapter-derived Intro.
-    QVector<Segment> resolve(const QVector<Segment>& edl,
+    //
+    // The learned tier is SPLIT, and the two halves sit at opposite ends of the order:
+    //
+    //  * exactLearned — a mark the user made against THIS season — is the HIGHEST tier. It is the only tier
+    //    that is explicit, correctable and authored by the person watching: they saw what the detector offered,
+    //    judged it wrong, and said so. Ranking it below the chapter detector made a hand-mark on a chaptered rip
+    //    INERT while reporting success — put() stored it, the notice said "Intro remembered for season 1", and
+    //    the chapter range went on winning, so nothing the user could see ever changed. An automatic detector
+    //    must not outrank the correction aimed at it.
+    //  * inheritedLearned — the SegmentStore nearest-season fallback, i.e. a mark another season made — stays
+    //    the LOWEST tier. It is a guess that this season's opening matches a different season's, and a guess
+    //    must never beat this file's own chapters: one season's hand-mark would otherwise override every other
+    //    season's perfectly good chapter ranges, including seasons whose opening genuinely changed.
+    QVector<Segment> resolve(const QVector<Segment>& exactLearned,
+                             const QVector<Segment>& edl,
                              const QVector<Segment>& chapters,
-                             const QVector<Segment>& learned);
+                             const QVector<Segment>& inheritedLearned);
 
     // Series identity: the "tt…:S:E" stream id first — matched on SHAPE, so a differently-shaped 3-part id
     // ("tmdb:tv:1396") is not mistaken for one — else the filename via LocalLibrary::parseFile.
@@ -78,6 +102,16 @@ namespace MediaSegments
         // The segment just entered, or nullopt. Call on every position tick.
         std::optional<Segment> onPosition(double t);
         bool empty() const { return segs_.isEmpty(); }
+        // Mark consumed every segment CONTAINING t, without offering any of them. Returns how many it took.
+        //
+        // For re-arming after a re-gather: reset() wipes consumed_, so a user who dismissed the intro chip and
+        // then marked the credits — still sitting inside the intro — was instantly re-offered the intro they
+        // had just dismissed (and, with auto-skip on, the freshly armed range fired on the very next tick).
+        // Carrying the whole consumed_ set across a re-gather is not possible: the ranges themselves changed,
+        // so the indices mean nothing. What CAN be carried is the only thing that matters — "do not offer me
+        // something I am already inside" — which is exactly this. A range the user has not reached yet is
+        // untouched and still fires normally.
+        int consumeContaining(double t);
 
     private:
         QVector<Segment>  segs_;

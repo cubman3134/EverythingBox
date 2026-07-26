@@ -130,6 +130,14 @@ QVector<MediaSegments::Segment> SegmentStore::lookup(const QString& seriesKey, i
     return out;
 }
 
+QVector<MediaSegments::Segment> SegmentStore::lookupExact(const QString& seriesKey, int season) const
+{
+    if (seriesKey.isEmpty()) return {};
+    // Exactly the key put() writes, and nothing else — this is the ONE place that must not consult the derived
+    // nearest-season fallback, so it does not share lookup()'s body.
+    return byKey_.value(keyFor(seriesKey, season));
+}
+
 bool SegmentStore::put(const QString& seriesKey, int season, const MediaSegments::Segment& seg)
 {
     if (seriesKey.isEmpty() || seg.end <= seg.start) return false;   // nothing stored, no save attempted

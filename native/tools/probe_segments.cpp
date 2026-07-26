@@ -198,19 +198,49 @@ int main(int argc, char** argv)
     }
 
     // ---------------------------------------------------------------- 5. resolve: per-TYPE precedence
+    // Tier order is exactLearned > edl > chapters > inheritedLearned. The learned tier is SPLIT because its two
+    // halves carry different authority: a mark the user made against THIS season is an explicit, correctable
+    // correction of what a detector offered, while a mark inherited from a neighbouring season is only a guess
+    // that the two seasons share an opening.
     {
         const QVector<Segment> edl      = { { 100, 200, SegmentType::Commercial } };
         const QVector<Segment> chapters = { { 10,  40,  SegmentType::Intro } };
-        const QVector<Segment> learned  = { { 15,  45,  SegmentType::Intro },
-                                            { 900, 1000, SegmentType::Credits } };
-        const QVector<Segment> v = resolve(edl, chapters, learned);
-        CHECK(has(v, SegmentType::Intro, 10.0, 40.0), "chapters beat learned for Intro");
+        const QVector<Segment> inherited = { { 15,  45,  SegmentType::Intro },
+                                             { 900, 1000, SegmentType::Credits } };
+        const QVector<Segment> v = resolve({}, edl, chapters, inherited);
+        CHECK(has(v, SegmentType::Intro, 10.0, 40.0), "chapters beat an INHERITED learned Intro");
         CHECK(countOf(v, SegmentType::Intro) == 1, "the losing tier's Intro is not also included");
-        CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "learned supplies Credits when nothing else does");
+        CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "inherited supplies Credits when nothing else does");
         CHECK(has(v, SegmentType::Commercial, 100.0, 200.0), "the .edl Commercial survives");
         // The whole point of per-type precedence:
-        CHECK(countOf(resolve(edl, chapters, {}), SegmentType::Intro) == 1,
+        CHECK(countOf(resolve({}, edl, chapters, {}), SegmentType::Intro) == 1,
               "an .edl with ONLY a Commercial does not suppress a chapter Intro");
+
+        // ---- THE BUG THE SPLIT EXISTS FOR. On a chaptered rip the chip offers the CHAPTER intro [5,95]; the
+        // user judges it wrong and marks [10,40] for this season. put() succeeds and the notice says "Intro
+        // remembered for season 1" — but with learned as the LOWEST tier the re-gather resolved the chapter
+        // range again, so the mark was inert while claiming success and nothing the user could see ever changed.
+        // A hand-mark aimed AT a detector must outrank that detector.
+        const QVector<Segment> chapIntro = { { 5, 95, SegmentType::Intro } };
+        const QVector<Segment> mine      = { { 10, 40, SegmentType::Intro } };
+        const QVector<Segment> corrected = resolve(mine, {}, chapIntro, {});
+        CHECK(has(corrected, SegmentType::Intro, 10.0, 40.0), "an EXACT-season learned Intro beats a chapter Intro");
+        CHECK(countOf(corrected, SegmentType::Intro) == 1, "…and the chapter range is not also armed");
+        // It outranks the .edl for the same reason — a sidecar is a detector too, and the correction is newer.
+        CHECK(has(resolve(mine, { { 5, 95, SegmentType::Intro } }, {}, {}), SegmentType::Intro, 10.0, 40.0),
+              "an EXACT-season learned Intro beats an .edl Intro");
+
+        // ---- …and the symmetric limit, which is why the tier had to be SPLIT rather than simply promoted.
+        // An INHERITED mark is season N's opinion about season M. Letting it win would mean one season's
+        // hand-mark silently overrode every other season's perfectly good chapters — including the seasons
+        // whose opening genuinely changed, which is exactly when the inheritance is wrong.
+        const QVector<Segment> notMine = resolve({}, {}, chapIntro, mine);
+        CHECK(has(notMine, SegmentType::Intro, 5.0, 95.0), "an INHERITED learned Intro does NOT beat a chapter Intro");
+        CHECK(countOf(notMine, SegmentType::Intro) == 1, "…and only the chapter range is armed");
+        // Still per-type at the top tier: an exact mark for one type never suppresses another type's detector.
+        const QVector<Segment> mixed = resolve({ { 900, 1000, SegmentType::Credits } }, {}, chapIntro, {});
+        CHECK(has(mixed, SegmentType::Intro, 5.0, 95.0) && has(mixed, SegmentType::Credits, 900.0, 1000.0),
+              "an exact-season Credits mark does not suppress the chapter Intro");
     }
 
     // ---------------------------------------------------------------- 6. keyFor
@@ -247,6 +277,36 @@ int main(int argc, char** argv)
 
         Tracker empty;
         CHECK(empty.empty() && !empty.onPosition(10.0).has_value(), "an empty tracker never offers");
+
+        // ---- consumeContaining: what a RE-GATHER carries across an unavoidable reset(). Marking a range
+        // re-arms the tracker, and reset() wipes consumed_ — so a user who dismissed the intro chip and then
+        // marked the credits while STILL INSIDE the intro was immediately re-offered the intro they had just
+        // dismissed (intros run 60-90s, the chip lives 8s, so the overlap is the common case). With auto-skip on
+        // it is sharper still: the freshly armed range fires on the very next tick, and marking the credits from
+        // inside them seeks straight to the end of the file.
+        Tracker re;
+        re.reset({ { 10.0, 40.0, SegmentType::Intro }, { 900.0, 1000.0, SegmentType::Credits } });
+        CHECK(re.consumeContaining(20.0) == 1, "the range containing the position is taken, and only it");
+        CHECK(!re.onPosition(20.0).has_value(), "…so the range the user is already inside is never offered");
+        CHECK(!re.onPosition(39.9).has_value(), "…for the rest of that range");
+        CHECK(re.onPosition(900.0).has_value(), "…while a range still AHEAD is untouched and fires normally");
+
+        // Half-open, exactly like onPosition: a position at the end is inside nothing.
+        Tracker edge;
+        edge.reset({ { 10.0, 40.0, SegmentType::Intro } });
+        CHECK(edge.consumeContaining(40.0) == 0, "a position at a range's end is not inside it");
+        CHECK(edge.consumeContaining(9.9) == 0, "…nor is one before its start");
+        CHECK(edge.onPosition(10.0).has_value(), "…so neither suppressed the offer");
+
+        // And it re-arms positionally like everything else: seek back before the start and the offer returns.
+        Tracker back;
+        back.reset({ { 10.0, 40.0, SegmentType::Intro } });
+        back.consumeContaining(20.0);
+        CHECK(!back.onPosition(5.0).has_value(), "seeking before the start re-arms without offering");
+        CHECK(back.onPosition(11.0).has_value(), "…and re-entering offers it again");
+
+        Tracker none;
+        CHECK(none.consumeContaining(20.0) == 0, "consumeContaining on an empty tracker is a no-op");
     }
 
     // ---------------------------------------------------------------- 8. SegmentStore
@@ -273,6 +333,17 @@ int main(int argc, char** argv)
 
         // A different show gets nothing.
         CHECK(re.lookup(QStringLiteral("tt2"), 2).isEmpty(), "the fallback does not leak across series");
+
+        // ---- lookupExact: the same rows WITHOUT the fallback. This is what tells resolve() which learned rows
+        // are the user's own correction for this season (top tier, beats every detector) and which merely
+        // inherited from a neighbouring season (bottom tier, beats nothing). lookup() cannot distinguish them,
+        // and conflating the two is what made a hand-mark inert on a chaptered file while reporting success.
+        const QVector<Segment> e2 = re.lookupExact(QStringLiteral("tt1"), 2);
+        CHECK(e2.size() == 1 && has(e2, SegmentType::Intro, 10.0, 40.0), "lookupExact returns the season's own mark");
+        CHECK(re.lookupExact(QStringLiteral("tt1"), 3).isEmpty(),
+              "lookupExact NEVER falls back — season 3 inherits under lookup, but has nothing of its own");
+        CHECK(re.lookupExact(QStringLiteral("tt2"), 2).isEmpty(), "…and an unknown series is empty, not a fallback");
+        CHECK(re.lookupExact(QString(), 2).isEmpty(), "…as is an empty series key");
 
         // Same type overwrites; a different type coexists.
         re.put(QStringLiteral("tt1"), 2, Segment{ 12.0, 42.0, SegmentType::Intro });
