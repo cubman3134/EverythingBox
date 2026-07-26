@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.34 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.35 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -490,6 +490,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # per-type precedence, series-key derivation, and the tracker. Pure — no mpv, no video file.
     add_executable(probe_segments tools/probe_segments.cpp
         src/core/MediaSegments.cpp src/core/MediaSegments.h
+        src/core/SegmentStore.cpp  src/core/SegmentStore.h
         src/core/LocalLibrary.cpp  src/core/LocalLibrary.h
         src/core/Settings.cpp      src/core/Settings.h
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h)

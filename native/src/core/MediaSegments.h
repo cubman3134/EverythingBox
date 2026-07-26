@@ -5,8 +5,9 @@
 // (SegmentStore) and from ACTION (MainWindow's chip / auto-skip). A fourth provider — audio fingerprinting —
 // would plug in here without touching either of the other two layers. Deliberately pure: no Qt GUI, no mpv,
 // no file I/O, so probe_segments exercises it without a player or a fixture video: the three providers, the
-// precedence rule, keyFor and the Tracker. The typeToString/typeFromString token mapping is NOT covered there
-// — its assertions are deferred to SegmentStore's JSON round-trip, where the tokens are actually used.
+// precedence rule, keyFor and the Tracker. The typeToString/typeFromString token mapping is covered in the
+// same probe's SegmentStore section, where the tokens are actually used — both directions, distinctness, and
+// the unknown-token nullopt.
 #pragma once
 #include <QString>
 #include <QVector>
