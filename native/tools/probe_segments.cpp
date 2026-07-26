@@ -1,0 +1,178 @@
+// Headless coverage for the intro/credits segment core: the three providers, the per-type precedence rule,
+// series-key derivation, and the tracker's enter/consume/re-arm behaviour. Pure — no player, no video file.
+// Prints SEGMENTS-OK on success; any failure prints SEGMENTS-FAIL <what> and exits non-zero.
+#include "MediaSegments.h"
+
+#include <QCoreApplication>
+#include <cstdio>
+
+static int failures = 0;
+#define CHECK(cond, what)                                                        \
+    do { if (!(cond)) { std::fprintf(stderr, "SEGMENTS-FAIL %s\n", (what)); ++failures; } } while (0)
+
+using namespace MediaSegments;
+
+static int countOf(const QVector<Segment>& v, SegmentType t)
+{
+    int n = 0;
+    for (const Segment& s : v) if (s.type == t) ++n;
+    return n;
+}
+
+static bool has(const QVector<Segment>& v, SegmentType t, double start, double end)
+{
+    for (const Segment& s : v)
+        if (s.type == t && qAbs(s.start - start) < 0.01 && qAbs(s.end - end) < 0.01) return true;
+    return false;
+}
+
+int main(int argc, char** argv)
+{
+    QCoreApplication app(argc, argv);
+
+    // ---------------------------------------------------------------- 1. parseEdl: the three time forms
+    {
+        // seconds, HH:MM:SS.sss, and #frames at 25fps (250/25 = 10s .. 750/25 = 30s).
+        const QString edl = QStringLiteral(
+            "10.0\t40.0\t3\n"
+            "00:01:00.000\t00:01:30.000\t3\n"
+            "#250\t#750\t3\n");
+        const QVector<Segment> v = parseEdl(edl, 3600.0, 25.0);
+        CHECK(v.size() == 3, "all three time forms parse");
+        CHECK(has(v, SegmentType::Intro, 10.0, 40.0), "plain seconds");
+        CHECK(has(v, SegmentType::Commercial, 60.0, 90.0), "HH:MM:SS");
+        CHECK(has(v, SegmentType::Commercial, 10.0, 30.0), "frames at 25fps");
+
+        // Without an fps the frame line is unusable — but it must not poison the rest of the file.
+        const QVector<Segment> nofps = parseEdl(edl, 3600.0, 0.0);
+        CHECK(nofps.size() == 2, "frame lines drop when fps is unknown, others survive");
+    }
+
+    // ---------------------------------------------------------------- 2. parseEdl: actions and junk
+    {
+        const QString edl = QStringLiteral(
+            "10 40 0\n"      // cut -> a skip
+            "50 80 1\n"      // mute -> not a skip
+            "90 120 2\n"     // scene marker -> not a skip
+            "130 160 3\n"    // commercial -> a skip
+            "\n"
+            "garbage\n"
+            "200 abc 3\n"    // unparseable end time
+            "300 250 3\n"    // end <= start
+            "400 402 3\n");  // shorter than kMinSegmentS
+        const QVector<Segment> v = parseEdl(edl, 3600.0, 25.0);
+        CHECK(v.size() == 2, "only cut+commercial survive; junk, mute, marker, inverted and tiny all drop");
+    }
+
+    // ---------------------------------------------------------------- 3. parseEdl: position typing
+    {
+        // Credits: ends within kCreditsTailS of duration.
+        CHECK(countOf(parseEdl(QStringLiteral("3500 3560 3\n"), 3600.0, 0.0), SegmentType::Credits) == 1,
+              "a range ending 40s before the end is Credits");
+        CHECK(countOf(parseEdl(QStringLiteral("3400 3530 3\n"), 3600.0, 0.0), SegmentType::Credits) == 0,
+              "a range ending 70s before the end is NOT Credits");
+
+        // Intro window boundary: starts before kIntroWindowS.
+        CHECK(countOf(parseEdl(QStringLiteral("899 950 3\n"), 3600.0, 0.0), SegmentType::Intro) == 1,
+              "starting at 899s is inside the intro window");
+        CHECK(countOf(parseEdl(QStringLiteral("901 950 3\n"), 3600.0, 0.0), SegmentType::Intro) == 0,
+              "starting at 901s is outside the intro window");
+
+        // Intro length boundary: <= kIntroMaxLenS.
+        CHECK(countOf(parseEdl(QStringLiteral("10 309 3\n"), 3600.0, 0.0), SegmentType::Intro) == 1,
+              "a 299s range is short enough to be an intro");
+        CHECK(countOf(parseEdl(QStringLiteral("10 311 3\n"), 3600.0, 0.0), SegmentType::Intro) == 0,
+              "a 301s range is too long to be an intro");
+
+        // Only the FIRST qualifying range is the intro.
+        const QVector<Segment> two = parseEdl(QStringLiteral("10 40 3\n60 90 3\n"), 3600.0, 0.0);
+        CHECK(countOf(two, SegmentType::Intro) == 1, "only the first qualifying range is the Intro");
+
+        // THE OVERLAP CASE. In a short file one range satisfies both rules. Credits must win: typing it as
+        // an Intro would make the chip offer to skip the entire rest of the episode.
+        const QVector<Segment> overlap = parseEdl(QStringLiteral("30 100 3\n"), 120.0, 0.0);
+        CHECK(countOf(overlap, SegmentType::Credits) == 1 && countOf(overlap, SegmentType::Intro) == 0,
+              "a range satisfying both rules types as Credits, never Intro");
+    }
+
+    // ---------------------------------------------------------------- 4. fromChapters
+    {
+        const QVector<Chapter> ch = {
+            { 0.0,   QStringLiteral("Recap") },
+            { 45.0,  QStringLiteral("Opening Credits") },
+            { 135.0, QStringLiteral("Part One") },
+            { 900.0, QStringLiteral("End Credits") },
+        };
+        const QVector<Segment> v = fromChapters(ch, 1000.0);
+        CHECK(has(v, SegmentType::Recap, 0.0, 45.0), "a Recap chapter runs to the next chapter");
+        // "Opening Credits" CONTAINS "credits". Intro phrases are tested first for exactly this reason —
+        // otherwise every anime and drama opening in the world types as end credits.
+        CHECK(has(v, SegmentType::Intro, 45.0, 135.0), "\"Opening Credits\" is an Intro, not Credits");
+        CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "the last chapter runs to duration");
+        CHECK(countOf(v, SegmentType::Intro) == 1 && v.size() == 3, "\"Part One\" matches nothing");
+
+        // Word-boundary matching, not substring. Without it every documentary gets a phantom intro.
+        const QVector<Segment> introduction =
+            fromChapters({ { 0.0, QStringLiteral("Introduction") }, { 300.0, QStringLiteral("Body") } }, 600.0);
+        CHECK(introduction.isEmpty(), "\"Introduction\" does NOT match the intro phrase \"intro\"");
+
+        // Punctuation and case are normalized away.
+        const QVector<Segment> punct =
+            fromChapters({ { 0.0, QStringLiteral("[OP]") }, { 90.0, QStringLiteral("A") } }, 600.0);
+        CHECK(countOf(punct, SegmentType::Intro) == 1, "\"[OP]\" normalizes to the intro token \"op\"");
+
+        // A last chapter cannot be sized without a duration.
+        CHECK(fromChapters({ { 0.0, QStringLiteral("Intro") } }, 0.0).isEmpty(),
+              "an unknown duration drops the last chapter");
+    }
+
+    // ---------------------------------------------------------------- 5. resolve: per-TYPE precedence
+    {
+        const QVector<Segment> edl      = { { 100, 200, SegmentType::Commercial } };
+        const QVector<Segment> chapters = { { 10,  40,  SegmentType::Intro } };
+        const QVector<Segment> learned  = { { 15,  45,  SegmentType::Intro },
+                                            { 900, 1000, SegmentType::Credits } };
+        const QVector<Segment> v = resolve(edl, chapters, learned);
+        CHECK(has(v, SegmentType::Intro, 10.0, 40.0), "chapters beat learned for Intro");
+        CHECK(countOf(v, SegmentType::Intro) == 1, "the losing tier's Intro is not also included");
+        CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "learned supplies Credits when nothing else does");
+        CHECK(has(v, SegmentType::Commercial, 100.0, 200.0), "the .edl Commercial survives");
+        // The whole point of per-type precedence:
+        CHECK(countOf(resolve(edl, chapters, {}), SegmentType::Intro) == 1,
+              "an .edl with ONLY a Commercial does not suppress a chapter Intro");
+    }
+
+    // ---------------------------------------------------------------- 6. keyFor
+    {
+        const Key k = keyFor(QStringLiteral("tt0903747:2:7"), QString());
+        CHECK(k.seriesKey == QStringLiteral("tt0903747") && k.season == 2, "the stream id supplies series+season");
+
+        const Key f = keyFor(QString(), QStringLiteral("D:/TV/Breaking Bad/Breaking Bad S03E05.mkv"));
+        CHECK(f.seriesKey == QStringLiteral("name:breaking bad") && f.season == 3,
+              "a filename with no stream id still yields a series key");
+
+        CHECK(keyFor(QString(), QStringLiteral("D:/Movies/Blade Runner (1982).mkv")).seriesKey.isEmpty(),
+              "a movie has no series key");
+        CHECK(keyFor(QString(), QString()).seriesKey.isEmpty(), "nothing in, nothing out");
+    }
+
+    // ---------------------------------------------------------------- 7. Tracker
+    {
+        Tracker t;
+        t.reset({ { 10.0, 40.0, SegmentType::Intro } });
+        CHECK(!t.onPosition(5.0).has_value(), "before the segment: no offer");
+        CHECK(t.onPosition(10.0).has_value(), "entering the segment offers it");
+        CHECK(!t.onPosition(20.0).has_value(), "still inside: not offered again");
+        CHECK(!t.onPosition(50.0).has_value(), "past it: not offered again");
+        CHECK(!t.onPosition(45.0).has_value(), "seeking back but still past the start does NOT re-arm");
+        CHECK(!t.onPosition(9.0).has_value(), "seeking to before the start re-arms but does not itself offer");
+        CHECK(t.onPosition(11.0).has_value(), "…and re-entering offers it again");
+
+        Tracker empty;
+        CHECK(empty.empty() && !empty.onPosition(10.0).has_value(), "an empty tracker never offers");
+    }
+
+    if (failures) { std::fprintf(stderr, "SEGMENTS-FAIL %d check(s) failed\n", failures); return 1; }
+    std::printf("SEGMENTS-OK\n");
+    return 0;
+}
