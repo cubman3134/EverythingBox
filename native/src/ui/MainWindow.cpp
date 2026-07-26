@@ -244,6 +244,10 @@ static QSettings& store()
 
 static QPushButton* panelRow(const QString& label); // large TV-friendly menu row (defined below)
 
+// How long the "Skip Intro" / "Next Episode" chip stays offered. Longer than the 4 s transport-chrome grace on
+// purpose: this is a decision, not a hover, and the user may be reaching for a remote.
+static constexpr int kChipMs = 8000;
+
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
@@ -777,6 +781,26 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         home_->requestNextSource();
     });
 
+    // The skip affordance. Deliberately NOT a NavOverlay: every overlay grabs all input (keyboard grab +
+    // NavContext routing, topmost owns everything), which is exactly wrong for a non-modal prompt over live
+    // video. This follows streamIssueBtn_ above — a plain child of player_, composited over the GL surface.
+    skipChip_ = new QPushButton(tr("Skip Intro"), player_);
+    skipChip_->setObjectName(QStringLiteral("skipChip"));
+    skipChip_->setStyleSheet(QStringLiteral(
+        "#skipChip { background: rgba(20,20,24,0.85); color:#e8e8e8; border:2px solid transparent; border-radius:8px;"
+        " padding:10px 20px; font-weight:bold; }"
+        "#skipChip:hover { background: rgba(45,45,52,0.95); }"
+        "#skipChip:focus { background: rgba(90,140,255,0.80); border:2px solid #fff; }"));
+    skipChip_->setCursor(Qt::PointingHandCursor);
+    skipChip_->hide();
+    skipChip_->installEventFilter(this);   // hovering it keeps it alive (see eventFilter)
+    connect(skipChip_, &QPushButton::clicked, this, &MainWindow::activateSkipChip);
+
+    // Its OWN timer, not the shared 4s controlsHideTimer_: the chip must outlive a chrome hide.
+    skipChipTimer_ = new QTimer(this);
+    skipChipTimer_->setSingleShot(true);
+    connect(skipChipTimer_, &QTimer::timeout, this, &MainWindow::hideSkipChip);
+
     // The app's single user-feedback channel: a window-level notice (download/resolve progress + errors,
     // over ANY view) and a transient centred message over the player (visible in full screen).
     notifier_ = new Notifier(centralWidget(), this);
@@ -1137,6 +1161,12 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
                            || event->type() == QEvent::TouchEnd))
         return handlePlayerTouch(static_cast<QTouchEvent*>(event));
 
+    // Hovering the skip chip keeps it alive — it is a click target with a bounded life, and it must not vanish
+    // out from under a cursor that is on its way to it. Deliberately NOT in the reveal list below: revealing the
+    // transport repositions the chip upward (it clears the bar), i.e. straight out from under that cursor.
+    if (obj == skipChip_ && event->type() == QEvent::MouseMove && skipChip_->isVisible())
+        skipChipTimer_->start(kChipMs);
+
     if (event->type() == QEvent::MouseMove && (obj == player_ || obj == mediaControls_ || obj == videoBack_
                                                || obj == streamIssueBtn_))
         revealMediaControls();
@@ -1151,7 +1181,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 void MainWindow::resizeEvent(QResizeEvent* event)
 {
     QMainWindow::resizeEvent(event);
-    if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_)
+    // The chip is laid out by positionMediaControls too, and it outlives the transport chrome — so a resize
+    // while only the chip is up (chrome already faded) must still re-place it, or it strands off-screen.
+    if ((mediaControls_ && mediaControls_->isVisible()) || subOverlay_ || (skipChip_ && skipChip_->isVisible()))
         positionMediaControls();
     if (notifier_) notifier_->reposition();
 }
@@ -2064,6 +2096,11 @@ void MainWindow::keyPressEvent(QKeyEvent* e)
         case Qt::Key_F12: captureVideoScreenshot(); revealMediaControls(); return;
         case Qt::Key_BracketRight: cyclePlaybackSpeed(+1); revealMediaControls(); return; // ]  faster
         case Qt::Key_BracketLeft:  cyclePlaybackSpeed(-1); revealMediaControls(); return; // [  slower
+        case Qt::Key_S:
+            // Only meaningful while a chip is up; otherwise it is a no-op, not a surprise.
+            if (skipChip_ && skipChip_->isVisible()) activateSkipChip();
+            return;
+        case Qt::Key_I: showSegmentMarksMenu(); return;
         default: break; // Backspace/Escape exit via the unified Back above (stop + return home)
         }
     }
@@ -2264,6 +2301,14 @@ void MainWindow::positionMediaControls()
     streamIssueBtn_->move(margin + videoBack_->width() + 10, margin); // just right of Back
     notifier_->reposition();
     if (subOverlay_) subOverlay_->setGeometry(player_->rect()); // keep the subtitle scrim covering the player
+    // The skip chip: bottom-right, lifted clear of the transport bar whenever the bar is up.
+    if (skipChip_ && skipChip_->isVisible())
+    {
+        const int m = 24;
+        const int above = mediaControls_ && mediaControls_->isVisible() ? mediaControls_->height() + m : m;
+        skipChip_->move(player_->width() - skipChip_->width() - m,
+                        player_->height() - skipChip_->height() - above);
+    }
 }
 
 void MainWindow::notify(const QString& text, int ms)
@@ -2800,6 +2845,8 @@ void MainWindow::resetSegmentState()
     segCtx_ = {};
     segTracker_.reset({});
     segGathered_ = false;
+    hideSkipChip();         // the previous file's offer dies with it — never inherited by the new one
+    segIntroStart_ = -1.0;  // and so does a half-finished mark (a start with no end yet)
     nextEpPending_ = false; // a new file's ending is its own; nothing is in flight for it yet
     ++nextEpGen_;           // any pending resolve from the previous file is now stale -> its callback drops
 }
@@ -10292,6 +10339,11 @@ void MainWindow::gatherSegments()
     // (the PlaybackSession::playRequested choke point), which is what this guard used to strand.
     if (segGathered_) return;                     // this open already armed (or declined) — never re-run
     segTracker_.reset({});
+    // The disarm invalidates any offer on screen: the chip holds a COPY of a range from the previous arming, and
+    // after a re-gather (a fresh mark) that range may no longer exist. Cross-FILE safety is resetSegmentState()'s.
+    // segIntroStart_ is deliberately NOT cleared here — a pending intro start must survive marking the credits,
+    // which re-gathers.
+    hideSkipChip();
     if (duration_ <= 0.0) return;                 // length still unknown: no gather consumed, we'll be called
                                                   // again (credits classification is relative to it)
     segGathered_ = true;
@@ -10339,13 +10391,13 @@ void MainWindow::gatherSegments()
     segTracker_.reset(resolved);
 }
 
-// A segment was just entered. Task 5 replaces the else branch with the on-screen chip.
+// A segment was just entered: take it (auto) or offer it (the chip).
 void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
 {
     const bool isCredits = seg.type == MediaSegments::SegmentType::Credits;
     if (seg.type != MediaSegments::SegmentType::Intro && !isCredits) return; // Recap/Commercial are stored,
                                                                             // not acted on
-    if (!Settings::skipSegmentsAuto()) return;                              // Task 5: show the chip instead
+    if (!Settings::skipSegmentsAuto()) { showSkipChip(seg); return; }        // offer it instead of taking it
 
     // Hand the credits to episode-autoplay ONLY when a hand-off will actually happen. Gating on the setting
     // alone (it defaults to ON) made this branch swallow the skip for every movie and every local-file play:
@@ -10357,6 +10409,126 @@ void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
     // Name what was skipped: an auto-skip from a slightly wrong learned range is otherwise an unexplained
     // jump, and the user needs a thread to pull to find the setting.
     notifier_->playerNotice(isCredits ? tr("Skipped the credits") : tr("Skipped the intro"), 2500);
+}
+
+// Does pressing the chip hand off to the next episode, or just seek past the range? ONE predicate, asked by both
+// the label and the action, so a button reading "Next Episode" can never be one that does nothing:
+// tryPlayNextEpisode() silently no-ops without episode context (a movie, a local file with no SxxExx), and the
+// auto path already falls back to the seek for exactly that reason. Deliberately NOT gated on
+// Settings::autoplayNextEpisode() the way the auto path is — pressing the chip IS the request, and a user who
+// turned automatic advance off has not asked to be refused a manual one.
+bool MainWindow::skipChipHandsOff(const MediaSegments::Segment& seg) const
+{
+    return seg.type == MediaSegments::SegmentType::Credits && canPlayNextEpisode();
+}
+
+void MainWindow::showSkipChip(const MediaSegments::Segment& seg)
+{
+    if (!skipChip_) return;
+    skipChipSeg_ = seg;
+    const bool isCredits = seg.type == MediaSegments::SegmentType::Credits;
+    skipChip_->setText(skipChipHandsOff(seg) ? tr("Next Episode")
+                                             : (isCredits ? tr("Skip Credits") : tr("Skip Intro")));
+    skipChip_->adjustSize();
+    skipChip_->show();                // before positionMediaControls: it lays out only a VISIBLE chip
+    positionMediaControls();
+    skipChip_->raise();
+    skipChipTimer_->start(kChipMs);
+}
+
+void MainWindow::hideSkipChip()
+{
+    if (!skipChip_) return;
+    skipChipTimer_->stop();
+    // Do not strand focus on a widget that is about to vanish.
+    if (skipChip_->hasFocus() && videoBack_) videoBack_->setFocus(Qt::OtherFocusReason);
+    skipChip_->hide();
+}
+
+void MainWindow::activateSkipChip()
+{
+    if (!skipChip_ || !skipChip_->isVisible()) return;
+    const MediaSegments::Segment seg = skipChipSeg_;   // by value: hideSkipChip may outlive the member's meaning
+    const bool handOff = skipChipHandsOff(seg);
+    hideSkipChip();                                    // before acting: tryPlayNextEpisode tears down this playback
+    if (handOff) { tryPlayNextEpisode(); return; }
+    player_->setPosition(seg.end);
+}
+
+// The learn tier's entry point. A NavMenu is right here — the user asked for a menu, so modal is correct;
+// this is NOT the app-level Esc menu (showEscMenu), which during playback is unreachable because Escape exits
+// the player.
+void MainWindow::showSegmentMarksMenu()
+{
+    if (!player_ || stack_->currentWidget() != playerPage_) return;
+
+    const bool canLearn = !segCtx_.seriesKey.isEmpty();
+    const double at = lastPos_;              // set in onPosition — MpvWidget exposes no position accessor
+
+    QStringList rows;
+    rows << (canLearn ? tr("Mark intro start here") : tr("Mark intro — unavailable, no series information"))
+         << (canLearn ? tr("Mark intro end here")   : tr("Mark intro end — unavailable"))
+         << (canLearn ? tr("Mark credits start here") : tr("Mark credits — unavailable"))
+         << tr("Forget marks for this season");
+
+    new NavMenu(tr("Skip segments"), rows, [this, canLearn, at](int row) {
+        if (row < 0 || !segStore_) return;
+        if (!canLearn)
+        {
+            notifier_->playerNotice(tr("No series information for this file, so there is nothing to mark against."), 4000);
+            return;
+        }
+        // Every put()/forget() below is pre-validated here (non-empty seriesKey via canLearn, a forwards range via
+        // the guards), so the store rejecting the INPUT is already impossible: a false return can only mean the
+        // save failed. The mark is still live in memory for this playback — say exactly that rather than claim a
+        // durability the user does not have, because the difference only shows up on the next launch.
+        if (row == 0)
+        {
+            segIntroStart_ = at;
+            notifier_->playerNotice(tr("Intro starts here. Press I again at the end."), 4000);
+            return;
+        }
+        if (row == 1)
+        {
+            if (segIntroStart_ < 0.0)
+            { notifier_->playerNotice(tr("Mark the intro's START first."), 3000); return; }
+            if (at - segIntroStart_ < MediaSegments::kMinSegmentS)
+            { notifier_->playerNotice(tr("That is too close to the intro's start to be an intro."), 3000); return; }
+            const bool ok = segStore_->put(segCtx_.seriesKey, segCtx_.season,
+                                           { segIntroStart_, at, MediaSegments::SegmentType::Intro });
+            segIntroStart_ = -1.0;
+            notifier_->playerNotice(ok ? tr("Intro remembered for season %1.").arg(segCtx_.season)
+                                       : tr("Couldn't save the intro mark — it applies to this playback only."), 3000);
+            regatherSegments();    // the new mark applies to the rest of THIS episode too
+            return;
+        }
+        if (row == 2)
+        {
+            if (duration_ - at < MediaSegments::kMinSegmentS)
+            { notifier_->playerNotice(tr("That is too close to the end of the file to mark the credits."), 3000); return; }
+            const bool ok = segStore_->put(segCtx_.seriesKey, segCtx_.season,
+                                           { at, duration_, MediaSegments::SegmentType::Credits });
+            notifier_->playerNotice(ok ? tr("Credits remembered for season %1.").arg(segCtx_.season)
+                                       : tr("Couldn't save the credits mark — it applies to this playback only."), 3000);
+            regatherSegments();
+            return;
+        }
+        const bool ok = segStore_->forget(segCtx_.seriesKey, segCtx_.season);
+        segIntroStart_ = -1.0;     // a half-finished mark against marks that no longer exist is nonsense
+        notifier_->playerNotice(ok ? tr("Marks for this season forgotten.")
+                                   : tr("Marks cleared for this playback, but they couldn't be removed from disk."), 3000);
+        regatherSegments();
+    }, this);
+}
+
+// Re-arm after a mark. gatherSegments() cannot do this itself: its latch exists because mpv re-emits `duration`
+// for the same file, and an unconditional re-run there would wipe the consumed_ set on every such emit — the
+// user would be re-offered a segment they already passed. Dropping the latch HERE keeps that guarantee intact
+// and re-arms on exactly one thing: an explicit user action that changed what is stored.
+void MainWindow::regatherSegments()
+{
+    segGathered_ = false;
+    gatherSegments();
 }
 
 void MainWindow::onDuration(double seconds)
