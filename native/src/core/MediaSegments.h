@@ -4,7 +4,9 @@
 // Modeled on Jellyfin's Media Segments split: DETECTION (these providers) is separate from STORAGE
 // (SegmentStore) and from ACTION (MainWindow's chip / auto-skip). A fourth provider — audio fingerprinting —
 // would plug in here without touching either of the other two layers. Deliberately pure: no Qt GUI, no mpv,
-// no file I/O, so probe_segments covers every rule in this file without a player or a fixture video.
+// no file I/O, so probe_segments exercises it without a player or a fixture video: the three providers, the
+// precedence rule, keyFor and the Tracker. The typeToString/typeFromString token mapping is NOT covered there
+// — its assertions are deferred to SegmentStore's JSON round-trip, where the tokens are actually used.
 #pragma once
 #include <QString>
 #include <QVector>
@@ -56,7 +58,8 @@ namespace MediaSegments
                              const QVector<Segment>& chapters,
                              const QVector<Segment>& learned);
 
-    // Series identity: the "tt…:S:E" stream id first, else the filename via LocalLibrary::parseFile.
+    // Series identity: the "tt…:S:E" stream id first — matched on SHAPE, so a differently-shaped 3-part id
+    // ("tmdb:tv:1396") is not mistaken for one — else the filename via LocalLibrary::parseFile.
     Key keyFor(const QString& imdbStreamId, const QString& localPath);
 
     // Stable tokens for SegmentStore's JSON. Unknown text maps back to Intro's absence (std::nullopt).

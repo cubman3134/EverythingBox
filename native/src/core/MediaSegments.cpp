@@ -61,18 +61,33 @@ bool matchAny(const QString& norm, std::initializer_list<const char*> phrases)
     return false;
 }
 
-// Intro phrases are tested BEFORE credits phrases, and the order is load-bearing: "opening credits" contains
-// "credits", so a credits-first test would type every opening as end credits.
+// FOUR stages, and the order of all four is load-bearing.
+//
+// Intro must be tested before the GENERIC "credits", or "Opening Credits" — which contains "credits" — would
+// type every anime and drama opening as end credits. But the intro list owns the bare tokens "titles" and
+// "theme", and "End Titles" / "Closing Titles" (the conventional BBC/ITV chapter names) contain "titles". So
+// the EXPLICIT end cues are tested first of all: they are unambiguous, and letting them fall through to the
+// intro stage would hand a caller an "Intro" at 2700s of a 2760s episode — an offer to skip the rest of the
+// episode, the same failure parseEdl's credits-first rule exists to prevent.
+//
+// Phrases whose match is already implied by a shorter phrase in the SAME list are omitted, not listed for
+// documentation: "opening credits"/"opening titles" can never out-match "opening", nor "previously on"
+// "previously", so listing them would read as a live rule that can never decide anything.
 std::optional<MediaSegments::SegmentType> typeForTitle(const QString& title)
 {
     using T = MediaSegments::SegmentType;
     const QString n = normalizeTitle(title);
     if (n.isEmpty()) return std::nullopt;
-    if (matchAny(n, { "intro", "opening", "opening credits", "opening titles", "titles", "theme", "op" }))
+    // 1. Explicit END cues, before the intro list can claim their bare "titles".
+    if (matchAny(n, { "end credits", "end titles", "closing credits", "closing titles", "ending", "outro", "ed" }))
+        return T::Credits;
+    // 2. Intro, before the generic "credits" below can claim "Opening Credits".
+    if (matchAny(n, { "intro", "opening", "titles", "theme", "op" }))
         return T::Intro;
-    if (matchAny(n, { "recap", "previously", "previously on" }))
+    if (matchAny(n, { "recap", "previously" }))
         return T::Recap;
-    if (matchAny(n, { "credits", "end credits", "ending", "outro", "closing credits", "ed" }))
+    // 4. Generic: a bare "Credits" with no opening/closing qualifier is the end credits.
+    if (hasPhrase(n, "credits"))
         return T::Credits;
     return std::nullopt;
 }
@@ -95,12 +110,12 @@ QVector<MediaSegments::Segment> MediaSegments::parseEdl(const QString& text, dou
         const int action = f[2].toInt(&ok);
         if (!ok) continue;
         if (action != 0 && action != 3) continue;          // 1 mute / 2 scene marker are not skips
-        if (end <= start) continue;
         if (duration > 0.0)
         {
             if (start >= duration) continue;
             end = qMin(end, duration);
         }
+        // Also the inverted-range guard: kMinSegmentS is positive, so an end at or before start fails this.
         if (end - start < kMinSegmentS) continue;
 
         Segment s{ start, end, SegmentType::Commercial };
@@ -127,7 +142,8 @@ QVector<MediaSegments::Segment> MediaSegments::fromChapters(const QVector<Chapte
         if (!ty) continue;
         const double start = chapters[i].time;
         const double end   = (i + 1 < chapters.size()) ? chapters[i + 1].time : duration;
-        if (end <= start || end - start < kMinSegmentS) continue;
+        // Covers the last chapter with an unknown duration too: end = duration <= 0 <= start fails this.
+        if (end - start < kMinSegmentS) continue;
         out.push_back(Segment{ start, end, *ty });
     }
     return out;
@@ -155,7 +171,10 @@ MediaSegments::Key MediaSegments::keyFor(const QString& imdbStreamId, const QStr
 {
     Key k;
     const QStringList p = imdbStreamId.split(QLatin1Char(':'));
-    if (p.size() == 3 && !p[0].isEmpty())
+    // SHAPE, not just arity: "tt0903747:2:7" is the contract, but other 3-part tile ids exist —
+    // "tmdb:tv:1396" would otherwise key as seriesKey="tmdb", season=0, collapsing every TMDB-catalogued
+    // show into ONE learned bucket and offering one show's intro during another's.
+    if (p.size() == 3 && p[0].startsWith(QLatin1String("tt")))
     {
         k.seriesKey = p[0];
         k.season    = p[1].toInt();
