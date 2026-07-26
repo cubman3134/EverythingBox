@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.31 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.32 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -173,6 +173,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h
         src/core/SubtitleCache.cpp src/core/SubtitleCache.h
+        src/core/MediaSegments.cpp src/core/MediaSegments.h
+        src/core/SegmentStore.cpp  src/core/SegmentStore.h
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
@@ -483,6 +485,16 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h)
     target_include_directories(probe_subs PRIVATE src src/core src/theme2)
     target_link_libraries(probe_subs PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the intro/credits segment core: the three providers (.edl / chapters / learned),
+    # per-type precedence, series-key derivation, and the tracker. Pure — no mpv, no video file.
+    add_executable(probe_segments tools/probe_segments.cpp
+        src/core/MediaSegments.cpp src/core/MediaSegments.h
+        src/core/LocalLibrary.cpp  src/core/LocalLibrary.h
+        src/core/Settings.cpp      src/core/Settings.h
+        src/theme2/FormFactor.cpp  src/theme2/FormFactor.h)
+    target_include_directories(probe_segments PRIVATE src src/core src/theme2)
+    target_link_libraries(probe_segments PRIVATE Qt6::Core Qt6::Gui)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
     add_executable(probe_resolver tools/probe_resolver.cpp
