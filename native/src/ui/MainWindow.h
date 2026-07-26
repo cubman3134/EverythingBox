@@ -548,7 +548,15 @@ private:
     // (duplicate seek + duplicate notice) and repeating the synchronous .edl disk read on the GUI thread.
     bool                     segGathered_ = false;
     void gatherSegments();
+    // Re-run gatherSegments() after the user marks or forgets a range, so the mark applies to the rest of THIS
+    // episode. The latch is dropped HERE and not inside gatherSegments(): the once-per-open guarantee exists to
+    // survive mpv re-emitting `duration`, and only an explicit user action may re-arm past it.
+    void regatherSegments();
     void onSegmentEntered(const MediaSegments::Segment& seg);
+    // The learn tier: mark an intro/credits range against this season, or forget the season's marks.
+    void showSegmentMarksMenu();
+    // A marked intro START awaiting its END (-1 = none pending). Per-playback, so resetSegmentState() clears it.
+    double                   segIntroStart_ = -1.0;
     // The per-open reset of every segment/hand-off latch. notePlaybackStart() calls it, but two mpv-open routes
     // (openAudio's multi-select branch, the StreamResolver::playQueue lambda) go straight to setQueue and never
     // reach notePlaybackStart — they call this directly so a previous episode's learned intro can't be armed
@@ -634,6 +642,19 @@ private:
     QFrame* mediaControls_ = nullptr; // floating transport overlay over the player
     QPushButton* videoBack_ = nullptr; // top-left "Back" overlay to exit the movie
     QPushButton* streamIssueBtn_ = nullptr; // top-left "Issue with Streaming" overlay (next to Back) for Allarr media
+    // The skip affordance shown when auto-skip is OFF. Deliberately a plain child of player_ like
+    // streamIssueBtn_ above and NOT a NavOverlay: every overlay grabs all input (keyboard grab + NavContext
+    // routing, topmost owns everything), which is exactly wrong for a non-modal prompt over live video that
+    // the user is free to ignore.
+    QPushButton*           skipChip_ = nullptr;
+    QTimer*                skipChipTimer_ = nullptr; // its OWN life, not the shared 4 s controlsHideTimer_
+    MediaSegments::Segment skipChipSeg_;             // what the visible chip would skip
+    // One predicate behind both the chip's LABEL and its action, so "Next Episode" is never a button that does
+    // nothing: tryPlayNextEpisode() silently no-ops without episode context.
+    bool skipChipHandsOff(const MediaSegments::Segment& seg) const;
+    void showSkipChip(const MediaSegments::Segment& seg);
+    void hideSkipChip();
+    void activateSkipChip();
     bool currentNextSourceCapable_ = false; // the open media came from a file provider that can serve another source
     class Notifier* notifier_ = nullptr;    // the app's single user-feedback channel (window notice + player notice)
     class StreamResolver* streams_ = nullptr; // .m3u/.m3u8 playlist + stream-link classification (see connect block)
