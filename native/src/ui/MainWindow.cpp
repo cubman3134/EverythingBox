@@ -817,6 +817,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // the initial track to its stable id AFTER setQueue, so a stable id still wins track 1 while advances fall
         // through to this per-track key.
         syncKey_ = p;
+        // A queue ADVANCE (handleTrackEnd/next/prev/a playlist-row click -> playIndex) lands here and nowhere
+        // else: it reaches neither notePlaybackStart() nor either of the two setQueue sites that reset by hand.
+        // Without this, tracks 2..N of every video queue kept track 1's armed ranges (auto-skip firing at an
+        // unrelated timestamp) and never re-gathered their own, because segGathered_ was still true. Must run
+        // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
+        // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
+        resetSegmentState();
         player_->play(p);
     });
     connect(session_, &PlaybackSession::queueChanged, this,
@@ -2558,6 +2565,22 @@ bool MainWindow::canPlayNextEpisode() const
     return !parts.value(0).isEmpty() && parts.value(1).toInt() > 0 && parts.value(2).toInt() > 0;
 }
 
+// A next-episode resolve came back: is this result still ours to act on? A `false` here is the hand-off DYING,
+// not pausing — so it also performs the compensation both drop paths used to skip, or the file would be left
+// latched (no retry at EOF for the rest of it) under an "Up next…" notice with nothing behind it for 20 s.
+bool MainWindow::nextEpHandoffStillOurs(int gen)
+{
+    if (gen != nextEpGen_)
+    {
+        // Superseded: the new open's resetSegmentState() already cleared the latch. If it is set again, a hand-off
+        // started SINCE this one owns the notice — only take the notice down when nothing is behind it.
+        if (!nextEpPending_) notifier_->hidePlayerNotice();
+        return false;
+    }
+    if (!canPlayNextEpisode()) { nextEpPending_ = false; notifier_->hidePlayerNotice(); return false; }
+    return true;
+}
+
 void MainWindow::tryPlayNextEpisode()
 {
     // A hand-off already in flight owns this file's ending. The credits branch calls us WITHOUT seeking, so
@@ -2590,15 +2613,18 @@ void MainWindow::tryPlayNextEpisode()
     notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
         [this, gen, nextEp, nextSeason, playLocalIfOwned](const QString& url, const QString& mime) {
-        if (gen != nextEpGen_ || !canPlayNextEpisode()) return; // superseded, or the user navigated away
+        if (!nextEpHandoffStillOurs(gen)) return;               // superseded, or the user navigated away
         if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
         // End of season? Try the first episode of the next one — again local before network.
         if (playLocalIfOwned(nextSeason)) return;
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
             [this, gen, nextSeason](const QString& url2, const QString& mime2) {
-            if (gen != nextEpGen_ || !canPlayNextEpisode()) return;
+            if (!nextEpHandoffStillOurs(gen)) return;
             if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
-            else { notifier_->hidePlayerNotice(); notify(tr("No next episode found — that looks like the finale."), kFeedbackLong); }
+            else { nextEpPending_ = false;   // the finale: nothing is in flight, and the credits branch may
+                                             // legitimately try again if the user seeks back into them
+                   notifier_->hidePlayerNotice();
+                   notify(tr("No next episode found — that looks like the finale."), kFeedbackLong); }
         });
     });
 }
@@ -2616,6 +2642,12 @@ void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString&
     it.id = imdbStreamId; // stable resume/Recent key for this episode
     notify(tr("Up next: %1").arg(it.title), 4000);
     openLibraryItem(it); // plays it, and re-arms subCtx_ so the following episode auto-advances too
+    // Clear the latch unconditionally now the synchronous dispatch has returned — the channelAiring_ precedent
+    // at airChannelPick(). A normal in-app play already consumed it (notePlaybackStart -> resetSegmentState),
+    // so this is a no-op there. But an external-player divert early-returns from routePlay BEFORE
+    // notePlaybackStart, leaving the latch SET with nothing in flight: the file still on screen could then
+    // never hand off again, not at its credits and not at its EOF.
+    nextEpPending_ = false;
 }
 
 // ---- Channel mode ------------------------------------------------------------------------------------------
@@ -10251,10 +10283,18 @@ void MainWindow::refreshInputButtonRows()
 // Runs ONCE per file (from onDuration, because credits classification needs the length), never per tick.
 void MainWindow::gatherSegments()
 {
-    if (segGathered_ || duration_ <= 0.0) return; // once per open, and only once the length is actually known
-                                                  // (credits classification is relative to it)
-    segGathered_ = true;
+    // ORDER MATTERS. The disarm sits ABOVE the duration gate: a file whose length isn't known on its first
+    // durationChanged must not be left holding the PREVIOUS file's armed ranges while it waits for a real one.
+    // It stays BELOW the once-per-open latch on purpose — mpv re-emits `duration` for the same file, and an
+    // unconditional disarm here would silently drop the ranges we armed seconds earlier (skipping would just
+    // stop working mid-file, and the consumed_ set would go with it). CROSS-FILE safety is therefore owned by
+    // resetSegmentState(), which every route that opens a file now reaches — including the queue advance
+    // (the PlaybackSession::playRequested choke point), which is what this guard used to strand.
+    if (segGathered_) return;                     // this open already armed (or declined) — never re-run
     segTracker_.reset({});
+    if (duration_ <= 0.0) return;                 // length still unknown: no gather consumed, we'll be called
+                                                  // again (credits classification is relative to it)
+    segGathered_ = true;
     if (!Settings::skipSegments() || !player_) return;
     // VIDEO ONLY. The chapter tier needs no series identity, so clearing segCtx_ does not protect audio at all:
     // podcasts and audiobooks routinely ship a chapter literally titled "Intro" that types as Intro and clears
