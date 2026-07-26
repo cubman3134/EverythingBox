@@ -296,6 +296,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // when a network call is even needed. A hit means a replay costs no OpenSubtitles daily quota at all.
     subCache_ = std::make_unique<SubtitleCache>(AppPaths::dataDir() + QStringLiteral("/subtitles.json"));
     subCache_->load();
+    // The learned intro/credits ranges, beside the other stores: detection and action live in MainWindow,
+    // storage stays a plain device-local file the user's marks accumulate into.
+    segStore_ = new SegmentStore(QDir(AppPaths::dataDir()).filePath(QStringLiteral("segments.json")));
+    segStore_->load();
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
@@ -2404,6 +2408,10 @@ void MainWindow::openVideoPath(const QString& path)
     }
     notePlaybackStart();               // channel guard: the channel's own pick keeps it alive; a manual play ends it
     subCtx_ = {};                      // a local file isn't matched to a catalog title/IMDB id for subtitles
+    // subCtx_ is cleared here (no catalog metadata), but a filename alone can still name the show and
+    // season — so segments keep working on the Recents / "Open Video…" route.
+    const MediaSegments::Key k = MediaSegments::keyFor(QString(), path);
+    segCtx_ = { k.seriesKey, k.season, path };
     currentNextSourceCapable_ = false; // a local file has no Allarr alternate source
     themedAudioSession_ = false;       // openVideoPath is VIDEO — keep the classic player page
     retro_->stop();
@@ -2725,6 +2733,12 @@ void MainWindow::exitChannel()
 // dispatch, a manual play interleaved during a pending async resolve sees it FALSE here and correctly exits.
 void MainWindow::notePlaybackStart()
 {
+    // Intro/credits: a new open invalidates the previous file's segment identity AND its armed ranges. Cleared
+    // HERE, at the one hook every play sink already reaches, so a route that cannot name a series (audio, a
+    // pasted link, an IPTV channel) can never inherit the previous episode's learned intro and jump mid-track.
+    // The two routes that CAN name one — armSubtitleFetch and openVideoPath — re-arm segCtx_ right after this.
+    segCtx_ = {};
+    segTracker_.reset({});
     if (channelAiring_) { channelAiring_ = false; channelSkips_ = 0; return; } // the channel's own pick — keep it
     if (channelActive()) exitChannel();                                         // a manual play supersedes the channel
 }
@@ -6227,6 +6241,16 @@ void MainWindow::stopScrobble()
 void MainWindow::armSubtitleFetch(const MediaItem& item)
 {
     subCtx_ = {};
+    // A local file gives us the bytes, so the OSDb moviehash tier (an exact-rip match) becomes available;
+    // a stream has no path and simply starts the chain one tier down.
+    const QString localPath = (item.mime == QStringLiteral("local:video")) ? item.url : QString();
+
+    // Segment context rides along on the tile route, where the stream id gives series + season directly. It is
+    // armed BEFORE the subtitle-eligibility gate below on purpose: segments are a separate feature whose only
+    // requirement is an identifiable series, so an item type the subtitle fetcher declines still gets skips.
+    const MediaSegments::Key k = MediaSegments::keyFor(item.imdbStreamId, localPath);
+    segCtx_ = { k.seriesKey, k.season, localPath };
+
     const QString t = item.type.toLower();
     const bool eligible = t.isEmpty() || t == QStringLiteral("movie") || t == QStringLiteral("series")
                           || t == QStringLiteral("episode") || t == QStringLiteral("video");
@@ -6235,9 +6259,7 @@ void MainWindow::armSubtitleFetch(const MediaItem& item)
     // the automatic-on-load fetch when the feature is enabled, configured, and we have something to match on.
     subCtx_.imdbStreamId = item.imdbStreamId;
     subCtx_.title = item.title;
-    // A local file gives us the bytes, so the OSDb moviehash tier (an exact-rip match) becomes available;
-    // a stream has no path and simply starts the chain one tier down.
-    subCtx_.localPath = (item.mime == QStringLiteral("local:video")) ? item.url : QString();
+    subCtx_.localPath = localPath;
     subCtx_.active = Settings::subtitlesOnByDefault() && SubtitleFetcher::configured()
                      && !(item.imdbStreamId.isEmpty() && item.title.isEmpty());
 }
@@ -10189,6 +10211,48 @@ void MainWindow::refreshInputButtonRows()
 }
 #endif // MMV_HAVE_QML
 
+// Collect every provider's segments for the file that just loaded, resolve them, and arm the tracker.
+// Runs ONCE per file (from onDuration, because credits classification needs the length), never per tick.
+void MainWindow::gatherSegments()
+{
+    segTracker_.reset({});
+    if (!Settings::skipSegments() || !player_) return;
+
+    // 1. Kodi .edl sidecar, local files only — a stream has no sidecar.
+    QVector<MediaSegments::Segment> edl;
+    if (!segCtx_.localPath.isEmpty())
+    {
+        const QFileInfo fi(segCtx_.localPath);
+        const QString edlPath = fi.dir().filePath(fi.completeBaseName() + QStringLiteral(".edl"));
+        QFile f(edlPath);
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+            edl = MediaSegments::parseEdl(QString::fromUtf8(f.readAll()), duration_, player_->fps());
+    }
+
+    // 2. Named chapters. 3. What the user taught us for this season.
+    const QVector<MediaSegments::Segment> chapters =
+        MediaSegments::fromChapters(player_->chapters(), duration_);
+    const QVector<MediaSegments::Segment> learned =
+        segStore_ ? segStore_->lookup(segCtx_.seriesKey, segCtx_.season) : QVector<MediaSegments::Segment>{};
+
+    segTracker_.reset(MediaSegments::resolve(edl, chapters, learned));
+}
+
+// A segment was just entered. Task 5 replaces the else branch with the on-screen chip.
+void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
+{
+    const bool isCredits = seg.type == MediaSegments::SegmentType::Credits;
+    if (seg.type != MediaSegments::SegmentType::Intro && !isCredits) return; // Recap/Commercial are stored,
+                                                                            // not acted on
+    if (!Settings::skipSegmentsAuto()) return;                              // Task 5: show the chip instead
+
+    if (isCredits && Settings::autoplayNextEpisode()) { tryPlayNextEpisode(); return; }
+    player_->setPosition(seg.end);
+    // Name what was skipped: an auto-skip from a slightly wrong learned range is otherwise an unexplained
+    // jump, and the user needs a thread to pull to find the setting.
+    notifier_->playerNotice(isCredits ? tr("Skipped the credits") : tr("Skipped the intro"), 2500);
+}
+
 void MainWindow::onDuration(double seconds)
 {
     duration_ = seconds;
@@ -10201,6 +10265,8 @@ void MainWindow::onDuration(double seconds)
     const double at = session_->takeResumeSeek(); // one-shot
     if (at > 1.0 && at < seconds - 5.0)
         player_->setPosition(at);
+
+    gatherSegments();
 }
 
 void MainWindow::onPosition(double seconds)
@@ -10210,6 +10276,9 @@ void MainWindow::onPosition(double seconds)
     time_->setText(fmt(seconds) + QStringLiteral(" / ") + fmt(duration_));
 
     session_->setPosition(seconds); // updates the tracked position and throttles resume writes internally
+
+    lastPos_ = seconds;   // the marks menu needs "where am I now"; nothing else in MainWindow tracks it
+    if (const auto seg = segTracker_.onPosition(seconds)) onSegmentEntered(*seg);
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
     // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.

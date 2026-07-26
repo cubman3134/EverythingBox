@@ -13,6 +13,8 @@
 #include <functional>
 #include "../addons/AddonModels.h"
 #include "../core/LifecyclePolicy.h"
+#include "../core/MediaSegments.h"
+#include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
 
 class MpvWidget;
@@ -521,6 +523,16 @@ private:
     void tryPlayNextEpisode();
     void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
 
+    // Intro/credits skipping. A SEPARATE context from subCtx_ on purpose: subCtx_ is the subtitle system's
+    // and is deliberately cleared on the openVideoPath route, whereas segments can still be derived there
+    // from the filename alone.
+    struct SegmentCtx { QString seriesKey; int season = 0; QString localPath; };
+    SegmentCtx               segCtx_;
+    MediaSegments::Tracker   segTracker_;
+    SegmentStore*            segStore_ = nullptr;
+    void gatherSegments();
+    void onSegmentEntered(const MediaSegments::Segment& seg);
+
     // ---- Channel mode: shuffle-bag random autoplay over a video/audio playlist ------------------------------
     // A "channel" turns a playlist into a personal TV network: it airs a random item, and on each NATURAL end
     // (EOF only — the queueFinished seam is already EOF-gated) shows a cancelable countdown then airs the next
@@ -626,6 +638,7 @@ private:
     QWidget* panelDialog_ = nullptr;       // an embedded dialog hosted in the panel (owns keyboard nav), or null
     std::function<void()> panelOnBack_;
     double duration_ = 0.0;
+    double lastPos_ = 0.0;   // last reported playback position, for the segment marks menu
     bool sliderDown_ = false;
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
     bool forceClose_ = false;        // set once the exit push completes, so closeEvent stops deferring the quit
