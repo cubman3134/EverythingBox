@@ -267,7 +267,7 @@ int main(int argc, char** argv)
         const QVector<Segment> s2 = re.lookup(QStringLiteral("tt1"), 2);
         CHECK(s2.size() == 1 && has(s2, SegmentType::Intro, 10.0, 40.0), "the season mark round-trips");
 
-        // The series-level fallback: season 3 was never marked, so it inherits the most recent mark.
+        // The DERIVED fallback: season 3 was never marked, so it inherits the nearest season that was.
         const QVector<Segment> s3 = re.lookup(QStringLiteral("tt1"), 3);
         CHECK(s3.size() == 1 && has(s3, SegmentType::Intro, 10.0, 40.0), "an unmarked season falls back");
 
@@ -292,7 +292,7 @@ int main(int argc, char** argv)
             SegmentStore mix(QDir(tmp.path()).filePath(QStringLiteral("mix.json")));
             mix.load();
             mix.put(QStringLiteral("tt7"), 1, Segment{ 10.0, 40.0, SegmentType::Intro });
-            mix.put(QStringLiteral("tt7"), 2, Segment{ 12.0, 42.0, SegmentType::Intro });    // bare Intro moves on
+            mix.put(QStringLiteral("tt7"), 2, Segment{ 12.0, 42.0, SegmentType::Intro });
             mix.put(QStringLiteral("tt7"), 2, Segment{ 900.0, 1000.0, SegmentType::Credits });
             const QVector<Segment> perType = mix.lookup(QStringLiteral("tt7"), 1);
             CHECK(perType.size() == 2, "a non-empty season entry does not suppress the types it lacks");
@@ -306,9 +306,9 @@ int main(int argc, char** argv)
             CHECK(has(s3, SegmentType::Credits, 800.0, 900.0), "…while the freshly marked credits win");
         }
 
-        // ---- forget, one season only: the mark is genuinely GONE. put() wrote the bare series key too, so
-        // dropping just "tt1|s2" would leave a byte-identical copy that lookup's fallback resurrects — a
-        // wrong range the user can never clear, because no public call sequence reaches that copy.
+        // ---- forget, one season only: the mark is genuinely GONE. It lived under exactly one key, and the
+        // fallback is derived rather than stored, so there is no second copy for lookup() to resurrect — the
+        // wrong range the user just cleared cannot come back.
         re.forget(QStringLiteral("tt1"), 2);
         CHECK(re.lookup(QStringLiteral("tt1"), 2).isEmpty(), "forgetting the only marked season leaves NOTHING");
         CHECK(re.lookup(QStringLiteral("tt1"), 9).isEmpty(), "…and there is no series-level ghost to inherit");
@@ -334,7 +334,7 @@ int main(int argc, char** argv)
             two.put(QStringLiteral("tt3"), 2, Segment{ 20.0, 50.0, SegmentType::Intro });
         }
         SegmentStore two(twoPath);
-        two.load();                                        // via disk, so the "src" field is exercised
+        two.load();                                        // via disk, so the round-trip is exercised too
         CHECK(two.forget(QStringLiteral("tt3"), 1), "forget reports success");
         const QVector<Segment> inherited = two.lookup(QStringLiteral("tt3"), 1);
         CHECK(inherited.size() == 1 && has(inherited, SegmentType::Intro, 20.0, 50.0),
@@ -343,22 +343,72 @@ int main(int argc, char** argv)
         const QVector<Segment> s2Still = two.lookup(QStringLiteral("tt3"), 2);
         CHECK(s2Still.size() == 1 && has(s2Still, SegmentType::Intro, 20.0, 50.0), "season 2 is untouched");
 
-        // ---- Rows from a file written before provenance existed carry no "src". They load as season 0, so
-        // no forget matches them: an unknown origin is never guessed at and deleted.
+        // ---- THE REGRESSION. Clearing one season must not disturb what a DIFFERENT season was inheriting.
+        // Season 1 is marked and season 3 is silently inheriting it; the user then marks season 2 (its
+        // opening differs) and later clears that mark again. Season 3 must be exactly where it started —
+        // inheriting season 1 — because season 1's mark was never touched. The build that maintained a
+        // second, series-level copy of "the most recent mark" failed here: season 2's put overwrote that
+        // copy, and forget(season 2) then deleted it, leaving season 3 with no skip at all while
+        // lookup(season 1) still proved the mark existed. Deriving the fallback removes the failure mode.
+        {
+            SegmentStore reg(QDir(tmp.path()).filePath(QStringLiteral("regress.json")));
+            reg.load();
+            reg.put(QStringLiteral("tt8"), 1, Segment{ 10.0, 40.0, SegmentType::Intro });
+            reg.put(QStringLiteral("tt8"), 2, Segment{ 20.0, 50.0, SegmentType::Intro });
+            CHECK(reg.forget(QStringLiteral("tt8"), 2), "clearing season 2 reports success");
+            const QVector<Segment> r3 = reg.lookup(QStringLiteral("tt8"), 3);
+            CHECK(r3.size() == 1 && has(r3, SegmentType::Intro, 10.0, 40.0),
+                  "clearing season 2 leaves season 3 inheriting season 1 exactly as before");
+            CHECK(has(reg.lookup(QStringLiteral("tt8"), 1), SegmentType::Intro, 10.0, 40.0),
+                  "…and season 1's own mark is untouched, so the mark demonstrably still exists");
+            const QVector<Segment> r2 = reg.lookup(QStringLiteral("tt8"), 2);
+            CHECK(r2.size() == 1 && has(r2, SegmentType::Intro, 10.0, 40.0),
+                  "…and season 2 goes back to inheriting, not to nothing");
+        }
+
+        // ---- NEAREST season, not highest. Seasons 1-4 share an opening and season 5 changed it: an unmarked
+        // season 2 must inherit season 1, the nearest mark BELOW it — inheriting the highest-numbered mark
+        // would hand it the one range known to be wrong for it. Only when no earlier season supplies a type
+        // does the search go upwards, which is how season 2 still gets season 5's credits.
+        {
+            SegmentStore nearest(QDir(tmp.path()).filePath(QStringLiteral("near.json")));
+            nearest.load();
+            nearest.put(QStringLiteral("tt10"), 1, Segment{ 10.0, 40.0, SegmentType::Intro });
+            nearest.put(QStringLiteral("tt10"), 5, Segment{ 50.0, 80.0, SegmentType::Intro });
+            nearest.put(QStringLiteral("tt10"), 5, Segment{ 900.0, 1000.0, SegmentType::Credits });
+            const QVector<Segment> n2 = nearest.lookup(QStringLiteral("tt10"), 2);
+            CHECK(has(n2, SegmentType::Intro, 10.0, 40.0) && !has(n2, SegmentType::Intro, 50.0, 80.0),
+                  "an unmarked season inherits the nearest mark BELOW it, not the highest");
+            CHECK(has(n2, SegmentType::Credits, 900.0, 1000.0),
+                  "…and a type no earlier season supplies comes from the nearest season above");
+            const QVector<Segment> n6 = nearest.lookup(QStringLiteral("tt10"), 6);
+            CHECK(has(n6, SegmentType::Intro, 50.0, 80.0) && !has(n6, SegmentType::Intro, 10.0, 40.0),
+                  "past the last mark, the nearest below is season 5");
+        }
+
+        // ---- A file written by the provenance build carries a stray "src" on every row and a bare
+        // series-level copy of the newest mark. The field is unknown now and simply ignored — refusing the
+        // file would throw away the only copy of the user's marks. The bare copy loads as what it is, a
+        // season-unknown mark, so it keeps working as a fallback; forget() takes the key it is given, which
+        // means the season key and then the bare one. The old build could remove NEITHER, because a row with
+        // no "src" matched no forget at all — the original "forget cannot forget" symptom, verbatim.
         const QString oldPath = QDir(tmp.path()).filePath(QStringLiteral("old.json"));
         {
             QFile f(oldPath);
-            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "write the pre-provenance file");
-            f.write("{\"tt5\":[{\"s\":10,\"e\":40,\"t\":\"intro\"}],"
-                    "\"tt5|s1\":[{\"s\":10,\"e\":40,\"t\":\"intro\"}]}");
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "write the provenance-era file");
+            f.write("{\"tt5\":[{\"s\":10,\"e\":40,\"t\":\"intro\",\"src\":1}],"
+                    "\"tt5|s1\":[{\"s\":10,\"e\":40,\"t\":\"intro\",\"src\":1}]}");
         }
         SegmentStore legacy(oldPath);
         legacy.load();
         CHECK(has(legacy.lookup(QStringLiteral("tt5"), 1), SegmentType::Intro, 10.0, 40.0),
-              "a file with no \"src\" still loads");
+              "a stray \"src\" field is ignored, not a load error");
         legacy.forget(QStringLiteral("tt5"), 1);
         CHECK(has(legacy.lookup(QStringLiteral("tt5"), 1), SegmentType::Intro, 10.0, 40.0),
-              "an unknown-provenance fallback row survives forget rather than being guessed away");
+              "the old bare copy stays as a season-unknown mark once the season key is cleared");
+        legacy.forget(QStringLiteral("tt5"), 0);
+        CHECK(legacy.lookup(QStringLiteral("tt5"), 1).isEmpty(),
+              "…and forget(season 0) clears that too: nothing in the file is unforgettable any more");
 
         // ---- A save that cannot happen is reported, not swallowed: this file is the only copy of ranges the
         // user hand-marked, so a caller must be able to tell the mark did not stick.
