@@ -99,6 +99,7 @@ std::optional<MediaSegments::SegmentType> typeForTitle(const QString& title)
     // 3. Intro, before the generic "credits" below can claim "Opening Credits".
     if (matchAny(n, { "intro", "opening", "titles", "title", "theme", "op" }))
         return T::Intro;
+    // 4. Recap — after the intro stage, which owns the bare nouns, and before the generic credits below.
     if (matchAny(n, { "recap", "previously" }))
         return T::Recap;
     // 5. Generic: a bare "Credits" with no opening/closing qualifier is the end credits.

@@ -303,6 +303,11 @@ private:
     qint64  padNext_[8] = { 0 };      // per-nav-input: tick at which a held direction may repeat again
     void revealMediaControls();
     void positionMediaControls();
+    // Place + re-stack the skip chip alone. Split out of positionMediaControls() because the chip's position
+    // DEPENDS on whether the transport bar is currently visible, so it has to be (re)run AFTER any show()/hide()
+    // of the bar — not before it, which is what drew the chip underneath the bar. Safe to call at any time: it
+    // no-ops unless the chip is visible.
+    void positionSkipChip();
     void hideMediaControls();               // hide the transport chrome now (shared by the idle timer + touch tap)
     void togglePlayerChrome();              // touch tap: hide if shown / reveal (+re-arm) if hidden
     bool handlePlayerTouch(class QTouchEvent* te); // player tap-toggle + double-tap ±10 s seek (touch only)
@@ -683,6 +688,14 @@ private:
     std::function<void()> panelOnBack_;
     double duration_ = 0.0;
     double lastPos_ = 0.0;   // last reported playback position, for the segment marks menu
+    // Which playback epoch (nextEpGen_) these two were last reported FOR. mpv reports neither until well after an
+    // open, so between the open and its first callback they still hold the PREVIOUS file's numbers. These are the
+    // player's own live transport state and must NOT be zeroed on an open (a play ATTEMPT that fails leaves a
+    // still-running file with a dead slider and a "0:00" length) — so segment code asks "is this MY file's number
+    // yet?" instead, with the same nextEpGen_ epoch the marks menu already uses for the cross-episode case.
+    // -1 = never reported.
+    int durGen_ = -1;
+    int posGen_ = -1;
     bool sliderDown_ = false;
     bool focusedOnShow_ = false; // ensure we grab keyboard focus only once, on the first show
     bool forceClose_ = false;        // set once the exit push completes, so closeEvent stops deferring the quit
