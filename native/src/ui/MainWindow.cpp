@@ -8211,9 +8211,10 @@ void MainWindow::openGeneralSettings()
         // Offer to skip an episode's opening and end credits when one is known; "Skip automatically" seeks
         // past them without asking, instead of showing a button.
         toggle(QStringLiteral("pb.skipseg"), tr("Skip intros and credits"), Settings::skipSegments());
-        toggle(QStringLiteral("pb.skipsegauto"), tr("Skip automatically"), Settings::skipSegmentsAuto());
-        info(QStringLiteral("pb.skipseghint"), tr("While a video is playing"),
-             tr("S skips the offered segment, I marks where one starts and ends."));
+        toggle(QStringLiteral("pb.skipsegauto"), tr("Skip them automatically (no button)"), Settings::skipSegmentsAuto());
+        info(QStringLiteral("pb.skipseghint"),
+             tr("While a video is playing: S skips the offered segment, I marks where one starts and ends."),
+             QString());
         // Videos play in the built-in player by default, or hand off to an installed/custom external player.
         // Hidden ENTIRELY for a restricted (kids) profile — no external escape hatch offered, PIN or not.
         if (!ProfileStore::current().restricted)
