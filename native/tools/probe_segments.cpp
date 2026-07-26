@@ -129,34 +129,63 @@ int main(int argc, char** argv)
         CHECK(has(v, SegmentType::Credits, 900.0, 1000.0), "the last chapter runs to duration");
         CHECK(countOf(v, SegmentType::Intro) == 1 && v.size() == 3, "\"Part One\" matches nothing");
 
-        // THE OTHER ORDERING TRAP. "End Titles" and "Closing Titles" — the conventional BBC/ITV chapter
-        // names — contain the bare intro token "titles". Explicit END cues are therefore tested BEFORE the
-        // intro phrases: typing one as an Intro hands the caller a skip covering the rest of the episode.
-        for (const char* endCue : { "End Titles", "Closing Titles", "End Credits", "Closing Credits" })
+        // THE OTHER ORDERING TRAP, and the whole title-typing contract in one table.
+        //
+        // "End Titles" and "Closing Titles" — the conventional BBC/ITV chapter names — contain the bare
+        // intro noun "titles", so end cues must be tested BEFORE the intro stage: typing one as an Intro
+        // hands the caller a skip covering the rest of the episode.
+        //
+        // The end stage is COMPOSITIONAL — any qualifier of {end, ending, closing, final} beside any noun of
+        // {credits, credit, titles, title, theme} — and this table is why. It used to be a flat list of
+        // spelled-out phrases ("end credits", "end titles", "closing credits", "closing titles"), which is
+        // unfixable by construction: the list enumerates a cross product, so every pair nobody wrote down is
+        // a live bug. "Closing Theme" was exactly that — it matched no end phrase, fell through to the intro
+        // stage, matched the bare "theme", and came back an INTRO; in a 2760s episode with that chapter at
+        // 2700s the feature then offered "Skip Intro" 60 seconds from the end. "End Theme", "Final Titles"
+        // and the singular "End Title" all failed the same way. Every row below must hold, and the rows are
+        // the product, not a list of remembered special cases.
+        struct TitleCase { const char* title; int type; };   // -1 = matches nothing
+        static const TitleCase titleCases[] = {
+            { "Opening Credits", int(SegmentType::Intro)   },  // "opening" is NOT an end qualifier…
+            { "Opening Titles",  int(SegmentType::Intro)   },  // …so these must miss the end stage entirely
+            { "Main Theme",      int(SegmentType::Intro)   },
+            { "Intro",           int(SegmentType::Intro)   },
+            { "[OP]",            int(SegmentType::Intro)   },  // punctuation and case normalize away
+            { "End Titles",      int(SegmentType::Credits) },
+            { "End Title",       int(SegmentType::Credits) },  // singular: the pair list never had it
+            { "Closing Titles",  int(SegmentType::Credits) },
+            { "Closing Theme",   int(SegmentType::Credits) },  // the regression this rule exists for
+            { "End Theme",       int(SegmentType::Credits) },
+            { "Final Titles",    int(SegmentType::Credits) },
+            { "End Credits",     int(SegmentType::Credits) },
+            { "Ending",          int(SegmentType::Credits) },  // a qualifier with no noun: standalone marker
+            { "Credits",         int(SegmentType::Credits) },  // generic, no qualifier at all
+            { "Recap",           int(SegmentType::Recap)   },
+            { "Previously On",   int(SegmentType::Recap)   },
+            { "Introduction",    -1 },                         // word-boundary, not substring, vs "intro"
+            { "Part One",        -1 },
+        };
+        for (const TitleCase& tc : titleCases)
+        {
+            const QVector<Segment> v2 = fromChapters({ { 0.0,  QString::fromLatin1(tc.title) },
+                                                       { 90.0, QStringLiteral("Body") } }, 2760.0);
+            const QByteArray what = QByteArray("\"") + tc.title + "\" types as expected";
+            if (tc.type < 0)
+                CHECK(v2.isEmpty(), what.constData());
+            else
+                CHECK(v2.size() == 1 && has(v2, SegmentType(tc.type), 0.0, 90.0), what.constData());
+        }
+
+        // …and the positional consequence, which is what makes a mistyped end cue harmful rather than
+        // merely wrong: an end cue 60s from the end must never come back as a skippable Intro.
+        for (const char* endCue : { "End Titles", "End Title", "Closing Titles", "Closing Theme",
+                                    "End Theme", "Final Titles", "End Credits", "Closing Credits", "Ending" })
         {
             const QVector<Segment> v2 = fromChapters({ { 0.0,    QStringLiteral("Part One") },
                                                        { 2700.0, QString::fromLatin1(endCue) } }, 2760.0);
             CHECK(has(v2, SegmentType::Credits, 2700.0, 2760.0) && countOf(v2, SegmentType::Intro) == 0,
                   (QByteArray("\"") + endCue + "\" is Credits, never an Intro at 2700s").constData());
         }
-        // …while the openings, which the END cues must not swallow, still type as Intro.
-        for (const char* openCue : { "Opening Credits", "Opening Titles", "Theme", "Intro" })
-        {
-            const QVector<Segment> v2 = fromChapters({ { 0.0,  QString::fromLatin1(openCue) },
-                                                       { 90.0, QStringLiteral("Part One") } }, 2760.0);
-            CHECK(has(v2, SegmentType::Intro, 0.0, 90.0) && countOf(v2, SegmentType::Credits) == 0,
-                  (QByteArray("\"") + openCue + "\" is an Intro, not Credits").constData());
-        }
-
-        // Word-boundary matching, not substring. Without it every documentary gets a phantom intro.
-        const QVector<Segment> introduction =
-            fromChapters({ { 0.0, QStringLiteral("Introduction") }, { 300.0, QStringLiteral("Body") } }, 600.0);
-        CHECK(introduction.isEmpty(), "\"Introduction\" does NOT match the intro phrase \"intro\"");
-
-        // Punctuation and case are normalized away.
-        const QVector<Segment> punct =
-            fromChapters({ { 0.0, QStringLiteral("[OP]") }, { 90.0, QStringLiteral("A") } }, 600.0);
-        CHECK(countOf(punct, SegmentType::Intro) == 1, "\"[OP]\" normalizes to the intro token \"op\"");
 
         // A last chapter cannot be sized without a duration.
         CHECK(fromChapters({ { 0.0, QStringLiteral("Intro") } }, 0.0).isEmpty(),

@@ -34,6 +34,8 @@ namespace MediaSegments
 
     // Ranges shorter than this are noise, not intros.
     constexpr double kMinSegmentS   = 5.0;
+    static_assert(kMinSegmentS > 0.0, "parseEdl/fromChapters rely on the minimum-length check to reject "
+                                      "inverted and zero-length ranges; a zero minimum would let them through");
     // A range ending within this of the end of the file is the credits.
     constexpr double kCreditsTailS  = 60.0;
     // An intro starts before this, and runs no longer than kIntroMaxLenS.
