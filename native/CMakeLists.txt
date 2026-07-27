@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.59 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.60 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -208,6 +208,9 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
+        src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h  # per-file save decision table (save-sync T1)
+        src/core/SaveSync.cpp     src/core/SaveSync.h      # save-sync transport (save-sync T2)
+        src/core/SaveMeta.cpp     src/core/SaveMeta.h      # save baseline/metadata store (save-sync T4)
         src/core/SteamLibrary.cpp src/core/SteamLibrary.h
         src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
@@ -506,6 +509,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/BingeStore.cpp src/core/BingeStore.h)
     target_include_directories(probe_stremio PRIVATE src src/addons src/core)
     target_link_libraries(probe_stremio PRIVATE Qt6::Core)
+
+    # Headless test for the save-sync decision table. Pure — no Drive, no filesystem.
+    add_executable(probe_savesync tools/probe_savesync.cpp
+        src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h)
+    target_include_directories(probe_savesync PRIVATE src src/core)
+    target_link_libraries(probe_savesync PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
     add_executable(probe_resolver tools/probe_resolver.cpp
