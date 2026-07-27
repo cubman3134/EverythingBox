@@ -132,13 +132,14 @@ void MediaPane::openVideo(const QString& url, const QString& title)
     emit focusRequested();
 }
 
-void MediaPane::openGame(const QString& corePath, const QString& romPath, const QString& coreName)
+void MediaPane::openGame(const QString& corePath, const QString& romPath, const QString& coreName,
+                         const QString& title, const QString& systemId)
 {
     kind_ = Game;
     showView(retro_, QFileInfo(romPath).completeBaseName(), /*hasAudio*/ true);
     retro_->setVolume(volPct_ / 100.0);
     QString err;
-    retro_->openGame(corePath, romPath, coreName, &err);
+    retro_->openGame(corePath, romPath, coreName, &err, title, systemId);
     retro_->setInputActive(focused_);
     emit focusRequested();
 }

@@ -27,10 +27,11 @@
 #include "core/Settings.h"
 #include "core/ConsumptionStats.h" // mdsync T3: fold legacy accumulators into this device's namespace at startup
 #include "core/PlayStats.h"
+#include "core/SaveMeta.h"     // save-sync T4: the one-time stray core-save sweep
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.64";
+static constexpr const char* kAppVersion = "0.5.65";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -228,6 +229,8 @@ int main(int argc, char** argv)
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
     ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace
     PlayStats::migrate();         // one-time: same for per-game playtime (before any CloudMerge serialize)
+    SaveMeta::sweepStrays();      // one-time: core save files left loose in the app dir move into saves/,
+                                  // before any core runs — after this, saveDir points cores there anyway
 
     // A profile must be active before the app is usable. One profile -> use it. With none or several, the
     // picker is shown inline once the window is up (chooseProfile); set a provisional current first so the

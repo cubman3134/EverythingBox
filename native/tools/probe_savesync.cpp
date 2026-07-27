@@ -11,7 +11,9 @@
 #include "SaveSyncPlan.h"
 #include "SaveSync.h"
 
+#include "AppPaths.h"
 #include "CloudSync.h"
+#include "SaveMeta.h"
 #include "Tombstones.h"
 
 #include <QCoreApplication>
@@ -848,6 +850,74 @@ static void transportChecks()
     }
 }
 
+// ---- section 9: where a save FILE lives, and what it is called in front of a user (SaveMeta) -----------
+//
+// resolvePath is string-and-existence logic with a data-loss failure mode: the moment the emulator starts
+// reading only saves/<system>/<base>.srm, every save written under the old flat layout becomes invisible and
+// the game boots as if it had never been played — which is indistinguishable, to the user, from their save
+// being wiped. It cannot be exercised through RetroView (a QWidget, never linked into a headless probe), so
+// the rule lives in SaveMeta and is asserted here.
+static void saveMetaChecks()
+{
+    const QString root = freshRoot(QStringLiteral("meta")) + QStringLiteral("/saves");
+    QDir().mkpath(root);
+    const QString SNES = QStringLiteral("snes"), NES = QStringLiteral("nes");
+    const QString SRM = QStringLiteral(".srm");
+
+    // Nothing on disk yet: a brand-new save is namespaced.
+    const QString fresh = SaveMeta::resolvePath(root, SNES, QStringLiteral("Zelda"), SRM);
+    CHECK(fresh == root + QStringLiteral("/snes/Zelda.srm"), "a save that does not exist yet is created namespaced");
+
+    // THE RULE. A save written before namespacing lives flat, and must keep being used exactly where it is.
+    writeFile(root + QStringLiteral("/Metroid.srm"), "old-progress");
+    const QString legacy = SaveMeta::resolvePath(root, SNES, QStringLiteral("Metroid"), SRM);
+    CHECK(legacy == root + QStringLiteral("/Metroid.srm"),
+          "an existing FLAT save is still found after namespacing — it is not silently abandoned");
+    CHECK(readFile(root + QStringLiteral("/Metroid.srm")) == "old-progress"
+              && !QFileInfo::exists(root + QStringLiteral("/snes/Metroid.srm")),
+          "…and resolving it neither moves nor copies it: nothing is migrated under the user");
+
+    // Once a namespaced copy exists it wins — that is how a save that came down from another device (already
+    // namespaced) takes over from a stale flat one rather than the two alternating.
+    writeFile(root + QStringLiteral("/snes/Metroid.srm"), "newer");
+    CHECK(SaveMeta::resolvePath(root, SNES, QStringLiteral("Metroid"), SRM) == root + QStringLiteral("/snes/Metroid.srm"),
+          "the namespaced path takes precedence when both layouts exist");
+
+    // The collision the namespacing exists for.
+    CHECK(SaveMeta::resolvePath(root, NES, QStringLiteral("Contra"), SRM)
+              != SaveMeta::resolvePath(root, SNES, QStringLiteral("Contra"), SRM),
+          "two systems sharing a ROM base name no longer resolve to ONE file");
+
+    // No system to namespace under (an extension no catalog claims). The flat path is the answer, and it must
+    // not contain an empty component: "saves//Odd.srm" is a sync key scanLocal never produces, so the file
+    // would be written somewhere the sync could not name.
+    const QString unknown = SaveMeta::resolvePath(root, QString(), QStringLiteral("Odd"), SRM);
+    CHECK(unknown == root + QStringLiteral("/Odd.srm") && !unknown.contains(QStringLiteral("//")),
+          "an unresolved system yields the flat path, never a path with an empty component");
+
+    // ---- the sidecar: which GAME a save file belongs to -------------------------------------------------
+    const QString KEY = QStringLiteral("saves/nes/101306d4c0ffee.srm"); // a cached remote ROM's 40-hex name
+    CHECK(!SaveMeta::titleFor(KEY).isEmpty(), "titleFor is never empty, even with nothing recorded");
+    CHECK(SaveMeta::titleFor(KEY) == QStringLiteral("101306d4c0ffee"),
+          "…falling back to the save's own base name");
+    CHECK(!SaveMeta::titleFor(QString()).isEmpty(), "…and it survives an empty name");
+
+    SaveMeta::put(KEY, QStringLiteral("Zelda II"), NES, QStringLiteral("C:/roms/cache/101306d4c0ffee.nes"));
+    CHECK(SaveMeta::titleFor(KEY) == QStringLiteral("Zelda II"),
+          "a recorded save is named by its GAME, not by the hash the ROM cache gave the file");
+    const SaveMeta::Entry got = SaveMeta::lookup(KEY);
+    CHECK(got.system == NES && got.romPath.endsWith(QStringLiteral(".nes")) && got.updatedAt > 0,
+          "…and the entry keeps the system, the ROM it came from, and when it was written");
+    CHECK(!SaveMeta::lookup(QStringLiteral("saves/nes/Other.srm")).recorded(),
+          "an unrecorded save reports nothing recorded rather than another game's row");
+    // Windows builds every one of these paths with QDir, but a native-separator key would file the same save
+    // twice and the conflict notice would then miss it.
+    CHECK(SaveMeta::titleFor(QStringLiteral("saves\\nes\\101306d4c0ffee.srm")) == QStringLiteral("Zelda II"),
+          "a native-separator key finds the same entry");
+
+    QFile::remove(AppPaths::dataDir() + QStringLiteral("/saves-meta.json")); // the probe's own scratch sidecar
+}
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -1041,6 +1111,11 @@ int main(int argc, char** argv)
     // CAS, the torn-write guard, the baseline write) is the real code running against real files.
     {
         transportChecks();
+    }
+
+    // ------------------------------------------------- 9. where a save file lives, and what it is called
+    {
+        saveMetaChecks();
     }
 
     clearTombs();
