@@ -172,7 +172,7 @@ Non-blocking items surfaced during Phase 1; carry into Phase 2 planning or a pol
   real-device check that a genuine horizontal flick from the very edge still pages.
 - **Mixed-DPR / multi-monitor** — tokens verified at DPR 1.5; validate scale/inset
   math across mixed-DPR displays and on a genuine phone DPR.
-- **Qt6::GuiPrivate coupling** — `mymediavault` links `Qt6::GuiPrivate` for the qpa
+- **Qt6::GuiPrivate coupling** — `everythingbox` links `Qt6::GuiPrivate` for the qpa
   touch-synthesis header (uitest); recheck this still resolves on a Qt version bump
   and on the Android Qt kit.
 - **grabGesture(PinchGesture) follow-up** — intentionally NOT used (non-deterministic
@@ -203,7 +203,7 @@ Non-blocking items surfaced during Phase 1; carry into Phase 2 planning or a pol
 ## Phase 2 follow-ups (deferred from Tasks 1–6 + emulator verification)
 
 Phase 2 built the Android provisioning and proved it on the x86_64 emulator (APKs green in
-CI on both ABIs; themed home boots, `assets:/mmv` extraction proven on-device, auto→Mobile,
+CI on both ABIs; themed home boots, `assets:/eb` extraction proven on-device, auto→Mobile,
 touch/OSK/Back/lifecycle smoke passed). The **TV-device pass is user-deferred** ("close it out
 for now until we can test more") — the items below carry the unverified surface and the
 structural debt into a later hardware session.
@@ -215,7 +215,7 @@ structural debt into a later hardware session.
   can only run a TV-**res** phone image — the real leanback launcher/banner, TV auto-detect,
   remote D-pad walk, and native video+core playback were never exercised. When TV hardware is
   available: enable ADB debugging on the device → `adb connect <device-ip>:5555` (or USB) →
-  `adb install -r MyMediaVault-android-arm64.apk` (TV devices are arm64; the arm64 APK from the
+  `adb install -r EverythingBox-android-arm64.apk` (TV devices are arm64; the arm64 APK from the
   green CI run is the artifact) → confirm the app appears in the **leanback launcher row** (the
   320×180 banner + `LEANBACK_LAUNCHER` category are already in the manifest, Task 3) →
   `FormFactor::resolveAuto()` should return **Tv** via `UiModeManager.getCurrentModeType() ==

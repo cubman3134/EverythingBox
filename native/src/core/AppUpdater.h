@@ -1,4 +1,4 @@
-// Checks GitHub Releases for a newer My Media Vault build and, on desktop, installs it in place. The app is a
+// Checks GitHub Releases for a newer EverythingBox build and, on desktop, installs it in place. The app is a
 // portable folder (exe + DLLs + resources next to it), and Windows can't overwrite a running exe, so applying an
 // update downloads the release's platform archive, extracts it, and hands off to a tiny helper that waits for
 // this process to exit, swaps the files over the install dir, and relaunches. The version check is cross-
@@ -33,7 +33,7 @@ signals:
 private:
     QNetworkAccessManager* nam_ = nullptr;
     QString pendingUrl_;      // browser_download_url of this platform's asset for the newer release
-    QString pendingAsset_;    // its file name (e.g. MyMediaVault-windows-x64.zip)
+    QString pendingAsset_;    // its file name (e.g. EverythingBox-windows-x64.zip)
     QString latestVersion_;
     QString latestNotes_;
     bool applyArchive(const QString& archivePath, QString* error); // extract + spawn the swap helper, then quit

@@ -44,12 +44,12 @@ jobs:
         run: |
           cmake -S native -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
 
       # Build ONLY the probe harnesses (not the whole app) — this is a test job, so keep it quick.
       - name: Build probes
-        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_meta probe_addon probe_gameagg probe_gamelist probe_notifier probe_m3u probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_stats probe_playlists probe_cloudmerge probe_importers probe_onboarding probe_locallib probe_resolver probe_showdispatch probe_subs probe_segments probe_stremio probe_savesync
+        run: cmake --build build --target probe_core probe_netplay probe_netplay_both probe_nav probe_navqml probe_meta probe_addon probe_gameagg probe_gamelist probe_notifier probe_m3u probe_playback probe_browse probe_perf probe_formfactor probe_bootstrap probe_sync probe_extplayer probe_marks probe_stats probe_playlists probe_cloudmerge probe_importers probe_onboarding probe_locallib probe_resolver probe_showdispatch probe_subs probe_segments probe_stremio probe_savesync probe_brand
 
       # Best-effort: grab a small real libretro core so the suite can prove the frontend can load one. If the
       # external buildbot is unavailable the suite just skips this check (it's advisory, never gates CI).

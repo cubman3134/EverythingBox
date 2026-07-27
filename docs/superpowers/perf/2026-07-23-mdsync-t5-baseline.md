@@ -1,7 +1,7 @@
 # Perf baseline — 2026-07-23 (multi-device sync close-out, mdsync T5)
 
 Standard route (`perfbaseline.py`), Release build of `sync/multidevice` @ 59c1c3c (cadence fix)
-temporarily deployed to `C:\MyMediaVault-app` for the run, then the pre-task exe + ini were restored
+temporarily deployed to `C:\EverythingBox-app` for the run, then the pre-task exe + ini were restored
 byte-identical (ini md5 `8817fa31…` verified). 3 consecutive runs. Ranked spans, worst / avg ms per run:
 
 | span               | run1 (w/avg) | run2 (w/avg) | run3 (w/avg) | samples |

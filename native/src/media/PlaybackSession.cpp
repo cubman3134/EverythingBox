@@ -1,4 +1,5 @@
 #include "PlaybackSession.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 #include <QCryptographicHash>
@@ -31,7 +32,7 @@ QSettings& PlaybackSession::store()
     if (!settings_)
     {
         const QString file = settingsFile_.isEmpty()
-            ? AppPaths::dataDir() + QStringLiteral("/mymediavault.ini")
+            ? AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile)
             : settingsFile_;
         settings_ = new QSettings(file, QSettings::IniFormat, this);
     }

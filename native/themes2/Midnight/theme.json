@@ -1,6 +1,6 @@
 {
   "name": "Midnight",
-  "author": "My Media Vault",
+  "author": "EverythingBox",
   "sounds": { "navigate": "sounds/move.wav", "select": "sounds/select.wav", "back": "sounds/back.wav", "volume": 0.55 },
   "settingsPanel": { "background": "#0A0B10", "panel": "#12141C", "row": "#161822", "rowSelected": "#2A2030", "accent": "#FF6A3D", "text": "#EAECF2", "dim": "#8A90A0", "separator": "#6C7284", "warning": "#FF5C5C" },
   "views": {
@@ -10,7 +10,7 @@
         { "type": "particles", "id": "stars", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 0, "opacity": 0.5,
           "preset": "stars", "count": 90, "color": "#ABB6E0", "dotSize": 0.006 },
 
-        { "type": "text",     "pos": [0.05, 0.07], "size": [0.6, 0.06],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#EAECF2", "fontSize": 0.034, "bold": true },
+        { "type": "text",     "pos": [0.05, 0.07], "size": [0.6, 0.06],  "origin": [0, 0.5], "text": "EverythingBox", "color": "#EAECF2", "fontSize": 0.034, "bold": true },
         { "type": "datetime", "pos": [0.95, 0.07], "size": [0.2, 0.05],  "origin": [1, 0.5], "format": "hh:mm", "color": "#8A90A0", "fontSize": 0.03, "align": "right" },
 
         { "type": "carousel", "pos": [0.5, 0.30], "size": [0.96, 0.34], "origin": [0.5, 0.5],

@@ -1,3 +1,7 @@
+# The Worker NAME KEEPS THE PREVIOUS BRAND, deliberately: it fixes the workers.dev hostname, and that
+# hostname is the add-on URL every existing user has already pasted into the app. Renaming it here would
+# deploy a NEW Worker at a NEW hostname and leave every saved add-on URL pointing at nothing. This file is
+# exempt from the suite old-brand gate for that reason; see native/tools/run-headless-probes.sh.
 name = "mymediavault-aiocatalog"
 main = "src/worker.js"
 compatibility_date = "2024-11-01"

@@ -34,7 +34,7 @@ int main(int argc, char** argv)
     // A canned, keyless game meta provider. Returns http urls that just get stored in the art blob (the
     // downloads to x.invalid fail harmlessly; the urls are what we assert on).
     writeFile(addonDir + QStringLiteral("/manifest.json"),
-        R"JSON({ "id":"com.mymediavault.testgamemeta","name":"Test Game Meta","version":"1.0.0",
+        R"JSON({ "id":"com.everythingbox.testgamemeta","name":"Test Game Meta","version":"1.0.0",
                  "type":"media-source","entry":"main.js","permissions":[],"metaFor":["game"],"catalogs":[] })JSON");
     writeFile(addonDir + QStringLiteral("/main.js"),
         R"JS( function getMeta(argJson){ var a; try{a=JSON.parse(argJson);}catch(e){return "{}";}

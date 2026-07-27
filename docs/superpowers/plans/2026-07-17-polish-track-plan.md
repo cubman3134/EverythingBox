@@ -16,7 +16,7 @@
 - One fix per commit; visual fixes carry a before/after screenshot pair committed under `docs/superpowers/polish/`; probe_nav + full suite green on every commit.
 - HANDS OFF: FavoritesStore write path, OSK focus handoff (running sessions), poster-cache eviction + async ensureBios (chip follow-ups).
 - Audit screenshots are BULKY: the full sweep set lives in `.superpowers/polish-audit/` (gitignored scratch); ONLY the inventory's key-evidence images and per-fix before/after pairs are committed, downscaled to 640px wide (`python -c "from PIL import Image; ..."` or ffmpeg/magick if available — any tool; committed images must be ≤150 KB each).
-- Machine facts (as all prior tracks): build `cmake --build build --config Release [--target <t>]`; probes need Qt bin (+ /c/mpv-dev for the runner) on PATH and offscreen QPA; deploy Release over the existing exe in `C:\MyMediaVault-app` (keep name); drive ONLY via `python native/tools/uitest.py` with `MMV_UITEST=1` (add `MMV_PERF=1` only when measuring); never SendKeys/focus; kill the app after; protect user data (playlist "Weekend Picks"; byte-identical ini restore for any seed). `rtk` proxy hook is normal.
+- Machine facts (as all prior tracks): build `cmake --build build --config Release [--target <t>]`; probes need Qt bin (+ /c/mpv-dev for the runner) on PATH and offscreen QPA; deploy Release over the existing exe in `C:\EverythingBox-app` (keep name); drive ONLY via `python native/tools/uitest.py` with `EB_UITEST=1` (add `EB_PERF=1` only when measuring); never SendKeys/focus; kill the app after; protect user data (playlist "Weekend Picks"; byte-identical ini restore for any seed). `rtk` proxy hook is normal.
 
 ---
 

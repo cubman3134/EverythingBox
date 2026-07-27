@@ -28,11 +28,11 @@ int main(int argc, char** argv)
     QTemporaryDir tmp;
     const QString log = tmp.filePath("perf.log");
 
-    CHECK(!PerfTrace::enabled(), "disabled by default (no MMV_PERF)");
+    CHECK(!PerfTrace::enabled(), "disabled by default (no EB_PERF)");
     { PERF_SPAN("dead.span"); }              // must be a no-op while disabled
     PerfTrace::begin("dead.b"); PerfTrace::end("dead.b");
     CHECK(lines(log).isEmpty(), "disabled emits nothing to the test log");
-    // (Do NOT assert the app's real perf_trace.log is absent — a prior MMV_PERF run may have left one.)
+    // (Do NOT assert the app's real perf_trace.log is absent — a prior EB_PERF run may have left one.)
 
     // Disabled-path overhead budget: 1M scoped spans well under 200ms (it's one branch each).
     { QElapsedTimer t; t.start();
@@ -72,7 +72,7 @@ int main(int argc, char** argv)
 
     // ---- Component budgets: real hot-path builders/parsers over synthetic worst-case inputs ----------
     // Each budget = max(measured worst-of-3 on the 2026-07 dev box x 3, a 50ms floor so CI jitter can't
-    // false-fail a low-single-digit-ms measurement). Numbers captured with MMV_PERF off, offscreen QPA.
+    // false-fail a low-single-digit-ms measurement). Numbers captured with EB_PERF off, offscreen QPA.
     auto worstOf3 = [](const std::function<void()>& run) {
         qint64 w = 0;
         for (int r = 0; r < 3; ++r) { QElapsedTimer t; t.start(); run(); w = qMax(w, t.elapsed()); }

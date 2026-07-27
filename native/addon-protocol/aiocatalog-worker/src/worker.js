@@ -4,20 +4,25 @@
 //   Comics -> Comic Vine,  Manga -> MangaDex.
 //
 // Same logic as the local JS addon, made async (Workers have only async fetch). Keys are PER USER: each
-// user enters their own in the app's Configure… dialog and the app sends them in the X-MMV-Config header,
+// user enters their own in the app's Configure… dialog and the app sends them in the X-EB-Config header,
 // so the Worker stays keyless and shared. (Worker env vars are only an optional fallback for a self-host.)
-// Serves the My Media Vault remote-addon protocol.
+// Serves the EverythingBox remote-addon protocol.
 
-const UA = "MyMediaVault/1.0 (+https://github.com/cubman3134/MyMediaVault)";
+const UA = "EverythingBox/1.0 (+https://github.com/cubman3134/EverythingBox)";
 // The bundled console tiles live in the app repo; reference them absolutely since the Worker can't serve them.
-const CONSOLE_ICONS = "https://raw.githubusercontent.com/cubman3134/MyMediaVault/main/native/addons/aiocatalog/consoles/";
+const CONSOLE_ICONS = "https://raw.githubusercontent.com/cubman3134/EverythingBox/main/native/addons/aiocatalog/consoles/";
 
+// The add-on id KEEPS THE PREVIOUS BRAND, deliberately. The app keys a saved remote add-on by the id its
+// manifest returns; changing it here would orphan the entry every existing user has already added by URL —
+// their configured API keys included — with no migration path, because the app has never seen the new id.
+// Same reasoning as the Worker name in wrangler.toml (which fixes the workers.dev hostname users typed).
+// This file is exempt from the suite old-brand gate for these two strings; see run-headless-probes.sh.
 const MANIFEST = {
   id: "com.mymediavault.aiocatalog-worker",
   name: "AIO Catalog (Worker)",
   version: "1.0.0",
   type: "media-source",
-  author: "My Media Vault",
+  author: "EverythingBox",
   description: "All-in-one metadata catalog served from a Cloudflare Worker: Movies & TV (TMDB), Games (IGDB), Music (MusicBrainz), Books (Google Books / Open Library), Comics (Comic Vine), Manga (MangaDex).",
   catalogs: [
     { id: "movies", name: "Movies", type: "movie" },
@@ -42,7 +47,7 @@ const MANIFEST = {
 };
 
 // ---- host-API shims (replace the addon's getConfig / httpGet / httpRequest) --------------------------
-// Config is PER USER: the app sends each user's keys in the X-MMV-Config header. We stash them in an
+// Config is PER USER: the app sends each user's keys in the X-EB-Config header. We stash them in an
 // AsyncLocalStorage scope per request so concurrent requests (which share an isolate) can't see each
 // other's keys. Worker env vars are only an optional fallback for a personal self-host.
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -712,7 +717,8 @@ function parseExtras(seg) {
 }
 const dec = (s) => (s == null ? "" : decodeURIComponent(s));
 
-// The app sends each user's config (their API keys etc.) as base64url(JSON) in the X-MMV-Config header.
+// The app sends each user's config (their API keys etc.) as base64url(JSON) in the X-EB-Config header
+// (older app builds send X-MMV-Config; the fetch handler accepts either — see the note there).
 function parseConfigHeader(h) {
   if (!h) return {};
   try { return JSON.parse(atob(h.replace(/-/g, "+").replace(/_/g, "/"))) || {}; } catch (e) { return {}; }
@@ -740,7 +746,21 @@ async function route(request) {
 export default {
   async fetch(request, env) {
     ENV = env;
-    const cfg = parseConfigHeader(request.headers.get("X-MMV-Config"));
+    // Read the new header, fall back to the old one. What this actually buys is BACKWARD compatibility in
+    // one direction only: once this Worker is redeployed, app builds still sending the old X-MMV-Config keep
+    // working. It does NOT protect the other direction — a Worker still running an earlier revision of this
+    // file does not contain this line, so adding a fallback to the source cannot help a deployment that has
+    // not taken the source.
+    //
+    // RESIDUAL RISK (unmitigated here): app updated, Worker NOT yet redeployed. The app then sends only
+    // X-EB-Config, this Worker's old revision looks only for X-MMV-Config, and every per-user credential
+    // arrives EMPTY — the addon appears to work while quietly returning nothing (no error, no keys, no
+    // results). The ONLY real mitigation is deployment ORDER: redeploy this Worker BEFORE shipping an app
+    // build that sends the new header. Dual-sending from the app is deliberately NOT done — it would put
+    // user API keys in a second header indefinitely and leave the cutover with no end.
+    //
+    // Delete the fallback only once no supported app build still sends X-MMV-Config.
+    const cfg = parseConfigHeader(request.headers.get("X-EB-Config") || request.headers.get("X-MMV-Config"));
     // Run the whole request inside the per-user config scope so getConfig() resolves THIS user's keys.
     return cfgStore.run(cfg, async () => {
       try { return await route(request); }

@@ -281,7 +281,7 @@ int main(int argc, char** argv)
         // A confirm card with a long word-wrapped message (the uninstall warning shape) — this is the case
         // adjustSize() used to under-measure, cutting the text off.
         auto* confirm = new NavConfirm(
-            QStringLiteral("Permanently remove My Media Vault and all of its data?"),
+            QStringLiteral("Permanently remove EverythingBox and all of its data?"),
             QStringLiteral("This deletes the whole app folder. That includes your settings, cloud sign-in, "
                            "downloaded games and music, emulator saves and save states, and installed "
                            "emulators and cores, plus the cache and crash logs. This cannot be undone. If you "

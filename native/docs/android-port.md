@@ -1,4 +1,4 @@
-# Android port plan — My Media Vault
+# Android port plan — EverythingBox
 
 Status: **planning**. Android is feasible (unlike iOS) — it allows JIT and `dlopen`, Qt Widgets runs,
 and our deps (libmpv, SDL2) build for Android. The work is mostly **toolchain + native-dependency

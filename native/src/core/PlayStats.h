@@ -1,5 +1,5 @@
 // Per-game play history: when a game was last played and how long it's been played in total. Recorded at
-// launch (last-played) and on the game's exit (accumulated session time), stored in mymediavault.ini and
+// launch (last-played) and on the game's exit (accumulated session time), stored in everythingbox.ini and
 // shown as facts in the info panel. Per-profile, keyed by a hash of the game's stable identity (its addon
 // item id when it has one, else the file/exe path — the same identity RecentStore de-dups on).
 //

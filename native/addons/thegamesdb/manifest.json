@@ -1,10 +1,10 @@
 {
-  "id": "com.mymediavault.thegamesdb",
+  "id": "com.everythingbox.thegamesdb",
   "name": "TheGamesDB",
   "version": "1.0.0",
   "type": "media-source",
   "entry": "main.js",
-  "author": "My Media Vault",
+  "author": "EverythingBox",
   "description": "Game artwork & metadata provider (TheGamesDB). Aggregated with other providers on hover. Requires a free API key configured in Settings.",
   "permissions": ["network"],
   "metaFor": ["game"],

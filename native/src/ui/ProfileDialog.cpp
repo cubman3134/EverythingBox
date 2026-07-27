@@ -31,7 +31,7 @@ QStringList ProfileDialog::iconChoices()
 ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
     : QDialog(parent), mustChoose_(mustChoose)
 {
-    setWindowTitle(tr("Who's using My Media Vault?"));
+    setWindowTitle(tr("Who's using EverythingBox?"));
     setMinimumWidth(360);
 
     auto* root = new QVBoxLayout(this);

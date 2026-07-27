@@ -17,7 +17,7 @@ exists trustworthy". This is the deferral `2026-07-23-multidevice-sync-design.md
 - UI is a 6-row slot grid in the pause menu (`showStateSlots`, `:197`) with thumbnail + timestamp. **No
   delete, no rename, no export, no import, no cross-game view.**
 
-**Sync** (`native/src/core/CloudSync.cpp`): a single `mymediavault-sync.zip` carrying `settings.json`,
+**Sync** (`native/src/core/CloudSync.cpp`): a single `everythingbox-sync.zip` carrying `settings.json`,
 `addons/`, `themes/`, **`saves/` and `states/`** (`:491-492`). Applied wholesale — `applyBundle` (`:502`)
 overwrites every local file — and the startup policy is literally *always take the cloud*
 (`main.cpp:69-73`), run before settings are even read.
@@ -32,7 +32,7 @@ overwrites every local file — and the startup policy is literally *always take
 3. **Some saves are never synced at all.** `LibretroCore::saveDir` defaults to `"."` (`LibretroCore.h:105`)
    and is **never assigned** — only `systemDir` is. So `RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY` hands cores the
    process CWD, and cores that write their own save files put them in the app directory. The deployed
-   install has `*.smpc` files loose in `C:\MyMediaVault-app\`; the repo root has `4Mbit_cart.brm`, `scd_U.brm`.
+   install has `*.smpc` files loose in `C:\EverythingBox-app\`; the repo root has `4Mbit_cart.brm`, `scd_U.brm`.
    None are under `saves/`, so none are backed up.
 4. **Saves are keyed to an opaque, collidable name.** The key is the ROM's `completeBaseName`. Remote ROMs
    are cached under 40-hex hashed filenames, so most real `.srm` files are named `101306d4…` for a ROM that
@@ -244,4 +244,4 @@ unrecoverable, so it is asserted directly and mutation-tested, not left to revie
 - **The netplay save/load desync** (`RetroView.cpp` never guards `saveState`/`loadState` against
   `netActive_`, so F4 mid-session desyncs silently). A real bug, recorded, and a different one from sync.
 - Compressing save states, changing the slot count, or altering the pause-menu slot grid.
-- Any change to the progress-sync document (`mymediavault-progress.json`) or its merge rules.
+- Any change to the progress-sync document (`everythingbox-progress.json`) or its merge rules.

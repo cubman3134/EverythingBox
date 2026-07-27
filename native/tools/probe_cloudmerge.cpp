@@ -1,6 +1,6 @@
 // Headless check of the multi-device-sync FOUNDATION (mdsync T1): the device identity, the per-store write
 // timestamps, and the deletion tombstones that the generalized CloudMerge pass (T2) will read. QtCore-only
-// (QSettings + JSON wrappers over the shared portable mymediavault.ini), so it runs under the offscreen QPA in
+// (QSettings + JSON wrappers over the shared portable everythingbox.ini), so it runs under the offscreen QPA in
 // CI and pins the contract T2's serializers lean on:
 //
 //   * Settings::deviceId() — minted ONCE (a stable UUID), persisted at exactly key "device/id", and never
@@ -18,7 +18,7 @@
 // Prints CLOUDMERGE-OK on success; any failure prints CLOUDMERGE-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: like the other core probes (probe_marks/probe_sync), AppPaths::dataDir() is the probe exe's own
-// build-tree folder (portable app), so the mymediavault.ini it reads/writes sits next to the probe and never
+// build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and never
 // touches a deployed install. We wipe the groups we use at start and seed our own profile ids via
 // ProfileStore::setCurrent so a developer's real profile/data can't leak into the asserts.
 #include "Settings.h"
@@ -30,6 +30,7 @@
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "ProfileStore.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -72,7 +73,7 @@ static bool saneTs(qint64 ts, qint64 before, qint64 after)
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 
     // Reset every group we touch so a stale ini can't skew the asserts.
     {

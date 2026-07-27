@@ -17,7 +17,7 @@
 - Fire-and-forget stated: no resume/sync/completion from external sessions; RecentStore::add still fires on the open path.
 - Detection must be seam-testable (injectable probe roots — no probe touches the real registry or launches anything).
 - Probe env recipe: PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` and `/c/mpv-dev`; `QT_QPA_PLATFORM=offscreen`; `QT_PLUGIN_PATH=C:\Qt\6.8.3\msvc2022_64\plugins`; `BUILD_DIR=C:/Users/cubma/Project Goliath/build`; runner + ci.yml registration for any new probe; FULL build before suite (linked-into-the-product lesson: the app target gets ExternalPlayer.cpp in the SAME task that creates it).
-- Live: deploy Release over `C:\MyMediaVault-app\MyMediaVault.exe`; MMV_UITEST=1; uitest.py only; byte-identical ini restores; throwaway profiles only for restricted checks.
+- Live: deploy Release over `C:\EverythingBox-app\EverythingBox.exe`; EB_UITEST=1; uitest.py only; byte-identical ini restores; throwaway profiles only for restricted checks.
 - Desktop suite + perf gates unchanged.
 
 ---
@@ -51,7 +51,7 @@ bool    launch(const QString& urlOrPath);
 
 - [ ] **Step 1 (probe RED):** probe_extplayer — QCoreApplication + CHECK; fake fs root with `VideoLAN/VLC/vlc.exe` + `MPC-HC/mpc-hc64.exe` under it → detect(fakeRoot, fakeReg) finds both with right kinds/paths; empty root → empty (no real-system leakage in probe mode); Settings round-trip incl. unknown string → Builtin; routing decision table as pure logic if implemented as a helper (defer to Task 2 if routing lives in MainWindow — then probe only detection+settings here). Sentinel EXTPLAYER-OK. Configure-fail = RED.
 - [ ] **Step 2:** Implement (registry probe via QSettings NativeFormat on the real path ONLY when regProbeRoot empty; fs probe = QFileInfo checks under the root or the real Program Files env vars). Android branch `#ifdef Q_OS_ANDROID`: detect() returns the AndroidIntent entry; launch() = QJniObject Intent ACTION_VIEW with `video/*`, try/catch-style isValid checks, false on failure.
-- [ ] **Step 3:** Build probe + mymediavault (SAME task — the store links into the app now), suite green, commit `feat: ExternalPlayer detection/launch core (extplayer T1)`.
+- [ ] **Step 3:** Build probe + everythingbox (SAME task — the store links into the app now), suite green, commit `feat: ExternalPlayer detection/launch core (extplayer T1)`.
 
 ---
 
@@ -72,7 +72,7 @@ bool    launch(const QString& urlOrPath);
 
 ### Task 3: close-out — spec status, gates, final review, merge
 
-- [ ] Spec Status → `Complete: desktop verified; Android Intent code in place (emulator Intent check rides the next Android session; TV pass still pending).` — the Android emulator check is OPTIONAL here: attempt it only if the emulator is still healthy (AVD mmv_phone exists from Phase 2; APK rebuild via CI is NOT required for a desktop-only merge — record the Android-side as code-complete/device-unverified in the spec, consistent with the TV-pass precedent).
+- [ ] Spec Status → `Complete: desktop verified; Android Intent code in place (emulator Intent check rides the next Android session; TV pass still pending).` — the Android emulator check is OPTIONAL here: attempt it only if the emulator is still healthy (AVD eb_phone exists from Phase 2; APK rebuild via CI is NOT required for a desktop-only merge — record the Android-side as code-complete/device-unverified in the spec, consistent with the TV-pass precedent).
 - [ ] Full suite + perfbaseline (3 runs, the re-anchor note from the sync track applies — prefer an idle-machine run).
 - [ ] Fable whole-branch review; fix rounds; merge+push+redeploy under standing autonomy.
 

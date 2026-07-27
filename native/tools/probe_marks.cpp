@@ -14,13 +14,14 @@
 // Prints MARKS-OK on success; any failure prints MARKS-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: like the other core probes (probe_sync/probe_formfactor), AppPaths::dataDir() is the probe exe's
-// own build-tree folder (portable app), so the mymediavault.ini it reads/writes sits next to the probe and
+// own build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and
 // never touches a deployed install. We wipe the "marks" and "profiles" groups at start and SEED our own
 // profile ids via ProfileStore::setCurrent, so ProfileStore::currentId() (which reads the real store) can't
 // leak a developer's actual profile into the asserts.
 #include "ItemMarks.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -54,7 +55,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 
     // Reset: wipe any leftover marks/* and profiles/* so a stale ini can't skew the asserts. Shares
     // QSettings' per-file cache with ItemMarks' own store(), so this is visible to every later read.

@@ -19,7 +19,7 @@
 //   Decline      — Restore was picked but sign-in isn't available on this platform; the caller routes it onward
 //                  to the Fresh path (kept distinct from Fresh so the caller can surface a one-line notice).
 
-namespace mmv {
+namespace eb {
 
 enum class OnboardingRoute { ChoiceScreen, Fresh, Picker, Decline };
 
@@ -57,4 +57,4 @@ inline RestorePullStage restorePullStage(bool reached, bool listReached, bool ha
     return hasRemote ? RestorePullStage::HasBundle : RestorePullStage::Seed; // proven state (query had no error)
 }
 
-} // namespace mmv
+} // namespace eb

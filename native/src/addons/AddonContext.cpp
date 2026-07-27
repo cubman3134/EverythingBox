@@ -1,4 +1,5 @@
 #include "AddonContext.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "BuiltinSecrets.h" // generated into the build tree by cmake/GenerateSecrets.cmake
 
@@ -21,7 +22,7 @@
 
 static QSettings& configStore()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -59,7 +60,7 @@ QString AddonContext::builtinCredential(const QString& key) const
     // reversing the binary). Only the bundled ScreenScraper addon (its manifest id) may read its two
     // keys; any other addon id or key gets an empty string.
     static const QHash<QString, QSet<QString>> kAllowlist = {
-        { QStringLiteral("com.mymediavault.screenscraper"),
+        { QString::fromLatin1(AppBrand::kAddonPrefix) + QLatin1String("screenscraper"),
           { QStringLiteral("devid"), QStringLiteral("devpassword") } },
     };
     const auto allowed = kAllowlist.constFind(id_);
@@ -69,7 +70,7 @@ QString AddonContext::builtinCredential(const QString& key) const
     // rolling XOR (this MUST mirror native/cmake/GenerateSecrets.cmake byte-for-byte), then slice the
     // recovered plaintext blob into devid|devpassword by their stored lengths. The XOR only keeps the
     // creds out of a `strings` scan — anyone with the binary can recover them.
-    using namespace mmv_secrets;
+    using namespace eb_secrets;
     const int total = kScreenScraperALen + kScreenScraperBLen;
     if (total <= 0) return QString(); // secrets file was absent at build → nothing embedded
 
@@ -125,7 +126,7 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         return QString();
 
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultAddon"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxAddon"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     const QJsonObject headers = o.value(QStringLiteral("headers")).toObject();
     for (auto it = headers.begin(); it != headers.end(); ++it)

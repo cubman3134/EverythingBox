@@ -1,4 +1,5 @@
 #include "CarouselView.h"
+#include "../core/AppBrand.h"
 
 #include <QPainter>
 #include <QPaintEvent>
@@ -61,7 +62,7 @@ void CarouselView::pumpImages()
         if (i < 0 || i >= entries_.size()) continue;
         const int g = gen_;
         QNetworkRequest req((QUrl(entries_[i].imageUrl)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++imgActive_;

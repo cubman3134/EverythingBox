@@ -1,5 +1,5 @@
 {
-  "name": "mymediavault-aiocatalog-worker",
+  "name": "everythingbox-aiocatalog-worker",
   "version": "1.0.0",
   "private": true,
   "type": "module"

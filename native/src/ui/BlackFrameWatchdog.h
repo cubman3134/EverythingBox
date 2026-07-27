@@ -9,7 +9,7 @@ class QTimer;
 // A debug-gated self-heal for the user's intermittent "all-black app" state: once a second it samples a tiny
 // downscaled grab of the window and, if the frame is (near-)entirely black in a context where it never should
 // be, logs WHERE it happened and — on a SECOND consecutive black frame — asks the host to kick the renderer
-// back to life. Created ONLY under the UI-test/debug gate (MMV_UITEST / --uitest / Settings ▸ Debug), so it
+// back to life. Created ONLY under the UI-test/debug gate (EB_UITEST / --uitest / Settings ▸ Debug), so it
 // costs nothing in a normal run.
 //
 // The classifier isBlack() is a pure, side-effect-free static so the probe can pin its judgment exhaustively.

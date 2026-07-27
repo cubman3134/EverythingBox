@@ -75,7 +75,7 @@ built-in "like RetroBat" — obfuscated in the binary, never in the public repo.
   stale-serve, queue-yields-to-user-request ordering) with a stubbed request layer;
   live — cold launch then IMMEDIATE menu walk with the network traced (warm hits issue
   zero requests; spans show catalog.load ~0), addon disable→refresh observed, TTL
-  fire observed with a shortened test TTL env knob (`MMV_PREFETCH_TTL_S` override).
+  fire observed with a shortened test TTL env knob (`EB_PREFETCH_TTL_S` override).
 - Creds: build with secrets → addon works with the manifest fields absent (live scrape
   against ScreenScraper on a real ROM); build without secrets → loud STATUS + stored-
   settings fallback still works; `strings`-grep the built exe for the plaintext devid

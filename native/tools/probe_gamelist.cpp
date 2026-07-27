@@ -100,7 +100,7 @@ int main(int argc, char** argv)
 
     // --- write-back round-trip (metadata + facts; no network) -----------------------------------------
     {
-        const QString tmp = QDir::tempPath() + QStringLiteral("/mmv-gltest");
+        const QString tmp = QDir::tempPath() + QStringLiteral("/eb-gltest");
         QDir(tmp).removeRecursively(); QDir().mkpath(tmp);
         MediaDetail w; w.title = QStringLiteral("My Test Game"); w.overview = QStringLiteral("A description.");
         w.subtitle = QStringLiteral("1998"); w.valid = true;

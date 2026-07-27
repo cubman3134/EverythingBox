@@ -1,4 +1,4 @@
-// Transparently turn a .zip / .7z ROM into a plain ROM file the emulators can load. MyMediaVault's
+// Transparently turn a .zip / .7z ROM into a plain ROM file the emulators can load. EverythingBox's
 // libretro cores and external emulators all take a file path (or read the file into memory), so the
 // universal way to support archived ROMs is to extract the inner ROM to a temp file once and hand that
 // path on. .zip uses the bundled miniz; .7z uses the vendored LZMA SDK (see SevenZip) — both portable C,

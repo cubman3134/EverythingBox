@@ -1,4 +1,5 @@
 #include "RaBrowse.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QSettings>
@@ -16,7 +17,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
     return s;
 }
 static QString raUser() { return store().value(QStringLiteral("ra/user")).toString(); }

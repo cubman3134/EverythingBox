@@ -1,4 +1,5 @@
 #include "ComicView.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
 
@@ -27,7 +28,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

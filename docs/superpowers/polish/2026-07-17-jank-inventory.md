@@ -1,4 +1,4 @@
-# MyMediaVault — ranked jank inventory (Polish Track, Task 2)
+# EverythingBox — ranked jank inventory (Polish Track, Task 2)
 
 **Date:** 2026-07-17 · **Branch:** `polish/track-plan1` · **Author:** Polish Task 2
 

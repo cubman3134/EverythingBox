@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include <QSettings>
@@ -8,7 +9,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -63,9 +64,14 @@ void Settings::setSkipSegmentsAuto(bool on) { store().setValue(QStringLiteral("p
 
 // The PIN is stored as SHA-256(salt + pin) — enough to keep it out of the ini in the clear and deter a
 // casual child; it isn't a cryptographic secret store.
+//
+// The salt is AppBrand::Legacy::kParentalPinSalt and must STAY legacy: it is an input to a hash already
+// written to every existing user's ini, so "renaming" it silently redefines the function and no PIN a user
+// previously set ever matches again. The rebrand's prose sweep did rename it, which is why it now lives as a
+// named legacy constant rather than a literal a future sweep can walk over. See AppBrand.h.
 static QString pinHash(const QString& pin)
 {
-    const QByteArray in = QByteArrayLiteral("mmv-parental:") + pin.toUtf8();
+    const QByteArray in = QByteArray(AppBrand::Legacy::kParentalPinSalt) + pin.toUtf8();
     return QString::fromLatin1(QCryptographicHash::hash(in, QCryptographicHash::Sha256).toHex());
 }
 bool Settings::hasParentalPin() { return !store().value(QStringLiteral("parental/pinHash")).toString().isEmpty(); }

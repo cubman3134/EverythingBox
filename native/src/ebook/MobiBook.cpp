@@ -185,7 +185,7 @@ bool MobiBook::open(const QString& path, QString* error)
     const QString hash = QString::fromLatin1(
         QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
     rootDir_ = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                   .filePath(QStringLiteral("mmv-mobi-") + hash);
+                   .filePath(QStringLiteral("eb-mobi-") + hash);
     QDir().mkpath(rootDir_);
     const QString chapterPath = rootDir_ + QStringLiteral("/book.html");
     QFile out(chapterPath);

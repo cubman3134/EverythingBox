@@ -78,7 +78,7 @@ jobs:
         run: |
           cmake -S native -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DMYMEDIAVAULT_BUILD_APP=ON `
+            -DEVERYTHINGBOX_BUILD_APP=ON `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
             -DMPV_INCLUDE_DIR="$env:MPV_DIR/include" `
             -DMPV_LIBRARY="$env:MPV_DIR/mpv.lib" `
@@ -91,35 +91,35 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $dist = "dist/MyMediaVault"
+          $dist = "dist/EverythingBox"
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
-          Copy-Item build/MyMediaVault.exe $dist/
-          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations --no-system-d3d-compiler --qmldir native/src/theme2/qml "$dist/MyMediaVault.exe"
+          Copy-Item build/EverythingBox.exe $dist/
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations --no-system-d3d-compiler --qmldir native/src/theme2/qml "$dist/EverythingBox.exe"
           Copy-Item "$env:MPV_DIR/libmpv-2.dll" $dist/
           Copy-Item "$env:SDL2_DIR/lib/x64/SDL2.dll" $dist/
           # Bundle the sample addons + the StreamingAssets the app ships with.
           if (Test-Path native/addons)    { Copy-Item native/addons    "$dist/addons"    -Recurse -Force }
           if (Test-Path native/themes2)   { Copy-Item native/themes2   "$dist/themes2"   -Recurse -Force }
           Copy-Item native/resources/Uninstall.cmd "$dist/"  # standalone uninstaller (for when the app won't launch)
-          Compress-Archive -Path "$dist/*" -DestinationPath MyMediaVault-windows-x64.zip -Force
+          Compress-Archive -Path "$dist/*" -DestinationPath EverythingBox-windows-x64.zip -Force
           # Ship the debug symbols as a SEPARATE asset (not in the app zip — no need to bloat every download by
           # ~25 MB). Keep it to symbolize a crash report from this exact build: match the .pdb to a dump by GUID.
-          if (Test-Path build/MyMediaVault.pdb) { Compress-Archive -Path build/MyMediaVault.pdb -DestinationPath MyMediaVault-windows-x64-pdb.zip -Force }
+          if (Test-Path build/EverythingBox.pdb) { Compress-Archive -Path build/EverythingBox.pdb -DestinationPath EverythingBox-windows-x64-pdb.zip -Force }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-windows-x64
+          name: EverythingBox-windows-x64
           path: |
-            MyMediaVault-windows-x64.zip
-            MyMediaVault-windows-x64-pdb.zip
+            EverythingBox-windows-x64.zip
+            EverythingBox-windows-x64-pdb.zip
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            MyMediaVault-windows-x64.zip
-            MyMediaVault-windows-x64-pdb.zip
+            EverythingBox-windows-x64.zip
+            EverythingBox-windows-x64-pdb.zip
           generate_release_notes: true
 
   # ------------------------------------------------------------------ macOS ---
@@ -147,7 +147,7 @@ jobs:
         run: |
           cmake -S native -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
             -DMPV_INCLUDE_DIR="$(brew --prefix mpv)/include" \
             -DMPV_LIBRARY="$(brew --prefix mpv)/lib/libmpv.dylib" \
@@ -159,21 +159,21 @@ jobs:
 
       - name: Package (.dmg)
         run: |
-          APP=$(find build -name 'MyMediaVault.app' -maxdepth 3 | head -n1)
+          APP=$(find build -name 'EverythingBox.app' -maxdepth 3 | head -n1)
           if [ -z "$APP" ]; then echo "No .app bundle produced"; ls -R build | head -50; exit 1; fi
           "$QT_ROOT_DIR/bin/macdeployqt" "$APP" -dmg
-          mv "$(dirname "$APP")/MyMediaVault.dmg" MyMediaVault-macos-arm64.dmg
+          mv "$(dirname "$APP")/EverythingBox.dmg" EverythingBox-macos-arm64.dmg
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-macos-arm64
-          path: MyMediaVault-macos-arm64.dmg
+          name: EverythingBox-macos-arm64
+          path: EverythingBox-macos-arm64.dmg
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-macos-arm64.dmg
+          files: EverythingBox-macos-arm64.dmg
           generate_release_notes: true
 
   # -------------------------------------------------------------------- iOS ---
@@ -215,7 +215,7 @@ jobs:
         run: |
           DEV="$HOME/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework"
           "$QT_ROOT_DIR/bin/qt-cmake" -S native -B build-ios -G Xcode \
-            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
             -DQT_HOST_PATH="$QT_HOST_DIR" \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
@@ -223,29 +223,29 @@ jobs:
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
             -DMPV_INCLUDE_DIR="$DEV/Headers" \
             -DMPV_LIBRARY="$DEV/Libmpv" \
-            -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+            -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
 
       - name: Build
         run: cmake --build build-ios --config Release
 
       - name: Package (.ipa, unsigned)
         run: |
-          APP=$(find build-ios -maxdepth 3 -name 'MyMediaVault.app' -path '*iphoneos*' | head -n1)
+          APP=$(find build-ios -maxdepth 3 -name 'EverythingBox.app' -path '*iphoneos*' | head -n1)
           if [ -z "$APP" ]; then echo "No .app bundle produced"; find build-ios -maxdepth 3 | head -50; exit 1; fi
           mkdir -p ipa/Payload
           cp -R "$APP" ipa/Payload/
-          (cd ipa && zip -qry ../MyMediaVault-ios-arm64.ipa Payload)
+          (cd ipa && zip -qry ../EverythingBox-ios-arm64.ipa Payload)
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-ios-arm64
-          path: MyMediaVault-ios-arm64.ipa
+          name: EverythingBox-ios-arm64
+          path: EverythingBox-ios-arm64.ipa
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-ios-arm64.ipa
+          files: EverythingBox-ios-arm64.ipa
           generate_release_notes: true
 
   # ------------------------------------------------------------------ Linux ---
@@ -279,7 +279,7 @@ jobs:
         run: |
           cmake -S native -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
 
       - name: Build
@@ -289,14 +289,15 @@ jobs:
         run: |
           APPDIR=AppDir
           mkdir -p $APPDIR/usr/bin
-          cp build/MyMediaVault $APPDIR/usr/bin/
-          cp native/resources/appicon.png MyMediaVault.png
-          cat > MyMediaVault.desktop <<'EOF'
+          cp build/EverythingBox $APPDIR/usr/bin/
+          cp native/resources/appicon.png EverythingBox.png
+          cat > EverythingBox.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=My Media Vault
-          Exec=MyMediaVault
-          Icon=MyMediaVault
+          Name=EverythingBox
+          Comment=EverythingBox — one place for your films, shows, music, books, comics and games.
+          Exec=EverythingBox
+          Icon=EverythingBox
           Categories=AudioVideo;Player;
           Terminal=false
           EOF
@@ -305,9 +306,9 @@ jobs:
           chmod +x linuxdeploy*.AppImage
           export QMAKE="$QT_ROOT_DIR/bin/qmake"
           export EXTRA_QT_PLUGINS="multimedia;tls;networkinformation;imageformats"
-          export OUTPUT=MyMediaVault-linux-x86_64.AppImage
+          export OUTPUT=EverythingBox-linux-x86_64.AppImage
           ./linuxdeploy-x86_64.AppImage --appdir $APPDIR \
-            -e build/MyMediaVault -i MyMediaVault.png -d MyMediaVault.desktop \
+            -e build/EverythingBox -i EverythingBox.png -d EverythingBox.desktop \
             --plugin qt --output appimage
           # $OUTPUT sets the produced name; fall back to whatever AppImage was emitted (excluding the tools).
           if [ ! -f "$OUTPUT" ]; then
@@ -318,14 +319,14 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-linux-x86_64
-          path: MyMediaVault-linux-x86_64.AppImage
+          name: EverythingBox-linux-x86_64
+          path: EverythingBox-linux-x86_64.AppImage
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-linux-x86_64.AppImage
+          files: EverythingBox-linux-x86_64.AppImage
           generate_release_notes: true
 
   # ---------------------------------------------------------------- Android ---
@@ -515,7 +516,7 @@ jobs:
           echo "--- bundling OpenSSL for $JNI_ABI:"; ls -la "$SSL_DIR"
           echo "OPENSSL_ANDROID_LIBS_DIR=$(realpath "$SSL_DIR")" >> "$GITHUB_ENV"
 
-      # Release signing (Qt 6.8 androiddeployqt env route): decode the persistent MyMediaVault release keystore
+      # Release signing (Qt 6.8 androiddeployqt env route): decode the persistent EverythingBox release keystore
       # to the runner and expose QT_ANDROID_SIGN_APK + keystore path/alias/store+key pass via $GITHUB_ENV, so the
       # `apk` build target signs the release APK with the release key. Guarded on the secret being present — forks
       # and PRs from forks (no secrets) skip this and still build an *unsigned* release APK. The passwords come
@@ -524,14 +525,14 @@ jobs:
       - name: Set up release signing
         if: ${{ env.ANDROID_KEYSTORE_B64 != '' }}
         run: |
-          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mmv-release.keystore"
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/eb-release.keystore"
           # QT_ANDROID_SIGN_APK is a *CMake configure* variable (not an env var) — passed to qt-cmake below via
           # $QT_ANDROID_SIGN_CMAKE so the androiddeployqt build rule is generated with --sign. The keystore
           # PATH/ALIAS/STORE_PASS/KEY_PASS are the env vars androiddeployqt reads at build time. Passwords come
           # from secrets (auto-masked) and are alphanumeric, so the KEY=VALUE env-file lines are safe.
           {
             echo "QT_ANDROID_SIGN_CMAKE=-DQT_ANDROID_SIGN_APK=ON"
-            echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/mmv-release.keystore"
+            echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/eb-release.keystore"
             echo "QT_ANDROID_KEYSTORE_ALIAS=$ANDROID_KEY_ALIAS"
             echo "QT_ANDROID_KEYSTORE_STORE_PASS=$ANDROID_KEYSTORE_PASS"
             echo "QT_ANDROID_KEYSTORE_KEY_PASS=$ANDROID_KEYSTORE_PASS"
@@ -554,7 +555,7 @@ jobs:
             -DQT_HOST_PATH="$QT_HOST_ROOT" \
             -DANDROID_SDK_ROOT="$ANDROID_SDK_ROOT" \
             -DANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" \
-            -DMYMEDIAVAULT_BUILD_APP=ON \
+            -DEVERYTHINGBOX_BUILD_APP=ON \
             -DMPV_INCLUDE_DIR="$MPV_INCLUDE_DIR" \
             -DMPV_LIBRARY="$MPV_LIBRARY" \
             -DOPENSSL_ANDROID_LIBS_DIR="$OPENSSL_ANDROID_LIBS_DIR"
@@ -572,25 +573,25 @@ jobs:
           [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | grep -iE 'release|debug' | grep -vi 'unsigned' | head -n1)
           [ -n "$apk" ] || apk=$(find build-android -name '*.apk' | head -n1)
           [ -n "$apk" ] || { echo "No APK produced"; find build-android -name '*.apk' -o -name '*.aab'; exit 1; }
-          cp "$apk" "MyMediaVault-android-${ABI_NAME}.apk"
+          cp "$apk" "EverythingBox-android-${ABI_NAME}.apk"
           echo "Collected APK: $apk"
-          ls -la "MyMediaVault-android-${ABI_NAME}.apk"
+          ls -la "EverythingBox-android-${ABI_NAME}.apk"
           # Sanity: the staged assets and the qtdeclarative/mpv .so's must actually be inside the APK.
-          echo "=== APK assets/mmv (expect themes2 + addons) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'assets/mmv' | head -20 || true
-          echo "=== APK libs (expect libmpv + libQt6Quick) ==="; unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libmpv|Qt6Quick|Qt6Qml)' | head -20 || true
+          echo "=== APK assets/eb (expect themes2 + addons) ==="; unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'assets/eb' | head -20 || true
+          echo "=== APK libs (expect libmpv + libQt6Quick) ==="; unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libmpv|Qt6Quick|Qt6Qml)' | head -20 || true
           echo "=== APK OpenSSL (expect libssl + libcrypto — TLS) ==="
-          if ! unzip -l "MyMediaVault-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libssl|libcrypto)'; then
+          if ! unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libssl|libcrypto)'; then
             echo "FATAL: no libssl/libcrypto bundled — TLS would be dead on device (F2)"; exit 1
           fi
 
       - uses: actions/upload-artifact@v4
         with:
-          name: MyMediaVault-android-${{ matrix.name }}
-          path: MyMediaVault-android-${{ matrix.name }}.apk
+          name: EverythingBox-android-${{ matrix.name }}
+          path: EverythingBox-android-${{ matrix.name }}.apk
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: MyMediaVault-android-${{ matrix.name }}.apk
+          files: EverythingBox-android-${{ matrix.name }}.apk
           generate_release_notes: true

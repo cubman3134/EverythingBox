@@ -1,4 +1,4 @@
-// In-window overlays: the one way MMV shows anything "on top" — action menus, confirmations, prompts and
+// In-window overlays: the one way EB shows anything "on top" — action menus, confirmations, prompts and
 // the on-screen keyboard. An overlay is a CHILD of the main window (never a separate OS window, so no
 // black flicker over the QML themed surface and no focus tug-of-war with the desktop), drawn as a dimmed
 // scrim with a centred panel. Overlays stack LIFO; the topmost one owns all input (keyboard grab for

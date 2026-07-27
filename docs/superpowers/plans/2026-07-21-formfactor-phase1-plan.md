@@ -16,7 +16,7 @@
 - Setter/data-op fidelity: mode storage via `Settings` accessors only; no behavior change in Desktop mode (all tokens identity — every diff must be a no-op at Desktop defaults).
 - Probe env recipe: PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` and `/c/mpv-dev`; `QT_QPA_PLATFORM=offscreen`; `QT_PLUGIN_PATH=C:\Qt\6.8.3\msvc2022_64\plugins`; `BUILD_DIR=C:/Users/cubma/Project Goliath/build`; runner `native/tools/run-headless-probes.sh`.
 - New probes/greps must be registered in `native/tools/run-headless-probes.sh` AND built in `.github/workflows/ci.yml` (target list at the `cmake --build` line, ~:52) — a probe CI doesn't build silently never runs.
-- Live verification: deploy Release over `C:\MyMediaVault-app\MyMediaVault.exe` (keep name); `MMV_UITEST=1`; drive ONLY via `python native/tools/uitest.py` — never SendKeys/focus. Protect user data: Weekend Picks playlist untouched; byte-identical `mymediavault.ini` restores.
+- Live verification: deploy Release over `C:\EverythingBox-app\EverythingBox.exe` (keep name); `EB_UITEST=1`; drive ONLY via `python native/tools/uitest.py` — never SendKeys/focus. Protect user data: Weekend Picks playlist untouched; byte-identical `everythingbox.ini` restores.
 - Token table (the single source of truth; Desktop row MUST be identity):
 
 | Mode | uiScale | minHitPx (logical) | safeAreaFrac | density |

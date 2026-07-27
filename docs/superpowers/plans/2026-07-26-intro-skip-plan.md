@@ -10,15 +10,15 @@
 
 ## Global Constraints
 
-- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`** (the uitest harness runs the Release binary). App target `mymediavault`.
-- **Build ONLY named targets.** Never run a target-less `cmake --build build` — it builds every probe and stalls. Adding a source or a probe requires exactly ONE reconfigure: `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`). Report BLOCKED if a build exceeds ~6 minutes with no progress.
+- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`** (the uitest harness runs the Release binary). App target `everythingbox`.
+- **Build ONLY named targets.** Never run a target-less `cmake --build build` — it builds every probe and stalls. Adding a source or a probe requires exactly ONE reconfigure: `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`). Report BLOCKED if a build exceeds ~6 minutes with no progress.
 - **Suite:** `BUILD_DIR=build bash native/tools/run-headless-probes.sh` must print `ALL HEADLESS PROBES PASSED`.
-- **Sources are explicit, not globbed.** Every new `.cpp`/`.h` must be added to `qt_add_executable(mymediavault …)` in `native/CMakeLists.txt:122`.
+- **Sources are explicit, not globbed.** Every new `.cpp`/`.h` must be added to `qt_add_executable(everythingbox …)` in `native/CMakeLists.txt:122`.
 - **Nav kit:** all *modal* UI goes through `src/ui/nav` (`NavMenu`/`NavConfirm`/`Osk`) — never `QDialog`/`QMessageBox`/`QInputDialog`/top-level windows. The skip chip is deliberately **not** a `NavOverlay` (every overlay grabs all input, wrong for a non-modal prompt over live video); it follows `streamIssueBtn_` (`MainWindow.cpp:760-774`), an existing non-modal child of `player_`.
 - **Two settings builders.** `MainWindow::openGeneralSettings()` (`:8085`) contains a themed builder (`sep`/`info`/`toggle`/`action`/`textf`/`choice`, helpers at `:8165-8175`) **and** a classic QWidget builder. The themed one is the default-reachable surface; a setting added only to the QWidget builder is unconfigurable for default users. **Both must be touched.**
 - **Exact constants** (from the spec, use verbatim): `kMinSegmentS = 5.0`, `kCreditsTailS = 60.0`, `kIntroWindowS = 900.0`, `kIntroMaxLenS = 300.0`, `kChipMs = 8000`.
 - **Key bindings:** `S` = act on the visible chip. `I` = open the marks menu. Both only on the player page.
-- **Pre-commit hook** auto-bumps the patch version in `native/CMakeLists.txt` + `native/src/main.cpp`. Do not fight it; `MMV_NO_VERSION_BUMP=1` skips it for docs-only commits.
+- **Pre-commit hook** auto-bumps the patch version in `native/CMakeLists.txt` + `native/src/main.cpp`. Do not fight it; `EB_NO_VERSION_BUMP=1` skips it for docs-only commits.
 - **Commit messages:** end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ## File Structure
@@ -39,7 +39,7 @@
 **Files:**
 - Create: `native/src/core/MediaSegments.h`, `native/src/core/MediaSegments.cpp`
 - Create: `native/tools/probe_segments.cpp`
-- Modify: `native/CMakeLists.txt` (add `probe_segments` target; add the two new sources to `mymediavault`)
+- Modify: `native/CMakeLists.txt` (add `probe_segments` target; add the two new sources to `everythingbox`)
 - Modify: `native/tools/run-headless-probes.sh:119` (append `"probe_segments SEGMENTS-OK"` to the `for p in` list)
 
 **Interfaces:**
@@ -320,7 +320,7 @@ int main(int argc, char** argv)
 
 - [ ] **Step 3: Wire the build**
 
-In `native/CMakeLists.txt`, add the sources to the app target — insert after `src/core/SubtitleCache.cpp src/core/SubtitleCache.h` inside `qt_add_executable(mymediavault …)` (starts at `:122`):
+In `native/CMakeLists.txt`, add the sources to the app target — insert after `src/core/SubtitleCache.cpp src/core/SubtitleCache.h` inside `qt_add_executable(everythingbox …)` (starts at `:122`):
 
 ```cmake
         src/core/MediaSegments.cpp src/core/MediaSegments.h
@@ -354,7 +354,7 @@ And append to the runner list at `native/tools/run-headless-probes.sh:119`, afte
 - [ ] **Step 4: Reconfigure and run the probe to watch it FAIL**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON
 ```
 Then:
 ```bash
@@ -597,7 +597,7 @@ Expected: `SEGMENTS-OK`, exit 0.
 - [ ] **Step 7: Confirm the app still links**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox
 ```
 Expected: builds clean (the `SegmentStore` stub compiles to nothing).
 
@@ -686,7 +686,7 @@ In `native/CMakeLists.txt`, inside `add_executable(probe_segments …)`, after t
 - [ ] **Step 3: Run the probe to watch it FAIL**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON && cmake --build build --config Release --target probe_segments
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON && cmake --build build --config Release --target probe_segments
 ```
 Expected: **compile errors** — `SegmentStore` has no `lookup`/`put`/`forget`/`keyFor` yet.
 
@@ -977,7 +977,7 @@ checkbox takes **no parent argument** and carries a `font-size:15px` stylesheet 
 - [ ] **Step 6: Build the app**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox
 ```
 Expected: builds clean.
 
@@ -1125,7 +1125,7 @@ void MainWindow::onSegmentEntered(const MediaSegments::Segment& seg)
 - [ ] **Step 7: Build**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox
 ```
 Expected: builds clean.
 
@@ -1335,7 +1335,7 @@ In `hideMediaControls()` (`:2263`) leave the chip alone (it has its own timer), 
 - [ ] **Step 9: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault probe_nav && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox probe_nav && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: builds clean, `ALL HEADLESS PROBES PASSED`. `probe_nav` is built explicitly because the marks menu adds a new `NavMenu` caller.
 
@@ -1356,7 +1356,7 @@ git commit -m "feat: skip chip (S), the intro/credits marks menu (I), and credit
 
 - [ ] **Step 1: Live-verify against a throwaway copy**
 
-**Never launch or modify the deployed app at `C:\MyMediaVault-app` or its ini.** Copy it to a scratch dir, strip `cloud/*` and `sync/*` from the throwaway ini, and drive it with `MMV_UITEST=1` + a unique `MMV_UITEST_PIPE` via `python native/tools/uitest.py`. Read `verify-app-gui-capture.md` in the memory dir first.
+**Never launch or modify the deployed app at `C:\EverythingBox-app` or its ini.** Copy it to a scratch dir, strip `cloud/*` and `sync/*` from the throwaway ini, and drive it with `EB_UITEST=1` + a unique `EB_UITEST_PIPE` via `python native/tools/uitest.py`. Read `verify-app-gui-capture.md` in the memory dir first.
 
 Verify and screenshot each:
 1. **`.edl` tier** — put `10 40 3` in a `<name>.edl` beside a test video; play it; the chip appears at 0:10 and lands at 0:40.
@@ -1381,7 +1381,7 @@ On a version-line conflict in `native/CMakeLists.txt` / `native/src/main.cpp`, t
 - [ ] **Step 4: Build EVERY probe target on the merged tree**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T everythingbox
 ```
 Expected: exit 0. This catches a latent link break in a probe that compiles a source now depending on `MediaSegments` — that class of break has been caught at a merge gate on this project more than once, and the suite alone does not catch it because an unbuilt probe is silently skipped.
 
@@ -1395,7 +1395,7 @@ Expected: `ALL HEADLESS PROBES PASSED`, push succeeds.
 - [ ] **Step 6: Redeploy and verify the copy**
 
 ```bash
-cp build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe && md5sum build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe
+cp build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe && md5sum build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe
 ```
 Expected: the two hashes match.
 

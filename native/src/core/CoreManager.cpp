@@ -121,7 +121,7 @@ QString CoreManager::ensureCore(const QString& coreName, QString* error,
 
     QNetworkAccessManager nam;
     QNetworkRequest req((QUrl(url)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxNative"));
     QNetworkReply* reply = nam.get(req);
 
     // Report progress to the caller's inline indicator (no popup). The event loop keeps the UI responsive
@@ -186,7 +186,7 @@ void CoreManager::ensureBios(const QString& systemId, const QString& destDir,
 
         if (onStatus) onStatus(QObject::tr("Downloading BIOS %1…").arg(bf.fileName));
         QNetworkRequest req((QUrl(bf.url)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxNative"));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam.get(req);
 
@@ -245,7 +245,7 @@ private:
 
         if (onStatus_) onStatus_(QObject::tr("Downloading BIOS %1…").arg(bf.fileName));
         QNetworkRequest req((QUrl(bf.url)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxNative"));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         connect(reply, &QNetworkReply::finished, this, [this, reply, out] {
@@ -316,7 +316,7 @@ public:
         nam_->setTransferTimeout(60000);
 
         QNetworkRequest req((QUrl(url)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultNative"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxNative"));
         QNetworkReply* reply = nam_->get(req);
         if (onProgress_) onProgress_(0);
         connect(reply, &QNetworkReply::downloadProgress, this, [this](qint64 r, qint64 t) {

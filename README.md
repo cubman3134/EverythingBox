@@ -1,4 +1,4 @@
-# My Media Vault
+# EverythingBox
 
 A native, cross-platform **media hub** — video, audio (with playlists), libretro
 emulation, EPUB/PDF readers, and a sandboxed JavaScript addon system — built as a
@@ -10,13 +10,13 @@ Grab the latest build for your platform:
 
 | Platform | Download | Notes |
 |----------|----------|-------|
-| **Windows** (x64) | [**MyMediaVault-windows-x64.zip**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-windows-x64.zip) | Unzip anywhere and run `MyMediaVault.exe`. |
-| **macOS** (Apple Silicon) | [**MyMediaVault-macos-arm64.dmg**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-macos-arm64.dmg) | Unsigned build — first launch: right-click the app → **Open**. |
-| **Linux** (x86_64) | [**MyMediaVault-linux-x86_64.AppImage**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
-| **Android / Android TV** (arm64) | [**MyMediaVault-android-arm64.apk**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-android-arm64.apk) | Sideload it; runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. See [Android / Android TV](#android--android-tv). |
-| **iOS / iPadOS** (arm64) | [**MyMediaVault-ios-arm64.ipa**](https://github.com/cubman3134/MyMediaVault/releases/latest/download/MyMediaVault-ios-arm64.ipa) | Unsigned — sideload with [AltStore](https://altstore.io) or [Sideloadly](https://sideloadly.io) (they re-sign it with your Apple ID). Media hub (video/audio/readers/addons); emulation is unavailable on iOS. See [`native/docs/ios-port.md`](native/docs/ios-port.md). |
+| **Windows** (x64) | [**EverythingBox-windows-x64.zip**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-windows-x64.zip) | Unzip anywhere and run `EverythingBox.exe`. |
+| **macOS** (Apple Silicon) | [**EverythingBox-macos-arm64.dmg**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-macos-arm64.dmg) | Unsigned build — first launch: right-click the app → **Open**. |
+| **Linux** (x86_64) | [**EverythingBox-linux-x86_64.AppImage**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-linux-x86_64.AppImage) | `chmod +x` the file and run it. |
+| **Android / Android TV** (arm64) | [**EverythingBox-android-arm64.apk**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-android-arm64.apk) | Sideload it; runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. See [Android / Android TV](#android--android-tv). |
+| **iOS / iPadOS** (arm64) | [**EverythingBox-ios-arm64.ipa**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-ios-arm64.ipa) | Unsigned — sideload with [AltStore](https://altstore.io) or [Sideloadly](https://sideloadly.io) (they re-sign it with your Apple ID). Media hub (video/audio/readers/addons); emulation is unavailable on iOS. See [`native/docs/ios-port.md`](native/docs/ios-port.md). |
 
-Current version: **0.5.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/MyMediaVault/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
+Current version: **0.5.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/EverythingBox/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
 
 This repository is the native app. The previous Unity implementation has been
 removed; its portable logic (EPUB/PDF parsing, the addon model) was reimplemented
@@ -39,7 +39,7 @@ and current status.
 ## Quick build
 
 ```
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON ^
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON ^
   -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" ^
   -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib" ^
   -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
@@ -47,7 +47,7 @@ cmake --build build --config Release
 ```
 
 The libretro frontend + its `probe_core` harness build with just CMake + a C++17
-compiler (no Qt); the full app is gated behind `-DMYMEDIAVAULT_BUILD_APP=ON`.
+compiler (no Qt); the full app is gated behind `-DEVERYTHINGBOX_BUILD_APP=ON`.
 
 ## Android / Android TV
 
@@ -74,7 +74,7 @@ for the target ABI:
 # 1) Install Android SDK + NDK and the Qt-for-Android 6.8.3 arm64 kit.
 # 2) Cross-compile libmpv (+ffmpeg) and SDL2 for arm64-v8a.
 # 3) Configure with the Qt-for-Android qt-cmake, pointing MPV_LIBRARY/SDL2_LIBRARY at the .so builds:
-"$QT/android_arm64_v8a/bin/qt-cmake" -S native -B build-android -DMYMEDIAVAULT_BUILD_APP=ON \
+"$QT/android_arm64_v8a/bin/qt-cmake" -S native -B build-android -DEVERYTHINGBOX_BUILD_APP=ON \
   -DMPV_INCLUDE_DIR=… -DMPV_LIBRARY=…/libmpv.so \
   -DSDL2_INCLUDE_DIR=… -DSDL2_LIBRARY=…/libSDL2.so
 cmake --build build-android                       # produces the APK via androiddeployqt

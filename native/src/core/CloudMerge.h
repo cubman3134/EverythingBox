@@ -7,7 +7,7 @@
 // local ini. This is the ONLY reader/writer of the merge document: MainWindow::serializeProgress/mergeProgress
 // are thin wrappers over these two.
 //
-// Pure ini-in / json-out (QtCore + QSettings over the shared portable mymediavault.ini, same posture as the
+// Pure ini-in / json-out (QtCore + QSettings over the shared portable everythingbox.ini, same posture as the
 // other core stores) — NO MainWindow/UI dependency, so it links into headless probes. It reads/writes the ini
 // DIRECTLY (not through the per-profile store front-ends, which are current-profile-scoped) so one pass covers
 // EVERY profile at once. The only cross-store call is ItemMarks::invalidate() after a merge (its static cache

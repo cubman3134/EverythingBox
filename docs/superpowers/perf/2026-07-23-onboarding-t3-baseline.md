@@ -1,6 +1,6 @@
 # Perf baseline - 2026-07-23 (onboarding Drive-restore T3)
 
-Standard route, deployed Release `MyMediaVault.exe` (post-T3), driven by `perfbaseline.py`. Three runs.
+Standard route, deployed Release `EverythingBox.exe` (post-T3), driven by `perfbaseline.py`. Three runs.
 Onboarding is off the hot paths by design: on the returning-user path (`onboarding/done=true` in the
 deployed ini) startup adds exactly ONE `Settings` flag read and skips the choice screen entirely; the
 choice screen + restore flow are reached only on a true first run and never touch `nav.select`.

@@ -1,4 +1,4 @@
-# Generates the "My Media Vault" app icon: a play button inside a vault ring on a blue->purple gradient.
+# Generates the "EverythingBox" app icon: a play button inside a vault ring on a blue->purple gradient.
 # Produces appicon.png (256) and a multi-size appicon.ico.
 Add-Type -AssemblyName System.Drawing
 
