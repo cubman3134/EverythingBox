@@ -7,6 +7,11 @@
 namespace AppBrand
 {
     inline constexpr const char* kName        = "EverythingBox";
+    // The human-facing spaced form. Identical to kName here only because "EverythingBox" has no spaced
+    // variant (the design maps BOTH "MyMediaVault" and "My Media Vault" onto it) — the two are separate
+    // constants because Legacy's forms genuinely differ, and because kDisplayName feeds
+    // QApplication::setApplicationName, which is load-bearing for paths (see Legacy::kDisplayName).
+    inline constexpr const char* kDisplayName = "EverythingBox";
     inline constexpr const char* kIniFile     = "everythingbox.ini";
     inline constexpr const char* kDriveFolder = "EverythingBox";
     inline constexpr const char* kSyncZip     = "everythingbox-sync.zip";
@@ -21,6 +26,14 @@ namespace AppBrand
     namespace Legacy
     {
         inline constexpr const char* kName        = "MyMediaVault";
+        // DATA-BEARING on mobile, not prose. This is the value currently passed to
+        // QApplication::setApplicationName, and on Android/iOS AppPaths::dataDir() resolves through
+        // QStandardPaths::AppDataLocation, which incorporates applicationName (on iOS literally
+        // ~/Library/Application Support/<applicationName>). Swapping it for kDisplayName relocates the
+        // entire mobile data directory — ini, saves, states, addons — with no migration, i.e. a silent
+        // wipe. It stays legacy at the setApplicationName call site until the brand migration owns the
+        // mobile path move; see the comment there.
+        inline constexpr const char* kDisplayName = "My Media Vault";
         inline constexpr const char* kIniFile     = "mymediavault.ini";
         inline constexpr const char* kDriveFolder = "MyMediaVault";
         inline constexpr const char* kSyncZip     = "mymediavault-sync.zip";

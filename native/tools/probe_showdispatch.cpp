@@ -7,14 +7,11 @@
 #include "LocalResolveCache.h"
 #include "LocalLibrary.h"
 #include "Settings.h"
-#include "AppPaths.h"
-#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QTemporaryDir>
 #include <QDir>
 #include <QFile>
-#include <QSettings>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <functional>
@@ -60,32 +57,18 @@ static bool makeSeriesFixture(const QString& root, const QString& id, bool serie
 static LocalLibrary::VideoEntry ep(const QString& show, int s, int e, const QString& path)
 { LocalLibrary::VideoEntry v; v.kind = LocalLibrary::Kind::Episode; v.show = show; v.season = s; v.episode = e; v.path = path; return v; }
 
-// "Zero network" only holds if the fixture is the ONLY media source. The AddonManager constructor seeds the
-// default Stremio sources on first run, and that seeding persists into the app's shared portable ini — which
-// every probe in the suite writes to. So a probe that ran earlier can leave Cinemeta (a real series source,
-// manifest already cached) registered here: it answers the show job before the fixture does, the positive
-// case gets an IMDB id instead of the canned tmdb:tv:1396, and the movie-only negative control matches
-// anyway. Pin the one-time seed flags and drop every persisted remote source so neither can happen. Without
-// this the probe passes or fails on what the settings file happened to accumulate, not on the seam it tests.
-static void pinFixtureAsOnlySource()
-{
-    QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                QSettings::IniFormat);
-    for (const char* flag : { "addon.stremio.seeded", "addon.debridio.removed", "addon.cinemeta.removed",
-                              "addon.torrentio.seeded", "addon.torrentio.host.migrated" })
-        s.setValue(QLatin1String(flag), true);
-    const QStringList keys = s.allKeys();
-    for (const QString& k : keys)
-        if (k.startsWith(QStringLiteral("addon.remote."))) s.remove(k);
-    s.sync();
-}
-
+// "Zero network" holds because AddonManager's constructor skips every startup network kick (default-source
+// seeding, remote-manifest refresh, addon self-update) whenever MMV_ADDONS_ROOT is set, and runCase() sets
+// that override before constructing the manager. Without that gate a real remote source left in the shared
+// portable ini by an earlier probe (Cinemeta, manifest already cached) could answer the show job before the
+// fixture does — the positive case would get an IMDB id instead of the canned tmdb:tv:1396 and the
+// movie-only negative control would match anyway, i.e. the probe would pass or fail on what the settings
+// file happened to accumulate rather than on the seam it tests.
 static bool runCase(bool serieslike, QStringList& outIds)
 {
     QTemporaryDir root; QTemporaryDir data;
     makeSeriesFixture(root.path(), "fixture.series", serieslike);
     qputenv("MMV_ADDONS_ROOT", root.path().toUtf8());
-    pinFixtureAsOnlySource();
     Settings::setResolveOnline(true);                   // enqueue is gated on this; default is true, pin it anyway
     AddonManager mgr;                                   // real manager, loads the JsLocal fixture, no network
     LocalResolveCache cache(data.path() + "/localresolve.json"); cache.load();

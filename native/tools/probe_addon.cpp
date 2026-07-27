@@ -7,13 +7,10 @@
 #include "CatalogPrefetcher.h"
 #include "BuiltinSecrets.h" // generated (build tree): expected lengths for the credscope asserts
 #include "miniz.h"          // build a fixture .addon package for the reserved-namespace install guard
-#include "../src/core/AppPaths.h"
-#include "../src/core/AppBrand.h"
 
 #include <QCoreApplication>
 #include <QFile>
 #include <QDir>
-#include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QElapsedTimer>
@@ -370,28 +367,14 @@ static bool makeSlowFixture(const QString& root, const QString& id)
         && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
 }
 
-// "Touches no network" only holds if the JsLocal fixtures are the ONLY media sources. The AddonManager
-// constructor seeds the default Stremio sources on first run and persists them into the app's shared
-// portable ini, so on a settings file that has not been through that seeding yet (a clean checkout, or the
-// first run after the ini is renamed) Cinemeta and Torrentio register as extra remote sources here — and the
-// slot-accounting asserts below ("issued exactly one request per job") count their requests too. Pin the
-// one-time seed flags and drop every persisted remote source so the counts describe the fixtures alone.
-static void pinFixturesAsOnlySources()
-{
-    QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
-                QSettings::IniFormat);
-    for (const char* flag : { "addon.stremio.seeded", "addon.debridio.removed", "addon.cinemeta.removed",
-                              "addon.torrentio.seeded", "addon.torrentio.host.migrated" })
-        s.setValue(QLatin1String(flag), true);
-    const QStringList keys = s.allKeys();
-    for (const QString& k : keys)
-        if (k.startsWith(QStringLiteral("addon.remote."))) s.remove(k);
-    s.sync();
-}
-
+// "Touches no network" holds because AddonManager's constructor skips every startup network kick
+// (default-source seeding, remote-manifest refresh, addon self-update) whenever MMV_ADDONS_ROOT is set,
+// and this probe sets that override before constructing any manager. So the fixtures really are the only
+// sources, and the slot-accounting asserts below ("issued exactly one request per job") count only their
+// requests. This probe used to scrub the shared portable ini by hand to get the same guarantee; that
+// belongs in the production gate, not test-side, and the hand-scrub is gone.
 static int probePrefetch()
 {
-    pinFixturesAsOnlySources();
     int pass = 0, fail = 0;
     auto check = [&](const char* name, bool ok) {
         printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name); if (ok) ++pass; else ++fail;
@@ -590,7 +573,7 @@ static int probePrefetch()
     QDir(rootW).removeRecursively();
     qunsetenv("MMV_PREFETCH_WATCHDOG_S");
 
-    // ---- Reserved-namespace install guard: a package claiming a com.mymediavault.* id must be REFUSED
+    // ---- Reserved-namespace install guard: a package claiming a com.everythingbox.* id must be REFUSED
     // (bundled ids never arrive via installPackage; a side-loaded one could impersonate/overwrite one). ----
     {
         const QString rootI = root + QStringLiteral("-inst");
