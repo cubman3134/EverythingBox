@@ -311,16 +311,18 @@ static bool parseStremioManifest(const QByteArray& json, AddonManifest* outM, QS
 
     for (const StremioTranslate::Catalog& c : sm.catalogs)
     {
-        // Unsatisfiable cannot be asked at all — it stays on stremioManifest only, so Task 5 can explain
-        // its absence. SearchOnly IS carried here: it must remain reachable by the search fan-out, and
-        // dropping it is what would make a search-only addon invisible all over again. The searchOnly flag
-        // is what keeps it out of the browse shelves.
-        if (c.use == StremioTranslate::CatalogUse::Unsatisfiable) continue;
+        // Every declared catalog is carried, and its verdict rides with it. SearchOnly must remain reachable
+        // by the search fan-out (dropping it is what made a search-only addon invisible all over again), and
+        // the searchOnly flag is what keeps it out of the browse shelves. Unsatisfiable is carried for the
+        // opposite reason: it can never be FETCHED, but "skipped with a reason" has to be a reason the user
+        // can read, and a catalog dropped here has no surface left to say it on. dispatchRemoteCatalog
+        // answers it locally with that reason instead of ever building a request for it.
         AddonCatalog cat;
         cat.id         = c.routeId();
         cat.type       = c.type;
         cat.name       = c.name;
         cat.searchOnly = (c.use == StremioTranslate::CatalogUse::SearchOnly);
+        if (c.use == StremioTranslate::CatalogUse::Unsatisfiable) cat.skipReason = c.skipReason;
         m.catalogs.push_back(cat);
     }
 
@@ -954,6 +956,38 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
     const bool stremio = src->stremio;
+
+    // ---- Two things this add-on cannot do, said out loud instead of presenting as an empty shelf ----
+    // Both answer with the SAME synthetic type:"info" row the unreachable-add-on branch below uses (one
+    // surface for "here is why this is empty"), and both answer LOCALLY: neither request could succeed, so
+    // building one would only spend a round-trip to arrive at the same nothing. Delivered on the next
+    // event-loop turn, exactly like the cache hit in requestCatalog, so the caller records this reqId first.
+    QString cannot;
+    if (stremio && src->stremioManifest.configurationRequired)
+    {
+        const QString name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
+        cannot = tr("%1 needs to be configured before it can show anything.").arg(name);
+        // Only when the add-on says it HAS a configuration page. Its base URL is that page (the Stremio
+        // convention), so this points at somewhere real rather than telling the user to go look for it.
+        if (src->stremioManifest.configurable && !base.isEmpty())
+            cannot += QLatin1Char(' ') + tr("Open its configuration page at %1, then re-add it.").arg(base);
+    }
+    else if (stremio)
+    {
+        for (const AddonCatalog& c : src->manifest.catalogs)
+            if (c.id == catalogId && !c.skipReason.isEmpty())
+            { cannot = tr("“%1” %2.").arg(c.name, c.skipReason); break; }
+    }
+    if (!cannot.isEmpty())
+    {
+        MediaCatalog cat;
+        cat.title = tr("Unavailable");
+        MediaItem info; info.type = QStringLiteral("info"); info.title = cannot;
+        cat.items.push_back(info);
+        QMetaObject::invokeMethod(this, [this, reqId, cat] { emit catalogReady(reqId, cat); }, Qt::QueuedConnection);
+        return reqId;
+    }
+
     // Stremio declares its filters on the MANIFEST, not on the catalog response, so they're resolved here and
     // ridden into the reply handler; the non-Stremio branch gets its equivalents from MediaCatalog::fromJson.
     const QVector<CatalogFilter> stremioFilters = stremio ? stremioCatalogFilters(src, catalogId)
@@ -1478,10 +1512,13 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
 }
 
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
-                                 std::function<void(const QString&, const QString&)> cb, int attempt)
+                                 std::function<void(const QString&, const QString&)> cb, int attempt,
+                                 const QString& preferGroup)
 {
     if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString()); return; }
-    if (src->stremio) { resolveStremioStream(item, cb); return; } // aggregate across Stremio stream addons
+    // Aggregate across Stremio stream addons. preferGroup only matters here: a bingeGroup is a Stremio
+    // concept, and the non-Stremio /stream branch below has nothing to match it against.
+    if (src->stremio) { resolveStremioStream(item, cb, preferGroup); return; }
     const QString base = src->baseUrl;
     QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id, attempt));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));

@@ -10,6 +10,7 @@
 #include "../core/RecentStore.h"
 #include "../core/DownloadsStore.h"
 #include "../core/LocalLibrary.h"
+#include "../core/BingeStore.h"
 #include "../core/RaBrowse.h"
 #include "../core/Achievements.h"
 #include "../core/SteamAchievements.h"
@@ -673,6 +674,28 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     downloadBtn_->installEventFilter(this);
     arl->addWidget(downloadBtn_);
 
+    // "Choose source…": the manual release picker, offered beside Play on any leaf that resolves through the
+    // Stremio stream add-ons. Shown from requestMeta (a Stremio leaf) and showMeta (a bridged one), the same
+    // two places Play itself is revealed from, so the two can't disagree about what is resolvable.
+    sourceBtn_ = new QPushButton(tr("🔀  Choose source…"), actionRow_);
+    sourceBtn_->setCursor(Qt::PointingHandCursor);
+    sourceBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#EDE4FF;border:2px solid #7C5CFF;border-radius:6px;"
+        "padding:6px 14px;color:#3A2A7A;font-weight:bold;}"
+        "QPushButton:hover{background:#DCCEFF;}"
+        "QPushButton:focus{background:#C9B4FF;border-color:#5A3ED6;}"));
+    sourceBtn_->setVisible(false);
+    connect(sourceBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        MediaItem it = stack_.last().item;
+        // A bridged leaf got its stream id from /meta (showMeta armed playImdbId_) — carry it, exactly as
+        // resolvePlay's own callback stamps it onto the item it opens.
+        if (it.imdbStreamId.isEmpty() && !playImdbId_.isEmpty()) it.imdbStreamId = playImdbId_;
+        emit chooseSourceRequested(it);
+    });
+    sourceBtn_->installEventFilter(this);
+    arl->addWidget(sourceBtn_);
+
     arl->addStretch(1);
     mc->addWidget(actionRow_);
 
@@ -932,11 +955,26 @@ void HomeView::refresh()
     };
 
     // Lead with a single Movies tab, then a single TV tab, then every other winning catalog (one per type).
+    //
+    // A catalog carrying a skipReason can never be FETCHED (a Stremio catalog requiring an extra we have no
+    // value for); opening it shows that reason instead of items. It is still offered — that is the only way
+    // its reason reaches anyone — but it must never DISPLACE a working shelf. Movies and TV get exactly one
+    // tab each, so each is elected in two passes: a usable catalog first, and the self-explaining one only
+    // when the type has nothing usable at all (an explained tab beats a type that silently isn't there).
+    // Every other type adds a tab per winning catalog below, so there it is an addition, never a swap.
     bool didMovie = false, didSeries = false;
     for (const CatRef& c : all)
-        if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie) { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
+        if (wins(c) && c.cat.type == QStringLiteral("movie") && c.cat.skipReason.isEmpty() && !didMovie)
+        { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
     for (const CatRef& c : all)
-        if (wins(c) && isSeriesType(c.cat.type) && !didSeries) { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
+        if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie)
+        { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
+    for (const CatRef& c : all)
+        if (wins(c) && isSeriesType(c.cat.type) && c.cat.skipReason.isEmpty() && !didSeries)
+        { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
+    for (const CatRef& c : all)
+        if (wins(c) && isSeriesType(c.cat.type) && !didSeries)
+        { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
     for (const CatRef& c : all)
     {
         if (!wins(c)) continue;
@@ -3310,7 +3348,12 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                 else
                     showToast(tr("No playable source for “%1”. The addon returned no usable link.").arg(it.title), kFeedbackLong);
             }
-        });
+        }, /*attempt=*/0,
+        // The release already chosen for this series, if any. Only the Stremio leg reads it (a file provider
+        // has no bingeGroup to match against), and only an episode has a series key at all. Without this the
+        // memory would be honoured on the automatic next-episode hand-off and silently ignored the moment the
+        // user picked the next episode from the list themselves.
+        preferredBingeGroup(it.imdbStreamId.isEmpty() ? it.id : it.imdbStreamId));
         return;
     }
     if (!imdbId.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
@@ -3324,7 +3367,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                               "(check that Allarr is configured and returning results).").arg(it.title), kFeedbackLong);
-        });
+        }, /*attempt=*/0, preferredBingeGroup(imdbId)); // the release already chosen for this series, if any
         return;
     }
     showToast(tr("Nothing to play for “%1”.").arg(it.title), kFeedbackLong);
@@ -3673,6 +3716,9 @@ QVariantMap HomeView::themedDetailData(int idx)
     const bool directOpen = !it.expandable && (localSaved || it.type == QStringLiteral("game"));
     QStringList verbs;
     if (gates.play || directOpen) verbs << QStringLiteral("play");
+    // "Choose source…" sits next to Play because it IS a play: the same resolve, with the release picked by
+    // hand instead of by the auto rule. Offered only where several releases exist to choose between.
+    if (gates.play && canChooseStreamSource(it)) verbs << QStringLiteral("source");
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
@@ -3864,6 +3910,42 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     return g;
 }
 
+bool HomeView::canChooseStreamSource(const MediaItem& item) const
+{
+    if (item.expandable) return false;                       // a container resolves nothing itself
+    // Prefer-local wins over every resolve (resolvePlay and playThemedLeaf both short-circuit on it), so an
+    // owned item never reaches a stream addon and has no list of releases behind it.
+    if (!LocalLibrary::index().localPathFor(item.id).isEmpty()) return false;
+    if (!item.imdbStreamId.isEmpty() && !LocalLibrary::index().localPathFor(item.imdbStreamId).isEmpty())
+        return false;
+    // The route the play would actually take:
+    //   * a leaf of a Stremio catalog — resolveStream() hands it straight to resolveStremioStream();
+    //   * a leaf bridged to an IMDB stream id — resolveStreamByImdb() ends at the same aggregation.
+    // Anything else (a local script catalog, a file provider's own leaf, a game, a document) has one source.
+    const bool stremioLeaf = !stack_.isEmpty() && stack_.last().addon && stack_.last().addon->stremio;
+    const bool bridged = !item.imdbStreamId.isEmpty();
+    if (!stremioLeaf && !bridged) return false;
+    static const QSet<QString> kStreamable = {
+        QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"), QStringLiteral("episode") };
+    if (!kStreamable.contains(item.type)) return false;
+    const QString streamType = (item.type == QStringLiteral("movie")) ? QStringLiteral("movie")
+                                                                      : QStringLiteral("series");
+    return mgr_ && mgr_->hasStreamProvider(streamType);
+}
+
+QString HomeView::preferredBingeGroup(const QString& imdbStreamId) const
+{
+    // lookup() answers empty for an empty key and seriesKeyFor() answers empty for a movie, so this needs no
+    // "is it an episode?" test of its own — and a null store simply means no memory.
+    return bingeStore_ ? bingeStore_->lookup(BingeStore::seriesKeyFor(imdbStreamId)) : QString();
+}
+
+void HomeView::requestChooseSource(int idx)
+{
+    if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
+    emit chooseSourceRequested(items_[browseRowMap_[idx]]);
+}
+
 void HomeView::requestMeta(const MediaItem& item)
 {
     metaItem_ = item;             // remembered for the meta fallback in onMetaReady
@@ -3917,6 +3999,9 @@ void HomeView::requestMeta(const MediaItem& item)
         playBtn_->setVisible(gates.play);
     }
     if (downloadBtn_) downloadBtn_->setVisible(gates.download);
+    // "Choose source…" only where there is a list of releases to choose from (a Stremio-resolved leaf). A
+    // bridged leaf can't be known yet — its stream id arrives with /meta — so showMeta reveals that case.
+    if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
@@ -4133,6 +4218,14 @@ void HomeView::showMeta(const MediaDetail& d)
             playImdbId_ = d.imdbStreamId;
             playStremioType_ = stremioType;
             if (playBtn_) { playBtn_->setText(tr("▶  Play")); playBtn_->setVisible(true); }
+            // The bridge just established a stream id, so this leaf DOES resolve through the stream add-ons
+            // and has a list of releases behind it — offer the picker beside the Play it just revealed.
+            if (sourceBtn_)
+            {
+                MediaItem probe = stack_.last().item;
+                probe.imdbStreamId = d.imdbStreamId;
+                sourceBtn_->setVisible(canChooseStreamSource(probe));
+            }
         }
     }
 

@@ -35,6 +35,7 @@
 #include "../core/AppUpdater.h"
 #include "../core/SubtitleFetcher.h"
 #include "../core/SubtitleCache.h"
+#include "../core/BingeStore.h"
 #include "../core/CastManager.h"
 #include "../core/TraktClient.h"
 #include "../core/RecentStore.h"
@@ -304,6 +305,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // storage stays a plain device-local file the user's marks accumulate into.
     segStore_ = std::make_unique<SegmentStore>(QDir(AppPaths::dataDir()).filePath(QStringLiteral("segments.json")));
     segStore_->load();
+    // The release chosen per series ("Choose source…"), beside the other device-local stores. HomeView gets
+    // the pointer below (setBingeStore) so its browse Play paths consult the same memory this window writes.
+    bingeStore_ = std::make_unique<BingeStore>(QDir(AppPaths::dataDir()).filePath(QStringLiteral("binge.json")));
+    bingeStore_->load();
     connect(player_, &MpvWidget::fileLoaded, this, [this](bool hasSub, bool isVideo) {
         PerfTrace::end(QStringLiteral("open.video")); // one of these two is the live span, the other an orphan no-op
         PerfTrace::end(QStringLiteral("open.audio"));
@@ -406,7 +411,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     PerfTrace::end(QStringLiteral("startup.addons"));
 
     home_ = new HomeView(addons_.get(), this);
+    // The browse Play paths live in HomeView but the store is owned here (beside subCache_/segStore_), so
+    // lend it: the picker's choice and the automatic resolves must read the SAME memory.
+    home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
+    connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
     connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
 
@@ -2707,8 +2716,11 @@ void MainWindow::tryPlayNextEpisode()
     nextEpPending_ = true;
     const int gen = nextEpGen_;
     notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
+    // The release the user chose for THIS series, if any — the whole point of remembering a bingeGroup is
+    // that the next episode keeps using it. Both ids share the show prefix, so one lookup serves both legs.
+    const QString prefer = preferredBingeGroup(nextEp);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
-        [this, gen, nextEp, nextSeason, playLocalIfOwned](const QString& url, const QString& mime) {
+        [this, gen, nextEp, nextSeason, prefer, playLocalIfOwned](const QString& url, const QString& mime) {
         if (!nextEpHandoffStillOurs(gen)) return;               // superseded, or the user navigated away
         if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
         // End of season? Try the first episode of the next one — again local before network.
@@ -2721,8 +2733,8 @@ void MainWindow::tryPlayNextEpisode()
                                              // legitimately try again if the user seeks back into them
                    notifier_->hidePlayerNotice();
                    notify(tr("No next episode found — that looks like the finale."), kFeedbackLong); }
-        });
-    });
+        }, /*attempt=*/0, prefer);
+    }, /*attempt=*/0, prefer);
 }
 
 void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime)
@@ -4153,6 +4165,9 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     const int idx = themedDetailIndex_;
     if (idx < 0) return;
     if (verb == QStringLiteral("play"))          home_->playThemedLeaf(idx);
+    // The manual release picker for this leaf. HomeView resolves the index to its item and hands it back
+    // through chooseSourceRequested — the picker (and the BingeStore it writes) lives here.
+    else if (verb == QStringLiteral("source"))   home_->requestChooseSource(idx);
     else if (verb == QStringLiteral("download")) home_->downloadThemedLeaf(idx);
     else if (verb == QStringLiteral("playlist")) home_->addBrowseItemToPlaylist(idx);
     // One-off external/built-in override for THIS play. Two leak-free channels (see routePlay): the member
@@ -6967,6 +6982,134 @@ void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& lis
             notify(tr("Subtitle added."), 3000);
         });
     }, this);
+}
+
+// ---- "Choose source…": the manual release picker over the Stremio stream add-ons -----------------------
+
+QString MainWindow::preferredBingeGroup(const QString& imdbStreamId) const
+{
+    // lookup() already answers empty for an empty key, and seriesKeyFor() already answers empty for a movie
+    // (or any id without the :S:E tail) — so this needs no "is it an episode?" test of its own.
+    return bingeStore_ ? bingeStore_->lookup(BingeStore::seriesKeyFor(imdbStreamId)) : QString();
+}
+
+// The stream id a Stremio /stream request is keyed on for this item. A Stremio catalog leaf carries it as
+// its own `id` ("tt123:2:7" for an episode, "tt123" for a movie); an item bridged from a metadata-only
+// catalog carries it in imdbStreamId instead, with `id` being that catalog's private id. Preferring
+// imdbStreamId and falling back to `id` covers both without either caller having to say which it is.
+static QString streamIdOf(const MediaItem& item)
+{ return item.imdbStreamId.isEmpty() ? item.id : item.imdbStreamId; }
+
+// The type the Stremio /stream route uses. Episodes resolve under "series" (the id carries :S:E), which is
+// what parseStremioVideos already stamps on a Stremio episode row; a bridged "episode" has to be mapped.
+static QString streamTypeOf(const MediaItem& item)
+{
+    if (item.type == QStringLiteral("episode") || item.type == QStringLiteral("tv")
+        || item.type == QStringLiteral("series"))
+        return QStringLiteral("series");
+    return item.type;
+}
+
+void MainWindow::chooseStreamSource(const MediaItem& item)
+{
+    if (!addons_) return;
+    // Sticky (ms <= 0 never expires), cleared when the picker opens or when there is nothing to open. The
+    // WINDOW notice, not playerNotice(): this is raised from a browse/detail screen, and the player notice
+    // draws over the player surface — which is not what is on screen here.
+    notify(tr("Finding sources…"), 0);
+
+    // Pin the item's series key AT REQUEST TIME. The reply is async and the user can move on; keying the
+    // remembered choice off whatever is current when it lands would file it under the wrong show — the
+    // subtitle picker was fixed for exactly this (a94e995).
+    const QString seriesKey = BingeStore::seriesKeyFor(streamIdOf(item));
+
+    // What the /stream request is keyed on. The item the user plays is unchanged (its own id stays its
+    // resume/Recent/marks key); only the lookup is re-keyed.
+    MediaItem q = item;
+    q.id   = streamIdOf(item);
+    q.type = streamTypeOf(item);
+
+    addons_->listStremioStreams(q, [this, seriesKey, item](const QVector<StremioTranslate::StreamCandidate>& all) {
+        hideNotice();
+        if (all.isEmpty()) { notify(tr("No sources found for this item."), kFeedbackLong); return; }
+        presentStreamCandidates(all, seriesKey, item);
+    });
+}
+
+// A NavMenu of candidate streams — the same one primitive as the subtitle picker, the esc menu and the
+// completion-status picker (never a QDialog, and it scrolls, so the row count is not a layout constraint).
+// Rows come from StremioTranslate::describe, which flattens the addon's multi-line name/title into one
+// line: NavMenu word-wraps, and raw addon text reads as junk otherwise.
+void MainWindow::presentStreamCandidates(const QVector<StremioTranslate::StreamCandidate>& all,
+                                         const QString& seriesKey, const MediaItem& item)
+{
+    QStringList rows;
+    rows.reserve(all.size());
+    for (const StremioTranslate::StreamCandidate& c : all) rows << StremioTranslate::describe(c);
+
+    // Copy the candidates into the callback: it runs after the overlay closes, long after `all` (a temporary
+    // owned by the aggregator's reply handler) is gone.
+    const QVector<StremioTranslate::StreamCandidate> picks = all;
+    new NavMenu(tr("Choose a source"), rows, [this, picks, seriesKey, item](int row) {
+        if (row < 0 || row >= picks.size()) return;              // backed out
+        const StremioTranslate::StreamCandidate c = picks.at(row);
+        // Remember the release so the rest of the series uses it. Episodes only — seriesKeyFor already
+        // returned empty for a movie, so this is a no-op there rather than a special case here.
+        if (!seriesKey.isEmpty() && !c.bingeGroup.isEmpty() && bingeStore_
+            && !bingeStore_->put(seriesKey, c.bingeGroup))
+        {
+            // put() returning false means the choice did NOT reach disk (BingeStore rolls the in-memory
+            // entry back so the two can't disagree). Say so: claiming "the rest of the series will use
+            // this" when the next launch will have forgotten it is precisely the silent failure this
+            // feature exists to remove. Playback of the chosen source continues regardless.
+            notify(tr("Couldn't save that choice for the rest of the series — playing it anyway."),
+                   kFeedbackLong);
+        }
+        playChosenStream(item, c);
+    }, this);
+}
+
+void MainWindow::playChosenStream(const MediaItem& item, const StremioTranslate::StreamCandidate& c)
+{
+    const auto play = [this, item](const QString& url, const QString& mime) {
+        MediaItem m = item;
+        m.url = url;
+        m.mime = mime;
+        // The chosen release comes from a Stremio stream addon, which has no ?n= alternate-source knob —
+        // only a file provider (Allarr) does. Offering "Issue with Streaming" here would be a dead button.
+        m.nextSourceCapable = false;
+        // imdbStreamId is deliberately left exactly as the item carried it. This path differs from Play in
+        // ONE respect — which release is played — so it must hand openLibraryItem the same item Play would.
+        // (A Stremio-native leaf carries its stream id in `id` and reaches the player with an empty
+        // imdbStreamId today; deriving one HERE would give the picker subtitle/segment/next-episode
+        // behaviour that Play does not have on the same item. That gap belongs to the play path, not here.)
+        openLibraryItem(m);
+    };
+
+    if (c.isDirect()) { play(c.url, c.mime); return; }
+    if (c.infoHash.isEmpty())
+    {
+        notify(tr("That source has no playable link."), kFeedbackLong);
+        return;
+    }
+    // A torrent: hand it to the SAME TorBox resolution the automatic path uses (resolveTorBoxInfoHash — what
+    // AddonManager::playFirstPlayable calls), rather than repeating the chain here.
+    notify(tr("Getting that source ready…"), 0);   // sticky until the debrid round-trip answers
+    addons_->resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, play](const QString& url) {
+        hideNotice();
+        if (url.isEmpty())
+        {
+            // The user picked THIS release, so falling back to another one silently would be answering a
+            // different question than the one they asked. Say why it can't play and leave the picker's
+            // result to them. Both causes are named because resolveTorBoxInfoHash answers with the same
+            // empty url either way — claiming only "not cached" would misdiagnose a missing key outright.
+            notify(tr("That source is a torrent that can't be streamed right now — your debrid service "
+                      "doesn't have it cached, or no TorBox API key is set in Settings. Pick another "
+                      "source, or use Play to take the best available one."), kFeedbackLong);
+            return;
+        }
+        play(url, QString());
+    });
 }
 
 void MainWindow::openLibraryItem(const MediaItem& item)

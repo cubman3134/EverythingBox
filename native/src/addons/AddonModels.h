@@ -31,6 +31,11 @@ struct AddonCatalog
     // It must still be listed — dropping it is what previously made search-only add-ons invisible — so the
     // browse surfaces filter on this instead.
     bool searchOnly = false;
+    // Non-empty when this catalog can never be asked at all: it REQUIRES an extra we have no value for (a
+    // Stremio Unsatisfiable catalog). It is still listed, and opening it shows this reason as a single info
+    // row — "skipped with a reason" has to reach the user somewhere, and a catalog that silently vanishes
+    // from the shelf list is exactly the failure this whole translator exists to stop. Nothing may FETCH it.
+    QString skipReason;
 };
 
 // A user-selectable catalog filter (genre / year / rating / sort), advertised by a catalog response so the

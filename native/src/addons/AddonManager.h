@@ -120,8 +120,14 @@ public:
     // GUI thread with the url+mime, or empty strings if there's no stream). JsLocal items already carry url.
     // attempt (?n=K) selects which source a file provider returns: 0 = best, 1 = next best, … - so the user
     // can reject a release and ask for another. Stremio sources ignore it.
+    // preferGroup is the bingeGroup the user already chose for this series (BingeStore::lookup) — passed IN
+    // rather than looked up here, so the addon layer keeps no dependency on a UI-owned store. It reaches only
+    // the Stremio leg; empty = no memory, take the best candidate. This is the browse Play path for a Stremio
+    // catalog leaf, so without it a remembered release would be honoured on the next-episode hand-off and
+    // silently ignored the moment the user picked the next episode from the list themselves.
     void resolveStream(LoadedAddon* src, const MediaItem& item,
-                       std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
+                       std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                       const QString& preferGroup = QString());
     QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
     // The most recent /stream "notice" (e.g. a "caching started" message from Allarr), consumed once —
     // empty when there was none. resolveStream sets it just before its callback, so a callback handed an
