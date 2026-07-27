@@ -14,6 +14,7 @@
 #include "../addons/AddonModels.h"
 
 class AddonManager;
+class BingeStore;
 class SearchAggregator;
 class GameMetaAggregator;
 class RaBrowse;
@@ -45,6 +46,12 @@ public:
     // Re-resolve the last-opened file-provider playable for an ALTERNATE source (?n=K) and re-open it. Backs
     // the player/reader "Issue with Streaming" button. No-op (with a toast) when there's nothing to retry.
     void requestNextSource();
+    // The window's BingeStore (it owns the store; the browse Play paths that must consult it live here).
+    // Borrowed, never owned — null is a valid state and simply means "no remembered release".
+    void setBingeStore(BingeStore* store) { bingeStore_ = store; }
+    // "Choose source…" on the themed detail row for the browse-item at `browseIndex`: emits
+    // chooseSourceRequested with that item, which MainWindow turns into the picker.
+    void requestChooseSource(int browseIndex);
 
     // For the themed (QML) home: the media-type catalogs as data, and a way to open one by its navKey.
     QVariantList systemItems();
@@ -189,6 +196,9 @@ signals:
     // Outcome of requestNextSource(): ok=true means a new source is being opened (openItem follows); ok=false
     // carries a message to show the user. Surfaced by MainWindow over the player/reader (HomeView is hidden).
     void nextSourceResult(bool ok, const QString& message);
+    // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
+    // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
+    void chooseSourceRequested(const MediaItem& item);
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed
@@ -224,6 +234,15 @@ private:
     // verbs) both call this, so the themed row can never drift from the classic visibility rules.
     struct ActionGates { bool play = false; bool download = false; bool readable = false; };
     ActionGates classicActionGates(const MediaItem& item) const;
+
+    // True when playing this leaf goes through the Stremio stream add-ons — i.e. there is a LIST of releases
+    // to choose between, which is the only case "Choose source…" means anything. A local-library item plays
+    // its own file (prefer-local short-circuits every resolve), and a direct file has nothing to choose.
+    // Shared by the classic detail button and the themed action row, like classicActionGates.
+    bool canChooseStreamSource(const MediaItem& item) const;
+    // The bingeGroup already chosen for this stream id's series, or empty. Reads the window's store
+    // (setBingeStore); empty whenever there is none, so every caller can pass the result straight through.
+    QString preferredBingeGroup(const QString& imdbStreamId) const;
 
     void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
     void showCarousel();             // show the media-type carousel landing (carousel layout)
@@ -378,6 +397,8 @@ private:
     QPushButton* favBtn_ = nullptr;   // ★ toggle on the detail header
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
+    QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
+    BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.
     struct DlNode { LoadedAddon* addon = nullptr; MediaItem item; QString parentTitle; QString parentType; };

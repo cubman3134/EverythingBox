@@ -33,7 +33,11 @@ class CloudSync;
 class LocalResolveCache;
 class CatalogResolver;
 class SubtitleCache;
+class BingeStore;           // remembered release (bingeGroup) per series — see core/BingeStore.h
 struct SubtitleCandidate;   // one OpenSubtitles search row (see core/SubtitleFetcher.h) — the picker's choices
+// One candidate stream for the "Choose source…" picker (see addons/StremioTranslate.h). Declared, not
+// included: only references to QVector<StreamCandidate> appear here, so the definition is not needed.
+namespace StremioTranslate { struct StreamCandidate; }
 class QStackedWidget;
 class QSlider;
 class QLabel;
@@ -521,6 +525,11 @@ private:
     // (identifier, language) so a replay costs zero network and zero OpenSubtitles quota.
     class SubtitleFetcher* subFetcher_ = nullptr;
     std::unique_ptr<SubtitleCache> subCache_;
+    // The release the user chose per series, by Stremio's own bingeGroup, so the rest of the show keeps using
+    // it (episodes only — BingeStore::seriesKeyFor returns empty for a movie). Owned HERE, like subCache_:
+    // AddonManager takes the preference as a parameter rather than depending on a UI-owned store. HomeView is
+    // handed the raw pointer (setBingeStore) because the browse Play paths live there.
+    std::unique_ptr<BingeStore> bingeStore_;
     // localPath: the video file on disk when this open is a local one — enables the exact-rip OSDb hash tier.
     struct SubContext { QString imdbStreamId; QString title; QString localPath; bool active = false; } subCtx_;
     void armSubtitleFetch(const MediaItem& item); // set subCtx_ if this video is eligible for auto-subtitles
@@ -623,6 +632,20 @@ private:
     // download is a further round-trip), so a late reply can never cache under the wrong video's key.
     void presentSubtitleCandidates(const QVector<SubtitleCandidate>& list, const QString& lang,
                                    const QString& cacheKey);
+    // "Choose source…" on a catalog item that resolves through the Stremio stream add-ons: list every
+    // candidate release and let the user pick one, instead of taking whatever the auto rule ranked first.
+    void chooseStreamSource(const MediaItem& item);
+    // The picker itself: a NavMenu of StremioTranslate::describe rows. seriesKey is PINNED by the caller at
+    // REQUEST time — listStremioStreams is async and the user can move on, and keying the remembered choice
+    // off whatever is current when the reply lands would file it under the wrong show (the subtitle picker
+    // was fixed for exactly this in a94e995; the intro-skip marks menu repeated it).
+    void presentStreamCandidates(const QVector<StremioTranslate::StreamCandidate>& all,
+                                 const QString& seriesKey, const MediaItem& item);
+    // Play one chosen candidate: a direct http url as-is, else its infoHash through the SAME TorBox
+    // resolution the automatic path uses (AddonManager::resolveTorBoxInfoHash) — no second copy of the chain.
+    void playChosenStream(const MediaItem& item, const StremioTranslate::StreamCandidate& c);
+    // The bingeGroup already chosen for this stream id's series, or empty (no memory / a movie / no store).
+    QString preferredBingeGroup(const QString& imdbStreamId) const;
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move

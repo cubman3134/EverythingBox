@@ -86,6 +86,10 @@ void CatalogPrefetcher::enqueueSweep()
             // is the one request it cannot answer. Warming it would spend a request per sweep on a guaranteed
             // empty result. It stays reachable through the search fan-out, which supplies the term.
             if (cat.searchOnly) continue;
+            // A catalog carrying a skipReason can never be fetched at all (it requires an extra we have no
+            // value for). Opening it answers locally with that reason; warming it would only fill the cache
+            // with an explanation nobody asked for yet.
+            if (!cat.skipReason.isEmpty()) continue;
             const QString key = jobKey(sourceId, cat.id);
             if (active_.contains(key)) continue; // already queued or in flight
             // Skip anything still comfortably within the cache TTL — a warm cache costs no requests. (The

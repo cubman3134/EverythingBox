@@ -41,6 +41,7 @@ Item {
     // verb -> { label, color, textColor } (favourite flips its label/colour with the item's current state).
     function metaFor(verb) {
         if (verb === "play")     return { label: (readable ? "📖  Read" : "▶  Play"), color: "#3FA95E", textColor: "#FFFFFF" }
+        if (verb === "source")   return { label: "🔀  Choose source…",                 color: "#EDE4FF", textColor: "#3A2A7A" }
         if (verb === "download") return { label: "⬇  Download",                       color: "#5A8CFF", textColor: "#FFFFFF" }
         if (verb === "favorite") return { label: (favorited ? "★  Favorited" : "☆  Favorite"),
                                           color: (favorited ? "#E0A92E" : "#FFF1CC"), textColor: (favorited ? "#3A2A00" : "#7A4E00") }
