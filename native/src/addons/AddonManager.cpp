@@ -1,6 +1,7 @@
 #include "AddonManager.h"
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
+#include "../core/BrandMigration.h"  // the reserved-namespace guard still covers the previous prefix until migrated
 #include "AddonContext.h"
 #include "JsAddon.h"
 
@@ -1740,11 +1741,17 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
     // Reserved-namespace guard: the bundled addons (com.mymediavault.*) ship inside the app and are
     // NEVER installed through this path. Refuse a package that claims such an id so a downloaded /
     // side-loaded package can't impersonate a bundled source or overwrite its folder under root_.
-    if (manifest.id.startsWith(QLatin1String(AppBrand::kAddonPrefix)))
+    // Until the addon-id migration is confirmed, folders under root_ may STILL be named with the previous
+    // namespace, so that namespace is still impersonable and stays reserved too. The tolerance retires itself
+    // once the flag is set — by then nothing under root_ carries the old prefix for a package to collide with.
+    const bool legacyStillReserved = !BrandMigration::done(BrandMigration::Step::AddonIds)
+                                     && manifest.id.startsWith(QLatin1String(AppBrand::Legacy::kAddonPrefix));
+    if (manifest.id.startsWith(QLatin1String(AppBrand::kAddonPrefix)) || legacyStillReserved)
     {
         streamLog(QStringLiteral("addon install: refused reserved-namespace id %1").arg(manifest.id));
         return fail(QStringLiteral("Refused: \"%1\" uses the reserved %2* namespace.")
-                        .arg(manifest.id, QLatin1String(AppBrand::kAddonPrefix)));
+                        .arg(manifest.id, QLatin1String(legacyStillReserved ? AppBrand::Legacy::kAddonPrefix
+                                                                            : AppBrand::kAddonPrefix)));
     }
 
     const QString dest = root_ + QStringLiteral("/") + manifest.id;
