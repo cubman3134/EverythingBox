@@ -3,11 +3,10 @@
 
 #include <QAbstractSpinBox>
 #include <QApplication>
-#include <QDialog>
-#include <QDialogButtonBox>
 #include <QEventLoop>
 #include <QGridLayout>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QInputMethod>
 #include <QKeyEvent>
 #include <QLabel>
@@ -27,30 +26,65 @@ static bool nativeKeyboardPreferred()
 #endif
 }
 
-// The native-input drop-in for the OSK on mobile: a minimal modal sheet holding a REAL QLineEdit —
-// giving it focus summons the system keyboard (Qt's platform input context handles show/hide).
-// Blocking like Osk::getText's nested loop; a null return means cancelled.
+// The native-input drop-in for the OSK on mobile: a scrimmed IN-WINDOW card holding a REAL QLineEdit —
+// giving it focus summons the system keyboard (Qt's platform input context handles show/hide). It must
+// live inside the main window: iOS presents exactly one window, so a separate QDialog never becomes
+// visible. The card sits in the upper third so the OS keyboard (bottom half) can't cover it. Blocking
+// like Osk::getText's nested loop; a null return means cancelled.
 static QString nativeTextPrompt(const QString& title, const QString& initial,
                                 QLineEdit::EchoMode echo, QWidget* window)
 {
-    QDialog dlg(window);
-    dlg.setWindowTitle(title);
-    auto* v = new QVBoxLayout(&dlg);
-    auto* label = new QLabel(title, &dlg);
+    QWidget* host = window ? window->window() : QApplication::activeWindow();
+    if (!host) return QString();
+
+    QWidget scrim(host);
+    scrim.setAttribute(Qt::WA_StyledBackground, true);
+    scrim.setStyleSheet(QStringLiteral("background:rgba(0,0,0,150);"));
+    scrim.setGeometry(host->rect());
+
+    auto* card = new QWidget(&scrim);
+    card->setAttribute(Qt::WA_StyledBackground, true);
+    card->setStyleSheet(QStringLiteral("background:#161A20; border-radius:12px;"));
+    auto* v = new QVBoxLayout(card);
+    v->setContentsMargins(16, 16, 16, 16);
+    auto* label = new QLabel(title, card);
     label->setWordWrap(true);
+    label->setStyleSheet(QStringLiteral("color:#E6ECF3; font-size:16px; font-weight:bold; background:transparent;"));
     v->addWidget(label);
-    auto* edit = new QLineEdit(initial, &dlg);
+    auto* edit = new QLineEdit(initial, card);
     edit->setEchoMode(echo);
+    edit->setStyleSheet(QStringLiteral(
+        "background:#0F1216; color:#E6ECF3; border:1px solid #2A3540; border-radius:6px; padding:10px; font-size:16px;"));
     v->addWidget(edit);
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-    QObject::connect(edit, &QLineEdit::returnPressed, &dlg, &QDialog::accept);
-    v->addWidget(buttons);
+    auto* row = new QHBoxLayout;
+    auto* cancel = new QPushButton(QObject::tr("Cancel"), card);
+    auto* done = new QPushButton(QObject::tr("Done"), card);
+    const QString btnCss = QStringLiteral(
+        "QPushButton{color:#E6ECF3; background:%1; border:none; border-radius:8px; padding:10px 18px; font-size:15px;}");
+    cancel->setStyleSheet(btnCss.arg(QStringLiteral("#243244")));
+    done->setStyleSheet(btnCss.arg(QStringLiteral("#3A6FB0")));
+    row->addStretch(1); row->addWidget(cancel); row->addWidget(done);
+    v->addLayout(row);
+
+    const int w = qMin(host->width() - 32, 480);
+    card->setFixedWidth(w);
+    card->adjustSize();
+    card->move((host->width() - w) / 2, qMax(16, host->height() / 6));
+
+    QEventLoop loop;
+    bool accepted = false;
+    QObject::connect(cancel, &QPushButton::clicked, &loop, [&] { loop.quit(); });
+    QObject::connect(done, &QPushButton::clicked, &loop, [&] { accepted = true; loop.quit(); });
+    QObject::connect(edit, &QLineEdit::returnPressed, &loop, [&] { accepted = true; loop.quit(); });
+
+    scrim.show();
+    scrim.raise();
     edit->setFocus();
     edit->selectAll();
     if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->show();
-    return dlg.exec() == QDialog::Accepted ? edit->text() : QString();
+    loop.exec();
+    if (QGuiApplication::inputMethod()) QGuiApplication::inputMethod()->hide();
+    return accepted ? edit->text() : QString();
 }
 
 // The letter pages (lowercase; shift uppercases) and the symbols page, laid out per row.
