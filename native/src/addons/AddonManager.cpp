@@ -547,9 +547,16 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
                 : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
-    seedDefaultStremioSources(); // add Cinemeta once so Stremio movie/series catalogs work out of the box
-    refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest
-    checkAddonUpdates();         // self-update local addons that publish a newer package (manifest updateUrl)
+    // MMV_ADDONS_ROOT is the probes' hermetic-fixture override: with it set, skip every startup network
+    // kick (default-source seeding, remote-manifest refresh, addon self-update). A live fetch landing
+    // mid-probe fires reload()+sourcesChanged() at an arbitrary moment — which flushes/resweeps the
+    // prefetcher under test and pollutes its deterministic job counts with real-world catalogs.
+    if (!qEnvironmentVariableIsSet("MMV_ADDONS_ROOT"))
+    {
+        seedDefaultStremioSources(); // one-time default sources + migrations
+        refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest
+        checkAddonUpdates();         // self-update local addons that publish a newer package (manifest updateUrl)
+    }
 }
 
 void AddonManager::refreshRemoteManifests()
@@ -673,11 +680,14 @@ void AddonManager::loadRemoteSources()
 // (flagged) and the user stays in control afterwards (they can add/remove any of these from Settings).
 void AddonManager::seedDefaultStremioSources()
 {
-    // First-ever run: Cinemeta (movie/series metadata + IMDB ids) so Stremio catalogs work out of the box.
+    // First-ever-run latch. This block once seeded Cinemeta; Cinemeta was later dropped at the user's
+    // request (the cinemeta.removed migration below), which left seed-then-remove RACING: addRemoteSource
+    // persists its URL only when the async manifest fetch lands, so the removal migration — running
+    // synchronously right after — found nothing to remove, latched itself, and the fetch then persisted
+    // Cinemeta anyway (every fresh install re-acquired it). A fresh install now just sets the latch.
     if (!store().value(QStringLiteral("addon.stremio.seeded")).toBool())
     {
         store().setValue(QStringLiteral("addon.stremio.seeded"), true); store().sync();
-        addRemoteSource(QStringLiteral("https://v3-cinemeta.strem.io/manifest.json"));
     }
 
     // One-time: drop Debridio. Its debrid backend is unreliable (dead playback links + "error report this
@@ -693,6 +703,16 @@ void AddonManager::seedDefaultStremioSources()
     if (!store().value(QStringLiteral("addon.cinemeta.removed")).toBool())
     {
         store().setValue(QStringLiteral("addon.cinemeta.removed"), true); store().sync();
+        for (const QString& u : remoteSourceUrls())
+            if (u.contains(QStringLiteral("cinemeta"), Qt::CaseInsensitive)) removeRemoteSource(u);
+    }
+
+    // Second pass: anyone who ran the racy seed above has Cinemeta persisted anyway (the first removal
+    // ran before its async add landed — see the latch block's comment). Remove it again under a fresh
+    // latch, now that the seed itself is gone.
+    if (!store().value(QStringLiteral("addon.cinemeta.removed2")).toBool())
+    {
+        store().setValue(QStringLiteral("addon.cinemeta.removed2"), true); store().sync();
         for (const QString& u : remoteSourceUrls())
             if (u.contains(QStringLiteral("cinemeta"), Qt::CaseInsensitive)) removeRemoteSource(u);
     }
