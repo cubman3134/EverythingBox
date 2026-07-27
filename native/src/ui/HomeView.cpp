@@ -3597,6 +3597,17 @@ void HomeView::requestThemedDetailMeta(int idx)
     if (!mgr_ || idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty() || !stack_.last().addon) return;
     const MediaItem& it = items_[browseRowMap_[idx]];
     if (it.expandable || !it.imdbStreamId.isEmpty()) return;
+    // A GAME leaf's detail page enriches through the SAME machinery as the XMB hover panel (gamelist /
+    // MetaCache instantly, then the aggregator's online scrape + the addon's /meta) — kBridgeable below is
+    // the Stremio /meta bridge, which knows nothing about games, so game detail pages showed only the bare
+    // catalog row (no overview, facts or box art). Both emit themedMetaReady, which MainWindow merges into
+    // detailData while this page is open; no debounce here — the page is open NOW.
+    if (it.type == QStringLiteral("game"))
+    {
+        requestThemedMeta(idx);     // instant: cached art / gamelist facts (also arms themedMetaIndex_)
+        enrichThemedMeta();         // network: aggregator scrape + achievements
+        return;
+    }
     static const QSet<QString> kBridgeable = {
         QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"), QStringLiteral("episode") };
     if (!kBridgeable.contains(it.type)) return;
