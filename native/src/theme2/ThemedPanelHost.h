@@ -74,6 +74,23 @@ private:
     QVariantMap style_;
 };
 
+// Mobile inline text editing: instead of the OSK overlay, the host asks the QML delegate to edit the
+// selected TextField row IN PLACE (a focused TextInput pops the platform keyboard over the panel).
+// The host's blocking externalEdit contract is preserved — it spins an event loop until the QML side
+// commits or cancels through this bridge.
+class InlineEditBridge : public QObject
+{
+    Q_OBJECT
+public:
+    using QObject::QObject;
+signals:
+    void begin(const QString& initial, bool masked);  // -> QML: selected TextField row enters edit mode
+    void finished(const QString& text, bool ok);      // -> host: quits the nested loop
+public slots:
+    void commit(const QString& text) { emit finished(text, true); }
+    void cancel()                    { emit finished(QString(), false); }
+};
+
 class ThemedPanelHost : public QWidget
 {
     Q_OBJECT
@@ -142,6 +159,7 @@ private:
     NavGraph*       graph_ = nullptr;
     PanelListModel* model_ = nullptr;
     PanelBridge*    bridge_ = nullptr;
+    InlineEditBridge* inlineEdit_ = nullptr;
     QQuickWidget*   view_ = nullptr;
     QVariantMap     style_;
     QVector<Entry>  stack_;            // the presented panels, innermost last (parallel to the graph levels)
