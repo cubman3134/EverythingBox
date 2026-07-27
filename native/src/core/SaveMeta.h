@@ -19,7 +19,11 @@
 // user can no longer see: probe_savesync covers them here.
 //
 // Thread-safety: put/lookup/titleFor serialise on one internal mutex. saveSram() runs on the emulation WORKER
-// thread in split-screen mode, so put() genuinely is called from more than one thread.
+// thread in split-screen mode, so put() genuinely is called from more than one thread. That mutex is
+// PROCESS-LOCAL: the app is portable, so two instances doing read-modify-write on saves-meta.json are
+// last-writer-wins over the WHOLE document — each write is atomic (QSaveFile), but an entry the other instance
+// added between this one's read and write is lost. Acceptable because the sidecar is descriptive only: the
+// worst outcome is a save displaying its file name until the next put() re-records it.
 #pragma once
 #include <QString>
 
@@ -53,6 +57,13 @@ namespace SaveMeta
     // A legacy save is left where it is and keeps being written in place; nothing is migrated.
     // `ext` includes the dot (".srm"). An empty `systemId` (unknown system) yields the flat path — never a
     // path with an empty component, which would produce a "saves//x.srm" sync key that matches nothing.
+    //
+    // And before CREATING a namespaced save, every OTHER system's namespace is searched for the same base
+    // name. `systemId` describes how the user navigated to the ROM (systemHint, else the first catalog entry
+    // claiming the extension), not the ROM itself, so the same file can arrive here under two different
+    // systems — and without that search the second launch would start a fresh empty save while the real one
+    // sat unreachable under the first. One match is used as-is; several (different games sharing a base name)
+    // resolve to the most recently modified, and that ambiguity is logged.
     QString resolvePath(const QString& root, const QString& systemId, const QString& base, const QString& ext);
 
     // One-time: move core-written save files that landed loose in the app directory into <data>/saves/.

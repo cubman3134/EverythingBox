@@ -23,6 +23,7 @@
 #include <QIODevice>
 #include <QDir>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QFrame>
@@ -1421,10 +1422,15 @@ void RetroView::saveSram()
     if (!src || sz == 0) return;
     const QString path = sramPath();
     QDir().mkpath(QFileInfo(path).absolutePath()); // saves/<system>/ may not exist yet
-    QFile f(path);
+    // QSaveFile, not QFile: opening WriteOnly TRUNCATES the user's only copy of their save and then writes it
+    // back, and this runs off a ~10 s autosave timer, so that window is entered hundreds of times a session. A
+    // crash or power loss inside it leaves a zero-length or half-length .srm — which SaveSync then uploads as
+    // authoritative and propagates to every device. Everything else on this track (writeBaseline, the download
+    // path) is already atomic for exactly this reason; the actual save was the last file that wasn't.
+    QSaveFile f(path);
     if (!f.open(QIODevice::WriteOnly)) return;
-    if (f.write(reinterpret_cast<const char*>(src), qint64(sz)) != qint64(sz)) return;
-    f.close();
+    if (f.write(reinterpret_cast<const char*>(src), qint64(sz)) != qint64(sz)) { f.cancelWriting(); return; }
+    if (!f.commit()) return;                       // the previous save is still intact on disk
     noteSaveMeta(path);
 }
 

@@ -81,6 +81,14 @@ static QByteArray readFile(const QString& path)
     if (!f.open(QIODevice::ReadOnly)) return {};
     return f.readAll();
 }
+// Two files written back-to-back can land on the same filesystem timestamp, so "the newest wins" has to be
+// asserted against mtimes the test SET, not ones it hopes differ.
+static bool setMtime(const QString& path, const QDateTime& when)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadWrite)) return false;
+    return f.setFileTime(when, QFileDevice::FileModificationTime);
+}
 
 // Saves are keyed in the cloud by SaveSync's OWN mapping, so the probe addresses the fake Drive exactly the
 // way the code under test does (a duplicated mapping here would hide a change to the real one).
@@ -887,6 +895,32 @@ static void saveMetaChecks()
     CHECK(SaveMeta::resolvePath(root, NES, QStringLiteral("Contra"), SRM)
               != SaveMeta::resolvePath(root, SNES, QStringLiteral("Contra"), SRM),
           "two systems sharing a ROM base name no longer resolve to ONE file");
+
+    // THE OTHER HALF OF THE RULE, and the one with the same failure mode as the flat fallback. `systemId` is
+    // not a property of the ROM: GameLauncher takes the caller's systemHint when there is one and otherwise
+    // asks SystemCatalog::forExtension, which returns the FIRST system claiming the extension — and .cue/.iso/
+    // .bin/.pbp are claimed by several. Two openGamePath call sites pass no hint at all, so the SAME file
+    // opened from the library and from "Open game file…" arrives here under two different systems. Checking
+    // only this system's namespace and flat would then create an empty save while the real one — 20 hours of
+    // it — sat under the other system, unreachable from any UI and syncing as a rival copy of the same game.
+    writeFile(root + QStringLiteral("/psx/Symphony.srm"), "20-hours");
+    CHECK(SaveMeta::resolvePath(root, QStringLiteral("segacd"), QStringLiteral("Symphony"), SRM)
+              == root + QStringLiteral("/psx/Symphony.srm"),
+          "a save under ANOTHER system's namespace is found when the same ROM is launched as a second system");
+    CHECK(readFile(root + QStringLiteral("/psx/Symphony.srm")) == "20-hours"
+              && !QFileInfo::exists(root + QStringLiteral("/segacd/Symphony.srm")),
+          "…and, as with the flat fallback, it is used where it is: nothing is copied or created beside it");
+
+    // Several systems hold that base name — different games that merely share a file name, plus (possibly) the
+    // one we actually want. Nothing here can tell them apart, so the newest is the defensible guess; picking
+    // the first directory alphabetically would hand the user whichever game sorts earliest.
+    writeFile(root + QStringLiteral("/pcecd/Twin.srm"), "older");
+    writeFile(root + QStringLiteral("/saturn/Twin.srm"), "newer");
+    setMtime(root + QStringLiteral("/pcecd/Twin.srm"),  QDateTime::currentDateTime().addSecs(-7200));
+    setMtime(root + QStringLiteral("/saturn/Twin.srm"), QDateTime::currentDateTime().addSecs(-60));
+    CHECK(SaveMeta::resolvePath(root, QStringLiteral("segacd"), QStringLiteral("Twin"), SRM)
+              == root + QStringLiteral("/saturn/Twin.srm"),
+          "with saves under several systems the most recently modified one wins the tie-break");
 
     // No system to namespace under (an extension no catalog claims). The flat path is the answer, and it must
     // not contain an empty component: "saves//Odd.srm" is a sync key scanLocal never produces, so the file
