@@ -52,6 +52,10 @@ public:
     // "Choose source…" on the themed detail row for the browse-item at `browseIndex`: emits
     // chooseSourceRequested with that item, which MainWindow turns into the picker.
     void requestChooseSource(int browseIndex);
+    // A picker request is in flight (MainWindow owns the round-trip): grey the classic "Choose source…"
+    // button, exactly as the Play button greys itself while its own resolve is out, so two presses can't
+    // stack two sticky notices and then two menus.
+    void setChooseSourceBusy(bool busy);
 
     // For the themed (QML) home: the media-type catalogs as data, and a way to open one by its navKey.
     QVariantList systemItems();
@@ -111,6 +115,10 @@ public:
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
     void requestThemedMeta(int browseIndex); // INSTANT: local (session cache / gamelist / MetaCache) art + facts
     void enrichThemedMeta();                  // DEBOUNCED: online scrape + achievements + addon /meta for that row
+    // The themed DETAIL view's own /meta: fetched ONLY for a leaf that could bridge to a Stremio stream id and
+    // hasn't yet (the id exists nowhere but /meta). The XMB gets this from its hover debounce; the grid browse
+    // has no hover fetch, which is why "Choose source…" was unreachable on the default browse path.
+    void requestThemedDetailMeta(int browseIndex);
     // routeHint (0=default, 1=force built-in, 2=force external) is a one-off external-player override from a
     // detail action: for a catalog leaf it is stamped on the resolved MediaItem so it rides the async resolve
     // chain leak-free (a failed resolve never emits the item); local/recents leaves resolve synchronously and
@@ -240,9 +248,11 @@ private:
     // its own file (prefer-local short-circuits every resolve), and a direct file has nothing to choose.
     // Shared by the classic detail button and the themed action row, like classicActionGates.
     bool canChooseStreamSource(const MediaItem& item) const;
-    // The bingeGroup already chosen for this stream id's series, or empty. Reads the window's store
-    // (setBingeStore); empty whenever there is none, so every caller can pass the result straight through.
-    QString preferredBingeGroup(const QString& imdbStreamId) const;
+    // Record the bridged Stremio stream id /meta produced onto the stored browse row, so the gates AND the
+    // item requestChooseSource emits both carry it. True when it newly landed (i.e. the verbs may have changed).
+    bool bridgeStreamId(int browseIndex, const QString& streamId);
+    // (The bingeGroup already chosen for a stream id's series is BingeStore::preferredGroup — one definition
+    // shared with MainWindow's next-episode hand-off, which had a verbatim copy of it.)
 
     void selectType(LoadedAddon* addon, const QString& catalogId, const QString& type, const QString& name);
     void showCarousel();             // show the media-type carousel landing (carousel layout)

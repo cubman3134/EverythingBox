@@ -25,6 +25,14 @@ public:
     // episodes-only without the caller having to remember the rule.
     static QString seriesKeyFor(const QString& imdbStreamId);
 
+    // The release already chosen for THIS id's series, if any — the ONE definition every caller shares (the
+    // browse page's Play, the manual picker, the next-episode hand-off), so the memory can't be honoured on
+    // one path and silently ignored on another. lookup() answers empty for an empty key and seriesKeyFor()
+    // answers empty for a movie, so no caller needs an "is it an episode?" test of its own; a null store
+    // simply means no memory.
+    static QString preferredGroup(const BingeStore* store, const QString& imdbStreamId)
+    { return store ? store->lookup(seriesKeyFor(imdbStreamId)) : QString(); }
+
 private:
     QString file_;
     QHash<QString, QString> byKey_;

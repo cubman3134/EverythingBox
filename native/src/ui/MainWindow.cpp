@@ -2718,7 +2718,7 @@ void MainWindow::tryPlayNextEpisode()
     notifier_->playerNotice(tr("Up next — finding the next episode…"), 20000);
     // The release the user chose for THIS series, if any — the whole point of remembering a bingeGroup is
     // that the next episode keeps using it. Both ids share the show prefix, so one lookup serves both legs.
-    const QString prefer = preferredBingeGroup(nextEp);
+    const QString prefer = BingeStore::preferredGroup(bingeStore_.get(), nextEp);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
         [this, gen, nextEp, nextSeason, prefer, playLocalIfOwned](const QString& url, const QString& mime) {
         if (!nextEpHandoffStillOurs(gen)) return;               // superseded, or the user navigated away
@@ -4126,6 +4126,7 @@ void MainWindow::openThemedDetail(int browseIndex)
         g->pushLevel(QStringLiteral("detail"), [this, cur, ret] {
             themedDetailIndex_ = -1;
             themedDetailKey_.clear();
+            bumpChooseSourceGen(); // leaving the page a pending picker request was made FROM invalidates it
             QQuickItem* rr = ThemeEngine::rootItem(cur);
             if (!rr) { themedDetailMarksDirty_ = false; return; }
             rr->setProperty("currentView", ret); // -> detail zones hidden
@@ -4140,6 +4141,11 @@ void MainWindow::openThemedDetail(int browseIndex)
                 rr->setProperty("currentIndex", keep); // clamped by the QML model if it now overshoots
             }
         });
+    // AFTER currentView switched to "detail": the themedMetaReady handler merges into detailData only while
+    // the detail page is showing, and this fetch is what carries a bridged leaf's Stremio stream id (nothing
+    // on the grid browse ever asked for it). Its reply re-publishes the action verbs, so Play + "Choose
+    // source…" appear on a metadata-only movie/episode the moment the id is known.
+    home_->requestThemedDetailMeta(bi);
 }
 
 // The themed grid browse opens an info-page leaf (movie/series/book/comic/…) in the detail view instead of the
@@ -6986,13 +6992,6 @@ void MainWindow::presentSubtitleCandidates(const QVector<SubtitleCandidate>& lis
 
 // ---- "Choose source…": the manual release picker over the Stremio stream add-ons -----------------------
 
-QString MainWindow::preferredBingeGroup(const QString& imdbStreamId) const
-{
-    // lookup() already answers empty for an empty key, and seriesKeyFor() already answers empty for a movie
-    // (or any id without the :S:E tail) — so this needs no "is it an episode?" test of its own.
-    return bingeStore_ ? bingeStore_->lookup(BingeStore::seriesKeyFor(imdbStreamId)) : QString();
-}
-
 // The stream id a Stremio /stream request is keyed on for this item. A Stremio catalog leaf carries it as
 // its own `id` ("tt123:2:7" for an episode, "tt123" for a movie); an item bridged from a metadata-only
 // catalog carries it in imdbStreamId instead, with `id` being that catalog's private id. Preferring
@@ -7010,9 +7009,29 @@ static QString streamTypeOf(const MediaItem& item)
     return item.type;
 }
 
+// Every media open and every themed-detail pop invalidates a picker request that is still in flight: whatever
+// the user is doing now, it is no longer "show me the releases for the thing I was looking at". Clearing the
+// busy flag here (rather than only in the reply) means the NEXT screen can open its own picker immediately,
+// while the abandoned reply — which still lands — is dropped by the gen check instead of clearing that
+// screen's notice or popping a menu over a running player.
+void MainWindow::bumpChooseSourceGen()
+{
+    ++chooseSourceGen_;
+    chooseSourceBusy_ = false;
+    if (home_) home_->setChooseSourceBusy(false);
+}
+
 void MainWindow::chooseStreamSource(const MediaItem& item)
 {
     if (!addons_) return;
+    // A second press while the first fan-out is still out would stack a second sticky notice and, eventually,
+    // a second menu over the first. The classic Play button disables itself for the same reason; this covers
+    // BOTH surfaces (the themed action row has no button of its own to disable).
+    if (chooseSourceBusy_) { notify(tr("Still finding sources…"), kFeedbackShort); return; }
+    chooseSourceBusy_ = true;
+    if (home_) home_->setChooseSourceBusy(true);
+    // This request's identity. Re-checked when the reply lands; see bumpChooseSourceGen().
+    const int gen = chooseSourceGen_;
     // Sticky (ms <= 0 never expires), cleared when the picker opens or when there is nothing to open. The
     // WINDOW notice, not playerNotice(): this is raised from a browse/detail screen, and the player notice
     // draws over the player surface — which is not what is on screen here.
@@ -7029,7 +7048,12 @@ void MainWindow::chooseStreamSource(const MediaItem& item)
     q.id   = streamIdOf(item);
     q.type = streamTypeOf(item);
 
-    addons_->listStremioStreams(q, [this, seriesKey, item](const QVector<StremioTranslate::StreamCandidate>& all) {
+    addons_->listStremioStreams(q, [this, gen, seriesKey, item](const QVector<StremioTranslate::StreamCandidate>& all) {
+        // Superseded — the user opened something else or left the detail page while this was out. Drop it
+        // BEFORE hideNotice(): the notice on screen now belongs to whatever they are doing instead.
+        if (gen != chooseSourceGen_) return;
+        chooseSourceBusy_ = false;
+        if (home_) home_->setChooseSourceBusy(false);
         hideNotice();
         if (all.isEmpty()) { notify(tr("No sources found for this item."), kFeedbackLong); return; }
         presentStreamCandidates(all, seriesKey, item);
@@ -7101,11 +7125,12 @@ void MainWindow::playChosenStream(const MediaItem& item, const StremioTranslate:
         {
             // The user picked THIS release, so falling back to another one silently would be answering a
             // different question than the one they asked. Say why it can't play and leave the picker's
-            // result to them. Both causes are named because resolveTorBoxInfoHash answers with the same
-            // empty url either way — claiming only "not cached" would misdiagnose a missing key outright.
-            notify(tr("That source is a torrent that can't be streamed right now — your debrid service "
-                      "doesn't have it cached, or no TorBox API key is set in Settings. Pick another "
-                      "source, or use Play to take the best available one."), kFeedbackLong);
+            // result to them. ALL THREE causes are named because resolveTorBoxInfoHash answers with the same
+            // empty url for each — no key, not cached, and a failed checkcached call — so naming only the
+            // first two would report a transient network failure as "your debrid service doesn't have it".
+            notify(tr("That source is a torrent that can't be streamed right now — no TorBox API key is set "
+                      "in Settings, your debrid service doesn't have it cached, or it couldn't be reached. "
+                      "Pick another source, or use Play to take the best available one."), kFeedbackLong);
             return;
         }
         play(url, QString());
@@ -7114,6 +7139,9 @@ void MainWindow::playChosenStream(const MediaItem& item, const StremioTranslate:
 
 void MainWindow::openLibraryItem(const MediaItem& item)
 {
+    // A "Choose source…" fan-out still out from the PREVIOUS item is now stale: its reply must not clear the
+    // notice this open raises, nor pop a picker for the old episode over what is playing now.
+    bumpChooseSourceGen();
     // Whether the player/reader should offer "Issue with Streaming" for this item (an Allarr-resolved file
     // whose source can be swapped). Preserved across the remote-document download round-trip (item is copied).
     currentNextSourceCapable_ = item.nextSourceCapable;
