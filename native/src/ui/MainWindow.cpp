@@ -5512,7 +5512,13 @@ void MainWindow::presentProfileList(bool mustChoose, bool replace)
 
     auto onAct = [this, mustChoose](const QString& id, const QString&) {
         if (id == QStringLiteral("new"))            editProfilePanel(QString(), mustChoose); // nested picker
-        else if (id.startsWith(QStringLiteral("profile:"))) profileRowMenu(id.mid(8), mustChoose);
+        else if (id.startsWith(QStringLiteral("profile:")))
+        {
+            // Startup: picking a profile IS the answer to "Who's using?" — switch immediately.
+            // Edit/Delete stay on the in-app Profiles switcher, where the menu still opens.
+            if (mustChoose) chooseProfile(id.mid(8));
+            else            profileRowMenu(id.mid(8), mustChoose);
+        }
     };
     auto onBack = [this, mustChoose] {
         if (mustChoose) quitConfirmFromStartup();  // startup: no escape — confirm quit (or re-present the list)

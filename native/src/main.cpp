@@ -6,6 +6,7 @@
 #endif
 #include "core/AppPaths.h"
 #include "core/AssetBootstrap.h"
+#include "core/SafeAreaInsets.h"
 #include <QIcon>
 #include <QScreen>
 #include <QFile>
@@ -30,7 +31,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.59";
+static constexpr const char* kAppVersion = "0.5.61";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -277,15 +278,27 @@ int main(int argc, char** argv)
         qApp->installEventFilter(new FirstPaintProbe(&window));
     }
 #ifdef Q_OS_IOS
-    // The window spans the whole screen but Qt insets the layout by the safe areas (notch / home
-    // indicator) via contents margins — those margin strips render the top-level's palette Window
-    // color, which defaults to white. Paint them the themed dark background so the chrome is seamless.
+    // Edge-to-edge: don't let Qt inset the window OR any widget in the chain at the safe areas (that
+    // reads as the app "cutting off" at the notch/home bar, unlike native apps). Every widget applies
+    // the margins independently, so clear the attribute on the whole existing tree; the themed surface
+    // fills the physical screen and chrome pads itself from the `safeArea` bridge instead.
+    window.setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    for (QWidget* w : window.findChildren<QWidget*>())
+        w->setAttribute(Qt::WA_ContentsMarginsRespectsSafeArea, false);
+    // Belt & braces: the dark background still paints anywhere the content doesn't.
     {
         QPalette pal = window.palette();
         pal.setColor(QPalette::Window, QColor(0x0F, 0x12, 0x16)); // themes' default `background`
         window.setPalette(pal);
         window.setAutoFillBackground(true);
     }
+    // Media-app audio session: play through the silent switch (UI sounds + video/music audio).
+    mmvConfigureAudioSession();
+    // The platform reports zero insets until the window is actually up — refresh once shown (and again
+    // shortly after: the first layout pass can land before UIKit publishes them).
+    QTimer::singleShot(0,    [] { SafeAreaBridge::instance().refresh(); });
+    QTimer::singleShot(500,  [] { SafeAreaBridge::instance().refresh(); });
+    QTimer::singleShot(2000, [] { SafeAreaBridge::instance().refresh(); });
 #endif
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     // Mobile has no windowed mode: the app is always fullscreen. On Android, showFullScreen() also drives Qt 6.8's
