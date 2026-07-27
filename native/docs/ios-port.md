@@ -55,7 +55,7 @@ Configure + build (Xcode generator; x86_64 because that's Qt's simulator slice):
 ```sh
 SIM=~/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64_x86_64-simulator/Libmpv.framework
 ~/Qt/6.8.3/ios/bin/qt-cmake -S native -B build-ios -G Xcode \
-  -DMYMEDIAVAULT_BUILD_APP=ON \
+  -DEVERYTHINGBOX_BUILD_APP=ON \
   -DQT_HOST_PATH="$HOME/Qt/6.8.3/macos" \
   -DCMAKE_OSX_SYSROOT=iphonesimulator \
   -DCMAKE_OSX_ARCHITECTURES=x86_64 \
@@ -88,9 +88,9 @@ The UiTestServer works inside the simulator by pointing the pipe at an absolute 
 reach:
 
 ```sh
-SIMCTL_CHILD_MMV_UITEST=1 SIMCTL_CHILD_MMV_UITEST_PIPE=/tmp/mmv-ios-uitest \
+SIMCTL_CHILD_EB_UITEST=1 SIMCTL_CHILD_EB_UITEST_PIPE=/tmp/mmv-ios-uitest \
   xcrun simctl launch booted com.mymediavault.app
-MMV_UITEST_PIPE=mmv-ios-uitest python3 native/tools/uitest.py state
+EB_UITEST_PIPE=mmv-ios-uitest python3 native/tools/uitest.py state
 ```
 
 ## Device builds / the release .ipa
@@ -106,7 +106,7 @@ The same build locally (compiles + links verified):
 ```sh
 DEV=~/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework
 ~/Qt/6.8.3/ios/bin/qt-cmake -S native -B build-ios-dev -G Xcode \
-  -DMYMEDIAVAULT_BUILD_APP=ON \
+  -DEVERYTHINGBOX_BUILD_APP=ON \
   -DQT_HOST_PATH="$HOME/Qt/6.8.3/macos" \
   -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \

@@ -1603,7 +1603,7 @@ void MainWindow::updateNavForPage()
 #endif
 }
 
-// Create or tear down the UI-test channel (core/UiTestServer) to match its enablement: MMV_UITEST=1,
+// Create or tear down the UI-test channel (core/UiTestServer) to match its enablement: EB_UITEST=1,
 // --uitest, or the Settings ▸ Debug toggle. Lets a test agent drive navigation and capture the window
 // WITHOUT bringing it to the front or giving it OS focus — injected keys ride the app's own sendNavKey
 // routing, and grab() renders the widget tree even while occluded/backgrounded.
@@ -2333,10 +2333,10 @@ void MainWindow::maybeOfferTvMode()
     QScreen* scr = QGuiApplication::primaryScreen();
     if (!scr) return;
     qreal physWidthMm = scr->physicalSize().width(); // millimetres; empty/zero => unreliable, do not guess
-    // Test-only seam (parity with the MMV_UITEST channel): the physical-size guard is hardware-bound and can't
+    // Test-only seam (parity with the EB_UITEST channel): the physical-size guard is hardware-bound and can't
     // be seeded from an ini, so let the UI-test harness substitute a screen width to exercise this prompt. Never
-    // active in production — qEnvironmentVariableIsSet("MMV_UITEST") is only ever set by the test launcher.
-    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_SCREEN_MM"))
+    // active in production — qEnvironmentVariableIsSet("EB_UITEST") is only ever set by the test launcher.
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_SCREEN_MM"))
         physWidthMm = qEnvironmentVariableIntValue("MMV_TEST_SCREEN_MM");
     if (physWidthMm < 700.0) return;
 

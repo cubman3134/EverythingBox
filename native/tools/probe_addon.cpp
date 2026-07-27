@@ -262,7 +262,7 @@ static int probeRemote(const QString& url, const QString& catalogId)
 }
 
 // --- prefetch / cache-peek / enable-disable harness (Feature-Track Task 1) --------------------------
-// Spins its own deterministic JsLocal fixtures in an isolated temp addons root (MMV_ADDONS_ROOT) and drives
+// Spins its own deterministic JsLocal fixtures in an isolated temp addons root (EB_ADDONS_ROOT) and drives
 // the catalog cache peek + the CatalogPrefetcher entirely offline, asserting the Task-2 contract. No network.
 
 // Process the event loop for `ms`, delivering queued catalogReady/QtConcurrent completions.
@@ -368,7 +368,7 @@ static bool makeSlowFixture(const QString& root, const QString& id)
 }
 
 // "Touches no network" holds because AddonManager's constructor skips every startup network kick
-// (default-source seeding, remote-manifest refresh, addon self-update) whenever MMV_ADDONS_ROOT is set,
+// (default-source seeding, remote-manifest refresh, addon self-update) whenever EB_ADDONS_ROOT is set,
 // and this probe sets that override before constructing any manager. So the fixtures really are the only
 // sources, and the slot-accounting asserts below ("issued exactly one request per job") count only their
 // requests. This probe used to scrub the shared portable ini by hand to get the same guarantee; that
@@ -417,7 +417,7 @@ static int probePrefetch()
     const QStringList ids = { QStringLiteral("probe.fixture.0"), QStringLiteral("probe.fixture.1"),
                               QStringLiteral("probe.fixture.2") };
     for (const QString& id : ids) if (!makeFixture(root, id)) { printf("fixture write failed\n"); return 2; }
-    qputenv("MMV_ADDONS_ROOT", root.toUtf8());
+    qputenv("EB_ADDONS_ROOT", root.toUtf8());
 
     // ---- Manager A: comfortably-long TTL for the peek/disable/signal steps ----
     qputenv("MMV_PREFETCH_TTL_S", "30");
@@ -546,7 +546,7 @@ static int probePrefetch()
     QDir(rootW).removeRecursively();
     const QString slowId = QStringLiteral("a.slow"), fastId = QStringLiteral("b.fast");
     if (!makeSlowFixture(rootW, slowId) || !makeFixture(rootW, fastId)) { printf("wd fixture write failed\n"); return 2; }
-    qputenv("MMV_ADDONS_ROOT", rootW.toUtf8());
+    qputenv("EB_ADDONS_ROOT", rootW.toUtf8());
     qputenv("MMV_PREFETCH_TTL_S", "30");      // roomy TTL: cache entries must outlive the asserts below
     qputenv("MMV_PREFETCH_WATCHDOG_S", "1");  // expire a silent in-flight job after ~1s
     AddonManager mgrW;
@@ -578,7 +578,7 @@ static int probePrefetch()
     {
         const QString rootI = root + QStringLiteral("-inst");
         QDir(rootI).removeRecursively(); QDir().mkpath(rootI);
-        qputenv("MMV_ADDONS_ROOT", rootI.toUtf8());
+        qputenv("EB_ADDONS_ROOT", rootI.toUtf8());
         AddonManager mgrI;
         const QString reservedId = QStringLiteral("com.everythingbox.evil");
         const QString okId = QStringLiteral("com.thirdparty.ok");
@@ -598,7 +598,7 @@ static int probePrefetch()
     }
 
     QDir(root).removeRecursively();
-    qunsetenv("MMV_ADDONS_ROOT");
+    qunsetenv("EB_ADDONS_ROOT");
     qunsetenv("MMV_PREFETCH_TTL_S");
 
     printf("prefetch: %d passed, %d failed\n", pass, fail);

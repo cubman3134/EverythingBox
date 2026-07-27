@@ -295,7 +295,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // exactly like the detail zones. Built by the shared buildAudioPageNavGraph (NavThemeGraph.h), the ONE
     // definition probe_navqml shape-tests, so the CI assertion can never drift from this shipped graph.
     buildAudioPageNavGraph(*graph);
-    // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected. Under MMV_UITEST
+    // Invariant 2 gate, run on the REAL graph: geometric+declared union must be connected. Under EB_UITEST
     // (the probe/UI-test build) a failure is FATAL, not a warning: the graph shape is CI-asserted by
     // probe_navqml against the same builder, so a validate() failure here means a real structural break that
     // must halt the test run loudly rather than log-and-continue into undefined navigation.
@@ -303,7 +303,7 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
         QString why;
         if (!graph->validate(&why))
         {
-            if (qEnvironmentVariableIntValue("MMV_UITEST") == 1)
+            if (qEnvironmentVariableIntValue("EB_UITEST") == 1)
                 qFatal("theme2: nav graph failed validate(): %s", qPrintable(why)); // fail loudly in test/probe runs
             else
                 qWarning("theme2: nav graph failed validate(): %s", qPrintable(why));

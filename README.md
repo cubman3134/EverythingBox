@@ -39,7 +39,7 @@ and current status.
 ## Quick build
 
 ```
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON ^
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON ^
   -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" ^
   -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib" ^
   -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
@@ -47,7 +47,7 @@ cmake --build build --config Release
 ```
 
 The libretro frontend + its `probe_core` harness build with just CMake + a C++17
-compiler (no Qt); the full app is gated behind `-DMYMEDIAVAULT_BUILD_APP=ON`.
+compiler (no Qt); the full app is gated behind `-DEVERYTHINGBOX_BUILD_APP=ON`.
 
 ## Android / Android TV
 
@@ -74,7 +74,7 @@ for the target ABI:
 # 1) Install Android SDK + NDK and the Qt-for-Android 6.8.3 arm64 kit.
 # 2) Cross-compile libmpv (+ffmpeg) and SDL2 for arm64-v8a.
 # 3) Configure with the Qt-for-Android qt-cmake, pointing MPV_LIBRARY/SDL2_LIBRARY at the .so builds:
-"$QT/android_arm64_v8a/bin/qt-cmake" -S native -B build-android -DMYMEDIAVAULT_BUILD_APP=ON \
+"$QT/android_arm64_v8a/bin/qt-cmake" -S native -B build-android -DEVERYTHINGBOX_BUILD_APP=ON \
   -DMPV_INCLUDE_DIR=… -DMPV_LIBRARY=…/libmpv.so \
   -DSDL2_INCLUDE_DIR=… -DSDL2_LIBRARY=…/libSDL2.so
 cmake --build build-android                       # produces the APK via androiddeployqt

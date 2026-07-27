@@ -80,7 +80,7 @@ run "media-art schema"    ART-OK           "$META"
 
 # Addon engine + manager: builtinCredential scoping, catalog cache hit/miss, the prefetcher's in-flight cap,
 # reload-mid-sweep recovery, the TTL/watchdog paths, and the reserved-namespace install guard. Self-contained
-# — it writes its own JsLocal fixtures into a temp MMV_ADDONS_ROOT and touches no network. The `--prefetch`
+# — it writes its own JsLocal fixtures into a temp EB_ADDONS_ROOT and touches no network. The `--prefetch`
 # mode is the ASSERTING one (ADDON-OK); probe_addon's other modes take a real addon script or a live URL.
 #
 # This target existed and was maintained for a long time WITHOUT being wired into this script or CI, so every
