@@ -10,8 +10,10 @@
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPointer>
 #include <QSaveFile>
 #include <QStringList>
 #include <QTimer>
@@ -20,6 +22,7 @@
 using SaveSyncPlan::Act;
 using SaveSyncPlan::Decision;
 using SaveSyncPlan::Entry;
+using Tomb = SaveSync::Tomb;
 
 namespace {
 
@@ -29,16 +32,6 @@ const QLatin1String kIndexName("saves-index.json");
 const QLatin1String kBaselineName("save-baseline.json");
 // Tombstone namespace. Saves are not per-profile — a save belongs to the machine, not to a viewer profile.
 const QLatin1String kTombStore("saves");
-
-// Drive is ONE flat folder here (CloudSync's primitives take no parent path), and findFile builds its query
-// by substituting the name into a quoted Drive query string. So a save's relative path cannot be the Drive
-// name as-is: '/' would be meaningless there and an apostrophe in a ROM name would break the query outright.
-// Percent-encoding gives a flat, deterministic, query-safe name, and it is reversible if anyone ever needs
-// to read the folder by hand.
-QString driveNameFor(const QString& rel)
-{
-    return QStringLiteral("save-") + QString::fromLatin1(QUrl::toPercentEncoding(rel));
-}
 
 QString sha256Of(const QByteArray& data)
 {
@@ -67,9 +60,11 @@ Entry entryFromDisk(const QString& name, const QString& absPath)
     return e;
 }
 
-QByteArray entriesToJson(const QHash<QString, Entry>& m)
+// ---- the shared document (see the shape in SaveSync.h) -----------------------------------------------
+
+QByteArray docToJson(const QHash<QString, Entry>& m, const QVector<Tomb>& tombs)
 {
-    QJsonObject root;
+    QJsonObject files;
     for (auto it = m.constBegin(); it != m.constEnd(); ++it)
     {
         const Entry& e = it.value();
@@ -78,24 +73,41 @@ QByteArray entriesToJson(const QHash<QString, Entry>& m)
         o.insert(QStringLiteral("mtimeMs"), static_cast<double>(e.mtimeMs));
         o.insert(QStringLiteral("size"), static_cast<double>(e.size));
         if (!e.deviceId.isEmpty()) o.insert(QStringLiteral("deviceId"), e.deviceId);
-        root.insert(it.key(), o);
+        files.insert(it.key(), o);
     }
+    QJsonArray ts;
+    for (const Tomb& t : tombs)
+    {
+        if (t.key.isEmpty() || t.ts <= 0) continue;
+        ts.append(QJsonObject{ { QStringLiteral("key"), t.key },
+                               { QStringLiteral("ts"), static_cast<double>(t.ts) } });
+    }
+    QJsonObject root;
+    root.insert(QStringLiteral("v"), 2);
+    root.insert(QStringLiteral("files"), files);
+    root.insert(QStringLiteral("tombs"), ts);
     return QJsonDocument(root).toJson(QJsonDocument::Indented);
 }
 
-// `ok` distinguishes "no such document" from "a document we could not understand". A corrupt index parsed as
-// an empty one would look exactly like a cloud with no saves in it, which is a shape the rules are allowed
-// to delete against.
-QHash<QString, Entry> entriesFromJson(const QByteArray& data, bool* ok = nullptr)
+// FALSE for "a document we could not understand", true (with empty outputs) for "no document". A corrupt
+// index parsed as an empty one would look exactly like a cloud with no saves in it, which is a shape the
+// rules are allowed to delete against — and a corrupt BASELINE parsed as an empty one is a non-firstRun with
+// no history, which is the same hazard from the other side.
+bool docFromJson(const QByteArray& data, QHash<QString, Entry>& files, QVector<Tomb>& tombs)
 {
-    QHash<QString, Entry> out;
-    if (ok) *ok = true;
-    if (data.trimmed().isEmpty()) return out;
+    files.clear();
+    tombs.clear();
+    if (data.trimmed().isEmpty()) return true;
     QJsonParseError err{};
     const QJsonDocument doc = QJsonDocument::fromJson(data, &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) { if (ok) *ok = false; return out; }
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
     const QJsonObject root = doc.object();
-    for (auto it = root.constBegin(); it != root.constEnd(); ++it)
+
+    // No version marker: the pre-tombstone shape, whose ROOT is the file map. Read (an on-disk baseline may
+    // still be in it), never written.
+    const bool versioned = root.contains(QStringLiteral("v"));
+    const QJsonObject fileObj = versioned ? root.value(QStringLiteral("files")).toObject() : root;
+    for (auto it = fileObj.constBegin(); it != fileObj.constEnd(); ++it)
     {
         const QJsonObject o = it.value().toObject();
         Entry e;
@@ -105,9 +117,20 @@ QHash<QString, Entry> entriesFromJson(const QByteArray& data, bool* ok = nullptr
         e.size     = static_cast<qint64>(o.value(QStringLiteral("size")).toDouble());
         e.deviceId = o.value(QStringLiteral("deviceId")).toString();
         if (!e.present()) continue;              // an entry with no hash carries no decidable information
-        out.insert(e.name, e);
+        files.insert(e.name, e);
     }
-    return out;
+
+    const QJsonArray ts = root.value(QStringLiteral("tombs")).toArray();
+    for (const auto& v : ts)
+    {
+        const QJsonObject o = v.toObject();
+        Tomb t;
+        t.key = o.value(QStringLiteral("key")).toString();
+        t.ts  = static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble());
+        if (t.key.isEmpty() || t.ts <= 0) continue;
+        tombs.push_back(t);
+    }
+    return true;
 }
 
 // A relative path as the manifest keys it: forward slashes, no leading separator, no "./".
@@ -119,7 +142,19 @@ QString normalizeRel(const QString& rel)
     return s;
 }
 
+// The two trees this class syncs. A name outside them is not a save, and (for the restricted scan) is not
+// something a caller can smuggle a hash of out of the app directory with.
+bool underSyncedTree(const QString& rel)
+{
+    return rel.startsWith(QLatin1String("saves/")) || rel.startsWith(QLatin1String("states/"));
+}
+
 } // namespace
+
+QString SaveSync::driveNameFor(const QString& rel)
+{
+    return QStringLiteral("save-") + QString::fromLatin1(QUrl::toPercentEncoding(rel));
+}
 
 // One reconcile in flight. Held by shared_ptr because every step of it is a network callback away from the
 // next, and the run must outlive each of them.
@@ -128,9 +163,13 @@ struct SaveSync::Run
     QString folderId;
     QHash<QString, Entry> local, remote, baseline;
     QHash<QString, Entry> nextBase, nextRemote;   // what we will PUBLISH, built only from successes
+    QVector<Tomb>         tombs;                  // ours + every peer's, republished so deletes propagate
+    QString               indexHash;              // the index's stateHash when THIS run read it (the CAS)
+    QSet<QString>         only;                   // empty => every file
     QVector<Decision>     decisions;
     QSet<QString>         settled;                // names this run actually finished, for dirty_ retirement
     int  idx = 0, uploaded = 0, downloaded = 0, conflicts = 0;
+    int  attempt = 0;                             // >0 after a compare-and-swap retry
     bool failed = false;
     bool remoteMoved = false;                     // the manifest needs republishing
     std::function<void(bool, int, int, int)> cb;
@@ -153,9 +192,29 @@ bool SaveSync::firstRun() const { return !QFileInfo::exists(baselinePath()); }
 
 // ---- local state -------------------------------------------------------------------------------------
 
-QHash<QString, Entry> SaveSync::scanLocal(QSet<QString>* unreadable) const
+QHash<QString, Entry> SaveSync::scanLocal(QSet<QString>* unreadable, const QSet<QString>& only) const
 {
     QHash<QString, Entry> out;
+
+    // The RESTRICTED scan, and it is not an optimisation: every debounced push is a restricted run, this
+    // runs on the GUI thread, and a full recursive SHA-256 of saves/ and states/ there means one F2 press
+    // freezes the UI over multi-MB PS2/PPSSPP states ten seconds later. It changes no outcome — plan()
+    // decides strictly per name, the decision loop and seedAgreed both drop everything outside `only`, and
+    // the names it can produce are exactly the subset of the full walk's that `only` asked for.
+    if (!only.isEmpty())
+    {
+        for (const QString& rel : only)
+        {
+            if (!underSyncedTree(rel) || SaveSyncPlan::isConflictArtifact(rel)) continue;
+            const QString path = root_ + QLatin1Char('/') + rel;
+            if (!QFileInfo::exists(path)) continue;   // genuinely absent: restore-or-delete, and the rules decide
+            const Entry e = entryFromDisk(rel, path);
+            if (!e.present()) { if (unreadable) unreadable->insert(rel); continue; }
+            out.insert(rel, e);
+        }
+        return out;
+    }
+
     // Both trees, RECURSIVELY: new saves are written under saves/<system>/ (save-sync T4) while saves made
     // before that change stay flat, and the relative path INCLUDING the subdirectory is the sync name.
     const QStringList tops{ QStringLiteral("saves"), QStringLiteral("states") };
@@ -179,11 +238,15 @@ QHash<QString, Entry> SaveSync::scanLocal(QSet<QString>* unreadable) const
     return out;
 }
 
-QHash<QString, Entry> SaveSync::readBaseline() const
+QHash<QString, Entry> SaveSync::readBaseline(bool* ok) const
 {
+    if (ok) *ok = true;
     QFile f(baselinePath());
-    if (!f.open(QIODevice::ReadOnly)) return {};
-    return entriesFromJson(f.readAll());
+    if (!f.open(QIODevice::ReadOnly)) return {};    // no baseline at all — firstRun() is the one that says so
+    QHash<QString, Entry> m;
+    QVector<Tomb> ignored;
+    if (!docFromJson(f.readAll(), m, ignored)) { if (ok) *ok = false; return {}; }
+    return m;
 }
 
 bool SaveSync::writeBaseline(const QHash<QString, Entry>& m) const
@@ -194,50 +257,82 @@ bool SaveSync::writeBaseline(const QHash<QString, Entry>& m) const
     QDir().mkpath(root_);
     QSaveFile f(baselinePath());
     if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
-    const QByteArray json = entriesToJson(m);
+    const QByteArray json = docToJson(m, {});
     if (f.write(json) != json.size()) { f.cancelWriting(); return false; }
     return f.commit();
 }
 
 // ---- the Drive seam ----------------------------------------------------------------------------------
+//
+// Every callback below is owned by CloudSync's reply connections, NOT by this object, so each one guards on
+// a QPointer to itself. The intended wiring is flush() at exit inside the shutdown watchdog — a sync in
+// flight while this object is destroyed is the NORMAL case, not an exotic one, and an unguarded `this` there
+// dereferences freed memory and emits from a dead QObject.
 
 void SaveSync::resolveFolder(std::function<void(const QString&)> cb)
 {
     if (!cloud_) { cb(QString()); return; }
-    cloud_->ensureFolder(std::move(cb));
+    const QPointer<SaveSync> self(this);
+    cloud_->ensureFolder([self, cb](const QString& id) { if (!self) return; cb(id); });
 }
 
 void SaveSync::fetchManifest(const QString& folderId,
-                             std::function<void(bool, const QHash<QString, Entry>&)> cb)
+                             std::function<void(bool, const QHash<QString, Entry>&, const QVector<Tomb>&,
+                                                const QString&)> cb)
 {
-    if (!cloud_) { cb(false, {}); return; }
-    cloud_->findFile(folderId, kIndexName, [this, cb](bool listOk, const QString& id, const QString&, const QString&) {
+    if (!cloud_) { cb(false, {}, {}, QString()); return; }
+    const QPointer<SaveSync> self(this);
+    cloud_->findFile(folderId, kIndexName, [this, self, cb](bool listOk, const QString& id, const QString&,
+                                                            const QString& stateHash) {
+        if (!self) return;
         // listOk==false is "we could not reach Drive", NOT "there is nothing there". Reading it as an empty
         // cloud would hand plan() a remote side with every file missing — and with a tombstone that is a
         // local delete. Fail the run instead.
-        if (!listOk)     { cb(false, {}); return; }
-        if (id.isEmpty()) { cb(true,  {}); return; }   // proven absent: no saves have ever been synced
-        cloud_->downloadFile(id, [this, cb](bool ok, const QByteArray& data) {
-            if (!ok) { cb(false, {}); return; }
-            bool parsed = false;
-            const QHash<QString, Entry> m = entriesFromJson(data, &parsed);
-            if (!parsed) { emit log(QStringLiteral("save sync: the cloud index is unreadable")); cb(false, {}); return; }
-            cb(true, m);
+        if (!listOk)      { cb(false, {}, {}, QString()); return; }
+        if (id.isEmpty()) { cb(true,  {}, {}, QString()); return; }   // proven absent: nothing ever synced
+        cloud_->downloadFile(id, [this, self, cb, stateHash](bool ok, const QByteArray& data) {
+            if (!self) return;
+            if (!ok) { cb(false, {}, {}, QString()); return; }
+            QHash<QString, Entry> m;
+            QVector<Tomb> tombs;
+            if (!docFromJson(data, m, tombs))
+            { emit log(QStringLiteral("save sync: the cloud index is unreadable")); cb(false, {}, {}, QString()); return; }
+            // The hash we compare against at publish time is the one Drive REPORTS, not one we recompute, so
+            // the two ends of the compare-and-swap are the same quantity.
+            cb(true, m, tombs, stateHash);
         });
     });
 }
 
 void SaveSync::putManifest(const QString& folderId, const QHash<QString, Entry>& manifest,
-                           std::function<void(bool)> cb)
+                           const QVector<Tomb>& tombs, const QString& expectHash,
+                           std::function<void(bool, bool)> cb)
 {
-    if (!cloud_) { cb(false); return; }
-    const QByteArray json = entriesToJson(manifest);
-    cloud_->findFile(folderId, kIndexName, [this, folderId, json, cb](bool listOk, const QString& id, const QString&, const QString&) {
+    if (!cloud_) { cb(false, false); return; }
+    const QByteArray json = docToJson(manifest, tombs);
+    const QPointer<SaveSync> self(this);
+    cloud_->findFile(folderId, kIndexName, [this, self, folderId, json, expectHash, cb](
+                                               bool listOk, const QString& id, const QString&,
+                                               const QString& stateHash) {
+        if (!self) return;
         // Never create on a failed lookup: that mints a SECOND saves-index.json in the same folder and
         // findFile would then return whichever Drive listed first.
-        if (!listOk) { cb(false); return; }
+        if (!listOk) { cb(false, false); return; }
+        // COMPARE-AND-SWAP. This upload replaces the WHOLE document, and the document we built describes the
+        // index as it was when this run read it. If another device published in between, writing ours drops
+        // their rows while our baseline records success — the index then permanently disagrees with the
+        // blobs, each device believes it is in sync, and neither ever converges. Abort and reconcile again.
+        if (stateHash != expectHash)
+        {
+            emit log(QStringLiteral("save sync: the cloud index changed underneath this run — not overwriting it"));
+            cb(false, true);
+            return;
+        }
         cloud_->uploadFile(folderId, id, kIndexName, QStringLiteral("application/json"), json,
-                           sha256Of(json), [cb](const QString& newId) { cb(!newId.isEmpty()); });
+                           sha256Of(json), [self, cb](const QString& newId) {
+            if (!self) return;
+            cb(!newId.isEmpty(), false);
+        });
     });
 }
 
@@ -245,10 +340,14 @@ void SaveSync::downloadInto(const QString& folderId, const QString& name, const 
                             std::function<void(bool)> cb)
 {
     if (!cloud_) { cb(false); return; }
-    cloud_->findFile(folderId, driveNameFor(name), [this, name, destPath, cb](bool listOk, const QString& id, const QString&, const QString&) {
+    const QPointer<SaveSync> self(this);
+    cloud_->findFile(folderId, driveNameFor(name), [this, self, name, destPath, cb](
+                                                       bool listOk, const QString& id, const QString&, const QString&) {
+        if (!self) return;
         if (!listOk || id.isEmpty())
         { emit log(QStringLiteral("save sync: %1 is in the index but not in the cloud folder").arg(name)); cb(false); return; }
-        cloud_->downloadFile(id, [this, name, destPath, cb](bool ok, const QByteArray& data) {
+        cloud_->downloadFile(id, [this, self, name, destPath, cb](bool ok, const QByteArray& data) {
+            if (!self) return;
             if (!ok) { emit log(QStringLiteral("save sync: download of %1 failed").arg(name)); cb(false); return; }
             QDir().mkpath(QFileInfo(destPath).absolutePath());
             // QSaveFile again: a save half-written by an interrupted download is worse than no download.
@@ -261,7 +360,7 @@ void SaveSync::downloadInto(const QString& folderId, const QString& name, const 
 }
 
 void SaveSync::uploadFrom(const QString& folderId, const QString& name, const QString& srcPath,
-                          std::function<void(bool, const Entry&)> cb)
+                          const QString& expectRemoteSha, std::function<void(bool, const Entry&)> cb)
 {
     if (!cloud_) { cb(false, {}); return; }
 
@@ -270,6 +369,8 @@ void SaveSync::uploadFrom(const QString& folderId, const QString& name, const QS
     { emit log(QStringLiteral("save sync: could not read %1").arg(name)); cb(false, {}); return; }
     const QByteArray data = f.readAll();
     f.close();
+
+    if (midReadHook_) midReadHook_(srcPath);   // test-only; null in production (see SaveSync.h)
 
     // Torn-write guard. An emulator flushing SRAM, or a state being written as we read it, would otherwise
     // publish half a file under the real name — and the next device to sync would take it as the truth.
@@ -292,13 +393,29 @@ void SaveSync::uploadFrom(const QString& folderId, const QString& name, const QS
     sent.deviceId = deviceId_;
 
     const QString driveName = driveNameFor(name);
-    cloud_->findFile(folderId, driveName, [this, folderId, driveName, data, sha, sent, name, cb](bool listOk, const QString& id, const QString&, const QString&) {
+    const QPointer<SaveSync> self(this);
+    cloud_->findFile(folderId, driveName, [this, self, folderId, driveName, data, sha, sent, name,
+                                           expectRemoteSha, cb](bool listOk, const QString& id, const QString&,
+                                                                const QString& stateHash) {
+        if (!self) return;
         // Same reason as putManifest: uploading with an empty existingId CREATES, so a failed lookup would
         // leave two files with one name and later reads would pick between them arbitrarily.
         if (!listOk)
         { emit log(QStringLiteral("save sync: could not look up %1 in the cloud").arg(name)); cb(false, {}); return; }
+        // The blob's own compare-and-swap. The index told us this save's hash when the run started and the
+        // plan was made against THAT; a blob carrying anything else was PATCHed by another device since, so
+        // this upload would overwrite bytes the conflict rule never got to see. Two hashes are not a
+        // conflict: an EMPTY one is a blob predating appProperties (nothing to compare), and one already
+        // equal to what we are about to send is our own idempotent retry after a failed publish.
+        if (!expectRemoteSha.isEmpty() && !stateHash.isEmpty() && stateHash != expectRemoteSha && stateHash != sha)
+        {
+            emit log(QStringLiteral("save sync: %1 changed in the cloud since this run read the index — not overwriting it").arg(name));
+            cb(false, {});
+            return;
+        }
         cloud_->uploadFile(folderId, id, driveName, QStringLiteral("application/octet-stream"), data, sha,
-                           [this, name, sent, cb](const QString& newId) {
+                           [this, self, name, sent, cb](const QString& newId) {
+            if (!self) return;
             if (newId.isEmpty())
             { emit log(QStringLiteral("save sync: upload of %1 failed").arg(name)); cb(false, {}); return; }
             cb(true, sent);
@@ -313,7 +430,7 @@ void SaveSync::syncNow(std::function<void(bool, int, int, int)> cb)
     begin({}, std::move(cb));
 }
 
-void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, int, int)> cb)
+void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, int, int)> cb, int attempt)
 {
     if (busy_)
     {
@@ -326,37 +443,77 @@ void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, in
     busy_ = true;
 
     auto r = std::make_shared<Run>();
-    r->cb = std::move(cb);
+    r->cb      = std::move(cb);
+    r->only    = only;
+    r->attempt = attempt;
 
-    resolveFolder([this, r, only](const QString& folderId) {
+    resolveFolder([this, r](const QString& folderId) {
         if (folderId.isEmpty())
         { emit log(QStringLiteral("save sync: no Drive folder")); busy_ = false; r->cb(false, 0, 0, 0); return; }
         r->folderId = folderId;
 
-        fetchManifest(folderId, [this, r, only](bool ok, const QHash<QString, Entry>& remote) {
+        fetchManifest(folderId, [this, r](bool ok, const QHash<QString, Entry>& remote,
+                                          const QVector<Tomb>& remoteTombs, const QString& indexHash) {
             if (!ok)
             {
                 emit log(QStringLiteral("save sync: could not read the cloud index — doing nothing"));
                 busy_ = false; r->cb(false, 0, 0, 0); return;
             }
 
-            QSet<QString> unreadable;
-            r->remote   = remote;
-            r->local    = scanLocal(&unreadable);
-            r->baseline = readBaseline();
+            r->remote    = remote;
+            r->indexHash = indexHash;
 
-            QSet<QString> tombs;
+            // Import the peers' tombstones with THEIR ts (never downgrading a newer local one), exactly as
+            // CloudMerge does for the progress document. Without this a delete is local-only: the other
+            // device sees a file missing from the index, re-uploads it, and the delete is undone — on the
+            // deleting machine too, which then downloads its own deleted save back.
+            for (const Tomb& t : remoteTombs) Tombstones::record(kTombStore, t.key, t.ts);
+
+            QSet<QString> unreadable;
+            r->local = scanLocal(&unreadable, r->only);
+
+            bool baseOk = true;
+            r->baseline = readBaseline(&baseOk);
+            if (!baseOk)
+                emit log(QStringLiteral("save sync: %1 is unreadable — treating this pass as a first run, "
+                                        "so nothing is deleted").arg(kBaselineName));
+            // A baseline we could not parse is NOT "a baseline saying nothing happened": that shape is a
+            // non-firstRun with no history, which authorises deletes against a past we cannot actually see.
+            const bool noHistory = firstRun() || !baseOk;
+
+            QSet<QString> tombKeys;
             const QVector<Tombstones::Entry> ts = Tombstones::all(kTombStore);
-            for (const Tombstones::Entry& t : ts) tombs.insert(t.key);
+            for (const Tombstones::Entry& t : ts)
+            {
+                tombKeys.insert(t.key);
+                r->tombs.push_back(Tomb{ t.key, t.ts });   // republished, so a peer's delete keeps travelling
+            }
 
             // Failures leave their OLD baseline row untouched, so the next run re-plans them identically.
             r->nextBase   = r->baseline;
             r->nextRemote = r->remote;
 
-            const QVector<Decision> all = SaveSyncPlan::plan(r->local, r->remote, r->baseline, tombs, firstRun());
+            // A remote row a tombstone OUT-DATES is a delete the index has not caught up with. Suppressing it
+            // makes the rules see the file as gone from the cloud (so the local copy is deleted rather than
+            // resurrected) and drops the row from what we publish. The comparison is Tombstones'/CloudMerge's:
+            // ts >= the entry's own timestamp suppresses, and a strictly NEWER re-add beats the tombstone —
+            // which is what keeps "another device saved after your delete" an update, not a deletion.
+            for (const Tombstones::Entry& t : ts)
+            {
+                if (!r->only.isEmpty() && !r->only.contains(t.key)) continue;
+                const auto it = r->remote.constFind(t.key);
+                if (it == r->remote.constEnd()) continue;
+                if (t.ts < it.value().mtimeMs / 1000) continue;   // re-added after the delete: update wins
+                emit log(QStringLiteral("save sync: %1 was deleted (tombstone) — dropping the cloud row").arg(t.key));
+                r->remote.remove(t.key);
+                r->nextRemote.remove(t.key);
+                r->remoteMoved = true;
+            }
+
+            const QVector<Decision> all = SaveSyncPlan::plan(r->local, r->remote, r->baseline, tombKeys, noHistory);
             for (const Decision& d : all)
             {
-                if (!only.isEmpty() && !only.contains(d.name)) continue;
+                if (!r->only.isEmpty() && !r->only.contains(d.name)) continue;
                 // A file we could not hash is neither present nor absent as far as the rules go, and both of
                 // the answers plan() can give for "absent" (restore it, or delete it) are wrong for a save
                 // the emulator merely has open. Skip the name entirely and try again next time.
@@ -366,7 +523,7 @@ void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, in
             }
             for (const QString& u : unreadable) emit log(QStringLiteral("save sync: could not read %1").arg(u));
 
-            seedAgreed(r, only);
+            seedAgreed(r);
             step(r);
         });
     });
@@ -376,7 +533,7 @@ void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, in
 // for them, but leaving a stale baseline row in place is not harmless: with baseline "a" and both sides at
 // "z", the next local edit reads as localChanged AND remoteChanged and manufactures a conflict out of two
 // devices that were in step. Rows gone from both sides are dropped for the same reason in reverse.
-void SaveSync::seedAgreed(const std::shared_ptr<Run>& r, const QSet<QString>& only) const
+void SaveSync::seedAgreed(const std::shared_ptr<Run>& r) const
 {
     QSet<QString> names;
     for (auto it = r->local.constBegin();    it != r->local.constEnd();    ++it) names.insert(it.key());
@@ -385,7 +542,7 @@ void SaveSync::seedAgreed(const std::shared_ptr<Run>& r, const QSet<QString>& on
 
     for (const QString& name : names)
     {
-        if (!only.isEmpty() && !only.contains(name)) continue;
+        if (!r->only.isEmpty() && !r->only.contains(name)) continue;
         const Entry L = r->local.value(name);
         const Entry R = r->remote.value(name);
         if (!L.present() && !R.present())            { r->nextBase.remove(name); continue; }
@@ -405,7 +562,7 @@ void SaveSync::step(std::shared_ptr<Run> r)
     switch (d.act)
     {
     case Act::Upload:
-        uploadFrom(r->folderId, d.name, path, [this, r, d](bool ok, const Entry& sent) {
+        uploadFrom(r->folderId, d.name, path, r->remote.value(d.name).sha, [this, r, d](bool ok, const Entry& sent) {
             if (ok)
             {
                 ++r->uploaded;
@@ -482,19 +639,30 @@ void SaveSync::publish(std::shared_ptr<Run> r)
 {
     if (!r->remoteMoved) { finish(std::move(r), true); return; }
 
-    putManifest(r->folderId, r->nextRemote, [this, r](bool ok) {
-        if (!ok)
+    putManifest(r->folderId, r->nextRemote, r->tombs, r->indexHash, [this, r](bool ok, bool stale) {
+        if (ok) { finish(r, true); return; }
+
+        if (stale && r->attempt == 0)
         {
-            // The bytes went up but the index did not, so from the rules' point of view the cloud has not
-            // changed. Advancing the baseline here would be the exact lie this class must not tell: the next
-            // run would believe the cloud holds files its index does not list. Leave the baseline alone and
-            // let everything replay — uploads are idempotent PATCHes.
-            emit log(QStringLiteral("save sync: the cloud index could not be updated — baseline not advanced"));
-            r->failed = true;
-            finish(r, false);
+            // Another device republished between our read and our publish, so every remote row we planned
+            // against may be out of date. Do NOT write ours over theirs — reconcile again from the index
+            // they left. Anything we already uploaded is an idempotent PATCH, and the second pass sees their
+            // rows, so a save both devices changed becomes the conflict it always was instead of a silent
+            // overwrite. One retry only: a folder busy enough to lose twice is better served by the caller's
+            // own retry than by a loop.
+            emit log(QStringLiteral("save sync: another device published first — reconciling again"));
+            busy_ = false;
+            begin(r->only, r->cb, r->attempt + 1);
             return;
         }
-        finish(r, true);
+
+        // The bytes went up but the index did not, so from the rules' point of view the cloud has not
+        // changed. Advancing the baseline here would be the exact lie this class must not tell: the next
+        // run would believe the cloud holds files its index does not list. Leave the baseline alone and
+        // let everything replay — uploads are idempotent PATCHes.
+        emit log(QStringLiteral("save sync: the cloud index could not be updated — baseline not advanced"));
+        r->failed = true;
+        finish(r, false);
     });
 }
 
@@ -505,7 +673,24 @@ void SaveSync::finish(std::shared_ptr<Run> r, bool writeBase)
         emit log(QStringLiteral("save sync: could not write %1").arg(kBaselineName));
         r->failed = true;
     }
-    if (writeBase) for (const QString& n : r->settled) dirty_.remove(n);
+    if (writeBase)
+    {
+        // Retire a dirty name ONLY if what is on disk NOW is still the row we just recorded as synced. The
+        // debounced push copies dirty_ and this used to clear every settled name unconditionally — so a save
+        // written while its own upload was in flight (F2, debounce, upload, F2 again) was re-inserted by
+        // markDirty and then removed here, the next timer fire found an empty set, and flush() at shutdown
+        // reported success having pushed nothing. The newer bytes reached the cloud only at the next full
+        // syncNow. Comparing against what we actually SENT is the same discipline the baseline itself uses.
+        for (const QString& n : r->settled)
+        {
+            if (!dirty_.contains(n)) continue;
+            const QString path = root_ + QLatin1Char('/') + n;
+            const Entry rec = r->nextBase.value(n);
+            const bool stillOurs = rec.sha.isEmpty() ? !QFileInfo::exists(path)   // a delete: gone is "as sent"
+                                                     : sha256File(path) == rec.sha;
+            if (stillOurs) dirty_.remove(n);
+        }
+    }
 
     busy_ = false;
     r->cb(!r->failed, r->uploaded, r->downloaded, r->conflicts);
@@ -555,7 +740,9 @@ void SaveSync::executeConflict(const Decision& d, const Entry& localE, const Ent
     // the case that matters, and it would look correct in review.
     const QString who  = remoteE.deviceId.isEmpty() ? QStringLiteral("cloud") : remoteE.deviceId;
     const QString kept = SaveSyncPlan::conflictName(d.name, who, remoteE.mtimeMs);
-    downloadInto(folderId, d.name, root_ + QLatin1Char('/') + kept, [this, d, kept, localPath, folderId, done](bool ok) {
+    const QString expect = remoteE.sha;
+    downloadInto(folderId, d.name, root_ + QLatin1Char('/') + kept,
+                 [this, d, kept, localPath, folderId, expect, done](bool ok) {
         if (!ok)
         {
             emit log(QStringLiteral("save conflict: could not preserve the cloud copy of %1 — NOT uploading").arg(d.name));
@@ -566,7 +753,7 @@ void SaveSync::executeConflict(const Decision& d, const Entry& localE, const Ent
         // The preserved copy stays on disk even if this upload fails: deleting it would undo the one thing
         // we came here to guarantee. A retry re-fetches the same loser to the same name and overwrites it
         // with identical bytes.
-        uploadFrom(folderId, d.name, localPath, [done](bool uok, const Entry& sent) { done(uok, sent); });
+        uploadFrom(folderId, d.name, localPath, expect, [done](bool uok, const Entry& sent) { done(uok, sent); });
     });
 }
 

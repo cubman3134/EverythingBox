@@ -71,6 +71,14 @@ CloudSync::CloudSync(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
+QString CloudSync::driveQueryQuote(const QString& value)
+{
+    QString out = value;
+    out.replace(QLatin1Char('\\'), QLatin1String("\\\\"));   // first: else the escapes below get re-escaped
+    out.replace(QLatin1Char('\''), QLatin1String("\\'"));
+    return out;
+}
+
 bool CloudSync::isConfigured() { return !clientId().isEmpty() && !clientSecret().isEmpty(); }
 bool CloudSync::isSignedIn() const { return !store().value(QStringLiteral("cloud/refreshToken")).toString().isEmpty(); }
 QString CloudSync::accountEmail() const { return store().value(QStringLiteral("cloud/email")).toString(); }
@@ -274,8 +282,11 @@ void CloudSync::findFile(const QString& folderId, const QString& name,
         if (!ok) { cb(false, QString(), QString(), QString()); return; } // token/auth failure — Drive not reached
         QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files"));
         QUrlQuery q;
+        // driveQueryQuote, not raw: the name is interpolated INSIDE a Drive query string literal, and an
+        // apostrophe or backslash in it ("Link's Awakening.srm") would end that literal early — the query
+        // then fails and the caller reads a file that exists as absent.
         q.addQueryItem(QStringLiteral("q"), QStringLiteral("name='%1' and '%2' in parents and trashed=false")
-                                                .arg(name, folderId));
+                                                .arg(driveQueryQuote(name), folderId));
         // appProperties carries the bundle's own content hash, so we can detect "another device changed it"
         // without depending on Drive's modifiedTime (which our own uploads bump).
         q.addQueryItem(QStringLiteral("fields"), QStringLiteral("files(id,modifiedTime,appProperties)"));
