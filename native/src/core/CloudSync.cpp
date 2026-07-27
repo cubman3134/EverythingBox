@@ -71,6 +71,14 @@ CloudSync::CloudSync(QObject* parent) : QObject(parent)
     nam_ = new QNetworkAccessManager(this);
 }
 
+QString CloudSync::driveQueryQuote(const QString& value)
+{
+    QString out = value;
+    out.replace(QLatin1Char('\\'), QLatin1String("\\\\"));   // first: else the escapes below get re-escaped
+    out.replace(QLatin1Char('\''), QLatin1String("\\'"));
+    return out;
+}
+
 bool CloudSync::isConfigured() { return !clientId().isEmpty() && !clientSecret().isEmpty(); }
 bool CloudSync::isSignedIn() const { return !store().value(QStringLiteral("cloud/refreshToken")).toString().isEmpty(); }
 QString CloudSync::accountEmail() const { return store().value(QStringLiteral("cloud/email")).toString(); }
@@ -274,8 +282,11 @@ void CloudSync::findFile(const QString& folderId, const QString& name,
         if (!ok) { cb(false, QString(), QString(), QString()); return; } // token/auth failure — Drive not reached
         QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files"));
         QUrlQuery q;
+        // driveQueryQuote, not raw: the name is interpolated INSIDE a Drive query string literal, and an
+        // apostrophe or backslash in it ("Link's Awakening.srm") would end that literal early — the query
+        // then fails and the caller reads a file that exists as absent.
         q.addQueryItem(QStringLiteral("q"), QStringLiteral("name='%1' and '%2' in parents and trashed=false")
-                                                .arg(name, folderId));
+                                                .arg(driveQueryQuote(name), folderId));
         // appProperties carries the bundle's own content hash, so we can detect "another device changed it"
         // without depending on Drive's modifiedTime (which our own uploads bump).
         q.addQueryItem(QStringLiteral("fields"), QStringLiteral("files(id,modifiedTime,appProperties)"));
@@ -488,8 +499,9 @@ static QByteArray buildBundle()
     const QString app = AppPaths::dataDir();
     zipAddDir(z, app + QStringLiteral("/addons"), QStringLiteral("addons"), firstPartyAddonDirs());
     zipAddDir(z, app + QStringLiteral("/themes"), QStringLiteral("themes"));
-    zipAddDir(z, app + QStringLiteral("/saves"),  QStringLiteral("saves"));   // emulator battery saves (.srm)
-    zipAddDir(z, app + QStringLiteral("/states"), QStringLiteral("states"));  // emulator save states (.state)
+    // saves/ and states/ are NOT in the bundle: they sync per-file via SaveSync. They used to be here, which
+    // meant (a) two devices silently overwrote each other's saves wholesale, and (b) every save write flipped
+    // the fingerprint below and re-uploaded addons, themes and settings along with it.
 
     void* buf = nullptr; size_t sz = 0;
     mz_zip_writer_finalize_heap_archive(&z, &buf, &sz);
@@ -512,6 +524,12 @@ static bool applyBundle(const QByteArray& data)
         if (!mz_zip_reader_file_stat(&z, i, &st)) continue;
         if (mz_zip_reader_is_file_a_directory(&z, i)) continue;
         const QString name = QString::fromUtf8(st.m_filename);
+        // SKIP (never delete) any saves/states an OLDER device is still packing into its bundle. SaveSync owns
+        // these per-file now; extracting a legacy copy here would stomp a file the per-file pass just resolved
+        // — and it would do so wholesale, which is exactly the loss this track removes. Deleting them locally
+        // would be the other kind of wrong: this device's saves are live data, not bundle spillover. Checked
+        // before the extract so a legacy bundle's saves aren't decompressed just to be thrown away.
+        if (name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/"))) continue;
         size_t sz = 0;
         void* p = mz_zip_reader_extract_to_heap(&z, i, &sz, 0);
         if (!p) continue;
@@ -523,8 +541,7 @@ static bool applyBundle(const QByteArray& data)
             // Device-local keys AND per-item store keys are held off here (the merge document owns per-item).
             CloudSync::applySettingsJson(bytes);
         }
-        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/"))
-                 || name.startsWith(QStringLiteral("saves/")) || name.startsWith(QStringLiteral("states/")))
+        else if (name.startsWith(QStringLiteral("addons/")) || name.startsWith(QStringLiteral("themes/")))
         {
             // A first-party addon ships with the build; don't let an (older) cloud bundle overwrite it.
             if (name.startsWith(QStringLiteral("addons/")) && firstParty.contains(topSegment(name.mid(7))))
@@ -561,8 +578,10 @@ static QByteArray stateHash()
 
     const QString app = AppPaths::dataDir();
     const QSet<QString> firstParty = firstPartyAddonDirs(); // not synced -> not part of the fingerprint
-    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes"),
-                                QStringLiteral("saves"), QStringLiteral("states") })
+    // saves/ and states/ are NOT here either (save-sync T3), and this is the edit that pays for the track: a
+    // per-file SHA of every save folded into this fingerprint is precisely WHY one F2 press read as "local
+    // changed" and re-uploaded addons, themes and settings. SaveSync tracks those files' state itself.
+    for (const QString& sub : { QStringLiteral("addons"), QStringLiteral("themes") })
     {
         const QString dir = app + QStringLiteral("/") + sub;
         QStringList files;

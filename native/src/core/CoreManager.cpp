@@ -161,6 +161,13 @@ QString CoreManager::systemDir()
     return d;
 }
 
+QString CoreManager::savesDir()
+{
+    const QString d = AppPaths::dataDir() + QStringLiteral("/saves");
+    QDir().mkpath(d);
+    return d;
+}
+
 void CoreManager::ensureBios(const QString& systemId, const QString& destDir,
                              const std::function<void(const QString&)>& onStatus)
 {

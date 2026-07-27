@@ -131,6 +131,12 @@ namespace Settings
     QString netplayRelay();                      // "host:port" of the online-netplay relay (empty = not set)
     void setNetplayRelay(const QString& hostPort);
 
+    // One-shot: this install has already swept core-written save files that were left loose in the app
+    // directory into saves/ (SaveMeta::sweepStrays). Stored under "device/" so it does NOT sync — the flag
+    // describes THIS machine's directory, and another device's strays still need their own pass.
+    bool savesStraysSwept();
+    void setSavesStraysSwept(bool done);
+
     // Draw bezel / border artwork around the emulator picture (PNG in <data>/bezels). Default off.
     bool bezelEnabled();
     void setBezelEnabled(bool on);
