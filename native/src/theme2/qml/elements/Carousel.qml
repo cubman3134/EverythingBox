@@ -58,6 +58,10 @@ ListView {
                 text: (modelData && modelData.title) ? modelData.title : ""
                 color: "white"; horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: Math.max(10, 0.026 * (lv.host ? lv.host.height : 720)); font.bold: true
+                // Phone-width cards are narrower than the TV-scale font: shrink to fit before eliding,
+                // so "Movies" reads as Movies instead of "M…".
+                fontSizeMode: Text.HorizontalFit
+                minimumPixelSize: 10
                 elide: Text.ElideRight
             }
         }
