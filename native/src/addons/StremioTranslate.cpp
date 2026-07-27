@@ -4,6 +4,10 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRegularExpression>
+#include <QUrl>
+
+#include <algorithm>
 
 namespace {
 
@@ -136,4 +140,129 @@ StremioTranslate::Manifest StremioTranslate::parseManifest(const QByteArray& bod
         m.catalogs.push_back(c);
     }
     return m;
+}
+
+QString StremioTranslate::catalogPath(const Catalog& c, const QMap<QString, QString>& extras)
+{
+    auto seg = [](const QString& s) {
+        return QString::fromUtf8(QUrl::toPercentEncoding(s));
+    };
+    QString path = QStringLiteral("/catalog/") + seg(c.type) + QLatin1Char('/') + seg(c.id);
+
+    // The caller's values win; presets only fill keys the caller left alone.
+    QMap<QString, QString> merged = c.presets;
+    for (auto it = extras.constBegin(); it != extras.constEnd(); ++it) merged.insert(it.key(), it.value());
+
+    QStringList parts;
+    // QMap iterates in key order, which is what makes this string stable for the result cache.
+    for (auto it = merged.constBegin(); it != merged.constEnd(); ++it)
+    {
+        if (it.value().isEmpty()) continue;
+        parts << seg(it.key()) + QLatin1Char('=') + seg(it.value());
+    }
+    if (!parts.isEmpty()) path += QLatin1Char('/') + parts.join(QLatin1Char('&'));
+    return path + QStringLiteral(".json");
+}
+
+bool StremioTranslate::handlesId(const Manifest& m, const QString& resource, const QString& id)
+{
+    // A per-resource list REPLACES the manifest-level one for that resource — the object form exists
+    // precisely so a stream resource can narrow what the addon as a whole claims.
+    const QStringList prefixes = m.resourceIdPrefixes.contains(resource)
+                                     ? m.resourceIdPrefixes.value(resource)
+                                     : m.idPrefixes;
+    if (prefixes.isEmpty()) return true;      // claims nothing in particular -> eligible for everything
+    for (const QString& p : prefixes) if (id.startsWith(p)) return true;
+    return false;
+}
+
+namespace {
+
+// Addons put the seeder count in the title, conventionally after a 👤 (or "Seeders:"/"S:"). Best-effort:
+// an unparsed count is -1, which sorts last rather than pretending to be zero.
+int scrapeSeeders(const QString& title)
+{
+    static const QRegularExpression re(
+        QStringLiteral("(?:\\x{1F464}|seeders?\\s*:?|(?<![a-z])s\\s*:)\\s*(\\d+)"),
+        QRegularExpression::CaseInsensitiveOption);
+    const QRegularExpressionMatch mm = re.match(title);
+    return mm.hasMatch() ? mm.captured(1).toInt() : -1;
+}
+
+bool validInfoHash(const QString& h)
+{
+    if (h.size() == 40)
+    {
+        for (const QChar c : h)
+            if (!((c >= '0' && c <= '9') || (c.toLower() >= 'a' && c.toLower() <= 'f'))) return false;
+        return true;
+    }
+    if (h.size() == 32)
+    {
+        for (const QChar c : h)
+        { const QChar u = c.toUpper(); if (!((u >= 'A' && u <= 'Z') || (u >= '2' && u <= '7'))) return false; }
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const QByteArray& body)
+{
+    QVector<StreamCandidate> out;
+    for (const QJsonValue& sv : QJsonDocument::fromJson(body).object()
+                                    .value(QStringLiteral("streams")).toArray())
+    {
+        const QJsonObject s = sv.toObject();
+        StreamCandidate c;
+        c.url      = s.value(QStringLiteral("url")).toString();
+        c.mime     = s.value(QStringLiteral("mime")).toString();
+        c.infoHash = s.value(QStringLiteral("infoHash")).toString();
+        c.fileIdx  = s.contains(QStringLiteral("fileIdx")) ? s.value(QStringLiteral("fileIdx")).toInt() : -1;
+        c.name     = s.value(QStringLiteral("name")).toString();
+        c.title    = s.value(QStringLiteral("title")).toString();
+        if (c.title.isEmpty()) c.title = s.value(QStringLiteral("description")).toString();
+
+        const QJsonObject bh = s.value(QStringLiteral("behaviorHints")).toObject();
+        c.bingeGroup  = bh.value(QStringLiteral("bingeGroup")).toString();
+        c.notWebReady = bh.value(QStringLiteral("notWebReady")).toBool();
+        c.videoSize   = qint64(bh.value(QStringLiteral("videoSize")).toDouble());
+        c.seeders     = scrapeSeeders(c.title);
+
+        if (!c.isDirect() && !validInfoHash(c.infoHash)) continue;  // nothing playable here
+        out.push_back(c);
+    }
+
+    std::stable_sort(out.begin(), out.end(), [](const StreamCandidate& a, const StreamCandidate& b) {
+        if (a.isDirect() != b.isDirect()) return a.isDirect();   // instant beats needing a debrid round-trip
+        if (a.seeders != b.seeders)       return a.seeders > b.seeders;
+        return a.videoSize > b.videoSize;
+    });
+    if (out.size() > kMaxStreamRows) out.resize(kMaxStreamRows);
+    return out;
+}
+
+QString StremioTranslate::describe(const StreamCandidate& c)
+{
+    // Addons pack several lines into name/title; NavMenu word-wraps, so a row with embedded newlines reads
+    // as junk. Collapse to one line and join the parts the user actually chooses on.
+    auto flat = [](QString s) { return s.replace(QLatin1Char('\n'), QLatin1Char(' ')).simplified(); };
+    QStringList parts;
+    if (!c.name.isEmpty())  parts << flat(c.name);
+    if (!c.title.isEmpty()) parts << flat(c.title);
+    if (c.seeders >= 0)     parts << QStringLiteral("%1 seeders").arg(c.seeders);
+    if (c.videoSize > 0)    parts << QStringLiteral("%1 GB")
+                                        .arg(double(c.videoSize) / 1073741824.0, 0, 'f', 1);
+    if (c.notWebReady)      parts << QStringLiteral("may need an external player");
+    return parts.join(QStringLiteral(" · "));
+}
+
+int StremioTranslate::pickAuto(const QVector<StreamCandidate>& all, const QString& preferGroup)
+{
+    if (all.isEmpty()) return -1;
+    if (!preferGroup.isEmpty())
+        for (int i = 0; i < all.size(); ++i)
+            if (all[i].bingeGroup == preferGroup) return i;   // the release the user already chose
+    return 0;   // already sorted best-first
 }

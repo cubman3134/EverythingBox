@@ -68,4 +68,44 @@ namespace StremioTranslate
 
     // Empty (isValid() == false) when the body is not a Stremio manifest.
     Manifest parseManifest(const QByteArray& body);
+
+    // Past this many rows nobody is choosing. A parse/quota bound, NOT a display bound — NavMenu scrolls.
+    constexpr int kMaxStreamRows = 30;
+
+    // "/catalog/{type}/{id}/{k}={v}&{k}={v}.json". Per the protocol the extras are a URL-encoded query
+    // string living in a PATH segment. Keys are emitted sorted so the same request always produces the same
+    // string — AddonManager keys its result cache on it.
+    //
+    // `extras` is what the CALLER wants. The catalog's own presets are merged in ONLY where the caller gave
+    // no value for that key, so a required `genre` defaults to its first option while a user picking
+    // "Comedy" REPLACES that default instead of appearing alongside it.
+    QString catalogPath(const Catalog& c, const QMap<QString, QString>& extras);
+
+    // May this addon be asked for `resource` about `id`? Per-resource prefixes win over manifest-level;
+    // an addon declaring no prefixes at all is always eligible.
+    bool handlesId(const Manifest& m, const QString& resource, const QString& id);
+
+    struct StreamCandidate
+    {
+        QString url, mime, infoHash;
+        int     fileIdx = -1;
+        QString name;        // the addon's short label — usually provider and/or quality
+        QString title;       // the release line; addons commonly pack size and seeders in here
+        QString bingeGroup;  // behaviorHints.bingeGroup — "keep using this source for the next episode"
+        bool    notWebReady = false;
+        qint64  videoSize = 0;
+        int     seeders = -1;   // scraped out of `title` when present; -1 = unknown
+
+        bool isDirect() const { return url.startsWith(QStringLiteral("http")); }
+    };
+
+    // Usable candidates only, sorted best-first and capped at kMaxStreamRows.
+    QVector<StreamCandidate> parseStreams(const QByteArray& body);
+
+    // One picker row: "1080p · Release.Name.x265 · 42 seeders · 2.1 GB".
+    QString describe(const StreamCandidate& c);
+
+    // The automatic choice: a candidate whose bingeGroup matches `preferGroup` (when non-empty), else the
+    // first in sorted order. Returns -1 when there is nothing playable.
+    int pickAuto(const QVector<StreamCandidate>& all, const QString& preferGroup);
 }
