@@ -36,6 +36,14 @@ namespace CoreManager
     // core via RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY (see RetroView / LibretroCore).
     QString systemDir();
 
+    // <data>/saves : where cores are told to put the save files they write THEMSELVES (memory cards, .brm,
+    // .smpc — everything the frontend does not manage through RETRO_MEMORY_SAVE_RAM). Passed to each core via
+    // RETRO_ENVIRONMENT_GET_SAVE_DIRECTORY. Deliberately the flat saves root and not saves/<system>: these
+    // files are named and re-opened by the core itself, so moving the directory under a running install would
+    // hide a memory card the user has been writing to for months. SaveSync walks saves/ recursively, so they
+    // are backed up either way.
+    QString savesDir();
+
     // Download any BIOS files `systemId` needs (BiosCatalog) into destDir, skipping ones already present.
     // Best-effort and synchronous (blocks on a local event loop, like ensureCore); a failed file is left
     // missing so the core/emulator reports it as it would have anyway. onStatus(text) reports progress.
