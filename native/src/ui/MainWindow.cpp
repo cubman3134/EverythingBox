@@ -2991,7 +2991,7 @@ void MainWindow::openGamePath(const QString& rom, const QString& title, const QS
                 },
                 [this, pane, ready, recentTitle, thumb, key] {
                     mwLog(QStringLiteral("game: launching in split pane"));
-                    pane->openGame(ready.corePath, ready.launchRom, ready.core);
+                    pane->openGame(ready.corePath, ready.launchRom, ready.core, recentTitle, ready.systemId);
                     RecentStore::add({ ready.launchRom, recentTitle, QStringLiteral("game"), thumb, key, ready.systemId });
                     PlayStats::markPlayed(PlayStats::identity(key, ready.launchRom)); // split panes aren't session-timed
                 });
