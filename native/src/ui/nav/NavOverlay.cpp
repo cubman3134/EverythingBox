@@ -10,6 +10,7 @@
 #include <QEventLoop>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
@@ -159,6 +160,20 @@ bool NavOverlay::handleNavKey(int key)
         if (ring_->handleKey(key)) return true;
         return true; // swallow everything else too — the page behind must never react
     }
+}
+
+void NavOverlay::mousePressEvent(QMouseEvent* e)
+{
+    // Tap/click on the scrim — anywhere outside the card — dismisses, the way every phone sheet does
+    // (and the way desktop popups close on an outside click). Presses on the card land on its children
+    // and never reach this handler.
+    if (panel_ && !panel_->geometry().contains(e->pos()))
+    {
+        e->accept();
+        dismiss(-1);
+        return;
+    }
+    QWidget::mousePressEvent(e);
 }
 
 void NavOverlay::keyPressEvent(QKeyEvent* e)

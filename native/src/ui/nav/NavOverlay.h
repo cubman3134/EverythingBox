@@ -84,6 +84,7 @@ protected:
     virtual bool handleNavKey(int key);
 
     void keyPressEvent(QKeyEvent* e) override;   // physical keys arrive here via the keyboard grab
+    void mousePressEvent(QMouseEvent* e) override; // tap/click on the scrim (outside the card) dismisses
     bool eventFilter(QObject* obj, QEvent* ev) override; // track the window's resizes
     void showEvent(QShowEvent* e) override;
 
