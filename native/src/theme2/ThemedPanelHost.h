@@ -87,8 +87,9 @@ signals:
     void begin(const QString& initial, bool masked);  // -> QML: selected TextField row enters edit mode
     void finished(const QString& text, bool ok);      // -> host: quits the nested loop
 public slots:
-    void commit(const QString& text) { emit finished(text, true); }
-    void cancel()                    { emit finished(QString(), false); }
+    void commit(const QString& text);                 // defined in the .cpp: traced to stream_debug.log
+    void cancel();
+    void note(const QString& msg);                    // QML-side breadcrumb into the same trace (device debugging)
 };
 
 class ThemedPanelHost : public QWidget

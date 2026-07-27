@@ -47,8 +47,25 @@ Item {
             var p = btn.mapToItem(null, btn.width / 2, 0)
             if (p) edgeDist = btn.hside === "right" ? Math.max(40, btn.Window.width - p.x) : Math.max(40, p.x)
         }
-        Component.onCompleted: recompute()
-        Connections { target: btn.Window.window; function onWidthChanged() { hc.recompute() } }
+        // Defer past the binding storm: on rotation the window size changes FIRST and the theme re-lays the
+        // button slot after — mapping at the signal was a stale position (the "I can still see the end of
+        // the settings pod in landscape" report). callLater coalesces the flurry into one final mapping,
+        // and the settle Timer re-maps once more after any async relayout (anchors animate in on some views).
+        Timer { id: settle; interval: 150; onTriggered: hc.recompute() }
+        function recomputeLater() { Qt.callLater(recompute); settle.restart() }
+        Component.onCompleted: recomputeLater()
+        Connections {
+            target: btn.Window.window
+            function onWidthChanged()  { hc.recomputeLater() }
+            function onHeightChanged() { hc.recomputeLater() }
+        }
+        // The slot itself can move without the window resizing (safe-area/layout changes) — remap then too.
+        Connections {
+            target: btn
+            function onXChanged() { hc.recomputeLater() }
+            function onYChanged() { hc.recomputeLater() }
+            function onWidthChanged() { hc.recomputeLater() }
+        }
         id: hc
         property real capD: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.height
         property real hcH: btn.mobile ? capD * 1.35 : btn.height * 1.20
