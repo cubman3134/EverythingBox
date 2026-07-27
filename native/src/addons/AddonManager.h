@@ -14,6 +14,7 @@
 #include <QVector>
 #include <QMap>
 #include <QHash>
+#include <QSet>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -151,10 +152,16 @@ public:
                              const QString& preferGroup = QString());
 
     // Every candidate stream for an item, from every eligible provider — the picker's source of choices.
-    // Ordering and the cap are the translator's; this only aggregates across addons. The callback fires once,
-    // after every queried provider has answered (or failed), with an empty vector when nothing is playable.
+    // Ordering is the translator's (mergeCandidates); this only aggregates across addons. The callback fires
+    // once, after every queried provider has answered (or failed), with an empty vector when nothing is
+    // playable.
+    //
+    // `maxRowsPerAddon` bounds each PROVIDER'S response, and defaults to the picker's bound. The resolution
+    // path passes a larger one: those extra rows are never displayed, they only widen the pool of hashes the
+    // debrid batch cached-check may hit. See StremioTranslate::parseStreams.
     void listStremioStreams(const MediaItem& item,
-                            std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb);
+                            std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb,
+                            int maxRowsPerAddon = StremioTranslate::kMaxStreamRows);
     // Find a readable document on a file provider (Allarr) by searching its catalog of `catalogType` for
     // `query` and resolving the first hit's /stream. Used to read a comic/book/audiobook browsed from another
     // addon's catalog. providerError is non-empty when the provider couldn't be reached; noMatches is true when
@@ -206,11 +213,23 @@ private:
     // direct http url there plays as-is.
     //
     // The REST of the list still matters for a torrent: TorBox can only stream what it has cached, and the
-    // chosen release may not be. So the batch cached-check covers the whole list and the first CACHED entry
-    // in this order wins — preserving the pre-pick behaviour (play the best release TorBox actually has)
-    // instead of failing outright because one preferred hash was cold.
+    // chosen release may not be. So the batch cached-check covers the whole list and the first entry in this
+    // order that is PLAYABLE NOW wins — preserving the pre-pick behaviour (play the best release TorBox
+    // actually has) instead of failing outright because one preferred hash was cold.
     void playStremioCandidates(std::shared_ptr<QVector<StremioTranslate::StreamCandidate>> ordered,
                                std::function<void(const QString& url, const QString& mime)> cb);
+
+    // Walk `ordered` and start the first entry that can play RIGHT NOW: a direct http url, or a torrent whose
+    // hash is in `cached`. Returns false when nothing in the list qualifies.
+    //
+    // ONE loop, both kinds, in rank order — deliberately. Testing only the torrents here and treating direct
+    // urls as a separate last-resort sweep reorders the list behind the sort's back: once the preferred
+    // release turns out to be cold, "best remaining" is whatever ranks next, and the sort ranks an instant
+    // http url ABOVE every torrent. Splitting the two made a stale binge preference downgrade an instant
+    // stream into a debrid round-trip.
+    bool playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
+                           const QSet<QString>& cachedHashes,
+                           const std::function<void(const QString& url, const QString& mime)>& cb);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,

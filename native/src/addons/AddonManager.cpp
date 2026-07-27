@@ -1177,7 +1177,8 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
 }
 
 void AddonManager::listStremioStreams(const MediaItem& item,
-                                      std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb)
+                                      std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb,
+                                      int maxRowsPerAddon)
 {
     // Ask every enabled Stremio addon that offers streams for this type AND claims this id space (like
     // Stremio aggregates), then merge the answers into ONE list ordered by the translator's rule.
@@ -1205,40 +1206,68 @@ void AddonManager::listStremioStreams(const MediaItem& item,
     streamLog(QStringLiteral("stremio: querying %1 stream provider(s) for %2 %3")
                   .arg(providers.size()).arg(item.type, item.id));
 
-    auto all = std::make_shared<QVector<StremioTranslate::StreamCandidate>>();
+    // One slot per provider, filled in place, so a provider's block stays a block: mergeCandidates is what
+    // orders the aggregate, and it can only do that if it is handed the blocks rather than a pre-flattened
+    // list somebody already assumed was sorted.
+    auto blocks = std::make_shared<QVector<QVector<StremioTranslate::StreamCandidate>>>(providers.size());
     auto pending = std::make_shared<int>(providers.size());
-    for (LoadedAddon* p : providers)
+    for (int pi = 0; pi < providers.size(); ++pi)
     {
+        LoadedAddon* p = providers[pi];
         QNetworkRequest rq(stremioStreamUrl(p->baseUrl, item.type, item.id));
         rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(15000);
         QNetworkReply* reply = nam_->get(rq);
-        connect(reply, &QNetworkReply::finished, this, [reply, all, pending, cb] {
+        connect(reply, &QNetworkReply::finished, this, [reply, blocks, pending, cb, pi, maxRowsPerAddon] {
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) *all += StremioTranslate::parseStreams(reply->readAll());
+            if (reply->error() == QNetworkReply::NoError)
+                (*blocks)[pi] = StremioTranslate::parseStreams(reply->readAll(), maxRowsPerAddon);
             else streamLog(QStringLiteral("stremio: stream request error: %1").arg(reply->errorString()));
             if (--*pending != 0) return; // wait for every provider
 
-            // Each provider's block arrived already sorted and capped; the CONCATENATION is not, so order it
-            // by the same rule before anyone picks from it. Not re-capped: kMaxStreamRows bounds one
-            // response, and dropping rows here would only shrink what the debrid cached-check can hit.
-            StremioTranslate::sortCandidates(*all);
-            streamLog(QStringLiteral("stremio: %1 candidate stream(s)").arg(all->size()));
-            cb(*all);
+            // Each provider's block arrived already sorted and capped; the CONCATENATION is not, so order the
+            // aggregate by the same rule before anyone picks from it.
+            const QVector<StremioTranslate::StreamCandidate> all = StremioTranslate::mergeCandidates(*blocks);
+            streamLog(QStringLiteral("stremio: %1 candidate stream(s)").arg(all.size()));
+            cb(all);
         });
     }
 }
 
-// Last resort once the debrid path yields nothing: any direct http candidate still beats no playback.
-// Reachable because a remembered bingeGroup can put a torrent ahead of an instant url that is still in the
-// list — honour the choice first, but do not let it turn a playable item into an unplayable one.
-static bool playFirstDirect(const QVector<StremioTranslate::StreamCandidate>& v,
-                            const std::function<void(const QString&, const QString&)>& cb)
+// How many infoHashes one TorBox /torrents/checkcached request may carry — a URL-length bound, since the
+// hashes go in the query string. It is ALSO how many rows the resolution path asks each addon to parse: a
+// candidate that was never parsed is a cached release that can never be found, so parsing fewer rows than
+// this can carry throws away hits for nothing.
+static constexpr int kMaxHashes = 60;
+
+// ONE walk of the preference-ordered list, taking the first entry that can start right now. `cachedHashes`
+// empty means the debrid path is unavailable (no key, no torrents, failed batch check), so only direct urls
+// qualify — no special case needed for that.
+//
+// Direct and cached are checked TOGETHER, in rank order, because after the top pick turns out to be cold the
+// correct next choice is simply the best remaining playable row — and the sort already says an instant http
+// url outranks every torrent. Checking only cached torrents here and sweeping for direct urls afterwards
+// silently ranked a cached torrent above an instant url a remembered-but-cold bingeGroup had displaced.
+bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
+                                     const QSet<QString>& cachedHashes,
+                                     const std::function<void(const QString&, const QString&)>& cb)
 {
-    for (const StremioTranslate::StreamCandidate& c : v)
+    for (const StremioTranslate::StreamCandidate& c : ordered)
+    {
         if (c.isDirect())
-        { streamLog(QStringLiteral("stremio: falling back to a direct http url")); cb(c.url, c.mime); return true; }
+        {
+            streamLog(QStringLiteral("stremio: playing direct http url"));
+            cb(c.url, c.mime);
+            return true;
+        }
+        if (!c.infoHash.isEmpty() && cachedHashes.contains(c.infoHash.toLower()))
+        {
+            streamLog(QStringLiteral("torbox: resolving the best CACHED torrent"));
+            resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [cb](const QString& url) { cb(url, QString()); });
+            return true;
+        }
+    }
     return false;
 }
 
@@ -1257,11 +1286,10 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
     streamLog(QStringLiteral("stremio: %1 streams, %2 torrent(s), torbox key %3")
                   .arg(ordered->size()).arg(torrents).arg(key.isEmpty() ? QStringLiteral("missing") : QStringLiteral("present")));
     if (key.isEmpty() || torrents == 0)
-    { if (!playFirstDirect(*ordered, cb)) cb(QString(), QString()); return; }
+    { if (!playFirstPlayable(*ordered, {}, cb)) cb(QString(), QString()); return; }
 
     // Cap the batch (the list is preference-ordered, so the top entries are the relevant ones) to keep the
     // checkcached URL a sane length - a raw-torrent addon can return hundreds of candidates.
-    const int kMaxHashes = 60;
     QStringList hashes;
     for (const StremioTranslate::StreamCandidate& c : *ordered)
     {
@@ -1293,11 +1321,9 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
         else streamLog(QStringLiteral("torbox: batch checkcached error: %1").arg(bre->errorString()));
         streamLog(QStringLiteral("torbox: %1 candidate(s) cached").arg(cached.size()));
 
-        // First candidate in preference order whose hash is cached -> resolve just that one.
-        for (const StremioTranslate::StreamCandidate& c : *ordered)
-            if (!c.infoHash.isEmpty() && cached.contains(c.infoHash.toLower()))
-            { resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [cb](const QString& url) { cb(url, QString()); }); return; }
-        if (!playFirstDirect(*ordered, cb)) cb(QString(), QString()); // nothing cached -> can't stream right now
+        // First candidate in preference order that is playable now — an instant url or a cached hash, whichever
+        // ranks higher. Nothing qualifying means nothing streamable right now.
+        if (!playFirstPlayable(*ordered, cached, cb)) cb(QString(), QString());
     });
 }
 
@@ -1316,7 +1342,10 @@ void AddonManager::resolveStremioStream(const MediaItem& item,
         ordered->push_back(all[idx]);
         for (int i = 0; i < all.size(); ++i) if (i != idx) ordered->push_back(all[i]);
         playStremioCandidates(ordered, cb);
-    });
+    },
+    // Ask for as many rows as the batch cached-check can carry, NOT the picker's 30. These extra rows are
+    // never shown to anyone; they exist so a user whose only cached release ranks 31-60 still plays.
+    kMaxHashes);
 }
 
 bool AddonManager::hasStreamProvider(const QString& type) const

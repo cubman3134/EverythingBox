@@ -254,7 +254,7 @@ bool validInfoHash(const QString& h)
 
 } // namespace
 
-QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const QByteArray& body)
+QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const QByteArray& body, int maxRows)
 {
     QVector<StreamCandidate> out;
     for (const QJsonValue& sv : QJsonDocument::fromJson(body).object()
@@ -280,8 +280,21 @@ QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const 
         out.push_back(c);
     }
 
+    // Sort THEN cap: capping first would keep the 30 rows the addon happened to list, not the 30 best.
     sortCandidates(out);
-    if (out.size() > kMaxStreamRows) out.resize(kMaxStreamRows);
+    if (maxRows >= 0 && out.size() > maxRows) out.resize(maxRows);
+    return out;
+}
+
+QVector<StremioTranslate::StreamCandidate>
+StremioTranslate::mergeCandidates(const QVector<QVector<StreamCandidate>>& perAddon)
+{
+    QVector<StreamCandidate> out;
+    int total = 0;
+    for (const QVector<StreamCandidate>& block : perAddon) total += block.size();
+    out.reserve(total);
+    for (const QVector<StreamCandidate>& block : perAddon) out += block;
+    sortCandidates(out);   // NOT optional: a concatenation of sorted blocks is not itself sorted
     return out;
 }
 

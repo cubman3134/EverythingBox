@@ -113,8 +113,16 @@ namespace StremioTranslate
         bool isDirect() const { return url.startsWith(QStringLiteral("http")); }
     };
 
-    // Usable candidates only, sorted best-first and capped at kMaxStreamRows.
-    QVector<StreamCandidate> parseStreams(const QByteArray& body);
+    // Usable candidates only, sorted best-first and capped at `maxRows`.
+    //
+    // The cap is a PARAMETER, not a constant, because two callers want two different bounds out of the same
+    // parse. The picker wants kMaxStreamRows — past 30 rows nobody is choosing. The debrid resolution path
+    // wants as many as its batch cached-check can carry: it never shows these rows, it only asks TorBox
+    // "which of these hashes do you already have", and a row it never parsed is a cached release it can
+    // never play. Baking the picker's bound into the parse silently halved that pool for the single-addon
+    // setup (one Torrentio response is routinely 50-100+ rows), turning "plays fine" into "nothing cached".
+    // Same parse, two bounds — do not collapse them back together.
+    QVector<StreamCandidate> parseStreams(const QByteArray& body, int maxRows = kMaxStreamRows);
 
     // The candidate order parseStreams applies: instant beats a debrid round-trip, then seeders, then size.
     // Exposed rather than only applied inside parseStreams because an AGGREGATE across several stream addons
@@ -122,6 +130,14 @@ namespace StremioTranslate
     // above another's best, and auto-play would take a cold torrent over a neighbour's instant http url.
     // Stable, so an addon's own ordering survives among rows this cannot tell apart.
     void sortCandidates(QVector<StreamCandidate>& v);
+
+    // Flatten several addons' (individually sorted) blocks into ONE list ordered by sortCandidates.
+    // This exists as a named, testable function rather than a concat-then-sort at the call site because the
+    // concatenation ALONE is a plausible-looking bug: each block is sorted, so the merged list reads as
+    // sorted right up until addon B's instant http url sits below addon A's cold torrent and auto-play takes
+    // the torrent. Not re-capped — the per-response bound already applied, and dropping rows here would only
+    // shrink what the debrid cached-check can hit.
+    QVector<StreamCandidate> mergeCandidates(const QVector<QVector<StreamCandidate>>& perAddon);
 
     // One picker row: "1080p · Release.Name.x265 👤 42 · 2.1 GB". The seeder count is NEVER appended —
     // it was scraped out of the very title being rendered, so it is redundant by construction — and the

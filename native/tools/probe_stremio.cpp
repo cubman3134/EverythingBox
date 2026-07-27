@@ -505,23 +505,61 @@ int main(int argc, char** argv)
                   == (QVector<int>{0}), "a per-resource prefix list routes on its own terms");
     }
 
-    // ------------------------------------------------- 14. sortCandidates on an AGGREGATE
+    // ------------------------------------------------- 14. mergeCandidates: the AGGREGATE across addons
     {
-        // Two addons' already-sorted blocks, concatenated the way listStremioStreams builds them: addon A's
-        // torrents first, then addon B's instant http url. Ranking the merged list is what stops auto-play
-        // taking A's cold torrent over B's direct stream — the per-block sort inside parseStreams cannot.
-        QVector<StreamCandidate> agg;
+        // Two addons' blocks, EACH ALREADY SORTED, exactly as listStremioStreams hands them over: addon A's
+        // torrents (90, 40) and addon B's instant http url ahead of its own torrent (70). Both blocks are
+        // internally correct, so a plain concatenation reads as sorted — and puts A's cold torrent first.
+        // Merging is what stops auto-play taking it over B's instant stream.
+        QVector<StreamCandidate> a, b;
         StreamCandidate a1; a1.infoHash = QStringLiteral("a"); a1.seeders = 90;
         StreamCandidate a2; a2.infoHash = QStringLiteral("b"); a2.seeders = 40;
         StreamCandidate b1; b1.url = QStringLiteral("https://b/direct");
         StreamCandidate b2; b2.infoHash = QStringLiteral("c"); b2.seeders = 70;
-        agg << a1 << a2 << b1 << b2;
-        sortCandidates(agg);
+        a << a1 << a2;
+        b << b1 << b2;
+        // Sanity: each block IS sorted on its own, so the failure this pins is the merge's, not the fixture's.
+        QVector<StreamCandidate> aSorted = a, bSorted = b;
+        sortCandidates(aSorted); sortCandidates(bSorted);
+        CHECK(aSorted[0].infoHash == a[0].infoHash && bSorted[0].url == b[0].url,
+              "both fixture blocks are already individually sorted");
+
+        const QVector<StreamCandidate> agg = mergeCandidates({a, b});
+        CHECK(agg.size() == 4, "the merge keeps every row from every addon");
+        // THE assertion: delete the sort inside mergeCandidates and this is the line that fails.
         CHECK(agg[0].url == QStringLiteral("https://b/direct"),
               "the second addon's instant url outranks the first addon's best torrent");
         CHECK(agg[1].seeders == 90 && agg[2].seeders == 70 && agg[3].seeders == 40,
               "and the torrents interleave by seeders ACROSS addons");
         CHECK(pickAuto(agg, QString()) == 0, "so auto-play lands on the instant url");
+
+        // Degenerate shapes the aggregator really does hand it: no providers, and providers that answered
+        // with nothing (a failed request leaves an empty slot in place).
+        CHECK(mergeCandidates({}).isEmpty(), "no providers -> nothing");
+        CHECK(mergeCandidates({{}, {}}).isEmpty(), "providers that all answered empty -> nothing");
+        CHECK(mergeCandidates({{}, a, {}}).size() == 2, "empty slots do not disturb the rows that arrived");
+    }
+
+    // -------------------------------------- 14b. the per-response cap is a PARAMETER, not the debrid bound
+    {
+        // 50 rows from ONE addon — the common single-stream-addon setup. The picker's bound must still be 30,
+        // but the resolution path asks for more so the batch cached-check can reach a release ranked 31-60.
+        // With the cap hardcoded to kMaxStreamRows, a user whose only cached torrent sat at row 31 went from
+        // playing fine to "nothing cached".
+        QByteArray body = QByteArrayLiteral("{\"streams\":[");
+        for (int i = 0; i < 50; ++i)
+            body += QByteArray("{\"name\":\"t") + QByteArray::number(i)
+                  + "\",\"title\":\"\xF0\x9F\x91\xA4 " + QByteArray::number(i)
+                  + "\",\"infoHash\":\"0123456789abcdef0123456789abcdef0123456" + (i % 10 ? "7" : "8")
+                  + "\"},";
+        body.chop(1);
+        body += "]}";
+        CHECK(parseStreams(body).size() == kMaxStreamRows, "the default is still the picker's bound");
+        const QVector<StreamCandidate> deep = parseStreams(body, 60);
+        CHECK(deep.size() == 50, "a larger bound keeps every row the addon offered");
+        CHECK(deep[0].seeders == 49 && deep[30].seeders == 19,
+              "…including the ones past row 30, still in rank order");
+        CHECK(parseStreams(body, 5).size() == 5, "and a smaller bound is honoured too");
     }
 
     // ------------------------------------------------- 15. BingeStore
@@ -588,6 +626,25 @@ int main(int argc, char** argv)
         CHECK(h.lookup(QStringLiteral("ttA")) == QStringLiteral("g1"),
               "a usable entry is read even when unusable ones precede it");
         CHECK(h.lookup(QStringLiteral("ttZ")).isEmpty(), "a key the file never had stays unknown");
+
+        // A put whose WRITE fails must not leave memory ahead of disk. The store points into a directory that
+        // does not exist, so QSaveFile cannot open and save() returns false; put() has to undo its insert.
+        // Otherwise put() reports false while lookup() reports the new value for the rest of the run — and
+        // the first later put that DOES succeed persists this one too, silently.
+        BingeStore ro(QDir(tmp.path()).filePath(QStringLiteral("no-such-dir/binge.json")));
+        ro.load();
+        CHECK(!ro.put(QStringLiteral("ttA"), QStringLiteral("g1")), "a put that cannot be written fails");
+        CHECK(ro.lookup(QStringLiteral("ttA")).isEmpty(), "…and leaves nothing behind in memory");
+        // Same, but OVERWRITING an existing value: the rollback must restore the previous one, not erase it.
+        BingeStore ov(QDir(tmp.path()).filePath(QStringLiteral("ov.json")));
+        ov.load();
+        CHECK(ov.put(QStringLiteral("ttA"), QStringLiteral("good")), "seed a value that did write");
+        CHECK(QFile::remove(QDir(tmp.path()).filePath(QStringLiteral("ov.json"))), "drop its file");
+        CHECK(QDir().mkpath(QDir(tmp.path()).filePath(QStringLiteral("ov.json"))),
+              "…and put a DIRECTORY in its place so the next write cannot succeed");
+        CHECK(!ov.put(QStringLiteral("ttA"), QStringLiteral("bad")), "the overwrite fails to write");
+        CHECK(ov.lookup(QStringLiteral("ttA")) == QStringLiteral("good"),
+              "and the previous choice is restored, not erased");
     }
 
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }

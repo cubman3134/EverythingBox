@@ -41,8 +41,19 @@ QString BingeStore::lookup(const QString& seriesKey) const
 bool BingeStore::put(const QString& seriesKey, const QString& bingeGroup)
 {
     if (seriesKey.isEmpty() || bingeGroup.isEmpty()) return false;
+    // Remember what was there so a failed write can be undone. save() serializes byKey_, so the insert has
+    // to happen first — but if it does not reach disk, leaving it in memory makes put() report false while
+    // lookup() reports the new value for the rest of the run, and the next successful put for ANY series
+    // silently persists this one too. Memory and disk say the same thing, or the put did not happen.
+    const bool had = byKey_.contains(seriesKey);
+    const QString prev = had ? byKey_.value(seriesKey) : QString();
+
     byKey_.insert(seriesKey, bingeGroup);            // the newest choice wins
-    return save();
+    if (save()) return true;
+
+    if (had) byKey_.insert(seriesKey, prev);
+    else     byKey_.remove(seriesKey);
+    return false;
 }
 
 QString BingeStore::seriesKeyFor(const QString& imdbStreamId)
