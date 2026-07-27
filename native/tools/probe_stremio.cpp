@@ -26,6 +26,12 @@ int main(int argc, char** argv)
         CHECK(!parseManifest(QByteArray("{\"id\":\"x\",\"name\":\"y\"}")).isValid(),
               "a manifest with no resources is not Stremio");
         CHECK(!parseManifest(QByteArray("not json at all")).isValid(), "garbage is not Stremio");
+        // Detection needs BOTH keys, so each one has to be pinned WITHOUT the other — a body carrying
+        // neither would still be rejected by half a guard and proves nothing about the other half.
+        CHECK(!parseManifest(QByteArray(R"({"id":"a","resources":["stream"]})")).isValid(),
+              "resources without types is not Stremio");
+        CHECK(!parseManifest(QByteArray(R"({"id":"a","types":["movie"]})")).isValid(),
+              "types without resources is not Stremio");
     }
 
     // ------------------------------------------------- 2. resources: strings, objects, MIXED
@@ -124,7 +130,102 @@ int main(int argc, char** argv)
         CHECK(byId(m, "legacyopt")->use == CatalogUse::Browse, "extraSupported alone is not required");
     }
 
-    // ------------------------------------------------- 5. behaviorHints
+    // ------------------------------------------------- 5. BOTH extra forms on ONE catalog: MERGE
+    {
+        // Neither fixture above carries both forms, so a replace-style legacy block would pass them all.
+        // A manifest may declare the modern objects AND the legacy arrays; the legacy names must merge
+        // INTO the parsed objects, never stand in for them.
+        const QByteArray body = R"({
+          "id": "org.test.bothforms",
+          "types": ["movie"],
+          "resources": ["catalog"],
+          "catalogs": [
+            { "type": "movie", "id": "upgrade", "name": "By Genre",
+              "extra": [ { "name": "genre", "options": ["Action", "Comedy"] } ],
+              "extraRequired": ["genre"] },
+            { "type": "movie", "id": "adds", "name": "By Genre and Studio",
+              "extra": [ { "name": "genre", "options": ["Action", "Comedy"] } ],
+              "extraRequired": ["studio"] }
+          ]
+        })";
+        const Manifest m = parseManifest(body);
+
+        // Case 1: legacy names the SAME extra — it upgrades isRequired, the object's options survive.
+        const Catalog* u = byId(m, "upgrade");
+        CHECK(u->extras.size() == 1, "the legacy name merges into the modern entry, it does not duplicate it");
+        CHECK(u->extras.first().isRequired, "extraRequired upgrades the modern entry to required");
+        CHECK(u->use == CatalogUse::Browse, "…and the modern options survive, so it is still browsable");
+        CHECK(u->presets.value(QStringLiteral("genre")) == QStringLiteral("Action"),
+              "…preselecting the first option the object declared");
+
+        // Case 2: legacy names a DIFFERENT extra — it is added, option-less, so the catalog dies.
+        const Catalog* a = byId(m, "adds");
+        CHECK(a->extras.size() == 2, "a legacy name not in extra[] is ADDED alongside it");
+        CHECK(a->use == CatalogUse::Unsatisfiable,
+              "…and being required with no options makes the catalog unsatisfiable");
+        CHECK(!a->skipReason.isEmpty(), "…with a reason naming what is missing");
+    }
+
+    // ------------------------------------------------- 6. MULTIPLE required extras
+    {
+        const QByteArray body = R"({
+          "id": "org.test.multireq",
+          "types": ["movie"],
+          "resources": ["catalog"],
+          "catalogs": [
+            { "type": "movie", "id": "searchandgenre", "name": "Search by Genre",
+              "extra": [ { "name": "search", "isRequired": true },
+                         { "name": "genre", "isRequired": true, "options": ["Action", "Comedy"] } ] },
+            { "type": "movie", "id": "genrefirst", "name": "Genre then Mystery",
+              "extra": [ { "name": "genre", "isRequired": true, "options": ["Action", "Comedy"] },
+                         { "name": "mystery", "isRequired": true } ] },
+            { "type": "movie", "id": "mysteryfirst", "name": "Mystery then Genre",
+              "extra": [ { "name": "mystery", "isRequired": true },
+                         { "name": "genre", "isRequired": true, "options": ["Action", "Comedy"] } ] }
+          ]
+        })";
+        const Manifest m = parseManifest(body);
+
+        // Search dominates a defaultable extra — and dominating means the default is DROPPED. Left in
+        // place, presets["genre"] would seed the query map and quietly filter every search to Action.
+        const Catalog* sg = byId(m, "searchandgenre");
+        CHECK(sg->use == CatalogUse::SearchOnly,
+              "required search wins over a required extra we could have defaulted");
+        CHECK(sg->presets.isEmpty(),
+              "…and the default is dropped, so a search is never silently filtered by it");
+
+        // Same manifest, extras reordered: the classifier returns on the first extra it cannot supply,
+        // so the struct must be scrubbed on that path or its presets would depend on declaration order.
+        const Catalog* gf = byId(m, "genrefirst");
+        const Catalog* mf = byId(m, "mysteryfirst");
+        CHECK(gf->use == CatalogUse::Unsatisfiable && mf->use == CatalogUse::Unsatisfiable,
+              "an option-less required extra is unsatisfiable in either declaration order");
+        CHECK(!gf->skipReason.isEmpty() && !mf->skipReason.isEmpty(), "…both saying why");
+        CHECK(gf->presets.isEmpty(),
+              "an unsatisfiable catalog keeps NO presets, even ones recorded before the verdict");
+        CHECK(gf->presets == mf->presets, "…so reordering the extras cannot change the result");
+    }
+
+    // ------------------------------------------------- 7. duplicate names inside extra[]
+    {
+        const QByteArray body = R"({
+          "id": "org.test.dupes",
+          "types": ["movie"],
+          "resources": ["catalog"],
+          "catalogs": [
+            { "type": "movie", "id": "dupe", "name": "Twice",
+              "extra": [ { "name": "genre", "options": ["Action", "Comedy"] },
+                         { "name": "genre", "options": ["Sci-Fi"] } ] }
+          ]
+        })";
+        const Manifest m = parseManifest(body);
+        const Catalog* d = byId(m, "dupe");
+        CHECK(d->extras.size() == 1, "a name declared twice in extra[] yields ONE Extra, not a doubled control");
+        CHECK(d->extras.first().options == (QStringList{ QStringLiteral("Action"), QStringLiteral("Comedy") }),
+              "…the FIRST declaration wins, as on the legacy path");
+    }
+
+    // ------------------------------------------------- 8. behaviorHints
     {
         const QByteArray body = R"({
           "id": "org.test.cfg", "types": ["movie"], "resources": ["stream"],
