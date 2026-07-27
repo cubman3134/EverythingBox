@@ -233,9 +233,14 @@ private:
     // release turns out to be cold, "best remaining" is whatever ranks next, and the sort ranks an instant
     // http url ABOVE every torrent. Splitting the two made a stale binge preference downgrade an instant
     // stream into a debrid round-trip.
+    //
+    // `from` is the index to resume at: a cached torrent whose resolve chain comes back empty re-enters here
+    // at the NEXT candidate rather than ending the attempt, because the batch check already proved the rest of
+    // the cached rows are cached. Callers start at 0; only the retry continuation passes a non-zero value.
     bool playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
                            const QSet<QString>& cachedHashes,
-                           const std::function<void(const QString& url, const QString& mime)>& cb);
+                           const std::function<void(const QString& url, const QString& mime)>& cb,
+                           int from = 0);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,

@@ -195,6 +195,53 @@ int main(int argc, char** argv)
         CHECK(NavOverlay::topmost() == nullptr, "the cancelled OSK closed");
     }
 
+    // -------------------------------------------------- 8b. Shift/symbols relabel the grid, not flatten it
+    {
+        // The key grid stores each button's row/col in a DYNAMIC property that relabel() reads back. Naming it
+        // "pos" collided with QWidget's own QPoint `pos` property: the int write was swallowed, every read
+        // returned 0, and one Shift relabelled all 40 keys to "1" — so typing anything uppercase or symbolic
+        // inserted "1" instead. Controller/TV users could not type a capital letter at all.
+        //
+        // Counting the keys captioned "1" pins it without depending on the grid's internals: exactly one key
+        // (the digit) may ever read "1", on any page and in any shift state.
+        auto* osk = new Osk(QStringLiteral("Enter text"), QString(), QLineEdit::Normal,
+                            [](const QString&, bool) {}, &win);
+        pump();
+        auto onesAndUppers = [osk](int* ones, int* uppers) {
+            *ones = 0; *uppers = 0;
+            for (QPushButton* b : osk->findChildren<QPushButton*>())
+            {
+                const QString t = b->text();
+                if (t == QStringLiteral("1")) ++*ones;
+                if (t.size() == 1 && t.at(0).isLetter() && t.at(0).isUpper()) ++*uppers;
+            }
+        };
+        int ones = 0, uppers = 0;
+        onesAndUppers(&ones, &uppers);
+        CHECK(ones == 1, "the unshifted letter page shows exactly one \"1\" key");
+        CHECK(uppers == 0, "the unshifted letter page is lowercase");
+
+        // Press Shift, then the symbols page, via their own buttons (the same path a pad Enter drives).
+        auto clickLabel = [osk](const QString& label) {
+            for (QPushButton* b : osk->findChildren<QPushButton*>())
+                if (b->text() == label) { b->click(); return true; }
+            return false;
+        };
+        CHECK(clickLabel(QString::fromUtf8("\xE2\x87\xA7")), "the Shift key exists");
+        pump();
+        onesAndUppers(&ones, &uppers);
+        CHECK(ones == 1, "Shift relabels the letters — it does NOT turn every key into \"1\"");
+        CHECK(uppers > 20, "Shift actually uppercases the letter keys");
+
+        CHECK(clickLabel(QStringLiteral("#+=")), "the symbols key exists");
+        pump();
+        onesAndUppers(&ones, &uppers);
+        CHECK(ones == 1, "the symbols page relabels too — still exactly one \"1\" key");
+
+        osk->dismiss(0);
+        pump();
+    }
+
     // ---------------------------------------------------------------- 9. a text row opens the OSK on Enter
     {
         auto* page = new QWidget(&win);
