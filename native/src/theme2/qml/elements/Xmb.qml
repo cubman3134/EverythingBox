@@ -16,6 +16,9 @@ Item {
     property var ctx: ({})
     property var host
 
+    // Phone form factor: the TV-side metadata panel can't share a 402pt screen with the item column —
+    // it hides, and the item labels take the freed width (details stay reachable via the Details action).
+    readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
     readonly property var cats: host && host.categories ? host.categories : []
     readonly property int catIndex: host ? host.catIndex : 0
     readonly property var items: host && host.items ? host.items : []
@@ -251,8 +254,11 @@ Item {
                 visible: !row.hdr // header rows draw their own left-aligned divider label instead
                 anchors.left: parent.right; anchors.leftMargin: xmb.width * 0.015
                 anchors.verticalCenter: parent.verticalCenter
-                // Kept narrow so it never runs under the metadata panel on the right (the full title shows there).
-                width: xmb.width * 0.30; spacing: xmb.height * 0.004
+                // Kept narrow so it never runs under the metadata panel on the right (the full title shows
+                // there) — except on mobile, where that panel is hidden and the label takes the freed width.
+                width: xmb.mobile ? Math.max(xmb.width * 0.30, xmb.width - (xmb.crossX + xmb.rowSize / 2 + xmb.width * 0.015) - 16)
+                                  : xmb.width * 0.30
+                spacing: xmb.height * 0.004
                 Text {
                     width: parent.width
                     text: (row.modelData && row.modelData.title) ? row.modelData.title : ""
@@ -287,7 +293,7 @@ Item {
     Item {
         id: meta
         readonly property var m: (xmb.host && xmb.host.selectedMeta) ? xmb.host.selectedMeta : ({})
-        readonly property bool shown: !!(m && m.title)
+        readonly property bool shown: !!(m && m.title) && !xmb.mobile
         visible: opacity > 0.01
         opacity: shown ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: 180; easing.type: Easing.OutCubic } }
