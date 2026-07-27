@@ -350,8 +350,14 @@ static std::unique_ptr<LoadedAddon> buildRemoteAddon(const QString& base, const 
 }
 
 // Build the Stremio catalog URL for a route id ("type/id"), using the parsed catalog so its required-extra
-// defaults are applied. Falls back to a bare path when the manifest is unknown (a cached manifest from an
-// older build), so an upgrade never leaves a catalog unreachable.
+// defaults are applied.
+//
+// The fallback below is NOT for an unparsed manifest: every stremio LoadedAddon is built by buildRemoteAddon,
+// which always assigns stremioManifest, so a match failure never means "manifest unknown". What actually
+// reaches it is an EMPTY routeId — i.e. a caller that asked for a catalog without naming one (requestSearch,
+// and two LibraryView call sites). The URL it then produces ("/catalog///...") is not a real route, so any
+// caller that wants results must pass a real catalog id; the fallback only keeps a malformed ask from
+// crashing, it cannot make it work.
 static QUrl stremioCatalogUrl(const LoadedAddon* src, const QString& routeId, const QString& query, int page,
                               const QMap<QString, QString>& filters)
 {
@@ -387,9 +393,15 @@ static QVector<CatalogFilter> stremioCatalogFilters(const LoadedAddon* src, cons
             CatalogFilter f;
             f.key = e.name;
             f.label = e.name; f.label[0] = f.label[0].toUpper();
-            f.options.push_back({ QString(), QObject::tr("Any") });
-            const int cap = e.optionsLimit > 1 ? qMin(e.optionsLimit, int(e.options.size())) : int(e.options.size());
-            for (int i = 0; i < cap; ++i) f.options.push_back({ e.options.at(i), e.options.at(i) });
+            // No "Any" row for an extra we PRESET: the request carries that value whether the user touches the
+            // combo or not, so offering "Any" (and selecting it by default) would state a grid is unfiltered
+            // while it is filtered. Index 0 is the preset itself, which is also options.first() — picking it
+            // explicitly produces the identical request.
+            if (!c.presets.contains(e.name)) f.options.push_back({ QString(), QObject::tr("Any") });
+            // Every option, never a prefix of them: optionsLimit is how many values a user may SELECT (schema
+            // default 1), not how long the list is. Capping here would hide 17 of a 20-genre list behind an
+            // "optionsLimit: 3" that means something else entirely.
+            for (const QString& opt : e.options) f.options.push_back({ opt, opt });
             out.push_back(f);
         }
         break;

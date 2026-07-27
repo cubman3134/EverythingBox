@@ -115,8 +115,18 @@ void CatalogResolver::startJob(const QSharedPointer<Job>& job)
         }
         else
         {
-            const int reqId = addons_->requestSearch(s, query);   // movie jobs: untyped search defaults to movies — correct
-            if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+            // Same rule as the show branch, and for a sharper reason: requestSearch on a RemoteHttp source is
+            // dispatchRemoteCatalog with an EMPTY catalog id, which cannot name a Stremio route — the URL
+            // builder falls through to its bare path and emits "<base>/catalog///search=<q>.json", a 404 fired
+            // once per movie per addon while the real catalog is never asked. Since search-only catalogs are
+            // now carried (they are the whole point of the Stremio track), that hit every such addon. Query
+            // each movie/mixed catalog by its own id instead.
+            for (const AddonCatalog& c : addons_->catalogs(s))
+            {
+                if (c.type != QStringLiteral("movie") && c.type != QStringLiteral("mixed")) continue;
+                const int reqId = addons_->requestCatalog(s, c.id, query, 1);
+                if (reqId >= 0) { job->issued = true; job->outstanding.insert(reqId); reqToJob_.insert(reqId, job->id); }
+            }
         }
     }
     if (job->outstanding.isEmpty()) { const quint64 id = job->id; QTimer::singleShot(0, this, [this, id]{ finishJob(id); }); return; }

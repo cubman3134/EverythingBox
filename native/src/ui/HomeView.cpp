@@ -2987,7 +2987,23 @@ void HomeView::rebuildFilterBar(const QVector<CatalogFilter>& filters)
     // catalogs) - not on every reload (which would recreate the combos and re-fire their change signals).
     QString sig;
     for (const CatalogFilter& f : filters) sig += f.key + QLatin1Char('#') + QString::number(f.options.size()) + QLatin1Char(';');
-    if (sig == filterSig_) { filterBar_->setVisible(true); return; }
+    if (sig == filterSig_)
+    {
+        // Same filter SHAPE does not mean the same LEVEL. Switching tabs (selectType clears stack_) or
+        // drilling into a container installs a level whose `filters` map is empty, while these combos still
+        // show the previous level's pick — the bar would name a filter the request does not carry. Re-sync
+        // the indices from the live level instead of trusting the reused widgets. Signals stay blocked:
+        // onFilterChanged would write the stale value straight back into the fresh level and reload.
+        const QMap<QString, QString> cur = stack_.isEmpty() ? QMap<QString, QString>() : stack_.last().filters;
+        for (QComboBox* c : filterCombos_)
+        {
+            const QSignalBlocker block(c);
+            const int idx = c->findData(cur.value(c->property("filterKey").toString()));
+            c->setCurrentIndex(idx >= 0 ? idx : 0);
+        }
+        filterBar_->setVisible(true);
+        return;
+    }
     filterSig_ = sig;
 
     for (QComboBox* c : filterCombos_) c->deleteLater();
