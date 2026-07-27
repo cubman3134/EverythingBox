@@ -13,6 +13,10 @@ Item {
     property var ctx: ({})
     property var host
 
+    // Phone: theme button slots are width×height FRACTIONS tuned for landscape — portrait warps them
+    // into tall slivers (0.078w × 0.135h ≈ 31×118pt). The visible capsule clamps to a sane touch size,
+    // centered in whatever slot the theme gave it. TV/desktop fill the slot exactly as themed.
+    readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
     readonly property string action: T.val(el, "action", "")
     readonly property string glyph: T.val(el, "glyph", "")
     readonly property string label: T.val(el, "label", "")
@@ -80,7 +84,9 @@ Item {
 
     Rectangle {
         id: cap
-        anchors.fill: parent
+        anchors.centerIn: parent
+        width: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.width
+        height: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.height
         radius: btn.round ? Math.min(width, height) / 2 : height / 2
         scale: btn.focused ? 1.09 : (ma.pressed ? 0.93 : (ma.containsMouse ? 1.05 : 1.0))
         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
