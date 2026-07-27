@@ -1175,10 +1175,12 @@ static void runTouchAsserts()
     }
 
     // ---- (g) Channels: a vertical swipe pages the grid + look-ahead prefetch (round 6) ----
-    // A channels-element fixture (mobile forces the 2x3 page -> 6 per page) with 14 items -> 3 pages. A
-    // vertical mouse-drag (the DragHandler driver — same note as the flick) must flip a WHOLE page through
-    // gotoItemSelectOnly (selection +-perPage, never an activation), and landing on a page whose successor
-    // isn't fully loaded must fire nearEnd() exactly once (the per-page latch stops repeats).
+    // A channels-element fixture in a PORTRAIT window (mobile portrait forces the 2x3 page -> 6 per page;
+    // round 7 made the mobile grid orientation-aware, so the window must actually be portrait) with 14
+    // items -> 3 pages. A vertical mouse-drag on the viewport MouseArea (round 7: the touch tap/swipe
+    // arbiter — per-cell areas are desktop-only) must flip a WHOLE page through gotoItemSelectOnly
+    // (selection +-perPage, never an activation), and landing on a page whose successor isn't fully
+    // loaded must fire nearEnd() exactly once (the per-page latch stops repeats).
     {
         Settings::setDisplayMode(QStringLiteral("mobile"));
         FormFactor::instance().refresh();
@@ -1209,7 +1211,7 @@ static void runTouchAsserts()
             cr->setProperty("currentIndex", 0);
             cr->setProperty("currentView", QStringLiteral("home"));
             cr->setProperty("theme", chTheme);
-            cqw.resize(1280, 720);
+            cqw.resize(720, 1280);   // portrait: the phone shape whose 2x3 page the asserts count on
             cqw.show();
             pump(); pump();
             cqw.grabFramebuffer();   // force a render pass so the pages realize their delegates
@@ -1227,19 +1229,19 @@ static void runTouchAsserts()
 
             // Swipe UP (finger travels up) -> the NEXT page: selection 0 -> 6, and page 1's successor is
             // only partially loaded ((1+2)*6 = 18 > 14), so the prefetch fires nearEnd once.
-            mouseDrag(cqw.quickWindow(), QPoint(640, 520), QPoint(640, 200), 6);
+            mouseDrag(cqw.quickWindow(), QPoint(360, 900), QPoint(360, 400), 6);
             CHECK(cg.index() == 6 && cAct == 0,
                   "channels(mobile): a vertical swipe up flips one whole page (select-only, +perPage)");
             CHECK(near.count() == 1,
                   "channels(mobile): landing on the last loaded page fires nearEnd() once (prefetch before blanks)");
 
             // Swipe DOWN -> the previous page (6 -> 0); page 0's successor IS fully loaded (12 < 14): no prefetch.
-            mouseDrag(cqw.quickWindow(), QPoint(640, 200), QPoint(640, 520), 6);
+            mouseDrag(cqw.quickWindow(), QPoint(360, 400), QPoint(360, 900), 6);
             CHECK(cg.index() == 0 && cAct == 0,
                   "channels(mobile): a vertical swipe down flips back one page (select-only)");
 
             // Up again -> page 1 again: the per-page latch must NOT re-fire nearEnd for the same page.
-            mouseDrag(cqw.quickWindow(), QPoint(640, 520), QPoint(640, 200), 6);
+            mouseDrag(cqw.quickWindow(), QPoint(360, 900), QPoint(360, 400), 6);
             CHECK(cg.index() == 6 && near.count() == 1,
                   "channels(mobile): re-landing on the same page does NOT re-fire nearEnd (latched)");
         }
