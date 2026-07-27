@@ -663,6 +663,29 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                             QVariantMap d = dr->property("detailData").toMap();
                             for (auto it = meta.constBegin(); it != meta.constEnd(); ++it)
                                 if (it.key() != QStringLiteral("index")) d.insert(it.key(), it.value());
+                            // The detail poster binds selected.image, but scraped GAME art arrives as role
+                            // keys (box/poster/hero — MediaArt::writeInto never touches "image"). Fill the
+                            // poster slot from the best role when the row itself carried no art.
+                            if (d.value(QStringLiteral("image")).toString().isEmpty())
+                                for (const char* role : { "box", "poster", "boxfront", "hero", "logo" })
+                                    if (!d.value(QLatin1String(role)).toString().isEmpty())
+                                    { d.insert(QStringLiteral("image"), d.value(QLatin1String(role))); break; }
+                            // Enrichment carries `facts` as a list (the hover panel's shape); the detail
+                            // page binds the JOINED `factsText` (themedDetailData's shape) — join it here
+                            // with the same separator so late-arriving game/addon facts actually render.
+                            if (meta.contains(QStringLiteral("facts")))
+                            {
+                                QStringList fl;
+                                for (const QVariant& fv : meta.value(QStringLiteral("facts")).toList())
+                                {
+                                    const QVariantMap fm = fv.toMap();
+                                    const QString l = fm.value(QStringLiteral("label")).toString();
+                                    const QString v = fm.value(QStringLiteral("value")).toString();
+                                    if (!v.isEmpty()) fl << (l.isEmpty() ? v : (l + QStringLiteral(": ") + v));
+                                }
+                                if (!fl.isEmpty())
+                                    d.insert(QStringLiteral("factsText"), fl.join(QStringLiteral("     •     ")));
+                            }
                             dr->setProperty("detailData", d);
                         }
             }
