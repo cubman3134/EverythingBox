@@ -39,7 +39,9 @@ Item {
             var hs = String(((hr + 11) % 12) + 1)          // 1..12, no leading zero
             var ms = (mn < 10 ? "0" : "") + mn
 
-            var dh = H * 0.82, dw = dh * 0.54
+            // Digit height fits BOTH axes: H:MM + AM/PM needs ~3.9x the digit height in width, and a
+            // portrait phone's clock box is width-bound — without the clamp the digits run off the box.
+            var dh = Math.min(H * 0.82, W / 4.3), dw = dh * 0.54
             var t = dw * Number(T.val(clk.el, "thickness", 0.16))
             var gap = dw * 0.22, colonW = dw * 0.52
             var y = (H - dh) / 2, yb = y + dh
