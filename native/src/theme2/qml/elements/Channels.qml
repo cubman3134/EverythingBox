@@ -13,8 +13,11 @@ Item {
     property var host
     property var card: T.val(el, "card", ({}))
 
-    readonly property int cols: Math.max(1, Number(T.val(el, "columns", 4)))
-    readonly property int rows: Math.max(1, Number(T.val(el, "rows", 3)))
+    // Phone: the theme's landscape page density (4×3) crams 12 tiny cells onto a portrait screen —
+    // drop to 2×3 so each channel card is a readable, tappable size. TV/desktop keep the theme's grid.
+    readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
+    readonly property int cols: mobile ? 2 : Math.max(1, Number(T.val(el, "columns", 4)))
+    readonly property int rows: mobile ? 3 : Math.max(1, Number(T.val(el, "rows", 3)))
     readonly property int perPage: cols * rows
     readonly property var items: (ctx && ctx.items) ? ctx.items : []
     readonly property int count: items.length
@@ -26,6 +29,11 @@ Item {
     readonly property int renderedPages: pageCount + 1
     readonly property int page: Math.min(pageCount - 1, Math.floor(cur / perPage))
 
+    // Phone: the theme places the grid near the top of the view — pad it below the device cutout
+    // (Dynamic Island) so the first row's labels aren't shadowed. The element sits ~3% down already,
+    // so only the remainder of the real inset is added. Zero on TV/desktop.
+    readonly property real topPad: mobile && (typeof safeArea !== "undefined") && safeArea
+                                   ? Math.max(0, safeArea.top - height * 0.04) : 0
     readonly property real arrowW: height * 0.16         // page-arrow diameter (the arrows float over the grid)
     readonly property real gap: Number(T.val(el, "spacing", 0.01)) * (host ? host.width : 1280)
     // The grid spans the full width so the next column peeks right to the edge; the arrows float on top of it
@@ -34,12 +42,12 @@ Item {
     readonly property real peek: Number(T.val(el, "peek", 0.35))  // width of the peeking column, in cells
     readonly property real cellW: vpW / (cols + peek)    // a page is `cols` wide; the peek shows the next column
     readonly property real pageW: cols * cellW
-    readonly property real cellH: height / rows
+    readonly property real cellH: (height - topPad) / rows
 
     // ---- the pages (a Row of full-width pages, translated to the current page) ----
     Item {
         id: vp
-        x: 0; width: ch.vpW; height: ch.height; clip: true
+        x: 0; y: ch.topPad; width: ch.vpW; height: ch.height - ch.topPad; clip: true
         Row {
             x: -ch.page * ch.pageW
             Behavior on x { NumberAnimation { duration: 240; easing.type: Easing.OutCubic } }
