@@ -699,10 +699,32 @@ void AddonManager::seedDefaultStremioSources()
 
     // One-time: seed Torrentio as a stream source. It returns infoHashes (raw torrents); our TorBox resolver
     // (Settings -> General -> Streaming) turns the cached ones into playable links - no third-party debrid.
+    // The host is strem.FUN, not strem.io: torrentio.strem.io is NXDOMAIN, so seeding it gave every new
+    // install a stream provider that could never answer.
     if (!store().value(QStringLiteral("addon.torrentio.seeded")).toBool())
     {
         store().setValue(QStringLiteral("addon.torrentio.seeded"), true); store().sync();
-        addRemoteSource(QStringLiteral("https://torrentio.strem.io/manifest.json"));
+        addRemoteSource(QStringLiteral("https://torrentio.strem.fun/manifest.json"));
+    }
+
+    // One-time: repoint an ALREADY-PERSISTED torrentio.strem.io entry at the live host. Fixing the seed above
+    // only helps a fresh install; anyone who ran an earlier build has the dead URL in addon.remote.urls and
+    // would keep it forever (no error surfaces — a dead stream source just never returns candidates).
+    // Runs after the seed block so a first run sets both flags and finds nothing to migrate.
+    if (!store().value(QStringLiteral("addon.torrentio.host.migrated")).toBool())
+    {
+        store().setValue(QStringLiteral("addon.torrentio.host.migrated"), true); store().sync();
+        const QString dead = QStringLiteral("torrentio.strem.io");
+        const QString live = QStringLiteral("torrentio.strem.fun");
+        // remoteSourceUrls() returns a fresh list by value, so removing/adding inside the loop is safe.
+        for (const QString& u : remoteSourceUrls())
+        {
+            if (!u.contains(dead, Qt::CaseInsensitive)) continue;
+            QString fixed = u;
+            fixed.replace(dead, live, Qt::CaseInsensitive);
+            removeRemoteSource(u);        // drops the URL and its cached (never-fetched) manifest
+            addRemoteSource(fixed);       // re-adds it, fetching the live manifest
+        }
     }
 }
 
@@ -971,6 +993,21 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
         // convention), so this points at somewhere real rather than telling the user to go look for it.
         if (src->stremioManifest.configurable && !base.isEmpty())
             cannot += QLatin1Char(' ') + tr("Open its configuration page at %1, then re-add it.").arg(base);
+    }
+    else if (stremio && catalogId.isEmpty())
+    {
+        // A caller asked this Stremio add-on for a catalog without naming one. Stremio has no "default"
+        // catalog route — every catalog is /catalog/{type}/{id}.json — so the URL builder produced
+        // "{base}/catalog//.json", which 404s by construction — the "/catalog//.json - server replied: Not
+        // Found" line against Cinemeta in stream_debug.log. Reachable from the two LibraryView call sites that
+        // pass an empty id for "this source's landing page" (onSourceChanged fires on its own when the source
+        // list populates, so no user action is needed) and from requestSearch. Nothing caches a failed fetch,
+        // so it repeats on every visit. Answer locally instead of spending a round-trip on a route that
+        // cannot exist.
+        const QString name = src->manifest.name.isEmpty() ? src->manifest.id : src->manifest.name;
+        cannot = src->manifest.catalogs.isEmpty()
+                     ? tr("%1 doesn't publish any browsable catalogs.").arg(name)
+                     : tr("Pick one of %1's catalogs — it has no single default list.").arg(name);
     }
     else if (stremio)
     {
@@ -1285,10 +1322,12 @@ static constexpr int kMaxHashes = 60;
 // silently ranked a cached torrent above an instant url a remembered-but-cold bingeGroup had displaced.
 bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
                                      const QSet<QString>& cachedHashes,
-                                     const std::function<void(const QString&, const QString&)>& cb)
+                                     const std::function<void(const QString&, const QString&)>& cb,
+                                     int from)
 {
-    for (const StremioTranslate::StreamCandidate& c : ordered)
+    for (int i = qMax(0, from); i < ordered.size(); ++i)
     {
+        const StremioTranslate::StreamCandidate& c = ordered.at(i);
         if (c.isDirect())
         {
             streamLog(QStringLiteral("stremio: playing direct http url"));
@@ -1298,7 +1337,21 @@ bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandi
         if (!c.infoHash.isEmpty() && cachedHashes.contains(c.infoHash.toLower()))
         {
             streamLog(QStringLiteral("torbox: resolving the best CACHED torrent"));
-            resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [cb](const QString& url) { cb(url, QString()); });
+            // A resolve can come back empty even for a hash the batch check just reported as cached (a
+            // createtorrent/mylist/requestdl step can fail or hand back no url). Ending the WHOLE attempt on
+            // that throws away every other candidate the same batch check already proved cached — so continue
+            // down the ranked list from the next entry instead, and only report "nothing playable" once the
+            // list is genuinely exhausted.
+            //
+            // `ordered` and `cachedHashes` are borrowed references owned by the caller's frame (one call site
+            // passes a temporary `{}`), so the continuation copies both rather than capturing them.
+            auto rest = std::make_shared<QVector<StremioTranslate::StreamCandidate>>(ordered);
+            auto cached = std::make_shared<QSet<QString>>(cachedHashes);
+            resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, rest, cached, cb, i](const QString& url) {
+                if (!url.isEmpty()) { cb(url, QString()); return; }
+                streamLog(QStringLiteral("torbox: cached torrent failed to resolve — trying the next candidate"));
+                if (!playFirstPlayable(*rest, *cached, cb, i + 1)) cb(QString(), QString());
+            });
             return true;
         }
     }

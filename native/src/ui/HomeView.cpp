@@ -1558,7 +1558,7 @@ void HomeView::browseActivate(int index)
 
 bool HomeView::browseBack()
 {
-    if (stack_.size() > 1) { stack_.pop_back(); loadTop(); return true; }
+    if (stack_.size() > 1) { stack_.pop_back(); emit browseLevelPopped(); loadTop(); return true; }
     return false; // at the catalog root -> the host returns to the themed home
 }
 
@@ -2995,9 +2995,11 @@ void HomeView::openFavorite(const MediaItem& favItem)
 
 void HomeView::goBack()
 {
-    if (stack_.size() > 1) { stack_.pop_back(); loadTop(); return; }
+    // Every pop leaves the page a "Choose source…" request may have been made from — say so, so MainWindow can
+    // invalidate it (the classic stack is otherwise invisible there; see browseLevelPopped).
+    if (stack_.size() > 1) { stack_.pop_back(); emit browseLevelPopped(); loadTop(); return; }
     // A favourite opened from Home is a lone detail level -> Back returns to Home.
-    if (stack_.size() == 1 && stack_.last().detail) { selectRecent(); return; }
+    if (stack_.size() == 1 && stack_.last().detail) { emit browseLevelPopped(); selectRecent(); return; }
     // In carousel layout, Back from a catalog (or Home) returns to the media-type carousel.
     if (carouselMode_ && !atCarouselLanding_) { showCarousel(); return; }
     // Nothing left to pop: we're at the home root. The host decides (the app pause menu) — this keeps the

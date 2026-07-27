@@ -207,6 +207,12 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // A browse/detail level was POPPED (classic Back, or the themed column's Back). MainWindow uses this to
+    // invalidate a "Choose source…" fan-out started from the page being left: the themed detail pop bumps the
+    // generation itself, but the classic stack is invisible to MainWindow, so without this a slow reply from
+    // Show A's page pops its picker over Show B — and the busy latch keeps Show B answering "Still finding
+    // sources…" until it lands.
+    void browseLevelPopped();
 
 protected:
     bool eventFilter(QObject* obj, QEvent* event) override; // tune the grid's wheel-scroll speed

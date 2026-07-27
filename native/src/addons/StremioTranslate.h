@@ -139,9 +139,18 @@ namespace StremioTranslate
     // shrink what the debrid cached-check can hit.
     QVector<StreamCandidate> mergeCandidates(const QVector<QVector<StreamCandidate>>& perAddon);
 
+    // The one-row budget for describe(), in characters, ellipsis included. 96 is the width at which a row
+    // still fits the picker's panel on one line at the smallest form factor we ship (the TV/handheld key
+    // metrics), while still leaving room for the quality tag, the release name's distinguishing tokens and
+    // the trailing size — i.e. everything a user actually chooses on. A raw-torrent addon happily returns
+    // 180-character release lines; NavMenu word-wraps, so without a cap one candidate occupies two rows and
+    // the list stops being scannable.
+    inline constexpr int kMaxDescribeChars = 96;
+
     // One picker row: "1080p · Release.Name.x265 👤 42 · 2.1 GB". The seeder count is NEVER appended —
     // it was scraped out of the very title being rendered, so it is redundant by construction — and the
-    // behaviorHints size is appended only when the title does not already carry one.
+    // behaviorHints size is appended only when the title does not already carry one. The result is always
+    // one line and never longer than kMaxDescribeChars (elided with … past that).
     QString describe(const StreamCandidate& c);
 
     // The automatic choice: a candidate whose bingeGroup matches `preferGroup` (when non-empty), else the

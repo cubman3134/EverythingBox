@@ -375,6 +375,35 @@ int main(int argc, char** argv)
               "the size is suppressed when the title already carries one");
     }
 
+    // ------------------------------------------------- 11a. describe() is capped to ONE picker row
+    {
+        // A real raw-torrent release line. Flattening newlines keeps a row one PARAGRAPH; only the length cap
+        // keeps it one ROW — NavMenu word-wraps, so an over-long candidate silently occupies two rows and the
+        // list stops being scannable. Asserted against kMaxDescribeChars (not a literal) so the cap and the
+        // contract move together.
+        StreamCandidate longRow;
+        longRow.name  = QStringLiteral("Torrentio\n1080p");
+        longRow.title = QStringLiteral(
+            "The.Very.Long.Release.Name.2019.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1-GROUPNAME.Extended."
+            "Directors.Cut.With.Commentary.And.A.Great.Many.Further.Tokens.Nobody.Reads 👤 42");
+        longRow.url = QStringLiteral("https://example.com/a.mkv");
+        CHECK(longRow.title.size() > kMaxDescribeChars, "the fixture is actually longer than the cap");
+
+        const QString row = describe(longRow);
+        CHECK(row.size() <= kMaxDescribeChars,
+              "describe elides to kMaxDescribeChars so one candidate stays one row");
+        CHECK(row.endsWith(QChar(0x2026)), "an elided row says so with an ellipsis");
+        CHECK(!row.contains(QLatin1Char('\n')), "an elided row is still one line");
+
+        // A row that already fits is untouched — the cap must not trim or ellipsise short candidates.
+        StreamCandidate shortRow;
+        shortRow.name = QStringLiteral("1080p");
+        shortRow.title = QStringLiteral("Short.Release.x265");
+        shortRow.url = QStringLiteral("https://example.com/b.mkv");
+        CHECK(describe(shortRow) == QStringLiteral("1080p · Short.Release.x265"),
+              "a row within the cap is rendered verbatim");
+    }
+
     // ------------------------------------------------- 11b. seeder scraping is PRIORITY, not leftmost
     {
         // One combined alternation is leftmost-wins, so a season token pre-empts the real marker whenever

@@ -331,7 +331,14 @@ QString StremioTranslate::describe(const StreamCandidate& c)
         parts << QStringLiteral("%1 GB").arg(double(c.videoSize) / 1073741824.0, 0, 'f', 1);
 
     if (c.notWebReady) parts << QStringLiteral("may need an external player");
-    return parts.join(QStringLiteral(" · "));
+    QString row = parts.join(QStringLiteral(" · "));
+
+    // One candidate must stay ONE row. Flattening the newlines is not enough on its own: a raw-torrent addon
+    // routinely emits 150-200 character release lines, and NavMenu word-wraps, so a single candidate then ate
+    // two rows and the list stopped being scannable. Elide to kMaxDescribeChars (see the header for why 96).
+    if (row.size() > kMaxDescribeChars)
+        row = row.left(kMaxDescribeChars - 1).trimmed() + QChar(0x2026); // …
+    return row;
 }
 
 int StremioTranslate::pickAuto(const QVector<StreamCandidate>& all, const QString& preferGroup)

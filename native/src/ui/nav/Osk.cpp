@@ -110,7 +110,12 @@ Osk::Osk(const QString& title, const QString& initial, QLineEdit::EchoMode echo,
         for (int c = 0; c < row.size(); ++c)
         {
             QPushButton* b = makeKey(row.mid(c, 1));
-            b->setProperty("pos", r * 100 + c); // row/col into the current page's tables (see relabel)
+            // "oskPos", NOT "pos": QWidget ALREADY declares a `pos` property (a QPoint), so setProperty("pos",
+            // int) is swallowed by the real property instead of creating a dynamic one, and relabel() then
+            // read back 0 for every key — after Shift or #+= the whole grid relabelled to "1", and typing
+            // inserted "1". That made every uppercase letter and symbol unreachable on a pad or remote.
+            // A dynamic-property name must not collide with any Q_PROPERTY up the widget's meta-object chain.
+            b->setProperty("oskPos", r * 100 + c); // row/col into the current page's tables (see relabel)
             connect(b, &QPushButton::clicked, this, [this, b] { insert(b->text()); });
             charKeys_.push_back(b);
             grid->addWidget(b, r, c);
@@ -149,7 +154,7 @@ void Osk::relabel()
     const char** rows = symbols_ ? kSymbolRows : kLetterRows;
     for (QPushButton* b : charKeys_)
     {
-        const int pos = b->property("pos").toInt();
+        const int pos = b->property("oskPos").toInt();
         QString ch = QString::fromLatin1(rows[pos / 100]).mid(pos % 100, 1);
         if (!symbols_ && shift_) ch = ch.toUpper();
         b->setText(ch);

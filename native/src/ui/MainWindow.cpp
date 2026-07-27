@@ -416,6 +416,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
+    // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
+    // generation inline, and this is the same rule for the classic/browse stack pops.
+    connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
     connect(home_, &HomeView::downloadItem, this, &MainWindow::enqueueDownload);
     connect(home_, &HomeView::openImagePages, this, &MainWindow::openImagePages);
 
@@ -7118,8 +7121,26 @@ void MainWindow::playChosenStream(const MediaItem& item, const StremioTranslate:
     }
     // A torrent: hand it to the SAME TorBox resolution the automatic path uses (resolveTorBoxInfoHash — what
     // AddonManager::playFirstPlayable calls), rather than repeating the chain here.
+    //
+    // This leg is FOUR sequential HTTP requests (checkcached -> createtorrent -> mylist -> requestdl, ~50-65s
+    // worst case on a cold torrent), which is far longer than a user will wait before backing out and playing
+    // something else. So it needs the same generation check the listStremioStreams reply one level up has:
+    // WITHOUT it a stale reply landing a minute later clears the new context's notice and replaces whatever is
+    // playing with the old episode. (Same bug class as the subtitle picker and the intro-skip marks menu:
+    // an async reply that outlives the context it was asked from.)
+    const int gen = chooseSourceGen_;
+    // Hold the picker busy for the WHOLE debrid leg, not just the listing: the listing reply cleared the flag
+    // before the menu even appeared, so without this a second "Choose source…" could stack another fan-out
+    // (and another sticky notice) on top of one still resolving.
+    chooseSourceBusy_ = true;
+    if (home_) home_->setChooseSourceBusy(true);
     notify(tr("Getting that source ready…"), 0);   // sticky until the debrid round-trip answers
-    addons_->resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, play](const QString& url) {
+    addons_->resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, play, gen](const QString& url) {
+        // Superseded — checked BEFORE hideNotice() and before playing, because the notice on screen now
+        // belongs to whatever the user is doing instead, and so does the player.
+        if (gen != chooseSourceGen_) return;
+        chooseSourceBusy_ = false;
+        if (home_) home_->setChooseSourceBusy(false);
         hideNotice();
         if (url.isEmpty())
         {
