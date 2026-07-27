@@ -21,6 +21,10 @@ Rectangle {
     readonly property real ffs:     (typeof form !== "undefined" && form) ? form.uiScale : 1
     readonly property real density: (typeof form !== "undefined" && form) ? form.density : 1
     readonly property int  safeInset: Math.round(Math.min(width, height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+    // Real device cutout insets (Dynamic Island / home indicator). The window runs edge-to-edge; the
+    // panel's chrome pads itself clear of the physical cutouts with these (zero on desktop/TV).
+    readonly property real safeTop:    (typeof safeArea !== "undefined" && safeArea) ? safeArea.top : 0
+    readonly property real safeBottom: (typeof safeArea !== "undefined" && safeArea) ? safeArea.bottom : 0
 
     // Row-kind ints — must match PanelRow::Kind order (PanelModel.h).
     readonly property int kAction: 0
@@ -108,7 +112,7 @@ Rectangle {
     Rectangle {
         id: header
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        anchors.topMargin: root.safeInset; anchors.leftMargin: root.safeInset; anchors.rightMargin: root.safeInset
+        anchors.topMargin: root.safeInset + root.safeTop; anchors.leftMargin: root.safeInset; anchors.rightMargin: root.safeInset
         height: Math.round(74 * root.ffs)
         color: cBg
         readonly property bool sel: root.g && root.g.zone === "panelBack"
@@ -156,7 +160,7 @@ Rectangle {
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
         anchors.leftMargin: Math.round(28 * root.ffs) + root.safeInset
         anchors.rightMargin: Math.round(28 * root.ffs) + root.safeInset
-        anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset
+        anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset + root.safeBottom
         clip: true
         spacing: 8
         // Native kinetic scrolling on touch (D1 Task 4): a mobile drag flicks the row list; key/controller nav
@@ -307,6 +311,7 @@ Rectangle {
                         // host's inline-edit loop runs. Focus summons the system keyboard; Return commits,
                         // Escape (or losing focus) resolves the edit so the host's loop always terminates.
                         TextInput {
+                            id: inlineInput
                             visible: del.sel && del.kind === root.kTextField && root.inlineEditing
                             anchors.verticalCenter: parent.verticalCenter
                             width: Math.round(del.width * 0.55)
@@ -321,6 +326,19 @@ Rectangle {
                             Keys.onEscapePressed: { root.inlineEditing = false; inlineEdit.cancel() }
                             onActiveFocusChanged: // tapping away commits what was typed (phone convention)
                                 if (!activeFocus && root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
+                            // The software keyboard's Done button dismisses the input panel WITHOUT delivering
+                            // a Return key — treat panel dismissal during an edit as commit, or the typed text
+                            // silently evaporates and the edit state wedges.
+                            Connections {
+                                target: Qt.inputMethod
+                                enabled: inlineInput.visible
+                                function onVisibleChanged() {
+                                    if (!Qt.inputMethod.visible && root.inlineEditing && inlineInput.activeFocus) {
+                                        root.inlineEditing = false
+                                        inlineEdit.commit(inlineInput.text)
+                                    }
+                                }
+                            }
                         }
 
                         // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
