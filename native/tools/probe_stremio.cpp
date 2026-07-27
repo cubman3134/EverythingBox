@@ -239,6 +239,130 @@ int main(int argc, char** argv)
         CHECK(!none.configurable && !none.configurationRequired, "absent behaviorHints default to false");
     }
 
+    // ------------------------------------------------- 9. catalogPath
+    {
+        Catalog c;
+        c.type = QStringLiteral("movie");
+        c.id   = QStringLiteral("top");
+        CHECK(catalogPath(c, {}) == QStringLiteral("/catalog/movie/top.json"), "no extras -> bare path");
+
+        // Sorted keys, so the same request is always the same string (the result cache keys on it).
+        QMap<QString, QString> two;
+        two.insert(QStringLiteral("skip"), QStringLiteral("100"));
+        two.insert(QStringLiteral("genre"), QStringLiteral("Action"));
+        CHECK(catalogPath(c, two) == QStringLiteral("/catalog/movie/top/genre=Action&skip=100.json"),
+              "extras are emitted in sorted key order");
+
+        // A value containing the separators must not be able to forge extra params.
+        QMap<QString, QString> nasty;
+        nasty.insert(QStringLiteral("search"), QStringLiteral("a b&c=d"));
+        CHECK(catalogPath(c, nasty) == QStringLiteral("/catalog/movie/top/search=a%20b%26c%3Dd.json"),
+              "spaces, & and = in a value are percent-encoded");
+
+        // An empty value carries no information and must not become "key=" — some addons 400 on it.
+        QMap<QString, QString> blank;
+        blank.insert(QStringLiteral("search"), QString());
+        CHECK(catalogPath(c, blank) == QStringLiteral("/catalog/movie/top.json"),
+              "an empty value is dropped rather than emitted as a bare key=");
+
+        // Presets fill gaps; a caller value REPLACES rather than joins.
+        Catalog g = c;
+        g.presets.insert(QStringLiteral("genre"), QStringLiteral("Action"));
+        CHECK(catalogPath(g, {}) == QStringLiteral("/catalog/movie/top/genre=Action.json"),
+              "a preset supplies the default");
+        QMap<QString, QString> chosen;
+        chosen.insert(QStringLiteral("genre"), QStringLiteral("Comedy"));
+        CHECK(catalogPath(g, chosen) == QStringLiteral("/catalog/movie/top/genre=Comedy.json"),
+              "the caller's value replaces the preset, never appends");
+    }
+
+    // ------------------------------------------------- 10. handlesId
+    {
+        Manifest m;
+        m.resources << QStringLiteral("stream") << QStringLiteral("meta");
+        m.idPrefixes << QStringLiteral("tt");
+        m.resourceIdPrefixes.insert(QStringLiteral("stream"),
+                                    { QStringLiteral("kitsu:") });
+
+        CHECK(handlesId(m, QStringLiteral("stream"), QStringLiteral("kitsu:1234")),
+              "the per-resource prefix matches");
+        CHECK(!handlesId(m, QStringLiteral("stream"), QStringLiteral("tt0903747")),
+              "the per-resource list OVERRIDES the manifest-level one for that resource");
+        CHECK(handlesId(m, QStringLiteral("meta"), QStringLiteral("tt0903747")),
+              "a resource with no override falls back to manifest-level");
+        CHECK(!handlesId(m, QStringLiteral("meta"), QStringLiteral("kitsu:1")),
+              "…and is filtered by it");
+
+        Manifest open;
+        open.resources << QStringLiteral("stream");
+        CHECK(handlesId(open, QStringLiteral("stream"), QStringLiteral("anything")),
+              "an addon declaring NO prefixes answers for everything");
+    }
+
+    // ------------------------------------------------- 11. parseStreams
+    {
+        const QByteArray body = R"({"streams":[
+          { "name": "Torrentio\n1080p", "title": "Movie.2019.1080p.x265\n👤 42 💾 2.1 GB",
+            "infoHash": "0123456789abcdef0123456789abcdef01234567", "fileIdx": 0,
+            "behaviorHints": { "bingeGroup": "torrentio|1080p|x265", "videoSize": 2254857830 } },
+          { "name": "Direct", "url": "https://example.com/a.mkv", "mime": "video/x-matroska",
+            "behaviorHints": { "notWebReady": true } },
+          { "name": "Broken", "infoHash": "#", "title": "please report this issue" },
+          { "name": "Nothing useful", "title": "no url and no hash" }
+        ]})";
+        const QVector<StreamCandidate> v = parseStreams(body);
+        CHECK(v.size() == 2, "rows with neither a usable url nor a valid infoHash are dropped");
+
+        // Sorted: direct http before torrent.
+        CHECK(v[0].isDirect(), "a direct url sorts ahead of a torrent");
+        CHECK(v[0].notWebReady, "stream-level behaviorHints.notWebReady is kept");
+        CHECK(v[0].mime == QStringLiteral("video/x-matroska"), "mime is kept");
+
+        const StreamCandidate& t = v[1];
+        CHECK(t.name.contains(QStringLiteral("1080p")), "name is kept (it carries the quality)");
+        CHECK(t.title.contains(QStringLiteral("x265")), "title is kept (it carries the release)");
+        CHECK(t.bingeGroup == QStringLiteral("torrentio|1080p|x265"), "bingeGroup is kept");
+        CHECK(t.videoSize == 2254857830LL, "videoSize is kept");
+        CHECK(t.seeders == 42, "seeders are scraped out of the title");
+        CHECK(t.fileIdx == 0, "fileIdx is kept");
+
+        // "42" alone would already be in the copied title, so assert the rendered PHRASE — otherwise this
+        // still passes with the seeder part deleted from describe().
+        CHECK(describe(t).contains(QStringLiteral("42 seeders")), "describe surfaces the seeder count");
+        CHECK(describe(t).contains(QStringLiteral("2.1 GB")), "describe surfaces the size");
+        // describe must be ONE line — NavMenu word-wraps, and a row with embedded newlines reads as junk.
+        CHECK(!describe(t).contains(QLatin1Char('\n')), "describe collapses the addon's newlines");
+    }
+
+    // ------------------------------------------------- 12. sort order, cap, and pickAuto
+    {
+        QByteArray body = QByteArrayLiteral("{\"streams\":[");
+        for (int i = 0; i < 50; ++i)
+            body += QByteArray("{\"name\":\"t") + QByteArray::number(i)
+                  + "\",\"title\":\"\xF0\x9F\x91\xA4 " + QByteArray::number(i)
+                  + "\",\"infoHash\":\"0123456789abcdef0123456789abcdef0123456" + (i % 10 ? "7" : "8")
+                  + "\"},";
+        body.chop(1);
+        body += "]}";
+        const QVector<StreamCandidate> v = parseStreams(body);
+        CHECK(v.size() == kMaxStreamRows, "the candidate list is capped");
+        CHECK(v[0].seeders >= v[1].seeders, "higher seeders sort first");
+        // The cap must be applied AFTER the sort. Capping first also leaves a descending list — so the
+        // check above passes on that mutation, and only the actual best row's value catches it.
+        CHECK(v[0].seeders == 49 && v[v.size() - 1].seeders == 20,
+              "the cap keeps the BEST rows, not the first 30 the addon happened to list");
+
+        // pickAuto: a remembered bingeGroup wins over sort order; a miss falls back to the first row.
+        QVector<StreamCandidate> three;
+        StreamCandidate a; a.url = QStringLiteral("https://a"); a.bingeGroup = QStringLiteral("g1");
+        StreamCandidate b; b.url = QStringLiteral("https://b"); b.bingeGroup = QStringLiteral("g2");
+        three << a << b;
+        CHECK(pickAuto(three, QStringLiteral("g2")) == 1, "a remembered bingeGroup is chosen");
+        CHECK(pickAuto(three, QStringLiteral("nope")) == 0, "an unmatched group falls back to the first");
+        CHECK(pickAuto(three, QString()) == 0, "no preference -> the first");
+        CHECK(pickAuto({}, QStringLiteral("g1")) == -1, "nothing playable -> -1");
+    }
+
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("STREMIO-OK\n");
     return 0;
