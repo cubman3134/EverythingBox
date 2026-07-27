@@ -5,7 +5,7 @@
 // (already verb-wired); the "Favorites" shelf builds FROM FavoritesStore. ItemMarks owns hidden/completion/
 // tags only.
 //
-// Backed by the portable mymediavault.ini (same AppPaths::dataDir() posture as SyncOffsets/FavoritesStore —
+// Backed by the portable everythingbox.ini (same AppPaths::dataDir() posture as SyncOffsets/FavoritesStore —
 // QtCore only, no Quick/Widgets). Layout, all namespaced by the active profile id (or "default"):
 //   marks/<profile>/items/<itemHash>  -> JSON object { hidden, completion, tags } (one blob per item)
 //   marks/<profile>/tagVocab          -> JSON array of the profile's known tags

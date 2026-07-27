@@ -140,13 +140,13 @@ Item {
     }
 
     // --- real playback via the libmpv software-render item -------------------------------------------------
-    // Created lazily and guarded: if the MMV type isn't registered (e.g. the headless theme probe) or mpv
+    // Created lazily and guarded: if the EB type isn't registered (e.g. the headless theme probe) or mpv
     // can't open the url, `player` stays without frames and the Ken Burns still keeps showing.
     function ensurePlayer() {
         if (player || playUrl === "") return
         try {
             player = Qt.createQmlObject(
-                'import QtQuick; import MMV 1.0; MpvPreview { anchors.fill: parent }', frame, "mpvPreview")
+                'import QtQuick; import EB 1.0; MpvPreview { anchors.fill: parent }', frame, "mpvPreview")
             player.playingChanged.connect(function() { root.playing = player.playing })
             // A dead clip (mpv error before any frame): move on to the next candidate — or, none left,
             // playUrl collapses to "" and the ▶ badge disappears (plain artwork, no dead play button).

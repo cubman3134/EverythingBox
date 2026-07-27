@@ -1,4 +1,4 @@
-My Media Vault — Themes
+EverythingBox — Themes
 =======================
 
 Drop a "<Name>.json" file into this folder, then pick it under Settings -> Theme.

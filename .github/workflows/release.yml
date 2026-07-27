@@ -223,7 +223,7 @@ jobs:
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
             -DMPV_INCLUDE_DIR="$DEV/Headers" \
             -DMPV_LIBRARY="$DEV/Libmpv" \
-            -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+            -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
 
       - name: Build
         run: cmake --build build-ios --config Release
@@ -294,7 +294,8 @@ jobs:
           cat > EverythingBox.desktop <<'EOF'
           [Desktop Entry]
           Type=Application
-          Name=My Media Vault
+          Name=EverythingBox
+          Comment=EverythingBox — one place for your films, shows, music, books, comics and games.
           Exec=EverythingBox
           Icon=EverythingBox
           Categories=AudioVideo;Player;
@@ -524,14 +525,14 @@ jobs:
       - name: Set up release signing
         if: ${{ env.ANDROID_KEYSTORE_B64 != '' }}
         run: |
-          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/mmv-release.keystore"
+          echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/eb-release.keystore"
           # QT_ANDROID_SIGN_APK is a *CMake configure* variable (not an env var) — passed to qt-cmake below via
           # $QT_ANDROID_SIGN_CMAKE so the androiddeployqt build rule is generated with --sign. The keystore
           # PATH/ALIAS/STORE_PASS/KEY_PASS are the env vars androiddeployqt reads at build time. Passwords come
           # from secrets (auto-masked) and are alphanumeric, so the KEY=VALUE env-file lines are safe.
           {
             echo "QT_ANDROID_SIGN_CMAKE=-DQT_ANDROID_SIGN_APK=ON"
-            echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/mmv-release.keystore"
+            echo "QT_ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/eb-release.keystore"
             echo "QT_ANDROID_KEYSTORE_ALIAS=$ANDROID_KEY_ALIAS"
             echo "QT_ANDROID_KEYSTORE_STORE_PASS=$ANDROID_KEYSTORE_PASS"
             echo "QT_ANDROID_KEYSTORE_KEY_PASS=$ANDROID_KEYSTORE_PASS"
@@ -576,7 +577,7 @@ jobs:
           echo "Collected APK: $apk"
           ls -la "EverythingBox-android-${ABI_NAME}.apk"
           # Sanity: the staged assets and the qtdeclarative/mpv .so's must actually be inside the APK.
-          echo "=== APK assets/mmv (expect themes2 + addons) ==="; unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'assets/mmv' | head -20 || true
+          echo "=== APK assets/eb (expect themes2 + addons) ==="; unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'assets/eb' | head -20 || true
           echo "=== APK libs (expect libmpv + libQt6Quick) ==="; unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libmpv|Qt6Quick|Qt6Qml)' | head -20 || true
           echo "=== APK OpenSSL (expect libssl + libcrypto — TLS) ==="
           if ! unzip -l "EverythingBox-android-${ABI_NAME}.apk" | grep -E 'lib/.*(libssl|libcrypto)'; then

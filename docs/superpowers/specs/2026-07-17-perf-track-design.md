@@ -28,7 +28,7 @@ profiler integration à la Tracy/ETW (heavy, and leaves no CI-gateable artifact)
 
 - RAII span macro `PERF_SPAN("name")` plus explicit `PerfTrace::begin/end` for spans
   that cross functions or threads. `QElapsedTimer`-based.
-- Enabled by `MMV_PERF=1` (cached bool; disabled cost = one branch). Safe to leave in
+- Enabled by `EB_PERF=1` (cached bool; disabled cost = one branch). Safe to leave in
   release builds.
 - Output: `<app>/perf_trace.log`, one line per span:
   `ISO-timestamp | span.name | duration_ms | detail` (detail optional: counts, paths'

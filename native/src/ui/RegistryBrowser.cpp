@@ -43,7 +43,7 @@ static QString extrasKey(RegistryBrowser::Kind kind)
 QString RegistryBrowser::defaultUrl() const
 {
     return kind_ == Themes
-        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-themes/main/index.json")
+        ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json")
         : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
 }
 

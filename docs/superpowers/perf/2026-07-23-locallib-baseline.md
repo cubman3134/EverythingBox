@@ -1,7 +1,7 @@
 # Perf baseline — 2026-07-23 (Local Video Library close-out)
 
 Branch `local/video-library`, all 5 tasks merged. Captured with `native/tools/perfbaseline.py`
-(MMV_PERF=1 + MMV_UITEST=1) driving the standard route (cold start → Games → Recent → 50-row
+(EB_PERF=1 + EB_UITEST=1) driving the standard route (cold start → Games → Recent → 50-row
 scroll → open first local game → back → exit) against a **portable throwaway copy** of the deployed
 app (fresh Release exe, cloud/sync stripped, fixture video library). The real deployed app was never
 launched. Route ran fully on all three runs (no SKIPPED steps).

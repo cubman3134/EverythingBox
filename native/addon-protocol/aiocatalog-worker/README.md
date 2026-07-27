@@ -31,13 +31,19 @@ Then in the app:
 ## How per-user config works
 
 - The manifest declares `settings` (the keys), so the app's **Configure…** dialog renders a form.
-- Those values are sent as `X-MMV-Config: base64url(json)` on every request.
+- Those values are sent as `X-EB-Config: base64url(json)` on every request. The Worker also still accepts
+  the pre-rename `X-MMV-Config` from older app builds — so **redeploy this Worker before shipping an app
+  build that sends the new header**, or an un-redeployed Worker reads no config and silently returns
+  nothing. See the note in `src/worker.js`.
 - The Worker reads them in an `AsyncLocalStorage` scope (so concurrent users never see each other's keys)
   and falls back to env vars only if a request carries no config (handy for a private self-host).
 
 ## Migrating from the local addon
 
 Distinct id (`com.mymediavault.aiocatalog-worker`), so it runs side by side with the bundled local addon.
+That id and the `mymediavault-aiocatalog` hostname above still carry the **previous** brand on purpose:
+both are how already-installed copies of this add-on are identified, and renaming either orphans every
+add-on URL a user has saved. This README is exempt from the suite old-brand gate because it documents them.
 To fully migrate: add the Worker URL, Configure your keys, confirm it works, then **disable or Remove** the
 local "AIO Catalog" in the Library.
 

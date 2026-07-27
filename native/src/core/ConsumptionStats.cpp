@@ -12,7 +12,7 @@
 #include <QHash>
 #include <algorithm>
 
-// Shares the portable mymediavault.ini with the other stores (same AppPaths::dataDir() posture as
+// Shares the portable everythingbox.ini with the other stores (same AppPaths::dataDir() posture as
 // PlayStats/ItemMarks). Coherence with other QSettings on the same file comes from every writer calling
 // sync(); QSettings reloads on access when the on-disk file changed.
 static QSettings& store()

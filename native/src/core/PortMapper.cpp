@@ -121,7 +121,7 @@ void PortMapper::addMapping()
         QStringLiteral("<NewRemoteHost></NewRemoteHost><NewExternalPort>%1</NewExternalPort>"
                        "<NewProtocol>TCP</NewProtocol><NewInternalPort>%2</NewInternalPort>"
                        "<NewInternalClient>%3</NewInternalClient><NewEnabled>1</NewEnabled>"
-                       "<NewPortMappingDescription>MyMediaVault netplay</NewPortMappingDescription>"
+                       "<NewPortMappingDescription>EverythingBox netplay</NewPortMappingDescription>"
                        "<NewLeaseDuration>3600</NewLeaseDuration>")
             .arg(external_).arg(internal_).arg(localIp_);
     soap(QStringLiteral("AddPortMapping"), args, [this](bool ok, const QByteArray& resp) {

@@ -6,18 +6,23 @@
 // Same logic as the local JS addon, made async (Workers have only async fetch). Keys are PER USER: each
 // user enters their own in the app's Configure… dialog and the app sends them in the X-EB-Config header,
 // so the Worker stays keyless and shared. (Worker env vars are only an optional fallback for a self-host.)
-// Serves the My Media Vault remote-addon protocol.
+// Serves the EverythingBox remote-addon protocol.
 
-const UA = "EverythingBox/1.0 (+https://github.com/cubman3134/MyMediaVault)";
+const UA = "EverythingBox/1.0 (+https://github.com/cubman3134/EverythingBox)";
 // The bundled console tiles live in the app repo; reference them absolutely since the Worker can't serve them.
-const CONSOLE_ICONS = "https://raw.githubusercontent.com/cubman3134/MyMediaVault/main/native/addons/aiocatalog/consoles/";
+const CONSOLE_ICONS = "https://raw.githubusercontent.com/cubman3134/EverythingBox/main/native/addons/aiocatalog/consoles/";
 
+// The add-on id KEEPS THE PREVIOUS BRAND, deliberately. The app keys a saved remote add-on by the id its
+// manifest returns; changing it here would orphan the entry every existing user has already added by URL —
+// their configured API keys included — with no migration path, because the app has never seen the new id.
+// Same reasoning as the Worker name in wrangler.toml (which fixes the workers.dev hostname users typed).
+// This file is exempt from the suite old-brand gate for these two strings; see run-headless-probes.sh.
 const MANIFEST = {
   id: "com.mymediavault.aiocatalog-worker",
   name: "AIO Catalog (Worker)",
   version: "1.0.0",
   type: "media-source",
-  author: "My Media Vault",
+  author: "EverythingBox",
   description: "All-in-one metadata catalog served from a Cloudflare Worker: Movies & TV (TMDB), Games (IGDB), Music (MusicBrainz), Books (Google Books / Open Library), Comics (Comic Vine), Manga (MangaDex).",
   catalogs: [
     { id: "movies", name: "Movies", type: "movie" },

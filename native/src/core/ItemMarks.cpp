@@ -12,7 +12,7 @@
 #include <QJsonArray>
 #include <QHash>
 
-// Shares the portable mymediavault.ini with the other stores (same AppPaths::dataDir() posture). Coherence
+// Shares the portable everythingbox.ini with the other stores (same AppPaths::dataDir() posture). Coherence
 // with any other QSettings on the same file comes from every writer calling sync() (flush to disk); QSettings
 // reloads on access when the on-disk file changed.
 static QSettings& store()

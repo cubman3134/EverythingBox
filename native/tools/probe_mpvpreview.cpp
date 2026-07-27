@@ -35,14 +35,14 @@ int main(int argc, char** argv)
     qputenv("QT_QUICK_BACKEND", "software");
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software); // match the app's themed view
     QApplication app(argc, argv);
-    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview");
+    qmlRegisterType<MpvPreview>("EB", 1, 0, "MpvPreview");
 
     QQuickView view;
     view.setResizeMode(QQuickView::SizeRootObjectToView);
     view.resize(320, 240);
 
     QQmlComponent comp(view.engine());
-    comp.setData("import QtQuick\nimport MMV 1.0\nMpvPreview { anchors.fill: parent }", QUrl());
+    comp.setData("import QtQuick\nimport EB 1.0\nMpvPreview { anchors.fill: parent }", QUrl());
     auto* root = qobject_cast<QQuickItem*>(comp.create());
     if (!root) { std::fprintf(stderr, "MPV-PREVIEW-FAIL could not create MpvPreview (%s)\n",
                               comp.errorString().toUtf8().constData()); return 1; }

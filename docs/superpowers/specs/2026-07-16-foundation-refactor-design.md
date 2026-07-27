@@ -5,7 +5,7 @@
 
 ## Problem
 
-MyMediaVault has grown two god-files that own most of the app's behavior:
+EverythingBox has grown two god-files that own most of the app's behavior:
 
 - `native/src/ui/MainWindow.cpp` — 5,944 lines. Owns page routing, nav dispatch, the Esc
   menu, video/audio playback and queues, resume persistence, emulator launch and
@@ -101,7 +101,7 @@ respects the nav-kit rule (no QDialog/QMessageBox).
 Per commit:
 
 - Release build (deploys must be Release per project convention).
-- Drive the touched flow via `MMV_UITEST=1` + `native/tools/uitest.py` (key/state/shot),
+- Drive the touched flow via `EB_UITEST=1` + `native/tools/uitest.py` (key/state/shot),
   no window focus required.
 - `probe_nav` gate — nav regressions are the historical risk in these files.
 - For playback/launch seams: launch one video, one audio queue item, one libretro game,

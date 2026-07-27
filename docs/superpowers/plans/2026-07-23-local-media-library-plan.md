@@ -26,7 +26,7 @@
 | Probe copy-target | `probe_browse` CMake block `CMakeLists.txt:449-453`; runner loop `run-headless-probes.sh:119-122`; CI build list `ci.yml:52`; probe main+sentinel shape `probe_marks.cpp:1-14,21-34,53,212-214` |
 | Scanner shape to mirror | `RomLibrary.h:1-49` (free-function namespace, `root()` reads `Settings::romsFolder`) |
 
-- **Env recipe (probes/build), copy verbatim** — PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; the build dir carries a generated `qt.conf` (no `QT_PLUGIN_PATH` needed); configure `cmake -S native -B build -G "Visual Studio 18 2026" -A x64 -DMYMEDIAVAULT_BUILD_APP=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 -DMPV_INCLUDE_DIR=C:/mpv-dev/include -DMPV_LIBRARY=C:/mpv-dev/libmpv.lib`; build with `--parallel` (never `-- /m`). Probe runner: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
+- **Env recipe (probes/build), copy verbatim** — PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; the build dir carries a generated `qt.conf` (no `QT_PLUGIN_PATH` needed); configure `cmake -S native -B build -G "Visual Studio 18 2026" -A x64 -DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 -DMPV_INCLUDE_DIR=C:/mpv-dev/include -DMPV_LIBRARY=C:/mpv-dev/libmpv.lib`; build with `--parallel` (never `-- /m`). Probe runner: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
 - **Probe discipline:** RED-first (write the failing probe, see it fail, then implement). `probe_locallib` is QtCore-only (links `LocalLibrary.cpp` + `AddonModels.cpp` + `SyntheticCatalogs.cpp` for the browse builder; NOT CloudSync, NOT Settings) and builds a hermetic `QTemporaryDir` fixture tree in-process. Sentinel `LOCALLIB-OK` / `LOCALLIB-FAIL <cond> (line)`.
 - **Feature dormant when `library/folder` unset:** empty index, no synthetic folder, no decoration, zero render cost (the ROMs precedent). Every task must preserve this.
 - **Additive only:** un-owned addon tiles and the create-a-profile/fresh paths stay byte-identical. Seam A adds map keys before `writeInto`; Seam B adds an early redirect before existing branches.
@@ -281,12 +281,12 @@ int main(int argc, char** argv)
     target_link_libraries(probe_locallib PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 ```
 
-Also add `src/core/LocalLibrary.cpp` and `src/core/LocalLibrary.h` to the **app target** source list (find where `src/core/RomLibrary.cpp` is listed in the `MYMEDIAVAULT_BUILD_APP` target and add the LocalLibrary lines beside it).
+Also add `src/core/LocalLibrary.cpp` and `src/core/LocalLibrary.h` to the **app target** source list (find where `src/core/RomLibrary.cpp` is listed in the `EVERYTHINGBOX_BUILD_APP` target and add the LocalLibrary lines beside it).
 
 - [ ] **Step 3: Verify RED.**
 
 ```bash
-cmake -S native -B build -G "Visual Studio 18 2026" -A x64 -DMYMEDIAVAULT_BUILD_APP=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 -DMPV_INCLUDE_DIR=C:/mpv-dev/include -DMPV_LIBRARY=C:/mpv-dev/libmpv.lib
+cmake -S native -B build -G "Visual Studio 18 2026" -A x64 -DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH=C:/Qt/6.8.3/msvc2022_64 -DMPV_INCLUDE_DIR=C:/mpv-dev/include -DMPV_LIBRARY=C:/mpv-dev/libmpv.lib
 cmake --build build --target probe_locallib --parallel
 ```
 Expected: **link error** (`LocalLibrary::scanFolder` etc. undefined) — the header/impl don't exist yet. That is the RED state for a fresh module.
@@ -734,10 +734,10 @@ Declare `openLocalLibraryLevel(const QString&)`, `populateLocalLibrary(const QSt
 - [ ] **Step 9: Build the app, full suite, live smoke.**
 
 ```bash
-cmake --build build --target MyMediaVault --parallel
+cmake --build build --target EverythingBox --parallel
 BUILD_DIR=build bash native/tools/run-headless-probes.sh   # ALL HEADLESS PROBES PASSED
 ```
-Live smoke (uitest, per the verify-app-gui-capture memory — launch with `MMV_UITEST=1`, drive via `native/tools/uitest.py`; seed a throwaway `library/folder` pointing at a 2-3 file fixture tree in the scratchpad; do NOT touch the real deployed ini): open the video category → the **Local Library** folder appears → drill in → the fixture videos list → selecting a plain (no-nfo) file plays it from disk through mpv. Screenshot `locallib-browse.png`, `locallib-play.png`.
+Live smoke (uitest, per the verify-app-gui-capture memory — launch with `EB_UITEST=1`, drive via `native/tools/uitest.py`; seed a throwaway `library/folder` pointing at a 2-3 file fixture tree in the scratchpad; do NOT touch the real deployed ini): open the video category → the **Local Library** folder appears → drill in → the fixture videos list → selecting a plain (no-nfo) file plays it from disk through mpv. Screenshot `locallib-browse.png`, `locallib-play.png`.
 
 - [ ] **Step 10: Commit.**
 
@@ -844,7 +844,7 @@ Add `#include "LocalLibrary.h"` and `#include <QFileInfo>` to `MainWindow.cpp` i
 - [ ] **Step 6: Build + full suite + live smoke.**
 
 ```bash
-cmake --build build --target MyMediaVault probe_locallib --parallel
+cmake --build build --target EverythingBox probe_locallib --parallel
 BUILD_DIR=build bash native/tools/run-headless-probes.sh   # ALL HEADLESS PROBES PASSED
 ```
 Live (best-effort, per spec's honest posture): with the fixture `library/folder` set AND a fixture whose imdb id matches a tile in an installed addon catalog present, open that catalog → the owned tile shows the **On disk** badge → activating it plays the local file (not a stream). If no matching addon tile is available on this machine, record that Seam A/B are pinned by `probe_locallib`'s decision assertions + a code walk, and screenshot the badge on whatever tile can be induced (e.g. via a fixture nfo whose id matches a Cinemeta entry if installed). Screenshot `locallib-badge.png`.
@@ -912,7 +912,7 @@ git commit -m "feat: Seam A on-disk badge + Seam B prefer-local playback (locall
 - [ ] **Step 2: Build + suite.**
 
 ```bash
-cmake --build build --target MyMediaVault --parallel
+cmake --build build --target EverythingBox --parallel
 BUILD_DIR=build bash native/tools/run-headless-probes.sh   # ALL HEADLESS PROBES PASSED
 ```
 
@@ -933,7 +933,7 @@ git commit -m "feat: Local Library settings folder-picker + rescan (locallib T5)
 - [ ] **Step 2: Full gates.** `BUILD_DIR=build bash native/tools/run-headless-probes.sh` (ALL PASSED, incl. `probe_locallib`). Perf baseline 3 runs → `docs/superpowers/perf/2026-07-23-locallib-baseline.md`; confirm `nav.select` stays flat (the only steady-state add is Seam A's per-row `OwnedIndex` hash lookup; startup adds one off-thread scan off the hot path). Record numbers honestly.
 - [ ] **Step 3: Fable whole-branch review.** Run `scripts/review-package $(git merge-base main HEAD) HEAD` and dispatch the final reviewer (most capable model) with the printed path. Review dimensions: the dormant-when-unset contract (no folder → zero cost, no folder shown, no decoration); Seam A additivity (un-owned tiles byte-identical; keys added before `writeInto` never clobber reserved keys); Seam B non-recursion + not intercepting ROM/game/http items; the async-scan thread-safety (scan off-thread, `installIndex`/`index` main-thread only — no data race on `g_index`); the NFO parser's malformed-input safety (never aborts a scan); the id-key formats matching between `buildIndex` (`seriesId:S:E`) and Seam B (`imdbStreamId`); the fixture-only live posture recorded honestly.
 - [ ] **Step 4: Fix rounds** (one fix subagent per review wave with the full findings list), re-review until clean.
-- [ ] **Step 5: Merge + push + redeploy.** Merge `local/video-library` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green, push, delete the branch, redeploy Release to `C:\MyMediaVault-app` (md5-verify the exe), update `.superpowers/sdd/progress.md`, mark the chapter.
+- [ ] **Step 5: Merge + push + redeploy.** Merge `local/video-library` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green, push, delete the branch, redeploy Release to `C:\EverythingBox-app` (md5-verify the exe), update `.superpowers/sdd/progress.md`, mark the chapter.
 
 ## Self-Review (done at write time)
 

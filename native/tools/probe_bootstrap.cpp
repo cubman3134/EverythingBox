@@ -1,7 +1,7 @@
 // Headless check of the Android asset bootstrap (src/core/AssetBootstrap) — the first-run extractor that
 // seeds a fresh install's empty data dir with the stock themes2/ + first-party addons/ baked into the APK.
 // AssetBootstrap::run is a pure function of (sourceRoot, dataDir, appVersion), so this exercises the exact
-// production path with a temp source dir standing in for the APK's "assets:/mmv" and a temp dataDir standing
+// production path with a temp source dir standing in for the APK's "assets:/eb" and a temp dataDir standing
 // in for AppPaths::dataDir() — no Android toolchain, no display, runs under the offscreen QPA in CI.
 //
 // Pins the semantics the app depends on (see AssetBootstrap.h):

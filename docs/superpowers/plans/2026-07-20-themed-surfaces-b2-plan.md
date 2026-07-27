@@ -16,7 +16,7 @@
 - Preserve the scout-mapped landmines verbatim: Downloads' in-place progress updates + freed-pointer guard (`dlPanelOpen_` discipline); parental-PIN `Osk::getText` nesting; `retro_->stop()` before core-picker/input-mapping; `showDialogPanel`'s QUEUED finished-connect rationale.
 - Classic mode remains functional until the final cleanup (post-B2, user-approved later): themed-mode routing goes to the new surfaces; classic-mode routing keeps the old panels. Deprecation logging (one `mwLog` line per classic entry) fires only when a classic surface is entered WHILE `themedHomeEnabled()` — that's the future-cleanup signal.
 - Gates every task: probe_nav + probe_navqml + full suite; close-out adds latency (≤2 ms vs 16 ms), polishsweep, watchdog review.
-- Machine facts as all tracks (build/PATH/offscreen/deploy-keep-name/MMV_UITEST/uitest-only/protect-data/rtk; ini byte-identical restores; Weekend Picks intact).
+- Machine facts as all tracks (build/PATH/offscreen/deploy-keep-name/EB_UITEST/uitest-only/protect-data/rtk; ini byte-identical restores; Weekend Picks intact).
 - Scout anchors (verified 2026-07-20): showPanel/showDialogPanel MainWindow.cpp:4778-4827; panelRow :4830; panel nav :1420-1481 (NavTextField two-state Nav.h:43-67); call-site table + control inventory in the scout report (.superpowers/sdd/ — the B2 Task-1 brief carries the table verbatim); Esc menu :890-912; startup picker :1605; themed→settings flow :764/:2716 (LEAVES the themed surface today); themedHome/enabled read :2200-2207 default false, writer :2943; deprecation candidates list; QFileDialog sites :1949/:5202.
 
 ---

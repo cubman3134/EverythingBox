@@ -11,6 +11,7 @@
 //
 // Prints BRAND-OK on success; any failure prints BRAND-FAIL <what> and exits non-zero.
 #include "BrandMigration.h"
+#include "Settings.h"
 
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -216,6 +217,25 @@ int main(int argc, char** argv)
         CHECK(!BrandMigration::done(BrandMigration::Step::DriveFolder)
                   && !BrandMigration::done(BrandMigration::Step::DriveFiles),
               "the Drive steps are NOT flagged when Drive was never reached");
+    }
+
+    // ---- 6. the parental PIN salt is NOT a brand string ---------------------------------------------------
+    // The PIN is stored as SHA-256(salt + pin), so the salt is an INPUT to a hash already written to every
+    // existing user's ini — "renaming" it redefines the function and no PIN a user set ever matches again.
+    // The rebrand's prose sweep DID rename it (caught in review), so this asserts the hash against a value
+    // computed before the rename. It is deliberately a literal digest, not a re-derivation from the salt
+    // constant: a check that recomputes from whatever the salt currently is would pass after the very
+    // regression it exists to catch.
+    {
+        Settings::setParentalPin(QStringLiteral("1234"));
+        QSettings ini(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                      QSettings::IniFormat);
+        CHECK(ini.value(QStringLiteral("parental/pinHash")).toString()
+                  == QStringLiteral("dd4e3ef8689981a15d885a493b987d6b72c04cd0077c569fe515d99dbedcff30"),
+              "the parental PIN hash still matches the pre-rename salt");
+        CHECK(Settings::checkParentalPin(QStringLiteral("1234")),
+              "the PIN round-trips through checkParentalPin");
+        Settings::setParentalPin(QString());   // leave the probe's own ini clean
     }
 
     clearAllFlags();

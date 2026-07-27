@@ -73,7 +73,7 @@ static QNetworkRequest makeRequest(const QString& host, const QString& path, boo
     QNetworkRequest rq{ QUrl(QStringLiteral("https://%1/api/v1%2").arg(host, path)) };
     rq.setRawHeader("Api-Key", Settings::openSubApiKey().toUtf8());
     rq.setHeader(QNetworkRequest::UserAgentHeader,
-                 QStringLiteral("MyMediaVault v%1").arg(QCoreApplication::applicationVersion()));
+                 QStringLiteral("EverythingBox v%1").arg(QCoreApplication::applicationVersion()));
     rq.setRawHeader("Accept", "application/json");
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
@@ -380,7 +380,7 @@ void SubtitleFetcher::download(qint64 fileId, const QString& lang,
         const QString path = QStringLiteral("%1/%2-%3.srt").arg(dir, lang).arg(fileId);
         QNetworkRequest getReq{ QUrl(link) };
         getReq.setHeader(QNetworkRequest::UserAgentHeader,
-                         QStringLiteral("MyMediaVault v%1").arg(QCoreApplication::applicationVersion()));
+                         QStringLiteral("EverythingBox v%1").arg(QCoreApplication::applicationVersion()));
         getReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         getReq.setTransferTimeout(20000);
         QNetworkReply* dl = nam_->get(getReq);

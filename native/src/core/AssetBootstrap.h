@@ -6,7 +6,7 @@
 // first-party addons, so nothing is on disk until we extract it. This is that extractor.
 //
 // It is a pure function of (sourceRoot, dataDir, appVersion) so it is testable with any source dir (the probe
-// hands it a temp dir; the app hands it "assets:/mmv" on Android). QtCore-only, like FormFactor.
+// hands it a temp dir; the app hands it "assets:/eb" on Android). QtCore-only, like FormFactor.
 //
 // Semantics (probe_bootstrap pins these verbatim):
 //   * A stamp file `dataDir/.assets-version` records the version whose assets were last extracted.

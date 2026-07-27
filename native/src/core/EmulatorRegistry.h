@@ -1,4 +1,4 @@
-// Standalone (external) emulators that My Media Vault launches as a child process - the RetroBat / ES-DE
+// Standalone (external) emulators that EverythingBox launches as a child process - the RetroBat / ES-DE
 // model: keep a copy of each emulator under <emulators-root>/<id>/, run it with the ROM, and monitor it
 // until it exits. Used for systems that can't run as an in-process libretro core (e.g. GameCube/Wii via
 // Dolphin, which is hardware-rendered). Cf. SystemCatalog (in-process libretro cores).

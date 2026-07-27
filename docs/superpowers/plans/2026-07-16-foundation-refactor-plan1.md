@@ -6,7 +6,7 @@
 
 **Architecture:** Behavior-preserving extraction — code MOVES out of `native/src/ui/MainWindow.cpp` (5,944 lines) and `native/src/ui/HomeView.cpp` (3,997 lines) into new classes; MainWindow keeps window/stack orchestration and connects to signals. Spec: `docs/superpowers/specs/2026-07-16-foundation-refactor-design.md`.
 
-**Tech Stack:** Qt 6 Widgets C++ (existing style), headless `probe_*` executables (offscreen QPA, sentinel-on-success — the project's test pattern, see `native/tools/probe_nav.cpp`), `MMV_UITEST=1` + `native/tools/uitest.py` for live verification.
+**Tech Stack:** Qt 6 Widgets C++ (existing style), headless `probe_*` executables (offscreen QPA, sentinel-on-success — the project's test pattern, see `native/tools/probe_nav.cpp`), `EB_UITEST=1` + `native/tools/uitest.py` for live verification.
 
 **Scope note:** This is plan 1 of the phase-1 spec. It covers spec steps 1–4 plus the pure part of step 5 (recents/downloads/favorites catalog builders). A follow-up plan covers the async-coupled providers (playlists, Steam, search, addon catalogs) and the step-6 sweep — those touch HomeView's request/response machinery and deserve their own plan.
 
@@ -15,9 +15,9 @@
 - Qt 6, C++17, match the existing comment density and naming style (trailing `_` members, explanatory block comments).
 - NEVER use QDialog/QMessageBox/QInputDialog/top-level windows for new UI — all feedback goes through the nav kit / Notifier (project rule, enforced by probe_nav conventions).
 - One seam per commit. Move code, don't rewrite it — bodies transfer verbatim except for renamed member access.
-- Build: `cmake --build build --config Release` from the repo root (`C:\Users\cubma\Project Goliath`). App target: `mymediavault`. Probe exes land in `build/Release/`.
-- Live verification: deploy the Release exe over the copy in `C:\MyMediaVault-app` (check the existing exe name with `ls C:/MyMediaVault-app/*.exe` first and keep it), launch with `MMV_UITEST=1`, drive via `python native/tools/uitest.py`. Never use SendKeys/foreground automation.
-- New source files are added to the `qt_add_executable(mymediavault ...)` source list in `native/CMakeLists.txt` (MainWindow's entry is at line ~139: `src/ui/MainWindow.cpp src/ui/MainWindow.h`).
+- Build: `cmake --build build --config Release` from the repo root (`C:\Users\cubma\Project Goliath`). App target: `everythingbox`. Probe exes land in `build/Release/`.
+- Live verification: deploy the Release exe over the copy in `C:\EverythingBox-app` (check the existing exe name with `ls C:/EverythingBox-app/*.exe` first and keep it), launch with `EB_UITEST=1`, drive via `python native/tools/uitest.py`. Never use SendKeys/foreground automation.
+- New source files are added to the `qt_add_executable(everythingbox ...)` source list in `native/CMakeLists.txt` (MainWindow's entry is at line ~139: `src/ui/MainWindow.cpp src/ui/MainWindow.h`).
 - All log lines in extracted code keep using the `<app>/stream_debug.log` one-liner pattern; each new .cpp gets its own local `static void xxLog(const QString&)` copy of `mwLog` (MainWindow.cpp:142-147) — it's 4 lines, duplication is cheaper than a shared header for a logger.
 
 ---
@@ -186,10 +186,10 @@ Find every touch point: `grep -n "notice_\|showPlayerNotice\|positionNotice" nat
 
 - [ ] **Step 6: Build the app + probe suite, verify live**
 
-Run: `cmake --build build --config Release --target mymediavault probe_notifier probe_nav`
+Run: `cmake --build build --config Release --target everythingbox probe_notifier probe_nav`
 Expected: clean build; `./build/Release/probe_notifier.exe` → `NOTIFIER-OK`; `./build/Release/probe_nav.exe` → its PASS output.
 
-Live: deploy the exe over `C:\MyMediaVault-app`, launch with `MMV_UITEST=1`, then:
+Live: deploy the exe over `C:\EverythingBox-app`, launch with `EB_UITEST=1`, then:
 `python native/tools/uitest.py state` (app responds), `python native/tools/uitest.py shot scratchpad/notifier-smoke.png`. Drive Home → a catalog that shows a toast (any download/resolve action) if convenient; otherwise the state+shot smoke suffices — the probe covers the widget logic.
 
 - [ ] **Step 7: Commit**
@@ -356,10 +356,10 @@ Call sites: `openVideoPath:1455` and `openStreamUrl:2161` replace `openM3u(x, t)
 
 - [ ] **Step 6: Build + verify live**
 
-Run: `cmake --build build --config Release --target mymediavault probe_m3u`
+Run: `cmake --build build --config Release --target everythingbox probe_m3u`
 Expected: clean build, `M3U-OK`.
 
-Live: deploy, launch with `MMV_UITEST=1`. Create `scratchpad/test.m3u` with two entries pointing at any two local audio files (see `C:\MyMediaVault-app` media or any mp3s), then in the app: Settings → (or the stream prompt) — simplest deterministic path is Open Video on the .m3u file via the recent/open flow. Drive with uitest keys; confirm via `uitest.py state` that the player page is active and the queue panel is visible, `shot scratchpad/m3u-queue.png`. Exit playback (back), confirm home state.
+Live: deploy, launch with `EB_UITEST=1`. Create `scratchpad/test.m3u` with two entries pointing at any two local audio files (see `C:\EverythingBox-app` media or any mp3s), then in the app: Settings → (or the stream prompt) — simplest deterministic path is Open Video on the .m3u file via the recent/open flow. Drive with uitest keys; confirm via `uitest.py state` that the player page is active and the queue panel is visible, `shot scratchpad/m3u-queue.png`. Exit playback (back), confirm home state.
 
 - [ ] **Step 7: Commit**
 
@@ -382,7 +382,7 @@ git commit -m "refactor: extract StreamResolver — m3u/stream classification ou
 **Interfaces:**
 - Consumes: nothing from Tasks 1-2 (parallel-safe after Task 1).
 - Produces:
-  - `explicit PlaybackSession(const QString& settingsFile = QString(), QObject* parent = nullptr)` — empty `settingsFile` = the app store (`AppPaths::dataDir() + "/mymediavault.ini"`); probes pass a temp path
+  - `explicit PlaybackSession(const QString& settingsFile = QString(), QObject* parent = nullptr)` — empty `settingsFile` = the app store (`AppPaths::dataDir() + "/everythingbox.ini"`); probes pass a temp path
   - `void setQueue(const QStringList& files, int startIndex, const QStringList& titles = {})`
   - `void playIndex(int index)` / `void next()` / `void prev()` / `void handleTrackEnd()` (advances the queue or emits `queueFinished`)
   - `void clearQueue()` — persists then resets (was `clearAudioQueue` minus the widget lines)
@@ -520,10 +520,10 @@ Then the mechanical replacements (verify with `grep -n "tracks_\|trackIndex_\|re
 
 - [ ] **Step 6: Build + verify live**
 
-Run: `cmake --build build --config Release --target mymediavault probe_playback probe_notifier probe_m3u`
+Run: `cmake --build build --config Release --target everythingbox probe_playback probe_notifier probe_m3u`
 Expected: clean build, all three sentinels.
 
-Live: deploy, `MMV_UITEST=1` launch. Drive: open an audio folder (Home → Music/recent audio entry), confirm via `uitest.py state` the player page + queue list; `uitest.py key right` next-track behavior if mapped, else use the transport; play ~30s, back out to Home, re-open the same item, confirm it resumes (state shows position > 0 / screenshot the seek bar: `shot scratchpad/resume-check.png`). Then a video: open, wait, back — reopen resumes.
+Live: deploy, `EB_UITEST=1` launch. Drive: open an audio folder (Home → Music/recent audio entry), confirm via `uitest.py state` the player page + queue list; `uitest.py key right` next-track behavior if mapped, else use the transport; play ~30s, back out to Home, re-open the same item, confirm it resumes (state shows position > 0 / screenshot the seek bar: `shot scratchpad/resume-check.png`). Then a video: open, wait, back — reopen resumes.
 
 - [ ] **Step 7: Commit**
 
@@ -638,12 +638,12 @@ The Emulators panel (`openEmulatorManager`, 2060-2124): `ensureEmu(); if (emu_->
 
 - [ ] **Step 3: Build + verify live (the touchy one — take it slow)**
 
-Run: `cmake --build build --config Release --target mymediavault`
+Run: `cmake --build build --config Release --target everythingbox`
 Expected: clean build.
 
-Live, after deploy with `MMV_UITEST=1`:
+Live, after deploy with `EB_UITEST=1`:
 1. Libretro path: drive Home → Games → a console with local ROMs → launch a game. `uitest.py state` shows the retro page; `shot scratchpad/launch-retro.png` shows gameplay. Esc → pause/exit back to Home.
-2. External path: launch a game on a standalone-emulator system (Dolphin/PCSX2 — whatever is installed). Confirm: wait page appears, MMV minimizes, the emulator opens; press Esc (global hotkey) → the emulator closes and MMV restores. `shot scratchpad/launch-external-return.png`.
+2. External path: launch a game on a standalone-emulator system (Dolphin/PCSX2 — whatever is installed). Confirm: wait page appears, EB minimizes, the emulator opens; press Esc (global hotkey) → the emulator closes and EB restores. `shot scratchpad/launch-external-return.png`.
 3. Failure path: from the stream prompt or a bad file open, confirm errors surface as notices (Notifier), not silence.
 4. Confirm play time banked: reopen the game's themed panel — last-played updated.
 
@@ -780,14 +780,14 @@ void HomeView::populateFavorites(const QString& system)
 { showSyntheticCatalog(browse::favoritesCatalog(FavoritesStore::list(), system)); }
 ```
 
-Delete HomeView's local `iconTypeForKind` and include `../browse/SyntheticCatalogs.h`; fix its other call sites (grep from Task file list) to `browse::iconTypeForKind`. Add both SyntheticCatalogs files to the `mymediavault` source list.
+Delete HomeView's local `iconTypeForKind` and include `../browse/SyntheticCatalogs.h`; fix its other call sites (grep from Task file list) to `browse::iconTypeForKind`. Add both SyntheticCatalogs files to the `everythingbox` source list.
 
 - [ ] **Step 6: Build + verify live**
 
-Run: `cmake --build build --config Release --target mymediavault probe_browse`
+Run: `cmake --build build --config Release --target everythingbox probe_browse`
 Expected: clean build, `BROWSE-OK`.
 
-Live: deploy, `MMV_UITEST=1`. Drive into a games console → Recent / Downloaded / Favorites folders each render their rows exactly as before (state + `shot scratchpad/synthetic-levels.png`); open one recent entry to confirm activation still routes. Check a non-game catalogue's Recent too (kind filter without system).
+Live: deploy, `EB_UITEST=1`. Drive into a games console → Recent / Downloaded / Favorites folders each render their rows exactly as before (state + `shot scratchpad/synthetic-levels.png`); open one recent entry to confirm activation still routes. Check a non-game catalogue's Recent too (kind filter without system).
 
 - [ ] **Step 7: Commit**
 
@@ -822,7 +822,7 @@ Expected: every probe PASS, no FAIL lines, exit 0.
 
 - [ ] **Step 3: Full live smoke**
 
-Deploy, `MMV_UITEST=1`, one pass through every extracted seam: video open+resume, audio queue next/prev, an .m3u queue, a libretro game launch+exit, an external emulator launch+hotkey-return, Recent/Downloaded/Favorites folders, and one visible error notice. Screenshot each to `scratchpad/`. Line counts as a sanity metric: `wc -l native/src/ui/MainWindow.cpp native/src/ui/HomeView.cpp` — expect MainWindow well under 5,000 and shrinking per the spec trajectory (the ~800 target lands after plan 2's remaining moves).
+Deploy, `EB_UITEST=1`, one pass through every extracted seam: video open+resume, audio queue next/prev, an .m3u queue, a libretro game launch+exit, an external emulator launch+hotkey-return, Recent/Downloaded/Favorites folders, and one visible error notice. Screenshot each to `scratchpad/`. Line counts as a sanity metric: `wc -l native/src/ui/MainWindow.cpp native/src/ui/HomeView.cpp` — expect MainWindow well under 5,000 and shrinking per the spec trajectory (the ~800 target lands after plan 2's remaining moves).
 
 - [ ] **Step 4: Update the spec status + commit**
 

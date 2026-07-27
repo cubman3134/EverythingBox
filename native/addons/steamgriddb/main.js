@@ -1,4 +1,4 @@
-// SteamGridDB game-artwork provider for My Media Vault.
+// SteamGridDB game-artwork provider for EverythingBox.
 //
 // Pure metadata/artwork provider: only implements getMeta() for type "game". It does NOT
 // contribute a browse catalog (see manifest "catalogs": []). The app fans out to every

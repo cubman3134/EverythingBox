@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.74 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.75 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -46,11 +46,11 @@ option(EVERYTHINGBOX_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)
 if(EVERYTHINGBOX_BUILD_APP)
     # QtPdf (PDFium) isn't shipped for Android in the open-source packages, so it's desktop-only; PdfView is
     # stubbed on Android (see src/pdf/PdfView.cpp).
-    set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent Test)
+    set(EB_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent Test)
     if(NOT ANDROID)
-        list(APPEND MMV_QT_COMPONENTS Pdf PdfWidgets)
+        list(APPEND EB_QT_COMPONENTS Pdf PdfWidgets)
     endif()
-    find_package(Qt6 REQUIRED COMPONENTS ${MMV_QT_COMPONENTS})
+    find_package(Qt6 REQUIRED COMPONENTS ${EB_QT_COMPONENTS})
     qt_standard_project_setup()  # enables AUTOMOC etc.
 
     # ---------------------------------------------------------------------------
@@ -76,14 +76,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Multi-config (Visual Studio) puts exes in build/Release AND build/Debug, so emit one
     # qt.conf per config dir via $<CONFIG>; single-config (Ninja/Make, e.g. CI Linux) drops
     # exes straight in the build dir, so emit a single qt.conf there.
-    set(MMV_QT_PLUGINS_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
-    message(STATUS "MyMediaVault: qt.conf Plugins path = ${MMV_QT_PLUGINS_DIR}")
-    set(MMV_QT_CONF_CONTENT "[Paths]\nPlugins = ${MMV_QT_PLUGINS_DIR}\n")
-    get_property(_mmv_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
-    if(_mmv_multi_config)
-        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/qt.conf" CONTENT "${MMV_QT_CONF_CONTENT}")
+    set(EB_QT_PLUGINS_DIR "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_PLUGINS}")
+    message(STATUS "EverythingBox: qt.conf Plugins path = ${EB_QT_PLUGINS_DIR}")
+    set(EB_QT_CONF_CONTENT "[Paths]\nPlugins = ${EB_QT_PLUGINS_DIR}\n")
+    get_property(_eb_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(_eb_multi_config)
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/$<CONFIG>/qt.conf" CONTENT "${EB_QT_CONF_CONTENT}")
     else()
-        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/qt.conf" CONTENT "${MMV_QT_CONF_CONTENT}")
+        file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/qt.conf" CONTENT "${EB_QT_CONF_CONTENT}")
     endif()
 
     # Embedded provider dev credentials (FIRST configure_file in this repo). Reads the git-ignored
@@ -91,9 +91,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # BUILD TREE only. Absent secrets file -> empty header + a loud STATUS line (addon falls back to
     # user settings). The generated dir is added to the include path of every target that compiles
     # AddonContext.cpp (the app + the addon probes).
-    set(MMV_SECRETS_FILE     "${CMAKE_CURRENT_SOURCE_DIR}/secrets/screenscraper.secrets")
-    set(MMV_SECRETS_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/src/addons/BuiltinSecrets.h.in")
-    set(MMV_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
+    set(EB_SECRETS_FILE     "${CMAKE_CURRENT_SOURCE_DIR}/secrets/screenscraper.secrets")
+    set(EB_SECRETS_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/src/addons/BuiltinSecrets.h.in")
+    set(EB_SECRETS_GEN_DIR  "${CMAKE_CURRENT_BINARY_DIR}/generated/secrets")
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/GenerateSecrets.cmake")
 
     # QML theme engine (declarative, fully themeable front end). OPTIONAL so a Qt install without qtdeclarative
@@ -102,10 +102,10 @@ if(EVERYTHINGBOX_BUILD_APP)
     # degrades gracefully via the STATUS message below.
     find_package(Qt6 QUIET OPTIONAL_COMPONENTS Quick Qml QuickWidgets)
     if(TARGET Qt6::Quick AND TARGET Qt6::Qml AND TARGET Qt6::QuickWidgets)
-        set(MMV_HAVE_QML ON)
-        message(STATUS "MyMediaVault: QML theme engine enabled")
+        set(EB_HAVE_QML ON)
+        message(STATUS "EverythingBox: QML theme engine enabled")
     else()
-        message(STATUS "MyMediaVault: QML theme engine OFF (qtdeclarative not found)")
+        message(STATUS "EverythingBox: QML theme engine OFF (qtdeclarative not found)")
     endif()
 
     add_subdirectory(third_party/rcheevos) # RetroAchievements runtime + client (static lib, no extra deps)
@@ -162,7 +162,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         # FormFactor::instance() and both compile in every configuration, incl. the no-QML Android kit.
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         # AssetBootstrap: QtCore-only first-run APK-asset extractor (D2 Task 2). UNCONDITIONAL — main.cpp
-        # calls it on Android and under the MMV_TEST_BOOTSTRAP_SRC desktop override; compiles in every config.
+        # calls it on Android and under the EB_TEST_BOOTSTRAP_SRC desktop override; compiles in every config.
         src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h
         src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
@@ -235,7 +235,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
-    target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
+    target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(everythingbox PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
     target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
@@ -243,11 +243,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
-    if(MMV_HAVE_QML)
+    if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly (not via target_sources): qt_add_executable only wires up .qrc files
         # present in its initial source list at finalization, so a .qrc added later via target_sources is
         # silently skipped and "qrc:/theme2/ThemeView.qml" isn't found at runtime. This runs rcc directly.
-        qt_add_resources(MMV_THEME2_RCC resources/theme2.qrc)
+        qt_add_resources(EB_THEME2_RCC resources/theme2.qrc)
         target_sources(everythingbox PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
@@ -255,9 +255,9 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
             # FormFactor is now in the unconditional app source list above (Settings/RetroView need it in
             # the no-QML build too). It still drives `form` + TV scale/insets on the QML surfaces here.
-            ${MMV_THEME2_RCC})
+            ${EB_THEME2_RCC})
         target_link_libraries(everythingbox PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
-        target_compile_definitions(everythingbox PRIVATE MMV_HAVE_QML)
+        target_compile_definitions(everythingbox PRIVATE EB_HAVE_QML)
     endif()
     set_target_properties(everythingbox PROPERTIES OUTPUT_NAME "EverythingBox") # the on-disk exe is EverythingBox.exe
     # On macOS, produce an EverythingBox.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
@@ -271,7 +271,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Android (shared lib + APK) or iOS (app bundle).
     if(NOT ANDROID AND NOT IOS)
     # Crash triage (Windows): symbolize a minidump's faulting-thread stack against the Release .pdb, since there's
-    # no cdb/WinDbg on the box. No Qt — just DbgHelp. Usage: symbolize_dump <crash.dmp> C:\MyMediaVault-app
+    # no cdb/WinDbg on the box. No Qt — just DbgHelp. Usage: symbolize_dump <crash.dmp> C:\EverythingBox-app
     if(WIN32)
         add_executable(symbolize_dump tools/symbolize_dump.cpp)
         target_link_libraries(symbolize_dump PRIVATE dbghelp)
@@ -315,7 +315,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # SyncOffsets store: per-file/global audio+subtitle sync offsets, the persistence foundation the player's
     # sync controls (player/sync-controls Task 2) wire onto. QtCore-only (no Quick/Widgets) so the probe links
     # lean and runs under offscreen QPA. SyncOffsets.cpp is self-contained (its own QSettings store() on the
-    # shared mymediavault.ini), so the target needs neither Settings.cpp nor FormFactor.cpp — Qt6::Core only.
+    # shared everythingbox.ini), so the target needs neither Settings.cpp nor FormFactor.cpp — Qt6::Core only.
     add_executable(probe_sync tools/probe_sync.cpp
         src/core/SyncOffsets.cpp src/core/SyncOffsets.h)
     target_include_directories(probe_sync PRIVATE src src/core)
@@ -323,7 +323,7 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # ItemMarks store: per-profile hidden/completion/tags + tag vocab + pinned shelves, the persistence
     # foundation later library-management tasks (hidden filtering, detail actions, shelves) wire onto.
-    # QtCore-only (a QSettings wrapper over the shared mymediavault.ini) so the probe links lean and runs
+    # QtCore-only (a QSettings wrapper over the shared everythingbox.ini) so the probe links lean and runs
     # under offscreen QPA. Needs ProfileStore.cpp (marks are namespaced by the active profile id).
     add_executable(probe_marks tools/probe_marks.cpp
         src/core/ItemMarks.cpp src/core/ItemMarks.h
@@ -334,7 +334,7 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # ConsumptionStats store: per-profile media (watch/listen seconds) + reading (high-water pages) accrual, the
     # persistence foundation the Stats panel (stats T2) reads and the PlaybackSession/reader seams feed. QtCore-
-    # only (a QSettings+JSON wrapper over the shared mymediavault.ini) so the probe links lean and runs under
+    # only (a QSettings+JSON wrapper over the shared everythingbox.ini) so the probe links lean and runs under
     # offscreen QPA. Needs ProfileStore.cpp (stats are namespaced by the active profile id).
     # mdsync T3: the accumulators are now device-namespaced (stats/<profile>/<deviceId>/...), so both stores
     # need Settings::deviceId() (which drags FormFactor via Settings.cpp's virtualPadEnabled). PlayStats.cpp is
@@ -365,7 +365,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Multi-device-sync foundation (mdsync T1): device identity (Settings::deviceId), the per-store write
     # timestamps (ItemMarks updatedAt / FavoritesStore ts / PlaylistStore updatedAt), and the deletion
     # tombstones (core/Tombstones) that the generalized CloudMerge pass (T2) reads. QtCore-only (QSettings +
-    # JSON over the shared mymediavault.ini) so it links lean and runs under offscreen QPA. Pulls the real
+    # JSON over the shared everythingbox.ini) so it links lean and runs under offscreen QPA. Pulls the real
     # stores + their deps: Settings (deviceId) needs FormFactor; FavoritesStore's one-time list() migration
     # references RecentStore/DownloadsStore; every store is namespaced by ProfileStore.
     add_executable(probe_cloudmerge tools/probe_cloudmerge.cpp
@@ -389,7 +389,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 
-    # First-run onboarding router (onboarding/drive-restore T1): the pure mmv::onboardingRoute table plus
+    # First-run onboarding router (onboarding/drive-restore T1): the pure eb::onboardingRoute table plus
     # CloudSync::signInAvailable()'s desktop-true / Android-false platform gate. OnboardingRoute.h is header-only,
     # so the linkage is just CloudSync's TU (for signInAvailable) + its deps (Settings needs FormFactor;
     # CloudSync's bundle zip needs miniz). Same lean Core/Network/Gui set as probe_cloudmerge.
@@ -454,14 +454,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     # QML theme engine probe: renders a theme dir through ThemeEngine + the qrc-embedded QML (the app path).
     # Use qt_add_resources (not AUTORCC) for the same reasons as the app: it both reliably registers the
     # resource in the exe and re-runs rcc when the listed .qml files change (AUTORCC only tracks the .qrc).
-    if(MMV_HAVE_QML)
-        qt_add_resources(MMV_THEME2_RCC_PROBE resources/theme2.qrc)
+    if(EB_HAVE_QML)
+        qt_add_resources(EB_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
             src/core/Settings.cpp src/core/Settings.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
-            src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${MMV_THEME2_RCC_PROBE})
+            src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${EB_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
@@ -620,11 +620,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/BlackFrameWatchdog.cpp src/ui/BlackFrameWatchdog.h)
     target_include_directories(probe_navqml PRIVATE src src/ui src/theme2 src/core)
     target_link_libraries(probe_navqml PRIVATE Qt6::Core Qt6::Gui)
-    if(MMV_HAVE_QML)
+    if(EB_HAVE_QML)
         # Compile theme2.qrc explicitly for this probe too (a target_sources-added .qrc silently no-ops — see
         # the app target's note above), so qrc:/theme2/elements/ThemedTextField.qml is embedded and loadable.
-        qt_add_resources(MMV_THEME2_RCC_NAVQML resources/theme2.qrc)
-        target_sources(probe_navqml PRIVATE ${MMV_THEME2_RCC_NAVQML})
+        qt_add_resources(EB_THEME2_RCC_NAVQML resources/theme2.qrc)
+        target_sources(probe_navqml PRIVATE ${EB_THEME2_RCC_NAVQML})
         # §18(e) drives the REAL ThemedPanelHost (not the bare NavGraph) to pin the pop-restore clamp hazard at
         # host level. That drags in the panel host + the nav-kit closure its OSK edit path references
         # (Osk/NavOverlay/Nav) — the exact set probe_nav already links with only Qt6::Widgets, so no MainWindow.
@@ -640,7 +640,7 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/core/Settings.cpp     src/core/Settings.h)
         # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test)
-        target_compile_definitions(probe_navqml PRIVATE MMV_HAVE_QML)
+        target_compile_definitions(probe_navqml PRIVATE EB_HAVE_QML)
     endif()
 
     # Headless test for the Notifier overlay (the single user-feedback channel).
@@ -687,7 +687,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         third_party/duktape/duktape.c third_party/miniz.c)
-    target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
+    target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_addon PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
@@ -700,7 +700,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GamelistStore.cpp src/core/Settings.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
-    target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
+    target_include_directories(probe_gameagg PRIVATE src src/addons src/core third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_gameagg PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_gameagg PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
 
@@ -716,7 +716,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
-    target_include_directories(probe_showdispatch PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
+    target_include_directories(probe_showdispatch PRIVATE src src/core src/addons src/theme2 third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_showdispatch PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_showdispatch PRIVATE Qt6::Core Qt6::Network Qt6::Concurrent)
     endif() # NOT ANDROID (console probes)
@@ -745,38 +745,38 @@ if(EVERYTHINGBOX_BUILD_APP)
         # versionCode is a monotonic integer: major*1000000 + minor*10000 + patch (0.4.1 -> 4040001).
         # Patch capacity 9999 — the per-commit auto-bump hook (native/tools/pre-commit-version-bump.sh)
         # increments patch on every commit, so the old *100 formula would have overflowed into minor.
-        math(EXPR MMV_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*1000000 + ${PROJECT_VERSION_MINOR}*10000 + ${PROJECT_VERSION_PATCH}")
+        math(EXPR EB_ANDROID_VERSION_CODE "${PROJECT_VERSION_MAJOR}*1000000 + ${PROJECT_VERSION_MINOR}*10000 + ${PROJECT_VERSION_PATCH}")
         # Stage the APK package-source overlay in the BUILD tree — never mutate the committed native/android/.
-        # We copy the committed overlay verbatim, then add assets/mmv/ = the stock themes2/ + every first-party
+        # We copy the committed overlay verbatim, then add assets/eb/ = the stock themes2/ + every first-party
         # addon dir. androiddeployqt reads QT_ANDROID_PACKAGE_SOURCE_DIR and bundles its assets/ into the APK's
-        # read-only assets; AssetBootstrap::run("assets:/mmv", ...) extracts them into the writable data dir on
+        # read-only assets; AssetBootstrap::run("assets:/eb", ...) extracts them into the writable data dir on
         # first launch (main.cpp). Staged at CONFIGURE time so a fresh configure always mirrors the current tree.
         # NOTE: not testable locally (no Android toolchain) — inert on desktop; Task 4's CI run exercises it.
-        set(MMV_ANDROID_PKG_DIR "${CMAKE_CURRENT_BINARY_DIR}/android-package")
-        file(REMOVE_RECURSE "${MMV_ANDROID_PKG_DIR}")
-        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/android/" DESTINATION "${MMV_ANDROID_PKG_DIR}")
-        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/themes2" DESTINATION "${MMV_ANDROID_PKG_DIR}/assets/mmv")
+        set(EB_ANDROID_PKG_DIR "${CMAKE_CURRENT_BINARY_DIR}/android-package")
+        file(REMOVE_RECURSE "${EB_ANDROID_PKG_DIR}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/android/" DESTINATION "${EB_ANDROID_PKG_DIR}")
+        file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/themes2" DESTINATION "${EB_ANDROID_PKG_DIR}/assets/eb")
         # Ship every first-party addon dir under native/addons/ (each is a self-contained manifest.json + main.js).
-        file(GLOB _mmv_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
-        foreach(_addon ${_mmv_addon_dirs})
+        file(GLOB _eb_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
+        foreach(_addon ${_eb_addon_dirs})
             if(IS_DIRECTORY "${_addon}")
-                file(COPY "${_addon}" DESTINATION "${MMV_ANDROID_PKG_DIR}/assets/mmv/addons")
+                file(COPY "${_addon}" DESTINATION "${EB_ANDROID_PKG_DIR}/assets/eb/addons")
             endif()
         endforeach()
-        message(STATUS "Android assets staged at ${MMV_ANDROID_PKG_DIR}/assets/mmv (themes2 + first-party addons)")
+        message(STATUS "Android assets staged at ${EB_ANDROID_PKG_DIR}/assets/eb (themes2 + first-party addons)")
 
         set_target_properties(everythingbox PROPERTIES
             QT_ANDROID_MIN_SDK_VERSION 24
             QT_ANDROID_TARGET_SDK_VERSION 34
             QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
-            QT_ANDROID_VERSION_CODE "${MMV_ANDROID_VERSION_CODE}"
-            QT_ANDROID_PACKAGE_SOURCE_DIR "${MMV_ANDROID_PKG_DIR}") # build-staged manifest/res/assets overlay
+            QT_ANDROID_VERSION_CODE "${EB_ANDROID_VERSION_CODE}"
+            QT_ANDROID_PACKAGE_SOURCE_DIR "${EB_ANDROID_PKG_DIR}") # build-staged manifest/res/assets overlay
         # Bundle the app's non-Qt shared libraries into the APK (androiddeployqt copies these). libmpv pulls
         # in its ffmpeg stack (libav*/libsw*), so bundle every .so sitting next to MPV_LIBRARY, not just it.
         if(MPV_LIBRARY)
-            get_filename_component(_mmv_mpvdir "${MPV_LIBRARY}" DIRECTORY)
-            file(GLOB _mmv_mpvlibs "${_mmv_mpvdir}/*.so")
-            set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_mpvlibs})
+            get_filename_component(_eb_mpvdir "${MPV_LIBRARY}" DIRECTORY)
+            file(GLOB _eb_mpvlibs "${_eb_mpvdir}/*.so")
+            set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_eb_mpvlibs})
         endif()
         if(SDL2_LIBRARY)
             set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")
@@ -789,10 +789,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         # the version-suffixed sonames (libssl.so + libssl_3.so, libcrypto.so + libcrypto_3.so) ride along so
         # whichever name Qt's backend dlopens — and the libssl->libcrypto soname dependency — is satisfied.
         if(OPENSSL_ANDROID_LIBS_DIR)
-            file(GLOB _mmv_ssllibs "${OPENSSL_ANDROID_LIBS_DIR}/*.so")
-            if(_mmv_ssllibs)
-                set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_ssllibs})
-                message(STATUS "Bundling Android OpenSSL runtime: ${_mmv_ssllibs}")
+            file(GLOB _eb_ssllibs "${OPENSSL_ANDROID_LIBS_DIR}/*.so")
+            if(_eb_ssllibs)
+                set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_eb_ssllibs})
+                message(STATUS "Bundling Android OpenSSL runtime: ${_eb_ssllibs}")
             else()
                 message(WARNING "OPENSSL_ANDROID_LIBS_DIR=${OPENSSL_ANDROID_LIBS_DIR} has no .so's — TLS will fail on device")
             endif()
@@ -805,7 +805,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # iOS packaging. Mirrors the Android port: the media hub (video/audio via libmpv, readers, addons)
     # ships; standalone emulators + downloaded libretro cores are gated off (iOS forbids JIT and dlopen of
     # downloaded code). Configure with the Qt-for-iOS qt-cmake; libmpv comes from MPVKit's static
-    # xcframeworks (https://github.com/mpvkit/MPVKit) via -DMMV_IOS_MPV_DEPS_DIR=<dir of *.xcframework>,
+    # xcframeworks (https://github.com/mpvkit/MPVKit) via -DEB_IOS_MPV_DEPS_DIR=<dir of *.xcframework>,
     # plus -DMPV_INCLUDE_DIR=<Libmpv.framework/Headers> -DMPV_LIBRARY=<Libmpv.framework/Libmpv>.
     # -----------------------------------------------------------------------------------------------------
     if(IOS)
@@ -826,42 +826,42 @@ if(EVERYTHINGBOX_BUILD_APP)
 
         # Stage the stock themes2/ + first-party addons into the bundle (iOS bundles are shallow — resources
         # sit at the bundle root). AssetBootstrap extracts them into the writable data dir on first launch,
-        # exactly like the Android assets:/mmv flow (see main.cpp).
+        # exactly like the Android assets:/eb flow (see main.cpp).
         add_custom_command(TARGET everythingbox POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:everythingbox>/mmv"
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:everythingbox>/eb"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${CMAKE_CURRENT_SOURCE_DIR}/themes2" "$<TARGET_BUNDLE_DIR:everythingbox>/mmv/themes2"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/themes2" "$<TARGET_BUNDLE_DIR:everythingbox>/eb/themes2"
             COMMENT "Staging themes2 + addons into the app bundle")
-        file(GLOB _mmv_ios_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
-        foreach(_addon ${_mmv_ios_addon_dirs})
+        file(GLOB _eb_ios_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
+        foreach(_addon ${_eb_ios_addon_dirs})
             if(IS_DIRECTORY "${_addon}")
                 get_filename_component(_addon_name "${_addon}" NAME)
                 add_custom_command(TARGET everythingbox POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
-                            "${_addon}" "$<TARGET_BUNDLE_DIR:everythingbox>/mmv/addons/${_addon_name}")
+                            "${_addon}" "$<TARGET_BUNDLE_DIR:everythingbox>/eb/addons/${_addon_name}")
             endif()
         endforeach()
 
         # MPVKit ships libmpv + its whole dependency stack (ffmpeg, libass, gnutls, libplacebo, MoltenVK, ...)
         # as per-library STATIC xcframeworks. Link the slice matching the target (device vs simulator), plus
         # the system frameworks/libs that stack expects.
-        if(MMV_IOS_MPV_DEPS_DIR)
+        if(EB_IOS_MPV_DEPS_DIR)
             if(CMAKE_OSX_SYSROOT MATCHES "[Ss]imulator")
-                set(_mmv_ios_slices "ios-arm64_x86_64-simulator" "ios-arm64-simulator")
+                set(_eb_ios_slices "ios-arm64_x86_64-simulator" "ios-arm64-simulator")
             else()
-                set(_mmv_ios_slices "ios-arm64")
+                set(_eb_ios_slices "ios-arm64")
             endif()
-            foreach(_slice ${_mmv_ios_slices})
-                file(GLOB _mmv_ios_fws "${MMV_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.framework")
-                foreach(_fw ${_mmv_ios_fws})
+            foreach(_slice ${_eb_ios_slices})
+                file(GLOB _eb_ios_fws "${EB_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.framework")
+                foreach(_fw ${_eb_ios_fws})
                     get_filename_component(_fw_name "${_fw}" NAME_WE)
                     if(EXISTS "${_fw}/${_fw_name}")
                         target_link_libraries(everythingbox PRIVATE "${_fw}/${_fw_name}")
                     endif()
                 endforeach()
                 # Some deps ship a bare static lib in the slice instead of a framework (e.g. MoltenVK).
-                file(GLOB _mmv_ios_libs "${MMV_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.a")
-                foreach(_lib ${_mmv_ios_libs})
+                file(GLOB _eb_ios_libs "${EB_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.a")
+                foreach(_lib ${_eb_ios_libs})
                     target_link_libraries(everythingbox PRIVATE "${_lib}")
                 endforeach()
             endforeach()
@@ -872,7 +872,7 @@ if(EVERYTHINGBOX_BUILD_APP)
                 "-framework IOSurface" "-framework Security" "-framework SystemConfiguration"
                 "-framework CoreText" "-framework UIKit"
                 iconv bz2 z c++ resolv xml2)
-            message(STATUS "iOS: linking MPVKit static stack from ${MMV_IOS_MPV_DEPS_DIR}")
+            message(STATUS "iOS: linking MPVKit static stack from ${EB_IOS_MPV_DEPS_DIR}")
         endif()
         message(STATUS "Configuring iOS app bundle. Downloaded libretro cores + external emulators are "
                        "disabled on this platform.")

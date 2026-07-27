@@ -62,21 +62,21 @@ SIM=~/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64_x86_64-simulator/Libmpv.frame
   -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
   -DMPV_INCLUDE_DIR="$SIM/Headers" \
   -DMPV_LIBRARY="$SIM/Libmpv" \
-  -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+  -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
 cmake --build build-ios --config Release
 ```
 
 The `if(IOS)` CMake block links every framework/static-lib slice found under
-`MMV_IOS_MPV_DEPS_DIR/*.xcframework/<slice>/` (device builds pick the `ios-arm64` slice
+`EB_IOS_MPV_DEPS_DIR/*.xcframework/<slice>/` (device builds pick the `ios-arm64` slice
 automatically) plus the required system frameworks, and stages `themes2/` + `addons/` into the
-bundle as `mmv/`.
+bundle as `eb/`.
 
 Run it:
 
 ```sh
 xcrun simctl boot "iPhone 17 Pro"; open -a Simulator
-xcrun simctl install booted build-ios/Release-iphonesimulator/MyMediaVault.app
-xcrun simctl launch booted com.mymediavault.app
+xcrun simctl install booted build-ios/Release-iphonesimulator/EverythingBox.app
+xcrun simctl launch booted com.everythingbox.app
 ```
 
 First launch is slow (~1 min): Rosetta ahead-of-time-translates the whole statically-linked binary
@@ -88,9 +88,9 @@ The UiTestServer works inside the simulator by pointing the pipe at an absolute 
 reach:
 
 ```sh
-SIMCTL_CHILD_EB_UITEST=1 SIMCTL_CHILD_EB_UITEST_PIPE=/tmp/mmv-ios-uitest \
-  xcrun simctl launch booted com.mymediavault.app
-EB_UITEST_PIPE=mmv-ios-uitest python3 native/tools/uitest.py state
+SIMCTL_CHILD_EB_UITEST=1 SIMCTL_CHILD_EB_UITEST_PIPE=/tmp/eb-ios-uitest \
+  xcrun simctl launch booted com.everythingbox.app
+EB_UITEST_PIPE=eb-ios-uitest python3 native/tools/uitest.py state
 ```
 
 ## Device builds / the release .ipa
@@ -114,7 +114,7 @@ DEV=~/ios-deps/mpvkit/Libmpv.xcframework/ios-arm64/Libmpv.framework
   -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
   -DMPV_INCLUDE_DIR="$DEV/Headers" \
   -DMPV_LIBRARY="$DEV/Libmpv" \
-  -DMMV_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
+  -DEB_IOS_MPV_DEPS_DIR="$HOME/ios-deps/mpvkit"
 cmake --build build-ios-dev --config Release
 ```
 

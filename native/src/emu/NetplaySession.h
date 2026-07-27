@@ -1,4 +1,4 @@
-// Two-player LAN netplay between two MyMediaVault instances (not RetroArch-compatible). Uses deterministic
+// Two-player LAN netplay between two EverythingBox instances (not RetroArch-compatible). Uses deterministic
 // input-delay lockstep: both peers run the same libretro core + ROM, sync an initial save state, then exchange
 // one input packet per frame and advance in step. The host is player 0, the client player 1. Requires a
 // deterministic core (most 2D cores) and identical core options/BIOS on both sides.

@@ -1,4 +1,4 @@
-// Compute the RetroAchievements ROM hash (rc_hash) for a file, exactly as MMV's in-process RA client does, so
+// Compute the RetroAchievements ROM hash (rc_hash) for a file, exactly as EB's in-process RA client does, so
 // we can check whether a "unsupported game version" is a bad/unlisted dump vs. a hashing problem on our side.
 //   usage: probe_rahash <console_id> <file>
 #include "rc_hash.h"

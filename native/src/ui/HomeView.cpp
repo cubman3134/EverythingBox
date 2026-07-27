@@ -2801,7 +2801,7 @@ bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last()
 // Identity for a local game favourite: its stable resume key, else its path.
 static QString gameFavId(const MediaItem& it) { return it.id.isEmpty() ? it.url : it.id; }
 
-// True if `path` is a file MyMediaVault downloaded (under our downloads folder or the remote cache), so it's
+// True if `path` is a file EverythingBox downloaded (under our downloads folder or the remote cache), so it's
 // safe to delete on "Uninstall". A ROM the user keeps in their own library folder is left alone.
 static bool weOwnDownloadedFile(const QString& path)
 {

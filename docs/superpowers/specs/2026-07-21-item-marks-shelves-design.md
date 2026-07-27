@@ -27,7 +27,7 @@ Roadmap (user-set order): THIS (marks+completion+shelves) → category playlists
 - Item keys: the SAME stable keys the app already uses (addon itemId / local path
   keys); hashed internally before use as ini group leaves (the SyncOffsets lesson —
   the store owns key sanitization; MD5-over-UTF8 hex tokens).
-- Storage (portable `mymediavault.ini`, namespaced by the active profile id or
+- Storage (portable `everythingbox.ini`, namespaced by the active profile id or
   `default`): `marks/<profileId>/items/<itemHash>` → a JSON blob `{ hidden,
   completion, tags }` (one object per item); per-profile tag vocabulary
   `marks/<profileId>/tagVocab` and pinned-tag set `marks/<profileId>/pinnedTags`

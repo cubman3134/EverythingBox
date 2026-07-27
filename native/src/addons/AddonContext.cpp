@@ -70,7 +70,7 @@ QString AddonContext::builtinCredential(const QString& key) const
     // rolling XOR (this MUST mirror native/cmake/GenerateSecrets.cmake byte-for-byte), then slice the
     // recovered plaintext blob into devid|devpassword by their stored lengths. The XOR only keeps the
     // creds out of a `strings` scan — anyone with the binary can recover them.
-    using namespace mmv_secrets;
+    using namespace eb_secrets;
     const int total = kScreenScraperALen + kScreenScraperBLen;
     if (total <= 0) return QString(); // secrets file was absent at build → nothing embedded
 
@@ -126,7 +126,7 @@ QString AddonContext::httpRequest(const QString& optionsJson) const
         return QString();
 
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVaultAddon"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("EverythingBoxAddon"));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     const QJsonObject headers = o.value(QStringLiteral("headers")).toObject();
     for (auto it = headers.begin(); it != headers.end(); ++it)
