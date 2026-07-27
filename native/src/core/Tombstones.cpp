@@ -1,4 +1,5 @@
 #include "Tombstones.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QSettings>
@@ -11,7 +12,7 @@
 // with any other QSettings on the same file comes from every writer calling sync().
 static QSettings& store_()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

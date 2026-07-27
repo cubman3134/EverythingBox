@@ -22,6 +22,7 @@
 #include "ProfileStore.h"
 #include "Settings.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -65,7 +66,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
     {
         QSettings reset(iniPath, QSettings::IniFormat);
         reset.remove(QStringLiteral("stats"));

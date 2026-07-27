@@ -20,6 +20,7 @@
 #include "ExternalPlayer.h"
 #include "Settings.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -57,7 +58,7 @@ int main(int argc, char** argv)
 
     // Reset: wipe any leftover player/* keys so the Settings asserts start from defaults.
     {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         reset.remove(QStringLiteral("player"));
         reset.sync();
     }
@@ -184,7 +185,7 @@ int main(int argc, char** argv)
 
     // Restore a clean player group so a rerun starts from defaults.
     {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         reset.remove(QStringLiteral("player"));
         reset.sync();
     }

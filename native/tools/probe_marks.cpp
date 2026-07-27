@@ -21,6 +21,7 @@
 #include "ItemMarks.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -54,7 +55,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 
     // Reset: wipe any leftover marks/* and profiles/* so a stale ini can't skew the asserts. Shares
     // QSettings' per-file cache with ItemMarks' own store(), so this is visible to every later read.

@@ -1,4 +1,5 @@
 #include "Settings.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "../theme2/FormFactor.h"   // virtualPadEnabled() resolves "auto" against the form-factor authority
 #include <QSettings>
@@ -8,7 +9,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

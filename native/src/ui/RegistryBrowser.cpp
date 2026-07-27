@@ -1,4 +1,5 @@
 #include "RegistryBrowser.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../addons/AddonManager.h"
 
@@ -28,7 +29,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -43,7 +44,7 @@ QString RegistryBrowser::defaultUrl() const
 {
     return kind_ == Themes
         ? QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-themes/main/index.json")
-        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-addons/main/index.json");
+        : QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json");
 }
 
 QStringList RegistryBrowser::extraRegistries() const { return store().value(extrasKey(kind_)).toStringList(); }
@@ -232,7 +233,7 @@ void RegistryBrowser::fetchAll()
 void RegistryBrowser::fetchOne(const QString& indexUrl)
 {
     QNetworkRequest req((QUrl(indexUrl)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, indexUrl] {
@@ -312,7 +313,7 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
 bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QString* error)
 {
     QNetworkRequest req((QUrl(url)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
 

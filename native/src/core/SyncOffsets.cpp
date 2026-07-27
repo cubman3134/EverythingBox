@@ -1,4 +1,5 @@
 #include "SyncOffsets.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include <QSettings>
 #include <QCryptographicHash>
@@ -8,7 +9,7 @@
 // reloads on access when the on-disk file has changed. We do NOT rely on a shared in-process cache.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

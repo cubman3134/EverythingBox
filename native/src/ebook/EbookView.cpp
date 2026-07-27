@@ -1,4 +1,5 @@
 #include "EbookView.h"
+#include "../core/AppBrand.h"
 #include "EpubBook.h"
 #include "MobiBook.h"
 #include "PdfTextBook.h"
@@ -391,7 +392,7 @@ void BookPageWidget::mouseMoveEvent(QMouseEvent*)
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

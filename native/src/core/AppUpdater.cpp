@@ -1,4 +1,5 @@
 #include "AppUpdater.h"
+#include "AppBrand.h"
 #include "ArchiveRom.h"
 
 #include <QCoreApplication>
@@ -59,7 +60,7 @@ void AppUpdater::checkForUpdate()
 {
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     QNetworkRequest rq{ QUrl(QString::fromLatin1(kReleasesApi)) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setRawHeader("Accept", "application/vnd.github+json");
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
@@ -113,7 +114,7 @@ void AppUpdater::downloadAndApply()
 
     emit progress(tr("Downloading My Media Vault %1…").arg(latestVersion_), -1);
     QNetworkRequest rq{ QUrl(pendingUrl_) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(120000);
     QNetworkReply* reply = nam_->get(rq);

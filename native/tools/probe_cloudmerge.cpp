@@ -30,6 +30,7 @@
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "ProfileStore.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -72,7 +73,7 @@ static bool saneTs(qint64 ts, qint64 before, qint64 after)
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 
     // Reset every group we touch so a stale ini can't skew the asserts.
     {

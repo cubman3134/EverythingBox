@@ -18,6 +18,7 @@
 // defaults asserts.
 #include "SyncOffsets.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -35,7 +36,7 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
 
     // Reset: wipe any leftover sync/* keys so the defaults asserts start clean. Shares QSettings' per-file
     // cache with SyncOffsets' own store(), so this remove()+sync() is visible to every later read.

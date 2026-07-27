@@ -1,4 +1,5 @@
 #include "ConsumptionStats.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "Settings.h"           // deviceId() — the accumulator namespace (mdsync T3)
@@ -16,7 +17,7 @@
 // sync(); QSettings reloads on access when the on-disk file changed.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

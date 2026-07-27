@@ -1,4 +1,5 @@
 #include <QApplication>
+#include "core/AppBrand.h"
 #ifdef MMV_HAVE_QML
 #include "theme2/MpvPreview.h"
 #include <QQuickWindow>
@@ -32,7 +33,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.70";
+static constexpr const char* kAppVersion = "0.5.71";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -85,13 +86,13 @@ static void migrateLegacySettings()
 {
     const QString dir = AppPaths::dataDir();
     const QString oldIni = dir + QStringLiteral("/goliath.ini");
-    const QString newIni = dir + QStringLiteral("/mymediavault.ini");
+    const QString newIni = dir + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
     if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;
     if (!QFile::copy(oldIni, newIni)) return;
 
     QSettings s(newIni, QSettings::IniFormat);
     const QString oldNs = QStringLiteral("com.goliath.");
-    const QString newNs = QStringLiteral("com.mymediavault.");
+    const QString newNs = QString::fromLatin1(AppBrand::kAddonPrefix);
     const QStringList keys = s.allKeys();
     for (const QString& k : keys)
     {
