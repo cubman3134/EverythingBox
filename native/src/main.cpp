@@ -30,7 +30,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.62";
+static constexpr const char* kAppVersion = "0.5.63";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
