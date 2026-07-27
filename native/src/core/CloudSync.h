@@ -51,19 +51,29 @@ public:
     void signOut();                      // forget the tokens; emits signedOut()
 
     // ---- Drive primitives (callbacks fire on the GUI thread) ----
+    // These four are THE test seam for everything layered on them (SaveSync's index compare-and-swap, its
+    // torn-write guard, its listOk guards, its Drive-name mapping): a headless probe subclasses CloudSync,
+    // substitutes an in-memory Drive, and every caller above runs for real. Nothing in production overrides
+    // them — a seam any higher up would replace the very code whose failure modes are unrecoverable.
     // Find (or create) the "MyMediaVault" folder; returns its file id ("" on failure).
-    void ensureFolder(std::function<void(const QString& folderId)> cb);
+    virtual void ensureFolder(std::function<void(const QString& folderId)> cb);
     // Find a file by name inside a folder; cb gets {listOk, id, modifiedTimeIso, stateHash}. listOk is false
     // when the query (or its token refresh) had a network error — the caller must NOT read an empty id as
     // "no such file" in that case (it's "couldn't reach Drive"). "" id with listOk==true means genuinely absent.
-    void findFile(const QString& folderId, const QString& name,
+    virtual void findFile(const QString& folderId, const QString& name,
                   std::function<void(bool listOk, const QString& id, const QString& modifiedIso, const QString& stateHash)> cb);
     // Create or update a file's binary content; stateHash is stamped into appProperties (may be empty).
     // cb gets the file id ("" on failure).
-    void uploadFile(const QString& folderId, const QString& existingId, const QString& name,
+    virtual void uploadFile(const QString& folderId, const QString& existingId, const QString& name,
                     const QString& mimeType, const QByteArray& data, const QString& stateHash,
                     std::function<void(const QString& id)> cb);
-    void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
+    virtual void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
+
+    // Escape a value being interpolated into a Drive `q=` string literal. Drive's query grammar quotes with
+    // apostrophes and escapes with backslash, so a name carrying either — "Link's Awakening" is an ordinary
+    // ROM title — otherwise terminates the literal early and the query fails or, worse, matches something
+    // else. Backslashes first, or the escape we just added gets escaped again.
+    static QString driveQueryQuote(const QString& value);
 
     // ---- sync ----
     struct Status {

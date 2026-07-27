@@ -41,8 +41,16 @@ public:
     ~RetroView() override;
 
     // coreName is the bare core id (e.g. "mgba") used to look up the user's saved per-core options.
+    //
+    // title/systemId are the launching catalog item's display name and the system it was launched FROM. They
+    // are parameters rather than a setter called beforehand because openGame() begins by stop()ping whatever
+    // is running, and stop() writes the OUTGOING game's battery RAM: identity set before the call would file
+    // that write under the incoming game's system. Both are optional — an omitted systemId falls back to the
+    // extension lookup (ambiguous for extensions several systems share, which is why the launcher passes its
+    // resolved one) and an omitted title to the ROM's base name.
     bool openGame(const QString& corePath, const QString& romPath,
-                  const QString& coreName = QString(), QString* error = nullptr);
+                  const QString& coreName = QString(), QString* error = nullptr,
+                  const QString& title = QString(), const QString& systemId = QString());
     void stop();
     bool running() const { return running_; }
     bool paused()  const { return paused_; }   // freeze state (Esc menu + OS-lifecycle pause query)
@@ -75,6 +83,14 @@ signals:
     void coreError(const QString& text);     // a hard core error (crash) — error-class notice, kFeedbackLong (J10)
     void exitRequested();                    // the Esc menu's "Exit" - main window stops + returns Home
     void gameStopped();                      // a running game was torn down (main window records playtime)
+    // A save file or save state was just written to disk (save-sync T5). `relPath` is relative to
+    // AppPaths::dataDir() and INCLUDES the "saves/"|"states/" prefix — it is the exact name
+    // SaveSync::scanLocal produces and the only shape SaveSync::markDirty matches; a bare file name would
+    // match nothing on disk, so the push would find no such file and the save would never retire from the
+    // dirty set. Emitted from noteSaveMeta(), which already derives that name for the sidecar.
+    // In split-screen the battery-RAM autosave runs on the emulation WORKER thread, so this crosses threads:
+    // the receiver is the main window, so an auto connection queues it (QString is a registered metatype).
+    void saveWritten(const QString& relPath);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -149,9 +165,18 @@ private:
     QString statePath() const;          // <app>/states/<romBaseName>.state  (legacy single slot)
     QString statePath(int slot) const;  // <app>/states/<romBaseName>.stateN
     QString thumbPath(int slot) const;  // <app>/states/<romBaseName>.stateN.png
-    QString sramPath() const;  // <app>/saves/<romBaseName>.srm  (battery-backed in-game saves)
+    QString savesRoot() const; // <app>/saves
+    // <app>/saves/<system>/<romBaseName>.srm for a NEW save, or the legacy flat <app>/saves/<romBaseName>.srm
+    // when that file already exists — see SaveMeta::resolvePath. Never migrates an existing save.
+    QString sramPath() const;
     void loadSram();           // restore battery RAM after a game loads
     void saveSram();           // persist battery RAM (on stop, exit, and periodically)
+    // Record which GAME a save/state file belongs to, keyed the way SaveSync names it (a path relative to the
+    // data dir, "saves/…" or "states/…"). Cheap, best-effort, and the only thing that makes a 40-hex ROM
+    // hash's save identifiable later. Also emits saveWritten() with that same key — the sidecar and the sync
+    // must never disagree about what a save is called, so both names come from this one derivation.
+    // NOT const (it was): it emits, and every caller is already a non-const write path.
+    void noteSaveMeta(const QString& absPath);
     int16_t inputState(unsigned port, unsigned device, unsigned index, unsigned id);
     void updateControllerPorts(); // enable/disable core ports 0..3 as controllers come and go
     void loadTurbo();             // read turbo/autofire config from Settings
@@ -175,6 +200,8 @@ private:
     Keymap keymap_;           // keyboard -> RetroPad (remappable)
     QString romPath_;         // current content, for naming its save-state slot
     QString coreName_;        // the bare core id of the running game (for the netplay handshake)
+    QString systemId_;        // the running game's system ("nes", "snes", …); namespaces NEW save files
+    QString gameTitle_;       // the running game's display name, recorded in the saves-meta sidecar
     QTimer* timer_ = nullptr;
     std::set<int> pressedKeys_; // Qt key codes currently held (resolved per-port via keymap_)
     quint32 virtualPad_ = 0;    // held RetroPad bitmask from the on-screen virtual gamepad (port 0), OR'd in resolveInput

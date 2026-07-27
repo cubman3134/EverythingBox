@@ -127,7 +127,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK"; do
   set -- $p
   if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "(skip) $1 not built"; fi
 done
@@ -155,6 +155,34 @@ if [ -n "$qml_sel_hits" ]; then
   fail=1
 else
   echo "PASS: qml no-direct-selection-writes"
+fi
+echo
+
+# RetroView battery-save path gate (save-sync T4): where a .srm lives is decided in ONE place —
+# SaveMeta::resolvePath, called from RetroView::sramPath() — because that function is the only thing that knows
+# a save may live flat (pre-namespacing) or under a DIFFERENT system's namespace than the one this launch
+# resolved. A second `".srm"` literal anywhere else in RetroView.cpp is a path built by hand, and a hand-built
+# path misses both fallbacks: the game boots with an empty save while the real one sits on disk, unreachable.
+# resolvePath itself is asserted by probe_savesync; this gate asserts nothing bypasses it. Line-comments are
+# stripped first (via sed) so prose that merely mentions ".srm" never trips it.
+echo "=== retroview srm-path gate ==="
+RETROVIEW="$HERE/../src/emu/RetroView.cpp"
+srm_hits=""
+if [ -f "$RETROVIEW" ]; then
+  srm_hits="$(sed -E 's://.*$::' "$RETROVIEW" | awk '
+    /QString RetroView::sramPath/ { inpath = 1 }
+    inpath && /^}/               { inpath = 0; next }
+    /"\.srm"/ && !inpath         { print NR": "$0 }
+  ')"
+else
+  echo "FAIL: retroview srm-path gate (RetroView.cpp not found at $RETROVIEW)"; fail=1
+fi
+if [ -n "$srm_hits" ]; then
+  echo "$srm_hits"
+  echo "FAIL: retroview srm-path gate (a \".srm\" path is built outside RetroView::sramPath)"
+  fail=1
+else
+  echo "PASS: retroview srm-path gate"
 fi
 echo
 
