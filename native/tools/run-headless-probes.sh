@@ -78,6 +78,17 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# Addon engine + manager: builtinCredential scoping, catalog cache hit/miss, the prefetcher's in-flight cap,
+# reload-mid-sweep recovery, the TTL/watchdog paths, and the reserved-namespace install guard. Self-contained
+# — it writes its own JsLocal fixtures into a temp MMV_ADDONS_ROOT and touches no network. The `--prefetch`
+# mode is the ASSERTING one (ADDON-OK); probe_addon's other modes take a real addon script or a live URL.
+#
+# This target existed and was maintained for a long time WITHOUT being wired into this script or CI, so every
+# assertion in it gated nothing. Adding a probe target is not the same as running it — if you add one, add it
+# here too.
+ADDON="$(findexe probe_addon)"           || { echo "FATAL: probe_addon not built"; exit 2; }
+run "addon engine+manager" ADDON-OK      "$ADDON" --prefetch
+
 # EmulationStation / RetroBat gamelist.xml reader + write-back: parse a real gamelist, match a ROM, resolve
 # ES media roles to local files, and round-trip a write. Passes trivially where there's no RetroBat data
 # (CI), verifies for real where C:\RetroBat exists. Optional: only if built.
