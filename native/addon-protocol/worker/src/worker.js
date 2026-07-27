@@ -14,7 +14,7 @@ const TMDB = "https://api.themoviedb.org/3";
 const IMG = "https://image.tmdb.org/t/p/w342";
 
 const MANIFEST = {
-  id: "com.mymediavault.tmdb-worker",
+  id: "com.everythingbox.tmdb-worker",
   name: "TMDB (Worker)",
   version: "1.0.0",
   type: "media-source",

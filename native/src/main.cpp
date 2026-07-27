@@ -33,7 +33,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.71";
+static constexpr const char* kAppVersion = "0.5.72";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -78,21 +78,36 @@ static void cloudPullAtStartup()
     loop.exec();
 }
 
-// One-time migration from the old "Goliath" naming. If the old goliath.ini exists and the new
-// mymediavault.ini does not, copy it across and rewrite the renamed addon ids (com.goliath.* ->
-// com.mymediavault.*) in both keys and values, so existing profiles, API keys and favourites carry over.
-// Idempotent: once mymediavault.ini exists this is skipped.
+// One-time migration from the ORIGINAL "Goliath" naming: goliath.ini -> mymediavault.ini, rewriting the
+// renamed addon ids (com.goliath.* -> com.mymediavault.*) in both keys and values, so profiles, API keys
+// and favourites carry over. Idempotent: once mymediavault.ini exists this is skipped.
+//
+// The target here is deliberately AppBrand::Legacy::kIniFile, NOT AppBrand::kIniFile — this is the
+// Goliath->MyMediaVault hop, and pointing it at the current ini would be a data-loss bug, not a rename.
+// The original migration used QFile::copy and never rename, so goliath.ini is STILL on disk on every
+// install that ever ran it. Retargeting this at everythingbox.ini would make the guard read "if
+// everythingbox.ini is absent and goliath.ini is present": on a machine that ran Goliath and then
+// MyMediaVault for years, the decade-old file would be resurrected into everythingbox.ini FIRST, and the
+// MyMediaVault->EverythingBox migration would then find its destination occupied and skip. The user would
+// boot into Goliath-era settings with the entire MyMediaVault era invisible — nothing deleted, so it reads
+// as a wipe rather than looking like one. No ordering of the newer migration can repair that; the damage
+// is already done by the time it runs.
+//
+// Contract for the MyMediaVault->EverythingBox migration: this function's output must be indistinguishable
+// from a genuine MyMediaVault ini (hence the Legacy addon prefix below), so that hop can treat Goliath-era
+// and native MyMediaVault users identically. It must rewrite com.mymediavault.* -> com.everythingbox.*,
+// which it has to do for native MyMediaVault users anyway.
 static void migrateLegacySettings()
 {
     const QString dir = AppPaths::dataDir();
     const QString oldIni = dir + QStringLiteral("/goliath.ini");
-    const QString newIni = dir + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
+    const QString newIni = dir + QStringLiteral("/") + QLatin1String(AppBrand::Legacy::kIniFile);
     if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;
     if (!QFile::copy(oldIni, newIni)) return;
 
     QSettings s(newIni, QSettings::IniFormat);
     const QString oldNs = QStringLiteral("com.goliath.");
-    const QString newNs = QString::fromLatin1(AppBrand::kAddonPrefix);
+    const QString newNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
     const QStringList keys = s.allKeys();
     for (const QString& k : keys)
     {
@@ -176,8 +191,16 @@ int main(int argc, char** argv)
     std::setlocale(LC_NUMERIC, "C");
     capLogAtStartup();                      // trim a runaway log before we start appending to it
     qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
-    QApplication::setApplicationName(QStringLiteral("My Media Vault"));
-    QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
+    // WARNING: setApplicationName is NOT cosmetic — CHANGING THIS VALUE MOVES THE MOBILE DATA DIRECTORY.
+    // On Android/iOS AppPaths::dataDir() resolves through QStandardPaths::AppDataLocation, which
+    // incorporates applicationName (on iOS, ~/Library/Application Support/<applicationName>). Renaming it
+    // as part of a prose sweep would silently strand every mobile user's ini, saves, states and addons at
+    // the old path — a wipe with no migration and no error. So it stays on the LEGACY spaced form (a
+    // "lookup that tolerates the legacy name until migration is confirmed") until the brand migration
+    // owns the mobile path move as an explicit, migrated step. The DISPLAY name below is pure chrome and
+    // carries no path meaning, so it flips to the new brand now.
+    QApplication::setApplicationName(QString::fromLatin1(AppBrand::Legacy::kDisplayName));
+    QApplication::setApplicationDisplayName(QString::fromLatin1(AppBrand::kDisplayName));
     QApplication::setApplicationVersion(QString::fromLatin1(kAppVersion));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
 
@@ -252,7 +275,7 @@ int main(int argc, char** argv)
     }
 
     MainWindow window(chooseProfile);
-    window.setWindowTitle(QStringLiteral("My Media Vault"));
+    window.setWindowTitle(QString::fromLatin1(AppBrand::kDisplayName)); // chrome only — no path meaning
 #ifdef Q_OS_IOS
     // A phone screen is far narrower than the desktop layout's aggregate minimum width, and a fullscreen
     // window can never shrink below its layout minimum — override it so fullscreen clamps to the real

@@ -276,7 +276,12 @@ static QString parseStreamJson(const QByteArray& body, const QString& base, QStr
 }
 
 // Per-user config for a remote addon: the user's values for the addon's declared settings (API keys etc.),
-// base64url(JSON), sent as the X-MMV-Config header so the service uses THIS user's keys (not baked-in ones).
+// base64url(JSON), sent as the AppBrand::kConfigHeader header so the service uses THIS user's keys (not
+// baked-in ones). Exactly ONE header is sent — deliberately no dual-send of the legacy name, which would
+// put user API keys in a second header indefinitely and leave the rename with no end. That makes DEPLOY
+// ORDER load-bearing: any remote service must be redeployed to read the new header BEFORE an app build
+// sending it ships, or its per-user credentials silently arrive empty (see the note in the aiocatalog
+// Worker's fetch handler).
 static QByteArray remoteConfigHeader(const LoadedAddon* src)
 {
     if (!src) return {};
