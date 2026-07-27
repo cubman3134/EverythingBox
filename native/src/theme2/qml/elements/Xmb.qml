@@ -28,12 +28,18 @@ Item {
     readonly property real crossY: Number(T.val(el, "crossY", 0.30)) * height
     readonly property real catGap: Number(T.val(el, "catSpacing", 0.135)) * width
     readonly property real itemGap: Number(T.val(el, "itemSpacing", 0.082)) * height
-    readonly property real iconSize: Number(T.val(el, "iconSize", 0.11)) * height
+    // iconSize scales off HEIGHT but catGap off WIDTH — on a portrait phone that inverts (tall, narrow)
+    // and 96pt tiles land 54pt apart, overlapping into a mess. Clamp tiles just under the gap so the
+    // category axis can never overlap itself; TV/desktop (wide) keeps the theme's intended size.
+    readonly property real iconSize: Math.min(Number(T.val(el, "iconSize", 0.11)) * height, catGap * 0.92)
     // Column tile size is derived from the row spacing (and stays under it even when the selected row scales
     // up 1.12x), so column items never overlap regardless of the theme's iconSize/itemSpacing.
     readonly property real rowSize: itemGap * 0.8
-    // The column starts well below the category row + its label so the first item never collides with them.
-    readonly property real colTop: crossY + iconSize * 1.7
+    // The column starts below the category row + its label so the first item never collides with them.
+    // Derived from the label's actual extent (not a bare iconSize multiple): with the phone-clamped
+    // smaller tiles, iconSize*1.7 pulled the column up over the label.
+    readonly property real catLabelBottom: crossY + iconSize / 2 + height * 0.02 + Math.max(12, height * 0.03)
+    readonly property real colTop: catLabelBottom + 8 + rowSize * 0.6
 
     // Smoothly slide both axes toward the selection (the PS3 "everything glides to the cross" feel).
     property real catScroll: catIndex
