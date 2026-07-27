@@ -58,6 +58,7 @@
 #include "../core/Theme.h"
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
+#include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
@@ -389,6 +390,20 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // sweep's first request never competes with the first frame.
     prefetcher_ = new CatalogPrefetcher(addons_.get(), this);
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
+    // Per-file save/state sync (save-sync T5), owned beside the CloudSync it drives. Eager for the same reason
+    // cloud_ is: the exit flush must exist even if no game and no settings panel was ever opened this session.
+    // deviceId is Settings::deviceId() — the SAME id the progress sync stamps (mdsync T4), so a preserved
+    // conflict copy is named after a device the user can actually recognise.
+    saveSync_ = std::make_unique<SaveSync>(cloud_.get(), AppPaths::dataDir(), Settings::deviceId(), this);
+    connect(saveSync_.get(), &SaveSync::log, this, [](const QString& l) { mwLog(l); });
+    // A conflict was resolved: BOTH copies survive, and the user is told so by GAME name — the file name is a
+    // 40-hex ROM hash for anything downloaded through the app, which is not something anyone can act on
+    // (SaveMeta::titleFor already made that translation, and SaveSync passes the result here). A conflict the
+    // user is never told about is indistinguishable from the data loss this whole track exists to remove.
+    connect(saveSync_.get(), &SaveSync::conflictKept, this, [this](const QString& title, const QString& keptAs) {
+        notify(tr("%1 was saved on another device too — kept both. The older copy is %2.").arg(title, keptAs),
+               8000);
+    });
     library_ = new LibraryView(addons_.get(), this);
     connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
     dm_ = new DownloadManager(this);
@@ -1086,6 +1101,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // window-level notify() overlay (over ANY view, incl. the full-screen emulator) at kFeedbackLong.
     connect(retro_, &RetroView::coreError, this, [this](const QString& t) { notify(t, kFeedbackLong); });
     connect(retro_, &RetroView::exitRequested, this, [this] { retro_->stop(); openHome(); });
+    // A save/state landed on disk -> mark THAT ONE file for the debounced push (save-sync T5). relPath already
+    // carries the "saves/"|"states/" prefix (RetroView::noteSaveMeta derives it); nothing here re-derives it.
+    connect(retro_, &RetroView::saveWritten, this,
+            [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
     // (Play-time banking on RetroView::gameStopped now lives in GameLauncher, which owns the session state.)
     connect(playPause, &QPushButton::clicked, player_, &MpvWidget::togglePause);
     connect(stop, &QPushButton::clicked, this, [this] {
@@ -1123,6 +1142,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Pull another device's "continue watching" progress and merge it in, shortly after startup so it doesn't
     // block launch or hit the network before the UI is up. No-op if not signed into cloud sync.
     QTimer::singleShot(1500, this, [this] { pullAndMergeProgress(); });
+
+    // …and reconcile the per-file saves/states alongside it (save-sync T5). This is the STEADY-STATE pull
+    // chain's hook: main.cpp's cloudPullAtStartup() applies the state bundle SYNCHRONOUSLY before this window
+    // is even constructed, so by the time this fires the bundle has already landed and a legacy bundle's
+    // saves/ entries (which Task 3's applyBundle now skips anyway) cannot arrive on top of a resolved file.
+    // The FIRST-RUN restore is a different chain entirely and hooks itself — see finishOnboardingRestore.
+    QTimer::singleShot(1500, this, [this] { startSaveSync(); });
 
     // Local video library: scan off-thread at startup, install the index + refresh the home on the main
     // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
@@ -5137,6 +5163,14 @@ void MainWindow::enterSplitScreen()
             stack_->setCurrentWidget(home_);     // pick it from Home; the other pane keeps playing in the background
             home_->focusContent();
         });
+        // Each pane runs its OWN RetroView, so a split-screen game writes saves the main view never sees.
+        // Wire both to the same dirty-marking (save-sync T5) — otherwise a two-player session's battery saves
+        // reach the cloud only at the next full reconcile. These panes emulate on a worker thread, so the
+        // autosave's saveWritten crosses threads; the auto connection queues it onto the GUI thread.
+        for (MediaPane* p : { splitView_->paneA(), splitView_->paneB() })
+            if (p && p->retro())
+                connect(p->retro(), &RetroView::saveWritten, this,
+                        [this](const QString& rel) { if (saveSync_) saveSync_->markDirty(rel); });
         applyFormFactorWidgets(); // size the just-built pane bars to the current form-factor tokens
     }
     // Park the playing views (don't leave a movie playing behind the split) and show the empty split.
@@ -5464,6 +5498,13 @@ void MainWindow::onboardingRestorePull()
 // vs. empty), already pinned in the probe. onboarding/done is set only on these two terminal outcomes.
 void MainWindow::finishOnboardingRestore(bool restoreOk, bool remoteHasProfiles)
 {
+    // The SECOND cloud-pull chain's save-sync hook (save-sync T5). This path never goes through main.cpp's
+    // cloudPullAtStartup(), so the ctor's startup kick has already fired (against a not-yet-signed-in
+    // CloudSync) and done nothing: without this call a first-run restore would finish with an empty saves/
+    // and the user's saves would appear only at the NEXT launch. Gated on restoreOk because that is exactly
+    // "the bundle apply completed" — a failed pull must not reconcile against a view we could not read.
+    if (restoreOk) startSaveSync();
+
     switch (mmv::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ restoreOk,
                                  remoteHasProfiles, /*signInAvailable*/ true))
     {
@@ -9840,6 +9881,12 @@ void MainWindow::cloudSyncNow()
     cloud_->pushLocal([this](bool ok, const QString& m) {
         statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
     });
+    // "Sync now" is the user's explicit make-the-cloud-match lever, and saves are part of what is synced now,
+    // so reconcile them too (save-sync T5). This is ALSO the mid-session sign-in path: the Cloud Sync panel's
+    // signedIn handler calls this, and without it a user who signs in while the app is running would get no
+    // save reconcile until the next launch. Safe to run beside the push rather than after it: saves left the
+    // bundle in Task 3, so the two touch disjoint Drive files.
+    startSaveSync();
 }
 
 // ---- "Continue watching" cross-device sync ---------------------------------------------------------------
@@ -9894,6 +9941,30 @@ void MainWindow::pullAndMergeProgress()
     });
 }
 
+// ---- per-file save/state sync (save-sync T5) --------------------------------------------------------------
+// The single place a full reconcile is started from. Called by BOTH cloud-pull chains at their completion:
+//   • steady state — main.cpp's cloudPullAtStartup() runs (and finishes) before this window exists, so the
+//     deferred startup kick in the ctor is "after the bundle apply";
+//   • first run     — the restore chain is onboardingRestorePull() -> finishOnboardingRestore(), which is a
+//     DIFFERENT code path that main.cpp never touches. Hooking only the startup one would leave a fresh
+//     restore sitting on an empty saves/ until the next launch, which reads exactly like the saves not having
+//     been backed up at all.
+// syncNow's callback may run SYNCHRONOUSLY (no refresh token -> CloudSync::withAccessToken answers inline;
+// so does the busy_ early-return), so nothing here may depend on state set after the call returns.
+void MainWindow::startSaveSync()
+{
+    if (!saveSync_ || !cloud_ || !cloud_->isSignedIn()) return;   // nothing to reconcile against
+    saveSync_->syncNow([this](bool ok, int uploaded, int downloaded, int conflicts) {
+        mwLog(QStringLiteral("save sync: ok=%1 up=%2 down=%3 conflicts=%4")
+                  .arg(ok ? 1 : 0).arg(uploaded).arg(downloaded).arg(conflicts));
+        // Conflicts announce themselves individually (conflictKept, by game name). A plain restore is worth
+        // one line too — a save appearing that this device never wrote is otherwise indistinguishable from a
+        // bug. Silence on the ok/no-change path is deliberate: this runs every launch.
+        if (ok && downloaded > 0)
+            notify(tr("Restored %n save file(s) from your other devices.", nullptr, downloaded), 6000);
+    });
+}
+
 void MainWindow::closeEvent(QCloseEvent* e)
 {
     session_->persistResume(); // flush the current media's playback position before anything else on exit
@@ -9909,7 +9980,25 @@ void MainWindow::closeEvent(QCloseEvent* e)
     auto finishClose = [this] { forceClose_ = true; close(); };
     QTimer::singleShot(8000, this, [this, finishClose] { if (!forceClose_) finishClose(); });
     statusBar()->showMessage(tr("Saving to Google Drive…"));
-    cloud_->pushLocal([finishClose](bool, const QString&) { finishClose(); });
+
+    // TWO exit pushes now share this ONE watchdog: the heavy state bundle, and the per-file save flush
+    // (save-sync T5) that pushes whatever the debounce timer had not got to yet — including the battery RAM
+    // retro_->stop() just wrote above. They are independent Drive traffic (Task 3 took saves OUT of the
+    // bundle), so they run concurrently, and the close waits for BOTH: closing on the bundle alone would
+    // start the flush and abandon it mid-upload, losing exactly the saves made this session. The 8 s watchdog
+    // is unchanged and still the hard ceiling, so a stalled network cannot trap the app open.
+    //
+    // Either callback can arrive SYNCHRONOUSLY (flush with an empty dirty set answers inline), so the counter
+    // is set up BEFORE either call, and the completion is POSTED rather than run inline — calling close()
+    // from inside closeEvent() would re-enter this function while `e` is already ignored.
+    auto pending = std::make_shared<int>(2);
+    auto oneDone = [this, pending, finishClose] {
+        if (--*pending > 0) return;
+        QTimer::singleShot(0, this, finishClose);
+    };
+    if (saveSync_) saveSync_->flush([oneDone](bool) { oneDone(); });
+    else           oneDone();
+    cloud_->pushLocal([oneDone](bool, const QString&) { oneDone(); });
 }
 
 void MainWindow::openRetroAchievements()
