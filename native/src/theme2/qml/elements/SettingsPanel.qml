@@ -21,6 +21,10 @@ Rectangle {
     readonly property real ffs:     (typeof form !== "undefined" && form) ? form.uiScale : 1
     readonly property real density: (typeof form !== "undefined" && form) ? form.density : 1
     readonly property int  safeInset: Math.round(Math.min(width, height) * ((typeof form !== "undefined" && form) ? form.safeAreaFrac : 0))
+    // Real device cutout insets (Dynamic Island / home indicator). The window runs edge-to-edge; the
+    // panel's chrome pads itself clear of the physical cutouts with these (zero on desktop/TV).
+    readonly property real safeTop:    (typeof safeArea !== "undefined" && safeArea) ? safeArea.top : 0
+    readonly property real safeBottom: (typeof safeArea !== "undefined" && safeArea) ? safeArea.bottom : 0
 
     // Row-kind ints — must match PanelRow::Kind order (PanelModel.h).
     readonly property int kAction: 0
@@ -108,7 +112,7 @@ Rectangle {
     Rectangle {
         id: header
         anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
-        anchors.topMargin: root.safeInset; anchors.leftMargin: root.safeInset; anchors.rightMargin: root.safeInset
+        anchors.topMargin: root.safeInset + root.safeTop; anchors.leftMargin: root.safeInset; anchors.rightMargin: root.safeInset
         height: Math.round(74 * root.ffs)
         color: cBg
         readonly property bool sel: root.g && root.g.zone === "panelBack"
@@ -156,7 +160,7 @@ Rectangle {
         anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
         anchors.leftMargin: Math.round(28 * root.ffs) + root.safeInset
         anchors.rightMargin: Math.round(28 * root.ffs) + root.safeInset
-        anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset
+        anchors.bottomMargin: Math.round(20 * root.ffs) + root.safeInset + root.safeBottom
         clip: true
         spacing: 8
         // Native kinetic scrolling on touch (D1 Task 4): a mobile drag flicks the row list; key/controller nav
@@ -307,6 +311,7 @@ Rectangle {
                         // host's inline-edit loop runs. Focus summons the system keyboard; Return commits,
                         // Escape (or losing focus) resolves the edit so the host's loop always terminates.
                         TextInput {
+                            id: inlineInput
                             visible: del.sel && del.kind === root.kTextField && root.inlineEditing
                             anchors.verticalCenter: parent.verticalCenter
                             width: Math.round(del.width * 0.55)
@@ -314,13 +319,36 @@ Rectangle {
                             horizontalAlignment: TextInput.AlignRight
                             clip: true
                             echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
+                            EnterKey.type: Qt.EnterKeyDone // the ✓/Done return key on the software keyboard
                             onVisibleChanged: {
                                 if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
                             }
-                            onAccepted: if (root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
-                            Keys.onEscapePressed: { root.inlineEditing = false; inlineEdit.cancel() }
+                            // Finish an edit exactly once: FLUSH the input method first — iOS autocorrect
+                            // holds the current word as uncommitted composition, and reading .text without
+                            // committing it drops that word (the "my name cleared" bug) — then commit and
+                            // dismiss the keyboard explicitly (the ✓ key does not dismiss it on its own).
+                            function finishEdit(ok) {
+                                if (!root.inlineEditing) return
+                                Qt.inputMethod.commit()
+                                root.inlineEditing = false
+                                if (ok) inlineEdit.commit(text)
+                                else    inlineEdit.cancel()
+                                Qt.inputMethod.hide()
+                            }
+                            onAccepted: finishEdit(true)
+                            Keys.onEscapePressed: finishEdit(false)
                             onActiveFocusChanged: // tapping away commits what was typed (phone convention)
-                                if (!activeFocus && root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
+                                if (!activeFocus) finishEdit(true)
+                            // The software keyboard's Done button can also dismiss the input panel WITHOUT
+                            // delivering a Return key — treat panel dismissal during an edit as commit.
+                            Connections {
+                                target: Qt.inputMethod
+                                enabled: inlineInput.visible
+                                function onVisibleChanged() {
+                                    if (!Qt.inputMethod.visible && root.inlineEditing && inlineInput.activeFocus)
+                                        inlineInput.finishEdit(true)
+                                }
+                            }
                         }
 
                         // TextField: current text (masked to dots for credentials), or a dim "—" when empty.

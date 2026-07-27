@@ -1,5 +1,6 @@
 #include "ThemedPanelHost.h"
 #include "FormFactor.h"
+#include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/Osk.h"
 
@@ -100,6 +101,7 @@ void ThemedPanelHost::buildView()
     view_->rootContext()->setContextProperty(QStringLiteral("nav"), graph_);
     view_->rootContext()->setContextProperty(QStringLiteral("panel"), bridge_);
     view_->rootContext()->setContextProperty(QStringLiteral("inlineEdit"), inlineEdit_);
+    view_->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     // `form` (subsystem D): the panel scales its rows/fonts + insets the safe area from the form-factor tokens.
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/SettingsPanel.qml")));

@@ -13,6 +13,10 @@ Item {
     property var ctx: ({})
     property var host
 
+    // Phone: theme button slots are width×height FRACTIONS tuned for landscape — portrait warps them
+    // into tall slivers (0.078w × 0.135h ≈ 31×118pt). The visible capsule clamps to a sane touch size,
+    // centered in whatever slot the theme gave it. TV/desktop fill the slot exactly as themed.
+    readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
     readonly property string action: T.val(el, "action", "")
     readonly property string glyph: T.val(el, "glyph", "")
     readonly property string label: T.val(el, "label", "")
@@ -34,10 +38,24 @@ Item {
     Canvas {
         visible: btn.housing
         z: -1
-        property real hcH: btn.height * 1.20
-        height: hcH; width: btn.width * btn.hscale
-        // Top pinned to where the taller (1.28) tube sat; only the bottom comes up.
-        y: btn.height / 2 - btn.height * 1.28 / 2 + btn.height * 0.05
+        // Mobile: the pod scales from the CLAMPED cap (not the warped slot) and its tube runs to the
+        // real screen edge, so the flat end is never on-screen — the Wii look the theme intends.
+        // Distance from the cap centre to the near screen edge, in this item's coordinates.
+        property real edgeDist: btn.width * (btn.hscale - 0.5)
+        function recompute() {
+            if (!btn.mobile || !btn.Window.window) return
+            var p = btn.mapToItem(null, btn.width / 2, 0)
+            if (p) edgeDist = btn.hside === "right" ? Math.max(40, btn.Window.width - p.x) : Math.max(40, p.x)
+        }
+        Component.onCompleted: recompute()
+        Connections { target: btn.Window.window; function onWidthChanged() { hc.recompute() } }
+        id: hc
+        property real capD: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.height
+        property real hcH: btn.mobile ? capD * 1.35 : btn.height * 1.20
+        height: hcH
+        width: btn.mobile ? edgeDist + hcH / 2 : btn.width * btn.hscale
+        y: btn.mobile ? btn.height / 2 - hcH / 2
+                      : btn.height / 2 - btn.height * 1.28 / 2 + btn.height * 0.05
         x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
         onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
         onPaint: {
@@ -80,7 +98,9 @@ Item {
 
     Rectangle {
         id: cap
-        anchors.fill: parent
+        anchors.centerIn: parent
+        width: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.width
+        height: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.height
         radius: btn.round ? Math.min(width, height) / 2 : height / 2
         scale: btn.focused ? 1.09 : (ma.pressed ? 0.93 : (ma.containsMouse ? 1.05 : 1.0))
         Behavior on scale { NumberAnimation { duration: 100; easing.type: Easing.OutCubic } }
