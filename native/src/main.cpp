@@ -292,6 +292,8 @@ int main(int argc, char** argv)
         window.setPalette(pal);
         window.setAutoFillBackground(true);
     }
+    // Media-app audio session: play through the silent switch (UI sounds + video/music audio).
+    mmvConfigureAudioSession();
     // The platform reports zero insets until the window is actually up — refresh once shown (and again
     // shortly after: the first layout pass can land before UIKit publishes them).
     QTimer::singleShot(0,    [] { SafeAreaBridge::instance().refresh(); });
