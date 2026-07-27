@@ -259,6 +259,18 @@ int main(int argc, char** argv)
         CHECK(catalogPath(c, nasty) == QStringLiteral("/catalog/movie/top/search=a%20b%26c%3Dd.json"),
               "spaces, & and = in a value are percent-encoded");
 
+        // Only VALUES were exercised above, and every key in this file is unreserved — so the encoder
+        // could be dropped from the key path and from type/id entirely without a single check moving.
+        // A catalog id and an extra KEY that both need escaping pin those two call sites.
+        Catalog wild;
+        wild.type = QStringLiteral("movie");
+        wild.id   = QStringLiteral("top rated&x");
+        QMap<QString, QString> wildkey;
+        wildkey.insert(QStringLiteral("release year"), QStringLiteral("2019"));
+        CHECK(catalogPath(wild, wildkey)
+                  == QStringLiteral("/catalog/movie/top%20rated%26x/release%20year=2019.json"),
+              "the catalog id AND the extra key are percent-encoded, not just the value");
+
         // An empty value carries no information and must not become "key=" — some addons 400 on it.
         QMap<QString, QString> blank;
         blank.insert(QStringLiteral("search"), QString());
@@ -301,17 +313,24 @@ int main(int argc, char** argv)
 
     // ------------------------------------------------- 11. parseStreams
     {
+        // The torrent row's title deliberately carries NO size token, and its videoSize renders as
+        // "3.0 GB" — a string that appears nowhere in the fixture. describe() copies the title verbatim,
+        // so a size that merely echoes the title (the old "2.1 GB") asserted nothing: delete the size
+        // branch and the copied title still satisfied it.
         const QByteArray body = R"({"streams":[
-          { "name": "Torrentio\n1080p", "title": "Movie.2019.1080p.x265\n👤 42 💾 2.1 GB",
+          { "name": "Torrentio\n1080p", "title": "Movie.2019.1080p.x265\n👤 42",
             "infoHash": "0123456789abcdef0123456789abcdef01234567", "fileIdx": 0,
-            "behaviorHints": { "bingeGroup": "torrentio|1080p|x265", "videoSize": 2254857830 } },
+            "behaviorHints": { "bingeGroup": "torrentio|1080p|x265", "videoSize": 3221225472 } },
           { "name": "Direct", "url": "https://example.com/a.mkv", "mime": "video/x-matroska",
             "behaviorHints": { "notWebReady": true } },
+          { "name": "DescOnly", "description": "Fallback.Release.720p 👤 7 💾 1.5 GB",
+            "infoHash": "89abcdef0123456789abcdef0123456789abcdef",
+            "behaviorHints": { "videoSize": 3221225472 } },
           { "name": "Broken", "infoHash": "#", "title": "please report this issue" },
           { "name": "Nothing useful", "title": "no url and no hash" }
         ]})";
         const QVector<StreamCandidate> v = parseStreams(body);
-        CHECK(v.size() == 2, "rows with neither a usable url nor a valid infoHash are dropped");
+        CHECK(v.size() == 3, "rows with neither a usable url nor a valid infoHash are dropped");
 
         // Sorted: direct http before torrent.
         CHECK(v[0].isDirect(), "a direct url sorts ahead of a torrent");
@@ -322,16 +341,65 @@ int main(int argc, char** argv)
         CHECK(t.name.contains(QStringLiteral("1080p")), "name is kept (it carries the quality)");
         CHECK(t.title.contains(QStringLiteral("x265")), "title is kept (it carries the release)");
         CHECK(t.bingeGroup == QStringLiteral("torrentio|1080p|x265"), "bingeGroup is kept");
-        CHECK(t.videoSize == 2254857830LL, "videoSize is kept");
+        CHECK(t.videoSize == 3221225472LL, "videoSize is kept");
         CHECK(t.seeders == 42, "seeders are scraped out of the title");
         CHECK(t.fileIdx == 0, "fileIdx is kept");
 
-        // "42" alone would already be in the copied title, so assert the rendered PHRASE — otherwise this
-        // still passes with the seeder part deleted from describe().
-        CHECK(describe(t).contains(QStringLiteral("42 seeders")), "describe surfaces the seeder count");
-        CHECK(describe(t).contains(QStringLiteral("2.1 GB")), "describe surfaces the size");
+        // The size comes from behaviorHints, so it is genuinely additive here — and "3.0 GB" appears
+        // nowhere in the copied title, which is what makes this fail if the size branch is deleted.
+        CHECK(describe(t).contains(QStringLiteral("3.0 GB")),
+              "describe appends the behaviorHints size when the title carries none");
+        // Seeders are scraped FROM the title being displayed, so appending them can only duplicate it.
+        CHECK(!describe(t).contains(QStringLiteral("seeders")),
+              "describe never appends the seeder count — the title it renders already shows it");
         // describe must be ONE line — NavMenu word-wraps, and a row with embedded newlines reads as junk.
         CHECK(!describe(t).contains(QLatin1Char('\n')), "describe collapses the addon's newlines");
+
+        // An addon that puts its release line in `description` instead of `title`. Without the fallback
+        // it loses ALL picker text and — because the scrape reads `title` — its whole catalogue lands at
+        // -1 seeders and orders by size alone.
+        const StreamCandidate& d = v[2];
+        CHECK(d.title.startsWith(QStringLiteral("Fallback.Release.720p")),
+              "an empty title falls back to `description`");
+        CHECK(d.seeders == 7, "…and the fallen-back text is scraped for seeders like any other title");
+        // fileIdx is read behind a contains() guard. Drop it and an absent field becomes 0, which
+        // AddonManager reads as "play files[0]" — the sample or the NFO in a season pack — instead of
+        // falling back to the largest video file.
+        CHECK(d.fileIdx == -1, "an absent fileIdx stays -1, it does not collapse to file 0");
+        // This row's own text already carries "1.5 GB", so the behaviorHints size must NOT be appended.
+        CHECK(!describe(d).contains(QStringLiteral("3.0 GB")),
+              "the size is suppressed when the title already carries one");
+    }
+
+    // ------------------------------------------------- 11b. seeder scraping is PRIORITY, not leftmost
+    {
+        // One combined alternation is leftmost-wins, so a season token pre-empts the real marker whenever
+        // it sits further left — and a release that reads as 2 seeders sorts below every unknown (-1)
+        // row, so auto-play silently lands on a different, possibly dead torrent.
+        auto seedersOf = [](const QByteArray& title) {
+            const QByteArray b = QByteArrayLiteral("{\"streams\":[{\"name\":\"x\",\"title\":\"") + title
+                + "\",\"infoHash\":\"0123456789abcdef0123456789abcdef01234567\"}]}";
+            const QVector<StreamCandidate> got = parseStreams(b);
+            return got.size() == 1 ? got[0].seeders : -2;
+        };
+        const QByteArray person = QByteArrayLiteral("\xF0\x9F\x91\xA4");   // the seeder emoji
+        const QByteArray disk   = QByteArrayLiteral("\xF0\x9F\x92\xBE");   // the size emoji
+
+        CHECK(seedersOf(QByteArrayLiteral("Show S:2 E:5 ") + person + " 500 " + disk + " 12 GB") == 500,
+              "the seeder emoji wins over an S: season token sitting to its LEFT");
+        CHECK(seedersOf(QByteArrayLiteral("1080p S:2 E:5")) == 2,
+              "with no stronger marker present the bare s: form is still read");
+        CHECK(seedersOf(QByteArrayLiteral("S: 42 | L: 3")) == 42,
+              "the legitimate bare s: form — the reason that alternative exists at all");
+        CHECK(seedersOf(QByteArrayLiteral("Seeders: 9 | Peers: 3")) == 9, "the spelled-out form");
+
+        // Verified-clean shapes that must keep reading as unknown: the (?<![a-z]) lookbehind and the
+        // required colon are what protect them.
+        CHECK(seedersOf(QByteArrayLiteral("Movie.2019 2.1 GB")) == -1, "a size is not a seeder count");
+        CHECK(seedersOf(QByteArrayLiteral("Movie.2019.1080p")) == -1, "a resolution is not one either");
+        CHECK(seedersOf(QByteArrayLiteral("Show.S01E05.2160p")) == -1, "nor a scene episode token");
+        CHECK(seedersOf(QByteArrayLiteral("Sens8.S01 1080p")) == -1,
+              "…nor a season token glued to a title that ends in s");
     }
 
     // ------------------------------------------------- 12. sort order, cap, and pickAuto
@@ -356,10 +424,16 @@ int main(int argc, char** argv)
         QVector<StreamCandidate> three;
         StreamCandidate a; a.url = QStringLiteral("https://a"); a.bingeGroup = QStringLiteral("g1");
         StreamCandidate b; b.url = QStringLiteral("https://b"); b.bingeGroup = QStringLiteral("g2");
-        three << a << b;
+        // The third carries NO bingeGroup, and sits LAST. That is what gives the empty-preferGroup guard
+        // teeth: without the guard the match loop runs with preferGroup == "", finds this row's empty
+        // bingeGroup and returns 2 — handing "no preference" the worst row instead of the best one.
+        // With both candidates grouped (as this fixture used to be) the guard could be deleted unnoticed.
+        StreamCandidate c; c.url = QStringLiteral("https://c");
+        three << a << b << c;
         CHECK(pickAuto(three, QStringLiteral("g2")) == 1, "a remembered bingeGroup is chosen");
         CHECK(pickAuto(three, QStringLiteral("nope")) == 0, "an unmatched group falls back to the first");
-        CHECK(pickAuto(three, QString()) == 0, "no preference -> the first");
+        CHECK(pickAuto(three, QString()) == 0,
+              "no preference -> the BEST row, not the first one that happens to have no group");
         CHECK(pickAuto({}, QStringLiteral("g1")) == -1, "nothing playable -> -1");
     }
 

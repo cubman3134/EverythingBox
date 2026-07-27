@@ -180,13 +180,32 @@ namespace {
 
 // Addons put the seeder count in the title, conventionally after a 👤 (or "Seeders:"/"S:"). Best-effort:
 // an unparsed count is -1, which sorts last rather than pretending to be zero.
+//
+// The markers are scanned as SEPARATE patterns in priority order across the whole string, deliberately
+// NOT as one alternation. Regex alternation is leftmost-wins, so a single combined pattern lets the
+// weakest marker pre-empt the strongest whenever it happens to sit further left: "Show S:2 E:5 👤 500"
+// read 2, not 500 — and a release that reads as 2 seeders sorts below every unknown (-1) row, so
+// auto-play silently lands on a different, possibly dead torrent. Priority order fixes that while the
+// bare `s:` form still serves the addons that only ever emit "S: 42 | L: 3".
+//
+// The `(?<![a-z])` lookbehind and the REQUIRED colon on that last form are what keep sizes ("2.1 GB"),
+// resolutions ("1080p") and scene episode tokens ("S01E05", "Sens8.S01") reading as unknown. Do not relax
+// either one.
 int scrapeSeeders(const QString& title)
 {
-    static const QRegularExpression re(
-        QStringLiteral("(?:\\x{1F464}|seeders?\\s*:?|(?<![a-z])s\\s*:)\\s*(\\d+)"),
-        QRegularExpression::CaseInsensitiveOption);
-    const QRegularExpressionMatch mm = re.match(title);
-    return mm.hasMatch() ? mm.captured(1).toInt() : -1;
+    static const QRegularExpression markers[] = {
+        QRegularExpression(QStringLiteral("\\x{1F464}\\s*(\\d+)")),
+        QRegularExpression(QStringLiteral("seeders?\\s*:?\\s*(\\d+)"),
+                           QRegularExpression::CaseInsensitiveOption),
+        QRegularExpression(QStringLiteral("(?<![a-z])s\\s*:\\s*(\\d+)"),
+                           QRegularExpression::CaseInsensitiveOption),
+    };
+    for (const QRegularExpression& re : markers)
+    {
+        const QRegularExpressionMatch mm = re.match(title);
+        if (mm.hasMatch()) return mm.captured(1).toInt();
+    }
+    return -1;
 }
 
 bool validInfoHash(const QString& h)
@@ -247,14 +266,26 @@ QString StremioTranslate::describe(const StreamCandidate& c)
 {
     // Addons pack several lines into name/title; NavMenu word-wraps, so a row with embedded newlines reads
     // as junk. Collapse to one line and join the parts the user actually chooses on.
-    auto flat = [](QString s) { return s.replace(QLatin1Char('\n'), QLatin1Char(' ')).simplified(); };
+    // simplified() already turns every whitespace run — newlines included — into a single space.
+    auto flat = [](const QString& s) { return s.simplified(); };
     QStringList parts;
-    if (!c.name.isEmpty())  parts << flat(c.name);
-    if (!c.title.isEmpty()) parts << flat(c.title);
-    if (c.seeders >= 0)     parts << QStringLiteral("%1 seeders").arg(c.seeders);
-    if (c.videoSize > 0)    parts << QStringLiteral("%1 GB")
-                                        .arg(double(c.videoSize) / 1073741824.0, 0, 'f', 1);
-    if (c.notWebReady)      parts << QStringLiteral("may need an external player");
+    if (!c.name.isEmpty()) parts << flat(c.name);
+    const QString title = flat(c.title);
+    if (!title.isEmpty()) parts << title;
+
+    // The seeder count is NEVER appended. It is scraped out of `title` — the very string this row is
+    // already displaying — so appending it can only ever duplicate what the user is reading.
+    // StreamCandidate::seeders still exists and still drives the sort; this is only about the rendering.
+    //
+    // videoSize is different: it comes from behaviorHints, a source the title need not agree with, so it
+    // IS additive for the addons that do not write a size into their release line. Append it only when
+    // the title carries no size token of its own — a digit followed by GB/MB, case-insensitively.
+    static const QRegularExpression sizeInTitle(QStringLiteral("\\b\\d[\\d.]*\\s*[MG]B\\b"),
+                                                QRegularExpression::CaseInsensitiveOption);
+    if (c.videoSize > 0 && !title.contains(sizeInTitle))
+        parts << QStringLiteral("%1 GB").arg(double(c.videoSize) / 1073741824.0, 0, 'f', 1);
+
+    if (c.notWebReady) parts << QStringLiteral("may need an external player");
     return parts.join(QStringLiteral(" · "));
 }
 

@@ -70,7 +70,9 @@ namespace StremioTranslate
     Manifest parseManifest(const QByteArray& body);
 
     // Past this many rows nobody is choosing. A parse/quota bound, NOT a display bound — NavMenu scrolls.
-    constexpr int kMaxStreamRows = 30;
+    // `inline` so every translation unit shares ONE entity: a plain namespace-scope `constexpr` is
+    // internally linked, giving each TU its own copy and its own address.
+    inline constexpr int kMaxStreamRows = 30;
 
     // "/catalog/{type}/{id}/{k}={v}&{k}={v}.json". Per the protocol the extras are a URL-encoded query
     // string living in a PATH segment. Keys are emitted sorted so the same request always produces the same
@@ -102,7 +104,9 @@ namespace StremioTranslate
     // Usable candidates only, sorted best-first and capped at kMaxStreamRows.
     QVector<StreamCandidate> parseStreams(const QByteArray& body);
 
-    // One picker row: "1080p · Release.Name.x265 · 42 seeders · 2.1 GB".
+    // One picker row: "1080p · Release.Name.x265 👤 42 · 2.1 GB". The seeder count is NEVER appended —
+    // it was scraped out of the very title being rendered, so it is redundant by construction — and the
+    // behaviorHints size is appended only when the title does not already carry one.
     QString describe(const StreamCandidate& c);
 
     // The automatic choice: a candidate whose bingeGroup matches `preferGroup` (when non-empty), else the
