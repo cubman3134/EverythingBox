@@ -1,5 +1,6 @@
 #include "ThemedPanelHost.h"
 #include "FormFactor.h"
+#include "../core/AppPaths.h"
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
 #include "../ui/nav/Osk.h"
@@ -13,7 +14,23 @@
 #include <QColor>
 #include <QSet>
 #include <QTimer>
+#include <QFile>
+#include <QDateTime>
 #include <functional>
+
+// One-line append to <app>/stream_debug.log (the mwLog idiom): the inline-edit lifecycle is traced so a
+// device-only misbehaviour (the profile-name edit has had several) can be read straight off the phone.
+static void ieLog(const QString& msg)
+{
+    QFile f(AppPaths::dataDir() + QStringLiteral("/stream_debug.log"));
+    if (f.open(QIODevice::Append | QIODevice::Text))
+        f.write((QDateTime::currentDateTime().toString(Qt::ISODateWithMs)
+                 + QStringLiteral("  inline-edit: ") + msg + QStringLiteral("\n")).toUtf8());
+}
+
+void InlineEditBridge::commit(const QString& text) { ieLog(QStringLiteral("commit len=%1").arg(text.size())); emit finished(text, true); }
+void InlineEditBridge::cancel()                    { ieLog(QStringLiteral("cancel")); emit finished(QString(), false); }
+void InlineEditBridge::note(const QString& msg)    { ieLog(msg); }
 
 // ---- PanelListModel ----------------------------------------------------------------------------------------
 
@@ -339,9 +356,11 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
             bool ok = false; QString out;
             const QMetaObject::Connection conn = connect(inlineEdit_, &InlineEditBridge::finished, &loop,
                 [&](const QString& s, bool o) { out = s; ok = o; loop.quit(); });
+            ieLog(QStringLiteral("begin row=%1 initialLen=%2").arg(rowId).arg(initial.size()));
             emit inlineEdit_->begin(initial, masked);
             loop.exec();
             disconnect(conn);
+            ieLog(QStringLiteral("loop exit ok=%1 len=%2").arg(ok).arg(out.size()));
             t = ok ? out : QString();
         }
         else
