@@ -30,6 +30,7 @@ class HomeView;
 class AddonManager;
 class CatalogPrefetcher;
 class CloudSync;
+class SaveSync;             // per-file save/state sync — see core/SaveSync.h
 class LocalResolveCache;
 class CatalogResolver;
 class SubtitleCache;
@@ -506,6 +507,16 @@ private:
     std::unique_ptr<CatalogResolver> resolver_;
     CatalogPrefetcher* prefetcher_ = nullptr; // background catalog warmer (QObject child of this); kicked post-paint
     std::unique_ptr<CloudSync> cloud_;
+    // Per-file sync of emulator saves and save states (save-sync T5). Declared AFTER cloud_ on purpose: it
+    // holds a raw CloudSync* and members are destroyed in reverse declaration order, so this one goes first.
+    // The rules it obeys are SaveSyncPlan's; this window only decides WHEN it runs.
+    std::unique_ptr<SaveSync> saveSync_;
+    // One full save/state reconcile, guarded on "signed in" and safe to call more than once. Must only be
+    // called AFTER the state bundle has been applied — a legacy bundle can still carry saves/ entries, and
+    // applying one over a just-resolved file would put a stale save back. Both pull chains call it at their
+    // own completion: the steady-state one (main.cpp's cloudPullAtStartup, which finishes before this window
+    // exists) via the deferred startup kick, and the first-run restore via finishOnboardingRestore.
+    void startSaveSync();
     // "Continue watching" cloud sync: a small resume+recent JSON file, pulled+merged on startup and pushed
     // (debounced) when a position changes — separate from the heavy state bundle so it stays timely across devices.
     QTimer* progressSyncTimer_ = nullptr;

@@ -1395,11 +1395,15 @@ QString RetroView::sramPath() const
 // The sidecar entry for a save/state we just wrote. The key is the path relative to the data dir, INCLUDING
 // the saves/|states/ prefix — the same name SaveSync::scanLocal produces, because that is the name the
 // conflict notice looks a title up by.
-void RetroView::noteSaveMeta(const QString& absPath) const
+void RetroView::noteSaveMeta(const QString& absPath)
 {
     const QString rel = QDir(AppPaths::dataDir()).relativeFilePath(absPath);
     if (rel.startsWith(QStringLiteral(".."))) return; // outside the data dir: not ours to describe
     SaveMeta::put(rel, gameTitle_, systemId_, romPath_);
+    // …and tell the sync THE SAME name (save-sync T5). Deliberately the identical `rel` the sidecar was keyed
+    // by: SaveSync::markDirty matches on "saves/…"/"states/…" exactly, and the conflict notice looks the title
+    // up by this key, so a second, differently-derived name here would silently sync nothing and title nothing.
+    emit saveWritten(rel);
 }
 
 // Battery-backed RAM (in-game saves) is frontend-managed: restore it into the core's SAVE_RAM after loading,

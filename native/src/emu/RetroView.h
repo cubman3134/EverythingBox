@@ -83,6 +83,14 @@ signals:
     void coreError(const QString& text);     // a hard core error (crash) — error-class notice, kFeedbackLong (J10)
     void exitRequested();                    // the Esc menu's "Exit" - main window stops + returns Home
     void gameStopped();                      // a running game was torn down (main window records playtime)
+    // A save file or save state was just written to disk (save-sync T5). `relPath` is relative to
+    // AppPaths::dataDir() and INCLUDES the "saves/"|"states/" prefix — it is the exact name
+    // SaveSync::scanLocal produces and the only shape SaveSync::markDirty matches; a bare file name would
+    // match nothing on disk, so the push would find no such file and the save would never retire from the
+    // dirty set. Emitted from noteSaveMeta(), which already derives that name for the sidecar.
+    // In split-screen the battery-RAM autosave runs on the emulation WORKER thread, so this crosses threads:
+    // the receiver is the main window, so an auto connection queues it (QString is a registered metatype).
+    void saveWritten(const QString& relPath);
 
 protected:
     void paintEvent(QPaintEvent*) override;
@@ -165,8 +173,10 @@ private:
     void saveSram();           // persist battery RAM (on stop, exit, and periodically)
     // Record which GAME a save/state file belongs to, keyed the way SaveSync names it (a path relative to the
     // data dir, "saves/…" or "states/…"). Cheap, best-effort, and the only thing that makes a 40-hex ROM
-    // hash's save identifiable later.
-    void noteSaveMeta(const QString& absPath) const;
+    // hash's save identifiable later. Also emits saveWritten() with that same key — the sidecar and the sync
+    // must never disagree about what a save is called, so both names come from this one derivation.
+    // NOT const (it was): it emits, and every caller is already a non-const write path.
+    void noteSaveMeta(const QString& absPath);
     int16_t inputState(unsigned port, unsigned device, unsigned index, unsigned id);
     void updateControllerPorts(); // enable/disable core ports 0..3 as controllers come and go
     void loadTurbo();             // read turbo/autofire config from Settings
