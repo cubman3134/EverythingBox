@@ -466,6 +466,68 @@ Item {
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }
 
+    // --- phone relayout of the detail view --------------------------------------------------------------
+    // Every theme authors its detail view as a LANDSCAPE spread (poster on the left, a text column at
+    // x≈0.44) with fonts sized as fractions of the view HEIGHT. On a phone that geometry collapses: in
+    // portrait the tall height makes the title enormous (clipped mid-word), the action pills run off the
+    // right edge and the poster squeezes to a sliver. Rather than asking every theme to ship a second
+    // layout, the positioner re-lays the detail roles every theme shares — poster / title / subtitle /
+    // stars / actions / facts / overview — into a phone layout and rescales their fonts; decorative extras
+    // (help bar, screenshot gallery, logo, developer line) are dropped, there is no room for them.
+    // Geometry values are fractions: x/w of the view width, y/h of the view height, fs of the view height
+    // (matching each element's own fontSize convention). null = leave the theme's value.
+    readonly property bool phoneDetail: ffMobile && currentView === "detail"
+    readonly property var detailRoles: ({
+        // role keyed by element id first (every bundled theme uses these ids), binding/type as fallback
+        "poster": "poster", "preview": "poster",
+        "dTitle": "title", "dSub": "sub", "dStars": "stars", "dActions": "actions",
+        "dFacts": "facts", "dOverview": "overview", "dHelp": "hide",
+        "dLogo": "hide", "dDev": "hide", "dShots": "hide"
+    })
+    function detailRole(el) {
+        if (!el) return undefined
+        if (el.id && detailRoles[el.id]) return detailRoles[el.id]
+        if (el.type === "actionrow")  return "actions"
+        if (el.type === "rating")     return "stars"
+        if (el.type === "helpsystem") return "hide"
+        if (el.type === "gallery")    return "hide"
+        var b = el.binding || ""
+        if (b === "selected.image")     return "poster"
+        if (b === "selected.title")     return "title"
+        if (b === "selected.subtitle")  return "sub"
+        if (b === "selected.factsText") return "facts"
+        if (b === "selected.overview")  return "overview"
+        return undefined  // wave/particles/background decor: leave where the theme put it
+    }
+    // Portrait: one centered column, top to bottom. Landscape: the theme's own poster-left shape, but with
+    // phone-scale fonts and room for the action pills to wrap (ActionRow wraps on mobile).
+    readonly property var detailGeomPortrait: ({
+        "poster":   { x: 0.50, y: 0.055, w: 0.52, h: 0.30, ox: 0.5 },
+        "title":    { x: 0.50, y: 0.370, w: 0.92, h: 0.085, ox: 0.5, fs: 0.024, align: "center", lines: 2 },
+        "sub":      { x: 0.50, y: 0.460, w: 0.92, h: 0.035, ox: 0.5, fs: 0.016, align: "center" },
+        "stars":    { x: 0.50, y: 0.503, w: 0.34, h: 0.026, ox: 0.5 },
+        "actions":  { x: 0.50, y: 0.540, w: 0.94, h: 0.155, ox: 0.5, fs: 0.0148 },
+        "facts":    { x: 0.50, y: 0.700, w: 0.92, h: 0.055, ox: 0.5, fs: 0.0135, align: "center", lines: 3 },
+        "overview": { x: 0.50, y: 0.760, w: 0.92, h: 0.215, ox: 0.5, fs: 0.0155, lines: 10 }
+    })
+    readonly property var detailGeomLandscape: ({
+        "poster":   { x: 0.035, y: 0.50, w: 0.28, h: 0.78, ox: 0, oy: 0.5 },
+        "title":    { x: 0.36,  y: 0.055, w: 0.60, h: 0.13, ox: 0, fs: 0.055, lines: 2 },
+        "sub":      { x: 0.36,  y: 0.195, w: 0.60, h: 0.06, ox: 0, fs: 0.038 },
+        "stars":    { x: 0.36,  y: 0.265, w: 0.20, h: 0.05, ox: 0 },
+        "actions":  { x: 0.36,  y: 0.325, w: 0.615, h: 0.30, ox: 0, fs: 0.034 },
+        "facts":    { x: 0.36,  y: 0.645, w: 0.60, h: 0.10, ox: 0, fs: 0.032, lines: 2 },
+        "overview": { x: 0.36,  y: 0.755, w: 0.60, h: 0.22, ox: 0, fs: 0.034, lines: 4 }
+    })
+    function detailGeom(el) {
+        if (!phoneDetail) return undefined
+        var role = detailRole(el)
+        if (!role) return undefined
+        if (role === "hide") return { hide: true }
+        var g = (height > width) ? detailGeomPortrait[role] : detailGeomLandscape[role]
+        return g ? g : undefined
+    }
+
     // Resolve an asset path: a URL as-is, an absolute path to a file URL, else relative to the theme dir.
     function resolve(p) {
         if (!p) return ""
@@ -519,10 +581,16 @@ Item {
                 property var p: el.pos || [0, 0]
                 property var s: el.size || [0.1, 0.1]
                 property var o: el.origin || [0, 0]
-                width:  Number(s[0]) * root.width
-                height: Number(s[1]) * root.height
-                x: Number(p[0]) * root.width  - Number(o[0]) * width
-                y: Number(p[1]) * root.height - Number(o[1]) * height
+                // Phone detail relayout (see detailGeom above): a known detail role gets phone geometry;
+                // re-evaluated on rotation and on view switches (phoneDetail/width/height dependencies).
+                property var mg: root.phoneDetail ? root.detailGeom(el) : undefined
+                visible: !(mg && mg.hide)
+                width:  mg && !mg.hide ? mg.w * root.width  : Number(s[0]) * root.width
+                height: mg && !mg.hide ? mg.h * root.height : Number(s[1]) * root.height
+                x: mg && !mg.hide ? mg.x * root.width  - (mg.ox || 0) * width
+                                  : Number(p[0]) * root.width  - Number(o[0]) * width
+                y: mg && !mg.hide ? mg.y * root.height - (mg.oy || 0) * height
+                                  : Number(p[1]) * root.height - Number(o[1]) * height
                 z: Number(el.zIndex || 0)
                 opacity: el.opacity !== undefined ? Number(el.opacity) : 1
                 Loader {
@@ -530,7 +598,19 @@ Item {
                     source: root.urlFor(cell.el.type)
                     onLoaded: {
                         if (!item) return
-                        item.el = cell.el
+                        // The phone detail relayout also overrides the knobs the elements read from `el`
+                        // (fontSize/align/lines) — hand the element a patched copy while it applies, the
+                        // theme's own object otherwise. el is plain JSON, so a JSON deep-copy is exact.
+                        item.el = Qt.binding(function() {
+                            var m = cell.mg
+                            if (!m || m.hide || (m.fs === undefined && m.align === undefined && m.lines === undefined))
+                                return cell.el
+                            var c = JSON.parse(JSON.stringify(cell.el))
+                            if (m.fs !== undefined)    c.fontSize = m.fs
+                            if (m.align !== undefined) c.align = m.align
+                            if (m.lines !== undefined) c.lines = m.lines
+                            return c
+                        })
                         item.host = root
                         item.ctx = Qt.binding(function() { return root.dataCtx })
                     }

@@ -320,6 +320,12 @@ Rectangle {
                             clip: true
                             echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
                             EnterKey.type: Qt.EnterKeyDone // the ✓/Done return key on the software keyboard
+                            // No predictive composition: with autocorrect on, a one-word value ("Parker")
+                            // lives ENTIRELY in the IME preedit, and iOS tears that composition down while
+                            // the keyboard resigns — before any commit/accepted handler can read it, so the
+                            // name arrived empty no matter where it was read from. Names and settings values
+                            // don't want autocorrect anyway; without prediction .text is always literal.
+                            inputMethodHints: Qt.ImhNoPredictiveText
                             onVisibleChanged: {
                                 if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
                             }
