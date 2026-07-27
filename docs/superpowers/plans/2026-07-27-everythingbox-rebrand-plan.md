@@ -287,12 +287,15 @@ Append to `native/tools/run-headless-probes.sh`, following the shape of the `qml
 # rather than a claim someone made once. THREE files may still name the previous brand, each for a stated
 # reason: AppBrand.h's Legacy block and BrandMigration.cpp exist to migrate installs that predate the rename,
 # and the aiocatalog Worker accepts the old config header because a Worker already deployed from it keeps
-# reading that header until someone redeploys it. Anything else is a leftover — or a new one someone just
-# typed — and it fails here.
+# reading that header until someone redeploys it. The rebrand's own spec and plan are exempt for the obvious
+# reason that a document explaining a rename has to be able to name what was renamed. Anything else is a
+# leftover — or a new one someone just typed — and it fails here.
 echo "=== old-brand references ==="
 brand_hits="$(cd "$HERE/../.." && git grep -I -n -i -e 'mymediavault' -e 'my media vault' -e '\bMMV\b' -e 'MMV_' \
   -- . ':(exclude)native/src/core/AppBrand.h' ':(exclude)native/src/core/BrandMigration.cpp' \
-       ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' || true)"
+       ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' \
+       ':(exclude)docs/superpowers/specs/2026-07-27-everythingbox-rebrand-design.md' \
+       ':(exclude)docs/superpowers/plans/2026-07-27-everythingbox-rebrand-plan.md' || true)"
 if [ -n "$brand_hits" ]; then
   echo "$brand_hits"
   echo "FAIL: old-brand references (the previous name survives outside AppBrand.h/BrandMigration.cpp)"
@@ -425,11 +428,27 @@ git push origin main && git branch -d local/everythingbox
 
 - [ ] **Step 6: Rename the GitHub repository and its description — USER-AUTHORIZED**
 
-The user explicitly authorized this. GitHub keeps a redirect from the old URL, so existing clones and links keep working, but the local remote should be updated anyway.
+The user explicitly authorized **five** repository renames. GitHub keeps a redirect from each old URL, so existing clones and links keep working, but the local remote must still be updated.
+
+**`mymediavault-addons` is load-bearing, not cosmetic:** Task 1 pointed the app's default registry at `everythingbox-addons`, so the "Browse Add-ons" screen 404s until that repo is renamed. Do it in the same session as the main rename, and verify the registry actually loads afterwards.
 
 ```bash
-gh repo rename EverythingBox --repo cubman3134/MyMediaVault --yes
+gh repo rename EverythingBox        --repo cubman3134/MyMediaVault --yes
+gh repo rename everythingbox-addons --repo cubman3134/mymediavault-addons --yes
+gh repo rename everythingbox-themes --repo cubman3134/mymediavault-themes --yes
+gh repo rename EverythingBox-LiveSports --repo cubman3134/MyMediaVault-LiveSports --yes
+gh repo rename EverythingBox-LiveTV     --repo cubman3134/MyMediaVault-LiveTV --yes
 ```
+
+Then the descriptions — the two add-on repos currently say "for My Media Vault":
+
+```bash
+gh repo edit cubman3134/EverythingBox --description "EverythingBox — one place for your films, shows, music, books, comics and games."
+gh repo edit cubman3134/EverythingBox-LiveSports --description "Live sports scores/schedules (ESPN) + free legal sports channels (iptv-org) add-on for EverythingBox."
+gh repo edit cubman3134/EverythingBox-LiveTV --description "Free live TV (iptv-org) add-on for EverythingBox — browse by country/category, search channels."
+```
+
+**Also push the renamed registry and themes checkouts.** Task 1 renamed the local `mymediavault-addons` working copy and edited its index/manifest/README, but those are a *separate, gitignored repository* — the changes are uncommitted there. Commit and push them, and confirm the app's registry browser loads against the new URL. `mymediavault-themes` needs the same check: confirm whether the app fetches it at runtime, and if so that it still resolves.
 ```bash
 gh repo edit cubman3134/EverythingBox --description "EverythingBox — one place for your films, shows, music, books, comics and games."
 ```

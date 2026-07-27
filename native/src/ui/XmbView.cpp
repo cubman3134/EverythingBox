@@ -1,4 +1,5 @@
 #include "XmbView.h"
+#include "../core/AppBrand.h"
 
 #include <QPainter>
 #include <QPaintEvent>
@@ -156,7 +157,7 @@ void XmbView::pumpImages()
         if (i < 0 || i >= items_.size()) continue;
         const int g = gen_;
         QNetworkRequest req((QUrl(items_[i].imageUrl)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++imgActive_;

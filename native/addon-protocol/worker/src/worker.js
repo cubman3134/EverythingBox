@@ -1,4 +1,4 @@
-// A My Media Vault remote addon, as a Cloudflare Worker. It speaks the app's remote-addon protocol
+// A EverythingBox remote addon, as a Cloudflare Worker. It speaks the app's remote-addon protocol
 // (the same JSON the in-app JS addons return - MediaCatalog / MediaDetail) and is backed here by TMDB.
 //
 // Routes (all GET, all end in .json so the same layout also works as static files):
@@ -14,12 +14,12 @@ const TMDB = "https://api.themoviedb.org/3";
 const IMG = "https://image.tmdb.org/t/p/w342";
 
 const MANIFEST = {
-  id: "com.mymediavault.tmdb-worker",
+  id: "com.everythingbox.tmdb-worker",
   name: "TMDB (Worker)",
   version: "1.0.0",
   type: "media-source",
-  author: "My Media Vault",
-  description: "Movies & series from TMDB, served through the My Media Vault remote-addon protocol on a Cloudflare Worker.",
+  author: "EverythingBox",
+  description: "Movies & series from TMDB, served through the EverythingBox remote-addon protocol on a Cloudflare Worker.",
   catalogs: [
     { id: "movies", name: "Movies", type: "movie" },
     { id: "series", name: "Series", type: "series" },

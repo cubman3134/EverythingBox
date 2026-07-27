@@ -1,10 +1,10 @@
 // symbolize_dump — resolve a Windows minidump's faulting-thread stack to functions + lines, using PDBs on a
-// search path. Built because Release now ships a matching MyMediaVault.pdb but there's no cdb/WinDbg on the box;
+// search path. Built because Release now ships a matching EverythingBox.pdb but there's no cdb/WinDbg on the box;
 // this gives a symbolized call stack from the command line without opening Visual Studio.
 //
 //   symbolize_dump <crash.dmp> [symbol_search_path]
 //
-// The search path (default ".") should contain MyMediaVault.exe + MyMediaVault.pdb (e.g. C:\MyMediaVault-app) so
+// The search path (default ".") should contain EverythingBox.exe + EverythingBox.pdb (e.g. C:\EverythingBox-app) so
 // DbgHelp can match the module to its PDB by GUID. Qt/system DLLs have no PDB, so they resolve to module+offset —
 // still enough to pair with the WER fault offset. Windows-only, console, links dbghelp.
 #include <windows.h>
@@ -90,7 +90,7 @@ int main(int argc, char** argv)
 
     HANDLE proc = GetCurrentProcess();
     // EXACT_SYMBOLS: only use a PDB whose GUID matches the crashed module, so we never print plausible-but-wrong
-    // lines from a PDB of a different build. The deployed MyMediaVault.pdb matches the deployed exe by design.
+    // lines from a PDB of a different build. The deployed EverythingBox.pdb matches the deployed exe by design.
     SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_EXACT_SYMBOLS);
     if (!SymInitialize(proc, symPath, FALSE)) { fprintf(stderr, "SymInitialize failed\n"); return 1; }
 

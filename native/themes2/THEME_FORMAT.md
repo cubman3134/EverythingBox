@@ -1,4 +1,4 @@
-# My Media Vault — theme format
+# EverythingBox — theme format
 
 A theme is a folder under the app's `themes2/` directory containing a `theme.json`:
 

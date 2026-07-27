@@ -1,4 +1,5 @@
 #include "ItemMarks.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "Tombstones.h"
@@ -11,12 +12,12 @@
 #include <QJsonArray>
 #include <QHash>
 
-// Shares the portable mymediavault.ini with the other stores (same AppPaths::dataDir() posture). Coherence
+// Shares the portable everythingbox.ini with the other stores (same AppPaths::dataDir() posture). Coherence
 // with any other QSettings on the same file comes from every writer calling sync() (flush to disk); QSettings
 // reloads on access when the on-disk file changed.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

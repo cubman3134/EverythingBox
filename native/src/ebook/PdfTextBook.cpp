@@ -54,7 +54,7 @@ bool PdfTextBook::open(const QString& path, QString* error)
     const QString hash = QString::fromLatin1(
         QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
     rootDir_ = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                   .filePath(QStringLiteral("mmv-pdf-") + hash);
+                   .filePath(QStringLiteral("eb-pdf-") + hash);
     QDir().mkpath(rootDir_);
 
     qint64 totalChars = 0;

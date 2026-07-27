@@ -14,7 +14,7 @@
 // no focus; before each one the window is given Qt-INTERNAL activation (no OS foreground change) so focus
 // styling and the watchdog behave exactly as they would live. See native/tools/uitest.py for the client.
 //
-// OFF by default. Enabled only by MMV_UITEST=1 in the environment or a --uitest command-line argument.
+// OFF by default. Enabled only by EB_UITEST=1 in the environment or a --uitest command-line argument.
 #pragma once
 #include <QObject>
 #include <QString>
@@ -39,15 +39,15 @@ public:
         std::function<bool(const QString&)> touch;
     };
 
-    static bool wanted();                                 // MMV_UITEST=1 or --uitest present
+    static bool wanted();                                 // EB_UITEST=1 or --uitest present
     explicit UiTestServer(const Hooks& hooks, QObject* parent = nullptr);
 
-    // MMV_UITEST_PIPE overrides the channel name so a test build can be driven alongside a normally-running
+    // EB_UITEST_PIPE overrides the channel name so a test build can be driven alongside a normally-running
     // instance (which already owns the default pipe). uitest.py honours the same variable.
     static QString serverName()
     {
-        const QByteArray n = qgetenv("MMV_UITEST_PIPE");
-        return n.isEmpty() ? QStringLiteral("MyMediaVault-uitest") : QString::fromUtf8(n);
+        const QByteArray n = qgetenv("EB_UITEST_PIPE");
+        return n.isEmpty() ? QStringLiteral("EverythingBox-uitest") : QString::fromUtf8(n);
     }
 
 private:

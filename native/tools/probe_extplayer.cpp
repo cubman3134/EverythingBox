@@ -14,12 +14,13 @@
 // Prints EXTPLAYER-OK on success; any failure prints EXTPLAYER-FAIL <cond> and exits non-zero.
 //
 // Isolation: like the other core probes (see probe_sync), AppPaths::dataDir() is the probe exe's own folder
-// in the build tree (portable app), so the mymediavault.ini it reads/writes is next to the probe and never
+// in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and never
 // touches a deployed install. We wipe the "player" group at start so a leftover ini can't skew the asserts.
 // The fs/reg roots live in a QTemporaryDir wiped when the probe exits — nothing outside it is written.
 #include "ExternalPlayer.h"
 #include "Settings.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -57,7 +58,7 @@ int main(int argc, char** argv)
 
     // Reset: wipe any leftover player/* keys so the Settings asserts start from defaults.
     {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         reset.remove(QStringLiteral("player"));
         reset.sync();
     }
@@ -184,7 +185,7 @@ int main(int argc, char** argv)
 
     // Restore a clean player group so a rerun starts from defaults.
     {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         reset.remove(QStringLiteral("player"));
         reset.sync();
     }

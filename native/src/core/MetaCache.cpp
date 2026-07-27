@@ -1,4 +1,5 @@
 #include "MetaCache.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QCoreApplication>
@@ -60,7 +61,7 @@ QString imageExt(const QUrl& url, const QString& contentType)
 // total ("cache/imageBytes") so browsing never pays a directory sweep just to know if eviction is due.
 QSettings& ini()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
     return s;
 }
 const QString kImageBytesKey = QStringLiteral("cache/imageBytes");

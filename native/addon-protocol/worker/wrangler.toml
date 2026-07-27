@@ -1,4 +1,4 @@
-name = "mymediavault-tmdb-addon"
+name = "everythingbox-tmdb-addon"
 main = "src/worker.js"
 compatibility_date = "2024-11-01"
 
@@ -8,5 +8,5 @@ compatibility_date = "2024-11-01"
 #   wrangler secret put TMDB_API_KEY      # paste your TMDB v3 API key
 #   wrangler deploy
 #
-# Your addon URL is then:  https://mymediavault-tmdb-addon.<your-subdomain>.workers.dev
+# Your addon URL is then:  https://everythingbox-tmdb-addon.<your-subdomain>.workers.dev
 # Add it in the app:  Add-ons -> Add addon by URL.

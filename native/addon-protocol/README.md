@@ -1,4 +1,4 @@
-# My Media Vault — Remote Addon Protocol
+# EverythingBox — Remote Addon Protocol
 
 A **remote addon** is a media-source addon the app reaches over HTTP instead of running locally.
 The app stores **only the addon's URL + a cached copy of its manifest** — never any code — and calls it
@@ -59,7 +59,7 @@ wrangler secret put TMDB_API_KEY     # your TMDB v3 key
 wrangler deploy
 ```
 
-Your addon URL becomes `https://mymediavault-tmdb-addon.<subdomain>.workers.dev`.
+Your addon URL becomes `https://everythingbox-tmdb-addon.<subdomain>.workers.dev`.
 
 ## Add it in the app
 

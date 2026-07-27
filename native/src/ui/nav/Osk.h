@@ -1,4 +1,4 @@
-// The on-screen keyboard: a NavOverlay with a key grid, so every text box in MMV is typeable from the
+// The on-screen keyboard: a NavOverlay with a key grid, so every text box in EB is typeable from the
 // couch. Arrow-selecting a QLineEdit row and pressing Enter opens it (NavOverlay::editLineEdit); flows
 // that need a value inline call Osk::getText (nested-loop, QInputDialog-style drop-in).
 //

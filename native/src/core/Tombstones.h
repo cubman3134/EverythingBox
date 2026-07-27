@@ -5,7 +5,7 @@
 // while a newer re-add of the same key beats an older tombstone. Hidden is NOT a delete: hiding an item is a
 // mark, not a removal, so it gets a timestamp on its blob (ItemMarks) and never a tombstone.
 //
-// Storage (QtCore only, on the shared portable mymediavault.ini next to the other stores):
+// Storage (QtCore only, on the shared portable everythingbox.ini next to the other stores):
 //   deleted/<store>/<hashLeaf>  ->  JSON { "key": <original key>, "ts": <epoch seconds> }
 // The <store> namespace mirrors the source store's own namespacing so per-profile stores stay isolated — the
 // caller passes a per-profile store name (see the wired sites below), and one profile's tombstones are never

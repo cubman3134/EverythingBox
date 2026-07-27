@@ -28,7 +28,7 @@
 | Local items missing the id | `browse::localLibraryCatalog` `SyntheticCatalogs.cpp:81-99` (`it.id = e.imdbId.isEmpty() ? "local:"+e.path : e.imdbId;` — never sets `imdbStreamId`) |
 | Cache model to clone | `native/src/core/LocalResolveCache.{h,cpp}` (JSON load/save, `AppPaths::dataDir()`, probe fixture style) |
 
-- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** App target `mymediavault`. **Build hygiene:** build ONLY named targets (never target-less); adding a source/probe needs ONE `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`) regenerate; >6 min → report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
+- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** App target `everythingbox`. **Build hygiene:** build ONLY named targets (never target-less); adding a source/probe needs ONE `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`) regenerate; >6 min → report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
 
 ---
 
@@ -186,7 +186,7 @@ int main(int argc, char** argv)
 Then:
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON
 cmake --build build --target probe_subs --config Release --parallel
 ```
 Expected: compile/link failure (the two headers don't exist). If CMake needs the files present to configure, create them as empty stubs first so the failure is a genuine missing-declaration/unresolved-symbol RED.
@@ -566,7 +566,7 @@ Declare `SubtitleCandidate`, the three public methods, `buildQueries`, and `sear
 ```
   (Adapt to the lambda's real captured names; keep the existing `hasSub`/`isVideo`/one-shot guards exactly as they are.)
 
-- [ ] **Step 6: Build + suite.** `cmake --build build --target mymediavault probe_subs --config Release --parallel` (app compiles clean) then `BUILD_DIR=build bash native/tools/run-headless-probes.sh` → `ALL HEADLESS PROBES PASSED`.
+- [ ] **Step 6: Build + suite.** `cmake --build build --target everythingbox probe_subs --config Release --parallel` (app compiles clean) then `BUILD_DIR=build bash native/tools/run-headless-probes.sh` → `ALL HEADLESS PROBES PASSED`.
 
 - [ ] **Step 7: Commit.**
 ```bash
@@ -635,7 +635,7 @@ On activation:
 
 - [ ] **Step 4: Build + suite + commit.**
 ```bash
-cmake --build build --target mymediavault --config Release --parallel
+cmake --build build --target everythingbox --config Release --parallel
 BUILD_DIR=build bash native/tools/run-headless-probes.sh
 git add native/src/ui/MainWindow.cpp native/src/ui/MainWindow.h
 git commit -m "feat: Search subtitles… picker with cache-overwrite on choice (subs T3)"
@@ -646,11 +646,11 @@ git commit -m "feat: Search subtitles… picker with cache-overwrite on choice (
 ### Task 4: close-out — live verify, review, merge
 
 - [ ] **Step 1: Gates.** Full suite green (`SUBS-OK` + `ALL HEADLESS PROBES PASSED`); app compiles Release. No perf run (fetching is off the render path, on the file-loaded event) — note that inline.
-- [ ] **Step 2: Live verify (portable throwaway; NEVER touch `C:\MyMediaVault-app`).** Copy the deployed data dir, cloud-stripped, `MMV_UITEST=1` + `native/tools/uitest.py`. **Check first whether `subs/osApiKey`/`osUser`/`osPass` are configured in the copied ini.**
+- [ ] **Step 2: Live verify (portable throwaway; NEVER touch `C:\EverythingBox-app`).** Copy the deployed data dir, cloud-stripped, `EB_UITEST=1` + `native/tools/uitest.py`. **Check first whether `subs/osApiKey`/`osUser`/`osPass` are configured in the copied ini.**
   - **If configured:** point `library/folder` at a local video with NO sidecar `.srt` → play → a subtitle is fetched and appears; note whether the hash tier hit (`subs:` log lines); **replay** → the cache short-circuits (no second network call — confirm via the log and that `subtitles.json` gained the key); open the subtitle overlay → **Search subtitles…** → a candidate list appears → choose a different one → it loads → **replay again** → the *chosen* one comes back (cache overwrite). Screenshots `subs-picker.png`, `subs-cached.png`.
   - **If NOT configured:** verify the DORMANT path instead — the overlay shows the disabled "add OpenSubtitles credentials" row, no network is attempted, a sidecar `.srt` still auto-loads via `sub-auto=fuzzy` (place one beside a fixture video and confirm it appears as a track), and nothing regresses. Record the credentialed pass as **USER-GATED** and say so plainly.
 - [ ] **Step 3: Review.** `scripts/review-package $(git merge-base main HEAD) HEAD`, most-capable model. Dimensions: the OSDb hash matches the spec (LE words, both windows, size, 16 hex, <128 KiB ⇒ empty) and reads ONLY two windows (never the whole file — a multi-GB rip must not be slurped); the priority chain order and that a cache hit truly short-circuits before `ensureLogin`; `cacheIdentifier` agrees with what each tier matched; cache overwrite-on-put and self-healing miss; the shipped auto-fetch gate (`hasSub`) is untouched so sidecars/embedded tracks still suppress downloads; the old 4-arg `fetch` forwarder keeps every existing caller working; local `imdbStreamId` composition (movie vs episode vs unknown) and that `it.id` is unchanged; the picker uses the nav-kit list idiom (no QDialog/top-level window) and the unconfigured affordance; no credential ever reaches a log line. Fix rounds → merge.
-- [ ] **Step 4: Merge + push + redeploy.** Spec Status → complete (record which live steps ran vs were user-gated). Merge `local/subtitle-accuracy` → main (version-line conflict → take the higher patch), rebuild the combined tree, full suite green (**build all probe targets** to catch a latent link break), push, delete the branch, redeploy Release to `C:\MyMediaVault-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
+- [ ] **Step 4: Merge + push + redeploy.** Spec Status → complete (record which live steps ran vs were user-gated). Merge `local/subtitle-accuracy` → main (version-line conflict → take the higher patch), rebuild the combined tree, full suite green (**build all probe targets** to catch a latent link break), push, delete the branch, redeploy Release to `C:\EverythingBox-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
 
 ## Self-Review (done at write time)
 

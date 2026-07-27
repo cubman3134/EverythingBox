@@ -106,7 +106,7 @@ static void clearTombs()
 static QStringList g_roots;
 static QString freshRoot(const QString& tag)
 {
-    const QString r = QDir::tempPath() + QStringLiteral("/mmv-savesync-probe-%1-%2")
+    const QString r = QDir::tempPath() + QStringLiteral("/eb-savesync-probe-%1-%2")
                                              .arg(QCoreApplication::applicationPid()).arg(tag);
     QDir(r).removeRecursively();
     QDir().mkpath(r);

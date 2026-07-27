@@ -310,7 +310,7 @@ void GameLauncher::ensureEmu()
     });
     connect(emu_, &EmulatorManager::launched, this, [this](const QString& name) {
         emit waitPage(tr("Playing in %1.\n\nClose the %1 window — or press Start+Select on your controller, "
-                         "or Esc — to return to My Media Vault.").arg(name), true);
+                         "or Esc — to return to EverythingBox.").arg(name), true);
         if (!pendingEmuRom_.isEmpty()) // record now that it actually started
         {
             RecentStore::add({ pendingEmuRom_, pendingEmuTitle_, QStringLiteral("game"),
@@ -323,7 +323,7 @@ void GameLauncher::ensureEmu()
         emuDisplayName_ = name;
         emuUserClosing_ = false;
         emuRunClock_.start();  // to spot a boot that fails and exits instantly (missing BIOS/firmware)
-        startEmuHotkeyWatch(); // Start+Select / Esc closes the standalone emulator back to MMV
+        startEmuHotkeyWatch(); // Start+Select / Esc closes the standalone emulator back to EB
     });
     connect(emu_, &EmulatorManager::finished, this, [this](int code) {
         glLog(QStringLiteral("emu: process exited (code %1)").arg(code));
@@ -366,9 +366,9 @@ void GameLauncher::ensureEmu()
     });
 }
 
-// ---- Standalone-emulator exit hotkey: close melonDS/Dolphin/etc. back to MMV on Start+Select or Esc ---------
-// A libretro core shows MMV's own pause menu on Start+Select; a standalone emulator is a separate process we
-// can't inject a menu into, so the RetroBat-equivalent is to close it and come back. We poll while MMV is
+// ---- Standalone-emulator exit hotkey: close melonDS/Dolphin/etc. back to EB on Start+Select or Esc ---------
+// A libretro core shows EB's own pause menu on Start+Select; a standalone emulator is a separate process we
+// can't inject a menu into, so the RetroBat-equivalent is to close it and come back. We poll while EB is
 // minimized (Qt gets no input then): the pad works because SDL keeps device state live in the background
 // (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS), and Esc is read from the global key state on Windows.
 void GameLauncher::startEmuHotkeyWatch()

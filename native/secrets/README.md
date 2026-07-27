@@ -38,18 +38,33 @@ built binary as plaintext (the XOR obfuscation guarantees the latter).
 
 ## android-release.keystore + android-keystore.pass
 
-The **persistent Android release signing key** for the `org.mymediavault.app`
+The **persistent Android release signing key** for the `org.everythingbox.app`
 APK, and the password that unlocks it. Both are git-ignored (the `.keystore` and
 `.pass` are covered by `/native/secrets/*`; only this README is committed).
+
+**The names below still say `mmv` — deliberately.** A keystore's alias and
+subject are baked into the file at creation and cannot be edited; renaming them
+here would only make this document wrong and the `ANDROID_KEY_ALIAS` secret
+mismatch the keystore, which fails signing. This file is exempt from the suite's
+old-brand gate for that reason (see `native/tools/run-headless-probes.sh`).
+
+**Package id changed with the rebrand.** The APK is now `org.everythingbox.app`;
+it was `org.mymediavault.app`. Android identifies an app by *package id first*,
+signature second, so this keystore signing the new id does **not** make the new
+build an upgrade of an installed old one: devices carrying a pre-rename APK must
+uninstall it (losing its app data) and install the new package fresh. Both can
+sit side by side until then. The keystore itself is unchanged and still the one
+to preserve.
 
 - `android-release.keystore` — a Java keystore: RSA 4096, alias **`mmv-release`**,
   `CN=MyMediaVault`, 10000-day validity. Created with
   `keytool -genkeypair -keyalg RSA -keysize 4096 -validity 10000 -alias mmv-release`.
+  Alias and CN predate the rename and stay as-is (see the note above).
 - `android-keystore.pass` — the store/key password (same value for both), 32
   random alphanumeric chars, **no trailing newline**. Used as both
   `-storepass` and `-keypass`.
 
-### GitHub Actions secrets (repo `cubman3134/MyMediaVault`)
+### GitHub Actions secrets (repo `cubman3134/EverythingBox`)
 
 The release workflow (`.github/workflows/release.yml`, `android` job) signs each
 release APK via Qt 6.8's androiddeployqt env route. Three repo secrets feed it:
@@ -69,9 +84,9 @@ the secret still build an *unsigned* release APK.
 To rotate/re-provision the secrets from the local files:
 
 ```
-base64 -w0 android-release.keystore | gh secret set ANDROID_KEYSTORE_B64  --repo cubman3134/MyMediaVault
-gh secret set ANDROID_KEYSTORE_PASS --repo cubman3134/MyMediaVault < android-keystore.pass
-printf 'mmv-release' | gh secret set ANDROID_KEY_ALIAS --repo cubman3134/MyMediaVault
+base64 -w0 android-release.keystore | gh secret set ANDROID_KEYSTORE_B64  --repo cubman3134/EverythingBox
+gh secret set ANDROID_KEYSTORE_PASS --repo cubman3134/EverythingBox < android-keystore.pass
+printf 'mmv-release' | gh secret set ANDROID_KEY_ALIAS --repo cubman3134/EverythingBox
 ```
 
 ### ⚠️ Recovery warning — DO NOT LOSE THIS KEYSTORE

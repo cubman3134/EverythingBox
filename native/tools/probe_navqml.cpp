@@ -16,7 +16,7 @@
 //
 // Prints NAVQML-OK on success; any failure prints NAVQML-FAIL <what> and exits non-zero.
 //
-// When the QML theme engine is present (MMV_HAVE_QML) this ALSO proves the two-state themed input contract:
+// When the QML theme engine is present (EB_HAVE_QML) this ALSO proves the two-state themed input contract:
 // it instantiates the real ThemedTextField / ThemedChoice components (loaded from the theme2 qrc) in an
 // offscreen QQuickWidget with a REAL NavGraph exposed as the `nav` context property — exactly the wiring
 // subsystem B will use — and asserts register / select / edit / commit / cancel and the "arrows stay in the
@@ -33,7 +33,7 @@
 #include <set>
 #include <vector>
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 #include <QApplication>
 #include <QQmlComponent>
 #include <QQmlContext>
@@ -62,7 +62,7 @@ static int failures = 0;
 
 static void pump() { if (QCoreApplication::instance()) { QCoreApplication::processEvents(); } }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // Deliver a real key press+release to the QQuickWidget's offscreen window; it routes to the active-focus QML
 // item (the host's Keys handler when nothing is editing, or the TextInput/FocusScope while a field is edited).
 static void sendKey(QQuickWindow* win, int key)
@@ -1251,12 +1251,12 @@ static void runTouchAsserts()
     Settings::setDisplayMode(QStringLiteral("auto"));
     FormFactor::instance().refresh();
 }
-#endif // MMV_HAVE_QML
+#endif // EB_HAVE_QML
 
 int main(int argc, char** argv)
 {
     qputenv("QT_QPA_PLATFORM", "offscreen");   // the runner loop invokes us without a -platform arg
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     qputenv("QT_QUICK_BACKEND", "software");    // no GPU under the offscreen QPA — match the app's software backend
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
     QApplication app(argc, argv);               // QQuickWidget needs the widget app
@@ -2337,7 +2337,7 @@ int main(int argc, char** argv)
         }
     }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // ---------------------------------------------------------------- 14. two-state themed inputs (the real
     // ThemedTextField/ThemedChoice components, offscreen QQuickWidget, real NavGraph as `nav`).
     runThemedInputAsserts();

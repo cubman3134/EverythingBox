@@ -4,7 +4,7 @@
 // (forward-only Δposition, clamped) and the reader page-turn edges (PdfView/ComicView/EbookView) — so there
 // are no new timers. Games are NOT migrated here; the Stats panel reads their hours from PlayStats at display.
 //
-// Backed by the portable mymediavault.ini (same AppPaths::dataDir() posture as PlayStats/ItemMarks —
+// Backed by the portable everythingbox.ini (same AppPaths::dataDir() posture as PlayStats/ItemMarks —
 // QtCore only, no Quick/Widgets), all namespaced by the active profile id (or "default"):
 //   stats/<profile>/<deviceId>/items/<hash>  -> JSON { mediaSeconds, pagesRead, lastActivity, title }  (one blob/title)
 //   stats/<profile>/<deviceId>/cat/<cat>/{seconds|pages}  -> per-category rollups (video|audio|reading), kept at accrual

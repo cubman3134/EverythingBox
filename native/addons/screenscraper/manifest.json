@@ -1,10 +1,10 @@
 {
-  "id": "com.mymediavault.screenscraper",
+  "id": "com.everythingbox.screenscraper",
   "name": "ScreenScraper",
   "version": "1.0.0",
   "type": "media-source",
   "entry": "main.js",
-  "author": "My Media Vault",
+  "author": "EverythingBox",
   "description": "Game artwork & metadata provider (ScreenScraper). Aggregated with other providers on hover. Requires a free ScreenScraper account configured in Settings.",
   "permissions": ["network"],
   "metaFor": ["game"],

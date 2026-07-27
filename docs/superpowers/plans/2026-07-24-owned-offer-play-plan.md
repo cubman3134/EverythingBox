@@ -23,7 +23,7 @@
 | Ownership key | detail item `id` = the resolver's `OwnedIndex` key (`tmdb:movie:…`/`tt…`); `LocalLibrary` already `#include`d `HomeView.cpp:12`, `index()` already called in `resolvePlay` |
 
 - **`ownedPlayable` uses `localPathFor`, NOT `ownsId`** — `ownsId` is true for a series container (owns episodes), which has no directly-playable file; `localPathFor(item.id)` non-empty means "a real file will play," so no dead Play button on containers.
-- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs the RELEASE binary — build `--config Release`.** App target: `mymediavault`. You edit an EXISTING file only → NO reconfigure; build `cmake --build build --target mymediavault --config Release --parallel`. Do NOT run a target-less build; if a build runs >5 min, report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
+- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs the RELEASE binary — build `--config Release`.** App target: `everythingbox`. You edit an EXISTING file only → NO reconfigure; build `cmake --build build --target everythingbox --config Release --parallel`. Do NOT run a target-less build; if a build runs >5 min, report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
 
 ---
 
@@ -76,9 +76,9 @@ Use `playThemedLeaf`'s actual leaf-item variable name (the scout shows it as `it
 - [ ] **Step 3: Build the app (Release), verify clean compile.**
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"
-cmake --build build --target mymediavault --config Release --parallel
+cmake --build build --target everythingbox --config Release --parallel
 ```
-Expected: `mymediavault.vcxproj -> …\build\Release\MyMediaVault.exe` with no errors.
+Expected: `everythingbox.vcxproj -> …\build\Release\EverythingBox.exe` with no errors.
 
 - [ ] **Step 4: Full suite (regression check — no probe change).**
 ```bash
@@ -96,10 +96,10 @@ git commit -m "feat: owned items offer Play + themed prefer-local, even with no 
 
 ### Task 2: close-out — live verify + fable + merge
 
-- [ ] **Step 1: Live verify (the payoff).** Portable-throwaway technique (copy the deployed data dir with `aiocatalog`, cloud-stripped; real app untouched; `MMV_UITEST` + `native/tools/uitest.py` per the `verify-app-gui-capture` memory). Seed `library/folder` with a fixture movie whose title resolves via aiocatalog (e.g. `Interstellar (2014)`, no NFO). Launch → let the resolver cache the match → open that movie's **themed detail** → verify a **"Play" action is now present** → activating it **plays the local file** (mpv opens the on-disk path; an error on a tiny fixture is fine — verify it routes local, not a stream/"No stream source" toast). Also verify: a **non-owned** metadata-only movie shows **no Play**; a **series container** shows **no Play**. Screenshots `ownedplay-detail.png`, `ownedplay-play.png`. If the throwaway can't surface a matching tile, record honestly + rely on code-walk (the ownership primitives are probe-covered) — but attempt it (this is the scenario the resolver smoke couldn't complete).
+- [ ] **Step 1: Live verify (the payoff).** Portable-throwaway technique (copy the deployed data dir with `aiocatalog`, cloud-stripped; real app untouched; `EB_UITEST` + `native/tools/uitest.py` per the `verify-app-gui-capture` memory). Seed `library/folder` with a fixture movie whose title resolves via aiocatalog (e.g. `Interstellar (2014)`, no NFO). Launch → let the resolver cache the match → open that movie's **themed detail** → verify a **"Play" action is now present** → activating it **plays the local file** (mpv opens the on-disk path; an error on a tiny fixture is fine — verify it routes local, not a stream/"No stream source" toast). Also verify: a **non-owned** metadata-only movie shows **no Play**; a **series container** shows **no Play**. Screenshots `ownedplay-detail.png`, `ownedplay-play.png`. If the throwaway can't surface a matching tile, record honestly + rely on code-walk (the ownership primitives are probe-covered) — but attempt it (this is the scenario the resolver smoke couldn't complete).
 - [ ] **Step 2: Perf sanity.** The change is a per-detail-build gate term (an O(1) `localPathFor` hash lookup when a detail opens) + a play-time branch — off the browse/scroll hot path. A full perf baseline isn't warranted for a two-line gate; confirm the app starts and a detail opens without lag in the live pass, and note it. (If any lag is observed, capture a 3-run baseline; otherwise a one-line note suffices.)
 - [ ] **Step 3: Fable review.** `scripts/review-package $(git merge-base main HEAD) HEAD`, most-capable model. Dimensions: the `ownedPlayable`-uses-`localPathFor`-not-`ownsId` distinction (no dead Play on a series container); the term mirrors `resolvePlay`'s short-circuit precondition exactly (so "Play offered" ⟺ "a file will play"); the themed early-return sits before `needsImdb` and after the existing `local:video` return, with the `QFileInfo::exists` guard (stale path falls through, never crashes); classic Play route unchanged; Seam A/resolver untouched; an owned-AND-remotely-playable item isn't double-offered Play (idempotent OR term). Fix rounds → merge.
-- [ ] **Step 4: Merge + push + redeploy.** Update the spec Status → complete (live result recorded). Merge `local/owned-play` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green (**build all probe targets incl. probe_browse/probe_perf/probe_resolver/probe_importers/probe_locallib to catch any latent link break**), push, delete the branch, redeploy Release to `C:\MyMediaVault-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
+- [ ] **Step 4: Merge + push + redeploy.** Update the spec Status → complete (live result recorded). Merge `local/owned-play` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green (**build all probe targets incl. probe_browse/probe_perf/probe_resolver/probe_importers/probe_locallib to catch any latent link break**), push, delete the branch, redeploy Release to `C:\EverythingBox-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
 
 ## Self-Review (done at write time)
 

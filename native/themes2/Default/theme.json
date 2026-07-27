@@ -1,12 +1,12 @@
 {
   "name": "Default",
-  "author": "My Media Vault",
+  "author": "EverythingBox",
   "settingsPanel": { "background": "#0F1216", "panel": "#161A20", "row": "#1A1F27", "rowSelected": "#243244", "accent": "#E07A2E", "text": "#FFFFFF", "dim": "#AEB4C2", "separator": "#7C8794", "warning": "#E0524E" },
   "views": {
     "home": {
       "background": { "color": "#0F1216", "image": "", "dim": 0 },
       "elements": [
-        { "type": "text",     "id": "title",  "pos": [0.037, 0.055], "size": [0.5, 0.07],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#FFFFFF", "fontSize": 0.04, "bold": true },
+        { "type": "text",     "id": "title",  "pos": [0.037, 0.055], "size": [0.5, 0.07],  "origin": [0, 0.5], "text": "EverythingBox", "color": "#FFFFFF", "fontSize": 0.04, "bold": true },
         { "type": "datetime", "id": "clock",  "pos": [0.963, 0.055], "size": [0.18, 0.05], "origin": [1, 0.5], "format": "hh:mm", "color": "#FFFFFF", "fontSize": 0.032, "align": "right", "opacity": 0.65 },
 
         { "type": "carousel", "id": "systems", "pos": [0.5, 0.31], "size": [0.94, 0.30], "origin": [0.5, 0.5], "itemWidth": 0.15, "spacing": 0.015, "color": "#E07A2E", "card": { "radius": 14 } },

@@ -1,4 +1,5 @@
 #include "DownloadManager.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QNetworkAccessManager>
@@ -96,7 +97,7 @@ void DownloadManager::start(int idx)
     activeId_ = j.id;
 
     QNetworkRequest rq{ QUrl(j.url) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     if (have > 0) rq.setRawHeader("Range", QByteArray("bytes=") + QByteArray::number(have) + "-");
     reply_ = nam_->get(rq);

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Client for MMV's UI-test channel (src/core/UiTestServer) - drive and inspect the app WITHOUT
-bringing it to the front or giving it focus. The app must be running with MMV_UITEST=1 (or --uitest).
+"""Client for EB's UI-test channel (src/core/UiTestServer) - drive and inspect the app WITHOUT
+bringing it to the front or giving it focus. The app must be running with EB_UITEST=1 (or --uitest).
 
 Usage:
   uitest.py state                          print the UI state JSON
@@ -17,17 +17,17 @@ Usage:
                                             wait for the previous gesture to finish, then retry)
   uitest.py send "open C:/x.cbz"           raw passthrough of any server command
 
-No third-party deps. Windows: named pipe \\\\.\\pipe\\MyMediaVault-uitest; elsewhere: the QLocalServer
-unix socket (typically /tmp/MyMediaVault-uitest).
+No third-party deps. Windows: named pipe \\\\.\\pipe\\EverythingBox-uitest; elsewhere: the QLocalServer
+unix socket (typically /tmp/EverythingBox-uitest).
 """
 import json
 import os
 import sys
 import time
 
-# MMV_UITEST_PIPE picks a non-default channel, matching the server-side override in UiTestServer — lets a
+# EB_UITEST_PIPE picks a non-default channel, matching the server-side override in UiTestServer — lets a
 # test build be driven while a normally-running instance owns the default pipe.
-NAME = os.environ.get("MMV_UITEST_PIPE", "MyMediaVault-uitest")
+NAME = os.environ.get("EB_UITEST_PIPE", "EverythingBox-uitest")
 
 
 def _send(cmd: str) -> str:

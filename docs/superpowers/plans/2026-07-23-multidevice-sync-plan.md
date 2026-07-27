@@ -4,7 +4,7 @@
 
 **Goal:** Per-item multi-device sync on the existing Drive transport: all per-item stores merge by recency with tombstones, accumulators become device-namespaced (no double-count by construction), device-local keys stop syncing.
 
-**Architecture:** The proven `mymediavault-progress.json` pattern (serialize/merge pairs, 15s debounce, startup pull+merge) generalizes into a probe-linkable `core/CloudMerge` module; MainWindow's existing serializeProgress/mergeProgress move there and grow per-store pairs. Spec: `docs/superpowers/specs/2026-07-23-multidevice-sync-design.md` (the scout's anchor map is in its Scope section).
+**Architecture:** The proven `everythingbox-progress.json` pattern (serialize/merge pairs, 15s debounce, startup pull+merge) generalizes into a probe-linkable `core/CloudMerge` module; MainWindow's existing serializeProgress/mergeProgress move there and grow per-store pairs. Spec: `docs/superpowers/specs/2026-07-23-multidevice-sync-design.md` (the scout's anchor map is in its Scope section).
 
 **Tech Stack:** Qt 6.8.3, QJson, the existing CloudSync Drive plumbing, headless probes.
 
@@ -72,7 +72,7 @@
   (reverted); it is an expired/revoked token needing user re-sign-in, NOT a code defect. The merge /
   tombstone / stats-union / carve-out / bundle-hands-off / cadence semantics are all proven by
   `probe_cloudmerge` (RED-first) instead. **Cleanup:** because every push failed, the cloud was never
-  written (zero residue); the real deployed `C:\MyMediaVault-app` was never launched (portable copies
+  written (zero residue); the real deployed `C:\EverythingBox-app` was never launched (portable copies
   used), so its ini is provably byte-identical (md5 `8817fa31…` verified) and both portable instances
   were deleted.
 - [x] Spec status → complete (+ Android-OAuth follow-up + T2/T3 design-limitation notes + the

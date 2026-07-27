@@ -1,4 +1,5 @@
 #include "Achievements.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "../libretro/LibretroCore.h"
 
@@ -22,7 +23,7 @@ namespace {
 
 QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -63,12 +64,12 @@ QByteArray raUserAgent(rc_client_t* client)
     static QByteArray cached;
     if (cached.isEmpty() && client)
     {
-        cached = "MyMediaVault/" + QCoreApplication::applicationVersion().toUtf8();
+        cached = QByteArray(AppBrand::kUserAgent) + '/' + QCoreApplication::applicationVersion().toUtf8();
         char clause[128] = { 0 };
         if (rc_client_get_user_agent_clause(client, clause, sizeof(clause)) > 0 && clause[0])
         { cached += ' '; cached += clause; }
     }
-    return cached.isEmpty() ? QByteArrayLiteral("MyMediaVault") : cached;
+    return cached.isEmpty() ? QByteArray(AppBrand::kUserAgent) : cached;
 }
 
 // rc_client server call -> HTTP via Qt. The response is handed back through the rcheevos callback.

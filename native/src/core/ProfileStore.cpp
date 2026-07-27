@@ -1,4 +1,5 @@
 #include "ProfileStore.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QSettings>
@@ -12,7 +13,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -21,7 +22,7 @@ static void save(const QVector<Profile>& items); // defined below; used by migra
 
 // ---- Legacy profile-icon mojibake repair -------------------------------------------------------------------
 // Pre-existing (B2-era) builds round-tripped the profile-icon emoji through a Windows-1252 mis-decode: the
-// UTF-8 icon bytes in mymediavault.ini were read back with the local 8-bit codec and re-written as UTF-8,
+// UTF-8 icon bytes in everythingbox.ini were read back with the local 8-bit codec and re-written as UTF-8,
 // TWICE across the app's history. The dog emoji "🐶" (UTF-8 F0 9F 90 B6) thus ended up stored as the byte
 // sequence C3 83 C2 B0 C3 85 C2 B8 C3 82 C2 90 C3 82 C2 B6 — rendered as "Ã°Å¸ÂÂ¶" mojibake in every surface
 // that reads ProfileStore (classic and themed alike). Current code encodes/round-trips emoji correctly, so this
@@ -112,7 +113,7 @@ void ProfileStore::migrateIcons()
     }
     if (!changed) return;
     save(list()); // list() repairs; save() rewrites the JSON with corrected icons
-    qInfo("ProfileStore: repaired legacy mojibake profile icon(s) in mymediavault.ini");
+    qInfo("ProfileStore: repaired legacy mojibake profile icon(s) in everythingbox.ini");
 }
 
 static void save(const QVector<Profile>& items)

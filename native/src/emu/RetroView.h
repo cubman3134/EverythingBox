@@ -12,7 +12,7 @@
 #include <vector>
 #include <cstdint>
 #include <QHash>
-#include "LibretroCore.h"   // mymediavault_libretro PUBLIC include dir (src/libretro)
+#include "LibretroCore.h"   // everythingbox_libretro PUBLIC include dir (src/libretro)
 #include "../input/Gamepad.h"
 #include "../input/Keymap.h"
 

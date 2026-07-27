@@ -1,6 +1,6 @@
 // Google Drive sign-in + sync. Uses the OAuth 2.0 "loopback" flow for desktop apps (browser consent ->
 // a redirect to a temporary 127.0.0.1 port we listen on -> token exchange, PKCE). Scope: drive.file, so
-// the app can only touch files IT creates (a "MyMediaVault" folder). The refresh token is stored on-device.
+// the app can only touch files IT creates (a "EverythingBox" folder). The refresh token is stored on-device.
 //
 // Slice 1 (here): sign in/out, token refresh, and the Drive primitives (find-or-create folder, upload,
 // download, metadata). Slice 2 layers the state bundle + automatic sync on top of these.
@@ -55,7 +55,7 @@ public:
     // torn-write guard, its listOk guards, its Drive-name mapping): a headless probe subclasses CloudSync,
     // substitutes an in-memory Drive, and every caller above runs for real. Nothing in production overrides
     // them — a seam any higher up would replace the very code whose failure modes are unrecoverable.
-    // Find (or create) the "MyMediaVault" folder; returns its file id ("" on failure).
+    // Find (or create) the "EverythingBox" folder; returns its file id ("" on failure).
     virtual void ensureFolder(std::function<void(const QString& folderId)> cb);
     // Find a file by name inside a folder; cb gets {listOk, id, modifiedTimeIso, stateHash}. listOk is false
     // when the query (or its token refresh) had a network error — the caller must NOT read an empty id as
@@ -68,6 +68,15 @@ public:
                     const QString& mimeType, const QByteArray& data, const QString& stateHash,
                     std::function<void(const QString& id)> cb);
     virtual void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
+
+    // ---- brand-migration support (see core/BrandMigration.h) ----
+    // Look up a FOLDER by exact name at the Drive root. cb(queryOk, id): queryOk==false means the query (or
+    // its token refresh) failed, and the caller must NOT read the empty id as "no such folder" — same rule as
+    // findFile's listOk, for the same reason (mistaking unreachable for absent is how a duplicate folder or a
+    // clobbered backup happens). Never creates anything; ensureFolder owns creation.
+    virtual void findFolderNamed(const QString& name, std::function<void(bool queryOk, const QString& id)> cb);
+    // Rename a Drive file or folder in place (a metadata PATCH — the id, contents and sharing are unchanged).
+    virtual void renameFile(const QString& fileId, const QString& newName, std::function<void(bool ok)> cb);
 
     // Escape a value being interpolated into a Drive `q=` string literal. Drive's query grammar quotes with
     // apostrophes and escapes with backslash, so a name carrying either — "Link's Awakening" is an ordinary
@@ -93,6 +102,14 @@ public:
     // Merge-based: the caller serializes/merges, these just move the bytes. Empty json on pull => none yet.
     void pullProgress(std::function<void(bool ok, const QByteArray& json)> cb);
     void pushProgress(const QByteArray& json, std::function<void(bool ok)> cb);
+
+    // Locate one of the two brand-named sync documents, tolerating the PREVIOUS brand's file name until the
+    // DriveFiles migration step has confirmed the rename. Retires itself the moment that flag is set. Same
+    // {listOk,id,modifiedIso,stateHash} contract as findFile, and the same conservatism: an error on EITHER
+    // query yields listOk=false, so "unreachable" can never launder into "proven empty".
+    void findBrandedFile(const QString& folderId, const QString& name, const QString& legacyName,
+                         std::function<void(bool listOk, const QString& id, const QString& modifiedIso,
+                                            const QString& stateHash)> cb);
 
 signals:
     void signedIn(const QString& email);

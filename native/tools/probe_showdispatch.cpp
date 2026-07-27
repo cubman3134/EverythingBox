@@ -57,11 +57,18 @@ static bool makeSeriesFixture(const QString& root, const QString& id, bool serie
 static LocalLibrary::VideoEntry ep(const QString& show, int s, int e, const QString& path)
 { LocalLibrary::VideoEntry v; v.kind = LocalLibrary::Kind::Episode; v.show = show; v.season = s; v.episode = e; v.path = path; return v; }
 
+// "Zero network" holds because AddonManager's constructor skips every startup network kick (default-source
+// seeding, remote-manifest refresh, addon self-update) whenever EB_ADDONS_ROOT is set, and runCase() sets
+// that override before constructing the manager. Without that gate a real remote source left in the shared
+// portable ini by an earlier probe (Cinemeta, manifest already cached) could answer the show job before the
+// fixture does — the positive case would get an IMDB id instead of the canned tmdb:tv:1396 and the
+// movie-only negative control would match anyway, i.e. the probe would pass or fail on what the settings
+// file happened to accumulate rather than on the seam it tests.
 static bool runCase(bool serieslike, QStringList& outIds)
 {
     QTemporaryDir root; QTemporaryDir data;
     makeSeriesFixture(root.path(), "fixture.series", serieslike);
-    qputenv("MMV_ADDONS_ROOT", root.path().toUtf8());
+    qputenv("EB_ADDONS_ROOT", root.path().toUtf8());
     Settings::setResolveOnline(true);                   // enqueue is gated on this; default is true, pin it anyway
     AddonManager mgr;                                   // real manager, loads the JsLocal fixture, no network
     LocalResolveCache cache(data.path() + "/localresolve.json"); cache.load();

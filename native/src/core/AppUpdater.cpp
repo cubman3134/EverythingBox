@@ -1,4 +1,5 @@
 #include "AppUpdater.h"
+#include "AppBrand.h"
 #include "ArchiveRom.h"
 
 #include <QCoreApplication>
@@ -18,9 +19,9 @@
 
 namespace {
 constexpr const char* kReleasesApi =
-    "https://api.github.com/repos/cubman3134/MyMediaVault/releases/latest";
+    "https://api.github.com/repos/cubman3134/EverythingBox/releases/latest";
 constexpr const char* kReleasesPage =
-    "https://github.com/cubman3134/MyMediaVault/releases/latest";
+    "https://github.com/cubman3134/EverythingBox/releases/latest";
 
 // Compare dotted versions numerically ("0.10.0" > "0.9.0"), ignoring any "-suffix". >0 => a is newer.
 int versionCompare(const QString& a, const QString& b)
@@ -59,7 +60,7 @@ void AppUpdater::checkForUpdate()
 {
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     QNetworkRequest rq{ QUrl(QString::fromLatin1(kReleasesApi)) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setRawHeader("Accept", "application/vnd.github+json");
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
@@ -107,13 +108,13 @@ void AppUpdater::downloadAndApply()
     if (pendingUrl_.isEmpty()) { emit applyFailed(QStringLiteral("no update is pending")); return; }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
 
-    const QString dir = QDir::tempPath() + QStringLiteral("/mmv-app-update");
+    const QString dir = QDir::tempPath() + QStringLiteral("/eb-app-update");
     QDir().mkpath(dir);
     const QString archivePath = dir + QStringLiteral("/") + pendingAsset_;
 
-    emit progress(tr("Downloading My Media Vault %1…").arg(latestVersion_), -1);
+    emit progress(tr("Downloading EverythingBox %1…").arg(latestVersion_), -1);
     QNetworkRequest rq{ QUrl(pendingUrl_) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(120000);
     QNetworkReply* reply = nam_->get(rq);
@@ -159,10 +160,10 @@ bool AppUpdater::applyArchive(const QString& archivePath, QString* error)
     {
         const QFileInfoList entries = QDir(staging).entryInfoList(QDir::NoDotAndDotDot | QDir::AllEntries);
         if (entries.size() == 1 && entries.first().isDir()
-            && !QFileInfo::exists(staging + QStringLiteral("/MyMediaVault.exe")))
+            && !QFileInfo::exists(staging + QStringLiteral("/EverythingBox.exe")))
             src = entries.first().absoluteFilePath();
     }
-    if (!QFileInfo::exists(src + QStringLiteral("/MyMediaVault.exe")))
+    if (!QFileInfo::exists(src + QStringLiteral("/EverythingBox.exe")))
     {
         if (error) *error = tr("The update package didn't contain the app.");
         return false;
@@ -179,7 +180,7 @@ bool AppUpdater::applyArchive(const QString& archivePath, QString* error)
             "tasklist /FI \"PID eq %1\" 2>NUL | find \"%1\" >NUL && ( timeout /t 1 /nobreak >NUL & goto wait )\r\n"
             "robocopy \"%2\" \"%3\" /E /IS /IT /R:30 /W:1 /NFL /NDL /NJH /NJS >NUL\r\n"
             "rmdir /S /Q \"%4\" 2>NUL\r\n"
-            "start \"\" \"%3\\MyMediaVault.exe\"\r\n")
+            "start \"\" \"%3\\EverythingBox.exe\"\r\n")
         .arg(QString::number(pid),
              QDir::toNativeSeparators(src),
              QDir::toNativeSeparators(installDir),

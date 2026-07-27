@@ -50,11 +50,11 @@ run() { # <name> <sentinel> <exe> [args...]
 }
 
 # Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/mmv-relay.log 2>&1 &
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
 RELAY_PID=$!
 trap '[ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/mmv-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/mmv-relay.log 2>/dev/null | head -1)"; echo
+for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
+echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
@@ -80,7 +80,7 @@ run "media-art schema"    ART-OK           "$META"
 
 # Addon engine + manager: builtinCredential scoping, catalog cache hit/miss, the prefetcher's in-flight cap,
 # reload-mid-sweep recovery, the TTL/watchdog paths, and the reserved-namespace install guard. Self-contained
-# — it writes its own JsLocal fixtures into a temp MMV_ADDONS_ROOT and touches no network. The `--prefetch`
+# — it writes its own JsLocal fixtures into a temp EB_ADDONS_ROOT and touches no network. The `--prefetch`
 # mode is the ASSERTING one (ADDON-OK); probe_addon's other modes take a real addon script or a live URL.
 #
 # This target existed and was maintained for a long time WITHOUT being wired into this script or CI, so every
@@ -127,7 +127,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK"; do
   set -- $p
   if exe=$(findexe "$1"); then run "$1" "$2" "$exe"; else echo "(skip) $1 not built"; fi
 done
@@ -183,6 +183,73 @@ if [ -n "$srm_hits" ]; then
   fail=1
 else
   echo "PASS: retroview srm-path gate"
+fi
+echo
+
+# Old-brand gate (rebrand T4): the product was renamed, and "no mentions of the previous name remain" has to be
+# a property the suite ENFORCES rather than a claim someone made once — otherwise the next person to type
+# "MyMediaVault" into a comment reintroduces it and nothing notices. Everything that still names the old brand
+# is listed below WITH ITS REASON, because an unexplained exemption is indistinguishable from an oversight.
+# Anything not on this list is a leftover — or a new one someone just typed — and it fails here.
+#
+#   * run-headless-probes.sh          — this gate; it has to contain the pattern it searches for.
+#   * AppBrand.h                      — the Legacy:: block IS the previous identity, by definition.
+#   * BrandMigration{,Drive}.cpp      — the migration that moves installs off the old brand; it is its subject.
+#   * main.cpp                        — only migrateLegacySettings() and its comment block, carved out by the
+#                                       awk range below rather than excluding the whole 1000-line file: that
+#                                       function is the Goliath->MyMediaVault hop, where the old name is the
+#                                       subject matter and retargeting it at the current ini is a data-loss bug.
+#   * aiocatalog-worker/{worker.js,wrangler.toml,README.md}
+#                                     — USER DECISION: the deployed Worker's name (hence its workers.dev
+#                                       hostname), the add-on id com.mymediavault.aiocatalog-worker, and the
+#                                       X-MMV-Config header the old revision reads. Renaming the id or the
+#                                       hostname orphans every add-on URL a user has already saved. Left
+#                                       deliberately; its README documents them, so it is exempt too.
+#   * probe_playlists.cpp             — the v1 legacy playlist blob is a FIXTURE of what old installs wrote.
+#                                       Renaming the strings inside it destroys what the test tests.
+#   * native/secrets/README.md        — documents the EXISTING Android release keystore: alias `mmv-release`
+#                                       and CN=MyMediaVault are baked into that keystore file. Renaming the
+#                                       prose would make it false and the ANDROID_KEY_ALIAS secret wrong.
+#   * native/resources/Uninstall.cmd  — must still delete the PRE-rename state. `%LOCALAPPDATA%\My Media Vault`
+#                                       is the live cache dir (setApplicationName is still the legacy spaced
+#                                       form — see main.cpp:214), and this uninstaller exists precisely for the
+#                                       case where the app never launched, i.e. where migration never ran.
+#   * the rebrand's own spec + plan   — a document explaining a rename has to name what was renamed.
+echo "=== old-brand references ==="
+BRAND_PATTERNS=(-e 'mymediavault' -e 'my media vault' -e '\bMMV\b' -e 'MMV_')
+brand_hits="$(cd "$HERE/../.." && git grep -I -n -i "${BRAND_PATTERNS[@]}" \
+  -- . ':(exclude)native/tools/run-headless-probes.sh' \
+       ':(exclude)native/src/core/AppBrand.h' \
+       ':(exclude)native/src/core/BrandMigration.cpp' \
+       ':(exclude)native/src/core/BrandMigrationDrive.cpp' \
+       ':(exclude)native/src/main.cpp' \
+       ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' \
+       ':(exclude)native/addon-protocol/aiocatalog-worker/wrangler.toml' \
+       ':(exclude)native/addon-protocol/aiocatalog-worker/README.md' \
+       ':(exclude)native/tools/probe_playlists.cpp' \
+       ':(exclude)native/secrets/README.md' \
+       ':(exclude)native/resources/Uninstall.cmd' \
+       ':(exclude)docs/superpowers/specs/2026-07-27-everythingbox-rebrand-design.md' \
+       ':(exclude)docs/superpowers/plans/2026-07-27-everythingbox-rebrand-plan.md' || true)"
+# main.cpp is gated on everything OUTSIDE migrateLegacySettings — its exempt region runs from the comment
+# block that opens with the Goliath naming note down to that function's closing brace.
+MAINCPP="$HERE/../src/main.cpp"
+if [ -f "$MAINCPP" ]; then
+  main_hits="$(awk '
+    /^\/\/ One-time migration from the ORIGINAL "Goliath" naming/ { inmig = 1 }
+    inmig && /^}/ { inmig = 0; next }
+    !inmig { print FILENAME":"NR": "$0 }
+  ' "$MAINCPP" | grep -i -E 'mymediavault|my media vault|\<MMV\>|MMV_' || true)"
+  [ -n "$main_hits" ] && brand_hits="$brand_hits"$'\n'"$main_hits"
+else
+  echo "FAIL: old-brand references (main.cpp not found at $MAINCPP)"; fail=1
+fi
+if [ -n "$(printf '%s' "$brand_hits" | tr -d '[:space:]')" ]; then
+  echo "$brand_hits"
+  echo "FAIL: old-brand references (the previous name survives outside the documented exemptions above)"
+  fail=1
+else
+  echo "PASS: old-brand references"
 fi
 echo
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Perf baseline runner (phase-2 perf track). Launches the deployed app with MMV_PERF=1 +
-MMV_UITEST=1, drives the standard route via the uitest pipe, then parses perf_trace.log
+"""Perf baseline runner (phase-2 perf track). Launches the deployed app with EB_PERF=1 +
+EB_UITEST=1, drives the standard route via the uitest pipe, then parses perf_trace.log
 into a ranked markdown table.
 
-Usage: perfbaseline.py run --exe C:/MyMediaVault-app/<name>.exe --log <dataDir>/perf_trace.log --out docs/superpowers/perf/<date>-baseline.md
+Usage: perfbaseline.py run --exe C:/EverythingBox-app/<name>.exe --log <dataDir>/perf_trace.log --out docs/superpowers/perf/<date>-baseline.md
 
 Standard route: cold start -> home settles -> Games -> Recent (local ROMs) -> 50-row scroll ->
 open first game (local Jurassic Park) -> wait 5s -> back out -> exit. Route steps that fail are
@@ -47,7 +47,7 @@ def _state():
 
 def run_route(exe, log):
     if os.path.exists(log): os.remove(log)          # fresh trace per run
-    env = dict(os.environ, MMV_PERF="1", MMV_UITEST="1")
+    env = dict(os.environ, EB_PERF="1", EB_UITEST="1")
     proc = subprocess.Popen([exe], env=env, cwd=os.path.dirname(exe))
     skipped = []
     try:

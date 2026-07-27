@@ -20,11 +20,11 @@
 | bestMatch (movies) | `CatalogMatch.cpp:17-43`; the title-match loop `:28-41`, insert subtitle-year skip after the title check `:38` |
 | probe_resolver normalizeTitle + Amélie(defanged) | `probe_resolver.cpp:30-33` (drop the `\|\| true`); the `mi(id,title,type)` helper builds a candidate |
 | MediaItem.subtitle carries the year | aiocatalog `main.js:86` `subtitle: year(release_date\|\|first_air_date)`; `MediaItem::subtitle` (`AddonModels.h`) |
-| probe_addon fixture/spin harness (model for probe_showdispatch) | `spin`/`spinUntil` `probe_addon.cpp:268-281`; `writeText` `:283`; `makeFixture` (manifest+main.js, movies+shows catalogs) `:308-338`; `qputenv("MMV_ADDONS_ROOT", …)` + real `AddonManager` + `spinUntil` drive pattern (`probePrefetch`, ~:370-430) |
+| probe_addon fixture/spin harness (model for probe_showdispatch) | `spin`/`spinUntil` `probe_addon.cpp:268-281`; `writeText` `:283`; `makeFixture` (manifest+main.js, movies+shows catalogs) `:308-338`; `qputenv("EB_ADDONS_ROOT", …)` + real `AddonManager` + `spinUntil` drive pattern (`probePrefetch`, ~:370-430) |
 | Resolver show dispatch (what the probe pins) | `CatalogResolver::enqueue` (episode→show job via `LocalLibrary::showKeyFor`), `startJob` (show job → `requestCatalog(s, seriesCatalogId, showTitle, 1)` over series/tv/mixed catalogs), `finishJob` → `putShowMatched(showKey, ids)`; `LocalResolveCache::seriesIdsByShow()` |
 | Settings gate | `Settings::resolveOnline()` default true (resolver enqueue gates on it) |
 
-- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** **Build hygiene:** build ONLY named targets (never target-less); when you ADD a source/probe, regenerate ONCE with `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`); if a build runs >5 min report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
+- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** **Build hygiene:** build ONLY named targets (never target-less); when you ADD a source/probe, regenerate ONCE with `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`); if a build runs >5 min report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
 
 ---
 
@@ -195,7 +195,7 @@ static bool runCase(bool serieslike, QStringList& outIds)
 {
     QTemporaryDir root; QTemporaryDir data;
     makeSeriesFixture(root.path(), "fixture.series", serieslike);
-    qputenv("MMV_ADDONS_ROOT", root.path().toUtf8());
+    qputenv("EB_ADDONS_ROOT", root.path().toUtf8());
     AddonManager mgr;                                   // real manager, loads the JsLocal fixture, no network
     LocalResolveCache cache(data.path() + "/localresolve.json"); cache.load();
     CatalogResolver resolver(&mgr, &cache);
@@ -230,7 +230,7 @@ int main(int argc, char** argv)
 
 - [ ] **Step 4: Reconfigure + build + verify.**
 ```bash
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON   # new target
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON   # new target
 cmake --build build --target probe_showdispatch --config Release --parallel
 ./build/Release/probe_showdispatch.exe    # expect SHOWDISPATCH-OK
 ```
@@ -250,7 +250,7 @@ git commit -m "test: hermetic show-dispatch probe pins the CatalogResolver typed
 
 - [ ] **Step 1: Full suite green** (`RESOLVER-OK` with the new year/diacritic asserts + `SHOWDISPATCH-OK` + `ALL HEADLESS PROBES PASSED`). No perf run needed — `bestMatch` is off the render/hot path (resolve-time only) and the change is a narrower comparison; note that inline.
 - [ ] **Step 2: Fable review.** `scripts/review-package $(git merge-base main HEAD) HEAD`, most-capable model. Dimensions: `normalizeTitle` NFKD-strip correctness (Amélie/Pokémon fold; `·`/punct still → space; ASCII unaffected; the article-strip + simplified still run after); `bestMatch` subtitle-year only NARROWS (a candidate with no subtitle year, or `want.year==0`, behaves exactly as before — no new accept path; the ±1 tolerance; disambiguation picks the right film when both present); `bestSeriesMatch` untouched; the hermetic probe genuinely reproduces the C1 seam (real AddonManager + JsLocal series fixture, positive asserts `tmdb:tv:1396` cached, negative asserts movie-only → not cached), is deterministic/no-network, and terminates (spinUntil bounded). Fix rounds → merge.
-- [ ] **Step 3: Merge + push + redeploy.** Spec Status → complete. Merge `local/resolver-polish` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green (**build all probe targets incl. probe_browse/probe_perf/probe_resolver/probe_importers/probe_locallib/probe_showdispatch** to catch any latent link break), push, delete the branch, redeploy Release to `C:\MyMediaVault-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
+- [ ] **Step 3: Merge + push + redeploy.** Spec Status → complete. Merge `local/resolver-polish` → main (resolve any version-line conflict by taking the higher patch), rebuild the combined tree, full suite green (**build all probe targets incl. probe_browse/probe_perf/probe_resolver/probe_importers/probe_locallib/probe_showdispatch** to catch any latent link break), push, delete the branch, redeploy Release to `C:\EverythingBox-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
 
 ## Self-Review (done at write time)
 

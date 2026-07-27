@@ -15,7 +15,7 @@ chapter-derived provider and the fingerprinting [Intro Skipper](https://github.c
 `[start] [end] [action]`, actions `0`=cut, `1`=mute, `2`=scene marker, `3`=commercial break.
 
 This design takes the split and the typed store. It does **not** take Jellyfin's execution model: Jellyfin
-fingerprints server-side as a scheduled batch job over the library, and MMV is a client with no daemon.
+fingerprints server-side as a scheduled batch job over the library, and EB is a client with no daemon.
 
 ## What already exists (do NOT rebuild)
 
@@ -202,7 +202,7 @@ this season"**.
 `HomeView::backRequested`; during playback Escape falls through to the unified `goBack()` and exits to home
 (`MainWindow.cpp:2054`). There is no player Esc menu to hang this on. `I` is free (the player binds only
 Left/Right/Up/Down/Enter/Space/F12/`[`/`]`) and is mnemonic; `M` was rejected because mute is the near-
-universal meaning of that key in a video player and MMV would be surprising to anyone who reached for it.
+universal meaning of that key in a video player and EB would be surprising to anyone who reached for it.
 
 Because a bare keystroke is undiscoverable, the Playback settings section also carries a static `info` row
 naming both keys — that is the row's whole job, so the feature is findable where its toggles already are.

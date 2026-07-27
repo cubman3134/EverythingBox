@@ -112,7 +112,7 @@ public:
     // so this avoids copying a full result payload just to discard it.
     bool hasCachedCatalog(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
                           const QMap<QString, QString>& filters) const;
-    // The active catalog-cache TTL in ms (30 min by default; MMV_PREFETCH_TTL_S scales it for testability).
+    // The active catalog-cache TTL in ms (30 min by default; EB_PREFETCH_TTL_S scales it for testability).
     // The prefetcher reads this to size its resweep cadence off the same clock the cache expires on.
     qint64 catalogCacheTtlMs() const { return catalogCacheTtlMs_; }
 
@@ -273,7 +273,7 @@ private:
     QHash<QString, CatalogCacheEntry> catalogCache_;
     QHash<int, QString> pendingCatalogKey_;     // in-flight reqId -> cache key, to store the result on arrival
     static constexpr qint64 kCatalogCacheTtlMs = 30 * 60 * 1000; // 30 minutes (default)
-    // Effective TTL: kCatalogCacheTtlMs, or MMV_PREFETCH_TTL_S seconds when that env var is set (>0). The
+    // Effective TTL: kCatalogCacheTtlMs, or EB_PREFETCH_TTL_S seconds when that env var is set (>0). The
     // override scales BOTH cache expiry (here) and the prefetcher's resweep cadence so tests can compress time.
     qint64 catalogCacheTtlMs_ = kCatalogCacheTtlMs;
 };

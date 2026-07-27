@@ -1,6 +1,6 @@
 // Remembers where each downloaded PC (Windows) game landed so re-opening it launches the installed game
 // directly instead of re-running its installer. Keyed by the addon item id (a game's stable release id) and
-// stored in mymediavault.ini. Machine-global (an install isn't per-profile).
+// stored in everythingbox.ini. Machine-global (an install isn't per-profile).
 #pragma once
 #include <QString>
 

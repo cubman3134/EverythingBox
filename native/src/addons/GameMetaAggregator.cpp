@@ -1,4 +1,5 @@
 #include "GameMetaAggregator.h"
+#include "../core/AppBrand.h"
 #include "AddonManager.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
@@ -24,10 +25,11 @@ bool GameMetaAggregator::hasProviders() const
 // (broad fallback). Unknown providers sort after the known four but still contribute.
 int GameMetaAggregator::priorityOf(const QString& id) const
 {
-    if (id == QStringLiteral("com.mymediavault.steamgriddb"))   return 0;
-    if (id == QStringLiteral("com.mymediavault.igdb"))          return 1;
-    if (id == QStringLiteral("com.mymediavault.screenscraper")) return 2;
-    if (id == QStringLiteral("com.mymediavault.thegamesdb"))    return 3;
+    const QString p = QString::fromLatin1(AppBrand::kAddonPrefix);
+    if (id == p + QLatin1String("steamgriddb"))   return 0;
+    if (id == p + QLatin1String("igdb"))          return 1;
+    if (id == p + QLatin1String("screenscraper")) return 2;
+    if (id == p + QLatin1String("thegamesdb"))    return 3;
     return 100;
 }
 

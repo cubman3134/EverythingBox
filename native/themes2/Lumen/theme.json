@@ -1,12 +1,12 @@
 {
   "name": "Lumen",
-  "author": "My Media Vault",
+  "author": "EverythingBox",
   "settingsPanel": { "background": "#F5F6F8", "panel": "#FFFFFF", "row": "#FFFFFF", "rowSelected": "#DCE7FB", "accent": "#2D6CDF", "text": "#15171C", "dim": "#5A5E66", "separator": "#8A8F99", "warning": "#D8544B" },
   "views": {
     "home": {
       "background": { "color": "#F5F6F8" },
       "elements": [
-        { "type": "text",     "id": "title", "pos": [0.04, 0.06], "size": [0.6, 0.07],  "origin": [0, 0.5], "text": "My Media Vault", "color": "#15171C", "fontSize": 0.042, "bold": true },
+        { "type": "text",     "id": "title", "pos": [0.04, 0.06], "size": [0.6, 0.07],  "origin": [0, 0.5], "text": "EverythingBox", "color": "#15171C", "fontSize": 0.042, "bold": true },
         { "type": "datetime", "id": "clock", "pos": [0.96, 0.06], "size": [0.28, 0.05], "origin": [1, 0.5], "format": "ddd d MMM  ·  hh:mm", "color": "#5A5E66", "fontSize": 0.026, "align": "right" },
 
         { "type": "grid", "id": "grid", "pos": [0.04, 0.16], "size": [0.92, 0.66], "origin": [0, 0],

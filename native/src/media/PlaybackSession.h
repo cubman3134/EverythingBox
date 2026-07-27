@@ -11,7 +11,7 @@ class PlaybackSession : public QObject
 {
     Q_OBJECT
 public:
-    // Empty settingsFile = the app's own store (AppPaths::dataDir()/mymediavault.ini); probes pass a
+    // Empty settingsFile = the app's own store (AppPaths::dataDir()/everythingbox.ini); probes pass a
     // scratch path so tests never touch the real user store.
     explicit PlaybackSession(const QString& settingsFile = QString(), QObject* parent = nullptr);
 

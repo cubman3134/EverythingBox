@@ -1,11 +1,13 @@
 #include <QApplication>
-#ifdef MMV_HAVE_QML
+#include "core/AppBrand.h"
+#ifdef EB_HAVE_QML
 #include "theme2/MpvPreview.h"
 #include <QQuickWindow>
 #include <QtQml>
 #endif
 #include "core/AppPaths.h"
 #include "core/AssetBootstrap.h"
+#include "core/BrandMigration.h" // rebrand T3: per-step, resumable move of an existing install onto this brand
 #include "core/SafeAreaInsets.h"
 #include <QIcon>
 #include <QScreen>
@@ -32,7 +34,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.70";
+static constexpr const char* kAppVersion = "0.5.77";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -77,21 +79,55 @@ static void cloudPullAtStartup()
     loop.exec();
 }
 
-// One-time migration from the old "Goliath" naming. If the old goliath.ini exists and the new
-// mymediavault.ini does not, copy it across and rewrite the renamed addon ids (com.goliath.* ->
-// com.mymediavault.*) in both keys and values, so existing profiles, API keys and favourites carry over.
-// Idempotent: once mymediavault.ini exists this is skipped.
+// Move an install created under the PREVIOUS brand onto the current one (see core/BrandMigration.h). Must run
+// before any setting is read: Settings::store() holds a function-local static QSettings, so the first read
+// snapshots whatever file is on disk at that moment — if that happens before the ini is copied into place, the
+// whole session runs on an empty settings file and then writes it back. Also before the startup cloud pull, so
+// the pull resolves the renamed Drive folder rather than seeding a fresh one beside it.
+//
+// The local steps are synchronous; only the Drive half is async, so the event loop below runs only when there
+// is a network round-trip to wait for, and gives up after the same 8s budget as cloudPullAtStartup — an
+// unreachable Drive leaves its flags unset and the migration simply resumes next launch.
+static void brandMigrationAtStartup()
+{
+    QEventLoop loop;
+    bool finished = false;
+    BrandMigration::run([&loop, &finished](bool) { finished = true; loop.quit(); });
+    if (finished) return;                                  // resolved synchronously — nothing to wait for
+    QTimer::singleShot(8000, &loop, &QEventLoop::quit);    // never hang startup on a slow/absent network
+    loop.exec();
+}
+
+// One-time migration from the ORIGINAL "Goliath" naming: goliath.ini -> mymediavault.ini, rewriting the
+// renamed addon ids (com.goliath.* -> com.mymediavault.*) in both keys and values, so profiles, API keys
+// and favourites carry over. Idempotent: once mymediavault.ini exists this is skipped.
+//
+// The target here is deliberately AppBrand::Legacy::kIniFile, NOT AppBrand::kIniFile — this is the
+// Goliath->MyMediaVault hop, and pointing it at the current ini would be a data-loss bug, not a rename.
+// The original migration used QFile::copy and never rename, so goliath.ini is STILL on disk on every
+// install that ever ran it. Retargeting this at everythingbox.ini would make the guard read "if
+// everythingbox.ini is absent and goliath.ini is present": on a machine that ran Goliath and then
+// MyMediaVault for years, the decade-old file would be resurrected into everythingbox.ini FIRST, and the
+// MyMediaVault->EverythingBox migration would then find its destination occupied and skip. The user would
+// boot into Goliath-era settings with the entire MyMediaVault era invisible — nothing deleted, so it reads
+// as a wipe rather than looking like one. No ordering of the newer migration can repair that; the damage
+// is already done by the time it runs.
+//
+// Contract for the MyMediaVault->EverythingBox migration: this function's output must be indistinguishable
+// from a genuine MyMediaVault ini (hence the Legacy addon prefix below), so that hop can treat Goliath-era
+// and native MyMediaVault users identically. It must rewrite com.mymediavault.* -> com.everythingbox.*,
+// which it has to do for native MyMediaVault users anyway.
 static void migrateLegacySettings()
 {
     const QString dir = AppPaths::dataDir();
     const QString oldIni = dir + QStringLiteral("/goliath.ini");
-    const QString newIni = dir + QStringLiteral("/mymediavault.ini");
+    const QString newIni = dir + QStringLiteral("/") + QLatin1String(AppBrand::Legacy::kIniFile);
     if (QFile::exists(newIni) || !QFile::exists(oldIni)) return;
     if (!QFile::copy(oldIni, newIni)) return;
 
     QSettings s(newIni, QSettings::IniFormat);
     const QString oldNs = QStringLiteral("com.goliath.");
-    const QString newNs = QStringLiteral("com.mymediavault.");
+    const QString newNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
     const QStringList keys = s.allKeys();
     for (const QString& k : keys)
     {
@@ -120,7 +156,7 @@ static void migrateLegacySettings()
 // frame. This is deliberately distinct from startup.total's zero-timer end: a singleShot(0) can fire BEFORE
 // the window actually paints if the GUI thread is about to block on synchronous work, so a paint-based span
 // is the honest guard against a regression where startup work stalls the first paint (e.g. a slow audio /
-// device open landing on the GUI thread). Installed only under MMV_PERF, so normal runs pay nothing; it
+// device open landing on the GUI thread). Installed only under EB_PERF, so normal runs pay nothing; it
 // removes itself and self-destructs once the first paint fires.
 class FirstPaintProbe : public QObject
 {
@@ -156,14 +192,14 @@ int main(int argc, char** argv)
     qputenv("QT_WIDGETS_RHI_BACKEND", "metal");
 #endif
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The themed home is a QQuickView embedded via createWindowContainer (see ThemeEngine), rendered with
     // Qt Quick's software backend. The app also drives libmpv through a QOpenGLWidget, and a GPU-accelerated
     // QQuickWidget sharing GL with it renders blank; the software QQuickView avoids the GL path entirely.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
-    // The themed Video element's real-playback path: a libmpv software-render item themes create as MMV
+    // The themed Video element's real-playback path: a libmpv software-render item themes create as EB
     // MpvPreview (Video.qml instantiates it at runtime, guarded, when a playable clip exists).
-    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview");
+    qmlRegisterType<MpvPreview>("EB", 1, 0, "MpvPreview");
 #endif
 
     QApplication app(argc, argv);
@@ -175,8 +211,23 @@ int main(int argc, char** argv)
     std::setlocale(LC_NUMERIC, "C");
     capLogAtStartup();                      // trim a runaway log before we start appending to it
     qInstallMessageHandler(appLogHandler);  // no console (GUI app) -> send all diagnostics to the log file
-    QApplication::setApplicationName(QStringLiteral("My Media Vault"));
-    QApplication::setApplicationDisplayName(QStringLiteral("My Media Vault"));
+    // WARNING: setApplicationName is NOT cosmetic — CHANGING THIS VALUE MOVES THE MOBILE DATA DIRECTORY.
+    // On Android/iOS AppPaths::dataDir() resolves through QStandardPaths::AppDataLocation, which
+    // incorporates applicationName (on iOS, ~/Library/Application Support/<applicationName>). Renaming it
+    // as part of a prose sweep would silently strand every mobile user's ini, saves, states and addons at
+    // the old path — a wipe with no migration and no error. So it stays on the LEGACY spaced form (a
+    // "lookup that tolerates the legacy name until migration is confirmed") until the brand migration
+    // owns the mobile path move as an explicit, migrated step. The DISPLAY name below is pure chrome and
+    // carries no path meaning, so it flips to the new brand now.
+    //
+    // Rebrand T3 CONSIDERED migrating this and deliberately did not. Renaming it is not a rename — it is a
+    // recursive move of the whole mobile data directory (ini, saves, states, addons, themes), it cannot be
+    // exercised by a desktop headless probe (AppPaths::dataDir() only branches under Q_OS_ANDROID/Q_OS_IOS),
+    // and it cannot reuse BrandMigration's flag mechanism unchanged, because those flags live in the ini
+    // INSIDE the directory being moved. It is a device-tested step of its own; see core/BrandMigration.h.
+    // Until it lands, this pin IS the tolerance, and it must not be flipped by a prose sweep.
+    QApplication::setApplicationName(QString::fromLatin1(AppBrand::Legacy::kDisplayName));
+    QApplication::setApplicationDisplayName(QString::fromLatin1(AppBrand::kDisplayName));
     QApplication::setApplicationVersion(QString::fromLatin1(kAppVersion));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
 
@@ -209,23 +260,24 @@ int main(int argc, char** argv)
     // First-run asset extraction (D2 Task 2). A fresh Android install boots into an empty AppPaths::dataDir()
     // with the stock themes2/ + first-party addons/ only inside the read-only APK, so extract them before
     // AddonManager/ThemeEngine (built by MainWindow below) read those dirs off disk. On desktop this is a
-    // no-op UNLESS MMV_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
+    // no-op UNLESS EB_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
     // desktop-verifiable without an Android toolchain (see probe_bootstrap).
 #if defined(Q_OS_ANDROID)
-    AssetBootstrap::run(QStringLiteral("assets:/mmv"), AppPaths::dataDir(),
+    AssetBootstrap::run(QStringLiteral("assets:/eb"), AppPaths::dataDir(),
                         QString::fromLatin1(kAppVersion));
 #elif defined(Q_OS_IOS)
-    // iOS: the stock themes2/ + addons are staged at the bundle root as mmv/ (see the if(IOS) CMake block);
-    // extract them into the writable data dir exactly like the Android assets:/mmv flow.
-    AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/mmv"),
+    // iOS: the stock themes2/ + addons are staged at the bundle root as eb/ (see the if(IOS) CMake block);
+    // extract them into the writable data dir exactly like the Android assets:/eb flow.
+    AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/eb"),
                         AppPaths::dataDir(), QString::fromLatin1(kAppVersion));
 #else
-    if (qEnvironmentVariableIsSet("MMV_TEST_BOOTSTRAP_SRC"))
-        AssetBootstrap::run(qEnvironmentVariable("MMV_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
+    if (qEnvironmentVariableIsSet("EB_TEST_BOOTSTRAP_SRC"))
+        AssetBootstrap::run(qEnvironmentVariable("EB_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
                             QString::fromLatin1(kAppVersion));
 #endif
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
+    brandMigrationAtStartup(); // then move that install onto the CURRENT brand — still before any read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
     ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace
@@ -251,7 +303,7 @@ int main(int argc, char** argv)
     }
 
     MainWindow window(chooseProfile);
-    window.setWindowTitle(QStringLiteral("My Media Vault"));
+    window.setWindowTitle(QString::fromLatin1(AppBrand::kDisplayName)); // chrome only — no path meaning
 #ifdef Q_OS_IOS
     // A phone screen is far narrower than the desktop layout's aggregate minimum width, and a fullscreen
     // window can never shrink below its layout minimum — override it so fullscreen clamps to the real
@@ -260,12 +312,12 @@ int main(int argc, char** argv)
     if (QScreen* s = QGuiApplication::primaryScreen()) window.resize(s->geometry().size());
 #else
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
-    // Test-only seam (parity with MMV_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
+    // Test-only seam (parity with EB_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
     // mobile layout can be exercised with the uitest channel on a desktop host (where the window could
     // otherwise never go below the desktop layout's minimum). Never active in production.
-    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("EB_TEST_WINDOW"))
     {
-        const QStringList wh = qEnvironmentVariable("MMV_TEST_WINDOW").split(QLatin1Char('x'));
+        const QStringList wh = qEnvironmentVariable("EB_TEST_WINDOW").split(QLatin1Char('x'));
         if (wh.size() == 2 && wh[0].toInt() > 0 && wh[1].toInt() > 0)
         {
             window.setMinimumSize(1, 1);
@@ -274,7 +326,7 @@ int main(int argc, char** argv)
     }
 #endif
     // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
-    // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.
+    // under EB_PERF. It is the honest complement to startup.total's zero-timer end below.
     if (PerfTrace::enabled())
     {
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));

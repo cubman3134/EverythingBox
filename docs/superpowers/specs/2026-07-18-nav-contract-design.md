@@ -101,14 +101,14 @@ Subsystem B may not ship a themed surface using ad-hoc input elements.
 - The NavGraph back stack replaces `themedOnBack_` lambdas. Every level push (screen,
   drill, overlay — NavMenu, OSK, Esc menu are levels) registers its pop action.
 - Back hotkey (Escape, controller B, Backspace) pops exactly one level; at XMB root it
-  opens the exit menu (Resume / Exit My Media Vault). One code path; per-screen Back
+  opens the exit menu (Resume / Exit EverythingBox). One code path; per-screen Back
   wiring is deleted as surfaces adopt the contract.
 - **Invariant 4 (Back terminates):** from any state, repeated Back reaches the root
   exit menu in bounded steps (no cycles, no dead ends).
 
 ### Black-frame watchdog + hardening
 
-- Debug-gated (`MMV_UITEST` / Settings ▸ Debug): samples the composited frame ~1/s;
+- Debug-gated (`EB_UITEST` / Settings ▸ Debug): samples the composited frame ~1/s;
   ≥99%-black visible surface OUTSIDE legitimate contexts (video playing, game running,
   launch handoff, intentional black screens) → logs screen/state/timestamp to the
   existing debug log AND forces a scene refresh (QQuickWidget context-loss kick) as

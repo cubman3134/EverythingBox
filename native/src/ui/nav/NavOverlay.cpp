@@ -4,7 +4,7 @@
 
 #include <QApplication>
 #include <QCheckBox>
-#ifdef MMV_NAV_DEBUG
+#ifdef EB_NAV_DEBUG
 #include <cstdio>
 #endif
 #include <QEventLoop>
@@ -255,7 +255,7 @@ void NavOverlay::relayoutPanel()
         // to the layout, which otherwise shaves the last couple of pixels off the bottom line of text.
         const int maxW = qMax(300, width() - 120);
         const int w = qBound(320, panel_->sizeHint().width() + 4, maxW);
-#ifdef MMV_NAV_DEBUG
+#ifdef EB_NAV_DEBUG
         {
             QWidget* k0 = lay->itemAt(0) ? lay->itemAt(0)->widget() : nullptr;
             std::fprintf(stderr, "[relayout v2] overlay=%dx%d hint=%dx%d w=%d hfw=%d items=%d "

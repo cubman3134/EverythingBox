@@ -1,10 +1,10 @@
 # Perf baseline — 2026-07-24 (Local Library ID-Resolver close-out)
 
 Branch `local/id-resolver`, all 4 tasks merged. Captured with an adapted `perfbaseline.py`
-(MMV_PERF=1 + MMV_UITEST=1) driving a reference-style route (cold start → home settle → `right`
+(EB_PERF=1 + EB_UITEST=1) driving a reference-style route (cold start → home settle → `right`
 to the **Games** category rail → 50-item down/up scroll → exit) against a **portable throwaway copy**
 of the deployed app (fresh Release exe, `cloud/*`/`sync/*` stripped, aiocatalog + TMDB key retained,
-seeded movie fixtures). The real deployed app at `C:\MyMediaVault-app` was never launched. All three
+seeded movie fixtures). The real deployed app at `C:\EverythingBox-app` was never launched. All three
 runs completed the route with no SKIPPED steps.
 
 Route note: the stock `perfbaseline.py` opens Games ▸ Recent (local ROMs), which this throwaway does

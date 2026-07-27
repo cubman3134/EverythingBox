@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Polish-track flow sweep (phase-2 polish track, Task 1). Launches the deployed app with
-MMV_UITEST=1, walks the themed-XMB home flow, and captures a screenshot set that Task 2 ranks
+EB_UITEST=1, walks the themed-XMB home flow, and captures a screenshot set that Task 2 ranks
 for jarring transitions / rough empty states. Drives ONLY through the uitest pipe (no focus /
 SendKeys); grab() renders the window even while occluded.
 
-Usage: polishsweep.py run --exe C:/MyMediaVault-app/MyMediaVault.exe --out .superpowers/polish-audit
+Usage: polishsweep.py run --exe C:/EverythingBox-app/EverythingBox.exe --out .superpowers/polish-audit
 
 Output naming contract (Task 2 depends on it):
   step-NN-<slug>.png            a settled still of a named step
@@ -166,7 +166,7 @@ def run(exe, outdir):
     global _outdir
     _outdir = outdir
     os.makedirs(outdir, exist_ok=True)
-    env = dict(os.environ, MMV_UITEST="1")
+    env = dict(os.environ, EB_UITEST="1")
     proc = subprocess.Popen([exe], env=env, cwd=os.path.dirname(exe))
     try:
         if not wait_pipe():
@@ -356,7 +356,7 @@ def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--exe", default=r"C:/MyMediaVault-app/MyMediaVault.exe")
+    r.add_argument("--exe", default=r"C:/EverythingBox-app/EverythingBox.exe")
     r.add_argument("--out", default=".superpowers/polish-audit")
     a = ap.parse_args()
     run(a.exe, a.out)

@@ -1,4 +1,4 @@
-// TheGamesDB game-metadata provider for My Media Vault.
+// TheGamesDB game-metadata provider for EverythingBox.
 //
 // Pure metadata/artwork provider: only implements getMeta() for type "game". No browse
 // catalog (manifest "catalogs": []). The app fans out to every game-meta provider on hover

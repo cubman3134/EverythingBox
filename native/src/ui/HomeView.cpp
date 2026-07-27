@@ -1,4 +1,5 @@
 #include "HomeView.h"
+#include "../core/AppBrand.h"
 #include "../theme2/FormFactor.h"
 #include <QScrollArea>
 #include <QScroller>
@@ -102,7 +103,7 @@ static bool isReadableChapter(const QString& t)
 // Per-profile settings store (shared ini); used here to read media resume progress.
 static QSettings& settingsStore()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -2800,7 +2801,7 @@ bool HomeView::atDetailLevel() const { return !stack_.isEmpty() && stack_.last()
 // Identity for a local game favourite: its stable resume key, else its path.
 static QString gameFavId(const MediaItem& it) { return it.id.isEmpty() ? it.url : it.id; }
 
-// True if `path` is a file MyMediaVault downloaded (under our downloads folder or the remote cache), so it's
+// True if `path` is a file EverythingBox downloaded (under our downloads folder or the remote cache), so it's
 // safe to delete on "Uninstall". A ROM the user keeps in their own library folder is left alone.
 static bool weOwnDownloadedFile(const QString& path)
 {
@@ -4129,7 +4130,7 @@ void HomeView::requestSteamMeta(const MediaItem& item, int reqId)
     QUrlQuery q; q.addQueryItem(QStringLiteral("appids"), appid); q.addQueryItem(QStringLiteral("l"), QStringLiteral("english"));
     u.setQuery(q);
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, appid, item, reqId] {
@@ -4339,7 +4340,7 @@ void HomeView::showMeta(const MediaDetail& d)
         return;
     }
     QNetworkRequest req((QUrl(d.imageUrl)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, myMeta] {
@@ -4898,7 +4899,7 @@ void HomeView::pumpThumbnails()
         const QString cacheKey = MetaCache::keyFor(items_[i]); // to persist the fetched poster (offline-first)
 
         QNetworkRequest req((QUrl(url)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = nam_->get(req);
         ++thumbActive_;

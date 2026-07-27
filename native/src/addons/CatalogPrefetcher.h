@@ -5,7 +5,7 @@
 //
 // Pacing: a FIFO queue drained at most kMaxInFlight (3) requests at a time, so a warm-up never floods the JS
 // worker pool or the network and never competes hard with a user's own browsing. A staggered resweep timer
-// (~25 min ± jitter, scaled by MMV_PREFETCH_TTL_S via the manager's TTL) refreshes entries before they expire;
+// (~25 min ± jitter, scaled by EB_PREFETCH_TTL_S via the manager's TTL) refreshes entries before they expire;
 // each resweep skips anything still comfortably within the cache TTL, so a warm cache costs nothing. It also
 // resweeps whenever the source set or a source's enabled state changes. Failures are logged and never retried
 // within a sweep — a source that's down simply gets another chance on the next resweep.
@@ -39,7 +39,7 @@ public:
 
     static constexpr int kMaxInFlight = 3;
     static constexpr qint64 kWatchdogMs = 60 * 1000;   // give up on an in-flight job after 60s
-                                                       // (MMV_PREFETCH_WATCHDOG_S overrides, for tests)
+                                                       // (EB_PREFETCH_WATCHDOG_S overrides, for tests)
 
 private:
     // A queued job holds only IDENTIFIERS, never a LoadedAddon* — AddonManager::reload() (fired ~0.5-3s after

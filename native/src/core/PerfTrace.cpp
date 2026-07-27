@@ -13,7 +13,7 @@ namespace
     QMutex g_mutex;
     QHash<QString, QElapsedTimer> g_open; // begin()ed spans awaiting end()
 
-    bool computeEnabled() { return g_forced || qEnvironmentVariableIntValue("MMV_PERF") == 1; }
+    bool computeEnabled() { return g_forced || qEnvironmentVariableIntValue("EB_PERF") == 1; }
 }
 
 namespace PerfTrace

@@ -1,4 +1,5 @@
 #include "CloudMerge.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "Tombstones.h"
 #include "ItemMarks.h"
@@ -14,12 +15,12 @@
 #include <QStringList>
 #include <algorithm>
 
-// Shares the portable mymediavault.ini with every other store (same AppPaths::dataDir() posture). Coherence
+// Shares the portable everythingbox.ini with every other store (same AppPaths::dataDir() posture). Coherence
 // with the store front-ends comes from every writer calling sync(); QSettings reloads on access when the
 // on-disk file changed.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

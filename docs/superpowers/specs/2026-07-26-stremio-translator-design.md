@@ -3,12 +3,12 @@
 **Date:** 2026-07-26
 **Status:** Draft — approved through brainstorming; awaiting user spec review before plan.
 **Origin:** Roadmap #3 ("Stremio addon translator"). The roadmap line carried no description; brainstorming
-established the direction as **finishing MMV's Stremio client** so the existing addon ecosystem works
+established the direction as **finishing EB's Stremio client** so the existing addon ecosystem works
 properly here — not serving a manifest outward, and not adapting other ecosystems in.
 
 ## What exists today
 
-MMV speaks **two** protocols. Its own (`native/addon-protocol/README.md`) is the richer one — custom media
+EB speaks **two** protocols. Its own (`native/addon-protocol/README.md`) is the richer one — custom media
 types, settings forms, metadata-only providers, a `/detail` route. Alongside it, `AddonManager` contains a
 **partial Stremio client**, written inline in a ~1500-line networking class:
 
@@ -28,7 +28,7 @@ and [manifest schema](https://github.com/Stremio/stremio-addon-sdk/blob/master/d
 
 1. **The object form of `resources` is read for its name only; its `types` and `idPrefixes` are dropped.**
    The schema permits both `["catalog","stream"]` and
-   `[{"name":"stream","types":["movie"],"idPrefixes":["tt"]}]`, mixed freely. MMV *does* handle both shapes
+   `[{"name":"stream","types":["movie"],"idPrefixes":["tt"]}]`, mixed freely. EB *does* handle both shapes
    for the resource **name** (`AddonManager.cpp:314` ternaries on `isString()`), so this is not the
    "installs and does nothing" failure it first looked like — but everything else the object carries is
    discarded, which is where per-resource routing would have come from.
@@ -45,7 +45,7 @@ and [manifest schema](https://github.com/Stremio/stremio-addon-sdk/blob/master/d
 
 ### 1. `StremioTranslate` — the translator, extracted and pure (`native/src/addons/StremioTranslate.{h,cpp}`)
 
-The parsing above moves out of `AddonManager` into a pure unit: JSON in, MMV models out, no network, no
+The parsing above moves out of `AddonManager` into a pure unit: JSON in, EB models out, no network, no
 `QSettings`, no widgets. This is the point of the track — the current code is incomplete *because* it is
 untestable, and extraction is what lets `probe_stremio` assert against real manifest fixtures.
 
@@ -62,7 +62,7 @@ namespace StremioTranslate
         int         optionsLimit = 1;  // how many the user may select (schema default 1)
     };
 
-    // What MMV can actually do with a declared catalog.
+    // What EB can actually do with a declared catalog.
     enum class CatalogUse
     {
         Browse,        // a shelf — required extras (if any) can be satisfied from `options`
@@ -204,7 +204,7 @@ play    ─→ providers filtered by handlesId (fallback: all) ─→ parseStrea
 | Situation | Behavior |
 |---|---|
 | `resources` mixes strings and objects | Both parsed; resource names normalized into one list |
-| `"resources": []`, or objects whose `name` is missing/empty | **Behaviour change worth a release note.** Detection tightened from "has `resources` and `types` keys" to "`resources` is non-empty", so such an addon no longer registers as Stremio, falls through to MMV's own manifest parse, is rejected there, and **vanishes from the source list entirely** — where before it appeared with its catalogs. A manifest declaring catalogs but no resources is malformed, so this is the right call; it is recorded because it is a visible removal, not a silent degrade |
+| `"resources": []`, or objects whose `name` is missing/empty | **Behaviour change worth a release note.** Detection tightened from "has `resources` and `types` keys" to "`resources` is non-empty", so such an addon no longer registers as Stremio, falls through to EB's own manifest parse, is rejected there, and **vanishes from the source list entirely** — where before it appeared with its catalogs. A manifest declaring catalogs but no resources is malformed, so this is the right call; it is recorded because it is a visible removal, not a silent degrade |
 | `configurationRequired: true` | One explanatory row instead of empty shelves; links `configurable` when present |
 | Catalog requires an extra with no `options` | Skipped with a **named reason**, surfaced through the existing info-row mechanism |
 | **`idPrefixes` filters out every provider** | **Query all of them.** A bad manifest must degrade to today's behavior, never to a dead end |
@@ -245,10 +245,10 @@ play    ─→ providers filtered by handlesId (fallback: all) ─→ parseStrea
 
 ## Non-goals
 
-- Serving a Stremio manifest outward (no HTTP server exists in MMV; that is its own subsystem).
+- Serving a Stremio manifest outward (no HTTP server exists in EB; that is its own subsystem).
 - `addonCatalogs` / `addon_catalog` — addon discovery through addons.
 - The `subtitles` resource — OpenSubtitles already owns subtitles (roadmap #5, shipped).
 - A torrent streaming layer; torrents continue to resolve only through the user's own TorBox key.
-- Any change to MMV's own addon protocol, or to the JsLocal engine.
+- Any change to EB's own addon protocol, or to the JsLocal engine.
 - **Recorded as a follow-up, not fixed here:** `installPackage` flattens all zip paths to `fileName()`
   (`AddonManager.cpp:1534`), so an addon shipping `icons/` or `lib/` loses its structure.

@@ -57,7 +57,7 @@ static int probeMetaFlow(const QString& jsPath)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -104,7 +104,7 @@ static int probeMetaOne(const QString& jsPath, const QString& catalogId)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -138,7 +138,7 @@ static int probeGetMeta(const QString& jsPath, const QString& title, const QStri
     AddonManifest m;
     m.id = addonId.isEmpty() ? QStringLiteral("probe") : addonId;
     m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -165,7 +165,7 @@ static int probeMangaFlow(const QString& jsPath)
     QFile f(jsPath);
     if (!f.open(QIODevice::ReadOnly)) { printf("can't read %s\n", jsPath.toUtf8().constData()); return 1; }
     AddonManifest m; m.id = QStringLiteral("probe"); m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);
     if (!addon) { printf("load failed: %s\n", err.toUtf8().constData()); return 1; }
@@ -262,7 +262,7 @@ static int probeRemote(const QString& url, const QString& catalogId)
 }
 
 // --- prefetch / cache-peek / enable-disable harness (Feature-Track Task 1) --------------------------
-// Spins its own deterministic JsLocal fixtures in an isolated temp addons root (MMV_ADDONS_ROOT) and drives
+// Spins its own deterministic JsLocal fixtures in an isolated temp addons root (EB_ADDONS_ROOT) and drives
 // the catalog cache peek + the CatalogPrefetcher entirely offline, asserting the Task-2 contract. No network.
 
 // Process the event loop for `ms`, delivering queued catalogReady/QtConcurrent completions.
@@ -367,6 +367,12 @@ static bool makeSlowFixture(const QString& root, const QString& id)
         && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
 }
 
+// "Touches no network" holds because AddonManager's constructor skips every startup network kick
+// (default-source seeding, remote-manifest refresh, addon self-update) whenever EB_ADDONS_ROOT is set,
+// and this probe sets that override before constructing any manager. So the fixtures really are the only
+// sources, and the slot-accounting asserts below ("issued exactly one request per job") count only their
+// requests. This probe used to scrub the shared portable ini by hand to get the same guarantee; that
+// belongs in the production gate, not test-side, and the hand-scrub is gone.
 static int probePrefetch()
 {
     int pass = 0, fail = 0;
@@ -385,7 +391,7 @@ static int probePrefetch()
             " d: builtinCredential('devid').length, p: builtinCredential('devpassword').length }); }";
         auto lensFor = [&](const QString& addonId, int* d, int* p) -> bool {
             AddonManifest m; m.id = addonId;
-            auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mmv-credscope-probe"));
+            auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/eb-credscope-probe"));
             QString err;
             auto a = JsAddon::load(QString::fromUtf8(kCredJs), std::move(ctx), &err);
             if (!a) { printf("credscope fixture load failed: %s\n", err.toUtf8().constData()); return false; }
@@ -400,21 +406,21 @@ static int probePrefetch()
               lensFor(QStringLiteral("com.evil.thirdparty"), &d, &p) && d == 0 && p == 0);
         int d2 = -1, p2 = -1;
         check("credscope: screenscraper id passes the allowlist (lengths match the embedded header)",
-              lensFor(QStringLiteral("com.mymediavault.screenscraper"), &d2, &p2)
-              && d2 == mmv_secrets::kScreenScraperDevidLen
-              && p2 == mmv_secrets::kScreenScraperDevpasswordLen);
+              lensFor(QStringLiteral("com.everythingbox.screenscraper"), &d2, &p2)
+              && d2 == eb_secrets::kScreenScraperDevidLen
+              && p2 == eb_secrets::kScreenScraperDevpasswordLen);
     }
 
-    const QString root = QDir::tempPath() + QStringLiteral("/mmv-prefetch-fixture-")
+    const QString root = QDir::tempPath() + QStringLiteral("/eb-prefetch-fixture-")
                        + QString::number(QCoreApplication::applicationPid());
     QDir(root).removeRecursively();
     const QStringList ids = { QStringLiteral("probe.fixture.0"), QStringLiteral("probe.fixture.1"),
                               QStringLiteral("probe.fixture.2") };
     for (const QString& id : ids) if (!makeFixture(root, id)) { printf("fixture write failed\n"); return 2; }
-    qputenv("MMV_ADDONS_ROOT", root.toUtf8());
+    qputenv("EB_ADDONS_ROOT", root.toUtf8());
 
     // ---- Manager A: comfortably-long TTL for the peek/disable/signal steps ----
-    qputenv("MMV_PREFETCH_TTL_S", "30");
+    qputenv("EB_PREFETCH_TTL_S", "30");
     AddonManager mgr;
     for (const QString& id : ids) mgr.setEnabled(id, true); // isEnabled persists in the shared ini across runs
     check("discovered the 3 fixtures", mgr.sources().size() == 3);
@@ -524,7 +530,7 @@ static int probePrefetch()
     check("reload mid-sweep: resweep re-covered every dropped key (all catalogs cached)", allCachedR);
 
     // ---- Manager S: 1-second TTL to exercise expiry ----
-    qputenv("MMV_PREFETCH_TTL_S", "1");
+    qputenv("EB_PREFETCH_TTL_S", "1");
     AddonManager mgrS;
     mgrS.setEnabled(ids[0], true);
     LoadedAddon* ss = mgrS.sourceById(ids[0]);
@@ -540,9 +546,9 @@ static int probePrefetch()
     QDir(rootW).removeRecursively();
     const QString slowId = QStringLiteral("a.slow"), fastId = QStringLiteral("b.fast");
     if (!makeSlowFixture(rootW, slowId) || !makeFixture(rootW, fastId)) { printf("wd fixture write failed\n"); return 2; }
-    qputenv("MMV_ADDONS_ROOT", rootW.toUtf8());
-    qputenv("MMV_PREFETCH_TTL_S", "30");      // roomy TTL: cache entries must outlive the asserts below
-    qputenv("MMV_PREFETCH_WATCHDOG_S", "1");  // expire a silent in-flight job after ~1s
+    qputenv("EB_ADDONS_ROOT", rootW.toUtf8());
+    qputenv("EB_PREFETCH_TTL_S", "30");      // roomy TTL: cache entries must outlive the asserts below
+    qputenv("EB_PREFETCH_WATCHDOG_S", "1");  // expire a silent in-flight job after ~1s
     AddonManager mgrW;
     mgrW.setEnabled(slowId, true); mgrW.setEnabled(fastId, true);
     LoadedAddon* fastSrc = mgrW.sourceById(fastId);
@@ -565,16 +571,16 @@ static int probePrefetch()
     check("late replies ignored cleanly (prefetcher stays idle, counts unchanged)",
           pfW.idle() && pfW.expired() == 3 && pfW.issued() == 5);
     QDir(rootW).removeRecursively();
-    qunsetenv("MMV_PREFETCH_WATCHDOG_S");
+    qunsetenv("EB_PREFETCH_WATCHDOG_S");
 
-    // ---- Reserved-namespace install guard: a package claiming a com.mymediavault.* id must be REFUSED
+    // ---- Reserved-namespace install guard: a package claiming a com.everythingbox.* id must be REFUSED
     // (bundled ids never arrive via installPackage; a side-loaded one could impersonate/overwrite one). ----
     {
         const QString rootI = root + QStringLiteral("-inst");
         QDir(rootI).removeRecursively(); QDir().mkpath(rootI);
-        qputenv("MMV_ADDONS_ROOT", rootI.toUtf8());
+        qputenv("EB_ADDONS_ROOT", rootI.toUtf8());
         AddonManager mgrI;
-        const QString reservedId = QStringLiteral("com.mymediavault.evil");
+        const QString reservedId = QStringLiteral("com.everythingbox.evil");
         const QString okId = QStringLiteral("com.thirdparty.ok");
         const QString pkgBad = rootI + QStringLiteral("/reserved.addon");
         const QString pkgOk  = rootI + QStringLiteral("/ok.addon");
@@ -582,7 +588,7 @@ static int probePrefetch()
         QString errBad, errOk;
         const bool refused = built && !mgrI.installPackage(pkgBad, &errBad);
         const bool folderAbsent = !QDir(rootI + QStringLiteral("/") + reservedId).exists();
-        check("install guard: reserved com.mymediavault.* package refused (not installed)",
+        check("install guard: reserved com.everythingbox.* package refused (not installed)",
               refused && folderAbsent && !errBad.isEmpty());
         // Control: a normal third-party id still installs through the same path (guard isn't over-broad).
         const bool okInstalled = built && mgrI.installPackage(pkgOk, &errOk)
@@ -592,8 +598,8 @@ static int probePrefetch()
     }
 
     QDir(root).removeRecursively();
-    qunsetenv("MMV_ADDONS_ROOT");
-    qunsetenv("MMV_PREFETCH_TTL_S");
+    qunsetenv("EB_ADDONS_ROOT");
+    qunsetenv("EB_PREFETCH_TTL_S");
 
     printf("prefetch: %d passed, %d failed\n", pass, fail);
     printf("%s\n", fail == 0 ? "ADDON-OK" : "ADDON-FAIL");
@@ -629,7 +635,7 @@ int main(int argc, char** argv)
     AddonManifest m;
     m.id = QStringLiteral("probe");
     m.permissions << QStringLiteral("network");
-    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/mymediavault-addon-probe"));
+    auto ctx = std::make_unique<AddonContext>(m, QDir::tempPath() + QStringLiteral("/everythingbox-addon-probe"));
 
     QString err;
     auto addon = JsAddon::load(QString::fromUtf8(f.readAll()), std::move(ctx), &err);

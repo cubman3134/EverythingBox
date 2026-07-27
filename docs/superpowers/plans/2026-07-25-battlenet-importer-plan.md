@@ -32,7 +32,7 @@
 | Probe | `native/tools/probe_importers.cpp` — GOG INI fixture `:282-311`, catalog assertions `:313-325`, `relaunchFor` table `:177-188`, `iconTypeForKind` `:191-193`; sentinel `IMPORTERS-OK` |
 | CMake | app source list `native/CMakeLists.txt:~206`; `probe_importers` target `:~488-499` |
 
-- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** App target `mymediavault`. **Build hygiene:** build ONLY named targets (never target-less); adding a source file requires ONE `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`) regenerate; >5 min → report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
+- **Env recipe:** PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` + `/c/mpv-dev`; build dir `build` (generated qt.conf, no `QT_PLUGIN_PATH`). **Harness runs RELEASE — build `--config Release`.** App target `everythingbox`. **Build hygiene:** build ONLY named targets (never target-less); adding a source file requires ONE `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`) regenerate; >5 min → report BLOCKED. Suite: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
 
 ---
 
@@ -119,7 +119,7 @@ Also extend the existing `relaunchFor`/`iconTypeForKind` tables (`:177-193`):
 - [ ] **Step 2: Verify RED.** Add `BattleNetLibrary.cpp/.h` to the `probe_importers` target sources in `native/CMakeLists.txt` (`:~488-499`, beside `GogLibrary.cpp`) AND to the app source list (`:~206`), then regenerate + build:
 ```bash
 export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON
 cmake --build build --target probe_importers --config Release --parallel
 ```
 Expected: compile/link failure — `BattleNetLibrary.h` doesn't exist yet (create the two files empty/stubbed if CMake needs them to exist to configure, so the failure is an *unresolved symbol / missing declaration*, i.e. genuine RED).
@@ -471,7 +471,7 @@ In `openRecent` beside the GOG case (`:4961-4964`) add a `BattleNetGame` case: i
 
 - [ ] **Step 6: Build + suite.**
 ```bash
-cmake --build build --target mymediavault probe_importers --config Release --parallel
+cmake --build build --target everythingbox probe_importers --config Release --parallel
 BUILD_DIR=build bash native/tools/run-headless-probes.sh   # IMPORTERS-OK + ALL HEADLESS PROBES PASSED
 ```
 App must compile clean. **Dormancy check:** with no Blizzard games installed (this machine), launching the app must show NO Battle.net console — confirm by code-read of the injection guard (and in the T3 live pass).
@@ -487,9 +487,9 @@ git commit -m "feat: Battle.net console + catalog + mime + Recent kind + launch 
 ### Task 3: close-out — dormancy check, review, merge (live verify is USER-gated)
 
 - [ ] **Step 1: Gates.** Full suite green (`IMPORTERS-OK` + `ALL HEADLESS PROBES PASSED`); app compiles Release. No perf run (detection is a Games-root live scan, off the render hot path — the Steam/Epic/GOG precedent); note that inline.
-- [ ] **Step 2: Dormancy live check (no Blizzard game needed).** Portable throwaway (copy the deployed data dir, cloud-stripped; NEVER touch `C:\MyMediaVault-app`), `MMV_UITEST=1` + `native/tools/uitest.py`: open the Games catalogue root and confirm **NO Battle.net console appears** (nothing installed ⇒ dormant) and that Steam/Epic/GOG consoles are unchanged. Screenshot `bnet-dormant.png`. This is the verification that IS possible today.
+- [ ] **Step 2: Dormancy live check (no Blizzard game needed).** Portable throwaway (copy the deployed data dir, cloud-stripped; NEVER touch `C:\EverythingBox-app`), `EB_UITEST=1` + `native/tools/uitest.py`: open the Games catalogue root and confirm **NO Battle.net console appears** (nothing installed ⇒ dormant) and that Steam/Epic/GOG consoles are unchanged. Screenshot `bnet-dormant.png`. This is the verification that IS possible today.
 - [ ] **Step 3: Review.** `scripts/review-package $(git merge-base main HEAD) HEAD`, most-capable model. Dimensions: the dormant contract (no games ⇒ no console, zero UI change); `parseUninstallEntry`'s publisher filter (non-Blizzard entries can never reach the console) and that an empty name is the only "filtered" signal; the INI fixture seam mirrors GogLibrary (probe-testable with no launcher); dedupe across the two live hive views; the coded-vs-code-less launch split (id `bnet:<code>` ⇒ URI + `RecentStore::add`; exe ⇒ `launchPcExe` records itself — no double-record); the Recent re-open round-trip for both; all six UI touch-points present and mirroring GOG (injection/drill/open/back/search/not-a-ROM); no Steam/Epic/GOG regression; `findGameExe`'s filters can't pick an uninstaller/launcher. Fix rounds → merge.
-- [ ] **Step 4: Merge + push + redeploy.** Spec Status → complete, recording honestly: fixture-verified + dormancy-verified; the **live console/launch pass is USER-gated** (requires installing one Blizzard game via the already-installed Battle.net client) and will confirm/correct the real registry fields, the title→code entry, and the working launch mechanism. Merge `local/battlenet-importer` → main (version-line conflict → take the higher patch), rebuild the combined tree, full suite green (**build all probe targets** to catch a latent link break), push, delete the branch, redeploy Release to `C:\MyMediaVault-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
+- [ ] **Step 4: Merge + push + redeploy.** Spec Status → complete, recording honestly: fixture-verified + dormancy-verified; the **live console/launch pass is USER-gated** (requires installing one Blizzard game via the already-installed Battle.net client) and will confirm/correct the real registry fields, the title→code entry, and the working launch mechanism. Merge `local/battlenet-importer` → main (version-line conflict → take the higher patch), rebuild the combined tree, full suite green (**build all probe targets** to catch a latent link break), push, delete the branch, redeploy Release to `C:\EverythingBox-app` (md5-verify), update `.superpowers/sdd/progress.md`, mark the chapter.
 
 ## Self-Review (done at write time)
 

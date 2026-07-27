@@ -1,5 +1,5 @@
 // Headless check of the first-run onboarding router (onboarding/drive-restore T1). The pure decision that the
-// choice screen, the inject point, and T2's restore flow all route through is mmv::onboardingRoute — a total
+// choice screen, the inject point, and T2's restore flow all route through is eb::onboardingRoute — a total
 // function over five bools (src/core/OnboardingRoute.h). This pins its table verbatim from the plan so the UI
 // layers can never drift from it, and asserts CloudSync::signInAvailable() is desktop-true / Android-false.
 //
@@ -13,10 +13,10 @@
 #include <QtGlobal>
 #include <cstdio>
 
-using mmv::OnboardingRoute;
-using mmv::onboardingRoute;
-using mmv::RestorePullStage;
-using mmv::restorePullStage;
+using eb::OnboardingRoute;
+using eb::onboardingRoute;
+using eb::RestorePullStage;
+using eb::restorePullStage;
 
 static int failures = 0;
 #define CHECK(cond) do { \

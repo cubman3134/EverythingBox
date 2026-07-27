@@ -39,7 +39,7 @@ QString baseName(const QString& n)
 QString outDirFor(const QString& archivePath)
 {
     const QByteArray h = QCryptographicHash::hash(archivePath.toUtf8(), QCryptographicHash::Sha1).toHex().left(16);
-    const QString d = QDir::tempPath() + QStringLiteral("/mymediavault-roms/") + QString::fromLatin1(h);
+    const QString d = QDir::tempPath() + QStringLiteral("/everythingbox-roms/") + QString::fromLatin1(h);
     QDir().mkpath(d);
     return d;
 }

@@ -1,4 +1,4 @@
-// Translates the Stremio addon protocol into MMV's models. Pure: JSON in, structs out — no network, no
+// Translates the Stremio addon protocol into EB's models. Pure: JSON in, structs out — no network, no
 // QSettings, no widgets, so probe_stremio can assert every rule against real manifest fixtures.
 //
 // This lives apart from AddonManager deliberately. The Stremio support that preceded it was written inline
@@ -25,7 +25,7 @@ namespace StremioTranslate
         int         optionsLimit = 1;  // how many a user may select (schema default is 1)
     };
 
-    // What MMV can actually do with a declared catalog.
+    // What EB can actually do with a declared catalog.
     enum class CatalogUse
     {
         Browse,        // a shelf; any required extra can be satisfied from its options

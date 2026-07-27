@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-My Media Vault netplay relay.
+EverythingBox netplay relay.
 
 Lets two players behind NAT play online without port-forwarding: both connect OUTBOUND to this server, which
-pairs them by a short room code and then just forwards raw bytes between the two — the MMV netplay lockstep
+pairs them by a short room code and then just forwards raw bytes between the two — the EB netplay lockstep
 protocol runs over that pipe unchanged. Deploy on a public host (e.g. your server) and point clients at it via
 Settings > the netplay relay address.
 
@@ -102,7 +102,7 @@ async def main():
     ap.add_argument("--port", type=int, default=55666)
     args = ap.parse_args()
     server = await asyncio.start_server(handle, args.host, args.port)
-    print(f"MMV netplay relay listening on {args.host}:{args.port}", flush=True)
+    print(f"EB netplay relay listening on {args.host}:{args.port}", flush=True)
     async with server:
         await server.serve_forever()
 
