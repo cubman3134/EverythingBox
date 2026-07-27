@@ -158,5 +158,33 @@ else
 fi
 echo
 
+# RetroView battery-save path gate (save-sync T4): where a .srm lives is decided in ONE place —
+# SaveMeta::resolvePath, called from RetroView::sramPath() — because that function is the only thing that knows
+# a save may live flat (pre-namespacing) or under a DIFFERENT system's namespace than the one this launch
+# resolved. A second `".srm"` literal anywhere else in RetroView.cpp is a path built by hand, and a hand-built
+# path misses both fallbacks: the game boots with an empty save while the real one sits on disk, unreachable.
+# resolvePath itself is asserted by probe_savesync; this gate asserts nothing bypasses it. Line-comments are
+# stripped first (via sed) so prose that merely mentions ".srm" never trips it.
+echo "=== retroview srm-path gate ==="
+RETROVIEW="$HERE/../src/emu/RetroView.cpp"
+srm_hits=""
+if [ -f "$RETROVIEW" ]; then
+  srm_hits="$(sed -E 's://.*$::' "$RETROVIEW" | awk '
+    /QString RetroView::sramPath/ { inpath = 1 }
+    inpath && /^}/               { inpath = 0; next }
+    /"\.srm"/ && !inpath         { print NR": "$0 }
+  ')"
+else
+  echo "FAIL: retroview srm-path gate (RetroView.cpp not found at $RETROVIEW)"; fail=1
+fi
+if [ -n "$srm_hits" ]; then
+  echo "$srm_hits"
+  echo "FAIL: retroview srm-path gate (a \".srm\" path is built outside RetroView::sramPath)"
+  fail=1
+else
+  echo "PASS: retroview srm-path gate"
+fi
+echo
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"
