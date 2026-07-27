@@ -12,9 +12,18 @@ Item {
     property var host
 
     readonly property string src: host ? host.resolve(T.imageSource(el, ctx)) : ""
-    // Show the text fallback only when the theme asked for it AND no image resolved (or it failed to load).
+    // Double-buffered display: `shown` is the last source that ACTUALLY loaded; `probe` test-loads every
+    // new src off-screen and only promotes it on Ready. Without this, a source swap (e.g. the detail page's
+    // async meta replacing the catalog thumb with hi-res art) blanked the element while loading — and if the
+    // new URL failed, the poster that WAS showing vanished for good ("the poster starts to load, then
+    // doesn't"). The two Images share Qt's cache, so promoting a probed source repaints instantly.
+    property string shown: ""
+    // A selection change to an item with NO art must clear the frame — holding the previous item's art
+    // (which the promote-on-Ready rule alone would do) shows the wrong poster instead of the placeholder.
+    onSrcChanged: if (src === "") shown = ""
+    // Show the text fallback only when the theme asked for it AND nothing displayable ever resolved.
     readonly property bool showText: (el.textFallback === true)
-                                     && (src === "" || img.status === Image.Error)
+                                     && shown === "" && (src === "" || probe.status === Image.Error)
 
     Rectangle { // placeholder while loading / when empty (hidden if we're drawing the text fallback)
         anchors.fill: parent
@@ -22,10 +31,18 @@ Item {
         color: T.val(el, "color", "#1A1E25")
         radius: Number(T.val(el, "radius", 0))
     }
+    Image { // off-screen loader: promotes src -> shown only once it is known-good
+        id: probe
+        source: parent.src
+        asynchronous: true
+        visible: false
+        width: 1; height: 1   // rendering is img's job; this only drives the cache/status
+        onStatusChanged: if (status === Image.Ready && source != "") parent.shown = source
+    }
     Image {
         id: img
         anchors.fill: parent
-        source: parent.src
+        source: parent.shown
         asynchronous: true
         fillMode: T.val(el, "fillMode", "contain") === "cover"   ? Image.PreserveAspectCrop
                 : T.val(el, "fillMode", "contain") === "stretch" ? Image.Stretch

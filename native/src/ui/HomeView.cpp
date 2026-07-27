@@ -3597,6 +3597,17 @@ void HomeView::requestThemedDetailMeta(int idx)
     if (!mgr_ || idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty() || !stack_.last().addon) return;
     const MediaItem& it = items_[browseRowMap_[idx]];
     if (it.expandable || !it.imdbStreamId.isEmpty()) return;
+    // A GAME leaf's detail page enriches through the SAME machinery as the XMB hover panel (gamelist /
+    // MetaCache instantly, then the aggregator's online scrape + the addon's /meta) — kBridgeable below is
+    // the Stremio /meta bridge, which knows nothing about games, so game detail pages showed only the bare
+    // catalog row (no overview, facts or box art). Both emit themedMetaReady, which MainWindow merges into
+    // detailData while this page is open; no debounce here — the page is open NOW.
+    if (it.type == QStringLiteral("game"))
+    {
+        requestThemedMeta(idx);     // instant: cached art / gamelist facts (also arms themedMetaIndex_)
+        enrichThemedMeta();         // network: aggregator scrape + achievements
+        return;
+    }
     static const QSet<QString> kBridgeable = {
         QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"), QStringLiteral("episode") };
     if (!kBridgeable.contains(it.type)) return;
@@ -3683,7 +3694,15 @@ bool HomeView::isThemedInfoLeaf(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return false;
     const MediaItem& it = items_[browseRowMap_[idx]];
-    return isInfoPageType(it.type) && !it.expandable;
+    if (it.expandable) return false;
+    if (isInfoPageType(it.type)) return true;
+    // A stream-less GAME leaf (an IGDB catalog row: no url, no local file) would otherwise fall through
+    // browseActivate -> openResolvedItem -> openDetailLevel, which pushes a level with no children and no
+    // classic page — the themed browse renders that as an EMPTY grid ("I clicked a game and nothing came
+    // up"). Its verbs (Download / Favorite / Playlist) live on the themed detail page, so open that.
+    // Local/downloaded game rows carry a url (or a localgame: mime) and keep their direct action-menu path.
+    if (it.type == QStringLiteral("game") && it.url.isEmpty() && it.mime.isEmpty()) return true;
+    return false;
 }
 
 // The themed detail view's data for the browse-item at `idx`: rich art + facts resolved from the SAME local

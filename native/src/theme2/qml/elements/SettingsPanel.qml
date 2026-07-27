@@ -61,16 +61,34 @@ Rectangle {
 
     // Mobile inline text editing (host contract: InlineEditBridge). While active, the SELECTED TextField
     // row swaps its value label for a focused TextInput — the platform keyboard pops over the panel.
+    // The AUTHORITATIVE text lives here (inlineText), not on the TextInput: the input delegate can be torn
+    // down and rebuilt mid-edit (list churn), and iOS clears the input's own state while the keyboard
+    // resigns — every observed "my name committed empty" came from reading the input at finish time. The
+    // input mirrors into inlineText on every change; finishing reads the mirror, never the input.
     property bool   inlineEditing: false
     property string inlineInitial: ""
+    property string inlineText:    ""
     property bool   inlineMasked:  false
     Connections {
         target: (typeof inlineEdit !== "undefined") ? inlineEdit : null
         function onBegin(initial, masked) {
             root.inlineInitial = initial
+            root.inlineText = initial
             root.inlineMasked = masked
             root.inlineEditing = true
         }
+    }
+    // Finish exactly once, from the ROOT (callable even when the input delegate no longer exists — the ✓/✗
+    // pills, the Back header and the keyboard teardown all funnel here). Commits the mirror.
+    function inlineFinish(ok) {
+        if (!inlineEditing) return
+        inlineEditing = false
+        if (typeof inlineEdit !== "undefined" && inlineEdit) {
+            inlineEdit.note("inlineFinish ok=" + ok + " mirrorLen=" + inlineText.length)
+            if (ok) inlineEdit.commit(inlineText)
+            else    inlineEdit.cancel()
+        }
+        Qt.inputMethod.hide()
     }
     // The currently-selected row's kind — the selected delegate (always realized: it's the ListView currentItem)
     // publishes it, so the root can tell whether Enter should enter LogView scroll mode without reaching into the
@@ -131,7 +149,13 @@ Rectangle {
             }
             MouseArea {
                 anchors.fill: parent; cursorShape: Qt.PointingHandCursor
-                onClicked: { if (root.g) { root.g.select("panelBack", 0); root.g.activate() } }
+                onClicked: {
+                    // While an inline edit runs, the host is parked in its nested edit loop — a panelBack
+                    // activation would be queued into a blocked dispatcher (the "Back does nothing while the
+                    // name box is up" report). Back during an edit CANCELS the edit; a second tap then leaves.
+                    if (root.inlineEditing) { root.inlineFinish(false); return }
+                    if (root.g) { root.g.select("panelBack", 0); root.g.activate() }
+                }
             }
         }
         Text {
@@ -320,21 +344,35 @@ Rectangle {
                             clip: true
                             echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
                             EnterKey.type: Qt.EnterKeyDone // the ✓/Done return key on the software keyboard
+                            // No predictive composition: with autocorrect on, a one-word value ("Parker")
+                            // lives ENTIRELY in the IME preedit, and iOS tears that composition down while
+                            // the keyboard resigns. Names and settings values don't want autocorrect anyway.
+                            inputMethodHints: Qt.ImhNoPredictiveText
                             onVisibleChanged: {
-                                if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
+                                if (visible) {
+                                    // Restore from the MIRROR, not the initial: a delegate rebuilt mid-edit
+                                    // must come back with what was typed so far, not reset the field.
+                                    text = root.inlineText
+                                    if (text === root.inlineInitial) selectAll()
+                                    else cursorPosition = text.length
+                                    forceActiveFocus(); Qt.inputMethod.show()
+                                }
                             }
-                            // Finish an edit exactly once: FLUSH the input method first — iOS autocorrect
-                            // holds the current word as uncommitted composition, and reading .text without
-                            // committing it drops that word (the "my name cleared" bug) — then commit and
-                            // dismiss the keyboard explicitly (the ✓ key does not dismiss it on its own).
-                            function finishEdit(ok) {
+                            // Mirror every change (text + any live composition) into root.inlineText — the
+                            // value that gets committed. Empty arriving WITHOUT focus is the iOS teardown
+                            // wiping the field during keyboard resignation, never the user: don't mirror it.
+                            function syncMirror() {
                                 if (!root.inlineEditing) return
-                                Qt.inputMethod.commit()
-                                root.inlineEditing = false
-                                if (ok) inlineEdit.commit(text)
-                                else    inlineEdit.cancel()
-                                Qt.inputMethod.hide()
+                                var full = text + (preeditText || "")
+                                // A full wipe only counts as the user's when they are demonstrably still
+                                // typing (focused WITH the keyboard up) — anything else is the platform
+                                // clearing the field on its way down.
+                                if (full.length || (activeFocus && Qt.inputMethod.visible))
+                                    root.inlineText = full
                             }
+                            onTextChanged: syncMirror()
+                            onPreeditTextChanged: syncMirror()
+                            function finishEdit(ok) { syncMirror(); root.inlineFinish(ok) }
                             onAccepted: finishEdit(true)
                             Keys.onEscapePressed: finishEdit(false)
                             onActiveFocusChanged: // tapping away commits what was typed (phone convention)
@@ -349,6 +387,28 @@ Rectangle {
                                         inlineInput.finishEdit(true)
                                 }
                             }
+                        }
+
+                        // Explicit ✓ / ✗ pills while the inline edit runs: a deterministic touch path that
+                        // never depends on how the platform keyboard delivers its Done key (onPressed fires
+                        // BEFORE any focus-loss commit can race it). ✗ must run first-hand as cancel.
+                        Rectangle {
+                            visible: del.sel && del.kind === root.kTextField && root.inlineEditing
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 34 * root.ffs; height: 34 * root.ffs; radius: height / 2
+                            color: "#3FA95E"
+                            Text { anchors.centerIn: parent; text: "✓"; color: "#FFFFFF"; font.bold: true
+                                   font.pixelSize: Math.round(18 * root.ffs) }
+                            MouseArea { anchors.fill: parent; onPressed: root.inlineFinish(true) }
+                        }
+                        Rectangle {
+                            visible: del.sel && del.kind === root.kTextField && root.inlineEditing
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: 34 * root.ffs; height: 34 * root.ffs; radius: height / 2
+                            color: "#B0BBC9"
+                            Text { anchors.centerIn: parent; text: "✕"; color: "#2A3646"; font.bold: true
+                                   font.pixelSize: Math.round(16 * root.ffs) }
+                            MouseArea { anchors.fill: parent; onPressed: root.inlineFinish(false) }
                         }
 
                         // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
