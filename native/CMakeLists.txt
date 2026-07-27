@@ -164,6 +164,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         # AssetBootstrap: QtCore-only first-run APK-asset extractor (D2 Task 2). UNCONDITIONAL — main.cpp
         # calls it on Android and under the MMV_TEST_BOOTSTRAP_SRC desktop override; compiles in every config.
         src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h
+        src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
@@ -429,6 +430,7 @@ if(MYMEDIAVAULT_BUILD_APP)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
             src/core/Settings.cpp src/core/Settings.h
+            src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${MMV_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
@@ -571,6 +573,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         # (Osk/NavOverlay/Nav) — the exact set probe_nav already links with only Qt6::Widgets, so no MainWindow.
         target_sources(probe_navqml PRIVATE
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # the panel host registers `safeArea`
             src/ui/nav/Nav.cpp        src/ui/nav/Nav.h
             src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
             src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
@@ -743,8 +746,17 @@ if(MYMEDIAVAULT_BUILD_APP)
     # plus -DMPV_INCLUDE_DIR=<Libmpv.framework/Headers> -DMPV_LIBRARY=<Libmpv.framework/Libmpv>.
     # -----------------------------------------------------------------------------------------------------
     if(IOS)
+        # Real safe-area insets for the edge-to-edge window (UIKit query; the .cpp fallback is
+        # Q_OS_IOS-guarded so both compiling is not a duplicate definition).
+        target_sources(mymediavault PRIVATE src/core/SafeAreaInsets.mm)
+        # Personal-team dev installs need a UNIQUE bundle id (the canonical one is registered to the
+        # project's team; Apple refuses to register it to another). Override with
+        # -DMMV_IOS_BUNDLE_ID=com.yourname.mymediavault for on-device development.
+        if(NOT MMV_IOS_BUNDLE_ID)
+            set(MMV_IOS_BUNDLE_ID "com.mymediavault.app")
+        endif()
         set_target_properties(mymediavault PROPERTIES
-            MACOSX_BUNDLE_GUI_IDENTIFIER "com.mymediavault.app"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${MMV_IOS_BUNDLE_ID}"
             MACOSX_BUNDLE_BUNDLE_NAME "MyMediaVault"
             MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")

@@ -44,6 +44,21 @@ Item {
     readonly property real catLabelBottom: crossY + iconSize / 2 + height * 0.02 + Math.max(12, height * 0.03)
     readonly property real colTop: catLabelBottom + 8 + rowSize * 0.6
 
+    // Touch: swipe horizontally anywhere on the surface to move between categories (phone convention).
+    // A DragHandler cooperates with the row/tile MouseAreas — it only takes the grab once the drag
+    // threshold is crossed, so plain taps still land on the areas beneath.
+    DragHandler {
+        enabled: xmb.mobile
+        target: null
+        xAxis.enabled: true; yAxis.enabled: false
+        onActiveChanged: {
+            if (active || !xmb.host) return
+            var dx = centroid.position.x - centroid.pressPosition.x
+            if (dx <= -48)     xmb.host.gotoCat(Math.min(xmb.cats.length - 1, xmb.catIndex + 1))
+            else if (dx >= 48) xmb.host.gotoCat(Math.max(0, xmb.catIndex - 1))
+        }
+    }
+
     // Smoothly slide both axes toward the selection (the PS3 "everything glides to the cross" feel).
     property real catScroll: catIndex
     property real itemScroll: itemIndex
@@ -278,7 +293,13 @@ Item {
             // the row's vertical slot (itemGap) so adjacent rows don't overlap; disabled for faded-out rows.
             MouseArea {
                 anchors.verticalCenter: parent.verticalCenter
-                x: 0; width: parent.width + xmb.width * 0.30; height: xmb.itemGap
+                // The hit box must cover the whole visible row: on mobile the labels extend to the screen
+                // edge (the metadata panel is hidden), so a 0.30-width box left the right half of a row
+                // dead to taps — which read as "tapping lower rows does nothing / does the wrong thing".
+                x: 0
+                width: xmb.mobile ? (xmb.width - (xmb.crossX - xmb.rowSize / 2) - 8)
+                                  : parent.width + xmb.width * 0.30
+                height: xmb.itemGap
                 enabled: row.opacity > 0.1; cursorShape: Qt.PointingHandCursor
                 onClicked: if (xmb.host) xmb.host.gotoItem(row.index)
             }
