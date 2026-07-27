@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.73 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.74 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -209,6 +209,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CatalogResolver.cpp src/core/CatalogResolver.h      # async throttled resolver engine (id-resolver T3)
         src/core/Theme.cpp        src/core/Theme.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
+        # Brand migration (rebrand T3): per-step, resumable move of an existing install off the previous name.
+        # Split in two TUs on purpose — BrandMigration.cpp is the QtCore-only half (flags + ini + addon ids)
+        # that the lean Core-only probes link just to read a flag, while BrandMigrationDrive.cpp holds run()
+        # and the Google Drive steps and is the only part that drags CloudSync/Qt6::Network in.
+        src/core/BrandMigration.cpp      src/core/BrandMigration.h
+        src/core/BrandMigrationDrive.cpp
         src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h  # per-file save decision table (save-sync T1)
         src/core/SaveSync.cpp     src/core/SaveSync.h      # save-sync transport (save-sync T2)
         src/core/SaveMeta.cpp     src/core/SaveMeta.h      # save baseline/metadata store (save-sync T4)
@@ -376,6 +382,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
     target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2 third_party)
@@ -389,12 +396,30 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_onboarding tools/probe_onboarding.cpp
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
         third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
     target_include_directories(probe_onboarding PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_onboarding PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_onboarding PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
+    # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
+    # there is no AppPaths.cpp to add. run()'s Drive half lives in BrandMigrationDrive.cpp, which pulls
+    # CloudSync (and hence Settings + FormFactor + miniz + Network/Gui) — the same lean set probe_onboarding
+    # already uses. The probe makes no network call: it clears the cloud credentials first, so isConfigured()
+    # is false and the Drive steps stay dormant.
+    add_executable(probe_brand tools/probe_brand.cpp
+        src/core/BrandMigration.cpp      src/core/BrandMigration.h
+        src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
+        src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/Settings.cpp        src/core/Settings.h
+        src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
+        third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
+    target_include_directories(probe_brand PRIVATE src src/core src/theme2 third_party)
+    target_compile_definitions(probe_brand PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_brand PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
     # ExternalPlayer detection/handoff core (VLC/MPC/custom desktop exe, or the Android ACTION_VIEW intent) —
     # the foundation the external-player settings UI + playback routing (player/external-handoff Task 2) wire
@@ -523,6 +548,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SaveMeta.cpp     src/core/SaveMeta.h
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h
         third_party/miniz.c)
@@ -658,6 +684,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
@@ -668,6 +695,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/GamelistStore.cpp src/core/Settings.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
@@ -683,6 +711,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_showdispatch tools/probe_showdispatch.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp

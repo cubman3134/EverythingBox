@@ -7,6 +7,7 @@
 #endif
 #include "core/AppPaths.h"
 #include "core/AssetBootstrap.h"
+#include "core/BrandMigration.h" // rebrand T3: per-step, resumable move of an existing install onto this brand
 #include "core/SafeAreaInsets.h"
 #include <QIcon>
 #include <QScreen>
@@ -33,7 +34,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.73";
+static constexpr const char* kAppVersion = "0.5.74";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -75,6 +76,25 @@ static void cloudPullAtStartup()
         if (!st.reached || !st.hasRemote) { loop.quit(); return; }
         cloud.applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [&loop](bool) { loop.quit(); }); // always take the cloud
     });
+    loop.exec();
+}
+
+// Move an install created under the PREVIOUS brand onto the current one (see core/BrandMigration.h). Must run
+// before any setting is read: Settings::store() holds a function-local static QSettings, so the first read
+// snapshots whatever file is on disk at that moment — if that happens before the ini is copied into place, the
+// whole session runs on an empty settings file and then writes it back. Also before the startup cloud pull, so
+// the pull resolves the renamed Drive folder rather than seeding a fresh one beside it.
+//
+// The local steps are synchronous; only the Drive half is async, so the event loop below runs only when there
+// is a network round-trip to wait for, and gives up after the same 8s budget as cloudPullAtStartup — an
+// unreachable Drive leaves its flags unset and the migration simply resumes next launch.
+static void brandMigrationAtStartup()
+{
+    QEventLoop loop;
+    bool finished = false;
+    BrandMigration::run([&loop, &finished](bool) { finished = true; loop.quit(); });
+    if (finished) return;                                  // resolved synchronously — nothing to wait for
+    QTimer::singleShot(8000, &loop, &QEventLoop::quit);    // never hang startup on a slow/absent network
     loop.exec();
 }
 
@@ -199,6 +219,13 @@ int main(int argc, char** argv)
     // "lookup that tolerates the legacy name until migration is confirmed") until the brand migration
     // owns the mobile path move as an explicit, migrated step. The DISPLAY name below is pure chrome and
     // carries no path meaning, so it flips to the new brand now.
+    //
+    // Rebrand T3 CONSIDERED migrating this and deliberately did not. Renaming it is not a rename — it is a
+    // recursive move of the whole mobile data directory (ini, saves, states, addons, themes), it cannot be
+    // exercised by a desktop headless probe (AppPaths::dataDir() only branches under Q_OS_ANDROID/Q_OS_IOS),
+    // and it cannot reuse BrandMigration's flag mechanism unchanged, because those flags live in the ini
+    // INSIDE the directory being moved. It is a device-tested step of its own; see core/BrandMigration.h.
+    // Until it lands, this pin IS the tolerance, and it must not be flipped by a prose sweep.
     QApplication::setApplicationName(QString::fromLatin1(AppBrand::Legacy::kDisplayName));
     QApplication::setApplicationDisplayName(QString::fromLatin1(AppBrand::kDisplayName));
     QApplication::setApplicationVersion(QString::fromLatin1(kAppVersion));
@@ -250,6 +277,7 @@ int main(int argc, char** argv)
 #endif
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
+    brandMigrationAtStartup(); // then move that install onto the CURRENT brand — still before any read
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
     ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace

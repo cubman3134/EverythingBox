@@ -1,6 +1,7 @@
 #include "CloudSync.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "BrandMigration.h"  // the Drive lookups tolerate the previous brand until its flag is set
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 
 #include <QCoreApplication>
@@ -237,31 +238,62 @@ void CloudSync::withAccessToken(std::function<void(bool)> cb)
 
 // ---- Drive primitives ------------------------------------------------------------------------------
 
-void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
+void CloudSync::findFolderNamed(const QString& name, std::function<void(bool, const QString&)> cb)
 {
-    withAccessToken([this, cb](bool ok) {
-        if (!ok) { cb(QString()); return; }
+    withAccessToken([this, name, cb](bool ok) {
+        if (!ok) { cb(false, QString()); return; }
         QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files"));
         QUrlQuery q;
         q.addQueryItem(QStringLiteral("q"), QStringLiteral("mimeType='application/vnd.google-apps.folder' and "
-            "name='%1' and trashed=false").arg(QString::fromLatin1(kFolder)));
+            "name='%1' and trashed=false").arg(driveQueryQuote(name)));
         q.addQueryItem(QStringLiteral("fields"), QStringLiteral("files(id)"));
         u.setQuery(q);
         QNetworkRequest req(u);
         req.setRawHeader("Authorization", "Bearer " + accessToken_.toUtf8());
         QNetworkReply* reply = nam_->get(req);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, cb] {
+        connect(reply, &QNetworkReply::finished, this, [reply, cb] {
             reply->deleteLater();
             // A network error on the folder list-GET must NOT be read as "no folder" — that would POST a DUPLICATE
             // empty folder, and a subsequent findFile in that fresh-empty folder reads listReached=true/hasRemote=false
             // ("proven-empty") -> Seed -> a later pushLocal (resolving the ORIGINAL folder) overwrites the real backup.
-            // Return no folder id (folderId.isEmpty() -> st.reached=false -> Retry): a query failure can't launder into
-            // a Seed, and no duplicate folder is ever minted on a transient error (fixes it for ALL sync paths).
-            if (reply->error() != QNetworkReply::NoError) { cb(QString()); return; }
+            // Surfacing queryOk=false (folderId.isEmpty() -> st.reached=false -> Retry) means a query failure can't
+            // launder into a Seed, and no duplicate folder is ever minted on a transient error.
+            if (reply->error() != QNetworkReply::NoError) { cb(false, QString()); return; }
             const QJsonArray files = QJsonDocument::fromJson(reply->readAll()).object()
                                          .value(QStringLiteral("files")).toArray();
-            if (!files.isEmpty()) { cb(files.first().toObject().value(QStringLiteral("id")).toString()); return; }
-            // Not found (query succeeded, folder genuinely absent) -> create it.
+            if (files.isEmpty()) { cb(true, QString()); return; } // proven-absent (the query itself succeeded)
+            cb(true, files.first().toObject().value(QStringLiteral("id")).toString());
+        });
+    });
+}
+
+void CloudSync::renameFile(const QString& fileId, const QString& newName, std::function<void(bool)> cb)
+{
+    withAccessToken([this, fileId, newName, cb](bool ok) {
+        if (!ok) { cb(false); return; }
+        QUrl u(QString::fromLatin1(kDrive) + QStringLiteral("/files/") + fileId);
+        QUrlQuery q; q.addQueryItem(QStringLiteral("fields"), QStringLiteral("id"));
+        u.setQuery(q);
+        QNetworkRequest req(u);
+        req.setRawHeader("Authorization", "Bearer " + accessToken_.toUtf8());
+        req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+        const QJsonObject meta{ { QStringLiteral("name"), newName } };
+        QNetworkReply* reply = nam_->sendCustomRequest(req, "PATCH",
+                                                       QJsonDocument(meta).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [reply, cb] {
+            reply->deleteLater();
+            cb(reply->error() == QNetworkReply::NoError);
+        });
+    });
+}
+
+void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
+{
+    // Create the app folder under the CURRENT name. Reached only when a query proved no folder exists under
+    // either name — never on a query error, or a transient failure would mint a duplicate.
+    auto create = [this, cb] {
+        withAccessToken([this, cb](bool ok) {
+            if (!ok) { cb(QString()); return; }
             QNetworkRequest cr((QUrl(QString::fromLatin1(kDrive) + QStringLiteral("/files"))));
             cr.setRawHeader("Authorization", "Bearer " + accessToken_.toUtf8());
             cr.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
@@ -273,6 +305,34 @@ void CloudSync::ensureFolder(std::function<void(const QString&)> cb)
                 cb(QJsonDocument::fromJson(cre->readAll()).object().value(QStringLiteral("id")).toString());
             });
         });
+    };
+
+    findFolderNamed(QString::fromLatin1(kFolder), [this, cb, create](bool queryOk, const QString& id) {
+        if (!queryOk) { cb(QString()); return; }  // unreachable -> Retry (never "absent", never a duplicate)
+        if (!id.isEmpty()) { cb(id); return; }
+        // The folder is provably not under the current name. Until BrandMigration has CONFIRMED the rename,
+        // it may still be under the previous one — and creating a second, empty folder here is exactly the
+        // "proven-empty -> Seed -> overwrite the real backup" path above, only caused by a rebrand instead of
+        // a dropped packet. Once the flag is set this second query is skipped and the tolerance is gone.
+        if (BrandMigration::done(BrandMigration::Step::DriveFolder)) { create(); return; }
+        findFolderNamed(QString::fromLatin1(AppBrand::Legacy::kDriveFolder),
+                        [cb, create](bool legacyOk, const QString& legacyId) {
+            if (!legacyOk) { cb(QString()); return; }
+            if (!legacyId.isEmpty()) { cb(legacyId); return; }
+            create();
+        });
+    });
+}
+
+void CloudSync::findBrandedFile(const QString& folderId, const QString& name, const QString& legacyName,
+                                std::function<void(bool, const QString&, const QString&, const QString&)> cb)
+{
+    findFile(folderId, name, [this, folderId, legacyName, cb](bool listOk, const QString& id,
+                                                              const QString& modIso, const QString& hash) {
+        // Found it, or couldn't reach Drive at all, or the rename is already confirmed -> answer as-is.
+        if (!listOk || !id.isEmpty() || BrandMigration::done(BrandMigration::Step::DriveFiles))
+        { cb(listOk, id, modIso, hash); return; }
+        findFile(folderId, legacyName, cb);   // an error here yields listOk=false, i.e. "unreachable", not "empty"
     });
 }
 
@@ -382,7 +442,14 @@ static QSet<QString> firstPartyAddonDirs()
         QFile mf(d.absoluteFilePath() + QStringLiteral("/manifest.json"));
         if (!mf.open(QIODevice::ReadOnly)) continue;
         const QJsonObject m = QJsonDocument::fromJson(mf.readAll()).object();
-        if (m.value(QStringLiteral("id")).toString().startsWith(QLatin1String(AppBrand::kAddonPrefix)))
+        const QString id = m.value(QStringLiteral("id")).toString();
+        // Until the addon-id migration is confirmed, a first-party manifest may still carry the PREVIOUS
+        // namespace. Missing it here would let the cloud snapshot carry a bundled addon and then clobber the
+        // freshly-deployed copy on the next startup — the exact failure this exclusion exists to prevent.
+        // The tolerance retires itself the moment the flag is set.
+        if (id.startsWith(QLatin1String(AppBrand::kAddonPrefix))
+            || (!BrandMigration::done(BrandMigration::Step::AddonIds)
+                && id.startsWith(QLatin1String(AppBrand::Legacy::kAddonPrefix))))
             out.insert(d.fileName());
     }
     return out;
@@ -614,7 +681,7 @@ void CloudSync::checkStatus(std::function<void(const Status&)> cb)
         st.reached = true;
         const QByteArray synced = store().value(QStringLiteral("cloud/syncedHash")).toByteArray();
         st.localChanged = (stateHash() != synced);
-        findFile(folderId, QString::fromLatin1(kBundleName),
+        findBrandedFile(folderId, QString::fromLatin1(kBundleName), QString::fromLatin1(AppBrand::Legacy::kSyncZip),
                  [this, cb, st, synced](bool listOk, const QString& id, const QString& modIso, const QString& remoteHash) mutable {
             st.listReached = listOk;   // false => the file-query failed; "no bundle" is UNPROVEN, don't seed fresh
             st.hasRemote = !id.isEmpty();
@@ -655,7 +722,7 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
         if (folderId.isEmpty()) { cb(false, tr("Couldn't reach Drive.")); return; }
         const QByteArray bundle = buildBundle();
         const QByteArray hash = stateHash();
-        findFile(folderId, QString::fromLatin1(kBundleName), [this, folderId, bundle, hash, cb](bool listOk, const QString& id, const QString&, const QString&) {
+        findBrandedFile(folderId, QString::fromLatin1(kBundleName), QString::fromLatin1(AppBrand::Legacy::kSyncZip), [this, folderId, bundle, hash, cb](bool listOk, const QString& id, const QString&, const QString&) {
             // A failed lookup returns an empty id; uploading with existingId="" would POST a DUPLICATE bundle instead
             // of PATCHing the real one. Bail so the caller retries rather than fragmenting the backup into two files.
             if (!listOk) { cb(false, tr("Couldn't reach Drive.")); return; }
@@ -663,7 +730,7 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
                        QString::fromUtf8(hash),
                        [this, folderId, hash, cb](const QString& newId) {
                 if (newId.isEmpty()) { cb(false, tr("Upload failed.")); return; }
-                findFile(folderId, QString::fromLatin1(kBundleName), [this, hash, cb](bool, const QString&, const QString& modIso, const QString&) {
+                findBrandedFile(folderId, QString::fromLatin1(kBundleName), QString::fromLatin1(AppBrand::Legacy::kSyncZip), [this, hash, cb](bool, const QString&, const QString& modIso, const QString&) {
                     if (!modIso.isEmpty()) store().setValue(QStringLiteral("cloud/appliedModified"), modIso);
                     store().setValue(QStringLiteral("cloud/syncedHash"), hash);
                     store().sync();
@@ -680,7 +747,7 @@ void CloudSync::pullProgress(std::function<void(bool, const QByteArray&)> cb)
 {
     ensureFolder([this, cb](const QString& folderId) {
         if (folderId.isEmpty()) { cb(false, QByteArray()); return; }
-        findFile(folderId, QString::fromLatin1(kProgressName), [this, cb](bool, const QString& id, const QString&, const QString&) {
+        findBrandedFile(folderId, QString::fromLatin1(kProgressName), QString::fromLatin1(AppBrand::Legacy::kProgressDoc), [this, cb](bool, const QString& id, const QString&, const QString&) {
             if (id.isEmpty()) { cb(true, QByteArray()); return; } // no progress file yet — a valid "nothing to merge"
             downloadFile(id, [cb](bool ok, const QByteArray& data) { cb(ok, data); });
         });
@@ -691,7 +758,7 @@ void CloudSync::pushProgress(const QByteArray& json, std::function<void(bool)> c
 {
     ensureFolder([this, json, cb](const QString& folderId) {
         if (folderId.isEmpty()) { cb(false); return; }
-        findFile(folderId, QString::fromLatin1(kProgressName), [this, folderId, json, cb](bool, const QString& id, const QString&, const QString&) {
+        findBrandedFile(folderId, QString::fromLatin1(kProgressName), QString::fromLatin1(AppBrand::Legacy::kProgressDoc), [this, folderId, json, cb](bool, const QString& id, const QString&, const QString&) {
             uploadFile(folderId, id, QString::fromLatin1(kProgressName), QStringLiteral("application/json"), json,
                        QString(), [cb](const QString& newId) { cb(!newId.isEmpty()); });
         });

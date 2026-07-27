@@ -69,6 +69,15 @@ public:
                     std::function<void(const QString& id)> cb);
     virtual void downloadFile(const QString& fileId, std::function<void(bool ok, const QByteArray& data)> cb);
 
+    // ---- brand-migration support (see core/BrandMigration.h) ----
+    // Look up a FOLDER by exact name at the Drive root. cb(queryOk, id): queryOk==false means the query (or
+    // its token refresh) failed, and the caller must NOT read the empty id as "no such folder" — same rule as
+    // findFile's listOk, for the same reason (mistaking unreachable for absent is how a duplicate folder or a
+    // clobbered backup happens). Never creates anything; ensureFolder owns creation.
+    virtual void findFolderNamed(const QString& name, std::function<void(bool queryOk, const QString& id)> cb);
+    // Rename a Drive file or folder in place (a metadata PATCH — the id, contents and sharing are unchanged).
+    virtual void renameFile(const QString& fileId, const QString& newName, std::function<void(bool ok)> cb);
+
     // Escape a value being interpolated into a Drive `q=` string literal. Drive's query grammar quotes with
     // apostrophes and escapes with backslash, so a name carrying either — "Link's Awakening" is an ordinary
     // ROM title — otherwise terminates the literal early and the query fails or, worse, matches something
@@ -93,6 +102,14 @@ public:
     // Merge-based: the caller serializes/merges, these just move the bytes. Empty json on pull => none yet.
     void pullProgress(std::function<void(bool ok, const QByteArray& json)> cb);
     void pushProgress(const QByteArray& json, std::function<void(bool ok)> cb);
+
+    // Locate one of the two brand-named sync documents, tolerating the PREVIOUS brand's file name until the
+    // DriveFiles migration step has confirmed the rename. Retires itself the moment that flag is set. Same
+    // {listOk,id,modifiedIso,stateHash} contract as findFile, and the same conservatism: an error on EITHER
+    // query yields listOk=false, so "unreachable" can never launder into "proven empty".
+    void findBrandedFile(const QString& folderId, const QString& name, const QString& legacyName,
+                         std::function<void(bool listOk, const QString& id, const QString& modifiedIso,
+                                            const QString& stateHash)> cb);
 
 signals:
     void signedIn(const QString& email);
