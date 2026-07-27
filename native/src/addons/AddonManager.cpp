@@ -486,36 +486,8 @@ static MediaCatalog parseStremioVideos(const QByteArray& body)
     return cat;
 }
 
-// One candidate stream from a /stream response: either a direct http url, or a torrent to resolve via debrid.
-struct StremioStreamOpt { QString url; QString mime; QString infoHash; int fileIdx = -1; };
-
-// A real BitTorrent infoHash is 40 hex chars (v1) or a 32-char base32 string. This rejects placeholder
-// junk some addons emit on failure (e.g. Debridio returns infoHash "#" with a "report this issue" title).
-static bool isValidInfoHash(const QString& h)
-{
-    if (h.size() == 40)
-    { for (QChar c : h) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) return false; return true; }
-    if (h.size() == 32)
-    { for (QChar c : h) { const QChar u = c.toUpper(); if (!((u >= 'A' && u <= 'Z') || (u >= '2' && u <= '7'))) return false; } return true; }
-    return false;
-}
-
-// {streams:[{url|infoHash|fileIdx|...}]} -> all *usable* candidates, in the addon's order (best first).
-static QVector<StremioStreamOpt> parseStremioStreams(const QByteArray& body)
-{
-    QVector<StremioStreamOpt> out;
-    for (const QJsonValue& sv : QJsonDocument::fromJson(body).object().value(QStringLiteral("streams")).toArray())
-    {
-        const QJsonObject s = sv.toObject();
-        StremioStreamOpt o;
-        o.url = s.value(QStringLiteral("url")).toString();
-        o.mime = s.value(QStringLiteral("mime")).toString();
-        o.infoHash = s.value(QStringLiteral("infoHash")).toString();
-        o.fileIdx = s.contains(QStringLiteral("fileIdx")) ? s.value(QStringLiteral("fileIdx")).toInt() : -1;
-        if (o.url.startsWith(QStringLiteral("http")) || isValidInfoHash(o.infoHash)) out.push_back(o);
-    }
-    return out;
-}
+// Stream parsing (candidates, infoHash validation, ordering, the row cap) lives in StremioTranslate — one
+// copy, pinned by probe_stremio against real fixtures. This file only aggregates across addons.
 
 static QString torboxApiKey() { store().sync(); return store().value(QStringLiteral("debrid/torbox/apikey")).toString().trimmed(); }
 
@@ -1204,20 +1176,36 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
     });
 }
 
-void AddonManager::resolveStremioStream(const MediaItem& item,
-                                        std::function<void(const QString&, const QString&)> cb)
+void AddonManager::listStremioStreams(const MediaItem& item,
+                                      std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb)
 {
-    // Query EVERY installed Stremio addon that offers streams for this type (like Stremio aggregates), collect
-    // all candidate streams, then play the first direct http url - or resolve the first cached torrent via TorBox.
-    QVector<LoadedAddon*> providers;
+    // Ask every enabled Stremio addon that offers streams for this type AND claims this id space (like
+    // Stremio aggregates), then merge the answers into ONE list ordered by the translator's rule.
+    QVector<LoadedAddon*> enabled;
+    QVector<StremioTranslate::Manifest> manifests;
     for (LoadedAddon* s : sources_)
-        if (s->stremio && isEnabled(s->manifest.id) && s->stremioResources.contains(QStringLiteral("stream"))
-            && (s->stremioTypes.isEmpty() || s->stremioTypes.contains(item.type)))
-            providers.push_back(s);
-    if (providers.isEmpty()) { streamLog(QStringLiteral("stremio: no stream providers for type %1").arg(item.type)); cb(QString(), QString()); return; }
-    streamLog(QStringLiteral("stremio: querying %1 stream provider(s) for %2 %3").arg(providers.size()).arg(item.type, item.id));
+        if (s->stremio && isEnabled(s->manifest.id))
+        { enabled.push_back(s); manifests.push_back(s->stremioManifest); }
 
-    auto opts = std::make_shared<QVector<StremioStreamOpt>>();
+    bool fellBackToAll = false;
+    const QVector<int> chosen = StremioTranslate::routeProviders(manifests, QStringLiteral("stream"),
+                                                                 item.type, item.id, &fellBackToAll);
+    QVector<LoadedAddon*> providers;
+    for (int i : chosen) providers.push_back(enabled[i]);
+
+    if (providers.isEmpty())
+    {
+        streamLog(QStringLiteral("stremio: no stream providers for type %1").arg(item.type));
+        cb({});
+        return;
+    }
+    if (fellBackToAll)
+        streamLog(QStringLiteral("stremio: idPrefixes matched no provider for %1 — asking all %2")
+                      .arg(item.id).arg(providers.size()));
+    streamLog(QStringLiteral("stremio: querying %1 stream provider(s) for %2 %3")
+                  .arg(providers.size()).arg(item.type, item.id));
+
+    auto all = std::make_shared<QVector<StremioTranslate::StreamCandidate>>();
     auto pending = std::make_shared<int>(providers.size());
     for (LoadedAddon* p : providers)
     {
@@ -1226,66 +1214,109 @@ void AddonManager::resolveStremioStream(const MediaItem& item,
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(15000);
         QNetworkReply* reply = nam_->get(rq);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, opts, pending, cb] {
+        connect(reply, &QNetworkReply::finished, this, [reply, all, pending, cb] {
             reply->deleteLater();
-            if (reply->error() == QNetworkReply::NoError) *opts += parseStremioStreams(reply->readAll());
+            if (reply->error() == QNetworkReply::NoError) *all += StremioTranslate::parseStreams(reply->readAll());
             else streamLog(QStringLiteral("stremio: stream request error: %1").arg(reply->errorString()));
             if (--*pending != 0) return; // wait for every provider
 
-            // Prefer a direct http url (instant).
-            for (const StremioStreamOpt& o : *opts)
-                if (o.url.startsWith(QStringLiteral("http"))) { streamLog(QStringLiteral("stremio: playing direct http url")); cb(o.url, o.mime); return; }
-
-            // Otherwise the candidates are torrents. Batch-check which hashes TorBox has cached in ONE request
-            // (rather than probing each torrent's full resolve chain in turn), then resolve only the first hit.
-            const QString key = torboxApiKey();
-            int torrents = 0; for (const StremioStreamOpt& o : *opts) if (!o.infoHash.isEmpty()) ++torrents;
-            streamLog(QStringLiteral("stremio: %1 streams, %2 torrent(s), torbox key %3")
-                          .arg(opts->size()).arg(torrents).arg(key.isEmpty() ? QStringLiteral("missing") : QStringLiteral("present")));
-            if (key.isEmpty() || torrents == 0) { cb(QString(), QString()); return; }
-
-            // Cap the batch (addons list best-first, so the top results are the relevant ones) to keep the
-            // checkcached URL a sane length - a raw-torrent addon can return hundreds of candidates.
-            const int kMaxHashes = 60;
-            QStringList hashes;
-            for (const StremioStreamOpt& o : *opts)
-            {
-                if (o.infoHash.isEmpty()) continue;
-                const QString h = o.infoHash.toLower();
-                if (!hashes.contains(h)) hashes << h;
-                if (hashes.size() >= kMaxHashes) break;
-            }
-            if (torrents > hashes.size())
-                streamLog(QStringLiteral("torbox: checking top %1 of %2 torrents").arg(hashes.size()).arg(torrents));
-            QUrl chk(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/checkcached"));
-            QUrlQuery cq; cq.addQueryItem(QStringLiteral("hash"), hashes.join(QLatin1Char(',')));
-            cq.addQueryItem(QStringLiteral("format"), QStringLiteral("object"));
-            chk.setQuery(cq);
-            QNetworkRequest br(chk);
-            br.setRawHeader("Authorization", "Bearer " + key.toUtf8());
-            br.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
-            br.setTransferTimeout(15000);
-            streamLog(QStringLiteral("torbox: batch checkcached %1 hash(es)").arg(hashes.size()));
-            QNetworkReply* bre = nam_->get(br);
-            connect(bre, &QNetworkReply::finished, this, [this, bre, opts, cb] {
-                bre->deleteLater();
-                QSet<QString> cached;
-                if (bre->error() == QNetworkReply::NoError)
-                {
-                    const QJsonObject data = QJsonDocument::fromJson(bre->readAll()).object().value(QStringLiteral("data")).toObject();
-                    for (auto it = data.begin(); it != data.end(); ++it) cached.insert(it.key().toLower());
-                }
-                else streamLog(QStringLiteral("torbox: batch checkcached error: %1").arg(bre->errorString()));
-                streamLog(QStringLiteral("torbox: %1 candidate(s) cached").arg(cached.size()));
-
-                // First candidate (addons list best-first) whose hash is cached -> resolve just that one.
-                for (const StremioStreamOpt& o : *opts)
-                    if (!o.infoHash.isEmpty() && cached.contains(o.infoHash.toLower()))
-                    { resolveTorBoxInfoHash(o.infoHash, o.fileIdx, [cb](const QString& url) { cb(url, QString()); }); return; }
-                cb(QString(), QString()); // nothing cached -> can't stream right now
-            });
+            // Each provider's block arrived already sorted and capped; the CONCATENATION is not, so order it
+            // by the same rule before anyone picks from it. Not re-capped: kMaxStreamRows bounds one
+            // response, and dropping rows here would only shrink what the debrid cached-check can hit.
+            StremioTranslate::sortCandidates(*all);
+            streamLog(QStringLiteral("stremio: %1 candidate stream(s)").arg(all->size()));
+            cb(*all);
         });
     }
+}
+
+// Last resort once the debrid path yields nothing: any direct http candidate still beats no playback.
+// Reachable because a remembered bingeGroup can put a torrent ahead of an instant url that is still in the
+// list — honour the choice first, but do not let it turn a playable item into an unplayable one.
+static bool playFirstDirect(const QVector<StremioTranslate::StreamCandidate>& v,
+                            const std::function<void(const QString&, const QString&)>& cb)
+{
+    for (const StremioTranslate::StreamCandidate& c : v)
+        if (c.isDirect())
+        { streamLog(QStringLiteral("stremio: falling back to a direct http url")); cb(c.url, c.mime); return true; }
+    return false;
+}
+
+void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslate::StreamCandidate>> ordered,
+                                         std::function<void(const QString&, const QString&)> cb)
+{
+    if (ordered->isEmpty()) { cb(QString(), QString()); return; }
+    if (ordered->first().isDirect())
+    { streamLog(QStringLiteral("stremio: playing direct http url")); cb(ordered->first().url, ordered->first().mime); return; }
+
+    // The pick is a torrent. Batch-check which hashes TorBox has cached in ONE request (rather than probing
+    // each torrent's full resolve chain in turn), then resolve only the first hit.
+    const QString key = torboxApiKey();
+    int torrents = 0;
+    for (const StremioTranslate::StreamCandidate& c : *ordered) if (!c.infoHash.isEmpty()) ++torrents;
+    streamLog(QStringLiteral("stremio: %1 streams, %2 torrent(s), torbox key %3")
+                  .arg(ordered->size()).arg(torrents).arg(key.isEmpty() ? QStringLiteral("missing") : QStringLiteral("present")));
+    if (key.isEmpty() || torrents == 0)
+    { if (!playFirstDirect(*ordered, cb)) cb(QString(), QString()); return; }
+
+    // Cap the batch (the list is preference-ordered, so the top entries are the relevant ones) to keep the
+    // checkcached URL a sane length - a raw-torrent addon can return hundreds of candidates.
+    const int kMaxHashes = 60;
+    QStringList hashes;
+    for (const StremioTranslate::StreamCandidate& c : *ordered)
+    {
+        if (c.infoHash.isEmpty()) continue;
+        const QString h = c.infoHash.toLower();
+        if (!hashes.contains(h)) hashes << h;
+        if (hashes.size() >= kMaxHashes) break;
+    }
+    if (torrents > hashes.size())
+        streamLog(QStringLiteral("torbox: checking top %1 of %2 torrents").arg(hashes.size()).arg(torrents));
+    QUrl chk(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/checkcached"));
+    QUrlQuery cq; cq.addQueryItem(QStringLiteral("hash"), hashes.join(QLatin1Char(',')));
+    cq.addQueryItem(QStringLiteral("format"), QStringLiteral("object"));
+    chk.setQuery(cq);
+    QNetworkRequest br(chk);
+    br.setRawHeader("Authorization", "Bearer " + key.toUtf8());
+    br.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    br.setTransferTimeout(15000);
+    streamLog(QStringLiteral("torbox: batch checkcached %1 hash(es)").arg(hashes.size()));
+    QNetworkReply* bre = nam_->get(br);
+    connect(bre, &QNetworkReply::finished, this, [this, bre, ordered, cb] {
+        bre->deleteLater();
+        QSet<QString> cached;
+        if (bre->error() == QNetworkReply::NoError)
+        {
+            const QJsonObject data = QJsonDocument::fromJson(bre->readAll()).object().value(QStringLiteral("data")).toObject();
+            for (auto it = data.begin(); it != data.end(); ++it) cached.insert(it.key().toLower());
+        }
+        else streamLog(QStringLiteral("torbox: batch checkcached error: %1").arg(bre->errorString()));
+        streamLog(QStringLiteral("torbox: %1 candidate(s) cached").arg(cached.size()));
+
+        // First candidate in preference order whose hash is cached -> resolve just that one.
+        for (const StremioTranslate::StreamCandidate& c : *ordered)
+            if (!c.infoHash.isEmpty() && cached.contains(c.infoHash.toLower()))
+            { resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [cb](const QString& url) { cb(url, QString()); }); return; }
+        if (!playFirstDirect(*ordered, cb)) cb(QString(), QString()); // nothing cached -> can't stream right now
+    });
+}
+
+void AddonManager::resolveStremioStream(const MediaItem& item,
+                                        std::function<void(const QString&, const QString&)> cb,
+                                        const QString& preferGroup)
+{
+    listStremioStreams(item, [this, cb, preferGroup](const QVector<StremioTranslate::StreamCandidate>& all) {
+        const int idx = StremioTranslate::pickAuto(all, preferGroup);
+        if (idx < 0) { cb(QString(), QString()); return; }
+        if (idx != 0)
+            streamLog(QStringLiteral("stremio: binge memory chose row %1 over the top-ranked one").arg(idx));
+        // The chosen release first, then the rest in rank order. The tail is not decoration: TorBox can only
+        // stream what it has cached, and the chosen release may be cold.
+        auto ordered = std::make_shared<QVector<StremioTranslate::StreamCandidate>>();
+        ordered->push_back(all[idx]);
+        for (int i = 0; i < all.size(); ++i) if (i != idx) ordered->push_back(all[i]);
+        playStremioCandidates(ordered, cb);
+    });
 }
 
 bool AddonManager::hasStreamProvider(const QString& type) const
@@ -1322,31 +1353,34 @@ static MediaItem fileProviderItem(const QString& type, const QString& imdbStream
 
 void AddonManager::resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                             const QString& type, const QString& imdbStreamId,
-                                            std::function<void(const QString&, const QString&)> cb, int attempt)
+                                            std::function<void(const QString&, const QString&)> cb, int attempt,
+                                            const QString& preferGroup)
 {
     if (idx >= providers->size()) // none of the file providers had it -> fall back to Stremio stream addons
-    { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb); return; }
+    { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb, preferGroup); return; }
     resolveStream(providers->at(idx), fileProviderItem(type, imdbStreamId),
-                  [this, providers, idx, type, imdbStreamId, cb, attempt](const QString& url, const QString& mime) {
+                  [this, providers, idx, type, imdbStreamId, cb, attempt, preferGroup](const QString& url, const QString& mime) {
         if (!url.isEmpty()) cb(url, mime);
-        else resolveFromFileProviders(providers, idx + 1, type, imdbStreamId, cb, attempt);
+        else resolveFromFileProviders(providers, idx + 1, type, imdbStreamId, cb, attempt, preferGroup);
     }, attempt);
 }
 
 void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                                       std::function<void(const QString&, const QString&)> cb, int attempt)
+                                       std::function<void(const QString&, const QString&)> cb, int attempt,
+                                       const QString& preferGroup)
 {
     if (imdbStreamId.isEmpty()) { cb(QString(), QString()); return; }
     // Prefer the user's file provider(s) - non-Stremio remote media-sources (e.g. Allarr) that serve the
     // actual files - then fall back to Stremio stream addons. attempt (?n=K) asks the provider for an
-    // alternate source when the user rejects the current one.
+    // alternate source when the user rejects the current one. preferGroup only reaches the Stremio leg —
+    // a bingeGroup is a Stremio concept and a file provider has nothing to match it against.
     auto providers = std::make_shared<QVector<LoadedAddon*>>();
     for (LoadedAddon* s : sources_)
         if (s->transport == LoadedAddon::RemoteHttp && !s->stremio && s->isMediaSource() && isEnabled(s->manifest.id))
             providers->push_back(s);
     if (providers->isEmpty())
-    { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb); return; }
-    resolveFromFileProviders(providers, 0, type, imdbStreamId, cb, attempt);
+    { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb, preferGroup); return; }
+    resolveFromFileProviders(providers, 0, type, imdbStreamId, cb, attempt, preferGroup);
 }
 
 void AddonManager::resolveDocumentByQuery(const QString& query, const QString& catalogType,

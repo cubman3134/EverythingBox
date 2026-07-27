@@ -143,8 +143,18 @@ public:
     bool hasFileProvider() const;
     // Resolve a playable source for an IMDB stream id ("tt123" or "ttShow:s:e"): try the file provider(s)
     // (Allarr) first, then the Stremio stream addons.
+    // preferGroup is the bingeGroup the user already chose for this series (BingeStore::lookup) — passed IN
+    // rather than looked up here, so the addon layer keeps no dependency on a UI-owned store. Empty = no
+    // memory, take the best candidate.
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                             std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
+                             std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                             const QString& preferGroup = QString());
+
+    // Every candidate stream for an item, from every eligible provider — the picker's source of choices.
+    // Ordering and the cap are the translator's; this only aggregates across addons. The callback fires once,
+    // after every queried provider has answered (or failed), with an empty vector when nothing is playable.
+    void listStremioStreams(const MediaItem& item,
+                            std::function<void(const QVector<StremioTranslate::StreamCandidate>&)> cb);
     // Find a readable document on a file provider (Allarr) by searching its catalog of `catalogType` for
     // `query` and resolving the first hit's /stream. Used to read a comic/book/audiobook browsed from another
     // addon's catalog. providerError is non-empty when the provider couldn't be reached; noMatches is true when
@@ -186,13 +196,26 @@ private:
     void loadFolder(const QString& dir);
     void loadRemoteSources();                   // build RemoteHttp addons from the persisted URL list
     void seedDefaultStremioSources();           // add Cinemeta on first run so movie/series catalogs work
-    // Stremio stream resolution aggregates across every installed Stremio stream addon (à la Stremio).
+    // Stremio stream resolution aggregates across every installed Stremio stream addon (à la Stremio):
+    // listStremioStreams() for the candidates, pickAuto() for the choice, then play it directly or resolve
+    // its infoHash through TorBox.
     void resolveStremioStream(const MediaItem& item,
-                              std::function<void(const QString& url, const QString& mime)> cb);
+                              std::function<void(const QString& url, const QString& mime)> cb,
+                              const QString& preferGroup = QString());
+    // Turn a preference-ordered candidate list into a playable url. `ordered[0]` is the chosen release; a
+    // direct http url there plays as-is.
+    //
+    // The REST of the list still matters for a torrent: TorBox can only stream what it has cached, and the
+    // chosen release may not be. So the batch cached-check covers the whole list and the first CACHED entry
+    // in this order wins — preserving the pre-pick behaviour (play the best release TorBox actually has)
+    // instead of failing outright because one preferred hash was cold.
+    void playStremioCandidates(std::shared_ptr<QVector<StremioTranslate::StreamCandidate>> ordered,
+                               std::function<void(const QString& url, const QString& mime)> cb);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,
-                                  std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0);
+                                  std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                                  const QString& preferGroup = QString());
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
     // Key for the catalog-result cache: source + catalog + query + page + filters (QMap iterates sorted).
     QString catalogCacheKey(LoadedAddon* src, const QString& catalogId, const QString& query, int page,
