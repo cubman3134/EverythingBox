@@ -176,6 +176,33 @@ bool StremioTranslate::handlesId(const Manifest& m, const QString& resource, con
     return false;
 }
 
+QVector<int> StremioTranslate::routeProviders(const QVector<Manifest>& manifests, const QString& resource,
+                                              const QString& type, const QString& id, bool* fellBackToAll)
+{
+    if (fellBackToAll) *fellBackToAll = false;
+
+    // Stage 1: who OFFERS this resource for this type at all. The type test uses the MANIFEST-level list
+    // deliberately, not resourceTypes: a per-resource narrowing has no fallback beneath it, so honouring it
+    // here could silently leave a type with no provider — the exact failure the stage-2 fallback exists to
+    // prevent. Widening this is a separate decision, not a side effect of adding id routing.
+    QVector<int> offering;
+    for (int i = 0; i < manifests.size(); ++i)
+    {
+        const Manifest& m = manifests[i];
+        if (!m.resources.contains(resource)) continue;
+        if (!m.types.isEmpty() && !m.types.contains(type)) continue;
+        offering.push_back(i);
+    }
+
+    // Stage 2: of those, who claims THIS id space — and the fallback that makes the narrowing safe.
+    QVector<int> routed;
+    for (int i : offering)
+        if (handlesId(manifests[i], resource, id)) routed.push_back(i);
+    if (!routed.isEmpty()) return routed;
+    if (fellBackToAll) *fellBackToAll = !offering.isEmpty();
+    return offering;
+}
+
 namespace {
 
 // Addons put the seeder count in the title, conventionally after a 👤 (or "Seeders:"/"S:"). Best-effort:
@@ -253,13 +280,18 @@ QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const 
         out.push_back(c);
     }
 
-    std::stable_sort(out.begin(), out.end(), [](const StreamCandidate& a, const StreamCandidate& b) {
+    sortCandidates(out);
+    if (out.size() > kMaxStreamRows) out.resize(kMaxStreamRows);
+    return out;
+}
+
+void StremioTranslate::sortCandidates(QVector<StreamCandidate>& v)
+{
+    std::stable_sort(v.begin(), v.end(), [](const StreamCandidate& a, const StreamCandidate& b) {
         if (a.isDirect() != b.isDirect()) return a.isDirect();   // instant beats needing a debrid round-trip
         if (a.seeders != b.seeders)       return a.seeders > b.seeders;
         return a.videoSize > b.videoSize;
     });
-    if (out.size() > kMaxStreamRows) out.resize(kMaxStreamRows);
-    return out;
 }
 
 QString StremioTranslate::describe(const StreamCandidate& c)

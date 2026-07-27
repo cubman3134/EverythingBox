@@ -87,6 +87,18 @@ namespace StremioTranslate
     // an addon declaring no prefixes at all is always eligible.
     bool handlesId(const Manifest& m, const QString& resource, const QString& id);
 
+    // Which of `manifests` should be asked for `resource` about a `type`/`id` — indices, in input order.
+    // Callers pass only the manifests of addons they already consider usable (e.g. enabled ones); this
+    // knows nothing about installation state.
+    //
+    // Two stages. First the addons that OFFER `resource` for `type`; then, among those, the ones whose
+    // idPrefixes claim this id space. THE SECOND STAGE MAY NEVER COST A RESULT: when it selects nobody,
+    // every offering addon is returned instead and *fellBackToAll is set. A mis-declared or unusual manifest
+    // must degrade to the old ask-everyone behaviour, never to an unplayable item — routing is an
+    // optimization, and it is not allowed to be the reason nothing plays.
+    QVector<int> routeProviders(const QVector<Manifest>& manifests, const QString& resource,
+                                const QString& type, const QString& id, bool* fellBackToAll = nullptr);
+
     struct StreamCandidate
     {
         QString url, mime, infoHash;
@@ -103,6 +115,13 @@ namespace StremioTranslate
 
     // Usable candidates only, sorted best-first and capped at kMaxStreamRows.
     QVector<StreamCandidate> parseStreams(const QByteArray& body);
+
+    // The candidate order parseStreams applies: instant beats a debrid round-trip, then seeders, then size.
+    // Exposed rather than only applied inside parseStreams because an AGGREGATE across several stream addons
+    // has to be ordered by the SAME rule — concatenating per-addon blocks would rank one addon's worst row
+    // above another's best, and auto-play would take a cold torrent over a neighbour's instant http url.
+    // Stable, so an addon's own ordering survives among rows this cannot tell apart.
+    void sortCandidates(QVector<StreamCandidate>& v);
 
     // One picker row: "1080p · Release.Name.x265 👤 42 · 2.1 GB". The seeder count is NEVER appended —
     // it was scraped out of the very title being rendered, so it is redundant by construction — and the

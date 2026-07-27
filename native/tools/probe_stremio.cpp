@@ -1,8 +1,12 @@
 // Headless coverage for the Stremio protocol translator. Pure — no network, no addon installed.
 // Prints STREMIO-OK on success; any failure prints STREMIO-FAIL <what> and exits non-zero.
 #include "StremioTranslate.h"
+#include "BingeStore.h"
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <cstdio>
 
 static int failures = 0;
@@ -435,6 +439,155 @@ int main(int argc, char** argv)
         CHECK(pickAuto(three, QString()) == 0,
               "no preference -> the BEST row, not the first one that happens to have no group");
         CHECK(pickAuto({}, QStringLiteral("g1")) == -1, "nothing playable -> -1");
+    }
+
+    // ------------------------------------------------- 13. routeProviders: the id filter and its fallback
+    {
+        auto mf = [](const QString& res, const QStringList& types, const QStringList& prefixes) {
+            Manifest m;
+            m.resources = QStringList{res};
+            m.types = types;
+            m.idPrefixes = prefixes;
+            return m;
+        };
+        const QStringList movie{QStringLiteral("movie")};
+        QVector<Manifest> ms;
+        ms << mf(QStringLiteral("stream"), movie, {QStringLiteral("tt")})        // 0: imdb only
+           << mf(QStringLiteral("stream"), movie, {QStringLiteral("kitsu:")})    // 1: anime only
+           << mf(QStringLiteral("catalog"), movie, {QStringLiteral("tt")})       // 2: wrong resource
+           << mf(QStringLiteral("stream"), {QStringLiteral("series")}, {QStringLiteral("tt")}); // 3: wrong type
+
+        bool fell = true;
+        QVector<int> r = routeProviders(ms, QStringLiteral("stream"), QStringLiteral("movie"),
+                                        QStringLiteral("tt0133093"), &fell);
+        CHECK(r == (QVector<int>{0}), "only the stream addon of this type that claims the id space");
+        CHECK(!fell, "…and that is a real match, not the fallback");
+
+        r = routeProviders(ms, QStringLiteral("stream"), QStringLiteral("movie"),
+                           QStringLiteral("kitsu:1"), &fell);
+        CHECK(r == (QVector<int>{1}), "a different id space selects a different addon");
+        CHECK(!fell, "still a real match");
+
+        // THE FALLBACK, the reason routing is allowed to exist at all: an id no manifest claims must still
+        // reach every stream provider. Without it a mis-declared idPrefixes makes an item silently unplayable.
+        r = routeProviders(ms, QStringLiteral("stream"), QStringLiteral("movie"),
+                           QStringLiteral("weird:99"), &fell);
+        CHECK(r == (QVector<int>{0, 1}), "an unclaimed id falls back to ASKING EVERY stream provider");
+        CHECK(fell, "and says so, so the log can explain it");
+        // The fallback widens the ID filter ONLY. A resource/type mismatch is not a routing guess, it is the
+        // addon saying it does not serve this at all — indices 2 and 3 must stay out even here.
+        CHECK(!r.contains(2) && !r.contains(3),
+              "the fallback does not resurrect the wrong resource or the wrong type");
+
+        // An addon declaring NO prefixes claims everything, so it absorbs the unclaimed id on its own merits.
+        // That is a match, not a fallback — and the addons that DID declare a mismatching prefix stay out.
+        QVector<Manifest> withOpen = ms;
+        withOpen << mf(QStringLiteral("stream"), movie, {});                      // 4: claims everything
+        r = routeProviders(withOpen, QStringLiteral("stream"), QStringLiteral("movie"),
+                           QStringLiteral("weird:99"), &fell);
+        CHECK(r == (QVector<int>{4}) && !fell,
+              "an addon claiming no prefixes takes the unclaimed id WITHOUT triggering the fallback");
+
+        // Nothing offers the resource -> empty, and NOT flagged as a fallback: there was nothing to widen to.
+        QVector<Manifest> none;
+        none << mf(QStringLiteral("catalog"), movie, {});
+        r = routeProviders(none, QStringLiteral("stream"), QStringLiteral("movie"), QStringLiteral("tt1"), &fell);
+        CHECK(r.isEmpty() && !fell, "no provider offers streams at all -> empty, and not a fallback");
+        CHECK(routeProviders({}, QStringLiteral("stream"), QStringLiteral("movie"), QStringLiteral("tt1")).isEmpty(),
+              "an empty roster is handled without the out-param");
+
+        // A per-resource idPrefixes narrows what the manifest-level list claims (handlesId's rule, reached
+        // through the router — the seam AddonManager actually calls).
+        Manifest perRes = mf(QStringLiteral("stream"), movie, {QStringLiteral("tt")});
+        perRes.resourceIdPrefixes.insert(QStringLiteral("stream"), {QStringLiteral("kitsu:")});
+        QVector<Manifest> two; two << perRes;
+        CHECK(routeProviders(two, QStringLiteral("stream"), QStringLiteral("movie"), QStringLiteral("kitsu:1"))
+                  == (QVector<int>{0}), "a per-resource prefix list routes on its own terms");
+    }
+
+    // ------------------------------------------------- 14. sortCandidates on an AGGREGATE
+    {
+        // Two addons' already-sorted blocks, concatenated the way listStremioStreams builds them: addon A's
+        // torrents first, then addon B's instant http url. Ranking the merged list is what stops auto-play
+        // taking A's cold torrent over B's direct stream — the per-block sort inside parseStreams cannot.
+        QVector<StreamCandidate> agg;
+        StreamCandidate a1; a1.infoHash = QStringLiteral("a"); a1.seeders = 90;
+        StreamCandidate a2; a2.infoHash = QStringLiteral("b"); a2.seeders = 40;
+        StreamCandidate b1; b1.url = QStringLiteral("https://b/direct");
+        StreamCandidate b2; b2.infoHash = QStringLiteral("c"); b2.seeders = 70;
+        agg << a1 << a2 << b1 << b2;
+        sortCandidates(agg);
+        CHECK(agg[0].url == QStringLiteral("https://b/direct"),
+              "the second addon's instant url outranks the first addon's best torrent");
+        CHECK(agg[1].seeders == 90 && agg[2].seeders == 70 && agg[3].seeders == 40,
+              "and the torrents interleave by seeders ACROSS addons");
+        CHECK(pickAuto(agg, QString()) == 0, "so auto-play lands on the instant url");
+    }
+
+    // ------------------------------------------------- 15. BingeStore
+    // (the brief numbered this 10; 10-12 were already taken by handlesId/parseStreams/sort, so it lands later)
+    {
+        CHECK(BingeStore::seriesKeyFor(QStringLiteral("tt0903747:2:7")) == QStringLiteral("tt0903747"),
+              "an episode id yields its series key");
+        CHECK(BingeStore::seriesKeyFor(QStringLiteral("tt0133093")).isEmpty(),
+              "a MOVIE id yields no key — binge memory is episodes-only");
+        CHECK(BingeStore::seriesKeyFor(QString()).isEmpty(), "empty in, empty out");
+        // SHAPE, not just arity — the same landmine MediaSegments::keyFor documents. Without the "tt" test
+        // every TMDB-catalogued show keys as "tmdb" and one show's remembered release is handed to another.
+        CHECK(BingeStore::seriesKeyFor(QStringLiteral("tmdb:tv:1396")).isEmpty(),
+              "a 3-part id that is not an imdb episode is NOT a series key");
+        CHECK(BingeStore::seriesKeyFor(QStringLiteral("tt1:2:7:extra")).isEmpty(),
+              "and a longer id is not one either");
+
+        QTemporaryDir tmp;
+        CHECK(tmp.isValid(), "temp dir");
+        const QString path = QDir(tmp.path()).filePath(QStringLiteral("binge.json"));
+
+        BingeStore st(path);
+        st.load();
+        CHECK(st.lookup(QStringLiteral("tt1")).isEmpty(), "an empty store has nothing");
+        CHECK(st.put(QStringLiteral("tt1"), QStringLiteral("torrentio|1080p")), "put succeeds");
+        CHECK(st.lookup(QStringLiteral("tt1")) == QStringLiteral("torrentio|1080p"),
+              "and the value is visible on the SAME instance, without a reload");
+        CHECK(st.lookup(QStringLiteral("tt-other")).isEmpty(), "an unrelated series is still unknown");
+
+        BingeStore re(path);
+        re.load();
+        CHECK(re.lookup(QStringLiteral("tt1")) == QStringLiteral("torrentio|1080p"), "it round-trips");
+        re.put(QStringLiteral("tt1"), QStringLiteral("torrentio|4k"));
+        CHECK(re.lookup(QStringLiteral("tt1")) == QStringLiteral("torrentio|4k"), "the newest choice wins");
+        CHECK(!re.put(QString(), QStringLiteral("g")), "an empty key is refused");
+        CHECK(!re.put(QStringLiteral("tt2"), QString()), "and so is an empty group");
+        CHECK(re.lookup(QStringLiteral("tt2")).isEmpty(), "a refused put stores nothing");
+
+        // load() must REPLACE what is in memory, not merge into it: a store whose file vanished must forget,
+        // otherwise a cleared/rewritten file leaves the old choice quietly in effect for the rest of the run.
+        CHECK(QFile::remove(path), "remove the backing file");
+        re.load();
+        CHECK(re.lookup(QStringLiteral("tt1")).isEmpty(), "load() clears what was there before");
+
+        BingeStore missing(QDir(tmp.path()).filePath(QStringLiteral("nope.json")));
+        missing.load();
+        CHECK(missing.lookup(QStringLiteral("tt1")).isEmpty(), "a missing file loads as empty");
+
+        // A hand-written file carrying values load() cannot use (a number, an empty string) alongside a good
+        // one. The unusable keys sort FIRST — QJsonObject iterates by key — so a load() that BAILS on the
+        // first value it cannot use, rather than skipping it, loses the entry that follows.
+        //
+        // That reachability is the only assertable part: a value skipped versus stored as "" is invisible
+        // through lookup(), which cannot tell a stored "" from "never chosen". Asserting lookup("bEmpty")
+        // is empty would pass either way, so it is deliberately not asserted here.
+        const QString hand = QDir(tmp.path()).filePath(QStringLiteral("hand.json"));
+        {
+            QFile f(hand);
+            CHECK(f.open(QIODevice::WriteOnly), "write a hand-made store");
+            f.write("{\"aBad\":5,\"bEmpty\":\"\",\"ttA\":\"g1\"}");
+        }
+        BingeStore h(hand);
+        h.load();
+        CHECK(h.lookup(QStringLiteral("ttA")) == QStringLiteral("g1"),
+              "a usable entry is read even when unusable ones precede it");
+        CHECK(h.lookup(QStringLiteral("ttZ")).isEmpty(), "a key the file never had stays unknown");
     }
 
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
