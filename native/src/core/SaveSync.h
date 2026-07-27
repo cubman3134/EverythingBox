@@ -171,4 +171,5 @@ private:
     QTimer*    debounce_ = nullptr;
     QSet<QString> dirty_;
     bool       busy_ = false;   // one reconcile at a time; two would race on the baseline and the manifest
+    bool       warnedNoFolder_ = false;   // "no Drive folder" is said once per session, not once per autosave
 };

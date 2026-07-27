@@ -1388,8 +1388,10 @@ QString RetroView::savesRoot() const { return AppPaths::dataDir() + QStringLiter
 // headless probe can reach it.
 QString RetroView::sramPath() const
 {
+    // romPath_ is not decoration here: it is what lets resolvePath tell "this ROM already has a save under
+    // another system" from "a different game whose ROM merely has the same base name".
     return SaveMeta::resolvePath(savesRoot(), systemId_, QFileInfo(romPath_).completeBaseName(),
-                                 QStringLiteral(".srm"));
+                                 QStringLiteral(".srm"), romPath_);
 }
 
 // The sidecar entry for a save/state we just wrote. The key is the path relative to the data dir, INCLUDING
@@ -1397,7 +1399,9 @@ QString RetroView::sramPath() const
 // conflict notice looks a title up by.
 void RetroView::noteSaveMeta(const QString& absPath)
 {
-    const QString rel = QDir(AppPaths::dataDir()).relativeFilePath(absPath);
+    // SaveMeta::keyFor, not a second derivation of the same thing: resolvePath now LOOKS UP candidates by that
+    // key, so a key recorded in a different spelling here would make every one of those lookups miss.
+    const QString rel = SaveMeta::keyFor(absPath);
     if (rel.startsWith(QStringLiteral(".."))) return; // outside the data dir: not ours to describe
     SaveMeta::put(rel, gameTitle_, systemId_, romPath_);
     // …and tell the sync THE SAME name (save-sync T5). Deliberately the identical `rel` the sidecar was keyed
@@ -1453,14 +1457,24 @@ bool RetroView::saveState(int slot, QString* error)
         return false;
     }
     const QString path = statePath(slot);
-    QFile f(path);
+    // QSaveFile, for the same reason saveSram() uses it: WriteOnly TRUNCATES the slot the user already has and
+    // only then writes the new state. A crash or a full disk inside that window leaves a torn .stateN — and a
+    // torn state is WORSE than a torn .srm, because it hashes consistently on the next launch, so SaveSync's
+    // torn-write guard (which only catches a file changing mid-read) cannot see it: it is uploaded as
+    // authoritative and overwrites every other device's good copy of that slot.
+    QSaveFile f(path);
     if (!f.open(QIODevice::WriteOnly) ||
         f.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size())) != static_cast<qint64>(data.size()))
+    {
+        f.cancelWriting();                             // the slot's previous contents are still intact
+        if (error) *error = tr("Couldn't write the save-state file.");
+        return false;
+    }
+    if (!f.commit())
     {
         if (error) *error = tr("Couldn't write the save-state file.");
         return false;
     }
-    f.close();
     noteSaveMeta(path); // which game this slot belongs to, for the conflict notice and any later save browser
     // A thumbnail of the current frame, so the slot menu shows what's in each slot.
     const QImage img = currentFrameImage();

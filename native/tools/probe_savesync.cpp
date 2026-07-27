@@ -856,6 +856,53 @@ static void transportChecks()
         CHECK(ok, "…the pass still completes");
         CHECK(s.readBaseline().value(N).sha == shaOf(LOCAL), "…and leaves a baseline that parses again");
     }
+
+    // ---- 8u. a conflict REPLAYED through the stale-CAS retry must not eat the copy it preserved ----
+    // The retry path (8m) re-runs begin() WITHOUT advancing the baseline, and the losing device's index row is
+    // untouched by our failed publish — so pass 2 re-plans the identical conflict with the identical
+    // localWins, and conflictName() derives the identical .conflict-* name from that same row. But pass 1
+    // already uploaded the winner, so the blob under the real name now holds the WINNER. Re-fetching that name
+    // into the preserved artifact writes the winner's bytes over the loser's only copy anywhere — while the
+    // user has been told twice that both copies were kept.
+    {
+        const QString root = freshRoot(QStringLiteral("conflictreplay"));
+        const QString OTHER = QStringLiteral("saves/Unrelated.srm");
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeCloud cloud;
+        TestSync s(&cloud, root);
+        staleBaseline(s);
+        const Entry rr = remoteRow(N, REMOTE, kHour, QStringLiteral("devB"));   // the cloud copy loses
+        seedIndex(cloud, one(rr));
+        seedBlob(cloud, N, REMOTE);
+
+        // A third device publishes an UNRELATED file in the window between this run's read of the index and
+        // its own publish — that alone is enough to lose the compare-and-swap. N's row is left exactly as it
+        // was, which is what makes pass 2 re-plan the same conflict.
+        int idxFinds = 0;
+        bool fired = false;
+        cloud.hook = [&](const QString& op, const QString& name) {
+            if (fired || op != QLatin1String("find") || name != kIdx) return;
+            if (++idxFinds != 2) return;                 // the publish-time lookup of pass 1
+            fired = true;
+            QHash<QString, Entry> moved = one(rr);
+            moved.insert(OTHER, remoteRow(OTHER, "unrelated", kHour, QStringLiteral("devC")));
+            seedBlob(cloud, OTHER, "unrelated");
+            seedIndex(cloud, moved);                     // a new index hash under our feet
+        };
+
+        bool ok = false; int conf = 0;
+        s.syncNow([&](bool o, int, int, int c) { ok = o; conf = c; });
+        cloud.hook = nullptr;
+        CHECK(fired, "the interleave actually happened");
+        CHECK(ok && conf == 1, "the replayed conflict resolves");
+
+        const QString kept = conflictName(N, QStringLiteral("devB"), rr.mtimeMs);
+        CHECK(readFile(root + QStringLiteral("/") + kept) == REMOTE,
+              "the preserved LOSER survives the replay — re-fetching that name writes the winner over it");
+        CHECK(readFile(root + QStringLiteral("/") + N) == LOCAL, "the winner still holds the real name");
+        CHECK(blobOf(cloud, N) == LOCAL && cloudIndex(cloud).value(N).sha == shaOf(LOCAL),
+              "…and the cloud finally agrees with it");
+    }
 }
 
 // ---- section 9: where a save FILE lives, and what it is called in front of a user (SaveMeta) -----------
@@ -921,6 +968,35 @@ static void saveMetaChecks()
     CHECK(SaveMeta::resolvePath(root, QStringLiteral("segacd"), QStringLiteral("Twin"), SRM)
               == root + QStringLiteral("/saturn/Twin.srm"),
           "with saves under several systems the most recently modified one wins the tie-break");
+
+    // …but that adoption needs a DISCRIMINATOR, and the base name is not one. Frontend SRAM is always ".srm",
+    // and identical base names across systems are routine: "Aladdin (USA).sfc" and "Aladdin (USA).md" are two
+    // different games. Adopting blind binds the Genesis game to the SNES game's save, the ~10 s autosave
+    // overwrites 20 hours of it, and the sync propagates that as a plain Upload — no conflict declared, so no
+    // .conflict-* copy to recover from either. The sidecar already records which ROM each save belongs to.
+    const QString SNES_ROM = QStringLiteral("C:/roms/snes/Aladdin (USA).sfc");
+    const QString MD_ROM   = QStringLiteral("C:/roms/md/Aladdin (USA).md");
+    const QString ALADDIN  = QStringLiteral("Aladdin (USA)");
+    const QString snesSave = root + QStringLiteral("/snes/Aladdin (USA).srm");
+    writeFile(snesSave, "snes-progress");
+    SaveMeta::put(SaveMeta::keyFor(snesSave), QStringLiteral("Aladdin"), SNES, SNES_ROM);
+    CHECK(SaveMeta::resolvePath(root, QStringLiteral("megadrive"), ALADDIN, SRM, MD_ROM)
+              == root + QStringLiteral("/megadrive/Aladdin (USA).srm"),
+          "a save the sidecar says belongs to a DIFFERENT ROM is not adopted across systems");
+    CHECK(readFile(snesSave) == "snes-progress" && !QFileInfo::exists(root + QStringLiteral("/megadrive/Aladdin (USA).srm")),
+          "…and the other game's save is untouched — nothing is bound to it, nothing is created beside it");
+    CHECK(SaveMeta::resolvePath(root, QStringLiteral("snes9x"), ALADDIN, SRM, SNES_ROM) == snesSave,
+          "…while the SAME ROM arriving under a second system id still finds its own save");
+
+    // The multi-match branch has exactly the same exposure: "the newest wins" would hand this ROM another
+    // game's save purely because that game was played more recently. The sidecar filter runs FIRST.
+    const QString mdSave = root + QStringLiteral("/genesis/Aladdin (USA).srm");
+    writeFile(mdSave, "md-progress");
+    SaveMeta::put(SaveMeta::keyFor(mdSave), QStringLiteral("Aladdin"), QStringLiteral("genesis"), MD_ROM);
+    setMtime(snesSave, QDateTime::currentDateTime());
+    setMtime(mdSave,   QDateTime::currentDateTime().addSecs(-7200));
+    CHECK(SaveMeta::resolvePath(root, QStringLiteral("megadrive"), ALADDIN, SRM, MD_ROM) == mdSave,
+          "with two systems holding the base name, the ROM's OWN save wins over a NEWER stranger");
 
     // No system to namespace under (an extension no catalog claims). The flat path is the answer, and it must
     // not contain an empty component: "saves//Odd.srm" is a sync key scanLocal never produces, so the file

@@ -47,6 +47,12 @@ namespace SaveMeta
     void  put(const QString& relPath, const QString& title, const QString& system, const QString& romPath);
     Entry lookup(const QString& relPath);   // a default-constructed Entry when nothing is recorded
 
+    // The sidecar key for an ABSOLUTE save path: that same data-dir-relative spelling, derived in ONE place.
+    // Callers that have an absolute path (RetroView after writing a save, resolvePath inspecting a candidate)
+    // must not each re-derive it — a second, differently-derived key would record and look up different rows
+    // for one file and every lookup would silently miss.
+    QString keyFor(const QString& absPath);
+
     // The display title for a save file, or the bare file name when nothing is recorded. Never empty.
     QString titleFor(const QString& relPath);
 
@@ -64,7 +70,16 @@ namespace SaveMeta
     // systems — and without that search the second launch would start a fresh empty save while the real one
     // sat unreachable under the first. One match is used as-is; several (different games sharing a base name)
     // resolve to the most recently modified, and that ambiguity is logged.
-    QString resolvePath(const QString& root, const QString& systemId, const QString& base, const QString& ext);
+    //
+    // `romPath` is what GATES that adoption, and it is load-bearing: frontend SRAM is always ".srm", so the
+    // base name alone cannot tell "the same ROM opened as a second system" from two different games that
+    // merely share a name ("Aladdin (USA).sfc" / "Aladdin (USA).md"). A candidate whose sidecar entry names a
+    // DIFFERENT ROM is declined — adopting it would bind this game to another game's save and the first
+    // autosave would overwrite it, syncing as a plain Upload with no conflict and no notice. A candidate with
+    // no recorded romPath (a pre-sidecar save) is adopted as before. An empty `romPath` argument therefore
+    // declines every candidate the sidecar has a ROM for, which is the safe direction.
+    QString resolvePath(const QString& root, const QString& systemId, const QString& base, const QString& ext,
+                        const QString& romPath = QString());
 
     // One-time: move core-written save files that landed loose in the app directory into <data>/saves/.
     // LibretroCore::saveDir was never assigned, so cores that write their own files (memory cards, .brm,

@@ -73,6 +73,37 @@ SaveMeta::Entry entryFromJson(const QJsonObject& o)
     return e;
 }
 
+// Two ROM paths that name the same file. Compared as cleaned, forward-slashed strings (and case-insensitively
+// on Windows, where the same ROM reached through the library and through "Open game file…" can differ only in
+// case). Deliberately NOT canonicalFilePath: the recorded ROM may since have been deleted or moved off a
+// removable drive, and an unresolvable path must compare EQUAL to itself rather than collapsing to empty.
+bool sameRom(const QString& a, const QString& b)
+{
+    if (a.isEmpty() || b.isEmpty()) return false;
+    const QString ca = QDir::cleanPath(QDir::fromNativeSeparators(a));
+    const QString cb = QDir::cleanPath(QDir::fromNativeSeparators(b));
+#ifdef Q_OS_WIN
+    return ca.compare(cb, Qt::CaseInsensitive) == 0;
+#else
+    return ca == cb;
+#endif
+}
+
+// resolvePath is called from sramPath() on EVERY ~10 s autosave, not once at launch, so an unguarded qInfo in
+// it printed its adoption decision a dozen times for a single game. The decision is a property of the
+// (game, layout) pair and only interesting the first time the path is established, so it is said once.
+void logOnce(const QString& key, const QString& line)
+{
+    static QMutex m;
+    static QSet<QString> said;
+    {
+        QMutexLocker lk(&m);
+        if (said.contains(key)) return;
+        said.insert(key);
+    }
+    qInfo().noquote() << line;
+}
+
 // How stale a recorded entry may be before an otherwise identical put() rewrites the file. Battery RAM
 // autosaves every ~10 s per running game, and rewriting the whole sidecar that often buys nothing — the only
 // field that would change is updatedAt.
@@ -123,8 +154,14 @@ QString SaveMeta::titleFor(const QString& relPath)
     return relPath.isEmpty() ? QStringLiteral("this save") : relPath;
 }
 
+QString SaveMeta::keyFor(const QString& absPath)
+{
+    if (absPath.isEmpty()) return {};
+    return normKey(QDir(AppPaths::dataDir()).relativeFilePath(absPath));
+}
+
 QString SaveMeta::resolvePath(const QString& root, const QString& systemId,
-                              const QString& base, const QString& ext)
+                              const QString& base, const QString& ext, const QString& romPath)
 {
     const QString flat = root + QLatin1Char('/') + base + ext;
     // No system to namespace under (an extension no catalog claims): the flat path IS the answer. Building
@@ -143,21 +180,40 @@ QString SaveMeta::resolvePath(const QString& root, const QString& systemId,
     // its save under two different systems, and the second launch would create an EMPTY save while 20 hours sat
     // three directories away, unreachable from any UI and syncing as a rival copy of the same game. Before
     // creating anything, look for this ROM's save under every OTHER system's namespace and keep using it.
+    //
+    // …but ONLY when the save under that other namespace belongs to THIS ROM. Frontend SRAM is always ".srm",
+    // so the base name is the only discriminator here — and identical base names across systems are routine
+    // ("Aladdin (USA).sfc" and "Aladdin (USA).md"). Adopting blind would bind the Genesis game to the SNES
+    // game's save, the ~10 s autosave would overwrite 20 hours of the wrong game, and sync would propagate it
+    // as a plain Upload: no conflict declared, so no .conflict-* copy to recover from either. The sidecar is
+    // the discriminator that already exists on disk — it records romPath per save — so consult it and DECLINE
+    // any candidate it says belongs to a different ROM. A candidate with no recorded romPath is a pre-sidecar
+    // save, where the old flat behaviour was equally lossy and adopting is no worse than not adopting.
     QVector<QFileInfo> others;
     const QFileInfoList dirs = QDir(root).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks,
                                                         QDir::Name);
     for (const QFileInfo& d : dirs)
     {
         const QFileInfo cand(root + QLatin1Char('/') + d.fileName() + QLatin1Char('/') + base + ext);
-        if (cand.isFile()) others.push_back(cand);
+        if (!cand.isFile()) continue;
+        const QString recorded = lookup(keyFor(cand.absoluteFilePath())).romPath;
+        if (!recorded.isEmpty() && !sameRom(recorded, romPath))
+        {
+            logOnce(QStringLiteral("decline:") + cand.absoluteFilePath() + QLatin1Char('|') + romPath,
+                    QStringLiteral("saves: %1%2 under %3 belongs to a different game (%4) — not using it")
+                        .arg(base, ext, d.fileName(), QFileInfo(recorded).fileName()));
+            continue;
+        }
+        others.push_back(cand);
     }
     if (others.isEmpty()) return ns;             // genuinely brand new -> namespaced
     if (others.size() == 1)
     {
         const QString found = root + QLatin1Char('/') + others.front().dir().dirName()
                               + QLatin1Char('/') + base + ext;
-        qInfo().noquote() << QStringLiteral("saves: %1%2 already has a save under another system (%3) — using it")
-                                 .arg(base, ext, others.front().dir().dirName());
+        logOnce(QStringLiteral("adopt:") + found,
+                QStringLiteral("saves: %1%2 already has a save under another system (%3) — using it")
+                    .arg(base, ext, others.front().dir().dirName()));
         return found;
     }
 
@@ -170,9 +226,11 @@ QString SaveMeta::resolvePath(const QString& root, const QString& systemId,
         if (fi.lastModified() > newest->lastModified()) newest = &fi;
     QStringList where;
     for (const QFileInfo& fi : others) where << fi.dir().dirName();
-    qInfo().noquote() << QStringLiteral("saves: %1%2 has saves under several systems (%3) — using the newest (%4)")
-                             .arg(base, ext, where.join(QStringLiteral(", ")), newest->dir().dirName());
-    return root + QLatin1Char('/') + newest->dir().dirName() + QLatin1Char('/') + base + ext;
+    const QString pick = root + QLatin1Char('/') + newest->dir().dirName() + QLatin1Char('/') + base + ext;
+    logOnce(QStringLiteral("adopt:") + pick,
+            QStringLiteral("saves: %1%2 has saves under several systems (%3) — using the newest (%4)")
+                .arg(base, ext, where.join(QStringLiteral(", ")), newest->dir().dirName()));
+    return pick;
 }
 
 void SaveMeta::sweepStrays()

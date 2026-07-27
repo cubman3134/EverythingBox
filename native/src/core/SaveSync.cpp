@@ -449,7 +449,19 @@ void SaveSync::begin(const QSet<QString>& only, std::function<void(bool, int, in
 
     resolveFolder([this, r](const QString& folderId) {
         if (folderId.isEmpty())
-        { emit log(QStringLiteral("save sync: no Drive folder")); busy_ = false; r->cb(false, 0, 0, 0); return; }
+        {
+            // ONCE per session, not once per attempt. Every ~10 s autosave marks the save dirty and the
+            // debounce turns that into a reconcile, so a signed-out user got this line 58 times in a
+            // 45-second session and their log became nothing else. The flag is cleared the moment a folder
+            // does resolve, so signing in and then out again says it again.
+            if (!warnedNoFolder_)
+            {
+                warnedNoFolder_ = true;
+                emit log(QStringLiteral("save sync: no Drive folder"));
+            }
+            busy_ = false; r->cb(false, 0, 0, 0); return;
+        }
+        warnedNoFolder_ = false;
         r->folderId = folderId;
 
         fetchManifest(folderId, [this, r](bool ok, const QHash<QString, Entry>& remote,
@@ -740,8 +752,27 @@ void SaveSync::executeConflict(const Decision& d, const Entry& localE, const Ent
     // the case that matters, and it would look correct in review.
     const QString who  = remoteE.deviceId.isEmpty() ? QStringLiteral("cloud") : remoteE.deviceId;
     const QString kept = SaveSyncPlan::conflictName(d.name, who, remoteE.mtimeMs);
+    const QString keptPath = root_ + QLatin1Char('/') + kept;
     const QString expect = remoteE.sha;
-    downloadInto(folderId, d.name, root_ + QLatin1Char('/') + kept,
+
+    // NEVER overwrite an artifact that is already there, because on a REPLAY the blob no longer holds the
+    // loser. A pass can get this far — loser preserved, winner uploaded — and then fail to publish the index:
+    // the compare-and-swap loses to any other device's publish (an unrelated file is enough), and begin() then
+    // retries WITHOUT advancing the baseline. The unchanged baseline and the unchanged index row re-plan the
+    // identical conflict with the identical localWins, and conflictName is deterministic from that same row —
+    // so the second pass would download the name again and QSaveFile would write the WINNER's bytes over the
+    // preserved loser. That is the loser's only copy anywhere, and the user was told twice that both were kept.
+    // The name encodes the losing device AND its mtime, so an existing file under it IS that loser version,
+    // already preserved by the pass that created it. Skip straight to the upload.
+    if (QFileInfo::exists(keptPath))
+    {
+        emit log(QStringLiteral("save conflict: the cloud copy of %1 is already preserved as %2 — not re-fetching it")
+                     .arg(d.name, kept));
+        uploadFrom(folderId, d.name, localPath, expect, [done](bool uok, const Entry& sent) { done(uok, sent); });
+        return;
+    }
+
+    downloadInto(folderId, d.name, keptPath,
                  [this, d, kept, localPath, folderId, expect, done](bool ok) {
         if (!ok)
         {
@@ -751,8 +782,8 @@ void SaveSync::executeConflict(const Decision& d, const Entry& localE, const Ent
         }
         emit conflictKept(SaveMeta::titleFor(d.name), kept);
         // The preserved copy stays on disk even if this upload fails: deleting it would undo the one thing
-        // we came here to guarantee. A retry re-fetches the same loser to the same name and overwrites it
-        // with identical bytes.
+        // we came here to guarantee. A retry finds the artifact already there and takes the branch above
+        // rather than re-fetching a blob that by then holds the winner.
         uploadFrom(folderId, d.name, localPath, expect, [done](bool uok, const Entry& sent) { done(uok, sent); });
     });
 }
