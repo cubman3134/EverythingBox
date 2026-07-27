@@ -30,6 +30,10 @@ QVector<StremioTranslate::Extra> parseExtras(const QJsonObject& c)
         StremioTranslate::Extra e;
         e.name = eo.value(QStringLiteral("name")).toString();
         if (e.name.isEmpty()) continue;
+        // Deduplicate by name, FIRST-WINS — matching what the legacy `extraSupported` path below already
+        // does. Without this a manifest declaring `genre` twice yields two Extras: `presets` collapses
+        // them, but a UI iterating `extras` would draw the control twice.
+        if (find(e.name)) continue;
         e.isRequired  = eo.value(QStringLiteral("isRequired")).toBool();
         e.options     = stringArray(eo.value(QStringLiteral("options")));
         e.optionsLimit = eo.contains(QStringLiteral("optionsLimit"))
@@ -63,12 +67,23 @@ void classify(StremioTranslate::Catalog& c)
         {
             c.use = U::Unsatisfiable;
             c.skipReason = QStringLiteral("needs a \"%1\" value the add-on does not list").arg(e.name);
+            // BOTH non-Browse verdicts clear `presets`, for one shared reason: a preset is a browse
+            // default, and neither of these is a browse. Callers build catalog paths straight out of
+            // `presets` without re-checking `use`, so anything left here leaks into a request.
+            // Here it also makes the struct ORDER-INDEPENDENT. This loop returns on the first required
+            // extra we cannot supply, so without the clear the same manifest would produce different
+            // presets depending only on the order the extras happened to be declared in:
+            // [genre(options), mystery(none)] would keep genre="Action", [mystery, genre] nothing.
+            // The verdict is order-independent; the rest of the struct must be too.
+            c.presets.clear();
             return;
         }
         c.presets.insert(e.name, e.options.first());
     }
     // Search dominates: a catalog that cannot answer without a query is a search source, not a shelf —
-    // even when it also takes a genre we could have defaulted.
+    // even when it also takes a genre we could have defaulted. Clearing presets is what makes that real:
+    // a leftover genre default would silently filter EVERY query on this catalog. Same rule as the
+    // Unsatisfiable path above — do not "simplify" either clear away.
     c.use = needsSearch ? U::SearchOnly : U::Browse;
     if (needsSearch) c.presets.clear();
 }

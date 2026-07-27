@@ -53,6 +53,10 @@ namespace StremioTranslate
         QStringList      idPrefixes;  // manifest-level
         // Per-resource overrides from the object form, keyed by resource name. A resource present here
         // uses ITS list; anything absent falls back to the manifest-level list.
+        // Deliberate: an EXPLICITLY empty array ("idPrefixes": []) is recorded as absent, i.e. it falls
+        // back to the manifest-level list rather than meaning "this resource accepts no ids". The Stremio
+        // schema gives empty no distinct meaning, and reading it as "accepts nothing" would silently
+        // unroute a resource over what is far more often a serializer artifact.
         QHash<QString, QStringList> resourceIdPrefixes;
         QHash<QString, QStringList> resourceTypes;
         QVector<Catalog> catalogs;
