@@ -7,6 +7,7 @@
 #include "../core/Settings.h"
 #include "../core/Achievements.h"
 #include "../core/SystemCatalog.h"
+#include "../core/SaveMeta.h"
 #include "../core/PortMapper.h"
 #include <QTimer>
 #include <QNetworkAccessManager>
@@ -22,6 +23,7 @@
 #include <QIODevice>
 #include <QDir>
 #include <QFile>
+#include <QSaveFile>
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QFrame>
@@ -695,12 +697,18 @@ QImage RetroView::buildFilterOverlay(QSize dst, int srcW, int srcH, VideoFilter 
 RetroView::~RetroView() { stop(); }
 
 bool RetroView::openGame(const QString& corePath, const QString& romPath,
-                         const QString& coreName, QString* error)
+                         const QString& coreName, QString* error,
+                         const QString& title, const QString& systemId)
 {
-    stop();
+    stop();   // writes the OUTGOING game's battery RAM — which is why the new identity is assigned below, not here
     // Point the core at <data>/system for BIOS / firmware before it loads (cores read the system directory
     // during set_environment). MainWindow has already fetched any required BIOS there (CoreManager::ensureBios).
     core_.systemDir = CoreManager::systemDir().toStdString();
+    // And at <data>/saves for the save files it writes ITSELF (memory cards, .brm, .smpc — the ones the
+    // frontend does not manage through RETRO_MEMORY_SAVE_RAM). This was never assigned, so saveDir defaulted
+    // to "." and those files landed in the process working directory: the deployed install has loose *.smpc
+    // files at its root, outside saves/ and therefore never backed up by anything.
+    core_.saveDir = CoreManager::savesDir().toStdString();
     std::string err;
     if (!core_.loadCore(corePath.toStdString(), &err))
     {
@@ -743,6 +751,17 @@ bool RetroView::openGame(const QString& corePath, const QString& romPath,
     }
     romPath_ = romPath;
     coreName_ = coreName;
+    // The running game's identity, assigned only now that the previous game is fully torn down. systemId
+    // decides where NEW save files go; the launcher's value wins because it knows which console the item was
+    // opened from, and an extension like .bin or .iso belongs to several. gameTitle_ is what the saves-meta
+    // sidecar records so a save named after a 40-hex ROM hash can still be named to the user later.
+    systemId_ = systemId;
+    if (systemId_.isEmpty())
+    {
+        const GameSystem* s = SystemCatalog::forExtension(QFileInfo(romPath).suffix().toLower());
+        systemId_ = s ? s->id : QString();
+    }
+    gameTitle_ = title.trimmed().isEmpty() ? QFileInfo(romPath).completeBaseName() : title.trimmed();
     // A GL/GLES core (N64 with GLideN64, Beetle PSX HW, Flycast, ...) asks for hardware rendering during
     // loadGame. Stand up the offscreen GL context + FBO now, before the first frame. HW rendering runs on the
     // GUI thread (one GL context), so a split-pane HW core drops out of threaded mode.
@@ -1361,11 +1380,34 @@ QImage RetroView::currentFrameImage()
                   static_cast<int>(w * 4), QImage::Format_RGB32).copy();
 }
 
+QString RetroView::savesRoot() const { return AppPaths::dataDir() + QStringLiteral("/saves"); }
+
+// NEW battery saves are namespaced by system so two consoles with a same-named ROM stop overwriting each
+// other; a save that already exists flat in saves/ keeps being used exactly where it is. The rule (and the
+// reason it must never "tidy" a legacy save by moving it) lives in SaveMeta::resolvePath, which is where a
+// headless probe can reach it.
 QString RetroView::sramPath() const
 {
-    const QString dir = AppPaths::dataDir() + QStringLiteral("/saves");
-    QDir().mkpath(dir);
-    return dir + QStringLiteral("/") + QFileInfo(romPath_).completeBaseName() + QStringLiteral(".srm");
+    // romPath_ is not decoration here: it is what lets resolvePath tell "this ROM already has a save under
+    // another system" from "a different game whose ROM merely has the same base name".
+    return SaveMeta::resolvePath(savesRoot(), systemId_, QFileInfo(romPath_).completeBaseName(),
+                                 QStringLiteral(".srm"), romPath_);
+}
+
+// The sidecar entry for a save/state we just wrote. The key is the path relative to the data dir, INCLUDING
+// the saves/|states/ prefix — the same name SaveSync::scanLocal produces, because that is the name the
+// conflict notice looks a title up by.
+void RetroView::noteSaveMeta(const QString& absPath)
+{
+    // SaveMeta::keyFor, not a second derivation of the same thing: resolvePath now LOOKS UP candidates by that
+    // key, so a key recorded in a different spelling here would make every one of those lookups miss.
+    const QString rel = SaveMeta::keyFor(absPath);
+    if (rel.startsWith(QStringLiteral(".."))) return; // outside the data dir: not ours to describe
+    SaveMeta::put(rel, gameTitle_, systemId_, romPath_);
+    // …and tell the sync THE SAME name (save-sync T5). Deliberately the identical `rel` the sidecar was keyed
+    // by: SaveSync::markDirty matches on "saves/…"/"states/…" exactly, and the conflict notice looks the title
+    // up by this key, so a second, differently-derived name here would silently sync nothing and title nothing.
+    emit saveWritten(rel);
 }
 
 // Battery-backed RAM (in-game saves) is frontend-managed: restore it into the core's SAVE_RAM after loading,
@@ -1386,9 +1428,18 @@ void RetroView::saveSram()
     const void* src = core_.memoryData(RETRO_MEMORY_SAVE_RAM);
     const size_t sz = core_.memorySize(RETRO_MEMORY_SAVE_RAM);
     if (!src || sz == 0) return;
-    QFile f(sramPath());
-    if (f.open(QIODevice::WriteOnly))
-        f.write(reinterpret_cast<const char*>(src), qint64(sz));
+    const QString path = sramPath();
+    QDir().mkpath(QFileInfo(path).absolutePath()); // saves/<system>/ may not exist yet
+    // QSaveFile, not QFile: opening WriteOnly TRUNCATES the user's only copy of their save and then writes it
+    // back, and this runs off a ~10 s autosave timer, so that window is entered hundreds of times a session. A
+    // crash or power loss inside it leaves a zero-length or half-length .srm — which SaveSync then uploads as
+    // authoritative and propagates to every device. Everything else on this track (writeBaseline, the download
+    // path) is already atomic for exactly this reason; the actual save was the last file that wasn't.
+    QSaveFile f(path);
+    if (!f.open(QIODevice::WriteOnly)) return;
+    if (f.write(reinterpret_cast<const char*>(src), qint64(sz)) != qint64(sz)) { f.cancelWriting(); return; }
+    if (!f.commit()) return;                       // the previous save is still intact on disk
+    noteSaveMeta(path);
 }
 
 // F2/F4 quick save/load act on the current slot (which follows the last slot used in the visual menu).
@@ -1405,14 +1456,26 @@ bool RetroView::saveState(int slot, QString* error)
         if (error) *error = tr("This core doesn't support save states for this game.");
         return false;
     }
-    QFile f(statePath(slot));
+    const QString path = statePath(slot);
+    // QSaveFile, for the same reason saveSram() uses it: WriteOnly TRUNCATES the slot the user already has and
+    // only then writes the new state. A crash or a full disk inside that window leaves a torn .stateN — and a
+    // torn state is WORSE than a torn .srm, because it hashes consistently on the next launch, so SaveSync's
+    // torn-write guard (which only catches a file changing mid-read) cannot see it: it is uploaded as
+    // authoritative and overwrites every other device's good copy of that slot.
+    QSaveFile f(path);
     if (!f.open(QIODevice::WriteOnly) ||
         f.write(reinterpret_cast<const char*>(data.data()), static_cast<qint64>(data.size())) != static_cast<qint64>(data.size()))
+    {
+        f.cancelWriting();                             // the slot's previous contents are still intact
+        if (error) *error = tr("Couldn't write the save-state file.");
+        return false;
+    }
+    if (!f.commit())
     {
         if (error) *error = tr("Couldn't write the save-state file.");
         return false;
     }
-    f.close();
+    noteSaveMeta(path); // which game this slot belongs to, for the conflict notice and any later save browser
     // A thumbnail of the current frame, so the slot menu shows what's in each slot.
     const QImage img = currentFrameImage();
     if (!img.isNull()) img.scaledToWidth(240, Qt::SmoothTransformation).save(thumbPath(slot), "PNG");

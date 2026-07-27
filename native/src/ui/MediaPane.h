@@ -22,7 +22,10 @@ public:
     explicit MediaPane(QWidget* parent = nullptr);
 
     void openVideo(const QString& url, const QString& title); // also used for audio (mpv plays audio-only)
-    void openGame(const QString& corePath, const QString& romPath, const QString& coreName);
+    // title/systemId carry the catalog item's display name and the console it was opened from through to
+    // RetroView, which needs both to file this game's save files (see RetroView::openGame).
+    void openGame(const QString& corePath, const QString& romPath, const QString& coreName,
+                  const QString& title = QString(), const QString& systemId = QString());
     void openBook(const QString& path);
     void openPdf(const QString& path);
     void openComic(const QString& path);
