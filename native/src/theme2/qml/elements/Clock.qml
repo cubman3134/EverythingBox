@@ -75,19 +75,46 @@ Item {
                 c.beginPath(); c.arc(SX(cx, y2), y2, r, 0, 6.2832); c.fill()
             }
 
-            // Layout: hour digits, colon, minute digits, then a small AM/PM.
-            var ampmSize = H * Number(T.val(clk.el, "ampmSize", 0.30))
-            c.font = "bold " + ampmSize + "px sans-serif"; c.textBaseline = "top"
-            var ampmTxt = pm ? "PM" : "AM", ampmW = c.measureText(ampmTxt).width, ampmGap = dw * 0.42
-            var totalW = hs.length * dw + (hs.length - 1) * gap + gap + colonW + gap
-                       + ms.length * dw + (ms.length - 1) * gap + ampmGap + ampmW + slant * dh
+            // AM/PM: stroke-drawn letters in the SAME slanted segment style as the digits (a plain
+            // canvas font read as a different typeface and, being sized off the element height, was
+            // the one run that could still overflow the box). Everything below scales with dh, so the
+            // whole unit has an EXACT width and centers as one piece.
+            var lh = dh * 0.38, lw = lh * 0.72, lgap = lh * 0.24, ampmGap = dw * 0.42
+            var ampmW = 2 * lw + lgap
+            function letter(ch, x0, y0) {
+                c.strokeStyle = ampmC; c.lineWidth = Math.max(2, t * 0.7); c.lineCap = "round"; c.lineJoin = "round"
+                function L(pts) {
+                    c.beginPath(); c.moveTo(SX(x0 + pts[0][0] * lw, y0 + pts[0][1] * lh), y0 + pts[0][1] * lh)
+                    for (var q = 1; q < pts.length; q++) c.lineTo(SX(x0 + pts[q][0] * lw, y0 + pts[q][1] * lh), y0 + pts[q][1] * lh)
+                    c.stroke()
+                }
+                if (ch === "A")      { L([[0, 1], [0.5, 0], [1, 1]]); L([[0.2, 0.62], [0.8, 0.62]]) }
+                else if (ch === "P") { L([[0, 1], [0, 0], [0.85, 0], [0.85, 0.5], [0, 0.5]]) }
+                else if (ch === "M") { L([[0, 1], [0, 0], [0.5, 0.5], [1, 0], [1, 1]]) }
+            }
+
+            // Exact unit width (all terms scale with dh) -> re-derive dh so the unit always fits, then center.
+            function unitW(dhv) {
+                var dwv = dhv * 0.54, gv = dwv * 0.22, cwv = dwv * 0.52
+                var lhv = dhv * 0.38, lwv = lhv * 0.72
+                return hs.length * dwv + (hs.length - 1) * gv + gv + cwv + gv
+                     + ms.length * dwv + (ms.length - 1) * gv + dwv * 0.42 + (2 * lwv + lhv * 0.24) + slant * dhv
+            }
+            if (unitW(dh) > W) {
+                dh = dh * W / unitW(dh)
+                dw = dh * 0.54; t = dw * Number(T.val(clk.el, "thickness", 0.16)); t2 = t / 2
+                gap = dw * 0.22; colonW = dw * 0.52; y = (H - dh) / 2; yb = y + dh
+                lh = dh * 0.38; lw = lh * 0.72; lgap = lh * 0.24; ampmGap = dw * 0.42; ampmW = 2 * lw + lgap
+            }
+            var totalW = unitW(dh)
             var x = (T.val(clk.el, "align", "center") === "left") ? 0 : (W - totalW) / 2
 
             for (var i = 0; i < hs.length; i++) { digit(x, hs.charCodeAt(i) - 48); x += dw + gap }
             colon(x); x += colonW + gap
             for (var j = 0; j < ms.length; j++) { digit(x, ms.charCodeAt(j) - 48); x += dw + gap }
             x += ampmGap - gap
-            c.fillStyle = ampmC; c.fillText(ampmTxt, x, y + dh * 0.06)
+            var ly = y + dh * 0.08
+            letter(pm ? "P" : "A", x, ly); letter("M", x + lw + lgap, ly)
         }
     }
 }
