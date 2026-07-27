@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.61 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.62 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -510,11 +510,23 @@ if(MYMEDIAVAULT_BUILD_APP)
     target_include_directories(probe_stremio PRIVATE src src/addons src/core)
     target_link_libraries(probe_stremio PRIVATE Qt6::Core)
 
-    # Headless test for the save-sync decision table. Pure — no Drive, no filesystem.
+    # Headless test for the save-sync decision table (pure) AND for the transport's conflict ordering and
+    # baseline rules, which are driven through SaveSync's virtual Drive seam against an in-memory cloud and
+    # a scratch dir under TEMP — real plan/execute/baseline code, no network. CloudSync is linked because
+    # SaveSync's default seam implementations call its primitives (miniz comes along for CloudSync's bundle
+    # zip, which nothing here touches).
     add_executable(probe_savesync tools/probe_savesync.cpp
-        src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h)
-    target_include_directories(probe_savesync PRIVATE src src/core)
-    target_link_libraries(probe_savesync PRIVATE Qt6::Core)
+        src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h
+        src/core/SaveSync.cpp     src/core/SaveSync.h
+        src/core/SaveMeta.cpp     src/core/SaveMeta.h
+        src/core/Tombstones.cpp   src/core/Tombstones.h
+        src/core/CloudSync.cpp    src/core/CloudSync.h
+        src/core/Settings.cpp     src/core/Settings.h
+        src/theme2/FormFactor.cpp src/theme2/FormFactor.h
+        third_party/miniz.c)
+    target_include_directories(probe_savesync PRIVATE src src/core src/theme2 third_party)
+    target_compile_definitions(probe_savesync PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_link_libraries(probe_savesync PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
     add_executable(probe_resolver tools/probe_resolver.cpp

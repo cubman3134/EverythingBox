@@ -1,8 +1,16 @@
-// Headless coverage for the save-sync decision table. Pure — no network, no Drive, no files on disk.
+// Headless coverage for the save-sync decision table (sections 1-7: pure — no network, no Drive, no files on
+// disk) AND for the transport's two load-bearing orderings (section 8: real SaveSync driven against an
+// in-memory cloud and a scratch directory under the temp dir; still no network).
 // Prints SAVESYNC-OK on success; any failure prints SAVESYNC-FAIL <what> and exits non-zero.
 #include "SaveSyncPlan.h"
+#include "SaveSync.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <cstdio>
 
 static int failures = 0;
@@ -28,6 +36,338 @@ static const Decision* decFor(const QVector<Decision>& ds, const QString& name)
 {
     for (const Decision& d : ds) if (d.name == name) return &d;
     return nullptr;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Section 8 scaffolding: a SaveSync whose FIVE Drive calls are in-memory, so the real plan/execute/
+// baseline path can be driven end to end. `calls` is an ordered transcript — the conflict rule is an
+// ORDERING rule, so the assertion that matters is which entry comes first, not which files exist after.
+// ---------------------------------------------------------------------------------------------------
+
+static QString shaOf(const QByteArray& d)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(d, QCryptographicHash::Sha256).toHex());
+}
+static bool writeFile(const QString& path, const QByteArray& data)
+{
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    const bool ok = f.write(data) == data.size();
+    f.close();
+    return ok;
+}
+static QByteArray readFile(const QString& path)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return {};
+    return f.readAll();
+}
+
+static QStringList g_roots;
+static QString freshRoot(const QString& tag)
+{
+    const QString r = QDir::tempPath() + QStringLiteral("/mmv-savesync-probe-%1-%2")
+                                             .arg(QCoreApplication::applicationPid()).arg(tag);
+    QDir(r).removeRecursively();
+    QDir().mkpath(r);
+    g_roots << r;
+    return r;
+}
+static void cleanupRoots() { for (const QString& r : g_roots) QDir(r).removeRecursively(); }
+
+// Index of the first transcript entry starting with `prefix`, or -1.
+static int firstCall(const QStringList& calls, const QString& prefix)
+{
+    for (int i = 0; i < calls.size(); ++i) if (calls.at(i).startsWith(prefix)) return i;
+    return -1;
+}
+
+class FakeSync : public SaveSync
+{
+public:
+    explicit FakeSync(const QString& root)
+        : SaveSync(nullptr, root, QStringLiteral("devLocal")) {}
+
+    // the in-memory cloud
+    QHash<QString, QByteArray> blobs;    // sync name -> bytes
+    QHash<QString, Entry>      index;    // the saves-index.json
+    QStringList                calls;    // "dl:<name>", "up:<name>", "putidx", in call order
+    QSet<QString>              failDownload, failUpload;
+    bool failFetch = false, failPut = false;
+
+    using SaveSync::firstRun;
+    using SaveSync::readBaseline;
+    using SaveSync::scanLocal;
+    using SaveSync::writeBaseline;
+
+protected:
+    void resolveFolder(std::function<void(const QString&)> cb) override { cb(QStringLiteral("folder")); }
+
+    void fetchManifest(const QString&, std::function<void(bool, const QHash<QString, Entry>&)> cb) override
+    {
+        if (failFetch) { cb(false, {}); return; }
+        cb(true, index);
+    }
+
+    void putManifest(const QString&, const QHash<QString, Entry>& m, std::function<void(bool)> cb) override
+    {
+        calls << QStringLiteral("putidx");
+        if (failPut) { cb(false); return; }
+        index = m;
+        cb(true);
+    }
+
+    void downloadInto(const QString&, const QString& name, const QString& destPath,
+                      std::function<void(bool)> cb) override
+    {
+        calls << (QStringLiteral("dl:") + name);
+        if (failDownload.contains(name) || !blobs.contains(name)) { cb(false); return; }
+        cb(writeFile(destPath, blobs.value(name)));
+    }
+
+    void uploadFrom(const QString&, const QString& name, const QString& srcPath,
+                    std::function<void(bool, const Entry&)> cb) override
+    {
+        calls << (QStringLiteral("up:") + name);
+        if (failUpload.contains(name)) { cb(false, {}); return; }
+        QFile f(srcPath);
+        if (!f.open(QIODevice::ReadOnly)) { cb(false, {}); return; }
+        const QByteArray d = f.readAll();
+        f.close();
+        blobs.insert(name, d);
+        Entry sent;
+        sent.name     = name;
+        sent.sha      = shaOf(d);
+        sent.size     = d.size();
+        sent.mtimeMs  = QFileInfo(srcPath).lastModified().toMSecsSinceEpoch();
+        sent.deviceId = QStringLiteral("devLocal");
+        cb(true, sent);
+    }
+};
+
+// A remote index row. `ageMs` is signed: negative puts the cloud copy in the future, i.e. it wins.
+static Entry remoteRow(const QString& name, const QByteArray& bytes, qint64 ageMs, const QString& dev)
+{
+    Entry r;
+    r.name     = name;
+    r.sha      = shaOf(bytes);
+    r.size     = bytes.size();
+    r.mtimeMs  = QDateTime::currentMSecsSinceEpoch() - ageMs;
+    r.deviceId = dev;
+    return r;
+}
+
+static void transportChecks()
+{
+    const QString N = QStringLiteral("saves/Zelda.srm");
+    const QByteArray LOCAL  = "LOCAL-SAVE-BYTES";
+    const QByteArray REMOTE = "REMOTE-SAVE-BYTES";
+    const qint64 kHour = 3600LL * 1000;
+
+    // Both sides differ from this, so plan() sees "both changed" and declares a conflict.
+    const auto staleBaseline = [&](FakeSync& s) {
+        Entry b; b.name = N; b.sha = QStringLiteral("baseline-sha"); b.size = 1; b.mtimeMs = 1;
+        QHash<QString, Entry> h; h.insert(N, b);
+        CHECK(s.writeBaseline(h), "the baseline is writable");
+    };
+
+    // ---- 8a. scanLocal: recursive, prefixed, and blind to its own conflict artifacts ----
+    {
+        const QString root = freshRoot(QStringLiteral("scan"));
+        writeFile(root + QStringLiteral("/saves/Flat.srm"), "a");
+        writeFile(root + QStringLiteral("/saves/snes/Deep.srm"), "b");   // save-sync T4 namespacing
+        writeFile(root + QStringLiteral("/states/Game.state1"), "c");
+        writeFile(root + QStringLiteral("/saves/Flat.conflict-devB-20260101-000000.srm"), "d");
+        writeFile(root + QStringLiteral("/addons/thing.js"), "e");        // outside the synced trees
+
+        FakeSync s(root);
+        const QHash<QString, Entry> got = s.scanLocal();
+        CHECK(got.contains(QStringLiteral("saves/Flat.srm")), "scanLocal finds a flat save");
+        CHECK(got.contains(QStringLiteral("saves/snes/Deep.srm")),
+              "scanLocal RECURSES into saves/<system>/ and keeps the subdirectory in the name");
+        CHECK(got.contains(QStringLiteral("states/Game.state1")), "scanLocal walks states/ too");
+        CHECK(got.size() == 3, "scanLocal syncs neither .conflict-* artifacts nor anything outside saves/states");
+        CHECK(got.value(QStringLiteral("saves/Flat.srm")).sha == shaOf("a"), "…hashing the contents");
+    }
+
+    // ---- 8b. THE RULE: when the REMOTE copy loses, it is fetched BEFORE the winner is uploaded ----
+    {
+        const QString root = freshRoot(QStringLiteral("remoteloses"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeSync s(root);
+        staleBaseline(s);
+        const Entry rr = remoteRow(N, REMOTE, kHour, QStringLiteral("devB"));   // cloud copy is an hour old
+        s.index.insert(N, rr);
+        s.blobs.insert(N, REMOTE);
+
+        QString keptTitle, keptAs;
+        QObject::connect(&s, &SaveSync::conflictKept, &s, [&](const QString& t, const QString& k) {
+            keptTitle = t; keptAs = k;
+        });
+
+        bool ran = false; int up = 0, down = 0, conf = 0;
+        s.syncNow([&](bool ok, int u, int d, int c) { ran = ok; up = u; down = d; conf = c; });
+        CHECK(ran && conf == 1, "the local-newer conflict is resolved");
+
+        const int dl = firstCall(s.calls, QStringLiteral("dl:"));
+        const int ul = firstCall(s.calls, QStringLiteral("up:"));
+        // The whole preservation promise. Uploading first overwrites the only copy of the loser's bytes.
+        CHECK(dl >= 0 && ul >= 0 && dl < ul,
+              "the losing CLOUD copy is downloaded BEFORE the winner is uploaded");
+
+        const QString kept = conflictName(N, QStringLiteral("devB"), rr.mtimeMs);
+        CHECK(readFile(root + QStringLiteral("/") + kept) == REMOTE,
+              "…and the loser's bytes are on disk under its .conflict-* name");
+        CHECK(kept.startsWith(QStringLiteral("saves/")), "…beside the original, not at the root");
+        CHECK(readFile(root + QStringLiteral("/") + N) == LOCAL, "the winner keeps the real name");
+        CHECK(s.blobs.value(N) == LOCAL, "…and is what the cloud now holds");
+        CHECK(keptAs == kept && !keptTitle.isEmpty(), "conflictKept names the preserved copy and a title");
+        CHECK(s.readBaseline().value(N).sha == shaOf(LOCAL),
+              "the baseline records the bytes that actually reached the cloud");
+        (void)up; (void)down;
+    }
+
+    // ---- 8c. …and if the loser cannot be fetched, NOTHING is uploaded ----
+    {
+        const QString root = freshRoot(QStringLiteral("remotelosesfail"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeSync s(root);
+        staleBaseline(s);
+        const Entry rr = remoteRow(N, REMOTE, kHour, QStringLiteral("devB"));
+        s.index.insert(N, rr);
+        s.blobs.insert(N, REMOTE);
+        s.failDownload.insert(N);
+
+        bool ok = true;
+        s.syncNow([&](bool o, int, int, int) { ok = o; });
+        CHECK(!ok, "a conflict whose loser could not be preserved is a FAILED sync");
+        CHECK(firstCall(s.calls, QStringLiteral("up:")) < 0,
+              "the winner is NOT uploaded when the losing cloud copy could not be preserved");
+        CHECK(s.blobs.value(N) == REMOTE, "…so the cloud copy is untouched");
+        CHECK(readFile(root + QStringLiteral("/") + N) == LOCAL, "…and so is the local one");
+        CHECK(s.readBaseline().value(N).sha == QStringLiteral("baseline-sha"),
+              "a failed conflict does not advance the baseline");
+    }
+
+    // ---- 8d. when the LOCAL copy loses, it is renamed aside before the winner lands on it ----
+    {
+        const QString root = freshRoot(QStringLiteral("localloses"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        const qint64 localMtime = QFileInfo(root + QStringLiteral("/") + N).lastModified().toMSecsSinceEpoch();
+        FakeSync s(root);
+        staleBaseline(s);
+        s.index.insert(N, remoteRow(N, REMOTE, -kHour, QStringLiteral("devB")));   // cloud copy is newer
+        s.blobs.insert(N, REMOTE);
+
+        bool ok = false; int conf = 0;
+        s.syncNow([&](bool o, int, int, int c) { ok = o; conf = c; });
+        CHECK(ok && conf == 1, "the cloud-newer conflict is resolved");
+        const QString kept = conflictName(N, QStringLiteral("devLocal"), localMtime);
+        CHECK(readFile(root + QStringLiteral("/") + kept) == LOCAL,
+              "the losing LOCAL copy is preserved under its .conflict-* name");
+        CHECK(readFile(root + QStringLiteral("/") + N) == REMOTE, "the cloud winner takes the real name");
+        CHECK(firstCall(s.calls, QStringLiteral("up:")) < 0, "nothing is uploaded when the local copy lost");
+        CHECK(s.readBaseline().value(N).sha == shaOf(REMOTE), "the baseline records what was written locally");
+    }
+
+    // ---- 8e. …and if the winner cannot be fetched, the local copy goes back under its real name ----
+    {
+        const QString root = freshRoot(QStringLiteral("locallosesfail"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeSync s(root);
+        staleBaseline(s);
+        s.index.insert(N, remoteRow(N, REMOTE, -kHour, QStringLiteral("devB")));
+        s.blobs.insert(N, REMOTE);
+        s.failDownload.insert(N);
+
+        bool ok = true;
+        s.syncNow([&](bool o, int, int, int) { ok = o; });
+        CHECK(!ok, "a conflict whose winner could not be fetched is a FAILED sync");
+        CHECK(readFile(root + QStringLiteral("/") + N) == LOCAL,
+              "the local copy is put BACK under its real name — a failed conflict is not half-applied");
+        CHECK(s.readBaseline().value(N).sha == QStringLiteral("baseline-sha"),
+              "…and the baseline still describes the pre-conflict state");
+    }
+
+    // ---- 8f. the baseline is written from what SUCCEEDED, never from the plan ----
+    {
+        const QString root = freshRoot(QStringLiteral("failedupload"));
+        const QString GOOD = QStringLiteral("saves/Good.srm");
+        const QString BAD  = QStringLiteral("saves/Bad.srm");
+        writeFile(root + QStringLiteral("/") + GOOD, "good");
+        writeFile(root + QStringLiteral("/") + BAD,  "bad");
+        FakeSync s(root);
+        CHECK(s.writeBaseline({}), "an empty baseline is writable");   // exists => not firstRun
+        s.failUpload.insert(BAD);
+
+        bool ok = true; int up = 0;
+        s.syncNow([&](bool o, int u, int, int) { ok = o; up = u; });
+        CHECK(!ok && up == 1, "one upload lands, one fails, and the sync reports failure");
+        const QHash<QString, Entry> base = s.readBaseline();
+        CHECK(base.value(GOOD).sha == shaOf("good"), "the file that uploaded IS recorded as synced");
+        CHECK(!base.contains(BAD),
+              "the file that FAILED is not — recording it would make the next run believe the cloud has it");
+        CHECK(!s.index.contains(BAD), "…and it is not in the cloud index either");
+    }
+
+    // ---- 8g. an index we could not publish does not advance the baseline ----
+    {
+        const QString root = freshRoot(QStringLiteral("failedindex"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeSync s(root);
+        s.failPut = true;
+        CHECK(s.firstRun(), "no baseline yet");
+
+        bool ok = true;
+        s.syncNow([&](bool o, int, int, int) { ok = o; });
+        CHECK(!ok, "a sync whose index could not be published reports failure");
+        CHECK(s.firstRun(),
+              "…and writes no baseline: bytes the index does not list are not bytes the cloud has");
+    }
+
+    // ---- 8h. "could not reach the cloud" is never "the cloud is empty" ----
+    {
+        const QString root = freshRoot(QStringLiteral("unreachable"));
+        writeFile(root + QStringLiteral("/") + N, LOCAL);
+        FakeSync s(root);
+        s.failFetch = true;
+
+        bool ok = true;
+        s.syncNow([&](bool o, int, int, int) { ok = o; });
+        CHECK(!ok, "an unreadable index fails the sync");
+        CHECK(s.firstRun() && readFile(root + QStringLiteral("/") + N) == LOCAL,
+              "…and changes nothing: an empty remote view plus a tombstone is a DELETE");
+        CHECK(firstCall(s.calls, QStringLiteral("up:")) < 0 && firstCall(s.calls, QStringLiteral("dl:")) < 0,
+              "…nothing moved in either direction");
+    }
+
+    // ---- 8i. the ordinary two-way pass ----
+    {
+        const QString root = freshRoot(QStringLiteral("happy"));
+        const QString MINE   = QStringLiteral("saves/Mine.srm");
+        const QString THEIRS = QStringLiteral("states/Theirs.state1");
+        writeFile(root + QStringLiteral("/") + MINE, "mine");
+        FakeSync s(root);
+        s.index.insert(THEIRS, remoteRow(THEIRS, "theirs", kHour, QStringLiteral("devB")));
+        s.blobs.insert(THEIRS, "theirs");
+
+        bool ok = false; int up = 0, down = 0, conf = 0;
+        s.syncNow([&](bool o, int u, int d, int c) { ok = o; up = u; down = d; conf = c; });
+        CHECK(ok && up == 1 && down == 1 && conf == 0, "a local-only save goes up and a cloud-only one comes down");
+        CHECK(readFile(root + QStringLiteral("/") + THEIRS) == "theirs", "the downloaded save is on disk");
+        CHECK(s.blobs.value(MINE) == "mine", "the uploaded save is in the cloud");
+        const QHash<QString, Entry> base = s.readBaseline();
+        CHECK(base.value(MINE).sha == shaOf("mine") && base.value(THEIRS).sha == shaOf("theirs"),
+              "the baseline now describes both sides");
+        CHECK(!s.firstRun(), "…so the next run is not a firstRun");
+
+        // Running again with nothing changed must be a no-op, not a re-upload of everything.
+        s.calls.clear();
+        s.syncNow([&](bool o, int u, int d, int c) { ok = o; up = u; down = d; conf = c; });
+        CHECK(ok && up == 0 && down == 0 && conf == 0 && s.calls.isEmpty(),
+              "a second pass with nothing changed moves nothing");
+    }
 }
 
 int main(int argc, char** argv)
@@ -214,6 +554,17 @@ int main(int argc, char** argv)
               "the same basename under two systems cannot collide");
     }
 
+    // ------------------------------------------------- 8. the TRANSPORT: ordering, and a baseline that
+    //                                                       only ever records what actually happened.
+    //
+    // These are the two rules SaveSync exists to keep, and neither can be asserted against a live Google
+    // account — so the cloud is substituted through SaveSync's transport seam and everything else (plan,
+    // execute, conflict ordering, baseline write) is the real code running against real files.
+    {
+        transportChecks();
+    }
+
+    cleanupRoots();
     if (failures) { std::fprintf(stderr, "SAVESYNC-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("SAVESYNC-OK\n");
     return 0;
