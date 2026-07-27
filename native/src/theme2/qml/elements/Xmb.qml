@@ -72,7 +72,10 @@ Item {
             if (!xmb.host) return
             var n = xmb.items ? xmb.items.length : 0
             if (n < 1) { xmb.itemScroll = xmb.itemIndex; return }
-            var target = Math.max(0, Math.min(n - 1, Math.round(xmb.itemScroll)))
+            // Fling momentum: a fast flick travels beyond the finger's physical distance (~220ms of
+            // projected motion at release velocity), so a big swipe crosses many rows, not one or two.
+            var fling = -centroid.velocity.y * 0.22 / xmb.itemGap
+            var target = Math.max(0, Math.min(n - 1, Math.round(xmb.itemScroll + fling)))
             if (xmb.host.gotoItemSelectOnly) xmb.host.gotoItemSelectOnly(target)
             xmb.itemScroll = xmb.itemIndex   // snap (covers header rows / unchanged selection)
         }

@@ -9,6 +9,11 @@
 // Platform query: the key window's safe-area insets in points (iOS .mm implementation; zeros elsewhere).
 QMarginsF mmvSafeAreaInsets();
 
+// iOS: put the AVAudioSession in the Playback category. Qt's default session is 'ambient', which the
+// RINGER/SILENT switch mutes — a media app's sounds and video audio must play regardless of the switch
+// (every video app does this). No-op off iOS.
+void mmvConfigureAudioSession();
+
 // The `safeArea` context property: QML binds top/bottom; refresh() re-reads the platform (call it once the
 // window is up — the insets are zero before the platform window exists — and on orientation changes).
 class SafeAreaBridge : public QObject
