@@ -38,10 +38,24 @@ Item {
     Canvas {
         visible: btn.housing
         z: -1
-        property real hcH: btn.height * 1.20
-        height: hcH; width: btn.width * btn.hscale
-        // Top pinned to where the taller (1.28) tube sat; only the bottom comes up.
-        y: btn.height / 2 - btn.height * 1.28 / 2 + btn.height * 0.05
+        // Mobile: the pod scales from the CLAMPED cap (not the warped slot) and its tube runs to the
+        // real screen edge, so the flat end is never on-screen — the Wii look the theme intends.
+        // Distance from the cap centre to the near screen edge, in this item's coordinates.
+        property real edgeDist: btn.width * (btn.hscale - 0.5)
+        function recompute() {
+            if (!btn.mobile || !btn.Window.window) return
+            var p = btn.mapToItem(null, btn.width / 2, 0)
+            if (p) edgeDist = btn.hside === "right" ? Math.max(40, btn.Window.width - p.x) : Math.max(40, p.x)
+        }
+        Component.onCompleted: recompute()
+        Connections { target: btn.Window.window; function onWidthChanged() { hc.recompute() } }
+        id: hc
+        property real capD: btn.mobile ? Math.min(Math.max(btn.width, btn.height), 56) : btn.height
+        property real hcH: btn.mobile ? capD * 1.35 : btn.height * 1.20
+        height: hcH
+        width: btn.mobile ? edgeDist + hcH / 2 : btn.width * btn.hscale
+        y: btn.mobile ? btn.height / 2 - hcH / 2
+                      : btn.height / 2 - btn.height * 1.28 / 2 + btn.height * 0.05
         x: btn.hside === "right" ? (btn.width / 2 - hcH / 2) : (btn.width / 2 + hcH / 2 - width)
         onWidthChanged: requestPaint(); onHeightChanged: requestPaint()
         onPaint: {
