@@ -13,11 +13,13 @@ Item {
     property var host
     property var card: T.val(el, "card", ({}))
 
-    // Phone: the theme's landscape page density (4×3) crams 12 tiny cells onto a portrait screen —
-    // drop to 2×3 so each channel card is a readable, tappable size. TV/desktop keep the theme's grid.
+    // Phone: the theme's page density (4×3) crams 12 tiny cells onto a phone — drop to a readable,
+    // tappable grid per ORIENTATION: portrait stacks 2×3; landscape spreads 4×2 (portrait's 2 columns
+    // rotated made hugely wide, stubby cards). TV/desktop keep the theme's grid.
     readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
-    readonly property int cols: mobile ? 2 : Math.max(1, Number(T.val(el, "columns", 4)))
-    readonly property int rows: mobile ? 3 : Math.max(1, Number(T.val(el, "rows", 3)))
+    readonly property bool portrait: height > width
+    readonly property int cols: mobile ? (portrait ? 2 : 4) : Math.max(1, Number(T.val(el, "columns", 4)))
+    readonly property int rows: mobile ? (portrait ? 3 : 2) : Math.max(1, Number(T.val(el, "rows", 3)))
     readonly property int perPage: cols * rows
     readonly property var items: (ctx && ctx.items) ? ctx.items : []
     readonly property int count: items.length
@@ -75,7 +77,11 @@ Item {
                             z: sel ? 2 : 0
 
                             MouseArea {
-                                anchors.fill: parent; enabled: !cell.empty
+                                // Desktop/TV pointer path only — on touch the viewport MouseArea below
+                                // arbitrates tap-vs-swipe itself (a per-cell area would win the grab on
+                                // press and starve the swipe recognizer; that is why the round-6
+                                // DragHandler never fired on the phone).
+                                anchors.fill: parent; enabled: !cell.empty && !ch.mobile
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: if (ch.host && ch.host.gotoItem) ch.host.gotoItem(cell.slot)
                             }
@@ -141,6 +147,7 @@ Item {
     component PageArrow: Rectangle {
         property bool forward: true
         property bool on: false
+        z: 2  // above the touch tap/swipe MouseArea (a later sibling), so arrow clicks stay the arrows'
         width: ch.arrowW * 0.72; height: width; radius: width / 2
         color: T.val(ch.card, "labelBg", "#F7FAFD"); border.width: 2; border.color: "#AEBBCB"
         opacity: on ? 1.0 : 0.3
@@ -178,18 +185,31 @@ Item {
         if (!host || !host.gotoItemSelectOnly) return
         host.gotoItemSelectOnly(Math.max(0, Math.min(count - 1, cur + dir * perPage)))
     }
-    // Vertical swipe flips pages on touch devices (grab-threshold cooperation leaves cell taps alone).
-    DragHandler {
+    // Touch: ONE MouseArea over the viewport arbitrates tap vs swipe (the per-cell areas are desktop-only —
+    // see the note there; they won the grab on press and starved the round-6 DragHandler, which is why
+    // swiping never worked on the phone). A press that travels ≥ 40pt vertically (or 60 horizontally,
+    // matching the pages' slide direction) flips a page on release; anything shorter is a tap, mapped to
+    // its slot. Sits over the page Row but under the floating PageArrows (declaration order), so the
+    // arrows still take their clicks.
+    MouseArea {
         enabled: ch.mobile
-        target: null
-        yAxis.enabled: true; xAxis.enabled: false
-        // translation/centroid reset on deactivation — latch the travel while the drag is live.
-        property real dy: 0
-        onTranslationChanged: if (active) dy = translation.y
-        onActiveChanged: {
-            if (active) { dy = 0; return }
-            if (dy <= -40)     ch.flipPage(1)
-            else if (dy >= 40) ch.flipPage(-1)
+        x: 0; y: ch.topPad; width: ch.vpW; height: ch.height - ch.topPad
+        property real px: 0; property real py: 0
+        onPressed: function(m) { px = m.x; py = m.y }
+        onReleased: function(m) {
+            var dx = m.x - px, dy = m.y - py
+            if (dy <= -40 || dx <= -60)     { ch.flipPage(1);  return }
+            if (dy >= 40  || dx >= 60)      { ch.flipPage(-1); return }
+            if (Math.abs(dx) > 14 || Math.abs(dy) > 14) return   // a hesitant drag: neither tap nor swipe
+            // Tap: page-local slot under the finger (the Row is translated by whole pages, so global
+            // column → page + column decompose exactly; pageW == cols * cellW).
+            var gx = m.x + ch.page * ch.pageW
+            var pageIdx = Math.floor(gx / ch.pageW)
+            var colIn   = Math.floor((gx - pageIdx * ch.pageW) / ch.cellW)
+            var rowIn   = Math.floor(m.y / ch.cellH)
+            if (rowIn < 0 || rowIn >= ch.rows || colIn >= ch.cols) return
+            var slot = pageIdx * ch.perPage + rowIn * ch.cols + colIn
+            if (slot >= 0 && slot < ch.count && ch.host && ch.host.gotoItem) ch.host.gotoItem(slot)
         }
     }
     // Ask the host for the next page of items BEFORE its slots can peek into view as empty boxes:
