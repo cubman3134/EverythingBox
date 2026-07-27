@@ -6,6 +6,7 @@
 #include <QQuickWidget>
 #include <QQuickItem>
 #include <QQmlContext>
+#include <QEventLoop>
 #include <QVBoxLayout>
 #include <QUrl>
 #include <QColor>
@@ -62,6 +63,7 @@ ThemedPanelHost::ThemedPanelHost(QWidget* parent) : QWidget(parent)
     buildPanelNavGraph(*graph_, 0);   // counts fed live per present()
     model_ = new PanelListModel(this);
     bridge_ = new PanelBridge(model_, this);
+    inlineEdit_ = new InlineEditBridge(this);
 
     auto* v = new QVBoxLayout(this);
     v->setContentsMargins(0, 0, 0, 0);
@@ -97,6 +99,7 @@ void ThemedPanelHost::buildView()
     // model; `panel` carries the title/style/model the delegates bind.
     view_->rootContext()->setContextProperty(QStringLiteral("nav"), graph_);
     view_->rootContext()->setContextProperty(QStringLiteral("panel"), bridge_);
+    view_->rootContext()->setContextProperty(QStringLiteral("inlineEdit"), inlineEdit_);
     // `form` (subsystem D): the panel scales its rows/fonts + insets the safe area from the form-factor tokens.
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/elements/SettingsPanel.qml")));
@@ -322,8 +325,27 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
         // Snapshot the edit inputs first: a REFERENCE into e.rows must NOT survive the loop (an async replaceTop can
         // free this row's buffer mid-edit — the UAF the review found), so `r` is untouched from here on.
         const QString label = r.label, initial = r.value;
-        const QLineEdit::EchoMode echo = r.masked ? QLineEdit::Password : QLineEdit::Normal;
-        const QString t = Osk::getText(label, initial, echo, window(), graph_);
+        const bool masked = r.masked;
+        const QLineEdit::EchoMode echo = masked ? QLineEdit::Password : QLineEdit::Normal;
+        QString t;
+        if (FormFactor::instance().mode() == FormFactor::Mode::Mobile)
+        {
+            // Mobile: edit IN the row — the QML delegate swaps in a focused TextInput (the platform
+            // keyboard pops over the panel) and reports back through the bridge. Same blocking shape
+            // as the OSK path, so everything below (re-locate by id, commit, dispatch) is untouched.
+            QEventLoop loop;
+            bool ok = false; QString out;
+            const QMetaObject::Connection conn = connect(inlineEdit_, &InlineEditBridge::finished, &loop,
+                [&](const QString& s, bool o) { out = s; ok = o; loop.quit(); });
+            emit inlineEdit_->begin(initial, masked);
+            loop.exec();
+            disconnect(conn);
+            t = ok ? out : QString();
+        }
+        else
+        {
+            t = Osk::getText(label, initial, echo, window(), graph_);
+        }
         if (!t.isNull())
         {
             // Re-locate the row by id in the CURRENT top entry (the panel may have been rebuilt during the OSK).
