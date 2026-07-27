@@ -41,6 +41,9 @@
 #include <QJsonArray>
 #include <QVector>
 #include <QPair>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <tuple>
 #include <cstdio>
 
@@ -835,6 +838,41 @@ int main(int argc, char** argv)
                 raw.remove(QLatin1String(g));
             raw.sync();
         }
+    }
+
+    // ---- 18. save-sync T3: a SAVE write no longer moves the heavy-bundle fingerprint ---------------------
+    // saves/ and states/ left buildBundle AND stateHash. This is the whole point of that change: while saves
+    // were folded into the fingerprint, one F2 press read as "local changed" and re-uploaded addons, themes
+    // and settings alongside the save. SaveSync owns those files per-file now.
+    {
+        const QString app = AppPaths::dataDir();
+        const QString saveFile  = app + QStringLiteral("/saves/ProbeT3.srm");
+        const QString stateFile = app + QStringLiteral("/states/ProbeT3.state");
+        const QString themeFile = app + QStringLiteral("/themes/probeT3/theme.json");
+        QDir().mkpath(QFileInfo(saveFile).absolutePath());
+        QDir().mkpath(QFileInfo(stateFile).absolutePath());
+        QDir().mkpath(QFileInfo(themeFile).absolutePath());
+        const auto write = [](const QString& p, const QByteArray& b) {
+            QFile f(p); if (f.open(QIODevice::WriteOnly)) { f.write(b); f.close(); }
+        };
+
+        const QByteArray fp0 = CloudSync::stateFingerprint();
+        write(saveFile,  "SRAM-A");
+        write(stateFile, "STATE-A");
+        CHECK(CloudSync::stateFingerprint() == fp0);   // a save/state APPEARING doesn't flip the gate
+        write(saveFile,  "SRAM-B");                    // ...and neither does overwriting one (the F2 case)
+        write(stateFile, "STATE-B");
+        CHECK(CloudSync::stateFingerprint() == fp0);
+
+        // The fingerprint still notices a genuinely bundle-carried FILE, so we didn't silence it wholesale.
+        write(themeFile, "{}");
+        CHECK(CloudSync::stateFingerprint() != fp0);
+
+        QFile::remove(saveFile); QFile::remove(stateFile); QFile::remove(themeFile);
+        QDir(app + QStringLiteral("/saves")).removeRecursively();
+        QDir(app + QStringLiteral("/states")).removeRecursively();
+        QDir(app + QStringLiteral("/themes/probeT3")).removeRecursively();
+        CHECK(CloudSync::stateFingerprint() == fp0);   // cleanup restored the baseline (no stray left behind)
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
