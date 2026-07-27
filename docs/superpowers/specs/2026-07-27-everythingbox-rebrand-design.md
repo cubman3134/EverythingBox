@@ -122,9 +122,10 @@ exists because "should" is not "will", and because a token can expire mid-run.
 
 `native/tools/run-headless-probes.sh` gains a check, in the same shape as the existing
 `qml no-direct-selection-writes` and `retroview srm-path` gates: the tracked tree must contain **zero**
-occurrences of `MyMediaVault`, `My Media Vault`, `mymediavault`, or `MMV`, with exactly two exemptions —
-`AppBrand.h`'s `Legacy` block and `BrandMigration.cpp`. Both are named explicitly, so a new occurrence
-anywhere else fails CI rather than quietly accumulating.
+occurrences of `MyMediaVault`, `My Media Vault`, `mymediavault`, or `MMV`, with exactly **three** exemptions —
+`AppBrand.h`'s `Legacy` block, `BrandMigration.cpp`, and the aiocatalog Worker (which keeps reading the old
+config header for already-deployed instances, per the edge table below). All three are named explicitly, so a
+new occurrence anywhere else fails CI rather than quietly accumulating.
 
 This is the difference between "I renamed everything" and "nothing can slip back in."
 
