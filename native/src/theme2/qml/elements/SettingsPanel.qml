@@ -323,15 +323,17 @@ Rectangle {
                             onVisibleChanged: {
                                 if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
                             }
-                            // Finish an edit exactly once: FLUSH the input method first — iOS autocorrect
-                            // holds the current word as uncommitted composition, and reading .text without
-                            // committing it drops that word (the "my name cleared" bug) — then commit and
-                            // dismiss the keyboard explicitly (the ✓ key does not dismiss it on its own).
+                            // Finish an edit exactly once. iOS autocorrect holds the word being typed as
+                            // uncommitted COMPOSITION: it is not in .text yet, and Qt.inputMethod.commit()
+                            // flushes asynchronously on device — reading .text right after still misses it
+                            // (the "my name cleared" bug). preeditText IS that composition, synchronously —
+                            // commit text + preedit. Then dismiss the keyboard (the ✓ key never does).
                             function finishEdit(ok) {
                                 if (!root.inlineEditing) return
+                                var full = text + (preeditText || "")
                                 Qt.inputMethod.commit()
                                 root.inlineEditing = false
-                                if (ok) inlineEdit.commit(text)
+                                if (ok) inlineEdit.commit(full)
                                 else    inlineEdit.cancel()
                                 Qt.inputMethod.hide()
                             }

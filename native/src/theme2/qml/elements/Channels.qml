@@ -94,13 +94,33 @@ Item {
                                                                      : T.val(ch.card, "border", "#B7C3D4"))
                                 scale: cell.sel ? Number(T.val(ch.card, "selectedScale", 1.0)) : 1.0
                                 Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
+                                // Poster cards keep a title STRIP below the artwork (text over a poster is
+                                // unreadable/confusing); plain colored tiles (no image) keep the centered label.
+                                readonly property bool hasImg: !cell.empty && !!(cell.item && cell.item.image)
+                                readonly property real stripH: hasImg ? Math.max(30, height * 0.24) : 0
                                 Image {
-                                    anchors.fill: parent
+                                    anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+                                    height: parent.height - parent.stripH
                                     source: (cell.item && cell.item.image && ch.host) ? ch.host.resolve(cell.item.image) : ""
                                     fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready
                                 }
-                                Text {
-                                    visible: !cell.empty
+                                Rectangle { // the title strip under the poster
+                                    visible: parent.hasImg
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                                    height: parent.stripH
+                                    color: T.val(ch.card, "labelBg", "#F4F7FB")
+                                    Text {
+                                        anchors.fill: parent; anchors.margins: 4
+                                        text: (cell.item && cell.item.title) ? cell.item.title : ""
+                                        color: T.val(ch.card, "labelText", "#2A3646")
+                                        // Sized off the strip (not the screen) so two wrapped lines always fit.
+                                        font.pixelSize: Math.max(10, parent.parent.stripH * 0.30); font.bold: true
+                                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                        wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                                    }
+                                }
+                                Text { // colored tile (no artwork): label centered on the tile, as before
+                                    visible: !cell.empty && !parent.hasImg
                                     anchors.centerIn: parent; width: parent.width * 0.88
                                     text: (cell.item && cell.item.title) ? cell.item.title : ""
                                     color: T.val(ch.card, "labelColor", "#FFFFFF")
@@ -151,4 +171,36 @@ Item {
     }
     PageArrow { anchors.left: parent.left;  anchors.verticalCenter: parent.verticalCenter; forward: false; on: ch.page > 0 }
     PageArrow { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; forward: true;  on: ch.page < ch.pageCount - 1 }
+
+    // ---- touch paging + look-ahead loading -----------------------------------------------------------------
+    // Whole-page jump via the host's selection (the page follows the selection, same as the arrows).
+    function flipPage(dir) {
+        if (!host || !host.gotoItemSelectOnly) return
+        host.gotoItemSelectOnly(Math.max(0, Math.min(count - 1, cur + dir * perPage)))
+    }
+    // Vertical swipe flips pages on touch devices (grab-threshold cooperation leaves cell taps alone).
+    DragHandler {
+        enabled: ch.mobile
+        target: null
+        yAxis.enabled: true; xAxis.enabled: false
+        // translation/centroid reset on deactivation — latch the travel while the drag is live.
+        property real dy: 0
+        onTranslationChanged: if (active) dy = translation.y
+        onActiveChanged: {
+            if (active) { dy = 0; return }
+            if (dy <= -40)     ch.flipPage(1)
+            else if (dy >= 40) ch.flipPage(-1)
+        }
+    }
+    // Ask the host for the next page of items BEFORE its slots can peek into view as empty boxes:
+    // whenever the page after the current one isn't fully loaded, pull more (latched per page so a
+    // source with nothing further doesn't get hammered).
+    property int lastMoreReq: -1
+    function maybeLoadMore() {
+        if (!host || !host.nearEnd) return
+        if ((page + 2) * perPage > count && page !== lastMoreReq) { lastMoreReq = page; host.nearEnd() }
+    }
+    onPageChanged: maybeLoadMore()
+    onCountChanged: { lastMoreReq = -1; maybeLoadMore() }
+    Component.onCompleted: maybeLoadMore()
 }
