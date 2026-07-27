@@ -287,12 +287,15 @@ Append to `native/tools/run-headless-probes.sh`, following the shape of the `qml
 # rather than a claim someone made once. THREE files may still name the previous brand, each for a stated
 # reason: AppBrand.h's Legacy block and BrandMigration.cpp exist to migrate installs that predate the rename,
 # and the aiocatalog Worker accepts the old config header because a Worker already deployed from it keeps
-# reading that header until someone redeploys it. Anything else is a leftover — or a new one someone just
-# typed — and it fails here.
+# reading that header until someone redeploys it. The rebrand's own spec and plan are exempt for the obvious
+# reason that a document explaining a rename has to be able to name what was renamed. Anything else is a
+# leftover — or a new one someone just typed — and it fails here.
 echo "=== old-brand references ==="
 brand_hits="$(cd "$HERE/../.." && git grep -I -n -i -e 'mymediavault' -e 'my media vault' -e '\bMMV\b' -e 'MMV_' \
   -- . ':(exclude)native/src/core/AppBrand.h' ':(exclude)native/src/core/BrandMigration.cpp' \
-       ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' || true)"
+       ':(exclude)native/addon-protocol/aiocatalog-worker/src/worker.js' \
+       ':(exclude)docs/superpowers/specs/2026-07-27-everythingbox-rebrand-design.md' \
+       ':(exclude)docs/superpowers/plans/2026-07-27-everythingbox-rebrand-plan.md' || true)"
 if [ -n "$brand_hits" ]; then
   echo "$brand_hits"
   echo "FAIL: old-brand references (the previous name survives outside AppBrand.h/BrandMigration.cpp)"
