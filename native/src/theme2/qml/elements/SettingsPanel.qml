@@ -319,24 +319,34 @@ Rectangle {
                             horizontalAlignment: TextInput.AlignRight
                             clip: true
                             echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
+                            EnterKey.type: Qt.EnterKeyDone // the ✓/Done return key on the software keyboard
                             onVisibleChanged: {
                                 if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
                             }
-                            onAccepted: if (root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
-                            Keys.onEscapePressed: { root.inlineEditing = false; inlineEdit.cancel() }
+                            // Finish an edit exactly once: FLUSH the input method first — iOS autocorrect
+                            // holds the current word as uncommitted composition, and reading .text without
+                            // committing it drops that word (the "my name cleared" bug) — then commit and
+                            // dismiss the keyboard explicitly (the ✓ key does not dismiss it on its own).
+                            function finishEdit(ok) {
+                                if (!root.inlineEditing) return
+                                Qt.inputMethod.commit()
+                                root.inlineEditing = false
+                                if (ok) inlineEdit.commit(text)
+                                else    inlineEdit.cancel()
+                                Qt.inputMethod.hide()
+                            }
+                            onAccepted: finishEdit(true)
+                            Keys.onEscapePressed: finishEdit(false)
                             onActiveFocusChanged: // tapping away commits what was typed (phone convention)
-                                if (!activeFocus && root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
-                            // The software keyboard's Done button dismisses the input panel WITHOUT delivering
-                            // a Return key — treat panel dismissal during an edit as commit, or the typed text
-                            // silently evaporates and the edit state wedges.
+                                if (!activeFocus) finishEdit(true)
+                            // The software keyboard's Done button can also dismiss the input panel WITHOUT
+                            // delivering a Return key — treat panel dismissal during an edit as commit.
                             Connections {
                                 target: Qt.inputMethod
                                 enabled: inlineInput.visible
                                 function onVisibleChanged() {
-                                    if (!Qt.inputMethod.visible && root.inlineEditing && inlineInput.activeFocus) {
-                                        root.inlineEditing = false
-                                        inlineEdit.commit(inlineInput.text)
-                                    }
+                                    if (!Qt.inputMethod.visible && root.inlineEditing && inlineInput.activeFocus)
+                                        inlineInput.finishEdit(true)
                                 }
                             }
                         }
