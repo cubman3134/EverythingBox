@@ -54,6 +54,20 @@ Rectangle {
     // active LogView delegate scrolls in response to `scrollLog`.
     property bool logScroll: false
     signal scrollLog(int delta)
+
+    // Mobile inline text editing (host contract: InlineEditBridge). While active, the SELECTED TextField
+    // row swaps its value label for a focused TextInput — the platform keyboard pops over the panel.
+    property bool   inlineEditing: false
+    property string inlineInitial: ""
+    property bool   inlineMasked:  false
+    Connections {
+        target: (typeof inlineEdit !== "undefined") ? inlineEdit : null
+        function onBegin(initial, masked) {
+            root.inlineInitial = initial
+            root.inlineMasked = masked
+            root.inlineEditing = true
+        }
+    }
     // The currently-selected row's kind — the selected delegate (always realized: it's the ListView currentItem)
     // publishes it, so the root can tell whether Enter should enter LogView scroll mode without reaching into the
     // model by index.
@@ -67,6 +81,7 @@ Rectangle {
         if (!g) return
         // Scroll mode: keys drive the log, not the cursor. EVERY key is swallowed while scrolling (a read-only
         // modal state) — an unhandled key must not leak past the mode and move the cursor or trigger the graph.
+        if (root.inlineEditing) return // the row's TextInput owns every key while an inline edit runs
         if (root.logScroll) {
             if (e.key === Qt.Key_Up)            root.scrollLog(-48)
             else if (e.key === Qt.Key_Down)     root.scrollLog(48)
@@ -121,7 +136,11 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             text: (typeof panel !== "undefined" && panel) ? panel.title : ""
             color: root.cText; font.pixelSize: Math.round(26 * root.ffs); font.bold: true
-            elide: Text.ElideRight // a phone-width header can't fit every title
+            // A phone-width header can't fit every title at full size: shrink-to-fit FIRST (the whole
+            // title stays readable), and only elide once even the minimum size can't hold it.
+            fontSizeMode: Text.HorizontalFit
+            minimumPixelSize: 15
+            elide: Text.ElideRight
         }
         Rectangle {   // hairline under the header
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
@@ -284,9 +303,29 @@ Rectangle {
                             }
                         }
 
+                        // Inline editor (mobile): replaces the value label on the selected row while the
+                        // host's inline-edit loop runs. Focus summons the system keyboard; Return commits,
+                        // Escape (or losing focus) resolves the edit so the host's loop always terminates.
+                        TextInput {
+                            visible: del.sel && del.kind === root.kTextField && root.inlineEditing
+                            anchors.verticalCenter: parent.verticalCenter
+                            width: Math.round(del.width * 0.55)
+                            color: root.cText; font.pixelSize: 16
+                            horizontalAlignment: TextInput.AlignRight
+                            clip: true
+                            echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
+                            onVisibleChanged: {
+                                if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
+                            }
+                            onAccepted: if (root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
+                            Keys.onEscapePressed: { root.inlineEditing = false; inlineEdit.cancel() }
+                            onActiveFocusChanged: // tapping away commits what was typed (phone convention)
+                                if (!activeFocus && root.inlineEditing) { root.inlineEditing = false; inlineEdit.commit(text) }
+                        }
+
                         // TextField: current text (masked to dots for credentials), or a dim "—" when empty.
                         Text {
-                            visible: del.kind === root.kTextField
+                            visible: del.kind === root.kTextField && !(del.sel && root.inlineEditing)
                             anchors.verticalCenter: parent.verticalCenter
                             readonly property bool has: del.rowData && del.rowData.value !== ""
                             readonly property bool masked: del.rowData && del.rowData.masked === true
