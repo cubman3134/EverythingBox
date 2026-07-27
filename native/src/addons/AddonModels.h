@@ -27,6 +27,10 @@ struct AddonCatalog
     QString id;    // passed back to getCatalog({catalog:id})
     QString name;  // display label (the media-type tab)
     QString type;  // "movie" | "series" | "game" | "album" | ... (hint for routing/icons)
+    // This catalog cannot answer without a search term, so it is a SEARCH SOURCE and not a browse shelf.
+    // It must still be listed — dropping it is what previously made search-only add-ons invisible — so the
+    // browse surfaces filter on this instead.
+    bool searchOnly = false;
 };
 
 // A user-selectable catalog filter (genre / year / rating / sort), advertised by a catalog response so the

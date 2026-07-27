@@ -6,6 +6,7 @@
 // no interpreter state is shared across threads. Results come back to the GUI via catalogReady().
 #pragma once
 #include "AddonModels.h"
+#include "StremioTranslate.h"
 
 #include <QObject>
 #include <QString>
@@ -36,6 +37,10 @@ struct LoadedAddon
     bool stremio = false;
     QStringList stremioResources; // "catalog" / "meta" / "stream" / "subtitles"
     QStringList stremioTypes;     // "movie" / "series" / ...
+    // The fully parsed Stremio manifest. stremioResources/stremioTypes above remain as the quick-lookup
+    // lists the rest of the class already uses; this carries everything they cannot (extras, idPrefixes,
+    // behaviorHints, per-catalog classification).
+    StremioTranslate::Manifest stremioManifest;
     bool isMediaSource() const
     {
         return (manifest.type == QStringLiteral("media-source") || stremio)

@@ -82,6 +82,10 @@ void CatalogPrefetcher::enqueueSweep()
         const QString sourceId = src->manifest.id;
         for (const AddonCatalog& cat : mgr_->catalogs(src))
         {
+            // A search-only catalog has no landing page to warm: this sweep fetches with an EMPTY query, which
+            // is the one request it cannot answer. Warming it would spend a request per sweep on a guaranteed
+            // empty result. It stays reachable through the search fan-out, which supplies the term.
+            if (cat.searchOnly) continue;
             const QString key = jobKey(sourceId, cat.id);
             if (active_.contains(key)) continue; // already queued or in flight
             // Skip anything still comfortably within the cache TTL — a warm cache costs no requests. (The
