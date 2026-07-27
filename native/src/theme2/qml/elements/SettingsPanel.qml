@@ -121,7 +121,11 @@ Rectangle {
             anchors.verticalCenter: parent.verticalCenter
             text: (typeof panel !== "undefined" && panel) ? panel.title : ""
             color: root.cText; font.pixelSize: Math.round(26 * root.ffs); font.bold: true
-            elide: Text.ElideRight // a phone-width header can't fit every title
+            // A phone-width header can't fit every title at full size: shrink-to-fit FIRST (the whole
+            // title stays readable), and only elide once even the minimum size can't hold it.
+            fontSizeMode: Text.HorizontalFit
+            minimumPixelSize: 15
+            elide: Text.ElideRight
         }
         Rectangle {   // hairline under the header
             anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
