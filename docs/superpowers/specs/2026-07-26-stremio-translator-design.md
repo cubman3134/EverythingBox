@@ -26,12 +26,12 @@ types, settings forms, metadata-only providers, a `/detail` route. Alongside it,
 Verified against the [Stremio addon protocol](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/protocol.md)
 and [manifest schema](https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/manifest.md).
 
-1. **`resources` may be an array of OBJECTS, and MMV assumes strings.** The schema permits both
-   `["catalog","stream"]` and `[{"name":"stream","types":["movie"],"idPrefixes":["tt"]}]`, mixed freely.
-   MMV parses the array with `toString()` into a `QStringList` (`AddonManager.cpp:302-310`), so the object
-   form yields empty strings, matches neither `"catalog"` nor `"stream"`, and **the addon installs and then
-   does nothing at all**. This is a live bug, not a missing feature, and the object form is exactly what
-   stream addons scoping to `tt` use.
+1. **The object form of `resources` is read for its name only; its `types` and `idPrefixes` are dropped.**
+   The schema permits both `["catalog","stream"]` and
+   `[{"name":"stream","types":["movie"],"idPrefixes":["tt"]}]`, mixed freely. MMV *does* handle both shapes
+   for the resource **name** (`AddonManager.cpp:314` ternaries on `isString()`), so this is not the
+   "installs and does nothing" failure it first looked like — but everything else the object carries is
+   discarded, which is where per-resource routing would have come from.
 2. **Catalogs that require an `extra` are dropped entirely** (`:321-327`). Search-only and genre-required
    catalogs — a large fraction of real addons — vanish silently.
 3. **`idPrefixes` is unreferenced anywhere in the repo**, so every stream request fans out to every provider.
