@@ -33,7 +33,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.72";
+static constexpr const char* kAppVersion = "0.5.73";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -287,7 +287,7 @@ int main(int argc, char** argv)
     // Test-only seam (parity with MMV_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
     // mobile layout can be exercised with the uitest channel on a desktop host (where the window could
     // otherwise never go below the desktop layout's minimum). Never active in production.
-    if (qEnvironmentVariableIsSet("MMV_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
     {
         const QStringList wh = qEnvironmentVariable("MMV_TEST_WINDOW").split(QLatin1Char('x'));
         if (wh.size() == 2 && wh[0].toInt() > 0 && wh[1].toInt() > 0)

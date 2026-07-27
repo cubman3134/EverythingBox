@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Polish-track flow sweep (phase-2 polish track, Task 1). Launches the deployed app with
-MMV_UITEST=1, walks the themed-XMB home flow, and captures a screenshot set that Task 2 ranks
+EB_UITEST=1, walks the themed-XMB home flow, and captures a screenshot set that Task 2 ranks
 for jarring transitions / rough empty states. Drives ONLY through the uitest pipe (no focus /
 SendKeys); grab() renders the window even while occluded.
 
@@ -166,7 +166,7 @@ def run(exe, outdir):
     global _outdir
     _outdir = outdir
     os.makedirs(outdir, exist_ok=True)
-    env = dict(os.environ, MMV_UITEST="1")
+    env = dict(os.environ, EB_UITEST="1")
     proc = subprocess.Popen([exe], env=env, cwd=os.path.dirname(exe))
     try:
         if not wait_pipe():

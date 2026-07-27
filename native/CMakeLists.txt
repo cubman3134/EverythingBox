@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.72 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.73 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -24,15 +24,15 @@ endif()
 # libretro frontend - no external deps. Loads/runs any libretro core via the
 # C ABI and exposes BGRA frames. VERIFIED: builds with MSVC, loads + inits mGBA.
 # ---------------------------------------------------------------------------
-add_library(mymediavault_libretro STATIC src/libretro/LibretroCore.cpp)
-target_include_directories(mymediavault_libretro PUBLIC src/libretro)
+add_library(everythingbox_libretro STATIC src/libretro/LibretroCore.cpp)
+target_include_directories(everythingbox_libretro PUBLIC src/libretro)
 
 # A console probe that exercises the frontend (no Qt) - used for verification. Desktop-only: Android builds
 # the app as a shared library packaged into an APK, and iOS builds an app bundle, so standalone console
 # executables don't fit either mobile platform.
 if(NOT ANDROID AND NOT IOS)
     add_executable(probe_core tools/probe_core.cpp)
-    target_link_libraries(probe_core PRIVATE mymediavault_libretro)
+    target_link_libraries(probe_core PRIVATE everythingbox_libretro)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -40,10 +40,10 @@ endif()
 # is OFF by default; the libretro lib + probe above build without them.
 #   Qt6:    https://www.qt.io/download-qt-installer  (or `aqt`)
 #   libmpv: vcpkg install libmpv   (or distro mpv-dev / a prebuilt SDK)
-# Configure with: cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON -DCMAKE_PREFIX_PATH=<Qt>
+# Configure with: cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON -DCMAKE_PREFIX_PATH=<Qt>
 # ---------------------------------------------------------------------------
-option(MYMEDIAVAULT_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
-if(MYMEDIAVAULT_BUILD_APP)
+option(EVERYTHINGBOX_BUILD_APP "Build the Qt application (requires Qt6 + libmpv)" OFF)
+if(EVERYTHINGBOX_BUILD_APP)
     # QtPdf (PDFium) isn't shipped for Android in the open-source packages, so it's desktop-only; PdfView is
     # stubbed on Android (see src/pdf/PdfView.cpp).
     set(MMV_QT_COMPONENTS Widgets OpenGLWidgets Multimedia Network Concurrent Test)
@@ -119,7 +119,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         message(FATAL_ERROR "libmpv not found. Install it and pass CMAKE_PREFIX_PATH (or -DMPV_INCLUDE_DIR / -DMPV_LIBRARY).")
     endif()
 
-    qt_add_executable(mymediavault
+    qt_add_executable(everythingbox
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
@@ -229,12 +229,12 @@ if(MYMEDIAVAULT_BUILD_APP)
         $<$<PLATFORM_ID:Windows>:${CMAKE_CURRENT_SOURCE_DIR}/resources/app.rc>
         third_party/miniz.c
         third_party/duktape/duktape.c)
-    target_include_directories(mymediavault PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
-    target_compile_definitions(mymediavault PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${MMV_SECRETS_GEN_DIR})
+    target_compile_definitions(everythingbox PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
-    target_link_libraries(mymediavault PRIVATE mymediavault_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
+    target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)
-        target_link_libraries(mymediavault PRIVATE Qt6::Pdf Qt6::PdfWidgets)
+        target_link_libraries(everythingbox PRIVATE Qt6::Pdf Qt6::PdfWidgets)
     endif()
     # QML theme engine: link Qt Quick, compile the qrc-embedded QML + ThemeEngine, and flag it on in code.
     if(MMV_HAVE_QML)
@@ -242,7 +242,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         # present in its initial source list at finalization, so a .qrc added later via target_sources is
         # silently skipped and "qrc:/theme2/ThemeView.qml" isn't found at runtime. This runs rcc directly.
         qt_add_resources(MMV_THEME2_RCC resources/theme2.qrc)
-        target_sources(mymediavault PRIVATE
+        target_sources(everythingbox PRIVATE
             src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
@@ -250,16 +250,16 @@ if(MYMEDIAVAULT_BUILD_APP)
             # FormFactor is now in the unconditional app source list above (Settings/RetroView need it in
             # the no-QML build too). It still drives `form` + TV scale/insets on the QML surfaces here.
             ${MMV_THEME2_RCC})
-        target_link_libraries(mymediavault PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
-        target_compile_definitions(mymediavault PRIVATE MMV_HAVE_QML)
+        target_link_libraries(everythingbox PRIVATE Qt6::Qml Qt6::Quick Qt6::QuickWidgets)
+        target_compile_definitions(everythingbox PRIVATE MMV_HAVE_QML)
     endif()
-    set_target_properties(mymediavault PROPERTIES OUTPUT_NAME "MyMediaVault") # the on-disk exe is MyMediaVault.exe
-    # On macOS, produce a MyMediaVault.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
-    set_target_properties(mymediavault PROPERTIES MACOSX_BUNDLE TRUE)
+    set_target_properties(everythingbox PROPERTIES OUTPUT_NAME "EverythingBox") # the on-disk exe is EverythingBox.exe
+    # On macOS, produce an EverythingBox.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
+    set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE TRUE)
     # On Windows, build as a GUI-subsystem app so no console window opens alongside the main window.
     # qt_add_executable links Qt's EntryPoint, which supplies the WinMain that forwards to main(); all
     # diagnostics go to the log file instead of the console (see main.cpp's message handler).
-    set_target_properties(mymediavault PROPERTIES WIN32_EXECUTABLE TRUE)
+    set_target_properties(everythingbox PROPERTIES WIN32_EXECUTABLE TRUE)
 
     # Console harnesses (desktop-only): standalone executables for headless verification - not built for
     # Android (shared lib + APK) or iOS (app bundle).
@@ -697,9 +697,9 @@ if(MYMEDIAVAULT_BUILD_APP)
     find_path(SDL2_INCLUDE_DIR NAMES SDL.h PATH_SUFFIXES SDL2)
     find_library(SDL2_LIBRARY NAMES SDL2)
     if(SDL2_INCLUDE_DIR AND SDL2_LIBRARY)
-        target_include_directories(mymediavault PRIVATE ${SDL2_INCLUDE_DIR})
-        target_link_libraries(mymediavault PRIVATE ${SDL2_LIBRARY})
-        target_compile_definitions(mymediavault PRIVATE MYMEDIAVAULT_HAVE_SDL)
+        target_include_directories(everythingbox PRIVATE ${SDL2_INCLUDE_DIR})
+        target_link_libraries(everythingbox PRIVATE ${SDL2_LIBRARY})
+        target_compile_definitions(everythingbox PRIVATE EVERYTHINGBOX_HAVE_SDL)
         message(STATUS "Gamepad: SDL2 found (${SDL2_LIBRARY})")
     else()
         message(STATUS "Gamepad: SDL2 not found - building without controller input")
@@ -709,7 +709,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     # Android packaging scaffolding. This sets up the APK metadata; a working build ALSO needs a Qt-for-
     # Android kit and the native deps (libmpv + ffmpeg, SDL2) cross-compiled for the target ABI and pointed
     # at via -DMPV_LIBRARY=/-DSDL2_LIBRARY= so they get bundled. See native/docs/android-port.md.
-    # Configure e.g.: <Qt>/android_arm64_v8a/bin/qt-cmake -S native -B build-android -DMYMEDIAVAULT_BUILD_APP=ON
+    # Configure e.g.: <Qt>/android_arm64_v8a/bin/qt-cmake -S native -B build-android -DEVERYTHINGBOX_BUILD_APP=ON
     # qt_add_executable already produces the shared library + APK target on Android.
     # -----------------------------------------------------------------------------------------------------
     if(ANDROID)
@@ -736,7 +736,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         endforeach()
         message(STATUS "Android assets staged at ${MMV_ANDROID_PKG_DIR}/assets/mmv (themes2 + first-party addons)")
 
-        set_target_properties(mymediavault PROPERTIES
+        set_target_properties(everythingbox PROPERTIES
             QT_ANDROID_MIN_SDK_VERSION 24
             QT_ANDROID_TARGET_SDK_VERSION 34
             QT_ANDROID_VERSION_NAME "${PROJECT_VERSION}"
@@ -747,10 +747,10 @@ if(MYMEDIAVAULT_BUILD_APP)
         if(MPV_LIBRARY)
             get_filename_component(_mmv_mpvdir "${MPV_LIBRARY}" DIRECTORY)
             file(GLOB _mmv_mpvlibs "${_mmv_mpvdir}/*.so")
-            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_mpvlibs})
+            set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_mpvlibs})
         endif()
         if(SDL2_LIBRARY)
-            set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")
+            set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS "${SDL2_LIBRARY}")
         endif()
         # OpenSSL runtime for TLS. Qt's OpenSSL *plugin* is bundled, but without a per-ABI libssl/libcrypto in
         # the APK, Qt's on-device dlopen of the system libcrypto.so is namespace-denied by Android's linker and
@@ -762,7 +762,7 @@ if(MYMEDIAVAULT_BUILD_APP)
         if(OPENSSL_ANDROID_LIBS_DIR)
             file(GLOB _mmv_ssllibs "${OPENSSL_ANDROID_LIBS_DIR}/*.so")
             if(_mmv_ssllibs)
-                set_property(TARGET mymediavault APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_ssllibs})
+                set_property(TARGET everythingbox APPEND PROPERTY QT_ANDROID_EXTRA_LIBS ${_mmv_ssllibs})
                 message(STATUS "Bundling Android OpenSSL runtime: ${_mmv_ssllibs}")
             else()
                 message(WARNING "OPENSSL_ANDROID_LIBS_DIR=${OPENSSL_ANDROID_LIBS_DIR} has no .so's — TLS will fail on device")
@@ -782,34 +782,34 @@ if(MYMEDIAVAULT_BUILD_APP)
     if(IOS)
         # Real safe-area insets for the edge-to-edge window (UIKit query; the .cpp fallback is
         # Q_OS_IOS-guarded so both compiling is not a duplicate definition).
-        target_sources(mymediavault PRIVATE src/core/SafeAreaInsets.mm)
+        target_sources(everythingbox PRIVATE src/core/SafeAreaInsets.mm)
         # Personal-team dev installs need a UNIQUE bundle id (the canonical one is registered to the
         # project's team; Apple refuses to register it to another). Override with
-        # -DMMV_IOS_BUNDLE_ID=com.yourname.mymediavault for on-device development.
-        if(NOT MMV_IOS_BUNDLE_ID)
-            set(MMV_IOS_BUNDLE_ID "com.mymediavault.app")
+        # -DEB_IOS_BUNDLE_ID=com.yourname.everythingbox for on-device development.
+        if(NOT EB_IOS_BUNDLE_ID)
+            set(EB_IOS_BUNDLE_ID "com.everythingbox.app")
         endif()
-        set_target_properties(mymediavault PROPERTIES
-            MACOSX_BUNDLE_GUI_IDENTIFIER "${MMV_IOS_BUNDLE_ID}"
-            MACOSX_BUNDLE_BUNDLE_NAME "MyMediaVault"
+        set_target_properties(everythingbox PROPERTIES
+            MACOSX_BUNDLE_GUI_IDENTIFIER "${EB_IOS_BUNDLE_ID}"
+            MACOSX_BUNDLE_BUNDLE_NAME "EverythingBox"
             MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
 
         # Stage the stock themes2/ + first-party addons into the bundle (iOS bundles are shallow — resources
         # sit at the bundle root). AssetBootstrap extracts them into the writable data dir on first launch,
         # exactly like the Android assets:/mmv flow (see main.cpp).
-        add_custom_command(TARGET mymediavault POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:mymediavault>/mmv"
+        add_custom_command(TARGET everythingbox POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_BUNDLE_DIR:everythingbox>/mmv"
             COMMAND ${CMAKE_COMMAND} -E copy_directory
-                    "${CMAKE_CURRENT_SOURCE_DIR}/themes2" "$<TARGET_BUNDLE_DIR:mymediavault>/mmv/themes2"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/themes2" "$<TARGET_BUNDLE_DIR:everythingbox>/mmv/themes2"
             COMMENT "Staging themes2 + addons into the app bundle")
         file(GLOB _mmv_ios_addon_dirs LIST_DIRECTORIES true "${CMAKE_CURRENT_SOURCE_DIR}/addons/*")
         foreach(_addon ${_mmv_ios_addon_dirs})
             if(IS_DIRECTORY "${_addon}")
                 get_filename_component(_addon_name "${_addon}" NAME)
-                add_custom_command(TARGET mymediavault POST_BUILD
+                add_custom_command(TARGET everythingbox POST_BUILD
                     COMMAND ${CMAKE_COMMAND} -E copy_directory
-                            "${_addon}" "$<TARGET_BUNDLE_DIR:mymediavault>/mmv/addons/${_addon_name}")
+                            "${_addon}" "$<TARGET_BUNDLE_DIR:everythingbox>/mmv/addons/${_addon_name}")
             endif()
         endforeach()
 
@@ -827,16 +827,16 @@ if(MYMEDIAVAULT_BUILD_APP)
                 foreach(_fw ${_mmv_ios_fws})
                     get_filename_component(_fw_name "${_fw}" NAME_WE)
                     if(EXISTS "${_fw}/${_fw_name}")
-                        target_link_libraries(mymediavault PRIVATE "${_fw}/${_fw_name}")
+                        target_link_libraries(everythingbox PRIVATE "${_fw}/${_fw_name}")
                     endif()
                 endforeach()
                 # Some deps ship a bare static lib in the slice instead of a framework (e.g. MoltenVK).
                 file(GLOB _mmv_ios_libs "${MMV_IOS_MPV_DEPS_DIR}/*.xcframework/${_slice}/*.a")
                 foreach(_lib ${_mmv_ios_libs})
-                    target_link_libraries(mymediavault PRIVATE "${_lib}")
+                    target_link_libraries(everythingbox PRIVATE "${_lib}")
                 endforeach()
             endforeach()
-            target_link_libraries(mymediavault PRIVATE
+            target_link_libraries(everythingbox PRIVATE
                 "-framework AudioToolbox" "-framework AVFoundation" "-framework CoreAudio"
                 "-framework CoreMedia" "-framework CoreVideo" "-framework VideoToolbox"
                 "-framework Metal" "-framework MetalKit" "-framework CoreImage" "-framework QuartzCore"

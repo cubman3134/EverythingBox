@@ -546,18 +546,18 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
     }
 
     nam_ = new QNetworkAccessManager(this);
-    // MMV_ADDONS_ROOT lets a test (probe_addon) point discovery at an isolated fixture dir instead of the
+    // EB_ADDONS_ROOT lets a test (probe_addon) point discovery at an isolated fixture dir instead of the
     // portable <app>/addons folder; unset in normal runs, so behaviour is unchanged.
-    root_ = qEnvironmentVariableIsSet("MMV_ADDONS_ROOT")
-                ? qEnvironmentVariable("MMV_ADDONS_ROOT")
+    root_ = qEnvironmentVariableIsSet("EB_ADDONS_ROOT")
+                ? qEnvironmentVariable("EB_ADDONS_ROOT")
                 : AppPaths::dataDir() + QStringLiteral("/addons");
     QDir().mkpath(root_);
     reload();
-    // MMV_ADDONS_ROOT is the probes' hermetic-fixture override: with it set, skip every startup network
+    // EB_ADDONS_ROOT is the probes' hermetic-fixture override: with it set, skip every startup network
     // kick (default-source seeding, remote-manifest refresh, addon self-update). A live fetch landing
     // mid-probe fires reload()+sourcesChanged() at an arbitrary moment — which flushes/resweeps the
     // prefetcher under test and pollutes its deterministic job counts with real-world catalogs.
-    if (!qEnvironmentVariableIsSet("MMV_ADDONS_ROOT"))
+    if (!qEnvironmentVariableIsSet("EB_ADDONS_ROOT"))
     {
         seedDefaultStremioSources(); // one-time default sources + migrations
         refreshRemoteManifests();    // pick up any catalogs an addon added since we last cached its manifest

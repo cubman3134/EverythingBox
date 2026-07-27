@@ -31,7 +31,7 @@ engine — which is what makes both all-format video and libretro first-class.
 ## Layout
 ```
 native/
-  CMakeLists.txt            libretro lib + probe_core always; Qt app + other probes behind -DMYMEDIAVAULT_BUILD_APP=ON
+  CMakeLists.txt            libretro lib + probe_core always; Qt app + other probes behind -DEVERYTHINGBOX_BUILD_APP=ON
   src/libretro/             LibretroCore.{h,cpp} + libretro.h  (no deps; load/run cores, options, save states)
   src/video/                MpvWidget                 (libmpv -> Qt OpenGL surface; video + audio + now-playing)
   src/emu/                  RetroView                 (core -> window, input routing, audio, save states)
@@ -65,7 +65,7 @@ Already set up on this machine:
 
 Configure + build (this exact command builds `MyMediaVault.exe` cleanly):
 ```
-cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON ^
+cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON ^
   -DCMAKE_PREFIX_PATH="C:/Qt/6.8.3/msvc2022_64" ^
   -DMPV_INCLUDE_DIR="C:/mpv-dev/include" -DMPV_LIBRARY="C:/mpv-dev/libmpv.lib" ^
   -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
