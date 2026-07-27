@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.46 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.47 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -173,6 +173,8 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/core/SubtitleFetcher.cpp src/core/SubtitleFetcher.h
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h
         src/core/SubtitleCache.cpp src/core/SubtitleCache.h
+        src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
+        src/core/BingeStore.cpp         src/core/BingeStore.h
         src/core/MediaSegments.cpp src/core/MediaSegments.h
         src/core/SegmentStore.cpp  src/core/SegmentStore.h
         src/core/CastManager.cpp  src/core/CastManager.h
@@ -496,6 +498,13 @@ if(MYMEDIAVAULT_BUILD_APP)
         src/theme2/FormFactor.cpp  src/theme2/FormFactor.h)
     target_include_directories(probe_segments PRIVATE src src/core src/theme2)
     target_link_libraries(probe_segments PRIVATE Qt6::Core Qt6::Gui)
+
+    # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
+    # catalog classification. Pure — no network, no addon installed.
+    add_executable(probe_stremio tools/probe_stremio.cpp
+        src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h)
+    target_include_directories(probe_stremio PRIVATE src src/addons)
+    target_link_libraries(probe_stremio PRIVATE Qt6::Core)
 
     # Headless test for the catalog id-resolver core (pure matcher + persisted cache).
     add_executable(probe_resolver tools/probe_resolver.cpp
