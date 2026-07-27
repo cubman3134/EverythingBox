@@ -1,4 +1,5 @@
 #include "PdfView.h"
+#include "../core/AppBrand.h"
 
 #if !defined(Q_OS_ANDROID)
 #include "../core/AppPaths.h"
@@ -19,7 +20,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

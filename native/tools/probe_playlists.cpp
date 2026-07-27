@@ -23,6 +23,7 @@
 #include "ShuffleBag.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
+#include "AppBrand.h"
 
 #include <QCoreApplication>
 #include <QSettings>
@@ -40,7 +41,7 @@ static QString schemaKey(const QString& profile) { return QStringLiteral("playli
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+    const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
     const QString profile = QStringLiteral("probePl");
 
     // ---- 0. mediaCategory oracle (the core function HomeView::mediaCategory now delegates to) ----------------

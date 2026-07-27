@@ -1,4 +1,5 @@
 #include "StreamResolver.h"
+#include "../core/AppBrand.h"
 
 #include "../core/AppPaths.h"
 
@@ -113,7 +114,7 @@ void StreamResolver::resolve(const QString& src, const QString& title)
     emit status(tr("Loading playlist…"));
     srLog(QStringLiteral("m3u: GET %1").arg(logSafeUrl(src)));
     QNetworkRequest rq{ QUrl(src) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, src, title] {

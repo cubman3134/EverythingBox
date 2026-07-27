@@ -1,4 +1,5 @@
 #include "AddonManager.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "AddonContext.h"
 #include "JsAddon.h"
@@ -29,7 +30,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -184,9 +185,9 @@ static QByteArray httpGetBlocking(const QUrl& url, const QByteArray& cfgHeader =
 {
     QNetworkAccessManager nam;
     QNetworkRequest rq(url);
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    if (!cfgHeader.isEmpty()) rq.setRawHeader("X-MMV-Config", cfgHeader);
+    if (!cfgHeader.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfgHeader);
     QEventLoop loop;
     QNetworkReply* reply = nam.get(rq);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
@@ -558,7 +559,7 @@ void AddonManager::refreshRemoteManifests()
     for (const QString& base : remoteSourceUrls())
     {
         QNetworkRequest rq((QUrl(base + QStringLiteral("/manifest.json"))));
-        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(15000);
         QNetworkReply* reply = nam_->get(rq);
@@ -591,7 +592,7 @@ void AddonManager::checkAddonUpdates()
     for (const Target& t : targets)
     {
         QNetworkRequest rq{ QUrl(t.url) };
-        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(20000);
         const QByteArray etag = store().value(updateEtagKey(t.id)).toByteArray();
@@ -1031,12 +1032,12 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
                                                           : QVector<CatalogFilter>();
     QNetworkRequest rq(stremio ? stremioCatalogUrl(src, catalogId, query, page, filters)
                                : remoteCatalogUrl(base, catalogId, query, page, filters));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio, stremioFilters] {
         reply->deleteLater();
@@ -1078,12 +1079,12 @@ int AddonManager::dispatchRemoteDetail(LoadedAddon* src, const MediaItem& item, 
     // Stremio has no separate "children" route: a series' episodes come from its /meta videos[].
     QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id)
                                : remoteDetailUrl(base, item.type, item.id, page));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
@@ -1120,12 +1121,12 @@ int AddonManager::dispatchRemoteMeta(LoadedAddon* src, const MediaItem& item)
     const QString base = src->baseUrl;
     const bool stremio = src->stremio;
     QNetworkRequest rq(stremio ? stremioMetaUrl(base, item.type, item.id) : remoteMetaUrl(base, item.type, item.id));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     // Liveness: without a transfer timeout a black-holed remote never finishes, its result signal never fires,
     // and anything waiting on this reqId (e.g. a prefetcher in-flight slot) wedges. 15s matches the other sites.
     rq.setTransferTimeout(15000);
-    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
         reply->deleteLater();
@@ -1159,7 +1160,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
     chk.setQuery(cq);
     QNetworkRequest rq(chk);
     rq.setRawHeader("Authorization", bearer);
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setTransferTimeout(15000);
     streamLog(QStringLiteral("torbox: checkcached %1").arg(shortHash));
     QNetworkReply* reply = nam_->get(rq);
@@ -1179,7 +1180,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
         QNetworkRequest cr((QUrl(QString::fromLatin1(kTorBoxApi) + QStringLiteral("/torrents/createtorrent"))));
         cr.setRawHeader("Authorization", bearer);
         cr.setHeader(QNetworkRequest::ContentTypeHeader, "multipart/form-data; boundary=" + boundary);
-        cr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        cr.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         cr.setTransferTimeout(20000);
         QNetworkReply* cre = nam_->post(cr, fb);
         connect(cre, &QNetworkReply::finished, this, [this, cre, shortHash, fileIdx, key, bearer, cb] {
@@ -1197,7 +1198,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
             ml.setQuery(mq);
             QNetworkRequest mr(ml);
             mr.setRawHeader("Authorization", bearer);
-            mr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+            mr.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
             mr.setTransferTimeout(15000);
             QNetworkReply* mre = nam_->get(mr);
             connect(mre, &QNetworkReply::finished, this, [this, mre, torrentId, fileIdx, key, cb] {
@@ -1230,7 +1231,7 @@ void AddonManager::resolveTorBoxInfoHash(const QString& infoHash, int fileIdx,
                 dq.addQueryItem(QStringLiteral("torrent_id"), torrentId); dq.addQueryItem(QStringLiteral("file_id"), fileId);
                 dl.setQuery(dq);
                 QNetworkRequest dr(dl);
-                dr.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+                dr.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
                 dr.setTransferTimeout(15000);
                 QNetworkReply* dre = nam_->get(dr);
                 connect(dre, &QNetworkReply::finished, this, [dre, cb] {
@@ -1286,7 +1287,7 @@ void AddonManager::listStremioStreams(const MediaItem& item,
     {
         LoadedAddon* p = providers[pi];
         QNetworkRequest rq(stremioStreamUrl(p->baseUrl, item.type, item.id));
-        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(15000);
         QNetworkReply* reply = nam_->get(rq);
@@ -1393,7 +1394,7 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
     chk.setQuery(cq);
     QNetworkRequest br(chk);
     br.setRawHeader("Authorization", "Bearer " + key.toUtf8());
-    br.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    br.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     br.setTransferTimeout(15000);
     streamLog(QStringLiteral("torbox: batch checkcached %1 hash(es)").arg(hashes.size()));
     QNetworkReply* bre = nam_->get(br);
@@ -1519,10 +1520,10 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
     const QString base = prov->baseUrl;
     streamLog(QStringLiteral("doc-bridge: searching %1 catalog '%2' for \"%3\"").arg(prov->manifest.id, catId, query));
     QNetworkRequest rq(remoteCatalogUrl(base, catId, query, 1));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(45000); // a provider title search can sweep several indexers; allow time, but don't hang
-    { const QByteArray cfg = remoteConfigHeader(prov); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    { const QByteArray cfg = remoteConfigHeader(prov); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, prov, base, cb] {
         reply->deleteLater();
@@ -1574,11 +1575,11 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
     if (src->stremio) { resolveStremioStream(item, cb, preferGroup); return; }
     const QString base = src->baseUrl;
     QNetworkRequest rq(remoteStreamUrl(base, item.type, item.id, attempt));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(90000); // debrid-resolving a torrent can be slow, but must not hang forever - a
                                   // timeout ends as an empty result so the caller can report an outcome
-    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
+    { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader(AppBrand::kConfigHeader, cfg); }
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, base, cb] {
         reply->deleteLater();
@@ -1626,7 +1627,7 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
     auto fetchPages = [this, cb](const QString& chapterId) {
         streamLog(QStringLiteral("manga: at-home for chapter %1").arg(chapterId));
         QNetworkRequest rq((QUrl(kMdxApi + QStringLiteral("/at-home/server/") + chapterId)));
-        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setTransferTimeout(15000);
         QNetworkReply* reply = nam_->get(rq);
         connect(reply, &QNetworkReply::finished, this, [reply, cb] {
@@ -1660,7 +1661,7 @@ void AddonManager::resolveMangaChapterPages(const QString& chapterItemId,
     for (const QString& id : ids) qq.addQueryItem(QStringLiteral("ids[]"), id);
     q.setQuery(qq);
     QNetworkRequest rq(q);
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setTransferTimeout(15000);
     QNetworkReply* reply = nam_->get(rq);
     const QString fallback = ids.first();
@@ -1714,10 +1715,11 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
     // Reserved-namespace guard: the bundled addons (com.mymediavault.*) ship inside the app and are
     // NEVER installed through this path. Refuse a package that claims such an id so a downloaded /
     // side-loaded package can't impersonate a bundled source or overwrite its folder under root_.
-    if (manifest.id.startsWith(QStringLiteral("com.mymediavault.")))
+    if (manifest.id.startsWith(QLatin1String(AppBrand::kAddonPrefix)))
     {
         streamLog(QStringLiteral("addon install: refused reserved-namespace id %1").arg(manifest.id));
-        return fail(QStringLiteral("Refused: \"%1\" uses the reserved com.mymediavault.* namespace.").arg(manifest.id));
+        return fail(QStringLiteral("Refused: \"%1\" uses the reserved %2* namespace.")
+                        .arg(manifest.id, QLatin1String(AppBrand::kAddonPrefix)));
     }
 
     const QString dest = root_ + QStringLiteral("/") + manifest.id;
@@ -1756,7 +1758,7 @@ void AddonManager::addRemoteSource(const QString& url)
     if (base.isEmpty()) { emit remoteSourceResult(false, tr("Enter a valid addon URL.")); return; }
 
     QNetworkRequest rq((QUrl(base + QStringLiteral("/manifest.json"))));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
     connect(reply, &QNetworkReply::finished, this, [this, reply, base] {

@@ -7,10 +7,13 @@
 #include "CatalogPrefetcher.h"
 #include "BuiltinSecrets.h" // generated (build tree): expected lengths for the credscope asserts
 #include "miniz.h"          // build a fixture .addon package for the reserved-namespace install guard
+#include "../src/core/AppPaths.h"
+#include "../src/core/AppBrand.h"
 
 #include <QCoreApplication>
 #include <QFile>
 #include <QDir>
+#include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QElapsedTimer>
@@ -367,8 +370,28 @@ static bool makeSlowFixture(const QString& root, const QString& id)
         && writeText(dir + QStringLiteral("/main.js"), QByteArray(JS));
 }
 
+// "Touches no network" only holds if the JsLocal fixtures are the ONLY media sources. The AddonManager
+// constructor seeds the default Stremio sources on first run and persists them into the app's shared
+// portable ini, so on a settings file that has not been through that seeding yet (a clean checkout, or the
+// first run after the ini is renamed) Cinemeta and Torrentio register as extra remote sources here — and the
+// slot-accounting asserts below ("issued exactly one request per job") count their requests too. Pin the
+// one-time seed flags and drop every persisted remote source so the counts describe the fixtures alone.
+static void pinFixturesAsOnlySources()
+{
+    QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                QSettings::IniFormat);
+    for (const char* flag : { "addon.stremio.seeded", "addon.debridio.removed", "addon.cinemeta.removed",
+                              "addon.torrentio.seeded", "addon.torrentio.host.migrated" })
+        s.setValue(QLatin1String(flag), true);
+    const QStringList keys = s.allKeys();
+    for (const QString& k : keys)
+        if (k.startsWith(QStringLiteral("addon.remote."))) s.remove(k);
+    s.sync();
+}
+
 static int probePrefetch()
 {
+    pinFixturesAsOnlySources();
     int pass = 0, fail = 0;
     auto check = [&](const char* name, bool ok) {
         printf("  [%s] %s\n", ok ? "PASS" : "FAIL", name); if (ok) ++pass; else ++fail;
@@ -400,7 +423,7 @@ static int probePrefetch()
               lensFor(QStringLiteral("com.evil.thirdparty"), &d, &p) && d == 0 && p == 0);
         int d2 = -1, p2 = -1;
         check("credscope: screenscraper id passes the allowlist (lengths match the embedded header)",
-              lensFor(QStringLiteral("com.mymediavault.screenscraper"), &d2, &p2)
+              lensFor(QStringLiteral("com.everythingbox.screenscraper"), &d2, &p2)
               && d2 == mmv_secrets::kScreenScraperDevidLen
               && p2 == mmv_secrets::kScreenScraperDevpasswordLen);
     }
@@ -574,7 +597,7 @@ static int probePrefetch()
         QDir(rootI).removeRecursively(); QDir().mkpath(rootI);
         qputenv("MMV_ADDONS_ROOT", rootI.toUtf8());
         AddonManager mgrI;
-        const QString reservedId = QStringLiteral("com.mymediavault.evil");
+        const QString reservedId = QStringLiteral("com.everythingbox.evil");
         const QString okId = QStringLiteral("com.thirdparty.ok");
         const QString pkgBad = rootI + QStringLiteral("/reserved.addon");
         const QString pkgOk  = rootI + QStringLiteral("/ok.addon");
@@ -582,7 +605,7 @@ static int probePrefetch()
         QString errBad, errOk;
         const bool refused = built && !mgrI.installPackage(pkgBad, &errBad);
         const bool folderAbsent = !QDir(rootI + QStringLiteral("/") + reservedId).exists();
-        check("install guard: reserved com.mymediavault.* package refused (not installed)",
+        check("install guard: reserved com.everythingbox.* package refused (not installed)",
               refused && folderAbsent && !errBad.isEmpty());
         // Control: a normal third-party id still installs through the same path (guard isn't over-broad).
         const bool okInstalled = built && mgrI.installPackage(pkgOk, &errOk)

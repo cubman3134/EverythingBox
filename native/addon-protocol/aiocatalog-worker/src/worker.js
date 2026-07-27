@@ -740,7 +740,10 @@ async function route(request) {
 export default {
   async fetch(request, env) {
     ENV = env;
-    const cfg = parseConfigHeader(request.headers.get("X-MMV-Config"));
+    // Accept both: a Worker already deployed from an earlier revision of this file still reads the old header,
+    // and the app is updated independently of when this Worker is redeployed. Prefer the new name; the fallback
+    // can be deleted once every deployment has been refreshed.
+    const cfg = parseConfigHeader(request.headers.get("X-EB-Config") || request.headers.get("X-MMV-Config"));
     // Run the whole request inside the per-user config scope so getConfig() resolves THIS user's keys.
     return cfgStore.run(cfg, async () => {
       try { return await route(request); }

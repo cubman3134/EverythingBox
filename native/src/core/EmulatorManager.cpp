@@ -1,4 +1,5 @@
 #include "EmulatorManager.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 
 #include <QCoreApplication>
@@ -64,7 +65,7 @@ static bool assetMatches(const QString& name, const QString& want)
 
 static QSettings appIni()
 {
-    return QSettings(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    return QSettings(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                      QSettings::IniFormat);
 }
 
@@ -966,7 +967,7 @@ void EmulatorManager::prepareCemuKeys(const QString& binDir, const std::function
     emit status(tr("Fetching Cemu keys…"), -1);
     QNetworkRequest rq((QUrl(QStringLiteral(
         "https://gist.githubusercontent.com/xXPhenomXx/093b352723ec51644453a9528a8dc87e/raw"))));
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     rq.setTransferTimeout(20000);
     auto* nam = new QNetworkAccessManager(launchCtx_); // dies with the launch context, aborting the transfer

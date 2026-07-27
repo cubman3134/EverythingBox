@@ -1,4 +1,5 @@
 #include "AddonContext.h"
+#include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "BuiltinSecrets.h" // generated into the build tree by cmake/GenerateSecrets.cmake
 
@@ -21,7 +22,7 @@
 
 static QSettings& configStore()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -59,7 +60,7 @@ QString AddonContext::builtinCredential(const QString& key) const
     // reversing the binary). Only the bundled ScreenScraper addon (its manifest id) may read its two
     // keys; any other addon id or key gets an empty string.
     static const QHash<QString, QSet<QString>> kAllowlist = {
-        { QStringLiteral("com.mymediavault.screenscraper"),
+        { QString::fromLatin1(AppBrand::kAddonPrefix) + QLatin1String("screenscraper"),
           { QStringLiteral("devid"), QStringLiteral("devpassword") } },
     };
     const auto allowed = kAllowlist.constFind(id_);

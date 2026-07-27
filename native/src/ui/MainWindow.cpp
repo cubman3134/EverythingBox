@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "../core/AppBrand.h"
 #include "Notifier.h"
 #include "BlackFrameWatchdog.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J08/J10/J11)
@@ -239,7 +240,7 @@ static const QStringList kAudioExts = {
 // Per-profile settings store (resume positions, etc.), mirroring the accessor the other views use.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -760,7 +761,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Restore the saved volume and apply it (mpv's volume is a session-global property, so it carries across
     // files). Changing the slider updates mpv + persists; the speaker button toggles mute.
     {
-        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         const int vol = s.value(QStringLiteral("player/volume"), 100).toInt();
         volume_->setValue(qBound(0, vol, 200));
         player_->setVolume(volume_->value());
@@ -772,7 +773,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // Speaker shows mute at 0, plain at 1..100, and a "boost" badge above 100%.
         muteBtn_->setText(v == 0 ? QStringLiteral("🔇") : v > 100 ? QStringLiteral("🔊+") : QStringLiteral("🔊"));
         volume_->setToolTip(tr("Volume: %1%").arg(v));
-        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         s.setValue(QStringLiteral("player/volume"), v);
     });
     connect(muteBtn_, &QPushButton::clicked, this, [this] {
@@ -3692,7 +3693,7 @@ void MainWindow::presentAddByUrl()
 namespace {
 // The built-in add-on registry (the always-present cubman3134 store index).
 QString addonsRegistryDefaultUrl()
-{ return QStringLiteral("https://raw.githubusercontent.com/cubman3134/mymediavault-addons/main/index.json"); }
+{ return QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-addons/main/index.json"); }
 // The directory an index URL lives in (its files are resolved relative to this).
 QString registryBaseUrl(const QString& indexUrl)
 { const int slash = indexUrl.lastIndexOf(QLatin1Char('/')); return slash > 0 ? indexUrl.left(slash) : indexUrl; }
@@ -3709,7 +3710,7 @@ QString registryNormalizeUrl(QString u)
 bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
 {
     QNetworkRequest req((QUrl(url)));
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam->get(req);
     QEventLoop loop;
@@ -3755,7 +3756,7 @@ void MainWindow::presentAddonRegistry()
 
     // Configured registries: the built-in add-on index + any user-saved extras (kept in the ini by the classic
     // browser). We render entries from them but omit the add/remove-registry management UI (source management only).
-    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
     QStringList regs; regs << addonsRegistryDefaultUrl();
     for (const QString& u : iniStore.value(QStringLiteral("registry/addonsExtras")).toStringList())
         if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
@@ -3812,7 +3813,7 @@ void MainWindow::presentAddonRegistry()
     for (const QString& indexUrl : regs)
     {
         QNetworkRequest req((QUrl(indexUrl)));
-        req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = docNam_->get(req);
         connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
@@ -5939,7 +5940,7 @@ void MainWindow::openPcGame(const MediaItem& item)
 
     mwLog(QStringLiteral("pcgame: download \"%1\" from %2").arg(item.title, logSafeUrl(item.url)));
     QNetworkRequest rq{ QUrl(item.url) };
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = docNam_->get(rq);
 
@@ -7605,7 +7606,7 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
     }
 
     QNetworkRequest rq{QUrl(item.url)};
-    rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = docNam_->get(rq);
 
@@ -7819,7 +7820,7 @@ void MainWindow::openImagePages(const QString& title, const QString& key, const 
     for (int i = 0; i < pageUrls.size(); ++i)
     {
         QNetworkRequest rq{QUrl(pageUrls[i])};
-        rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+        rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         rq.setTransferTimeout(20000);
         QNetworkReply* reply = docNam_->get(rq);
@@ -9795,7 +9796,7 @@ void MainWindow::openCloudClientSetup()
         // being top, and "Sign-in client" is top at that moment.
         themedPanelHost_->setStyle(settingsPanelStyle());
 
-        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
         QSettings s(iniPath, QSettings::IniFormat);
         auto pending = std::make_shared<QPair<QString, QString>>(
             s.value(QStringLiteral("cloud/clientId")).toString(),
@@ -9839,7 +9840,7 @@ void MainWindow::openCloudClientSetup()
     }
 #endif
     showPanel(tr("Sign-in client"), [this](QVBoxLayout* v) {
-        QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+        QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
         auto* intro = new QLabel(tr("Paste a Google <b>Desktop-app</b> OAuth client (from the Google Cloud "
             "console). The secret is non-confidential for desktop apps."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
@@ -9868,7 +9869,7 @@ void MainWindow::openCloudClientSetup()
         connect(save, &QPushButton::clicked, this, [this, idEdit, secEdit, err] {
             const QString id = idEdit->text().trimmed();
             if (id.isEmpty()) { err->setText(tr("Enter a client id.")); return; }
-            QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
             s.setValue(QStringLiteral("cloud/clientId"), id);
             s.setValue(QStringLiteral("cloud/clientSecret"), secEdit->text().trimmed());
             s.sync();
@@ -10020,7 +10021,7 @@ void MainWindow::openRetroAchievements()
         clearPanelPageConns();   // this present replaces the pool (lifetime model at openCloudSync's connect block)
         themedPanelHost_->setStyle(settingsPanelStyle());
 
-        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/mymediavault.ini");
+        const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
         const bool in = ach_ && ach_->isLoggedIn();
 
         QVector<PanelRow> rows;
@@ -10116,14 +10117,14 @@ void MainWindow::openRetroAchievements()
                 "Triple theme's info panel."));
             keyIntro->setWordWrap(true); keyIntro->setStyleSheet(QStringLiteral("font-size:13px;"));
             v->addWidget(keyIntro);
-            QSettings raStore(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+            QSettings raStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
             auto* keyEdit = new QLineEdit(); keyEdit->setMinimumHeight(34);
             keyEdit->setEchoMode(QLineEdit::Password); keyEdit->setPlaceholderText(tr("Web API key"));
             keyEdit->setText(raStore.value(QStringLiteral("ra/apikey")).toString());
             v->addWidget(keyEdit);
             auto* saveKey = panelRow(tr("Save API Key"));
             connect(saveKey, &QPushButton::clicked, this, [this, keyEdit] {
-                QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+                QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
                 s.setValue(QStringLiteral("ra/apikey"), keyEdit->text().trimmed()); s.sync();
                 statusBar()->showMessage(tr("Saved RetroAchievements web API key."), 4000);
             });

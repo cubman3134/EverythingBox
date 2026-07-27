@@ -1,4 +1,5 @@
 #include "CloudSync.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 
@@ -40,11 +41,11 @@ static const char* kUserInfo = "https://www.googleapis.com/oauth2/v3/userinfo";
 static const char* kDrive    = "https://www.googleapis.com/drive/v3";
 static const char* kDriveUp  = "https://www.googleapis.com/upload/drive/v3";
 static const char* kScopes   = "openid email https://www.googleapis.com/auth/drive.file";
-static const char* kFolder   = "MyMediaVault";
+static const char* kFolder   = AppBrand::kDriveFolder;
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }
@@ -365,7 +366,7 @@ void CloudSync::downloadFile(const QString& fileId, std::function<void(bool, con
 
 // ---- state bundle (a zip of the synced settings + local addons + themes) ----------------------------
 
-static const char* kBundleName = "mymediavault-sync.zip";
+static const char* kBundleName = AppBrand::kSyncZip;
 
 // First-party addon folders (manifest id "com.mymediavault.*"). These ship with the app build and are
 // updated by install/deploy, so they're kept OUT of cloud sync - otherwise the cloud snapshot would clobber
@@ -381,7 +382,7 @@ static QSet<QString> firstPartyAddonDirs()
         QFile mf(d.absoluteFilePath() + QStringLiteral("/manifest.json"));
         if (!mf.open(QIODevice::ReadOnly)) continue;
         const QJsonObject m = QJsonDocument::fromJson(mf.readAll()).object();
-        if (m.value(QStringLiteral("id")).toString().startsWith(QStringLiteral("com.mymediavault.")))
+        if (m.value(QStringLiteral("id")).toString().startsWith(QLatin1String(AppBrand::kAddonPrefix)))
             out.insert(d.fileName());
     }
     return out;
@@ -673,7 +674,7 @@ void CloudSync::pushLocal(std::function<void(bool, const QString&)> cb)
     });
 }
 
-static const char* kProgressName = "mymediavault-progress.json";
+static const char* kProgressName = AppBrand::kProgressDoc;
 
 void CloudSync::pullProgress(std::function<void(bool, const QByteArray&)> cb)
 {

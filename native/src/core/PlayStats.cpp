@@ -1,4 +1,5 @@
 #include "PlayStats.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
 #include "Settings.h"           // deviceId() — the per-device namespace (mdsync T3)
@@ -11,7 +12,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"), QSettings::IniFormat);
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
     return s;
 }
 

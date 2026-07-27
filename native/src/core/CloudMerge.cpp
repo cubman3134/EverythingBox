@@ -1,4 +1,5 @@
 #include "CloudMerge.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "Tombstones.h"
 #include "ItemMarks.h"
@@ -19,7 +20,7 @@
 // on-disk file changed.
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

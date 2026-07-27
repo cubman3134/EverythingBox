@@ -1,4 +1,5 @@
 #include "Theme.h"
+#include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
 
@@ -13,7 +14,7 @@
 
 static QSettings& store()
 {
-    static QSettings s(AppPaths::dataDir() + QStringLiteral("/mymediavault.ini"),
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
 }

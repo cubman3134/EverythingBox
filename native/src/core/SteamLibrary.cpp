@@ -1,4 +1,5 @@
 #include "SteamLibrary.h"
+#include "AppBrand.h"
 
 #include <QSettings>
 #include <QDir>
@@ -233,7 +234,7 @@ void SteamLibrary::ownedGamesFetch(const QString& apiKey, const QString& steamId
     q.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
     u.setQuery(q);
     QNetworkRequest req(u);
-    req.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
+    req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam->get(req);
 
