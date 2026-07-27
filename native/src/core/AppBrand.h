@@ -39,5 +39,12 @@ namespace AppBrand
         inline constexpr const char* kSyncZip     = "mymediavault-sync.zip";
         inline constexpr const char* kProgressDoc = "mymediavault-progress.json";
         inline constexpr const char* kAddonPrefix = "com.mymediavault.";
+
+        // DATA-BEARING, not prose. The parental PIN is stored as SHA-256(salt + pin) (Settings::pinHash),
+        // so the salt is an INPUT to a hash already written to every existing user's ini. Renaming it does
+        // not rename anything — it changes the function, so no existing PIN ever matches again and the
+        // parental lock cannot be opened with the PIN the user set. It stays legacy forever, or until
+        // something re-derives every stored hash, which is impossible without the plaintext PINs.
+        inline constexpr const char* kParentalPinSalt = "mmv-parental:";
     }
 }

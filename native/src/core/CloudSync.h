@@ -1,6 +1,6 @@
 // Google Drive sign-in + sync. Uses the OAuth 2.0 "loopback" flow for desktop apps (browser consent ->
 // a redirect to a temporary 127.0.0.1 port we listen on -> token exchange, PKCE). Scope: drive.file, so
-// the app can only touch files IT creates (a "MyMediaVault" folder). The refresh token is stored on-device.
+// the app can only touch files IT creates (a "EverythingBox" folder). The refresh token is stored on-device.
 //
 // Slice 1 (here): sign in/out, token refresh, and the Drive primitives (find-or-create folder, upload,
 // download, metadata). Slice 2 layers the state bundle + automatic sync on top of these.
@@ -55,7 +55,7 @@ public:
     // torn-write guard, its listOk guards, its Drive-name mapping): a headless probe subclasses CloudSync,
     // substitutes an in-memory Drive, and every caller above runs for real. Nothing in production overrides
     // them — a seam any higher up would replace the very code whose failure modes are unrecoverable.
-    // Find (or create) the "MyMediaVault" folder; returns its file id ("" on failure).
+    // Find (or create) the "EverythingBox" folder; returns its file id ("" on failure).
     virtual void ensureFolder(std::function<void(const QString& folderId)> cb);
     // Find a file by name inside a folder; cb gets {listOk, id, modifiedTimeIso, stateHash}. listOk is false
     // when the query (or its token refresh) had a network error — the caller must NOT read an empty id as

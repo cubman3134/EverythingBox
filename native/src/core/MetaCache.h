@@ -68,7 +68,7 @@ namespace MetaCache
 
     // Disk cap for the image cache. Browsing persists every scrolled poster (storeImage), so without a
     // bound the cache grows forever; storeImage keeps a cheap running byte total and triggers eviction
-    // when it crosses the cap (mymediavault.ini "cache/imageCapMB", default 500; 0 = unlimited). Eviction
+    // when it crosses the cap (everythingbox.ini "cache/imageCapMB", default 500; 0 = unlimited). Eviction
     // deletes the least-recently-served thumb-role images first (imagePath bumps a served file's mtime
     // once per run) until back under the cap — but never from a pinned bundle: the provider names the
     // keys of downloaded/favorited items, whose art must keep working offline. Detail-page art (poster/

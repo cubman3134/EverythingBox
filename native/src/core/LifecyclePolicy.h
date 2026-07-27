@@ -12,7 +12,7 @@
 //     earlier "we paused it" — only a resume does.
 #pragma once
 
-namespace mmv {
+namespace eb {
 
 class LifecyclePolicy
 {
@@ -50,4 +50,4 @@ private:
     bool pausedVideo_ = false;
 };
 
-} // namespace mmv
+} // namespace eb

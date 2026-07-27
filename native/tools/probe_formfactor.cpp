@@ -13,7 +13,7 @@
 // Prints FORMFACTOR-OK on success; any failure prints FORMFACTOR-FAIL <cond> and exits non-zero.
 //
 // Isolation: like the other core probes (see probe_meta), AppPaths::dataDir() is the probe exe's own folder
-// in the build tree (portable app), so the mymediavault.ini it reads/writes is next to the probe and never
+// in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and never
 // touches a deployed install. Every assert sets "display/mode" explicitly, so a leftover ini can't skew it.
 #include "FormFactor.h"
 #include "Settings.h"
@@ -143,11 +143,11 @@ int main(int argc, char** argv)
 
     // 7. Android OS-lifecycle pause/resume decision core (D2 Task 3). MainWindow::onApplicationStateChanged is
     // not headless-linkable (full widget/GL app), so the remember-and-restore policy lives in the pure
-    // mmv::LifecyclePolicy that MainWindow routes RetroView/MpvWidget state through — pinning it here pins the
+    // eb::LifecyclePolicy that MainWindow routes RetroView/MpvWidget state through — pinning it here pins the
     // real "pause on background, resume ONLY what we paused, never touch a user-paused item" behaviour.
     {
         // (a) A running, PLAYING core: backgrounding pauses it; foregrounding resumes exactly it.
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s = p.onSuspend(/*coreRunning*/true, /*corePaused*/false, /*videoActive*/false, /*videoPaused*/false);
         CHECK(s.core && !s.video);            // freeze the core, nothing else
         CHECK(p.corePausedByUs());
@@ -157,7 +157,7 @@ int main(int argc, char** argv)
     }
     {
         // (b) A USER-paused core: backgrounding must NOT claim it, so foregrounding must NOT un-pause it.
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s = p.onSuspend(/*coreRunning*/true, /*corePaused*/true, false, false);
         CHECK(!s.core);                       // already paused by the user -> we don't touch it
         CHECK(!p.corePausedByUs());
@@ -166,7 +166,7 @@ int main(int argc, char** argv)
     }
     {
         // (c) A PLAYING video: same remember-and-restore, on the video axis.
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s = p.onSuspend(false, false, /*videoActive*/true, /*videoPaused*/false);
         CHECK(s.video && !s.core);
         auto r = p.onResume();
@@ -174,7 +174,7 @@ int main(int argc, char** argv)
     }
     {
         // (d) A USER-paused video stays paused on return (the brief's explicit case).
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s = p.onSuspend(false, false, /*videoActive*/true, /*videoPaused*/true);
         CHECK(!s.video);
         auto r = p.onResume();
@@ -183,7 +183,7 @@ int main(int argc, char** argv)
     {
         // (e) Sticky across repeated suspends: Active -> Inactive (we pause the core) -> Suspended (core now
         // reads paused-by-us) must NOT drop the latch; the eventual resume still un-pauses it.
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s1 = p.onSuspend(true, /*corePaused*/false, false, false);
         CHECK(s1.core);                       // first suspend pauses it
         auto s2 = p.onSuspend(true, /*corePaused*/true, false, false); // second callback: already paused-by-us
@@ -194,7 +194,7 @@ int main(int argc, char** argv)
     }
     {
         // (f) Nothing active: every transition is a no-op.
-        mmv::LifecyclePolicy p;
+        eb::LifecyclePolicy p;
         auto s = p.onSuspend(false, false, false, false);
         CHECK(!s.core && !s.video);
         auto r = p.onResume();

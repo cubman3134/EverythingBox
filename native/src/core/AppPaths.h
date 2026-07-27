@@ -7,7 +7,7 @@
 #endif
 
 // The app's writable base directory. On desktop this is the executable's own folder - the app is portable,
-// so mymediavault.ini, cores/, saves/, states/, downloads/, addons/, ... all live next to MyMediaVault.
+// so everythingbox.ini, cores/, saves/, states/, downloads/, addons/, ... all live next to EverythingBox.
 // On Android and iOS the executable directory isn't writable, so use the app's private data location instead.
 // Everything that builds a path off the app dir goes through here, so a platform only changes this function.
 namespace AppPaths

@@ -15,9 +15,14 @@
 // Prints PLAYLISTS-OK on success; any failure prints PLAYLISTS-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: like the other core probes (probe_marks/probe_sync), AppPaths::dataDir() is the probe exe's own
-// build-tree folder (portable app), so the mymediavault.ini it reads/writes sits next to the probe and never
+// build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and never
 // touches a deployed install. We wipe the "playlists" and "profiles" groups at start and SEED our own profile
 // id via ProfileStore::setCurrent, so ProfileStore::currentId() can't leak a developer's real profile.
+//
+// The `com.mymediavault.*` ids below are NOT leftovers from the rebrand and must not be swept: they are the
+// FIXTURE — a byte-faithful copy of the v1 playlist blob an install written before the rename left on disk.
+// Renaming them would leave the legacyKey-preservation assertions testing nothing. This file is exempt from
+// the suite's old-brand gate for exactly that reason (see run-headless-probes.sh).
 #include "PlaylistStore.h"
 #include "MediaCategories.h"
 #include "ShuffleBag.h"

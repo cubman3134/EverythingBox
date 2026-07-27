@@ -150,10 +150,10 @@
 
 // PanelRow is a pure Qt-Core POD (no QML/Quick deps) and the SHARED row descriptor for both the themed panel
 // host AND the classic showPanel fallback (e.g. openStats), so its header must be visible in a no-QML build too —
-// keep this include OUTSIDE the MMV_HAVE_QML guard or the classic path fails to compile (pre-existing, fixed here).
+// keep this include OUTSIDE the EB_HAVE_QML guard or the classic path fails to compile (pre-existing, fixed here).
 #include "../theme2/PanelModel.h"
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 #include "../theme2/ThemeEngine.h"
 #include "../theme2/ReaderChromeHost.h"
 #include "../theme2/ThemedPanelHost.h"
@@ -189,7 +189,7 @@
 // Starts the catalog prefetcher only once the main window has actually painted its first frame. Paint-gated
 // (not a plain singleShot(0), which can fire before the native paint arrives) AND then deferred one more
 // event-loop pass, so the sweep's very first request always timestamps AFTER startup.firstpaint ends — under
-// MMV_PERF, main's FirstPaintProbe ends that span in the same Paint event, and posting the kick guarantees it
+// EB_PERF, main's FirstPaintProbe ends that span in the same Paint event, and posting the kick guarantees it
 // runs strictly after. Installed unconditionally on first show; removes itself and self-destructs once fired.
 class PrefetchPaintKick : public QObject
 {
@@ -328,7 +328,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         player_->setSubtitleDelay(off.sub);
         if (speedBtn_) speedBtn_->setText(QString::number(player_->speed(), 'g', 3) + QStringLiteral("×")); // reset to 1× per file
         // Themed audio page: the newly-loaded file plays (not paused); refresh its play button + speed + progress.
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         if (themedAudioSession_) { themedAudioPaused_ = false; themedAudioPushSec_ = -1; updateThemedAudioProgress(); }
 #endif
         if (!subCtx_.active) return;
@@ -420,7 +420,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Clear-finished appearing) — and, in themed mode, the action-chooser contents — so rebuild the panel.
     connect(dm_, &DownloadManager::changed, this, [this] {
         if (dlPanelOpen_ && stack_->currentWidget() == panelPage_) openDownloadManager();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         else if (themedPanelIsTop(tr("Downloads"))) openDownloadManager();   // themed: replaceTop (reentry) below
 #endif
     });
@@ -479,7 +479,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     stack_ = new QStackedWidget(this);
     stack_->addWidget(playerPage); // index 0 - video / audio
     stack_->addWidget(retro_);     // index 1 - games
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The ebook reader is wrapped in the themed chrome host: it reparents book_ inside itself and adds themed
     // strips over it in themed mode; in classic mode it's a transparent passthrough (book_ shows its own
     // chrome). The stack page is the host, not book_ directly (index 2 - ebooks).
@@ -488,7 +488,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #else
     stack_->addWidget(book_);      // index 2 - ebooks
 #endif
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // PDF + comic readers are wrapped in the same themed chrome host (Task 4): each reparents its reader and
     // adds themed strips in themed mode; classic mode is a transparent passthrough. The stack page is the host.
     pdfHost_ = new ReaderChromeHost(pdf_, ReaderKind::Pdf, this);
@@ -498,13 +498,13 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
 #endif
     stack_->addWidget(library_);   // index 4 - addon library
     stack_->addWidget(home_);      // index 5 - home / catalog landing
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     comicHost_ = new ReaderChromeHost(comic_, ReaderKind::Comic, this);
     stack_->addWidget(comicHost_); // index 6 - comic (CBZ) reader (via host)
 #else
     stack_->addWidget(comic_);     // index 6 - comic (CBZ) reader
 #endif
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The themed settings-panel surface (B2): a persistent stack page rendering PanelRow lists through the Nav
     // Contract, used in themed mode instead of the classic showPanel widget panel. Classic mode never shows it.
     themedPanelHost_ = new ThemedPanelHost(this);
@@ -566,7 +566,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // reader without QML) — treat both as content so full-screen memory works in either build.
         bool content = (w == retro_ || w == playerPage_ || w == emuPage_
                         || w == book_ || w == pdf_ || w == comic_);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         content = content || (readerHost_ && w == readerHost_) || (pdfHost_ && w == pdfHost_)
                           || (comicHost_ && w == comicHost_);
 #endif
@@ -604,14 +604,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // A found update just surfaces a toast; the actual install is user-triggered from Settings ▸ General.
     updater_ = new AppUpdater(this);
     connect(updater_, &AppUpdater::updateAvailable, this, [this](const QString& ver, const QString&) {
-        notify(tr("My Media Vault %1 is available — Settings ▸ General ▸ Updates to install.").arg(ver), 12000);
+        notify(tr("EverythingBox %1 is available — Settings ▸ General ▸ Updates to install.").arg(ver), 12000);
     });
     connect(updater_, &AppUpdater::progress, this, [this](const QString& t, int) { notify(t, 0); });
     connect(updater_, &AppUpdater::applyFailed, this, [this](const QString& why) { notify(why, kFeedbackLong); });
     if (Settings::checkUpdatesOnStartup())
         QTimer::singleShot(4000, updater_, [this] { updater_->checkForUpdate(); });
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Appearance (themed-home toggle + theme picker) is reachable anywhere via Ctrl+Shift+A - this is also
     // the reliable escape hatch to turn the themed home back off.
     {
@@ -897,7 +897,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         themedAudioCurrent_ = current;
         // Themed-mode audio: the QML now-playing page is the surface (mpv plays invisibly) — never show the
         // classic player page. VIDEO queues (IPTV) and classic-mode audio keep the playlist_ + player page.
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         if (themedAudioSession_) { showThemedAudioPage(); pushThemedAudioQueue(); return; }
 #endif
         playlist_->clear();
@@ -912,7 +912,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         playlist_->setCurrentRow(i);
         themedAudioCurrent_ = i;
         themedAudioPaused_ = false;                    // a new track auto-plays
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         if (themedAudioSession_) pushThemedAudioQueue(); // move the highlighted queue row on the themed page
 #endif
         statusBar()->showMessage(tr("Track %1 of %2").arg(i + 1).arg(n), 3000);
@@ -1026,7 +1026,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         // Drop any themed reader level + hide chrome on whichever reader host was up (all idempotent).
         if (readerHost_) readerHost_->onLeaving();
         if (pdfHost_)    pdfHost_->onLeaving();
@@ -1040,7 +1040,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // list position by NOT rebuilding it).
         QWidget* origin = readerOrigin_;
         readerOrigin_ = nullptr;
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         if (themedHomeEnabled())
         {
             if (origin && (origin == themedHome_ || origin == themedBrowse_))
@@ -1064,7 +1064,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(comic_, &ComicView::backRequested, this, returnFromReader);
     connect(book_,  &EbookView::backRequested, this, returnFromReader);
     connect(pdf_,   &PdfView::backRequested,   this, returnFromReader);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The themed reader hosts' Back router pops the "reader" level with the chrome hidden -> leave the reader.
     if (readerHost_) connect(readerHost_, &ReaderChromeHost::exitRequested, this, returnFromReader);
     if (pdfHost_)    connect(pdfHost_,    &ReaderChromeHost::exitRequested, this, returnFromReader);
@@ -1188,7 +1188,7 @@ MainWindow::~MainWindow() = default; // AddonManager is complete in this transla
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed input-mapping CAPTURE: while active this is installed on qApp, so it sees keys before the themed
     // QQuickWidget's QML nav. Swallow all key traffic (modal capture): Esc cancels, a keyboard key binds, the
     // pad button arrives via the poll timer. (ShortcutOverride too, so a key can't trigger a shortcut instead.)
@@ -1281,7 +1281,7 @@ void MainWindow::showEscMenu()
     if (escMenuVisible()) return;
     // A NavMenu overlay: an in-window child, so it renders over the themed QML surface with no separate OS
     // window (no focus tug-of-war, no black flash), and restores the previous selection when it closes.
-    auto* menu = new NavMenu(tr("My Media Vault"), { tr("Resume"), tr("Exit My Media Vault") },
+    auto* menu = new NavMenu(tr("EverythingBox"), { tr("Resume"), tr("Exit EverythingBox") },
                              [this](int row) { if (row == 1) close(); }, // close() runs the Drive-push exit
                              this);
     escMenuOverlay_ = menu;
@@ -1298,7 +1298,7 @@ void MainWindow::hideEscMenu()
 
 NavGraph* MainWindow::currentThemedGraph() const
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     QWidget* cur = stack_->currentWidget();
     if (cur == themedHome_ || cur == themedBrowse_) return ThemeEngine::navGraph(cur);
 #endif
@@ -1359,7 +1359,7 @@ void MainWindow::sendNavKey(int key)
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
     if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // 4.2. The themed settings-panel host is a QQuickWidget too — hand it the key; SettingsPanel.qml's Keys
     //      handler drives its NavGraph (arrows / Enter) AND its own Back (nav.back() pops one panel level).
     if (themedPanelHost_ && cur == themedPanelHost_) { deliver(themedPanelHost_->quickWidget(), key); return; }
@@ -1446,7 +1446,7 @@ void MainWindow::goBack()
     // Themed (QML) home/browse: drive its NavGraph back stack, exactly as the QML's own nav.back() does. The
     // graph's levels (catalog + browse drills) unwind one at a time; its rootBack (empty stack) fires the
     // screen's root action (the pause menu on the home, the themed home from a browse view).
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (cur == themedHome_ || cur == themedBrowse_)
         if (NavGraph* g = ThemeEngine::navGraph(cur)) { g->back(); return; }
 #endif
@@ -1458,7 +1458,7 @@ void MainWindow::goBack()
     if (cur == library_) { if (!library_->navBack()) openSettingsHub(); return; }
     // The themed reader host owns its own Back rule (chrome visible -> hide; hidden -> pop the reader level,
     // which returns us home). Route to it before the plain reader case below.
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The themed settings-panel host owns its own Back (pop one panel level; at the root, its onBack leaves to
     // the home screen). Route to it before the plain-reader/other cases below.
     if (themedPanelHost_ && cur == themedPanelHost_) { themedPanelHost_->handleBack(); return; }
@@ -1499,7 +1499,7 @@ void MainWindow::captureReaderOrigin()
 {
     QWidget* cur = stack_->currentWidget();
     bool inReader = (cur == book_ || cur == pdf_ || cur == comic_);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     inReader = inReader || (readerHost_ && cur == readerHost_) || (pdfHost_ && cur == pdfHost_)
                         || (comicHost_ && cur == comicHost_);
 #endif
@@ -1509,7 +1509,7 @@ void MainWindow::captureReaderOrigin()
 void MainWindow::presentBook()
 {
     captureReaderOrigin();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (readerHost_)
     {
         readerHost_->present(themedHomeEnabled());
@@ -1523,7 +1523,7 @@ void MainWindow::presentBook()
 void MainWindow::presentPdf()
 {
     captureReaderOrigin();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (pdfHost_)
     {
         pdfHost_->present(themedHomeEnabled());
@@ -1537,7 +1537,7 @@ void MainWindow::presentPdf()
 void MainWindow::presentComic()
 {
     captureReaderOrigin();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (comicHost_)
     {
         comicHost_->present(themedHomeEnabled());
@@ -1585,7 +1585,7 @@ void MainWindow::updateNavForPage()
         navCtx_->setBackAction(nullptr);
     }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // A themed (QML) page owns its own focus (no ring), but it DOES have a real selection surface — register
     // its NavGraph so the kit knows the page is navigable (presence), instead of the null-ring "nothing here".
     // Any other page clears it. (Set after the ring choice above so it applies on every page.)
@@ -1612,7 +1612,7 @@ void MainWindow::updateNavForPage()
 // No-op unless `page` is the themed home/browse (and only compiled with the QML engine).
 void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (page != themedHome_ && page != themedBrowse_) return;
     QQuickItem* r = ThemeEngine::rootItem(page);
     if (!r) return;
@@ -1831,7 +1831,7 @@ void MainWindow::updateUiTestServer()
         // selection state — the highlighted tile's title, the view, and (XMB) the category / (button
         // zone) the focused corner button — so QML-side automation is as precise as the Qt panels.
         addThemedSelection(o, cur);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
         // Themed reader host (book / pdf / comic): the chrome strips are opaque QQuickWidgets, so surface the
         // graph selection + chrome visibility + page info for reader-chrome automation.
         ReaderChromeHost* rh = (readerHost_ && cur == readerHost_) ? readerHost_
@@ -1959,7 +1959,7 @@ void MainWindow::updateUiTestServer()
 // together they re-run layout + repaint the scene into the widget's backing image. No-op off the themed home.
 void MainWindow::kickThemedRepaint()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     for (QWidget* w : { themedHome_, themedBrowse_ })
     {
         if (!w) continue;
@@ -2211,9 +2211,9 @@ void MainWindow::showEvent(QShowEvent* event)
             // profiles ⇒ straight to the picker. onboarding/done short-circuits ahead of it so an already-onboarded
             // (or existing) user is byte-for-byte today's behavior — the choice screen is a pure first-run prepend.
             const bool hasLocal = !ProfileStore::list().isEmpty();
-            const auto route = mmv::onboardingRoute(hasLocal, /*restorePicked*/ false, /*signInOk*/ false,
+            const auto route = eb::onboardingRoute(hasLocal, /*restorePicked*/ false, /*signInOk*/ false,
                                                     /*remoteHasProfiles*/ false, CloudSync::signInAvailable());
-            if (!Settings::onboardingDone() && route == mmv::OnboardingRoute::ChoiceScreen)
+            if (!Settings::onboardingDone() && route == eb::OnboardingRoute::ChoiceScreen)
                 presentOnboardingChoice();
             else
                 promptStartupProfile();                  // pick a user before anything else (unchanged path)
@@ -2243,7 +2243,7 @@ void MainWindow::changeEvent(QEvent* event)
                 // backing image stale until something invalidates it — the software backend won't repaint a
                 // scene it thinks is clean. Schedule an explicit repaint so the home never comes back blank.
                 w->update();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
                 if (auto* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
 #endif
             }
@@ -2254,18 +2254,18 @@ void MainWindow::changeEvent(QEvent* event)
         });
 }
 
-// Inline "Who's using My Media Vault?" picker, shown once the window is up (replaces the pre-window popup).
+// Inline "Who's using EverythingBox?" picker, shown once the window is up (replaces the pre-window popup).
 void MainWindow::promptStartupProfile()
 {
     startupChooseProfile_ = false;
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: render the picker on the Nav Contract (ThemedPanelHost) instead of hosting the classic
     // ProfileDialog. The host is a persistent stack page constructed in the ctor (independent of themedHome_,
     // which openHome builds AFTER a profile is chosen) — so it can present pre-home. mustChoose = no Back escape.
     if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
 #endif
     auto* dlg = new ProfileDialog(/*mustChoose*/ true, this);
-    showDialogPanel(tr("Who's using My Media Vault?"), dlg, [this, dlg](int result) {
+    showDialogPanel(tr("Who's using EverythingBox?"), dlg, [this, dlg](int result) {
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty())
         {
             ProfileStore::setCurrent(dlg->selectedId());
@@ -2336,8 +2336,8 @@ void MainWindow::maybeOfferTvMode()
     // Test-only seam (parity with the EB_UITEST channel): the physical-size guard is hardware-bound and can't
     // be seeded from an ini, so let the UI-test harness substitute a screen width to exercise this prompt. Never
     // active in production — qEnvironmentVariableIsSet("EB_UITEST") is only ever set by the test launcher.
-    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_SCREEN_MM"))
-        physWidthMm = qEnvironmentVariableIntValue("MMV_TEST_SCREEN_MM");
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("EB_TEST_SCREEN_MM"))
+        physWidthMm = qEnvironmentVariableIntValue("EB_TEST_SCREEN_MM");
     if (physWidthMm < 700.0) return;
 
     const int r = NavConfirm::ask(
@@ -3055,7 +3055,7 @@ void MainWindow::ensureEmuPage()
 
 void MainWindow::openEmulatorManager()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: folder Info row + Change… Action (native QFileDialog — the documented exception) + fullscreen
     // Toggle (same setter) + per-emulator Separator (display name) + status Info row (installed path / "Not
     // installed.") + Download/Update Action + Launch Action — the SAME launcher_->install()/runEmulator() calls
@@ -3214,7 +3214,7 @@ void MainWindow::openEmulatorManager()
 // protocols (HLS, etc.) for both audio and video; audio-only streams show the "now playing" overlay.
 void MainWindow::openStreamPrompt()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: a URL TextField (via the OSK) + a Play Action that feeds openStreamUrl() exactly. This is a
     // ROOT panel reached from the home flows (onRequestOpenFile "stream"), NOT a hub child — so it is a fresh
     // reset()+present() with Back returning to home (its classic onBack).
@@ -3408,7 +3408,7 @@ bool MainWindow::openDocumentPath(const QString& f)
 
 void MainWindow::openLibrary()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode (B2 Task 6.5): the Add-ons manager's SOURCE MANAGEMENT surface on the Nav Contract. Root rows =
     // Browse/Install-from-file/Add-by-URL/Reload actions + a Separator + one Action per installed source (drill
     // into presentAddonDetail). Catalog browsing / Local ROMs stay OUT of scope (the themed home covers content).
@@ -3496,7 +3496,7 @@ void MainWindow::openLibrary()
     stack_->setCurrentWidget(library_);
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // Patch the root "Add-ons" panel's status Info row in place (op results / add-by-URL outcomes). No-ops harmlessly
 // (updateRow returns false) when the root isn't the model's top panel.
 void MainWindow::setAddonsStatus(const QString& msg) { updatePanelInfo(QStringLiteral("lib.status"), msg); }
@@ -3592,7 +3592,7 @@ void MainWindow::presentAddonConfig(const AddonManifest& manifest)
         rows << r;
     }
     { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cfg.note"); r.label = tr("Note");
-      r.value = tr("Credentials are stored on this device (plaintext in mymediavault.ini) and are only sent "
+      r.value = tr("Credentials are stored on this device (plaintext in everythingbox.ini) and are only sent "
                    "where the add-on's script chooses to use them."); rows << r; }
 
     themedPanelHost_->present(tr("%1 — Settings").arg(name), rows,
@@ -3881,7 +3881,7 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
       r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
     updatePanelInfo(QStringLiteral("reg.status"), tr("Installed \"%1\".").arg(name));
 }
-#endif // MMV_HAVE_QML
+#endif // EB_HAVE_QML
 
 void MainWindow::openHome()
 {
@@ -3914,7 +3914,7 @@ void MainWindow::openHome()
 // setting is off (default) this is exactly the old behaviour: show home_.
 void MainWindow::showHomeScreen()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Keep the in-window overlays (Esc pause menu, action choosers, confirms) matched to the active theme: push
     // the current settingsPanel block on every return home (theme changes rebuild the home, so this re-runs after
     // an Appearance switch). Classic mode -> empty map -> the overlays keep their original hardcoded darks.
@@ -3942,7 +3942,7 @@ void MainWindow::showHomeScreen()
     stack_->setCurrentWidget(home_);
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // After (re)building the themed home, schedule a repaint. The themed page is a plain QQuickWidget, so this is
 // just a widget update — kept as a hook point (and for the windowed first-show).
 void MainWindow::nudgeThemedHome()
@@ -3956,7 +3956,7 @@ void MainWindow::nudgeThemedHome() {}
 
 bool MainWindow::themedHomeEnabled() const
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Default ON (B2 Task 6, item 3). The default only applies when the key is ABSENT: QSettings returns the
     // stored value whenever the key exists, so a user who explicitly chose classic (wrote `false` via the
     // Appearance toggle) is respected — only fresh installs and users who never touched the toggle now get the
@@ -3967,7 +3967,7 @@ bool MainWindow::themedHomeEnabled() const
 #endif
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // Text prompt for a themed-mode search: the in-window on-screen keyboard, so it's typeable from the couch
 // and never spawns a separate window. Null return = cancelled; "" = user cleared the box (full list).
 QString MainWindow::promptThemedSearch(const QString& scope)
@@ -4014,7 +4014,7 @@ void MainWindow::showThemedHome()
         appearanceIdx = int(items.size()) - 1;
     }
 
-    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
     auto onActivated = [this, navKeys, appearanceIdx](int idx) {
         if (idx == appearanceIdx) { openAppearance(); return; }
         if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
@@ -4657,7 +4657,7 @@ void MainWindow::showThemedXmb()
     const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
     const int startCat = qBound(0, themedHomeIndex_, settingsIdx);
 
-    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
 
     // Show a bucket's catalog list as the column. If the bucket has a single catalog (e.g. Games -> one
     // catalog whose top level IS the console list), open it directly so the column shows its contents (the
@@ -5015,7 +5015,7 @@ void MainWindow::openAppearance()
              tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
         info(QStringLiteral("appr.root"), tr("Themes folder"), ThemeEngine::themesRoot());
         info(QStringLiteral("appr.community"),
-             tr("Browse and share community themes at github.com/cubman3134/mymediavault-themes."), QString());
+             tr("Browse and share community themes at github.com/cubman3134/everythingbox-themes."), QString());
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         themedPanelHost_->present(tr("Appearance"), rows,
@@ -5047,7 +5047,7 @@ void MainWindow::openAppearance()
                 }
                 else if (id == QStringLiteral("appr.gallery")) {
                     // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
-                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/cubman3134/mymediavault-themes")));
+                    QDesktopServices::openUrl(QUrl(QStringLiteral("https://github.com/cubman3134/everythingbox-themes")));
                 }
             },
             [this] { openSettingsHub(); });   // defensive root onBack: Appearance is nested, so a pop re-renders the hub
@@ -5065,7 +5065,7 @@ void MainWindow::openAppearance()
         for (const char* n : { "Video", "Games", "Audio", "Reading" })
             previewItems << QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(n) },
                                          { QStringLiteral("accent"), QStringLiteral("#3E8E7E") } };
-    QVariantMap previewSystem; previewSystem.insert(QStringLiteral("name"), QStringLiteral("My Media Vault"));
+    QVariantMap previewSystem; previewSystem.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
 
     showPanel(tr("Appearance"), [this, previewItems, previewSystem](QVBoxLayout* v) {
         auto* enable = new QCheckBox(tr("Use the themed home screen (beta)"));
@@ -5114,7 +5114,7 @@ void MainWindow::openAppearance()
             "<b>Get more themes &amp; share yours.</b> "
             "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>. "
             "Browse and download community themes, or upload your own, at "
-            "<a href=\"https://github.com/cubman3134/mymediavault-themes\">github.com/cubman3134/mymediavault-themes</a>. "
+            "<a href=\"https://github.com/cubman3134/everythingbox-themes\">github.com/cubman3134/everythingbox-themes</a>. "
             "To <b>add</b> a theme, drop its folder into the directory above and pick it here. "
             "To <b>share</b> yours, add the folder under <code>themes2/</code> in that repo with an "
             "<code>index.json</code> entry and open a pull request (see <code>THEME_FORMAT.md</code> for the format).")
@@ -5313,7 +5313,7 @@ bool MainWindow::parentalUnlock(const QString& reason)
 void MainWindow::onSwitchProfile()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to switch profiles."))) return;
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the switcher on the Nav Contract. Back keeps the current profile (openHome), matching the
     // classic Cancel button (which mustChoose hides). The classic ProfileDialog path below stays for classic mode.
     if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ false); return; }
@@ -5329,9 +5329,9 @@ void MainWindow::onSwitchProfile()
 }
 
 // NOTE (non-QML link safety): onboardingChoiceTitle / presentOnboardingChoice / onboardingToFresh below are
-// deliberately OUTSIDE the MMV_HAVE_QML guard (which resumes before onboardingChoiceIsTop) — showEvent() calls
+// deliberately OUTSIDE the EB_HAVE_QML guard (which resumes before onboardingChoiceIsTop) — showEvent() calls
 // presentOnboardingChoice() UNCONDITIONALLY, so a Qt-without-qtdeclarative build must still link them. Each one's
-// own inner #ifdef MMV_HAVE_QML supplies the classic (no panel host) fallback, so both worlds build.
+// own inner #ifdef EB_HAVE_QML supplies the classic (no panel host) fallback, so both worlds build.
 
 // ---- Themed Profiles picker (B2 Task 5) --------------------------------------------------------------------
 // The classic ProfileDialog (a QStackedWidget: list page + a name/icon picker page) becomes, in themed mode, a
@@ -5357,11 +5357,11 @@ void MainWindow::onSwitchProfile()
 // This screen is ALSO the landing spot the restore flow re-presents on failure, so its title doubles as the
 // "onboarding is still the active surface" gate (onboardingChoiceIsTop) that drops a late OAuth completion after
 // the user navigated away — hence the one title source, onboardingChoiceTitle().
-QString MainWindow::onboardingChoiceTitle() { return tr("Welcome to My Media Vault"); }
+QString MainWindow::onboardingChoiceTitle() { return tr("Welcome to EverythingBox"); }
 
 void MainWindow::presentOnboardingChoice()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (themedHomeEnabled() && themedPanelHost_)
     {
         clearPanelPageConns();            // settings-area BOUNDARY: no stale async listener may outlive this present
@@ -5403,7 +5403,7 @@ void MainWindow::onboardingToFresh()
     promptStartupProfile();
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // "The onboarding choice/flow is still the active surface" — the restore flow's equivalent of themedPanelIsTop's
 // late-async gate (openCloudSync). While Restore is signing in / pulling, the choice screen panel stays presented
 // (only a notify overlays it), so its title being the live top panel means the user hasn't quit or navigated away.
@@ -5428,9 +5428,9 @@ bool MainWindow::onboardingChoiceIsTop() const
 void MainWindow::beginOnboardingRestore()
 {
     // The pre-sign-in decision goes through the pure router too: Decline (sign-in unavailable) -> the fresh path.
-    if (mmv::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ false,
+    if (eb::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ false,
                              /*remoteHasProfiles*/ false, CloudSync::signInAvailable())
-        == mmv::OnboardingRoute::Decline)
+        == eb::OnboardingRoute::Decline)
     {
         notify(tr("Drive sign-in isn't available on this device yet."));
         onboardingToFresh();
@@ -5469,18 +5469,18 @@ void MainWindow::onboardingRestorePull()
     notify(tr("Restoring your library from Google Drive…"));
     cloud_->checkStatus([this](const CloudSync::Status& st) {
         if (!onboardingChoiceIsTop()) return;                 // navigated away mid-pull — drop
-        switch (mmv::restorePullStage(st.reached, st.listReached, st.hasRemote))
+        switch (eb::restorePullStage(st.reached, st.listReached, st.hasRemote))
         {
-        case mmv::RestorePullStage::Retry:                    // unreachable OR the file-query failed: UNPROVEN empty.
+        case eb::RestorePullStage::Retry:                    // unreachable OR the file-query failed: UNPROVEN empty.
             // Route to the choice screen (token kept, done stays FALSE) — never seed fresh over a backup we merely
             // couldn't read. This is the data-safety fix: a query failure must not be mistaken for an empty cloud.
             finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false);
             return;
-        case mmv::RestorePullStage::Seed:                     // reached AND query succeeded, no bundle -> proven-empty
+        case eb::RestorePullStage::Seed:                     // reached AND query succeeded, no bundle -> proven-empty
             pullAndMergeProgress();                           // (no bundle, but any progress doc merges; no-ops if none)
             finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
             return;
-        case mmv::RestorePullStage::HasBundle:                // reached AND query succeeded AND a bundle exists -> apply
+        case eb::RestorePullStage::HasBundle:                // reached AND query succeeded AND a bundle exists -> apply
             cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
                 if (!onboardingChoiceIsTop()) return;         // navigated away mid-apply — drop
                 if (!ok) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
@@ -5506,18 +5506,18 @@ void MainWindow::finishOnboardingRestore(bool restoreOk, bool remoteHasProfiles)
     // "the bundle apply completed" — a failed pull must not reconcile against a view we could not read.
     if (restoreOk) startSaveSync();
 
-    switch (mmv::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ restoreOk,
+    switch (eb::onboardingRoute(/*hasLocal*/ false, /*restorePicked*/ true, /*signInOk*/ restoreOk,
                                  remoteHasProfiles, /*signInAvailable*/ true))
     {
-    case mmv::OnboardingRoute::Picker:                        // restored profiles pulled down -> pick one (as rows)
+    case eb::OnboardingRoute::Picker:                        // restored profiles pulled down -> pick one (as rows)
         Settings::setOnboardingDone(true);
         presentProfilePicker(/*mustChoose*/ true);
         break;
-    case mmv::OnboardingRoute::Fresh:                         // signed in, empty cloud -> this device seeds it
+    case eb::OnboardingRoute::Fresh:                         // signed in, empty cloud -> this device seeds it
         notify(tr("Nothing to restore yet — let's set up your library."));
         onboardingToFresh();
         break;
-    case mmv::OnboardingRoute::ChoiceScreen:                  // pull/network failure after auth -> retry (token kept)
+    case eb::OnboardingRoute::ChoiceScreen:                  // pull/network failure after auth -> retry (token kept)
     default:
         presentOnboardingChoice();                            // onboarding/done stays FALSE
         notify(tr("Couldn't reach Drive — check your connection and try again."));
@@ -5539,7 +5539,7 @@ void MainWindow::presentProfilePicker(bool mustChoose)
 
 void MainWindow::presentProfileList(bool mustChoose, bool replace)
 {
-    const QString title = mustChoose ? tr("Who's using My Media Vault?") : tr("Profiles");
+    const QString title = mustChoose ? tr("Who's using EverythingBox?") : tr("Profiles");
 
     QVector<PanelRow> rows;
     for (const Profile& p : ProfileStore::list())
@@ -5691,7 +5691,7 @@ void MainWindow::quitConfirmFromStartup()
     // written -> false) must NEVER see the choice screen — profiles-empty is what makes it genuinely first-run, so a
     // Back on THEIR startup picker keeps today's create-picker/quit behavior, not the Restore-vs-new prompt.
     const bool onboarding = !Settings::onboardingDone() && ProfileStore::list().isEmpty();
-    const int choice = NavConfirm::ask(tr("Quit My Media Vault?"),
+    const int choice = NavConfirm::ask(tr("Quit EverythingBox?"),
         onboarding ? tr("Choose Restore or a new library to continue.")
                    : tr("You need to choose a profile to continue."),
         { onboarding ? tr("Go back") : tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
@@ -5699,7 +5699,7 @@ void MainWindow::quitConfirmFromStartup()
     if (onboarding) { presentOnboardingChoice(); return; }       // re-present the choice screen (Back popped its level)
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
-#endif // MMV_HAVE_QML
+#endif // EB_HAVE_QML
 
 // A game whose platform is desktop Windows isn't an emulator ROM — we run it on the PC itself. The addon
 // tags these with the platform name it was opened from (e.g. "PC (Windows)").
@@ -7952,7 +7952,7 @@ void MainWindow::updateBackgroundMusic()
     if (!bgm_) return;
     QWidget* w = stack_->currentWidget();
     bool menu = (w == home_ || w == themedHome_ || w == themedBrowse_ || w == panelPage_ || w == library_);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     menu = menu || (w == themedPanelHost_);
 #endif
     bgm_->setActive(menu);
@@ -7978,7 +7978,7 @@ void MainWindow::applyThemeMusic(const QString& themeDir)
 void MainWindow::updateThemedNowPlaying()
 {
     if (!themedHome_ || !bgm_) return;
-#ifdef MMV_HAVE_QML // themedHome_ is only ever non-null in QML builds; guard the QtQuick types for the rest
+#ifdef EB_HAVE_QML // themedHome_ is only ever non-null in QML builds; guard the QtQuick types for the rest
     if (QQuickItem* r = ThemeEngine::rootItem(themedHome_))
         r->setProperty("nowPlaying", bgm_->currentTitle());
 #endif
@@ -7989,7 +7989,7 @@ void MainWindow::updateThemedNowPlaying()
 QVariantMap MainWindow::settingsPanelStyle() const
 {
     QVariantMap out;
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     const QStringList themes = ThemeEngine::availableThemes();
     QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
     if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
@@ -8010,13 +8010,13 @@ void MainWindow::openSettingsHub()
     // from a child panel — classic panelPage_ or the themed host — must NOT clobber the remembered return page.)
     QWidget* cw = stack_->currentWidget();
     bool fromPanel = (cw == panelPage_);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     fromPanel = fromPanel || (cw == themedPanelHost_);
 #endif
     if (!fromPanel)
         panelReturnTo_ = cw;
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: render the hub on the Nav Contract (ThemedPanelHost) instead of the classic widget panel. The
     // SAME rows, as Action descriptors, dispatch to the SAME open* methods (which route themed/classic per mode).
     if (themedHomeEnabled() && themedPanelHost_)
@@ -8046,7 +8046,7 @@ void MainWindow::openSettingsHub()
         act(QStringLiteral("input"),        tr("Input Mapping…"));
         act(QStringLiteral("debug"),        tr("Debug"));
         { PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("uninstall");
-          r.label = tr("Uninstall My Media Vault…"); r.destructive = true; rows << r; }
+          r.label = tr("Uninstall EverythingBox…"); r.destructive = true; rows << r; }
 
         themedPanelHost_->present(tr("Settings"), rows,
             [this](const QString& id, const QString&) {
@@ -8103,7 +8103,7 @@ void MainWindow::openSettingsHub()
         add(tr("BIOS Check"),         [this] { openBiosCheck(); });        // per-system BIOS presence (RetroBat-style)
         add(tr("Input Mapping…"),     [this] { openInputMapping(); });     // still a popup (phase 2)
         add(tr("Debug"),              [this] { openDebug(); });
-        add(tr("Uninstall My Media Vault…"), [this] { confirmUninstall(); }); // remove the app + all its data
+        add(tr("Uninstall EverythingBox…"), [this] { confirmUninstall(); }); // remove the app + all its data
     }, [this] {
         // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
         if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
@@ -8157,7 +8157,7 @@ void MainWindow::openStats()
     topSection(QStringLiteral("audio"),   tr("Most listened"), false);
     topSection(QStringLiteral("reading"), tr("Most read"),     true);
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: render the rows on the Nav Contract (ThemedPanelHost) — Info/Separator rows are non-focusable
     // dividers, so the panel is read-only (Back pops to the hub). A hub child, exactly like openEmulatorManager.
     if (themedHomeEnabled() && themedPanelHost_)
@@ -8204,7 +8204,7 @@ void MainWindow::confirmUninstall()
     const QString dir = QDir::toNativeSeparators(QCoreApplication::applicationDirPath());
     // An in-window confirm card (controller-navigable, no OS dialog); Cancel is focused and Back cancels.
     const int choice = NavConfirm::ask(
-        tr("Permanently remove My Media Vault and all of its data?"),
+        tr("Permanently remove EverythingBox and all of its data?"),
         tr("This deletes the whole app folder:\n%1\n\n"
            "That includes your settings, cloud sign-in, downloaded games/music, emulator saves and save "
            "states, and installed emulators/cores, plus the cache and crash logs. This cannot be undone.\n\n"
@@ -8231,12 +8231,12 @@ void MainWindow::performUninstall()
     if (!cacheDir.isEmpty())  del += QStringLiteral("rmdir /S /Q \"%1\" 2>NUL\r\n").arg(cacheDir);
     del += QStringLiteral("reg delete \"HKCU\\SOFTWARE\\Xenia\" /f >NUL 2>&1\r\n"); // the Xenia disclaimer flag we set
     if (!localApp.isEmpty())
-        del += QStringLiteral("del /Q \"%1\\CrashDumps\\MyMediaVault.exe.*.dmp\" >NUL 2>&1\r\n")
+        del += QStringLiteral("del /Q \"%1\\CrashDumps\\EverythingBox.exe.*.dmp\" >NUL 2>&1\r\n")
                    .arg(QDir::toNativeSeparators(localApp));
     del += QStringLiteral("(goto) 2>nul & del \"%~f0\"\r\n"); // self-delete this script
 
     const QString cmdPath = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                .filePath(QStringLiteral("mmv-uninstall.cmd"));
+                                .filePath(QStringLiteral("eb-uninstall.cmd"));
     QFile cf(cmdPath);
     if (!cf.open(QIODevice::WriteOnly | QIODevice::Text))
     { notify(tr("Couldn't start the uninstaller."), kFeedbackLong); return; }
@@ -8291,7 +8291,7 @@ static QString downloadStatusText(const DownloadJob& j)
 // a controller D-pad, or the mouse. Rebuilt on state changes; progress ticks update the bars in place.
 void MainWindow::openDownloadManager()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: each job = one Progress row (label=title, progress=pct, value=status text). Activating a job
     // row opens a NavMenu action chooser (the established overlay — like the XMB game menu) with that job's
     // applicable actions (Pause/Resume/Retry/Cancel/Remove per the SAME state logic classic uses to decide its
@@ -8452,7 +8452,7 @@ void MainWindow::openDownloadManager()
 // leaves keyboard/controller focus undisturbed, unlike a full panel rebuild).
 void MainWindow::updateDownloadRow(const QString& id)
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed: patch the job's Progress row in place (no rebuild, cursor undisturbed). host->updateRow no-ops when
     // no stacked panel carries "dl:"+id — the themed analogue of the classic dlPanelOpen_ guard: a tick that
     // arrives after the user left Downloads finds no matching row and returns false (no stray update, no crash).
@@ -8481,7 +8481,7 @@ void MainWindow::updateDownloadRow(const QString& id)
     }
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // Themed Downloads: activating a job's Progress row opens a NavMenu action chooser with exactly the actions the
 // classic panel would show as per-job buttons for that job's state — calling the SAME DownloadManager methods.
 // The overlay mirrors itself as a level on the panel host's own NavGraph (like Osk::getText does), so Back closes
@@ -8521,7 +8521,7 @@ void MainWindow::showDownloadActionMenu(const QString& id)
 
 void MainWindow::openGeneralSettings()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: render General as a flat PanelRow descriptor list on the Nav Contract (ThemedPanelHost),
     // instead of the classic QWidget builder. Every row writes the SAME Settings key via the SAME setter the
     // classic handler used. This is a NESTED present() (the hub is already up at level 1) — NO reset(), so Back
@@ -9446,7 +9446,7 @@ void MainWindow::clearPanelPageConns()
 // after the user navigated to Debug/home) must be dropped, never present a panel over an unrelated screen.
 bool MainWindow::themedPanelIsTop(const QString& title) const
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // ALSO require no overlay (OSK / NavMenu) above the top panel: an overlay doesn't change panelTitle(), so
     // without this a late async handler could rebuild the panel UNDER a live edit — force-cancelling the user's
     // OSK text, or (presentAddByUrl's deferred handleBack) popping the OSK's mirrored level and stacking a
@@ -9464,7 +9464,7 @@ bool MainWindow::themedPanelIsTop(const QString& title) const
 void MainWindow::openCloudSync()
 {
     if (!cloud_) cloud_ = std::make_unique<CloudSync>(this);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the four sign-in Actions become state-gated PanelRows (omitted, not just hidden, per the SAME
     // isConfigured()/isSignedIn() checks the classic refresh() uses), over a status Info row. The row SET flips
     // with sign-in state, so the async signals rebuild IN PLACE via replaceTop (reentry) — no stacked level. Same
@@ -9540,7 +9540,7 @@ void MainWindow::openCloudSync()
 #endif
     showPanel(tr("Cloud Sync"), [this](QVBoxLayout* v) {
         auto* intro = new QLabel(tr("<b>Google Drive sync</b><br>Back up your profiles, history, favourites, "
-            "settings and local add-ons to a “MyMediaVault” folder on your Google Drive, to sync between devices."));
+            "settings and local add-ons to a “EverythingBox” folder on your Google Drive, to sync between devices."));
         intro->setWordWrap(true); intro->setStyleSheet(QStringLiteral("font-size:14px;"));
         v->addWidget(intro);
         auto* status = new QLabel(); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
@@ -9625,7 +9625,7 @@ QString fileMd5(const QString& path)
 
 void MainWindow::openBiosCheck()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the RichText per-file MD5 report degrades to one Info row per system (name + a tick/cross/warn
     // glyph summarising that system's files), under a summary Info row. Same MD5 verification (biosFilePath +
     // fileMd5), same Download/Repair (drop wrong-hash files, then ensureBios) and Open Folder flows. Download
@@ -9782,7 +9782,7 @@ void MainWindow::openBiosCheck()
 // Inline form (no popup) to paste the Google OAuth client id/secret used for Drive sign-in.
 void MainWindow::openCloudClientSetup()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: two TextField rows (client id/secret via the OSK) + Save. Same write path (the cloud/clientId,
     // cloud/clientSecret ini keys) and same follow-through (signOut + back to a refreshed Cloud panel). Values are
     // held pending and only committed on Save — exactly like the classic form (Back discards). This is a nested
@@ -10010,7 +10010,7 @@ void MainWindow::closeEvent(QCloseEvent* e)
 
 void MainWindow::openRetroAchievements()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the login form (username/password TextFields) OR the signed-in state (web API key TextField +
     // Sign Out) per the SAME ach_->isLoggedIn() branch. Password + API key rows are MASKED — dots both in the
     // value display AND while editing (the host opens the OSK in QLineEdit::Password echo for a masked row; see
@@ -10165,7 +10165,7 @@ void MainWindow::openRetroAchievements()
 
 void MainWindow::openDebug()
 {
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the diagnostic log becomes a scrollable read-only LogView row (activate = scroll mode: Up/Down
     // scroll the tail, Esc returns to row selection — NavTextField's read-only two-state semantics at the panel
     // level) alongside Refresh / Clear / Open-location Actions and the UI-test Toggle. Same flows: the same log
@@ -10281,7 +10281,7 @@ void MainWindow::openEmulatorSettings()
     // The dialog loads cores headlessly to read their options; only one libretro core can be live at a
     // time (the C ABI routes through a global), so stop any running game first.
     retro_->stop();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: the per-system core picker on the Nav Contract (ThemedPanelHost) instead of the classic
     // SettingsDialog. Same combo data (SystemCatalog + Settings::coreFor); the per-core options editor page
     // becomes a nested panel level. A hub child -> nested present(), Back -> openSettingsHub.
@@ -10292,7 +10292,7 @@ void MainWindow::openEmulatorSettings()
                     [this] { openSettingsHub(); });
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // Themed core picker: one Choice row per system (cycles the libretro core, applied+persisted immediately via
 // Settings::setCoreFor — the themed-panel convention, no separate Save) + an indented "Options…" Action per
 // system that drills into that core's options as a nested panel level. retro_->stop() (openEmulatorSettings)
@@ -10400,13 +10400,13 @@ void MainWindow::editCoreOptions(const QString& systemId)
         },
         [] { /* nested: Back pops back to the core list */ });
 }
-#endif // MMV_HAVE_QML
+#endif // EB_HAVE_QML
 
 void MainWindow::openInputMapping()
 {
     // Stop the game so the remap has sole use of the controller (for "press a button" capture).
     retro_->stop();
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // Themed mode: a themed SHELL on the Nav Contract. player/scope/turbo Choices + per-button binding Action
     // rows; activating a binding row enters CAPTURE (the ControllerRemapDialog's capture machinery — keyboard
     // grab + pad poll — driven headlessly from the shell). Classic ControllerRemapDialog stays for classic mode.
@@ -10417,7 +10417,7 @@ void MainWindow::openInputMapping()
                     [this] { openSettingsHub(); });
 }
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 // The RetroPad buttons in editing order (mirrors ControllerRemapDialog::kRows — the stable
 // RETRO_DEVICE_ID_JOYPAD_* ABI numbers). Kept local to the themed shell.
 namespace {
@@ -10672,7 +10672,7 @@ void MainWindow::refreshInputButtonRows()
           themedPanelHost_->updateRow(r.id, r); }
     }
 }
-#endif // MMV_HAVE_QML
+#endif // EB_HAVE_QML
 
 // Collect every provider's segments for the file that just loaded, resolve them, and arm the tracker.
 // Runs ONCE per file (from onDuration, because credits classification needs the length), never per tick.
@@ -10981,7 +10981,7 @@ void MainWindow::onDuration(double seconds)
     duration_ = seconds;
     durGen_   = nextEpGen_;   // this length belongs to the file open RIGHT NOW — see resetSegmentState()
     session_->setDuration(seconds);
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (themedAudioSession_) updateThemedAudioProgress(); // refresh the page's total-time once the length is known
 #endif
     // Resume where we left off, now that the file is loaded and its length is known. Skip if the saved spot
@@ -11007,7 +11007,7 @@ void MainWindow::onPosition(double seconds)
 
     // Themed audio now-playing page: feed the progress bar at ~1 Hz (a whole-second change), not at mpv's
     // event rate — the bar steps once a second, never re-rendering the full-screen QML page continuously.
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     if (themedAudioSession_)
     {
         const int sec = int(seconds);

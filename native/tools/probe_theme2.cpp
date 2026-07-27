@@ -21,7 +21,7 @@ int main(int argc, char** argv)
     qputenv("QT_QUICK_BACKEND", "software");
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software); // match the app
     QApplication app(argc, argv);
-    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview"); // so Video.qml's real-playback path is available
+    qmlRegisterType<MpvPreview>("EB", 1, 0, "MpvPreview"); // so Video.qml's real-playback path is available
     if (argc < 3) { std::fprintf(stderr, "usage: probe_theme2 <themeDir> <out.png> [sampleImage]\n"); return 2; }
     const QString themeDir = QString::fromLocal8Bit(argv[1]);
     const QString outPng   = QString::fromLocal8Bit(argv[2]);

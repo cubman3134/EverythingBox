@@ -531,9 +531,9 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
             catalogCache_.insert(key, { QDateTime::currentMSecsSinceEpoch(), cat });
     });
 
-    // MMV_PREFETCH_TTL_S (seconds, >0) compresses the catalog-cache TTL for tests; it also scales the
+    // EB_PREFETCH_TTL_S (seconds, >0) compresses the catalog-cache TTL for tests; it also scales the
     // CatalogPrefetcher's resweep cadence (which reads catalogCacheTtlMs()). Unset -> the 30-minute default.
-    const int ttlOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_TTL_S");
+    const int ttlOverrideS = qEnvironmentVariableIntValue("EB_PREFETCH_TTL_S");
     if (ttlOverrideS > 0)
     {
         catalogCacheTtlMs_ = qint64(ttlOverrideS) * 1000;
@@ -541,7 +541,7 @@ AddonManager::AddonManager(QObject* parent) : QObject(parent)
         if (!loggedOverride)
         {
             loggedOverride = true;
-            streamLog(QStringLiteral("prefetch: MMV_PREFETCH_TTL_S override active - catalog cache TTL %1s")
+            streamLog(QStringLiteral("prefetch: EB_PREFETCH_TTL_S override active - catalog cache TTL %1s")
                           .arg(ttlOverrideS));
         }
     }
@@ -626,7 +626,7 @@ void AddonManager::checkAddonUpdates()
             if (!newEtag.isEmpty()) { store().setValue(updateEtagKey(t.id), newEtag); store().sync(); }
             if (versionCompare(remoteVer, t.version) <= 0) return;        // same or older -> keep what we have
 
-            const QString tmp = QDir::tempPath() + QStringLiteral("/mmv-update-") + t.id + QStringLiteral(".addon");
+            const QString tmp = QDir::tempPath() + QStringLiteral("/eb-update-") + t.id + QStringLiteral(".addon");
             QFile f(tmp);
             if (!f.open(QIODevice::WriteOnly)) return;
             f.write(pkg);
@@ -959,10 +959,10 @@ int AddonManager::requestCatalog(LoadedAddon* src, const QString& catalogId, con
         return reqId;
     }
 
-    // Instrumentation (MMV_PREFETCH_LOG=1, off by default): reaching here is a cache MISS -> a REAL fetch (JS
+    // Instrumentation (EB_PREFETCH_LOG=1, off by default): reaching here is a cache MISS -> a REAL fetch (JS
     // getCatalog or HTTP GET) is about to run. Zero of these lines during a menu walk is the warm-path proof;
     // they should all cluster at prefetch-sweep time. Cache-served requests return above and never log.
-    static const bool kLogFetch = qEnvironmentVariableIntValue("MMV_PREFETCH_LOG") > 0;
+    static const bool kLogFetch = qEnvironmentVariableIntValue("EB_PREFETCH_LOG") > 0;
     if (kLogFetch) streamLog(QStringLiteral("catalog fetch %1|%2 page=%3%4")
                                  .arg(src->manifest.id, catalogId).arg(page)
                                  .arg(query.isEmpty() ? QString() : QStringLiteral(" q=") + query));
@@ -1738,7 +1738,7 @@ bool AddonManager::installPackage(const QString& addonPackagePath, QString* erro
     mz_free(mfData);
     if (!ok) return fail(QStringLiteral("Package manifest is invalid."));
 
-    // Reserved-namespace guard: the bundled addons (com.mymediavault.*) ship inside the app and are
+    // Reserved-namespace guard: the bundled addons (com.everythingbox.*) ship inside the app and are
     // NEVER installed through this path. Refuse a package that claims such an id so a downloaded /
     // side-loaded package can't impersonate a bundled source or overwrite its folder under root_.
     // Until the addon-id migration is confirmed, folders under root_ may STILL be named with the previous

@@ -21,8 +21,8 @@ static void pfLog(const QString& msg)
 CatalogPrefetcher::CatalogPrefetcher(AddonManager* mgr, QObject* parent)
     : QObject(parent), mgr_(mgr)
 {
-    // MMV_PREFETCH_WATCHDOG_S (seconds, >0) shortens the in-flight watchdog for tests; default 60s.
-    const int wdOverrideS = qEnvironmentVariableIntValue("MMV_PREFETCH_WATCHDOG_S");
+    // EB_PREFETCH_WATCHDOG_S (seconds, >0) shortens the in-flight watchdog for tests; default 60s.
+    const int wdOverrideS = qEnvironmentVariableIntValue("EB_PREFETCH_WATCHDOG_S");
     if (wdOverrideS > 0) watchdogMs_ = qint64(wdOverrideS) * 1000;
 
     timer_ = new QTimer(this);
@@ -184,7 +184,7 @@ void CatalogPrefetcher::armTimer()
 {
     if (!periodic_) return;
     // Cadence tracks the cache TTL: ~25 min at the 30-min default (5/6 of TTL), + 0..(TTL/6) jitter so many
-    // installs don't resweep in lockstep. MMV_PREFETCH_TTL_S scales the manager's TTL, so this scales with it.
+    // installs don't resweep in lockstep. EB_PREFETCH_TTL_S scales the manager's TTL, so this scales with it.
     const qint64 ttl = mgr_ ? mgr_->catalogCacheTtlMs() : 30 * 60 * 1000;
     const qint64 base = ttl * 5 / 6;
     const qint64 jitter = ttl > 0 ? qint64(QRandomGenerator::global()->bounded(qint64(ttl / 6 + 1))) : 0;

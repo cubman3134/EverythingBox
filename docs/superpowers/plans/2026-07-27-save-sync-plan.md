@@ -10,15 +10,15 @@
 
 ## Global Constraints
 
-- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`**. App target `mymediavault`.
-- **Build ONLY named targets.** Never a target-less `cmake --build build` — it builds ~41 probes and stalls. Adding a source or probe needs exactly ONE reconfigure: `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`). Report BLOCKED past ~6 min with no progress.
+- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`**. App target `everythingbox`.
+- **Build ONLY named targets.** Never a target-less `cmake --build build` — it builds ~41 probes and stalls. Adding a source or probe needs exactly ONE reconfigure: `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`). Report BLOCKED past ~6 min with no progress.
 - **When you add a `.cpp` to a CMake target, create the file in the SAME step.** CMake resolves source lists at configure time, so referencing a file no step has created yet fails the *reconfigure*, not the build — this has cost two tasks on this project already.
 - **The suite script only RUNS pre-built exes.** After touching a shared source, rebuild every target that compiles it before trusting a green run. A green suite on stale binaries has happened here.
 - **A new probe must be registered in THREE places** or it silently never runs: its `add_executable` block, the runner list at `native/tools/run-headless-probes.sh:119`, and the `--target` list in `.github/workflows/ci.yml`.
 - **Exact constants:** `kSkewWindowMs = 5000`, `kUploadDebounceMs = 10000`, conflict name format `<base>.conflict-<deviceId>-<yyyyMMdd-HHmmss><ext>`, sweep extension allowlist `.srm .sav .brm .smpc .mcd .mcr .eep .fla .state`.
 - **THE SAFETY RULE:** the first sync after this upgrade **never deletes anything**, in either direction. `firstRun == true` disables every `Delete*` outcome. Its failure mode is unrecoverable data loss, so it is asserted directly and mutation-tested.
 - **THE PRESERVATION RULE:** on a conflict the losing copy is never destroyed. When the **remote** copy loses, its bytes exist only in the cloud and we are about to overwrite that name — the transport must **download the loser first**, write it as `.conflict-…`, and only then upload the winner.
-- **Pre-commit hook** auto-bumps the patch version; let it. `MMV_NO_VERSION_BUMP=1` skips it for docs-only commits.
+- **Pre-commit hook** auto-bumps the patch version; let it. `EB_NO_VERSION_BUMP=1` skips it for docs-only commits.
 - **Commit messages** end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 ## File Structure
@@ -278,7 +278,7 @@ int main(int argc, char** argv)
 
 Create `native/src/core/SaveSyncPlan.cpp` containing only `#include "SaveSyncPlan.h"` for now (the stub keeps the reconfigure valid — see Global Constraints), then edit `native/CMakeLists.txt`.
 
-Add to `qt_add_executable(mymediavault …)`:
+Add to `qt_add_executable(everythingbox …)`:
 
 ```cmake
         src/core/SaveSyncPlan.cpp src/core/SaveSyncPlan.h
@@ -303,7 +303,7 @@ Append `"probe_savesync SAVESYNC-OK"` to the runner list at `native/tools/run-he
 - [ ] **Step 4: Reconfigure, build, and watch it FAIL**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON && cmake --build build --config Release --target probe_savesync
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON && cmake --build build --config Release --target probe_savesync
 ```
 Expected: **link errors** — `plan`, `conflictName` and `isConflictArtifact` are declared but not defined. (The probe itself must compile clean; if it doesn't, the header is wrong, not the implementation.)
 
@@ -452,7 +452,7 @@ Expected: **SAVESYNC-FAIL** on the firstRun checks. Then revert, rebuild, confir
 - [ ] **Step 8: Confirm the app still links, then commit**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox
 git add native/src/core/SaveSyncPlan.h native/src/core/SaveSyncPlan.cpp native/src/core/SaveSync.h native/src/core/SaveSync.cpp native/src/core/SaveMeta.h native/src/core/SaveMeta.cpp native/tools/probe_savesync.cpp native/CMakeLists.txt native/tools/run-headless-probes.sh .github/workflows/ci.yml
 git commit -m "feat: SaveSyncPlan — the per-file save decision table"
 ```
@@ -584,7 +584,7 @@ void SaveSync::executeConflict(const SaveSyncPlan::Decision& d,
 - [ ] **Step 3: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault probe_savesync && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox probe_savesync && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: clean build, `ALL HEADLESS PROBES PASSED`.
 
@@ -629,7 +629,7 @@ At `CloudSync.cpp:563-565`, remove `saves` and `states` from the iterated subdir
 - [ ] **Step 4: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: clean build, `ALL HEADLESS PROBES PASSED`.
 
@@ -721,7 +721,7 @@ QString RetroView::resolveSavePath(const QString& base, const QString& ext) cons
 - [ ] **Step 4: Build, run the suite, commit**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 git add native/src/core/SaveMeta.h native/src/core/SaveMeta.cpp native/src/emu/RetroView.cpp
 git commit -m "fix: assign saveDir, sweep stray core saves, and identify saves by game"
 ```
@@ -769,7 +769,7 @@ Connect `conflictKept` to a notice naming the **game**, not the filename:
 - [ ] **Step 4: Build, run the suite, commit**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 git add native/src/ui/MainWindow.h native/src/ui/MainWindow.cpp native/src/emu/RetroView.cpp
 git commit -m "feat: wire per-file save sync into startup, save writes, and exit"
 ```
@@ -780,7 +780,7 @@ git commit -m "feat: wire per-file save sync into startup, save writes, and exit
 
 - [ ] **Step 1: Live-verify against a throwaway**
 
-**Never launch or modify the deployed app at `C:\MyMediaVault-app` or its ini.** Copy to a scratch dir, strip `cloud/*`/`sync/*` from the throwaway ini **except** what is needed to sign in, and drive with `MMV_UITEST=1` + a unique `MMV_UITEST_PIPE`. **Never print or screenshot a credential value.** Read `verify-app-gui-capture.md` in the memory dir first.
+**Never launch or modify the deployed app at `C:\EverythingBox-app` or its ini.** Copy to a scratch dir, strip `cloud/*`/`sync/*` from the throwaway ini **except** what is needed to sign in, and drive with `EB_UITEST=1` + a unique `EB_UITEST_PIPE`. **Never print or screenshot a credential value.** Read `verify-app-gui-capture.md` in the memory dir first.
 
 1. **Bundle no longer carries saves** — sync, download the Drive zip, confirm no `saves/` or `states/` entries.
 2. **One save = one upload** — press F2, confirm exactly one file appears in the Drive `saves/` folder and the bundle is not re-uploaded.
@@ -804,7 +804,7 @@ On a version-line conflict in `native/CMakeLists.txt` / `native/src/main.cpp`, t
 - [ ] **Step 4: Build EVERY probe target on the merged tree**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T everythingbox
 ```
 Expected: exit 0. This catches a latent link break in a probe that compiles a source now depending on the new files — that class of break has been caught at a merge gate here more than once.
 
@@ -817,7 +817,7 @@ export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && BUILD_DIR=build ba
 - [ ] **Step 6: Redeploy and verify**
 
 ```bash
-cp build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe && md5sum build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe
+cp build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe && md5sum build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe
 ```
 
 - [ ] **Step 7: Update the ledger**

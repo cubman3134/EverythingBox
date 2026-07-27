@@ -4,7 +4,7 @@
 #include <QSettings>
 #include <QCryptographicHash>
 
-// Shares the portable mymediavault.ini with Settings (same AppPaths::dataDir() posture). Coherence with any
+// Shares the portable everythingbox.ini with Settings (same AppPaths::dataDir() posture). Coherence with any
 // other QSettings on the same file comes from every writer here calling sync() (flush to disk); QSettings
 // reloads on access when the on-disk file has changed. We do NOT rely on a shared in-process cache.
 static QSettings& store()

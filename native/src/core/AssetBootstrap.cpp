@@ -7,7 +7,7 @@
 #include <QLoggingCategory>
 
 // First-run APK-asset extractor. See AssetBootstrap.h for the contract. sourceRoot is a real dir in the probe
-// and "assets:/mmv" (Qt's Android asset file engine) in the app — QDir/QDirIterator/QFile all speak both, so
+// and "assets:/eb" (Qt's Android asset file engine) in the app — QDir/QDirIterator/QFile all speak both, so
 // the copy logic is platform-blind.
 namespace
 {

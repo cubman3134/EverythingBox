@@ -1,6 +1,6 @@
 // Headless check of the ConsumptionStats store (src/core/ConsumptionStats) — the per-profile media/reading
 // accrual foundation (seconds watched/listened + pages read, per title + per category) the Stats panel (T2)
-// reads. QtCore-only (a QSettings wrapper over the shared mymediavault.ini), so it runs under the offscreen
+// reads. QtCore-only (a QSettings wrapper over the shared everythingbox.ini), so it runs under the offscreen
 // QPA in CI and pins the contract the panel + the two accrual seams lean on:
 //
 //   * forward-only media accrual — the STORE floors a non-positive Δ to a no-op (the seam clamps to [0,30]);
@@ -14,7 +14,7 @@
 // Prints STATS-OK on success; any failure prints STATS-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: like the other core probes, AppPaths::dataDir() is the probe exe's own build-tree folder, so the
-// mymediavault.ini it reads/writes sits next to the probe and never touches a deployed install. We wipe the
+// everythingbox.ini it reads/writes sits next to the probe and never touches a deployed install. We wipe the
 // "stats" and "profiles" groups at start and SEED profile ids via ProfileStore::setCurrent, so currentId()
 // can't leak a developer's real profile into the asserts.
 #include "ConsumptionStats.h"

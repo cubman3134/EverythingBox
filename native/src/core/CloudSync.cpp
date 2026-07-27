@@ -30,7 +30,7 @@
 #include <cstring>
 #include "miniz.h"
 
-// The shared "My Media Vault" Google OAuth client (Desktop-app type). For desktop/installed apps Google
+// The shared "EverythingBox" Google OAuth client (Desktop-app type). For desktop/installed apps Google
 // treats the client secret as non-confidential (it can't be hidden in a distributed binary; security comes
 // from PKCE + user consent), so it's embedded here. A settings override (cloud/clientId/clientSecret) wins.
 static const char* kClientId = "993265781329-4n8gj4fgjo96qu01pbdbpg3s26a8ssnh.apps.googleusercontent.com";
@@ -135,7 +135,7 @@ void CloudSync::signIn()
 
             // Try to auto-close the tab (works when the browser allows it); otherwise it shows a one-liner.
             const QByteArray body = "<html><body style='font-family:sans-serif;padding:30px'>"
-                                    "Signed in to My Media Vault — you can close this tab."
+                                    "Signed in to EverythingBox — you can close this tab."
                                     "<script>window.close();</script></body></html>";
             sock->write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + body);
             sock->flush();
@@ -428,7 +428,7 @@ void CloudSync::downloadFile(const QString& fileId, std::function<void(bool, con
 
 static const char* kBundleName = AppBrand::kSyncZip;
 
-// First-party addon folders (manifest id "com.mymediavault.*"). These ship with the app build and are
+// First-party addon folders (manifest id "com.everythingbox.*"). These ship with the app build and are
 // updated by install/deploy, so they're kept OUT of cloud sync - otherwise the cloud snapshot would clobber
 // a freshly-deployed update on the next startup. Third-party addons (other ids) still sync. Addon *config*
 // lives in settings.json, which is synced regardless, so API keys still travel across devices.

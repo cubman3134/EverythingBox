@@ -96,7 +96,7 @@ private slots:
     // Themed Downloads: a job's Progress row is activated to open a NavMenu action chooser (Pause/Resume/Retry/
     // Cancel/Remove per the SAME state logic classic uses for its per-job buttons), mirrored on the panel graph.
     // Themed-only (its body uses the QML panel host); guarded so moc emits no metacall for it in a no-QML build.
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     void showDownloadActionMenu(const QString& id);
 #endif
     // Window-level notification overlay for download/resolve progress + errors. A child-widget overlay owned by
@@ -142,7 +142,7 @@ protected:
     // ONLY what we froze (LifecyclePolicy). Left unguarded (a probe/test can call it directly); the connect
     // in the ctor is gated on Q_OS_ANDROID so desktop app-state churn (alt-tab) never touches playback.
     void onApplicationStateChanged(Qt::ApplicationState state);
-    mmv::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
+    eb::LifecyclePolicy lifecycle_;    // sticky pause/resume decision core
 
 private:
     class DownloadManager* dm_ = nullptr;
@@ -250,7 +250,7 @@ private:
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor
 
-    // App pause menu (Esc): a small "Resume / Exit My Media Vault" overlay, à la the in-game pause menu.
+    // App pause menu (Esc): a small "Resume / Exit EverythingBox" overlay, à la the in-game pause menu.
     // A NavMenu (in-window child overlay from the nav kit) — it renders over the themed QML surface without
     // spawning a separate OS window, and restores the previous selection when it closes.
     void showEscMenu();

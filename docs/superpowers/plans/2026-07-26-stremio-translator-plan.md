@@ -2,24 +2,24 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Finish MMV's partial Stremio client so the existing addon ecosystem works properly — catalogs that require an `extra` stop vanishing, stream requests route by `idPrefixes`, streams keep their identity behind a "Choose source…" picker, and `behaviorHints` is acted on.
+**Goal:** Finish EB's partial Stremio client so the existing addon ecosystem works properly — catalogs that require an `extra` stop vanishing, stream requests route by `idPrefixes`, streams keep their identity behind a "Choose source…" picker, and `behaviorHints` is acted on.
 
-**Architecture:** All Stremio parsing moves out of `AddonManager` (a ~1500-line networking class) into a pure `StremioTranslate` unit — JSON in, MMV models out, no network. `AddonManager` keeps transport, caching and TorBox resolution and calls into it for every Stremio-shaped decision. A small `BingeStore` remembers the chosen release per series.
+**Architecture:** All Stremio parsing moves out of `AddonManager` (a ~1500-line networking class) into a pure `StremioTranslate` unit — JSON in, EB models out, no network. `AddonManager` keeps transport, caching and TorBox resolution and calls into it for every Stremio-shaped decision. A small `BingeStore` remembers the chosen release per series.
 
 **Tech Stack:** Qt 6.8.3 (Core/Network/Gui/Widgets), C++17, MSVC 2022. Headless probes as the test framework.
 
 ## Global Constraints
 
-- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`**. App target `mymediavault`.
-- **Build ONLY named targets.** Never a target-less `cmake --build build` — it builds ~40 probes and stalls. Adding a source or probe needs exactly ONE reconfigure: `cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON` (no `-A`). Report BLOCKED past ~6 min with no progress.
+- **Build:** `export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH"`; build dir `build`; **always `--config Release`**. App target `everythingbox`.
+- **Build ONLY named targets.** Never a target-less `cmake --build build` — it builds ~40 probes and stalls. Adding a source or probe needs exactly ONE reconfigure: `cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON` (no `-A`). Report BLOCKED past ~6 min with no progress.
 - **Suite:** `BUILD_DIR=build bash native/tools/run-headless-probes.sh` must print `ALL HEADLESS PROBES PASSED`.
-- **Sources are explicit, not globbed** — every new `.cpp`/`.h` goes into `qt_add_executable(mymediavault …)` at `native/CMakeLists.txt:122`.
+- **Sources are explicit, not globbed** — every new `.cpp`/`.h` goes into `qt_add_executable(everythingbox …)` at `native/CMakeLists.txt:122`.
 - **A new probe must be added to THREE places:** its `add_executable` block in `native/CMakeLists.txt`, the runner list at `native/tools/run-headless-probes.sh:119`, and **the CI target list in `.github/workflows/ci.yml`** — an unbuilt probe is a non-fatal `(skip)` in the runner, so a probe missing from CI is silently never run.
 - **Nav kit:** modal UI goes through `src/ui/nav` (`NavMenu`/`NavConfirm`/`Osk`) — never `QDialog`/`QMessageBox`/`QInputDialog`/top-level windows. `NavMenu` scrolls when rows overflow.
 - **Exact constants:** `kMaxStreamRows = 30`. Stream sort order: **direct http before torrent, then seeders descending, then size descending**; unknown seeders (`-1`) sort last within their group.
 - **`idPrefixes` routing must fall back to querying ALL providers when the filter leaves none.** Routing is an optimization and must never be the reason nothing plays.
 - **bingeGroup memory is episodes-only.** A movie has no next episode; the store is never consulted or written for a one-part id.
-- **Pre-commit hook** auto-bumps the patch version in `native/CMakeLists.txt` + `native/src/main.cpp`; let it. `MMV_NO_VERSION_BUMP=1` skips it for docs-only commits.
+- **Pre-commit hook** auto-bumps the patch version in `native/CMakeLists.txt` + `native/src/main.cpp`; let it. `EB_NO_VERSION_BUMP=1` skips it for docs-only commits.
 - **Commit messages** end with `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
 
 **Refinement of the spec:** the spec gave `Catalog` a single `presetKey`/`presetValue` pair. A catalog may declare **more than one** required extra, so this plan uses `QMap<QString, QString> presets` instead. Everything else matches the spec.
@@ -28,7 +28,7 @@
 
 | File | Responsibility |
 |---|---|
-| `native/src/addons/StremioTranslate.{h,cpp}` | **New.** All Stremio↔MMV translation: `Extra`, `CatalogUse`, `Catalog`, `Manifest`, `StreamCandidate`; `parseManifest`, `catalogPath`, `handlesId`, `parseStreams`, `describe`, `pickAuto`. Pure — no network, no QSettings, no widgets. |
+| `native/src/addons/StremioTranslate.{h,cpp}` | **New.** All Stremio↔EB translation: `Extra`, `CatalogUse`, `Catalog`, `Manifest`, `StreamCandidate`; `parseManifest`, `catalogPath`, `handlesId`, `parseStreams`, `describe`, `pickAuto`. Pure — no network, no QSettings, no widgets. |
 | `native/src/core/BingeStore.{h,cpp}` | **New.** `seriesKey → bingeGroup` as JSON. |
 | `native/src/addons/AddonManager.{h,cpp}` | Calls the translator; stores the parsed `Manifest` per addon; extras/filters on catalog requests; `SearchOnly` catalogs into search; `idPrefixes` routing; candidate-returning stream resolution. |
 | `native/src/ui/MainWindow.{h,cpp}` | The "Choose source…" action and its `NavMenu` picker. |
@@ -52,7 +52,7 @@
 Create `native/src/addons/StremioTranslate.h`:
 
 ```cpp
-// Translates the Stremio addon protocol into MMV's models. Pure: JSON in, structs out — no network, no
+// Translates the Stremio addon protocol into EB's models. Pure: JSON in, structs out — no network, no
 // QSettings, no widgets, so probe_stremio can assert every rule against real manifest fixtures.
 //
 // This lives apart from AddonManager deliberately. The Stremio support that preceded it was written inline
@@ -79,7 +79,7 @@ namespace StremioTranslate
         int         optionsLimit = 1;  // how many a user may select (schema default is 1)
     };
 
-    // What MMV can actually do with a declared catalog.
+    // What EB can actually do with a declared catalog.
     enum class CatalogUse
     {
         Browse,        // a shelf; any required extra can be satisfied from its options
@@ -274,7 +274,7 @@ int main(int argc, char** argv)
 
 - [ ] **Step 3: Wire the build (all THREE places)**
 
-In `native/CMakeLists.txt`, add to `qt_add_executable(mymediavault …)` (starts `:122`), after the `SubtitleCache` lines:
+In `native/CMakeLists.txt`, add to `qt_add_executable(everythingbox …)` (starts `:122`), after the `SubtitleCache` lines:
 
 ```cmake
         src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
@@ -305,7 +305,7 @@ And append `probe_stremio` to the `--target` list in `.github/workflows/ci.yml:5
 - [ ] **Step 4: Reconfigure and run — expect RED**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON && cmake --build build --config Release --target probe_stremio
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON && cmake --build build --config Release --target probe_stremio
 ```
 Expected: **failure** — `StremioTranslate.cpp` has no implementation yet.
 
@@ -448,7 +448,7 @@ Expected: `STREMIO-OK`, exit 0.
 - [ ] **Step 7: Confirm the app still links**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox
 ```
 
 - [ ] **Step 8: Commit**
@@ -900,7 +900,7 @@ At `AddonManager.cpp:944-945`, the Stremio branch drops `filters`. Replace that 
 - [ ] **Step 5: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: clean build, `ALL HEADLESS PROBES PASSED`.
 
@@ -1005,7 +1005,7 @@ In `native/CMakeLists.txt`, inside `add_executable(probe_stremio …)`, add:
 and `src/core` to its `target_include_directories`. Then:
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DMYMEDIAVAULT_BUILD_APP=ON && cmake --build build --config Release --target probe_stremio
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON && cmake --build build --config Release --target probe_stremio
 ```
 Expected: compile errors — `BingeStore` has no implementation.
 
@@ -1113,7 +1113,7 @@ In the provider-selection loop, add the id filter — and the fallback that make
 - [ ] **Step 7: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault probe_stremio && ./build/Release/probe_stremio.exe && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox probe_stremio && ./build/Release/probe_stremio.exe && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: `STREMIO-OK` and `ALL HEADLESS PROBES PASSED`.
 
@@ -1234,7 +1234,7 @@ Two messages, both through the existing synthetic `type:"info"` row mechanism (`
 - [ ] **Step 6: Build and run the suite**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target mymediavault probe_nav && BUILD_DIR=build bash native/tools/run-headless-probes.sh
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && cmake --build build --config Release --target everythingbox probe_nav && BUILD_DIR=build bash native/tools/run-headless-probes.sh
 ```
 Expected: clean build, `ALL HEADLESS PROBES PASSED`. `probe_nav` is built explicitly because this adds a `NavMenu` caller.
 
@@ -1251,7 +1251,7 @@ git commit -m "feat: Choose source picker, binge memory, and honest messages for
 
 - [ ] **Step 1: Live-verify against real addons**
 
-**Never launch or modify the deployed app at `C:\MyMediaVault-app` or its ini.** Copy it to a scratch dir, strip `cloud/*` and `sync/*` from the throwaway ini, drive with `MMV_UITEST=1` + a unique `MMV_UITEST_PIPE` via `python native/tools/uitest.py`. Read `verify-app-gui-capture.md` in the memory dir first. **Never print or screenshot a credential value** — report credentials only as "configured".
+**Never launch or modify the deployed app at `C:\EverythingBox-app` or its ini.** Copy it to a scratch dir, strip `cloud/*` and `sync/*` from the throwaway ini, drive with `EB_UITEST=1` + a unique `EB_UITEST_PIPE` via `python native/tools/uitest.py`. Read `verify-app-gui-capture.md` in the memory dir first. **Never print or screenshot a credential value** — report credentials only as "configured".
 
 Install real addons and verify:
 1. **A search-only catalog** now appears in search results instead of vanishing.
@@ -1277,7 +1277,7 @@ On a version-line conflict in `native/CMakeLists.txt` / `native/src/main.cpp`, t
 - [ ] **Step 4: Build EVERY probe target on the merged tree**
 
 ```bash
-export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T mymediavault
+export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && T=$(grep -o 'add_executable([[:space:]]*probe_[a-z0-9_]*' native/CMakeLists.txt | sed 's/.*(\s*//' | tr '\n' ' ') && cmake --build build --config Release --target $T everythingbox
 ```
 Expected: exit 0. This catches a latent link break in a probe that compiles a source now depending on `StremioTranslate` — that class of break has been caught at a merge gate on this project more than once, and the suite alone misses it because an unbuilt probe is silently skipped.
 
@@ -1290,7 +1290,7 @@ export PATH="/c/Qt/6.8.3/msvc2022_64/bin:/c/mpv-dev:$PATH" && BUILD_DIR=build ba
 - [ ] **Step 6: Redeploy and verify**
 
 ```bash
-cp build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe && md5sum build/Release/MyMediaVault.exe /c/MyMediaVault-app/MyMediaVault.exe
+cp build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe && md5sum build/Release/EverythingBox.exe /c/EverythingBox-app/EverythingBox.exe
 ```
 Expected: the hashes match.
 

@@ -1,4 +1,4 @@
-// ScreenScraper game-metadata provider for My Media Vault.
+// ScreenScraper game-metadata provider for EverythingBox.
 //
 // Pure metadata/artwork provider: only implements getMeta() for type "game". No browse
 // catalog (manifest "catalogs": []). The app fans out to every game-meta provider on hover
@@ -118,8 +118,12 @@ function getMeta(argJson) {
     var title = a.title || "";
     if (!title) return "{}";
 
+    // softname identifies the CALLING software to ScreenScraper and is the only value here that a third
+    // party sees change with the rebrand — it previously carried the old brand. ScreenScraper meters quota
+    // per softname, so if their side ever gates on a registered value this is the line that starts returning
+    // login/quota errors while the credentials themselves are still fine. Verify against the live API.
     var url = SS + "?devid=" + enc(devid) + "&devpassword=" + enc(devpassword) +
-        "&softname=mymediavault&output=json&ssid=" + enc(ssid) +
+        "&softname=everythingbox&output=json&ssid=" + enc(ssid) +
         "&sspassword=" + enc(sspassword) + "&romnom=" + enc(title);
 
     var sid = systemId(a.systemHint);

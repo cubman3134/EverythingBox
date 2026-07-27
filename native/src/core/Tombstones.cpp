@@ -8,7 +8,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
-// Shares the portable mymediavault.ini with the other stores (same AppPaths::dataDir() posture). Coherence
+// Shares the portable everythingbox.ini with the other stores (same AppPaths::dataDir() posture). Coherence
 // with any other QSettings on the same file comes from every writer calling sync().
 static QSettings& store_()
 {

@@ -45,12 +45,12 @@ not a merge; this track upgrades it on the same Drive transport.
 
 ## Scope reality (scout, 2026-07-22)
 
-The merge machinery EXISTS IN MINIATURE: `mymediavault-progress.json` already syncs
+The merge machinery EXISTS IN MINIATURE: `everythingbox-progress.json` already syncs
 `resume/*` (merge-by-`ts`, keep newer, never delete — MainWindow::mergeProgress ~:8849)
 and `recent/<profile>/items` (union by id, newest ts, cap 40), pushed debounced 15s
 after playback (`scheduleProgressSync` armed from `PlaybackSession::resumeSaved`),
 pushed on exit, pulled+merged ~1.5s after startup. The heavy bundle
-(`mymediavault-sync.zip`) snapshots THE ENTIRE ini (minus `cloud/*`) + addons/themes/
+(`everythingbox-sync.zip`) snapshots THE ENTIRE ini (minus `cloud/*`) + addons/themes/
 saves/states, applied wholesale ("always take the cloud" at startup — main.cpp ~:68).
 
 ## Design

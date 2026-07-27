@@ -112,7 +112,7 @@ void RomLibrary::ensureStructure()
         if (f.open(QIODevice::WriteOnly | QIODevice::Text))
         {
             QString body =
-                QStringLiteral("My Media Vault — ROM library\r\n\r\n"
+                QStringLiteral("EverythingBox — ROM library\r\n\r\n"
                                "Drop game ROMs into the matching system folder below (RetroBat / EmulationStation\r\n"
                                "Desktop Edition layout). They then appear under \"Local ROMs\" in the Library.\r\n\r\n");
             for (const GameSystem& s : SystemCatalog::systems())

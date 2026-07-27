@@ -6,7 +6,7 @@
 
 **Architecture:** Continues plan 1's proven pattern — pure catalog builders in `native/src/browse/` + HomeView's marker dispatch + `showSyntheticCatalog` as the one shared reset path — instead of the spec's virtual `BrowseLevel` interface. Same goal (one small file per content type, one shared load path, `Notifier` for feedback), materially lower regression risk; Task 7 records the supersession in the spec. Behavior preservation remains the governing constraint.
 
-**Tech Stack:** Qt 6 Widgets C++ (existing style); headless `probe_*` pattern; `MMV_UITEST=1` + `native/tools/uitest.py` live verification.
+**Tech Stack:** Qt 6 Widgets C++ (existing style); headless `probe_*` pattern; `EB_UITEST=1` + `native/tools/uitest.py` live verification.
 
 **Scope note:** The spec's "addon catalogs provider" is HomeView's core Level machinery itself — already a single code path; extracting it buys nothing this phase. LibraryView's duplicated request idiom (LibraryView.cpp:83,169,175,218) is noted for a possible plan 3, not touched here. RetroView (src/emu) exposed no duplication from plan 1 — the spec's step-6 sweep resolves to Task 1's debris list.
 
@@ -16,7 +16,7 @@
 - NEVER QDialog/QMessageBox/QInputDialog/top-level windows — feedback via nav kit / Notifier.
 - One seam per commit. Move code, don't rewrite — bodies transfer verbatim except named substitutions.
 - Build: `cmake --build build --config Release [--target <t>]` from repo root. Probes need `PATH` prefixed with `/c/Qt/6.8.3/msvc2022_64/bin` (+ `/c/mpv-dev` for the full runner) and `QT_QPA_PLATFORM=offscreen` when run directly.
-- Live verification: deploy Release exe over the existing exe in `C:\MyMediaVault-app` (keep name), launch detached with `MMV_UITEST=1`, drive only via `python native/tools/uitest.py`. Never SendKeys/focus. Kill the app afterward; restore any seeded user data.
+- Live verification: deploy Release exe over the existing exe in `C:\EverythingBox-app` (keep name), launch detached with `EB_UITEST=1`, drive only via `python native/tools/uitest.py`. Never SendKeys/focus. Kill the app afterward; restore any seeded user data.
 - All scout line references below are against main @ 1edad4a — re-grep anchors before editing.
 
 ---

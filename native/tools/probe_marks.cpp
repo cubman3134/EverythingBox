@@ -14,7 +14,7 @@
 // Prints MARKS-OK on success; any failure prints MARKS-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: like the other core probes (probe_sync/probe_formfactor), AppPaths::dataDir() is the probe exe's
-// own build-tree folder (portable app), so the mymediavault.ini it reads/writes sits next to the probe and
+// own build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and
 // never touches a deployed install. We wipe the "marks" and "profiles" groups at start and SEED our own
 // profile ids via ProfileStore::setCurrent, so ProfileStore::currentId() (which reads the real store) can't
 // leak a developer's actual profile into the asserts.

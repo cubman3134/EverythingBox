@@ -1,7 +1,7 @@
 // A persistent, uncapped record of content that's been fully downloaded to disk (the "Downloaded" folder in
 // each catalogue). Distinct from RecentStore (which is capped and also holds streamed/played items): this is
 // only things saved for keeps - library downloads, PC games, and installed games. Machine-global (a file on
-// disk isn't tied to a profile) and stored as a JSON array in mymediavault.ini.
+// disk isn't tied to a profile) and stored as a JSON array in everythingbox.ini.
 #pragma once
 #include <QString>
 #include <QVector>

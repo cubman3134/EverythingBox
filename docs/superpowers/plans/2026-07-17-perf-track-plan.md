@@ -4,7 +4,7 @@
 
 **Goal:** Build the PerfTrace span harness, instrument the four pain areas, capture a committed baseline, fix hotspots in measured order with before/after evidence, and lock component budgets into a CI probe.
 
-**Architecture:** A tiny always-compiled tracing module (`MMV_PERF=1` gated) + span sites at the seams phase 1 exposed; a Python baseline runner drives the standard route through the existing uitest pipe and ranks spans; fixes are data-driven tasks instantiated by the controller from the ranking. Spec: `docs/superpowers/specs/2026-07-17-perf-track-design.md`.
+**Architecture:** A tiny always-compiled tracing module (`EB_PERF=1` gated) + span sites at the seams phase 1 exposed; a Python baseline runner drives the standard route through the existing uitest pipe and ranks spans; fixes are data-driven tasks instantiated by the controller from the ranking. Spec: `docs/superpowers/specs/2026-07-17-perf-track-design.md`.
 
 **Tech Stack:** Qt 6 C++ (QElapsedTimer/QMutex), Python 3 (reuses `native/tools/uitest.py`), headless probe pattern.
 
@@ -15,7 +15,7 @@
 - HANDS OFF until their sessions land on main: the FavoritesStore write path and the OSK focus handoff (two independent bug-fix sessions own them). Before each task, `git pull` main is NOT needed (work on the branch), but if a merge from main happens, re-check for conflicts in those areas.
 - Trace lines must never leak secrets: detail fields carry file NAMES and counts only (reuse the `logSafeUrl` idiom for anything URL-shaped).
 - Build: `cmake --build build --config Release [--target <t>]` from repo root. Probes: prepend `/c/Qt/6.8.3/msvc2022_64/bin` (and `/c/mpv-dev` for the full runner) to PATH, `QT_QPA_PLATFORM=offscreen`. Full runner: `BUILD_DIR=build bash native/tools/run-headless-probes.sh`.
-- Live: deploy Release exe over the existing exe in `C:\MyMediaVault-app` (keep name), launch detached with the needed env (`MMV_UITEST=1`, plus `MMV_PERF=1` for trace runs), drive only via `python native/tools/uitest.py`, never SendKeys/focus, kill after, protect user data (real playlist "Weekend Picks" exists).
+- Live: deploy Release exe over the existing exe in `C:\EverythingBox-app` (keep name), launch detached with the needed env (`EB_UITEST=1`, plus `EB_PERF=1` for trace runs), drive only via `python native/tools/uitest.py`, never SendKeys/focus, kill after, protect user data (real playlist "Weekend Picks" exists).
 - CI lesson from plan 2: a new probe must be added to BOTH `native/tools/run-headless-probes.sh` AND the build-target list at `.github/workflows/ci.yml:52`, or its gate silently never runs.
 
 ---
@@ -66,11 +66,11 @@ int main(int argc, char** argv)
     QTemporaryDir tmp;
     const QString log = tmp.filePath("perf.log");
 
-    CHECK(!PerfTrace::enabled(), "disabled by default (no MMV_PERF)");
+    CHECK(!PerfTrace::enabled(), "disabled by default (no EB_PERF)");
     { PERF_SPAN("dead.span"); }              // must be a no-op while disabled
     PerfTrace::begin("dead.b"); PerfTrace::end("dead.b");
     CHECK(lines(log).isEmpty(), "disabled emits nothing to the test log");
-    // (Do NOT assert the app's real perf_trace.log is absent — a prior MMV_PERF run may have left one.)
+    // (Do NOT assert the app's real perf_trace.log is absent — a prior EB_PERF run may have left one.)
 
     // Disabled-path overhead budget: 1M scoped spans well under 200ms (it's one branch each).
     { QElapsedTimer t; t.start();
@@ -136,7 +136,7 @@ Expected: FAIL — `PerfTrace.h: No such file or directory`
 #include <QString>
 #include <QElapsedTimer>
 
-// Lightweight span tracing for the phase-2 perf track. Enabled by MMV_PERF=1 (or
+// Lightweight span tracing for the phase-2 perf track. Enabled by EB_PERF=1 (or
 // forceEnableForTest in probes); when disabled every call is one cached-bool branch.
 // Lines land in <dataDir>/perf_trace.log as:  ISO-ts | span.name | duration_ms | detail
 // Semantics: begin() on an open span RESTARTS it; end() without a begin is a no-op —
@@ -186,7 +186,7 @@ namespace
     QMutex g_mutex;
     QHash<QString, QElapsedTimer> g_open; // begin()ed spans awaiting end()
 
-    bool computeEnabled() { return g_forced || qEnvironmentVariableIntValue("MMV_PERF") == 1; }
+    bool computeEnabled() { return g_forced || qEnvironmentVariableIntValue("EB_PERF") == 1; }
 }
 
 namespace PerfTrace
@@ -243,7 +243,7 @@ namespace PerfTrace
 }
 ```
 
-Add `src/core/PerfTrace.cpp src/core/PerfTrace.h` to the `qt_add_executable(mymediavault ...)` list.
+Add `src/core/PerfTrace.cpp src/core/PerfTrace.h` to the `qt_add_executable(everythingbox ...)` list.
 
 - [ ] **Step 4: Run the probe**
 
@@ -256,11 +256,11 @@ Expected: `PERF-OK`, exit 0. (If the format regex fights `Qt::ISODateWithMs` out
 
 - [ ] **Step 6: Build the app target too, then commit**
 
-Run: `cmake --build build --config Release --target mymediavault` — clean.
+Run: `cmake --build build --config Release --target everythingbox` — clean.
 
 ```bash
 git add native/src/core/PerfTrace.h native/src/core/PerfTrace.cpp native/tools/probe_perf.cpp native/CMakeLists.txt native/tools/run-headless-probes.sh .github/workflows/ci.yml
-git commit -m "perf: PerfTrace span harness (MMV_PERF=1), probe-tested, CI-gated"
+git commit -m "perf: PerfTrace span harness (EB_PERF=1), probe-tested, CI-gated"
 ```
 
 ---
@@ -280,7 +280,7 @@ git commit -m "perf: PerfTrace span harness (MMV_PERF=1), probe-tested, CI-gated
   - MainWindow constructor: bracket the four phases with `PerfTrace::begin/end` pairs — `startup.settings` around the initial Settings/store reads at the top of the ctor; `startup.addons` around the `addons_` construction + `mgr` initial load block; `startup.theme` around the theme/BGM/theme-watcher setup block; `startup.home` around the home view construction + `showHomeScreen()` call. Anchor by reading the ctor top-to-bottom (it is long); each phase = the contiguous block whose comments name that concern. If a phase is not contiguous, span the dominant block and note the exclusion in a code comment on the begin line.
 - [ ] **Step 2: Build + verify live**
 
-Run: build app; deploy; launch detached with BOTH `MMV_PERF=1` and `MMV_UITEST=1`; wait for home via `uitest.py state`; kill the app. Then read `C:\MyMediaVault-app\perf_trace.log` (or the dataDir the app uses — grep `dataDir` resolution if the log isn't beside the exe): expect one line per span, `startup.total` present with plausible ms, phases summing to less than total.
+Run: build app; deploy; launch detached with BOTH `EB_PERF=1` and `EB_UITEST=1`; wait for home via `uitest.py state`; kill the app. Then read `C:\EverythingBox-app\perf_trace.log` (or the dataDir the app uses — grep `dataDir` resolution if the log isn't beside the exe): expect one line per span, `startup.total` present with plausible ms, phases summing to less than total.
 - [ ] **Step 3: Run probe_nav + probe_perf (green), commit**
 
 ```bash
@@ -309,7 +309,7 @@ git commit -m "perf: startup spans (total + settings/addons/theme/home phases)"
   - `open.reader`: `begin` at the top of `openDocumentPath`; `end` after the successful open branch for each reader type (grep the function's success paths).
   - `catalog.load`: in `HomeView::issueRequest`, before the request dispatch: `PerfTrace::begin("catalog.load")`; in `onCatalogReady` after `populate(...)` returns (the non-search path): `PerfTrace::end(QStringLiteral("catalog.load"), QStringLiteral("page=%1 n=%2").arg(pendingPage_).arg(cat.items.size()))`.
   - `search.first`/`search.drain`: in `HomeView::startSearch` (the Task-5-of-plan-2 rewrite) after `agg_->start(...)`: `begin("search.first"); begin("search.drain");`. In the `resultsAppended` connect, first batch only: `PerfTrace::end(QStringLiteral("search.first"), QStringLiteral("n=%1").arg(add.items.size()))`. In the `finished` connect: `PerfTrace::end(QStringLiteral("search.drain"), QStringLiteral("total=%1").arg(total))`.
-- [ ] **Step 2: Build + verify live**: deploy; `MMV_PERF=1 MMV_UITEST=1` run; drive: scroll a console 10 rows, open a local video or audio file via Recents, open the local game, run one search; kill; assert every span name above appears in the log (except open.reader if no document is reachable — note it).
+- [ ] **Step 2: Build + verify live**: deploy; `EB_PERF=1 EB_UITEST=1` run; drive: scroll a console 10 rows, open a local video or audio file via Recents, open the local game, run one search; kill; assert every span name above appears in the log (except open.reader if no document is reachable — note it).
 - [ ] **Step 3: Full probe suite green (behavior unchanged), commit**
 
 ```bash
@@ -335,11 +335,11 @@ git commit -m "perf: nav/open/catalog/search spans across the phase-1 seams"
 
 ```python
 #!/usr/bin/env python3
-"""Perf baseline runner (phase-2 perf track). Launches the deployed app with MMV_PERF=1 +
-MMV_UITEST=1, drives the standard route via the uitest pipe, then parses perf_trace.log
+"""Perf baseline runner (phase-2 perf track). Launches the deployed app with EB_PERF=1 +
+EB_UITEST=1, drives the standard route via the uitest pipe, then parses perf_trace.log
 into a ranked markdown table.
 
-Usage: perfbaseline.py run --exe C:/MyMediaVault-app/<name>.exe --log <dataDir>/perf_trace.log --out docs/superpowers/perf/<date>-baseline.md
+Usage: perfbaseline.py run --exe C:/EverythingBox-app/<name>.exe --log <dataDir>/perf_trace.log --out docs/superpowers/perf/<date>-baseline.md
 
 Standard route: cold start -> home settles -> Games -> first console -> 50-row scroll ->
 open first game (local) -> wait 5s -> back out -> exit. Route steps that fail are recorded
@@ -369,7 +369,7 @@ def key(k, n=1, delay=0.15):
 
 def run_route(exe, log):
     if os.path.exists(log): os.remove(log)          # fresh trace per run
-    env = dict(os.environ, MMV_PERF="1", MMV_UITEST="1")
+    env = dict(os.environ, EB_PERF="1", EB_UITEST="1")
     proc = subprocess.Popen([exe], env=env, cwd=os.path.dirname(exe))
     skipped = []
     try:

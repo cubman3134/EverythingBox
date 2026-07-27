@@ -1,5 +1,5 @@
 // Persistent audio + subtitle sync offsets (seconds), the store the player's sync controls read/write. Backed
-// by the same portable mymediavault.ini as Settings (QtCore only — no Quick/Widgets). Two axes (Audio, Sub),
+// by the same portable everythingbox.ini as Settings (QtCore only — no Quick/Widgets). Two axes (Audio, Sub),
 // two scopes: a global default per axis, plus optional per-file overrides keyed by an opaque file key. resolve()
 // picks the per-file value when present, else the global. Every writer clamps to ±10.0 seconds; a corrupt or
 // absent value reads back as 0.0. An empty key means "the globals": resolve() returns them and savePerFile()

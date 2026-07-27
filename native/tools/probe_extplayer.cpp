@@ -14,7 +14,7 @@
 // Prints EXTPLAYER-OK on success; any failure prints EXTPLAYER-FAIL <cond> and exits non-zero.
 //
 // Isolation: like the other core probes (see probe_sync), AppPaths::dataDir() is the probe exe's own folder
-// in the build tree (portable app), so the mymediavault.ini it reads/writes is next to the probe and never
+// in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and never
 // touches a deployed install. We wipe the "player" group at start so a leftover ini can't skew the asserts.
 // The fs/reg roots live in a QTemporaryDir wiped when the probe exits — nothing outside it is written.
 #include "ExternalPlayer.h"

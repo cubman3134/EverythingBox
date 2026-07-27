@@ -28,7 +28,7 @@ for the async show-dispatch seam where the TV-resolution C1 bug lived (invisible
 - **`AddonManager`** is a concrete `QObject` with **non-virtual** `requestSearch`/`requestCatalog`/
   `requestMeta`/`sources`/`catalogs` (`AddonManager.h:58-95`) — not subclass-mockable without an interface
   extraction. But `probe_addon.cpp` (`probePrefetch`/`makeFixture`, ~:310-420) already stands up a **real**
-  `AddonManager` pointed at an `MMV_ADDONS_ROOT` temp dir holding a JsLocal fixture addon (manifest.json +
+  `AddonManager` pointed at an `EB_ADDONS_ROOT` temp dir holding a JsLocal fixture addon (manifest.json +
   main.js, zero network), driving async requests with a `spinUntil` event-loop helper (`:275-281`). JsLocal
   dispatch is async (`QtConcurrent`, `AddonManager.cpp:807-818`); `CatalogResolver::resolved()` debounces
   1500 ms (`CatalogResolver.cpp:173-174`).
@@ -66,7 +66,7 @@ helpers) with a `CatalogResolver` show-dispatch test — NO network, NO mock:
 
 1. `makeFixture` a JsLocal addon whose manifest declares a `series`-typed catalog and whose `getCatalog`
    returns a canned series row (`{ id: "tmdb:tv:1396", type: "series", name: "Breaking Bad" }`) for a query.
-2. `qputenv("MMV_ADDONS_ROOT", …)`; construct a real `AddonManager mgr;`, a temp-file `LocalResolveCache`,
+2. `qputenv("EB_ADDONS_ROOT", …)`; construct a real `AddonManager mgr;`, a temp-file `LocalResolveCache`,
    and a `CatalogResolver resolver(&mgr, &cache);`.
 3. `resolver.enqueue({ one Episode VideoEntry: show="Breaking Bad", season=1, episode=1 })`.
 4. `spinUntil` the resolver's `resolved()` fires (allow for the 1500 ms debounce + async dispatch).

@@ -16,7 +16,7 @@
 - Resume-key discipline: reuse the EXACT `rkey` each play path computes (`playStream`: `resumeKey.isEmpty() ? url : resumeKey`, MainWindow.cpp ~:2694; local video path: find the equivalent beside its resume-position save). Empty/no key → global-only, no per-file write.
 - Settings keys exactly: `sync/global/audio`, `sync/global/sub` (double, default 0.0); per-file `sync/files/<key>/audio`, `sync/files/<key>/sub`.
 - Probe env recipe: PATH prepend `/c/Qt/6.8.3/msvc2022_64/bin` and `/c/mpv-dev`; `QT_QPA_PLATFORM=offscreen`; `QT_PLUGIN_PATH=C:\Qt\6.8.3\msvc2022_64\plugins`; `BUILD_DIR=C:/Users/cubma/Project Goliath/build`; runner `native/tools/run-headless-probes.sh`; new probe registered there AND in ci.yml's build-target list.
-- Live verification: deploy Release over `C:\MyMediaVault-app\MyMediaVault.exe` (keep name); `MMV_UITEST=1`; uitest.py only; byte-identical ini restores (snapshot first — sync writes go to the real ini during verification, restore after); Weekend Picks untouched.
+- Live verification: deploy Release over `C:\EverythingBox-app\EverythingBox.exe` (keep name); `EB_UITEST=1`; uitest.py only; byte-identical ini restores (snapshot first — sync writes go to the real ini during verification, restore after); Weekend Picks untouched.
 - Desktop suite + perf gates unchanged (startup ±20%, nav.select flat).
 
 ---

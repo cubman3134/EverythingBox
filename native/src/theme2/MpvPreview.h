@@ -8,7 +8,7 @@
 // local file (MetaCache) plays instantly and offline. Silent by default (aid=no) so it doesn't fight the
 // menu music / the item's own theme song; loops while the item stays selected.
 //
-// Registered as QML type MMV/MpvPreview; Video.qml creates it at runtime (guarded) only when a playable clip
+// Registered as QML type EB/MpvPreview; Video.qml creates it at runtime (guarded) only when a playable clip
 // exists, and keeps the Ken Burns still underneath until the first frame arrives.
 #pragma once
 #include <QImage>

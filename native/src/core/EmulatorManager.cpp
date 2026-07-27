@@ -588,7 +588,7 @@ static void appendIniSectionIfAbsent(const QString& path, const QByteArray& mark
 
 // Upsert "key = value" inside [section] of an INI: replace the value if the key is present, else add it (creating
 // the section if needed). Unlike appendIniSectionIfAbsent this UPDATES an existing key — needed for the RA token,
-// which can change on re-login and must stay in sync with MMV.
+// which can change on re-login and must stay in sync with EB.
 static void setIniKey(const QString& path, const QString& section, const QString& key, const QString& value)
 {
     QStringList lines;
@@ -622,13 +622,13 @@ static void setIniKey(const QString& path, const QString& section, const QString
     if (f.open(QIODevice::WriteOnly | QIODevice::Text)) { f.write(lines.join(QLatin1Char('\n')).toUtf8()); f.close(); }
 }
 
-// Feed MMV's RetroAchievements login into a standalone emulator's own RA client, so it unlocks natively against
-// the same account (a standalone emulator is a separate process — MMV can't run rcheevos against its memory the
+// Feed EB's RetroAchievements login into a standalone emulator's own RA client, so it unlocks natively against
+// the same account (a standalone emulator is a separate process — EB can't run rcheevos against its memory the
 // way it does for in-process cores). Runs every launch to keep the token fresh; does nothing (leaves the config
-// untouched) when MMV isn't signed into RA.
+// untouched) when EB isn't signed into RA.
 //
 // Only emulators that accept a RAW rcheevos token in their config qualify. VERIFIED LIVE:
-//   • PCSX2 ([Achievements] Username/Token) — logs in successfully with MMV's token.
+//   • PCSX2 ([Achievements] Username/Token) — logs in successfully with EB's token.
 //   • DuckStation ([Cheevos]) — does NOT work: it ENCRYPTS its stored token with a machine key and rejects a raw
 //     one ("Invalid encrypted login token"). We only hold the token (not the password), so there's no way to feed
 //     it; writing one would just nag a failed login every launch. DuckStation manages its own RA login instead.
@@ -639,7 +639,7 @@ void EmulatorManager::prepareAchievements(const QString& binDir)
     QSettings ini = appIni();
     const QString user = ini.value(QStringLiteral("ra/user")).toString();
     const QString token = ini.value(QStringLiteral("ra/token")).toString();
-    if (user.isEmpty() || token.isEmpty()) return; // not signed into RetroAchievements in MMV
+    if (user.isEmpty() || token.isEmpty()) return; // not signed into RetroAchievements in EB
 
     QString path, section;
     if (em_.id == QStringLiteral("pcsx2")) { path = binDir + QStringLiteral("/inis/PCSX2.ini"); section = QStringLiteral("Achievements"); }
@@ -1178,7 +1178,7 @@ void EmulatorManager::launch(const QString& binary)
         prepareFirstRunConfig(binDir);
         prepareCemuConfig(binDir);
         prepareControllerConfig(binDir); // after the above wrote the base inis to append to
-        prepareAchievements(binDir);     // sync MMV's RetroAchievements login into the emulator
+        prepareAchievements(binDir);     // sync EB's RetroAchievements login into the emulator
         prepareCemuKeys(binDir, [this, program, args, binDir] { // async too (gist fetch, Cemu only)
             prepareCemuDiscKey(binDir); // appends to the keys.txt the fetch may have just (over)written
             restoreSaves(binDir); // seed saves from the central backup if this install has none

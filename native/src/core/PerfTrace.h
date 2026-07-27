@@ -2,7 +2,7 @@
 #include <QString>
 #include <QElapsedTimer>
 
-// Lightweight span tracing for the phase-2 perf track. Enabled by MMV_PERF=1 (or
+// Lightweight span tracing for the phase-2 perf track. Enabled by EB_PERF=1 (or
 // forceEnableForTest in probes); when disabled every call is one cached-bool branch.
 // Lines land in <dataDir>/perf_trace.log as:  ISO-ts | span.name | duration_ms | detail
 // Semantics: begin() on an open span RESTARTS it; end() without a begin is a no-op —

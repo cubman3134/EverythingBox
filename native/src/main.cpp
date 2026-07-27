@@ -1,6 +1,6 @@
 #include <QApplication>
 #include "core/AppBrand.h"
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
 #include "theme2/MpvPreview.h"
 #include <QQuickWindow>
 #include <QtQml>
@@ -34,7 +34,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.74";
+static constexpr const char* kAppVersion = "0.5.75";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -156,7 +156,7 @@ static void migrateLegacySettings()
 // frame. This is deliberately distinct from startup.total's zero-timer end: a singleShot(0) can fire BEFORE
 // the window actually paints if the GUI thread is about to block on synchronous work, so a paint-based span
 // is the honest guard against a regression where startup work stalls the first paint (e.g. a slow audio /
-// device open landing on the GUI thread). Installed only under MMV_PERF, so normal runs pay nothing; it
+// device open landing on the GUI thread). Installed only under EB_PERF, so normal runs pay nothing; it
 // removes itself and self-destructs once the first paint fires.
 class FirstPaintProbe : public QObject
 {
@@ -192,14 +192,14 @@ int main(int argc, char** argv)
     qputenv("QT_WIDGETS_RHI_BACKEND", "metal");
 #endif
 
-#ifdef MMV_HAVE_QML
+#ifdef EB_HAVE_QML
     // The themed home is a QQuickView embedded via createWindowContainer (see ThemeEngine), rendered with
     // Qt Quick's software backend. The app also drives libmpv through a QOpenGLWidget, and a GPU-accelerated
     // QQuickWidget sharing GL with it renders blank; the software QQuickView avoids the GL path entirely.
     QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
-    // The themed Video element's real-playback path: a libmpv software-render item themes create as MMV
+    // The themed Video element's real-playback path: a libmpv software-render item themes create as EB
     // MpvPreview (Video.qml instantiates it at runtime, guarded, when a playable clip exists).
-    qmlRegisterType<MpvPreview>("MMV", 1, 0, "MpvPreview");
+    qmlRegisterType<MpvPreview>("EB", 1, 0, "MpvPreview");
 #endif
 
     QApplication app(argc, argv);
@@ -260,19 +260,19 @@ int main(int argc, char** argv)
     // First-run asset extraction (D2 Task 2). A fresh Android install boots into an empty AppPaths::dataDir()
     // with the stock themes2/ + first-party addons/ only inside the read-only APK, so extract them before
     // AddonManager/ThemeEngine (built by MainWindow below) read those dirs off disk. On desktop this is a
-    // no-op UNLESS MMV_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
+    // no-op UNLESS EB_TEST_BOOTSTRAP_SRC points at a source dir — the env override makes the whole pipeline
     // desktop-verifiable without an Android toolchain (see probe_bootstrap).
 #if defined(Q_OS_ANDROID)
-    AssetBootstrap::run(QStringLiteral("assets:/mmv"), AppPaths::dataDir(),
+    AssetBootstrap::run(QStringLiteral("assets:/eb"), AppPaths::dataDir(),
                         QString::fromLatin1(kAppVersion));
 #elif defined(Q_OS_IOS)
-    // iOS: the stock themes2/ + addons are staged at the bundle root as mmv/ (see the if(IOS) CMake block);
-    // extract them into the writable data dir exactly like the Android assets:/mmv flow.
-    AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/mmv"),
+    // iOS: the stock themes2/ + addons are staged at the bundle root as eb/ (see the if(IOS) CMake block);
+    // extract them into the writable data dir exactly like the Android assets:/eb flow.
+    AssetBootstrap::run(QCoreApplication::applicationDirPath() + QStringLiteral("/eb"),
                         AppPaths::dataDir(), QString::fromLatin1(kAppVersion));
 #else
-    if (qEnvironmentVariableIsSet("MMV_TEST_BOOTSTRAP_SRC"))
-        AssetBootstrap::run(qEnvironmentVariable("MMV_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
+    if (qEnvironmentVariableIsSet("EB_TEST_BOOTSTRAP_SRC"))
+        AssetBootstrap::run(qEnvironmentVariable("EB_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
                             QString::fromLatin1(kAppVersion));
 #endif
 
@@ -312,12 +312,12 @@ int main(int argc, char** argv)
     if (QScreen* s = QGuiApplication::primaryScreen()) window.resize(s->geometry().size());
 #else
     window.resize(1280, 760);                              // the size we restore to when leaving full screen
-    // Test-only seam (parity with MMV_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
+    // Test-only seam (parity with EB_TEST_SCREEN_MM): pin the window to a phone/tablet size, so the
     // mobile layout can be exercised with the uitest channel on a desktop host (where the window could
     // otherwise never go below the desktop layout's minimum). Never active in production.
-    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("MMV_TEST_WINDOW"))
+    if (qEnvironmentVariableIsSet("EB_UITEST") && qEnvironmentVariableIsSet("EB_TEST_WINDOW"))
     {
-        const QStringList wh = qEnvironmentVariable("MMV_TEST_WINDOW").split(QLatin1Char('x'));
+        const QStringList wh = qEnvironmentVariable("EB_TEST_WINDOW").split(QLatin1Char('x'));
         if (wh.size() == 2 && wh[0].toInt() > 0 && wh[1].toInt() > 0)
         {
             window.setMinimumSize(1, 1);
@@ -326,7 +326,7 @@ int main(int argc, char** argv)
     }
 #endif
     // startup.firstpaint spans show() -> the window's first real paint (ends via FirstPaintProbe). Only armed
-    // under MMV_PERF. It is the honest complement to startup.total's zero-timer end below.
+    // under EB_PERF. It is the honest complement to startup.total's zero-timer end below.
     if (PerfTrace::enabled())
     {
         PerfTrace::begin(QStringLiteral("startup.firstpaint"));

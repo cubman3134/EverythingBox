@@ -15,7 +15,7 @@
 #include <QStringList>
 #include <algorithm>
 
-// Shares the portable mymediavault.ini with every other store (same AppPaths::dataDir() posture). Coherence
+// Shares the portable everythingbox.ini with every other store (same AppPaths::dataDir() posture). Coherence
 // with the store front-ends comes from every writer calling sync(); QSettings reloads on access when the
 // on-disk file changed.
 static QSettings& store()

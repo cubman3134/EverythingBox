@@ -31,7 +31,7 @@ static QThread* themeAudioThread()
 {
     static QThread* t = [] {
         auto* th = new QThread;                       // heap, never deleted: no ~QThread at exit -> no teardown race
-        th->setObjectName(QStringLiteral("mmv-theme-audio"));
+        th->setObjectName(QStringLiteral("eb-theme-audio"));
         // Stop accepting work and let the current open finish (bounded) when the app is quitting.
         QObject::connect(qApp, &QCoreApplication::aboutToQuit, th, [th] { th->quit(); th->wait(2000); });
         th->start();

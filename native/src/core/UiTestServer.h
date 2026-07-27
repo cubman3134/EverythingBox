@@ -47,7 +47,7 @@ public:
     static QString serverName()
     {
         const QByteArray n = qgetenv("EB_UITEST_PIPE");
-        return n.isEmpty() ? QStringLiteral("MyMediaVault-uitest") : QString::fromUtf8(n);
+        return n.isEmpty() ? QStringLiteral("EverythingBox-uitest") : QString::fromUtf8(n);
     }
 
 private:

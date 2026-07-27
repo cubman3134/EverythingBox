@@ -1,7 +1,7 @@
 // Per-profile, per-CATEGORY playlists: user-curated lists of catalog items. A playlist belongs to one of the
 // four inherent buckets (video / audio / game / reading — see core/MediaCategories.h), so e.g. a single Video
 // playlist can mix episodes and movies from any video catalogue. A "Playlists" folder shows at the category
-// level and at every catalogue root of that category. Stored as JSON in mymediavault.ini under the active
+// level and at every catalogue root of that category. Stored as JSON in everythingbox.ini under the active
 // profile, so each user has their own. Enough of each item is kept (like a FavoriteItem) to display it and
 // re-open/resolve it through its addon (each entry carries its own addonId — playlists may be mixed-source).
 //
