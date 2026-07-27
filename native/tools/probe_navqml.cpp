@@ -47,6 +47,7 @@
 #include <QSGRendererInterface>
 #include <QPointingDevice>            // §20: the synthetic touchscreen device QTest::touchEvent drives
 #include <QtTest/QTest>              // §20: QTest::touchEvent — real touch sequences with real hit-testing
+#include <QtTest/QSignalSpy>         // §20(g): counts the Channels prefetch nearEnd() firings
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
 #include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
@@ -1170,6 +1171,79 @@ static void runTouchAsserts()
             QObject::connect(pg, &NavGraph::backInvoked, &host, [&pBack] { ++pBack; });
             mouseDrag(pqw->quickWindow(), QPoint(6, 300), QPoint(120, 300), 6); // horizontal edge sweep >=80px
             CHECK(pBack >= 1, "edge(panel,mobile): a rightward edge drag from x<12 >=80px fires Back (panel edge-swipe)");
+        }
+    }
+
+    // ---- (g) Channels: a vertical swipe pages the grid + look-ahead prefetch (round 6) ----
+    // A channels-element fixture in a PORTRAIT window (mobile portrait forces the 2x3 page -> 6 per page;
+    // round 7 made the mobile grid orientation-aware, so the window must actually be portrait) with 14
+    // items -> 3 pages. A vertical mouse-drag on the viewport MouseArea (round 7: the touch tap/swipe
+    // arbiter — per-cell areas are desktop-only) must flip a WHOLE page through gotoItemSelectOnly
+    // (selection +-perPage, never an activation), and landing on a page whose successor isn't fully
+    // loaded must fire nearEnd() exactly once (the per-page latch stops repeats).
+    {
+        Settings::setDisplayMode(QStringLiteral("mobile"));
+        FormFactor::instance().refresh();
+        pump();
+        const QVariantMap chEl{ { QStringLiteral("type"), QStringLiteral("channels") },
+                                { QStringLiteral("columns"), 4 }, { QStringLiteral("rows"), 3 },
+                                { QStringLiteral("pos"), QVariantList{ 0, 0 } },
+                                { QStringLiteral("size"), QVariantList{ 1, 1 } } };
+        const QVariantMap chHome{ { QStringLiteral("background"), QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") } } },
+                                  { QStringLiteral("elements"), QVariantList{ chEl } } };
+        const QVariantMap chTheme{ { QStringLiteral("name"), QStringLiteral("TouchChannels") },
+                                   { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), chHome } } } };
+        NavGraph cg;
+        buildThemedNavGraph(cg, 14);
+        buildAudioPageNavGraph(cg);
+        QQuickWidget cqw;
+        cqw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        cqw.rootContext()->setContextProperty(QStringLiteral("nav"), &cg);
+        cqw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+        cqw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        QQuickItem* cr = cqw.rootObject();
+        CHECK(cr != nullptr, "channels(mobile): ThemeView.qml instantiates for the channels fixture");
+        if (cr)
+        {
+            cr->setProperty("categories", QVariantList{});
+            cr->setProperty("items", []() { QVariantList v; for (int i = 0; i < 14; ++i)
+                v << QVariantMap{ { QStringLiteral("title"), QStringLiteral("C%1").arg(i) } }; return v; }());
+            cr->setProperty("currentIndex", 0);
+            cr->setProperty("currentView", QStringLiteral("home"));
+            cr->setProperty("theme", chTheme);
+            cqw.resize(720, 1280);   // portrait: the phone shape whose 2x3 page the asserts count on
+            cqw.show();
+            pump(); pump();
+            cqw.grabFramebuffer();   // force a render pass so the pages realize their delegates
+            pump();
+            QObject::connect(&cg, &NavGraph::selectionChanged, cr, [cr](const QString& z, int i) {
+                if (z == QStringLiteral("items")) cr->setProperty("currentIndex", i);
+            });
+            int cAct = 0;
+            QObject::connect(&cg, &NavGraph::activated, cr, [&cAct](const QString&, int) { ++cAct; });
+            QSignalSpy near(cr, SIGNAL(nearEnd()));
+            cg.select(QStringLiteral("items"), 0);
+            cr->setProperty("currentIndex", 0);
+            pump();
+            near.clear();
+
+            // Swipe UP (finger travels up) -> the NEXT page: selection 0 -> 6, and page 1's successor is
+            // only partially loaded ((1+2)*6 = 18 > 14), so the prefetch fires nearEnd once.
+            mouseDrag(cqw.quickWindow(), QPoint(360, 900), QPoint(360, 400), 6);
+            CHECK(cg.index() == 6 && cAct == 0,
+                  "channels(mobile): a vertical swipe up flips one whole page (select-only, +perPage)");
+            CHECK(near.count() == 1,
+                  "channels(mobile): landing on the last loaded page fires nearEnd() once (prefetch before blanks)");
+
+            // Swipe DOWN -> the previous page (6 -> 0); page 0's successor IS fully loaded (12 < 14): no prefetch.
+            mouseDrag(cqw.quickWindow(), QPoint(360, 400), QPoint(360, 900), 6);
+            CHECK(cg.index() == 0 && cAct == 0,
+                  "channels(mobile): a vertical swipe down flips back one page (select-only)");
+
+            // Up again -> page 1 again: the per-page latch must NOT re-fire nearEnd for the same page.
+            mouseDrag(cqw.quickWindow(), QPoint(360, 900), QPoint(360, 400), 6);
+            CHECK(cg.index() == 6 && near.count() == 1,
+                  "channels(mobile): re-landing on the same page does NOT re-fire nearEnd (latched)");
         }
     }
 

@@ -3684,7 +3684,15 @@ bool HomeView::isThemedInfoLeaf(int idx) const
 {
     if (idx < 0 || idx >= browseRowMap_.size()) return false;
     const MediaItem& it = items_[browseRowMap_[idx]];
-    return isInfoPageType(it.type) && !it.expandable;
+    if (it.expandable) return false;
+    if (isInfoPageType(it.type)) return true;
+    // A stream-less GAME leaf (an IGDB catalog row: no url, no local file) would otherwise fall through
+    // browseActivate -> openResolvedItem -> openDetailLevel, which pushes a level with no children and no
+    // classic page — the themed browse renders that as an EMPTY grid ("I clicked a game and nothing came
+    // up"). Its verbs (Download / Favorite / Playlist) live on the themed detail page, so open that.
+    // Local/downloaded game rows carry a url (or a localgame: mime) and keep their direct action-menu path.
+    if (it.type == QStringLiteral("game") && it.url.isEmpty() && it.mime.isEmpty()) return true;
+    return false;
 }
 
 // The themed detail view's data for the browse-item at `idx`: rich art + facts resolved from the SAME local
