@@ -931,18 +931,36 @@ void HomeView::refresh()
         const bool fileProvider = (a->transport == LoadedAddon::RemoteHttp && !a->stremio);
         return fileProvider ? 0 : 1; // a browsable catalog (local/Stremio) wins a tab over a file provider
     };
-    struct CatRef { LoadedAddon* addon; AddonCatalog cat; };
+    // A catalog that can only ever answer with an explanation instead of items. TWO causes, and both must be
+    // treated alike everywhere below or the "usable-first" rule only holds for one of them:
+    //   * the catalog REQUIRES an extra we have no value for (a Stremio Unsatisfiable catalog -> skipReason);
+    //   * the whole ADD-ON says it must be configured first, so every catalog it declares answers with
+    //     "needs to be configured" (LoadedAddon::stremioManifest.configurationRequired — nothing writes a
+    //     skipReason for this case, so testing skipReason alone silently missed it).
+    // dispatchRemoteCatalog answers both locally with the same synthetic info row; this is the browse side.
+    auto isSelfExplaining = [](LoadedAddon* a, const AddonCatalog& c) {
+        return !c.skipReason.isEmpty() || (a->stremio && a->stremioManifest.configurationRequired);
+    };
+    struct CatRef { LoadedAddon* addon; AddonCatalog cat; bool selfExplaining; };
     QVector<CatRef> all;
     for (LoadedAddon* s : mgr_->sources())
     {
         if (!mgr_->isEnabled(s->manifest.id)) continue;
         // searchOnly catalogs can't answer a bare landing request (they REQUIRE a search term), so they get
         // no tab — they stay listed for the search fan-out, which is the only surface that can use them.
-        for (const AddonCatalog& c : mgr_->catalogs(s)) if (!c.searchOnly) all.push_back({ s, c });
+        for (const AddonCatalog& c : mgr_->catalogs(s))
+            if (!c.searchOnly) all.push_back({ s, c, isSelfExplaining(s, c) });
     }
-    QHash<QString, int> bestScore; // best source score available per media type
+    // Best source score available per media type. A self-explaining catalog is EXCLUDED from this (exactly as
+    // searchOnly ones are excluded from `all`) while still competing in the election below. sourceScore is
+    // per-ADDON, not per-catalog, so counting one here would raise the bar for its whole media type and knock
+    // every file-provider catalog of that type out of wins() — a catalog that can never be fetched would then
+    // eliminate a working shelf before either election pass ran (and, for a type outside movie/series, the
+    // working shelf would be dropped outright rather than merely out-ranked).
+    QHash<QString, int> bestScore;
     for (const CatRef& c : all)
-        bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
+        if (!c.selfExplaining)
+            bestScore[c.cat.type] = qMax(bestScore.value(c.cat.type, -1), sourceScore(c.addon));
     auto wins = [&](const CatRef& c) { return sourceScore(c.addon) >= bestScore.value(c.cat.type, 0); };
 
     auto addCat = [&](LoadedAddon* addon, const AddonCatalog& c, const QString& display) {
@@ -956,29 +974,37 @@ void HomeView::refresh()
 
     // Lead with a single Movies tab, then a single TV tab, then every other winning catalog (one per type).
     //
-    // A catalog carrying a skipReason can never be FETCHED (a Stremio catalog requiring an extra we have no
-    // value for); opening it shows that reason instead of items. It is still offered — that is the only way
-    // its reason reaches anyone — but it must never DISPLACE a working shelf. Movies and TV get exactly one
-    // tab each, so each is elected in two passes: a usable catalog first, and the self-explaining one only
-    // when the type has nothing usable at all (an explained tab beats a type that silently isn't there).
-    // Every other type adds a tab per winning catalog below, so there it is an addition, never a swap.
+    // A self-explaining catalog can never be FETCHED (see isSelfExplaining above); opening it shows the reason
+    // instead of items. It is still offered — that is the only way its reason reaches anyone — but it must
+    // never DISPLACE a working shelf. Movies and TV get exactly one tab each, so each is elected in two
+    // passes: a usable catalog first, and the self-explaining one only when the type has nothing usable at all
+    // (an explained tab beats a type that silently isn't there). Every other type adds a tab per winning
+    // catalog below, so there it is an addition, never a swap.
     bool didMovie = false, didSeries = false;
     for (const CatRef& c : all)
-        if (wins(c) && c.cat.type == QStringLiteral("movie") && c.cat.skipReason.isEmpty() && !didMovie)
+        if (wins(c) && c.cat.type == QStringLiteral("movie") && !c.selfExplaining && !didMovie)
         { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
     for (const CatRef& c : all)
         if (wins(c) && c.cat.type == QStringLiteral("movie") && !didMovie)
         { addCat(c.addon, c.cat, tr("Movies")); didMovie = true; }
     for (const CatRef& c : all)
-        if (wins(c) && isSeriesType(c.cat.type) && c.cat.skipReason.isEmpty() && !didSeries)
+        if (wins(c) && isSeriesType(c.cat.type) && !c.selfExplaining && !didSeries)
         { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
     for (const CatRef& c : all)
         if (wins(c) && isSeriesType(c.cat.type) && !didSeries)
         { addCat(c.addon, c.cat, tr("TV")); didSeries = true; }
+    QSet<QString> explainedTypes; // one "here is why this can't work" tab per type, not one per catalog
     for (const CatRef& c : all)
     {
         if (!wins(c)) continue;
         if (c.cat.type == QStringLiteral("movie") || isSeriesType(c.cat.type)) continue; // already led with Movies/TV
+        // Several Unsatisfiable catalogs of the same type say the same thing to the same effect; a strip of
+        // identical "can't work" entries is noise. The FIRST one carries the reason for that type.
+        if (c.selfExplaining)
+        {
+            if (explainedTypes.contains(c.cat.type)) continue;
+            explainedTypes.insert(c.cat.type);
+        }
         addCat(c.addon, c.cat, c.cat.name);
     }
 
@@ -3353,7 +3379,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         // has no bingeGroup to match against), and only an episode has a series key at all. Without this the
         // memory would be honoured on the automatic next-episode hand-off and silently ignored the moment the
         // user picked the next episode from the list themselves.
-        preferredBingeGroup(it.imdbStreamId.isEmpty() ? it.id : it.imdbStreamId));
+        BingeStore::preferredGroup(bingeStore_, it.imdbStreamId.isEmpty() ? it.id : it.imdbStreamId));
         return;
     }
     if (!imdbId.isEmpty()) // a non-Stremio catalog item bridged to IMDB -> resolve via stream addons
@@ -3367,7 +3393,7 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                               "(check that Allarr is configured and returning results).").arg(it.title), kFeedbackLong);
-        }, /*attempt=*/0, preferredBingeGroup(imdbId)); // the release already chosen for this series, if any
+        }, /*attempt=*/0, BingeStore::preferredGroup(bingeStore_, imdbId)); // the release already chosen, if any
         return;
     }
     showToast(tr("Nothing to play for “%1”.").arg(it.title), kFeedbackLong);
@@ -3556,6 +3582,41 @@ void HomeView::enrichThemedMeta()
     themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it); // -> onMetaReady (themed branch) enriches
 }
 
+// The themed DETAIL view asking for the ONE thing it cannot resolve locally: a bridged leaf's Stremio stream
+// id, which only /meta carries (MediaItem::fromJson never parses one — MediaDetail does). The XMB gets this
+// for free from its hover debounce (refreshThemedMeta -> requestThemedMeta + enrichThemedMeta); the GRID
+// browse — the default browse path — has no hover fetch at all, so without this the detail's verb row stays
+// frozen on what the raw catalog row could say and "Choose source…" never appears there.
+//
+// Deliberately narrow: only a leaf that could bridge and hasn't yet. Everything else the detail shows is
+// already resolved locally, so firing a network /meta on every detail open would buy nothing.
+void HomeView::requestThemedDetailMeta(int idx)
+{
+    if (!mgr_ || idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty() || !stack_.last().addon) return;
+    const MediaItem& it = items_[browseRowMap_[idx]];
+    if (it.expandable || !it.imdbStreamId.isEmpty()) return;
+    static const QSet<QString> kBridgeable = {
+        QStringLiteral("movie"), QStringLiteral("series"), QStringLiteral("tv"), QStringLiteral("episode") };
+    if (!kBridgeable.contains(it.type)) return;
+    themedMetaIndex_    = idx;   // the staleness key onMetaReady's themed branch compares the reply against
+    themedMetaReqIndex_ = idx;
+    themedMetaReq_ = mgr_->requestMeta(stack_.last().addon, it);
+}
+
+// A metadata-only catalog row carries no stream id of its own; the bridge produces one when /meta lands.
+// Stamp it onto the STORED row so every later read — the action-row gates and, crucially, the item
+// requestChooseSource emits — sees it. (The classic page keeps the same value in playImdbId_ and stamps it
+// on at emit time; the themed row has no equivalent stash, and emitting without it would send the addon's
+// private catalog id to /stream.) Returns true when the id newly landed.
+bool HomeView::bridgeStreamId(int idx, const QString& streamId)
+{
+    if (streamId.isEmpty() || idx < 0 || idx >= browseRowMap_.size()) return false;
+    MediaItem& row = items_[browseRowMap_[idx]];
+    if (!row.imdbStreamId.isEmpty()) return false;
+    row.imdbStreamId = streamId;
+    return true;
+}
+
 // A themed leaf that is a local game file (a console Recent/Downloaded/Favorites row) favourites by
 // path+console like the game action menu does; its identity is gameFavId (stable key, else path), not it.id.
 static bool isLocalGameLeaf(const MediaItem& it)
@@ -3680,6 +3741,9 @@ QVariantMap HomeView::themedDetailData(int idx)
         const MediaDetail cd = MetaCache::cachedDetail(metaKey);
         if (cd.valid)
         {
+            // A previously-cached /meta already carries the bridged stream id: adopt it now so an item whose
+            // detail we have seen before offers "Choose source…" on the FIRST push, with no network at all.
+            bridgeStreamId(idx, cd.imdbStreamId);
             if (!out.contains(QStringLiteral("overview")) && !cd.overview.isEmpty())
                 out.insert(QStringLiteral("overview"), cd.overview);
             if (facts.isEmpty())
@@ -3714,11 +3778,17 @@ QVariantMap HomeView::themedDetailData(int idx)
     const ActionGates gates = classicActionGates(it);
     const bool localSaved = isLocalGameLeaf(it) || atRecentsLevel() || atDownloadsLevel();
     const bool directOpen = !it.expandable && (localSaved || it.type == QStringLiteral("game"));
+    // A bridged (metadata-only) movie/episode whose stream id is now known DOES resolve — through the stream
+    // add-ons, exactly as the classic page's showMeta reveal says. classicActionGates is evaluated on the raw
+    // catalog row, which for a local-script catalog (AIO Catalog, the default Movies/TV shelf) claims neither
+    // Play nor Download for a movie, so without this both verbs stay missing however often the row is
+    // re-pushed. canChooseStreamSource is unchanged — the gate is not loosened, it is merely also consulted.
+    const bool bridgedStream = canChooseStreamSource(it);
     QStringList verbs;
-    if (gates.play || directOpen) verbs << QStringLiteral("play");
+    if (gates.play || directOpen || bridgedStream) verbs << QStringLiteral("play");
     // "Choose source…" sits next to Play because it IS a play: the same resolve, with the release picked by
     // hand instead of by the auto rule. Offered only where several releases exist to choose between.
-    if (gates.play && canChooseStreamSource(it)) verbs << QStringLiteral("source");
+    if (bridgedStream) verbs << QStringLiteral("source");
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
@@ -3933,11 +4003,9 @@ bool HomeView::canChooseStreamSource(const MediaItem& item) const
     return mgr_ && mgr_->hasStreamProvider(streamType);
 }
 
-QString HomeView::preferredBingeGroup(const QString& imdbStreamId) const
+void HomeView::setChooseSourceBusy(bool busy)
 {
-    // lookup() answers empty for an empty key and seriesKeyFor() answers empty for a movie, so this needs no
-    // "is it an episode?" test of its own — and a null store simply means no memory.
-    return bingeStore_ ? bingeStore_->lookup(BingeStore::seriesKeyFor(imdbStreamId)) : QString();
+    if (sourceBtn_) sourceBtn_->setEnabled(!busy);
 }
 
 void HomeView::requestChooseSource(int idx)
@@ -4130,6 +4198,17 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         // The enriched artwork/videos/audio/meta from the provider (or the aggregator) -> the live panel:
         // selected.logo, selected.box, selected.images.screenshot, selected.videos, selected.audio, ...
         det.art.writeInto(m);
+        // The bridge: this reply may carry the Stremio stream id the catalog row could not. Stamp it on, then
+        // re-publish the action verbs — themedDetailData is computed ONCE when the detail page opens, so
+        // without this the verb row stays frozen on the raw browse item and "Choose source…" (and, for a
+        // metadata-only movie/episode, Play itself) never appears. This is the themed twin of the second
+        // reveal showMeta does for the classic page's two buttons.
+        if (rowOk && bridgeStreamId(reqIdx, det.imdbStreamId))
+        {
+            const QVariantMap fresh = themedDetailData(reqIdx);
+            if (fresh.contains(QStringLiteral("actions")))
+                m.insert(QStringLiteral("actions"), fresh.value(QStringLiteral("actions")));
+        }
         emit themedMetaReady(reqIdx, m);
         return;
     }

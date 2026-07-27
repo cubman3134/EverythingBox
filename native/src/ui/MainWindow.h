@@ -644,8 +644,15 @@ private:
     // Play one chosen candidate: a direct http url as-is, else its infoHash through the SAME TorBox
     // resolution the automatic path uses (AddonManager::resolveTorBoxInfoHash) — no second copy of the chain.
     void playChosenStream(const MediaItem& item, const StremioTranslate::StreamCandidate& c);
-    // The bingeGroup already chosen for this stream id's series, or empty (no memory / a movie / no store).
-    QString preferredBingeGroup(const QString& imdbStreamId) const;
+    // Staleness latch for the picker, the shape nextEpGen_/channelAirGen_ already use here. listStremioStreams
+    // fans out to every enabled Stremio add-on (15 s transfer timeout) and answers only after the last one, so
+    // a reply can easily land after the user backed out and started playing something else. The gen is
+    // captured at REQUEST time and re-checked before the reply touches ANY shared surface — including
+    // hideNotice(), which would otherwise clear a notice the new playback raised. Bumped by every media open
+    // and every themed-detail pop via bumpChooseSourceGen(), which also clears the in-flight flag.
+    void bumpChooseSourceGen();
+    int  chooseSourceGen_ = 0;
+    bool chooseSourceBusy_ = false;   // a request is in flight: a second press must not stack a second menu
     void captureVideoScreenshot();                // save the current video frame to <app>/screenshots
     QWidget* subOverlay_ = nullptr;
     // The panel is a two-column card: track list (left) and sync/size/load/download (right). Up/Down move
