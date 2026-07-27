@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(MyMediaVaultNative VERSION 0.5.51 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(MyMediaVaultNative VERSION 0.5.52 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -633,6 +633,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_addon tools/probe_addon.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${MMV_SECRETS_GEN_DIR})
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
@@ -642,6 +643,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_gameagg tools/probe_gameagg.cpp
         src/addons/GameMetaAggregator.cpp src/addons/JsAddon.cpp src/addons/AddonContext.cpp
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
+        src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/GamelistStore.cpp src/core/Settings.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
@@ -656,6 +658,7 @@ if(MYMEDIAVAULT_BUILD_APP)
     add_executable(probe_showdispatch tools/probe_showdispatch.cpp
         src/addons/JsAddon.cpp src/addons/AddonContext.cpp src/addons/AddonModels.cpp
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
+        src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
         third_party/duktape/duktape.c third_party/miniz.c)

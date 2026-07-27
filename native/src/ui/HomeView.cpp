@@ -913,7 +913,9 @@ void HomeView::refresh()
     for (LoadedAddon* s : mgr_->sources())
     {
         if (!mgr_->isEnabled(s->manifest.id)) continue;
-        for (const AddonCatalog& c : mgr_->catalogs(s)) all.push_back({ s, c });
+        // searchOnly catalogs can't answer a bare landing request (they REQUIRE a search term), so they get
+        // no tab — they stay listed for the search fan-out, which is the only surface that can use them.
+        for (const AddonCatalog& c : mgr_->catalogs(s)) if (!c.searchOnly) all.push_back({ s, c });
     }
     QHash<QString, int> bestScore; // best source score available per media type
     for (const CatRef& c : all)

@@ -294,52 +294,45 @@ static QByteArray remoteConfigHeader(const LoadedAddon* src)
 // and routes /catalog/{type}/{id}.json, /meta/{type}/{id}.json, /stream/{type}/{id}.json. We translate
 // those into our MediaCatalog / MediaDetail / MediaItem models so they appear as ordinary catalogs.
 
-// Detect + parse a Stremio manifest into one of our AddonManifests (catalogs keyed "type/id"), plus the
-// declared resources/types. Returns false if it isn't a Stremio manifest.
-static bool parseStremioManifest(const QByteArray& json, AddonManifest* outM, QStringList* outRes, QStringList* outTypes)
+// Detect + parse a Stremio manifest into one of our AddonManifests. The RULES live in StremioTranslate;
+// this only maps the result onto the shapes the rest of AddonManager already consumes.
+static bool parseStremioManifest(const QByteArray& json, AddonManifest* outM, QStringList* outRes,
+                                 QStringList* outTypes, StremioTranslate::Manifest* outSm)
 {
-    const QJsonObject o = QJsonDocument::fromJson(json).object();
-    if (!o.contains(QStringLiteral("resources")) || !o.contains(QStringLiteral("types"))) return false;
+    const StremioTranslate::Manifest sm = StremioTranslate::parseManifest(json);
+    if (!sm.isValid()) return false;
 
     AddonManifest m;
-    m.id = o.value(QStringLiteral("id")).toString();
-    m.name = o.value(QStringLiteral("name")).toString(m.id);
-    m.version = o.value(QStringLiteral("version")).toString();
-    m.type = QStringLiteral("media-source"); // present it like one of ours
-    m.description = o.value(QStringLiteral("description")).toString();
+    m.id = sm.id;
+    m.name = sm.name;
+    m.version = sm.version;
+    m.type = QStringLiteral("media-source");   // present it like one of ours
+    m.description = sm.description;
 
-    QStringList resources, types;
-    for (const QJsonValue& r : o.value(QStringLiteral("resources")).toArray())
-        resources << (r.isString() ? r.toString() : r.toObject().value(QStringLiteral("name")).toString());
-    for (const QJsonValue& t : o.value(QStringLiteral("types")).toArray()) types << t.toString();
-
-    for (const QJsonValue& cv : o.value(QStringLiteral("catalogs")).toArray())
+    for (const StremioTranslate::Catalog& c : sm.catalogs)
     {
-        const QJsonObject c = cv.toObject();
-        const QString ctype = c.value(QStringLiteral("type")).toString();
-        const QString cid = c.value(QStringLiteral("id")).toString();
-        // Skip catalogs that require a search/genre to return anything (no plain landing page).
-        bool requiresExtra = false;
-        for (const QJsonValue& ev : c.value(QStringLiteral("extra")).toArray())
-            if (ev.toObject().value(QStringLiteral("isRequired")).toBool()) { requiresExtra = true; break; }
-        for (const QJsonValue& ev : c.value(QStringLiteral("extraRequired")).toArray())
-            { Q_UNUSED(ev); requiresExtra = true; }
-        if (requiresExtra) continue;
+        // Unsatisfiable cannot be asked at all — it stays on stremioManifest only, so Task 5 can explain
+        // its absence. SearchOnly IS carried here: it must remain reachable by the search fan-out, and
+        // dropping it is what would make a search-only addon invisible all over again. The searchOnly flag
+        // is what keeps it out of the browse shelves.
+        if (c.use == StremioTranslate::CatalogUse::Unsatisfiable) continue;
         AddonCatalog cat;
-        cat.id = ctype + QStringLiteral("/") + cid; // encode type+id for the route
-        cat.type = ctype;                            // drives our icons/routing
-        cat.name = c.value(QStringLiteral("name")).toString(ctype);
+        cat.id         = c.routeId();
+        cat.type       = c.type;
+        cat.name       = c.name;
+        cat.searchOnly = (c.use == StremioTranslate::CatalogUse::SearchOnly);
         m.catalogs.push_back(cat);
     }
-    *outM = m; *outRes = resources; *outTypes = types;
+
+    *outM = m; *outRes = sm.resources; *outTypes = sm.types; *outSm = sm;
     return true;
 }
 
 // Build an addon (Stremio dialect if applicable, else our own) from a cached manifest. Returns null on bad data.
 static std::unique_ptr<LoadedAddon> buildRemoteAddon(const QString& base, const QByteArray& manifestJson)
 {
-    AddonManifest manifest; QStringList res, types;
-    const bool isStremio = parseStremioManifest(manifestJson, &manifest, &res, &types);
+    AddonManifest manifest; QStringList res, types; StremioTranslate::Manifest sm;
+    const bool isStremio = parseStremioManifest(manifestJson, &manifest, &res, &types, &sm);
     bool ok = isStremio;
     if (!isStremio) manifest = AddonManifest::fromJson(manifestJson, &ok);
     if (!ok) return nullptr;
@@ -352,20 +345,56 @@ static std::unique_ptr<LoadedAddon> buildRemoteAddon(const QString& base, const 
     entry->stremio = isStremio;
     entry->stremioResources = res;
     entry->stremioTypes = types;
+    entry->stremioManifest = sm;
     return entry;
 }
 
-static QUrl stremioCatalogUrl(const QString& base, const QString& typeSlashId, const QString& query, int page)
+// Build the Stremio catalog URL for a route id ("type/id"), using the parsed catalog so its required-extra
+// defaults are applied. Falls back to a bare path when the manifest is unknown (a cached manifest from an
+// older build), so an upgrade never leaves a catalog unreachable.
+static QUrl stremioCatalogUrl(const LoadedAddon* src, const QString& routeId, const QString& query, int page,
+                              const QMap<QString, QString>& filters)
 {
-    const int slash = typeSlashId.indexOf(QLatin1Char('/'));
-    const QString type = slash > 0 ? typeSlashId.left(slash) : typeSlashId;
-    const QString id   = slash > 0 ? typeSlashId.mid(slash + 1) : QString();
-    QString u = base + QStringLiteral("/catalog/") + segEnc(type) + QStringLiteral("/") + segEnc(id);
-    QStringList extra;
-    if (!query.isEmpty()) extra << QStringLiteral("search=") + segEnc(query);
-    if (page > 1)         extra << QStringLiteral("skip=") + QString::number((page - 1) * 100); // Stremio paginates by skip
-    if (!extra.isEmpty()) u += QStringLiteral("/") + extra.join(QLatin1Char('&'));
-    return QUrl(u + QStringLiteral(".json"));
+    QMap<QString, QString> extras = filters;
+    if (!query.isEmpty()) extras.insert(QStringLiteral("search"), query);
+    if (page > 1)         extras.insert(QStringLiteral("skip"), QString::number((page - 1) * 100));
+
+    for (const StremioTranslate::Catalog& c : src->stremioManifest.catalogs)
+        if (c.routeId() == routeId) return QUrl(src->baseUrl + StremioTranslate::catalogPath(c, extras));
+
+    StremioTranslate::Catalog bare;
+    const int slash = routeId.indexOf(QLatin1Char('/'));
+    bare.type = slash > 0 ? routeId.left(slash) : routeId;
+    bare.id   = slash > 0 ? routeId.mid(slash + 1) : QString();
+    return QUrl(src->baseUrl + StremioTranslate::catalogPath(bare, extras));
+}
+
+// A catalog's declared extras -> the filter dropdowns the UI renders, mirroring what the non-Stremio branch
+// gets from MediaCatalog::fromJson (first option "" = "Any"; an empty selection is simply omitted from the
+// filters map, which is what lets a required extra fall back to its preset). `search` and `skip` are the
+// protocol's own query/paging knobs — stremioCatalogUrl owns those — and a free-form extra with no declared
+// options has nothing to put in a combo, so neither becomes a filter.
+static QVector<CatalogFilter> stremioCatalogFilters(const LoadedAddon* src, const QString& routeId)
+{
+    QVector<CatalogFilter> out;
+    for (const StremioTranslate::Catalog& c : src->stremioManifest.catalogs)
+    {
+        if (c.routeId() != routeId) continue;
+        for (const StremioTranslate::Extra& e : c.extras)
+        {
+            if (e.name.isEmpty() || e.options.isEmpty()) continue;
+            if (e.name == QStringLiteral("search") || e.name == QStringLiteral("skip")) continue;
+            CatalogFilter f;
+            f.key = e.name;
+            f.label = e.name; f.label[0] = f.label[0].toUpper();
+            f.options.push_back({ QString(), QObject::tr("Any") });
+            const int cap = e.optionsLimit > 1 ? qMin(e.optionsLimit, int(e.options.size())) : int(e.options.size());
+            for (int i = 0; i < cap; ++i) f.options.push_back({ e.options.at(i), e.options.at(i) });
+            out.push_back(f);
+        }
+        break;
+    }
+    return out;
 }
 static QUrl stremioMetaUrl(const QString& base, const QString& type, const QString& id)
 { return QUrl(base + QStringLiteral("/meta/") + segEnc(type) + QStringLiteral("/") + segEnc(id) + QStringLiteral(".json")); }
@@ -941,7 +970,11 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     const int reqId = ++reqCounter_;
     const QString base = src->baseUrl;
     const bool stremio = src->stremio;
-    QNetworkRequest rq(stremio ? stremioCatalogUrl(base, catalogId, query, page)
+    // Stremio declares its filters on the MANIFEST, not on the catalog response, so they're resolved here and
+    // ridden into the reply handler; the non-Stremio branch gets its equivalents from MediaCatalog::fromJson.
+    const QVector<CatalogFilter> stremioFilters = stremio ? stremioCatalogFilters(src, catalogId)
+                                                          : QVector<CatalogFilter>();
+    QNetworkRequest rq(stremio ? stremioCatalogUrl(src, catalogId, query, page, filters)
                                : remoteCatalogUrl(base, catalogId, query, page, filters));
     rq.setHeader(QNetworkRequest::UserAgentHeader, QStringLiteral("MyMediaVault"));
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
@@ -950,12 +983,13 @@ int AddonManager::dispatchRemoteCatalog(LoadedAddon* src, const QString& catalog
     rq.setTransferTimeout(15000);
     if (!stremio) { const QByteArray cfg = remoteConfigHeader(src); if (!cfg.isEmpty()) rq.setRawHeader("X-MMV-Config", cfg); }
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, reqId, base, stremio, stremioFilters] {
         reply->deleteLater();
         MediaCatalog cat;
         if (reply->error() == QNetworkReply::NoError)
         {
             cat = stremio ? parseStremioCatalog(reply->readAll()) : MediaCatalog::fromJson(reply->readAll());
+            if (stremio) cat.filters = stremioFilters; // genre & co., so the filter bar can round-trip them back
             for (MediaItem& it : cat.items)
             {
                 it.url = resolveRemoteUrl(it.url, base);
