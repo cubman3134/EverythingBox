@@ -76,7 +76,8 @@ namespace StremioTranslate
         QVector<Extra> extras;
         CatalogUse     use = CatalogUse::Browse;
         QString        skipReason;     // non-empty only when Unsatisfiable; shown, never swallowed
-        QString        presetKey, presetValue;  // the first option of a required extra, for Browse
+        QMap<QString,QString> presets;  // each required extra -> its first option. A MAP, not a single
+                                        // pair: a catalog may declare more than one required extra.
     };
 
     struct Manifest
@@ -98,7 +99,7 @@ namespace StremioTranslate
     // segment, per the protocol doc. Keys are emitted in a stable order so the result cache keys stably.
     //
     // `extras` is what the CALLER wants (a chosen filter value, a search term, a skip offset). The
-    // catalog's own presetKey/presetValue is merged in ONLY when the caller supplied no value for that
+    // catalog's own presets are merged in ONLY where the caller supplied no value for that
     // key — so a required `genre` defaults to the first option, and a user picking "Comedy" overrides it
     // rather than being appended alongside it.
     QString catalogPath(const Catalog&, const QMap<QString, QString>& extras);
@@ -118,7 +119,10 @@ namespace StremioTranslate
         qint64  videoSize = 0;
         int     seeders = -1;   // parsed out of `title` when the addon encodes it; -1 = unknown
     };
-    QVector<StreamCandidate> parseStreams(const QByteArray& body);
+    // maxRows bounds the returned list. The PICKER asks for kMaxStreamRows (30); the resolution path asks
+    // for kMaxHashes (60), because the debrid batch-check must not inherit a display bound — with a single
+    // stream addon a 30-row cap made a cached release ranked 31-60 unreachable.
+    QVector<StreamCandidate> parseStreams(const QByteArray& body, int maxRows = kMaxStreamRows);
 
     // The human-readable row for the picker: "1080p · Release.Name.x265 · 42 seeders · 2.1 GB".
     QString describe(const StreamCandidate&);
@@ -135,7 +139,7 @@ Per catalog, from its normalized extras:
 | Declares | `CatalogUse` | Behavior |
 |---|---|---|
 | `search` required | `SearchOnly` | Registered with the search fan-out; **not** a browse shelf |
-| A required extra **with** `options` | `Browse` | Shelf appears with the **first option preselected** (`presetKey`/`presetValue`); the options become a `CatalogFilter` |
+| A required extra **with** `options` | `Browse` | Shelf appears with the **first option preselected** (`presets`); the options become a `CatalogFilter`, and the preselected value is the row shown rather than a misleading "Any" |
 | A required extra **without** `options` | `Unsatisfiable` | Skipped with `skipReason` — surfaced, never silent |
 | Only optional extras | `Browse` | `genre` becomes a `CatalogFilter`; `skip` drives paging |
 
@@ -161,7 +165,9 @@ http url first, else the first TorBox-cached infoHash — it simply now runs ove
   with that same `bingeGroup` is preferred **before** the auto rule. That is precisely what `bingeGroup`
   exists for, and it makes the override one decision per series instead of one per episode.
 - Candidates are sorted **direct http before torrent, then by seeders descending, then by size descending**
-  (unknown seeders sort last within their group), then capped at **`kMaxStreamRows = 30`**. The cap is a
+  (unknown seeders sort last within their group), then capped at **`kMaxStreamRows = 30`** for the picker. The
+cap is a **parameter**, not a constant of the parse: the debrid resolution path asks for `kMaxHashes` (60)
+instead, because a display bound must not decide which releases are even checked for a cached copy. The cap is a
   parse/quota bound, **not** a display bound — `NavMenu` scrolls, and past thirty rows nobody is choosing.
 
 **`BingeStore`** (`native/src/core/BingeStore.{h,cpp}`) — device-local JSON at
@@ -198,12 +204,13 @@ play    ─→ providers filtered by handlesId (fallback: all) ─→ parseStrea
 | Situation | Behavior |
 |---|---|
 | `resources` mixes strings and objects | Both parsed; resource names normalized into one list |
+| `"resources": []`, or objects whose `name` is missing/empty | **Behaviour change worth a release note.** Detection tightened from "has `resources` and `types` keys" to "`resources` is non-empty", so such an addon no longer registers as Stremio, falls through to MMV's own manifest parse, is rejected there, and **vanishes from the source list entirely** — where before it appeared with its catalogs. A manifest declaring catalogs but no resources is malformed, so this is the right call; it is recorded because it is a visible removal, not a silent degrade |
 | `configurationRequired: true` | One explanatory row instead of empty shelves; links `configurable` when present |
 | Catalog requires an extra with no `options` | Skipped with a **named reason**, surfaced through the existing info-row mechanism |
 | **`idPrefixes` filters out every provider** | **Query all of them.** A bad manifest must degrade to today's behavior, never to a dead end |
 | Remembered `bingeGroup` matches nothing | Ignored; fall back to the auto rule. A stale preference must never block playback |
 | Legacy `extraRequired` / `extraSupported` | Normalized into `Extra[]`; `extraRequired` implies `isRequired` |
-| `optionsLimit` | Caps the options offered in the filter (schema default 1) |
+| `optionsLimit` | How many values a user may **select** (schema default 1). It does **not** bound how many options exist — an earlier draft capped the rendered list by it, which hid 17 of 20 genres for an addon declaring `optionsLimit: 3` |
 | Extra value containing a space, `&`, or `=` | URL-encoded within the path segment; asserted in the probe |
 | Stream flagged `notWebReady` | Still offered, labelled in the picker |
 | Addon returns an HTTP error | Existing synthetic `type:"info"` row, with a specific message rather than a generic one |
@@ -227,7 +234,8 @@ play    ─→ providers filtered by handlesId (fallback: all) ─→ parseStrea
     pulled from a title, and that a stream with neither a usable url nor a valid infoHash is dropped.
   - bingeGroup selection: remembered group matches → chosen; no match → the auto rule; a one-part (movie)
     id never consults the store.
-  - Candidate ordering at each tie-break level, and the `kMaxStreamRows` cap.
+  - Candidate ordering at each tie-break level, the `kMaxStreamRows` cap, and that the cap is a parameter
+    so the resolution path can ask for more than the picker shows.
   - `catalogPath` preset merging: a required `genre` with no caller value uses the first option; a caller
     value **replaces** it rather than appearing alongside it.
 - **Live:** install a real Stremio addon with a search-only catalog and a genre-required one; confirm both
