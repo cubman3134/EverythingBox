@@ -13,11 +13,13 @@ Item {
     property var host
     property var card: T.val(el, "card", ({}))
 
-    // Phone: the theme's landscape page density (4×3) crams 12 tiny cells onto a portrait screen —
-    // drop to 2×3 so each channel card is a readable, tappable size. TV/desktop keep the theme's grid.
+    // Phone: the theme's page density (4×3) crams 12 tiny cells onto a phone — drop to a readable,
+    // tappable grid per ORIENTATION: portrait stacks 2×3; landscape spreads 4×2 (portrait's 2 columns
+    // rotated made hugely wide, stubby cards). TV/desktop keep the theme's grid.
     readonly property bool mobile: (typeof form !== "undefined") && form && form.mode === "mobile"
-    readonly property int cols: mobile ? 2 : Math.max(1, Number(T.val(el, "columns", 4)))
-    readonly property int rows: mobile ? 3 : Math.max(1, Number(T.val(el, "rows", 3)))
+    readonly property bool portrait: height > width
+    readonly property int cols: mobile ? (portrait ? 2 : 4) : Math.max(1, Number(T.val(el, "columns", 4)))
+    readonly property int rows: mobile ? (portrait ? 3 : 2) : Math.max(1, Number(T.val(el, "rows", 3)))
     readonly property int perPage: cols * rows
     readonly property var items: (ctx && ctx.items) ? ctx.items : []
     readonly property int count: items.length
@@ -75,7 +77,11 @@ Item {
                             z: sel ? 2 : 0
 
                             MouseArea {
-                                anchors.fill: parent; enabled: !cell.empty
+                                // Desktop/TV pointer path only — on touch the viewport MouseArea below
+                                // arbitrates tap-vs-swipe itself (a per-cell area would win the grab on
+                                // press and starve the swipe recognizer; that is why the round-6
+                                // DragHandler never fired on the phone).
+                                anchors.fill: parent; enabled: !cell.empty && !ch.mobile
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: if (ch.host && ch.host.gotoItem) ch.host.gotoItem(cell.slot)
                             }
@@ -94,13 +100,33 @@ Item {
                                                                      : T.val(ch.card, "border", "#B7C3D4"))
                                 scale: cell.sel ? Number(T.val(ch.card, "selectedScale", 1.0)) : 1.0
                                 Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
+                                // Poster cards keep a title STRIP below the artwork (text over a poster is
+                                // unreadable/confusing); plain colored tiles (no image) keep the centered label.
+                                readonly property bool hasImg: !cell.empty && !!(cell.item && cell.item.image)
+                                readonly property real stripH: hasImg ? Math.max(30, height * 0.24) : 0
                                 Image {
-                                    anchors.fill: parent
+                                    anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
+                                    height: parent.height - parent.stripH
                                     source: (cell.item && cell.item.image && ch.host) ? ch.host.resolve(cell.item.image) : ""
                                     fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready
                                 }
-                                Text {
-                                    visible: !cell.empty
+                                Rectangle { // the title strip under the poster
+                                    visible: parent.hasImg
+                                    anchors.left: parent.left; anchors.right: parent.right; anchors.bottom: parent.bottom
+                                    height: parent.stripH
+                                    color: T.val(ch.card, "labelBg", "#F4F7FB")
+                                    Text {
+                                        anchors.fill: parent; anchors.margins: 4
+                                        text: (cell.item && cell.item.title) ? cell.item.title : ""
+                                        color: T.val(ch.card, "labelText", "#2A3646")
+                                        // Sized off the strip (not the screen) so two wrapped lines always fit.
+                                        font.pixelSize: Math.max(10, parent.parent.stripH * 0.30); font.bold: true
+                                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                                        wrapMode: Text.WordWrap; maximumLineCount: 2; elide: Text.ElideRight
+                                    }
+                                }
+                                Text { // colored tile (no artwork): label centered on the tile, as before
+                                    visible: !cell.empty && !parent.hasImg
                                     anchors.centerIn: parent; width: parent.width * 0.88
                                     text: (cell.item && cell.item.title) ? cell.item.title : ""
                                     color: T.val(ch.card, "labelColor", "#FFFFFF")
@@ -121,6 +147,7 @@ Item {
     component PageArrow: Rectangle {
         property bool forward: true
         property bool on: false
+        z: 2  // above the touch tap/swipe MouseArea (a later sibling), so arrow clicks stay the arrows'
         width: ch.arrowW * 0.72; height: width; radius: width / 2
         color: T.val(ch.card, "labelBg", "#F7FAFD"); border.width: 2; border.color: "#AEBBCB"
         opacity: on ? 1.0 : 0.3
@@ -151,4 +178,49 @@ Item {
     }
     PageArrow { anchors.left: parent.left;  anchors.verticalCenter: parent.verticalCenter; forward: false; on: ch.page > 0 }
     PageArrow { anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter; forward: true;  on: ch.page < ch.pageCount - 1 }
+
+    // ---- touch paging + look-ahead loading -----------------------------------------------------------------
+    // Whole-page jump via the host's selection (the page follows the selection, same as the arrows).
+    function flipPage(dir) {
+        if (!host || !host.gotoItemSelectOnly) return
+        host.gotoItemSelectOnly(Math.max(0, Math.min(count - 1, cur + dir * perPage)))
+    }
+    // Touch: ONE MouseArea over the viewport arbitrates tap vs swipe (the per-cell areas are desktop-only —
+    // see the note there; they won the grab on press and starved the round-6 DragHandler, which is why
+    // swiping never worked on the phone). A press that travels ≥ 40pt vertically (or 60 horizontally,
+    // matching the pages' slide direction) flips a page on release; anything shorter is a tap, mapped to
+    // its slot. Sits over the page Row but under the floating PageArrows (declaration order), so the
+    // arrows still take their clicks.
+    MouseArea {
+        enabled: ch.mobile
+        x: 0; y: ch.topPad; width: ch.vpW; height: ch.height - ch.topPad
+        property real px: 0; property real py: 0
+        onPressed: function(m) { px = m.x; py = m.y }
+        onReleased: function(m) {
+            var dx = m.x - px, dy = m.y - py
+            if (dy <= -40 || dx <= -60)     { ch.flipPage(1);  return }
+            if (dy >= 40  || dx >= 60)      { ch.flipPage(-1); return }
+            if (Math.abs(dx) > 14 || Math.abs(dy) > 14) return   // a hesitant drag: neither tap nor swipe
+            // Tap: page-local slot under the finger (the Row is translated by whole pages, so global
+            // column → page + column decompose exactly; pageW == cols * cellW).
+            var gx = m.x + ch.page * ch.pageW
+            var pageIdx = Math.floor(gx / ch.pageW)
+            var colIn   = Math.floor((gx - pageIdx * ch.pageW) / ch.cellW)
+            var rowIn   = Math.floor(m.y / ch.cellH)
+            if (rowIn < 0 || rowIn >= ch.rows || colIn >= ch.cols) return
+            var slot = pageIdx * ch.perPage + rowIn * ch.cols + colIn
+            if (slot >= 0 && slot < ch.count && ch.host && ch.host.gotoItem) ch.host.gotoItem(slot)
+        }
+    }
+    // Ask the host for the next page of items BEFORE its slots can peek into view as empty boxes:
+    // whenever the page after the current one isn't fully loaded, pull more (latched per page so a
+    // source with nothing further doesn't get hammered).
+    property int lastMoreReq: -1
+    function maybeLoadMore() {
+        if (!host || !host.nearEnd) return
+        if ((page + 2) * perPage > count && page !== lastMoreReq) { lastMoreReq = page; host.nearEnd() }
+    }
+    onPageChanged: maybeLoadMore()
+    onCountChanged: { lastMoreReq = -1; maybeLoadMore() }
+    Component.onCompleted: maybeLoadMore()
 }

@@ -37,6 +37,10 @@ Item {
     readonly property int focusIdx: (host ? host.detailActionIndex : 0)
 
     property real fs: Number(T.val(el, "fontSize", 0.026)) * (host ? host.height : 720)
+    // Phone: the verb list easily outgrows one row (Play / Choose source / Download / Favorite / Playlist /
+    // Hide / Status / Tags…) and a single Row marches straight off the screen edge — wrap instead. The
+    // phone detail relayout hands this element a box tall enough for the wrapped rows.
+    readonly property bool wrap: (typeof form !== "undefined") && form && form.mode === "mobile"
 
     // verb -> { label, color, textColor } (favourite flips its label/colour with the item's current state).
     function metaFor(verb) {
@@ -56,10 +60,12 @@ Item {
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 
-    Row {
+    Flow {
         id: btnRow
         anchors.left: parent.left
-        anchors.verticalCenter: parent.verticalCenter
+        anchors.right: wrap ? parent.right : undefined   // a wrapping Flow needs the width to wrap AT
+        anchors.verticalCenter: wrap ? undefined : parent.verticalCenter
+        anchors.top: wrap ? parent.top : undefined
         spacing: Math.max(8, fs * 0.5)
         Repeater {
             model: rowEl.verbs

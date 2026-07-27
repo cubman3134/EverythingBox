@@ -320,18 +320,26 @@ Rectangle {
                             clip: true
                             echoMode: root.inlineMasked ? TextInput.Password : TextInput.Normal
                             EnterKey.type: Qt.EnterKeyDone // the ✓/Done return key on the software keyboard
+                            // No predictive composition: with autocorrect on, a one-word value ("Parker")
+                            // lives ENTIRELY in the IME preedit, and iOS tears that composition down while
+                            // the keyboard resigns — before any commit/accepted handler can read it, so the
+                            // name arrived empty no matter where it was read from. Names and settings values
+                            // don't want autocorrect anyway; without prediction .text is always literal.
+                            inputMethodHints: Qt.ImhNoPredictiveText
                             onVisibleChanged: {
                                 if (visible) { text = root.inlineInitial; selectAll(); forceActiveFocus(); Qt.inputMethod.show() }
                             }
-                            // Finish an edit exactly once: FLUSH the input method first — iOS autocorrect
-                            // holds the current word as uncommitted composition, and reading .text without
-                            // committing it drops that word (the "my name cleared" bug) — then commit and
-                            // dismiss the keyboard explicitly (the ✓ key does not dismiss it on its own).
+                            // Finish an edit exactly once. iOS autocorrect holds the word being typed as
+                            // uncommitted COMPOSITION: it is not in .text yet, and Qt.inputMethod.commit()
+                            // flushes asynchronously on device — reading .text right after still misses it
+                            // (the "my name cleared" bug). preeditText IS that composition, synchronously —
+                            // commit text + preedit. Then dismiss the keyboard (the ✓ key never does).
                             function finishEdit(ok) {
                                 if (!root.inlineEditing) return
+                                var full = text + (preeditText || "")
                                 Qt.inputMethod.commit()
                                 root.inlineEditing = false
-                                if (ok) inlineEdit.commit(text)
+                                if (ok) inlineEdit.commit(full)
                                 else    inlineEdit.cancel()
                                 Qt.inputMethod.hide()
                             }
