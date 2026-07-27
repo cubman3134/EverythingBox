@@ -91,7 +91,7 @@
      "type": "clock",
      "id": "clock",
      "pos": [
-      0.43,
+      0.33,
       0.795
      ],
      "size": [
@@ -115,7 +115,7 @@
      "type": "datetime",
      "id": "date",
      "pos": [
-      0.435,
+      0.3,
       0.892
      ],
      "size": [
@@ -131,7 +131,7 @@
      "color": "#5A6B84",
      "fontSize": 0.055,
      "fontFile": "fonts/VarelaRound-Regular.ttf",
-     "align": "left"
+     "align": "center"
     },
     {
      "type": "button",
@@ -266,7 +266,7 @@
      "align": "right"
     },
     {
-     "type": "grid",
+     "type": "channels",
      "id": "bGrid",
      "pos": [
       0.05,
@@ -280,7 +280,7 @@
       0,
       0
      ],
-     "columns": 5,
+     "columns": 4,
      "aspect": 1.3,
      "spacing": 0.012,
      "color": "#2FA1E6",
@@ -296,7 +296,8 @@
       "labelSize": 0.2,
       "labelColor": "#38455A",
       "labelBg": "#F7FAFD"
-     }
+     },
+     "rows": 3
     },
     {
      "type": "helpsystem",
