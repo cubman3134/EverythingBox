@@ -7,6 +7,9 @@
 // and are stated as rules rather than behaviours, because their failure modes are unrecoverable:
 //   * firstRun NEVER deletes, in either direction.
 //   * a conflict NEVER destroys the losing copy.
+//   * a tombstone NEVER beats a copy that changed since the baseline, in either direction. A delete is
+//     authorised against the bytes that were tombstoned and nothing else; anything newer is a resurrection
+//     or another device's save, and update-beats-delete is the recoverable direction.
 #pragma once
 #include <QHash>
 #include <QSet>
@@ -22,11 +25,15 @@ namespace SaveSyncPlan
     // callers may pass it either way and plan() treats both identically.
     struct Entry
     {
-        QString name;        // "Zelda.srm" / "Zelda.state1" / "Zelda.state1.png"
+        // Path RELATIVE to the saves root: "Zelda.srm", "saves/Zelda.srm", "saves/snes/Zelda.srm".
+        // NOT read by plan() — the QHash key is authoritative for identity, and every lookup goes through
+        // it. A caller that inserts under a key differing from entry.name gets sane behaviour here and
+        // confusing behaviour downstream, so keep the two equal. It IS read by conflictName().
+        QString name;
         QString sha;         // content hash; empty = not present on this side
         qint64  mtimeMs = 0;
         qint64  size = 0;
-        QString deviceId;    // who last wrote it (remote side only); used only to break exact ties
+        QString deviceId;    // who last wrote it (remote side only); carried for logs, not used to decide
 
         bool present() const { return !sha.isEmpty(); }
     };
@@ -59,8 +66,10 @@ namespace SaveSyncPlan
                            bool                         firstRun);
 
     // "Zelda.state1" -> "Zelda.conflict-<deviceId>-20260727-141530.state1"
+    // "saves/snes/Zelda.srm" -> "saves/snes/Zelda.conflict-<deviceId>-20260727-141530.srm"
     // The suffix goes before the extension so the file keeps its type, and carries BOTH the device and the
-    // timestamp so two conflicts from two devices cannot collide.
+    // timestamp so two conflicts from two devices cannot collide. Any directory component is preserved, so
+    // the copy lands beside its original and two systems' same-named saves stay distinct.
     QString conflictName(const QString& name, const QString& deviceId, qint64 mtimeMs);
 
     // A .conflict-* artifact is local recovery only. Syncing it would multiply one conflict across every
