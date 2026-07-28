@@ -60,6 +60,11 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
     view_->rootContext()->setContextProperty(QStringLiteral("picker"), bridge_);
     view_->rootContext()->setContextProperty(QStringLiteral("safeArea"), &SafeAreaBridge::instance());
     view_->rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+    // The QML slot pushes its settled geometry at us (see ThemePicker.qml) — never polled. Connected BEFORE
+    // setSource: the slot reports once from Component.onCompleted, which fires DURING setSource, so a connect
+    // made after it would drop that first report. (It is inert today only because preview_ is still null then;
+    // that is luck, not design — the wire has to exist before the scene that fires it.)
+    connect(bridge_, &PickerBridge::slotChanged, this, &ThemePickerHost::layoutPreview);
     view_->setSource(QUrl(QStringLiteral("qrc:/theme2/ThemePicker.qml")));
     // The scene-root markers the nav kit reads (NavOverlay::dismiss force-focuses "mmvQuickRoot" when an
     // overlay closes back onto a host; ThemeEngine::rootItem resolves "mmvQuickView"). Same wire as
@@ -88,8 +93,6 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         const std::function<void()> fn = onBack_;
         if (fn) fn();
     });
-    // The QML slot pushes its settled geometry at us (see ThemePicker.qml) — never polled.
-    connect(bridge_, &PickerBridge::slotChanged, this, &ThemePickerHost::layoutPreview);
 }
 
 QWidget* ThemePickerHost::quickWidget() const { return view_; }
@@ -102,10 +105,27 @@ void ThemePickerHost::setStyle(const QVariantMap& style)
     if (view_ && !bg.isEmpty()) view_->setClearColor(QColor(bg));
 }
 
-void ThemePickerHost::present(const QString& title, const QString& currentFolder, bool mustChoose,
+bool ThemePickerHost::present(const QString& title, const QString& currentFolder, bool mustChoose,
                               std::function<void(const QString& folder)> onPicked,
                               std::function<void()> onBack)
 {
+    // THE INSTALL GUARD, held HERE so every caller inherits it. ThemeEngine::availableThemes() pads an empty
+    // result with ThemeChoice::kFallbackTheme (ThemeEngine.cpp) — a NAME, not a folder on disk — and
+    // ThemeEngine.h tells callers who need an actually-loadable theme to ask hasInstalledTheme() instead. Left
+    // unchecked this surface would show one row over an all-black preview and hand onPicked_ a folder that does
+    // not exist, persisting an unloadable theme for that profile.
+    //
+    // REFUSE rather than render an empty state: an empty state here is a dead screen. This surface's only
+    // actions are "highlight a theme" and "commit the highlight", and with nothing installed there is nothing
+    // to do on it — worse in the forced first-run mode, where Back is wired to a quit-confirm and the user
+    // would be pinned between an empty list and quitting. The caller has the recovery paths (the classic
+    // non-themed UI, an import flow, an error), so hand the decision back to it.
+    //
+    // Refuse BEFORE touching any member: a refused present must not disturb a presentation already live, and
+    // must never re-arm onPicked_/folders_ with the padded list. Callers (Task 4) MUST check the return and
+    // fall through when it is false — nothing is shown and no callback will ever fire.
+    if (!ThemeEngine::hasInstalledTheme()) return false;
+
     titleText_ = title;
     onPicked_ = std::move(onPicked);
     onBack_ = std::move(onBack);
@@ -122,12 +142,19 @@ void ThemePickerHost::present(const QString& title, const QString& currentFolder
     graph_->setZoneCount(QStringLiteral("themeRows"), folders_.size());
     int idx = folders_.indexOf(currentFolder);
     if (idx < 0) idx = 0;                       // absent/empty current -> the first installed theme
+    // Invalidate the dedupe key BEFORE select(), not after. select() emits selectionChanged SYNCHRONOUSLY, and
+    // our handler rebuilds the preview — so clearing afterwards would blow away the key that build just set and
+    // make the explicit rebuildPreview() below build the SAME theme a second time, throwing the first away. One
+    // redundant build is a theme.json parse, a whole QQuickWidget/QML scene, the theme's QSoundEffects and any
+    // MpvPreview it declares — on every real Appearance re-entry. Clearing first makes the guard cover BOTH
+    // paths: whichever of the two calls builds, the other sees a matching previewFolder_ and no-ops.
+    previewFolder_.clear();
     graph_->select(QStringLiteral("themeRows"), idx);
     // select() is silent when idx is already the live index (a re-present onto the same row), so force the
     // preview: the theme LIST may have changed under us even when the cursor did not.
-    previewFolder_.clear();
     rebuildPreview();
     if (view_) view_->setFocus();
+    return true;
 }
 
 QVariantList ThemePickerHost::previewItems()
@@ -148,11 +175,20 @@ void ThemePickerHost::rebuildPreview()
     if (folder.isEmpty()) return;
     if (preview_ && folder == previewFolder_) return;   // the cursor moved but the theme did not
 
-    if (preview_) { preview_->deleteLater(); preview_ = nullptr; }
+    // hide() before deleteLater(): a deleteLater'd widget keeps PAINTING until the event loop collects it, so
+    // on the failure path below (cast fails / broken theme) the OLD theme would stay on screen for an event-loop
+    // turn and only then blank — a stale preview that no longer matches the highlighted row.
+    if (preview_) { preview_->hide(); preview_->deleteLater(); preview_ = nullptr; }
     previewFolder_.clear();
 
     QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
     const QVariantList items = previewItems();
+    // This is a FULL theme instantiation, not a thumbnail: buildView brings its own NavGraph, its own
+    // ThemeBridge and signal fan-out, the theme's QSoundEffect set and any MpvPreview it declares — none of
+    // which this surface drives (the preview takes no focus, no keys, no selection). That cost is ACCEPTED and
+    // is the whole point: the preview must BE the real renderer, because a community theme is arbitrary QML and
+    // nothing short of running it can show what it looks like. Do not "optimise" this into a screenshot, a
+    // static mock or a cut-down loader — every such fake previews only the themes we happened to anticipate.
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
                                         items, system, this);
     preview_ = qobject_cast<QQuickWidget*>(w);

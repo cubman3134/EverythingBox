@@ -65,9 +65,16 @@ public:
     // mode: Back runs onBack (the caller wires the quit-confirm), and there is no other exit.
     // onPicked receives the chosen FOLDER name (not the display name) — persisting it (ThemeChoice) belongs
     // to the caller, exactly as ThemedPanelHost hands its onActivate the raw row value.
-    void present(const QString& title, const QString& currentFolder, bool mustChoose,
-                 std::function<void(const QString& folder)> onPicked,
-                 std::function<void()> onBack);
+    //
+    // RETURNS FALSE WHEN IT REFUSES TO PRESENT — currently the one case where no theme is installed
+    // (ThemeEngine::hasInstalledTheme() is false; availableThemes() would pad the list with a folder that is
+    // not on disk, so there is nothing real to offer and nothing to preview). On false NOTHING is shown, no
+    // state is touched, and neither onPicked nor onBack will ever fire: the CALLER must fall through to its own
+    // path (the classic non-themed UI, an import flow, an error) rather than leaving a dead screen up. On true
+    // the surface is presented and holds the callbacks. onPicked is guaranteed to receive an installed folder.
+    [[nodiscard]] bool present(const QString& title, const QString& currentFolder, bool mustChoose,
+                               std::function<void(const QString& folder)> onPicked,
+                               std::function<void()> onBack);
 
     void setStyle(const QVariantMap& style);
     QString title() const { return titleText_; }
