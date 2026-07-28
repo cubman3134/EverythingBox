@@ -126,6 +126,15 @@ QVector<CalendarEntry> trakt::parseMyShowsCalendar(const QByteArray& json)
     return out;
 }
 
+bool trakt::looksLikeCalendarPayload(const QByteArray& json)
+{
+    // Exactly the test parseMyShowsCalendar itself applies before it starts iterating — stated once,
+    // here, so a caller that needs to tell "empty calendar" from "not a calendar" asks the read layer
+    // rather than re-deriving the wire shape. Deliberately says nothing about the ROWS: a zero-row
+    // array is a valid calendar and must be usable as one.
+    return QJsonDocument::fromJson(json).isArray();
+}
+
 QString trakt::imdbStreamIdFor(const TraktIds& showIds, int season, int episode)
 {
     // No imdb id -> "", the "not playable" signal. Never fall back to tmdb/tvdb: nothing downstream

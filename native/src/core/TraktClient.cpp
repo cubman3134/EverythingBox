@@ -139,10 +139,31 @@ void TraktClient::disconnectAccount()
 }
 
 // Refresh the access token if it has (nearly) expired, then invoke done(ok).
+//
+// SINGLE-FLIGHT, and not as an optimisation. Trakt ROTATES the refresh token: the reply that hands
+// back a new access token also invalidates the refresh token that asked for it. So two callers that
+// both reach the POST below before either reply lands present the SAME refresh token, the second
+// presents one Trakt has already consumed, and — if the replies interleave — the later
+// setTraktTokens() writes the older pair over the newer one. The account link is then permanently
+// broken: every later refresh presents a token that no longer exists and the user has to re-link by
+// hand. That is precisely the failure SettingsTxn's scope exclusion is written to avoid, and it costs
+// far more than the duplicate request that caused it.
+//
+// It takes a fetch racing a scrobble today, which is rare. It stops being rare the moment two surfaces
+// both call fetchMyShowsCalendar at startup, so the guard belongs here, in the gate every path already
+// funnels through, rather than in any one caller. `tokenRefresh_` holds the waiters; the first caller
+// in issues the one request and settle() fans the result out to all of them exactly once — on failure
+// as well as success, since a queue that only drains on success would strand every joiner forever.
+// SingleFlight.h documents the drain ordering; probe_trakt §12 pins it.
 void TraktClient::ensureValidToken(std::function<void(bool)> done)
 {
-    if (!connected()) { done(false); return; }
-    if (QDateTime::currentSecsSinceEpoch() < Settings::traktTokenExpiry() - 60) { done(true); return; }
+    if (!connected()) { if (done) done(false); return; }
+    if (QDateTime::currentSecsSinceEpoch() < Settings::traktTokenExpiry() - 60) { if (done) done(true); return; }
+
+    // Queued either way; a false return means a refresh is already in flight and this caller has
+    // joined it, so there is nothing more to do but wait for that reply.
+    if (!tokenRefresh_.join(std::move(done))) return;
+
     const QJsonObject body{ { QStringLiteral("refresh_token"), Settings::traktRefreshToken() },
                             { QStringLiteral("client_id"), Settings::traktClientId() },
                             { QStringLiteral("client_secret"), Settings::traktClientSecret() },
@@ -150,14 +171,25 @@ void TraktClient::ensureValidToken(std::function<void(bool)> done)
                             { QStringLiteral("grant_type"), QStringLiteral("refresh_token") } };
     QNetworkReply* r = nam_->post(req(QStringLiteral("/oauth/token"), false),
                                   QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(r, &QNetworkReply::finished, this, [this, r, done] {
+    connect(r, &QNetworkReply::finished, this, [this, r] {
         r->deleteLater();
-        if (r->error() != QNetworkReply::NoError) { emit log(QStringLiteral("trakt: token refresh failed")); done(false); return; }
+        if (r->error() != QNetworkReply::NoError)
+        {
+            // Status + the QNetworkReply error ORDINAL, and nothing else. Every transport failure
+            // reports HTTP 0 — DNS, timeout and a rejected TLS handshake are one indistinguishable
+            // line without the ordinal — and an enum ordinal cannot carry a token the way
+            // errorString() can.
+            emit log(QStringLiteral("trakt: token refresh failed (HTTP %1, net %2)")
+                         .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt())
+                         .arg(static_cast<int>(r->error())));
+            tokenRefresh_.settle(false);
+            return;
+        }
         const QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
         const qint64 exp = QDateTime::currentSecsSinceEpoch() + o.value(QStringLiteral("expires_in")).toVariant().toLongLong();
         Settings::setTraktTokens(o.value(QStringLiteral("access_token")).toString(),
                                  o.value(QStringLiteral("refresh_token")).toString(), exp);
-        done(true);
+        tokenRefresh_.settle(true);
     });
 }
 
@@ -218,7 +250,14 @@ void TraktClient::fetchMyShowsCalendar(int daysBack, int daysForward,
         if (!ok) { if (cb) cb(false, {}); return; }
         const int back = qMax(0, daysBack);
         const int fwd  = qMax(0, daysForward);
-        const QString start = QDate::currentDate().addDays(-back).toString(Qt::ISODate);
+        // The UTC date, not the local one. Every time on this calendar is UTC — Trakt states it, the
+        // parser normalises to it, and CalendarEntry::airsAtUtc says so in its name — so a window
+        // whose start came from QDate::currentDate() would be expressed in a different clock than the
+        // rows it selects. East of UTC near midnight (UTC+13 is the extreme) the local date is already
+        // TOMORROW, so `today - back` silently starts the window a day late and drops the oldest day;
+        // west of UTC it starts a day early. Whatever bucketing a caller layers on top of these
+        // entries must likewise be done in UTC, or a row lands on the wrong day.
+        const QString start = QDateTime::currentDateTimeUtc().date().addDays(-back).toString(Qt::ISODate);
         // Trakt's `days` COUNTS the start date, so a window inclusive of both today-back and
         // today+fwd is back + fwd + 1 days, not back + fwd — the latter silently drops the last
         // day forward, which is the one a "what's on this week" surface cares most about.
@@ -229,20 +268,41 @@ void TraktClient::fetchMyShowsCalendar(int daysBack, int daysForward,
             r->deleteLater();
             if (r->error() != QNetworkReply::NoError)
             {
-                // The HTTP status and nothing else. No token, no client id, no secret, and not
-                // errorString() either — a diagnostic string is exactly where a credential leaks into
-                // a log by accident, and the status is what actually distinguishes "not authorised"
-                // from "no network".
-                emit log(QStringLiteral("trakt: calendar fetch failed (HTTP %1)")
-                             .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()));
+                // The HTTP status and the QNetworkReply error ORDINAL, and nothing else. No token, no
+                // client id, no secret, and not errorString() either — a diagnostic string is exactly
+                // where a credential leaks into a log by accident, while an enum ordinal cannot carry
+                // one. The status distinguishes "not authorised" from "no network"; the ordinal is
+                // what distinguishes the transport failures FROM EACH OTHER, since DNS failure, a
+                // timeout and a rejected TLS handshake all report HTTP 0 and this line is the only
+                // diagnostic this path has.
+                emit log(QStringLiteral("trakt: calendar fetch failed (HTTP %1, net %2)")
+                             .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt())
+                             .arg(static_cast<int>(r->error())));
                 if (cb) cb(false, {});
                 return;
             }
+            // An HTTP 200 is NOT on its own evidence that Trakt answered. A captive portal or a
+            // corporate proxy happily returns 200 with an HTML sign-in interstitial: no transport
+            // error, a tolerant parser that finds no rows in it, and — before this check — a cache
+            // overwritten with nothing. The cache exists precisely for the offline launch, i.e. for
+            // the network conditions that produce that interstitial, so it would be blanked exactly
+            // when it is needed and stay blank until the next successful fetch.
+            //
+            // The discriminator is whether the body IS a calendar (a JSON array), never whether it
+            // has rows: a real empty calendar ("nothing airs this week") must still be able to
+            // replace a stale non-empty one, or the user keeps seeing last month's forever. The
+            // array test lives in TraktRead with the rest of the wire-format knowledge; probe §11.
+            const QByteArray body = r->readAll();
+            if (!trakt::looksLikeCalendarPayload(body))
+            {
+                emit log(QStringLiteral("trakt: calendar reply was not a JSON array (HTTP %1) — cache kept")
+                             .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()));
+                if (cb) cb(false, {});   // ok=false, so a caller falls back to the cache it still has
+                return;
+            }
             // The parser is tolerant, so a partly-malformed body still yields the entries it could
-            // read. Cached unconditionally on a successful reply — including an empty result, which
-            // is a legitimate answer ("nothing airs this week") and must be able to REPLACE a stale
-            // non-empty cache, or the user would keep seeing last month's calendar forever.
-            const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(r->readAll());
+            // read. Cached on any reply that really was a calendar — including an empty one.
+            const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(body);
             writeCalendarCache(e);
             if (cb) cb(true, e);
         });
