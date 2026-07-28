@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.116 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.117 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -181,6 +181,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
+        src/core/SingleFlight.h   # ensureValidToken's one-refresh-many-waiters queue (probe_trakt §12)
         src/core/TraktRead.cpp  src/core/TraktRead.h  # Trakt read layer: calendar parser + id mapper (#23)
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
@@ -454,8 +455,11 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # Headless test for the Trakt read layer (issue #23): the tolerant calendar parser and the
     # identity mapper. TraktRead.cpp is QtCore-only (QJson + QDateTime), so this links leanest of all.
+    # SingleFlight.h is header-only and Qt-free on purpose: it is the token-refresh queue TraktClient
+    # runs, and listing it here is what makes that queue's re-entrancy cases testable without a socket.
     add_executable(probe_trakt tools/probe_trakt.cpp
-        src/core/TraktRead.cpp src/core/TraktRead.h)
+        src/core/TraktRead.cpp src/core/TraktRead.h
+        src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
 

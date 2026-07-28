@@ -49,6 +49,21 @@ namespace trakt
     // empty. One bad row must never cost the user their whole calendar.
     QVector<CalendarEntry> parseMyShowsCalendar(const QByteArray& json);
 
+    // Is this body a calendar response AT ALL — i.e. does it parse as a JSON array?
+    //
+    // parseMyShowsCalendar deliberately collapses two very different bodies onto the same empty
+    // vector: "a JSON array with zero rows" (a real, correct answer — nothing airs this week) and
+    // "this was never a calendar" (an HTML captive-portal interstitial, a JSON error object, a
+    // truncated body). A caller that only wants to READ a calendar is right not to care. A caller
+    // that OVERWRITES the offline cache with the result must care, because the second body would
+    // blank a good cache on a reply that carried HTTP 200 and no transport error at all.
+    //
+    // So the discriminator is the array-ness of the body, NOT the row count: an empty array must
+    // still be able to replace a stale calendar, or the user keeps seeing last month's forever.
+    // It lives here, with the rest of the wire-format knowledge, so TraktClient never has to
+    // construct a QJsonDocument of its own and no second place has an opinion about the shape.
+    bool looksLikeCalendarPayload(const QByteArray& json);
+
     // "ttShow:season:episode" — keyed on the SHOW's imdb id, which is the form the scrobbler already
     // emits and the stream resolver already consumes.
     //

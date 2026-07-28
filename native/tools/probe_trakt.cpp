@@ -12,7 +12,12 @@
 //   * imdbStreamIdFor returns "" — not an error, not a guess — when Trakt gave no show IMDB id.
 //     That empty string is the documented signal for "show it, but it is not playable".
 //
+// §11 and §12 pin the two properties the FETCH path depends on and could not otherwise reach without a
+// network: that "an empty calendar" and "not a calendar at all" are distinguishable before the offline
+// cache is overwritten, and that the token-refresh queue issues one refresh for any number of callers.
+//
 // Prints TRAKT-OK on success; any failure prints TRAKT-FAIL <cond> and exits non-zero.
+#include "SingleFlight.h"
 #include "TraktRead.h"
 
 #include <QByteArray>
@@ -374,6 +379,129 @@ int main(int argc, char** argv)
         CHECK(w.value(0).season == -1);                // a string season is absent, not 3
         CHECK(w.value(0).episode == -1);
         CHECK(trakt::imdbStreamIdFor(w.value(0).showIds, w.value(0).season, w.value(0).episode).isEmpty());
+    }
+
+    // ---- 11. "is this a calendar at all" vs "is this calendar empty" -------------------------
+    // parseMyShowsCalendar returns the same empty vector for a zero-row array and for a body that was
+    // never a calendar. The fetch path OVERWRITES the offline cache with its result, so for it those
+    // two must not be the same thing: a captive portal or corporate proxy answering with an HTTP 200
+    // HTML interstitial produces no transport error, parses to nothing, and would blank a good cache
+    // — the cache whose entire job is the offline launch. The discriminator is the ARRAY-NESS of the
+    // body, never the row count, because a genuinely empty calendar must still be able to replace a
+    // stale one or the user sees last month's forever.
+    {
+        // Rejected: not a JSON array, whatever else it may be.
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray(
+            "<!DOCTYPE html><html><head><title>Sign in to the network</title></head>"
+            "<body>Please accept the terms to continue.</body></html>")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray(R"({"error":"invalid_grant"})")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray(R"("just a string")")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("{}")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("null")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("42")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray()) == false);          // empty body
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("not json at all")) == false);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("[{\"first_aired\":")) == false); // truncated
+
+        // Accepted: a VALID EMPTY ARRAY is a real answer ("nothing airs this week"), and a populated
+        // one obviously is. Both must be cacheable.
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("[]")) == true);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("  [ ]  ")) == true);
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray(kNormal)) == true);
+        // An array of junk is still an array: the parser's totality drops the rows, and caching the
+        // (empty) result of a body Trakt really did send is correct.
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray(R"(["nope", 1, null])")) == true);
+        CHECK(trakt::parseMyShowsCalendar(QByteArray(R"(["nope", 1, null])")).isEmpty());
+
+        // The property that makes it a discriminator at all: accepted-and-empty and rejected are
+        // different states for the same empty parse result.
+        CHECK(trakt::parseMyShowsCalendar(QByteArray("[]")).isEmpty()
+              && trakt::parseMyShowsCalendar(QByteArray("{}")).isEmpty());
+        CHECK(trakt::looksLikeCalendarPayload(QByteArray("[]"))
+              != trakt::looksLikeCalendarPayload(QByteArray("{}")));
+    }
+
+    // ---- 12. the token-refresh single-flight queue --------------------------------------------
+    // TraktClient::ensureValidToken must issue ONE /oauth/token refresh no matter how many callers
+    // arrive while it is in flight: Trakt rotates the refresh token, so a second POST presents a token
+    // the first already consumed, and interleaved replies can write the older pair over the newer one
+    // — a permanently broken account link. The queue that guarantees it is SingleFlight, kept Qt-free
+    // precisely so its awkward cases are reachable here with no socket.
+    {
+        // One starter, many joiners; everyone is answered exactly once with the same result.
+        {
+            SingleFlight sf;
+            int calls = 0, trues = 0, starts = 0;
+            auto w = [&](bool ok) { ++calls; if (ok) ++trues; };
+            if (sf.join(w)) ++starts;
+            if (sf.join(w)) ++starts;
+            if (sf.join(w)) ++starts;
+            CHECK(starts == 1);              // exactly one caller was told to make the request
+            CHECK(sf.inFlight());
+            CHECK(sf.waiting() == 3);
+            CHECK(calls == 0);               // nobody is answered before the reply lands
+            sf.settle(true);
+            CHECK(calls == 3 && trues == 3); // ...and then everybody is, exactly once
+            CHECK(!sf.inFlight());
+            CHECK(sf.waiting() == 0);
+        }
+
+        // The failure path drains identically — a queue that only empties on success would strand
+        // every joiner forever, which is worse than the duplicate request it replaced.
+        {
+            SingleFlight sf;
+            int calls = 0, falses = 0;
+            auto w = [&](bool ok) { ++calls; if (!ok) ++falses; };
+            CHECK(sf.join(w) == true);
+            CHECK(sf.join(w) == false);
+            sf.settle(false);
+            CHECK(calls == 2 && falses == 2);
+            CHECK(!sf.inFlight() && sf.waiting() == 0);
+        }
+
+        // After settling, the NEXT caller starts a fresh operation rather than being told one is
+        // already running — the flag must not latch.
+        {
+            SingleFlight sf;
+            CHECK(sf.join([](bool) {}) == true);
+            sf.settle(true);
+            CHECK(sf.join([](bool) {}) == true);
+            sf.settle(true);
+            CHECK(!sf.inFlight());
+        }
+
+        // A waiter enqueued from INSIDE the fan-out — the case a naive drain gets wrong in both
+        // directions at once. It must be told to start a fresh operation (not silently queued behind
+        // one that already settled, where nothing would ever call it), and this drain must not also
+        // call it. Exactly once, on the second settle.
+        {
+            SingleFlight sf;
+            int lateCalls = 0, lateStarts = 0;
+            auto late = [&](bool) { ++lateCalls; };
+            sf.join([&](bool) { if (sf.join(late)) ++lateStarts; });
+            sf.settle(true);
+            CHECK(lateStarts == 1);     // told to start its own refresh
+            CHECK(lateCalls == 0);      // NOT called by the drain it arrived during
+            CHECK(sf.inFlight());       // the fresh operation is running
+            CHECK(sf.waiting() == 1);
+            sf.settle(true);
+            CHECK(lateCalls == 1);      // called exactly once, by its own operation
+            CHECK(!sf.inFlight() && sf.waiting() == 0);
+        }
+
+        // Degenerate calls must not crash or double-call: settling an idle queue, and a null waiter.
+        {
+            SingleFlight sf;
+            sf.settle(true);            // nobody waiting
+            CHECK(!sf.inFlight() && sf.waiting() == 0);
+            int calls = 0;
+            sf.join(SingleFlight::Waiter{});          // a default-constructed std::function
+            sf.join([&](bool) { ++calls; });
+            sf.settle(true);
+            CHECK(calls == 1);
+            sf.settle(true);            // a second settle on the same reply calls nobody again
+            CHECK(calls == 1);
+        }
     }
 
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }
