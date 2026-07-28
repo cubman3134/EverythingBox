@@ -57,6 +57,7 @@
 #include "../core/ItemMarks.h"
 #include "../core/ConsumptionStats.h"
 #include "../core/Theme.h"
+#include "../core/ThemeChoice.h"
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
 #include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
@@ -254,6 +255,15 @@ static constexpr int kChipMs = 8000;
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
+    // One-time: ThemeChoice's legacy GLOBAL theme key -> per-profile buckets, plus the XMB->Triple folder
+    // rename. The key itself is deliberately not spelled here — ThemeChoice is its only namer, and a grep
+    // for it must land in exactly one unit.
+    // FIRST statement in the ctor because it must land before ANY theme read, and it is safe here: it only
+    // needs ProfileStore::list(), which reads the ini directly (no MainWindow state). Flag-guarded AND
+    // naturally idempotent. Nothing writes the legacy global any more (every write goes through
+    // ThemeChoice::setForProfile), so the one-shot flag can never strand a later-recreated global.
+    ThemeChoice::runMigration();
+
     // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
     // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.
     MetaCache::setPinnedKeysProvider([] {
@@ -3977,6 +3987,21 @@ void MainWindow::nudgeThemedHome()
 void MainWindow::nudgeThemedHome() {}
 #endif
 
+// The ONE widget-side theme resolution. ThemeChoice owns both halves — which key holds the choice (per
+// profile, not the old global) and what to render when the stored folder isn't installed here — so the
+// twelve copies of a hand-rolled `if (!themes.contains(x)) x = themes.value(0)` are gone for good.
+QString MainWindow::currentThemeFolder() const
+{
+#ifdef EB_HAVE_QML
+    return ThemeChoice::resolve(ThemeChoice::forProfile(ProfileStore::currentId()),
+                                ThemeEngine::availableThemes());
+#else
+    // No QML engine -> no theme2 views at all (ThemeEngine isn't even compiled in), so there is nothing to
+    // resolve against. Mirrors themedHomeEnabled()'s no-QML answer: the themed home does not exist here.
+    return QString();
+#endif
+}
+
 bool MainWindow::themedHomeEnabled() const
 {
 #ifdef EB_HAVE_QML
@@ -4009,17 +4034,14 @@ void MainWindow::showThemedHome()
 {
     // An XMB theme drives the home as a two-axis cross (categories + live column) instead of a carousel/grid.
     {
-        const QStringList themes = ThemeEngine::availableThemes();
-        QString tn = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-        if (!themes.contains(tn)) tn = themes.value(0, QStringLiteral("Default"));
+        const QString tn = currentThemeFolder();
         themedHomeBuiltTheme_ = tn; // remember what we built, so showHomeScreen can reuse vs. rebuild
         if (ThemeEngine::homeIsXmb(ThemeEngine::themesRoot() + QStringLiteral("/") + tn)) { showThemedXmb(); return; }
     }
     themedHomeIsXmb_ = false;
 
     const QStringList themes = ThemeEngine::availableThemes();
-    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeName = currentThemeFolder();
     const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
 
     QVariantList items = home_->systemItems();
@@ -4053,7 +4075,7 @@ void MainWindow::showThemedHome()
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
         showThemedHome();
     };
     // "/" on the highlighted catalog: prompt for a query, open that catalog and search within it.
@@ -4675,8 +4697,7 @@ void MainWindow::showThemedXmb()
     };
 
     const QStringList themes = ThemeEngine::availableThemes();
-    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeName = currentThemeFolder();
     const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
     const int startCat = qBound(0, themedHomeIndex_, settingsIdx);
 
@@ -4811,7 +4832,7 @@ void MainWindow::showThemedXmb()
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
         showThemedHome();
     };
     auto onSearch = [this] {
@@ -4914,8 +4935,7 @@ void MainWindow::showThemedXmb()
 void MainWindow::showThemedBrowse()
 {
     const QStringList themes = ThemeEngine::availableThemes();
-    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeName = currentThemeFolder();
 
     QVariantMap system; system.insert(QStringLiteral("name"), home_->browseTitle());
     // An info-page leaf (movie/series/book/comic/…) opens the themed DETAIL view (the retired classic page's
@@ -4930,7 +4950,7 @@ void MainWindow::showThemedBrowse()
     auto onCycle = [this, themes, themeName] {
         if (themes.isEmpty()) return;
         const QString next = themes[(qMax(0, int(themes.indexOf(themeName))) + 1) % themes.size()];
-        store().setValue(QStringLiteral("themedHome/theme"), next); store().sync();
+        ThemeChoice::setForProfile(ProfileStore::currentId(), next);
         showThemedBrowse();
     };
     // "/" searches within the current catalog/console; the result refreshes via browseItemsChanged.
@@ -4968,7 +4988,8 @@ void MainWindow::openAppearance()
 {
     // Themed mode: render Appearance as a flat PanelRow list on the Nav Contract (ThemedPanelHost), instead of
     // the classic QWidget builder — the last classic surface reachable in themed mode (B2 Task 6.75). Same setters
-    // verbatim: the themed-home Toggle writes themedHome/enabled; the theme Choice writes themedHome/theme (+sync).
+    // verbatim: the themed-home Toggle writes themedHome/enabled; the theme Choice goes through ThemeChoice,
+    // which owns the per-profile key and syncs for us.
     //
     // PREVIEW: the classic panel embedded a live QQuickWidget preview of the picked theme. In themed mode the app
     // ITSELF is theme-rendered, so apply-on-select IS the preview — picking a theme restyles the LIVE panel host
@@ -4997,8 +5018,7 @@ void MainWindow::openAppearance()
             themePairs << qMakePair(disp, folder);
             themeOpts << disp;
         }
-        QString curFolder = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-        if (!themeFolders.contains(curFolder)) curFolder = themeFolders.value(0, QStringLiteral("Default"));
+        const QString curFolder = currentThemeFolder();
         QString curDisp;
         for (const auto& p : themePairs) if (p.second == curFolder) { curDisp = p.first; break; }
         if (curDisp.isEmpty()) curDisp = themeOpts.value(0);
@@ -5062,7 +5082,7 @@ void MainWindow::openAppearance()
                 else if (id == QStringLiteral("appr.theme")) {
                     QString folder = val;   // map the picked display name back to its folder
                     for (const auto& p : themePairs) if (p.first == val) { folder = p.second; break; }
-                    store().setValue(QStringLiteral("themedHome/theme"), folder); store().sync();   // save on selection
+                    ThemeChoice::setForProfile(ProfileStore::currentId(), folder);   // save on selection
                     // Apply-on-select IS the preview: restyle THIS panel to the newly-picked theme's settingsPanel
                     // block (settingsPanelStyle() reads the key we just saved). No underlay rebuild -> no wedge; the
                     // full theme lands when the hub root's onBack runs showHomeScreen() on the way out.
@@ -5109,7 +5129,7 @@ void MainWindow::openAppearance()
             "QListWidget::item{padding:10px 12px;border-radius:6px;}"
             "QListWidget::item:selected{background:#2D6CDF;color:white;}"));
         const QStringList themes = ThemeEngine::availableThemes();
-        const QString current = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
+        const QString current = currentThemeFolder();
         for (const QString& folder : themes)
         {
             auto* it = new QListWidgetItem(ThemeEngine::themeDisplayName(folder), list);
@@ -5160,7 +5180,7 @@ void MainWindow::openAppearance()
         connect(list, &QListWidget::currentItemChanged, this, [this, rebuildPreview](QListWidgetItem* it, QListWidgetItem*) {
             if (!it) return;
             const QString folder = it->data(Qt::UserRole).toString();
-            store().setValue(QStringLiteral("themedHome/theme"), folder); store().sync(); // save on selection
+            ThemeChoice::setForProfile(ProfileStore::currentId(), folder); // save on selection
             rebuildPreview(folder);
         });
         if (list->currentItem()) rebuildPreview(list->currentItem()->data(Qt::UserRole).toString());
@@ -8013,9 +8033,7 @@ QVariantMap MainWindow::settingsPanelStyle() const
 {
     QVariantMap out;
 #ifdef EB_HAVE_QML
-    const QStringList themes = ThemeEngine::availableThemes();
-    QString themeName = store().value(QStringLiteral("themedHome/theme"), QStringLiteral("Default")).toString();
-    if (!themes.contains(themeName)) themeName = themes.value(0, QStringLiteral("Default"));
+    const QString themeName = currentThemeFolder();
     const QString themeFile = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName
                             + QStringLiteral("/theme.json");
     QFile f(themeFile);

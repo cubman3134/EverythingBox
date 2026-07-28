@@ -669,7 +669,7 @@ static void runAppearancePanelAsserts()
     QVector<PanelRow> rows;
     { PanelRow r; r.kind = PanelRow::Toggle;    r.id = QStringLiteral("appr.themed");    r.label = QStringLiteral("Use the themed home screen (beta)"); r.checked = true; rows << r; } // 0 selectable
     { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Theme"); rows << r; }                                                                                            // 1 divider
-    { PanelRow r; r.kind = PanelRow::Choice;    r.id = QStringLiteral("appr.theme");     r.label = QStringLiteral("Theme"); r.options = { QStringLiteral("Default"), QStringLiteral("Lumen") }; r.value = QStringLiteral("Default"); rows << r; } // 2 selectable
+    { PanelRow r; r.kind = PanelRow::Choice;    r.id = QStringLiteral("appr.theme");     r.label = QStringLiteral("Theme"); r.options = { QStringLiteral("Triple"), QStringLiteral("Channels") }; r.value = QStringLiteral("Triple"); rows << r; } // 2 selectable
     { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.applies");   r.label = QStringLiteral("Applies live…"); rows << r; }                                            // 3 divider
     { PanelRow r; r.kind = PanelRow::Separator; r.label = QStringLiteral("Get more themes"); rows << r; }                                                                                  // 4 divider
     { PanelRow r; r.kind = PanelRow::Info;      r.id = QStringLiteral("appr.customise");  r.label = QStringLiteral("Edit theme.json…"); rows << r; }                                        // 5 divider
