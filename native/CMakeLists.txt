@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.111 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.112 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -181,6 +181,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CastManager.cpp  src/core/CastManager.h
         src/core/PortMapper.cpp   src/core/PortMapper.h
         src/core/TraktClient.cpp  src/core/TraktClient.h
+        src/core/TraktRead.cpp  src/core/TraktRead.h  # Trakt read layer: calendar parser + id mapper (#23)
         src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/EmulatorRegistry.h
         src/core/BiosCatalog.h
@@ -450,6 +451,13 @@ if(EVERYTHINGBOX_BUILD_APP)
     # is not declared or compiled at all, so a production call is a compile error, not a silent redirect.
     target_compile_definitions(probe_settingstxn PRIVATE EB_SETTINGSTXN_TEST_SEAM)
     target_link_libraries(probe_settingstxn PRIVATE Qt6::Core)
+
+    # Headless test for the Trakt read layer (issue #23): the tolerant calendar parser and the
+    # identity mapper. TraktRead.cpp is QtCore-only (QJson + QDateTime), so this links leanest of all.
+    add_executable(probe_trakt tools/probe_trakt.cpp
+        src/core/TraktRead.cpp src/core/TraktRead.h)
+    target_include_directories(probe_trakt PRIVATE src src/core)
+    target_link_libraries(probe_trakt PRIVATE Qt6::Core)
 
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
