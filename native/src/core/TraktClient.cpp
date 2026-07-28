@@ -112,12 +112,18 @@ void TraktClient::pollDeviceToken(const QString& deviceCode, int intervalSec)
             const int code = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
             if (code == 200)
             {
-                const QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
-                const qint64 created = o.value(QStringLiteral("created_at")).toVariant().toLongLong();
-                const qint64 exp = (created ? created : QDateTime::currentSecsSinceEpoch())
-                                 + o.value(QStringLiteral("expires_in")).toVariant().toLongLong();
-                Settings::setTraktTokens(o.value(QStringLiteral("access_token")).toString(),
-                                         o.value(QStringLiteral("refresh_token")).toString(), exp);
+                // Same guard as the refresh leg, same reason: an HTTP 200 that is not a token reply
+                // would otherwise store an empty pair and announce a link that does not exist
+                // (connected() reads the access token, so it would immediately disagree with the
+                // signal). Attended rather than unattended, so the user sees a real error instead.
+                const trakt::TokenReply t = trakt::parseTokenReply(r->readAll());
+                if (!t.valid) { emit connectError(tr("Trakt didn't return a usable token — try again.")); return; }
+                // created_at is Trakt's own issue time and is the better base HERE: the device flow
+                // has been polling for up to ten minutes, so "now" can be well after the token was
+                // minted. Absent -> fall back to the local clock.
+                const qint64 exp = (t.createdAtUnix ? t.createdAtUnix : QDateTime::currentSecsSinceEpoch())
+                                 + t.expiresInSec;
+                Settings::setTraktTokens(t.accessToken, t.refreshToken, exp);
                 emit connectedChanged(true);
                 return;
             }
@@ -134,6 +140,15 @@ void TraktClient::pollDeviceToken(const QString& deviceCode, int intervalSec)
 void TraktClient::disconnectAccount()
 {
     Settings::clearTraktTokens();
+    // The cached calendar belongs to the ACCOUNT, not to the install, so unlinking must take it with
+    // the tokens. Leaving it behind means the next account to link inherits the previous one's shows:
+    // every surface reads the cache directly, so until a fresh fetch lands the user is looking at
+    // somebody else's calendar — and MainWindow's 15-minute refresh cooldown can swallow exactly the
+    // fetch that would have corrected it. (That cooldown is reset on the same signal, in
+    // MainWindow's connectedChanged handler; both halves are needed — see the comment there.)
+    //
+    // Cleared BEFORE the signal, because the handler's onTraktCalendarChanged() re-reads the store.
+    clearCalendarCache();
     if (pollTimer_) pollTimer_->stop();
     emit connectedChanged(false);
 }
@@ -185,10 +200,41 @@ void TraktClient::ensureValidToken(std::function<void(bool)> done)
             tokenRefresh_.settle(false);
             return;
         }
-        const QJsonObject o = QJsonDocument::fromJson(r->readAll()).object();
-        const qint64 exp = QDateTime::currentSecsSinceEpoch() + o.value(QStringLiteral("expires_in")).toVariant().toLongLong();
-        Settings::setTraktTokens(o.value(QStringLiteral("access_token")).toString(),
-                                 o.value(QStringLiteral("refresh_token")).toString(), exp);
+        // A NoError reply is not on its own evidence that TRAKT answered — the same fact the calendar
+        // fetch learned below. A TLS-intercepting proxy, a captive-portal interstitial, or a 200 that
+        // simply omits the token all arrive here with no transport error, and the previous code parsed
+        // any of them to an empty object and wrote setTraktTokens("", "", exp).
+        //
+        // That is the worst write in the app. It blanks the access token AND the refresh token, and
+        // the refresh token is the only credential that can mint another one: the account is unlinked
+        // permanently and the user must re-link by hand. The calendar cache is guarded against exactly
+        // this class of body (looksLikeCalendarPayload) and its loss was repaired by the next fetch;
+        // this one is not repairable at all, so it gets the stronger guard, not the weaker.
+        //
+        // It matters more on this branch than it did before it: the 30-minute top-up timer and the
+        // startup fetch now drive refreshes UNATTENDED, at every expiry, on whatever network the box
+        // happens to be on — which is precisely the population of networks that produce these bodies.
+        const trakt::TokenReply t = trakt::parseTokenReply(r->readAll());
+        if (!t.valid)
+        {
+            // No token, no id, no secret, and no body excerpt either — a proxy interstitial is
+            // attacker-influenced text and this line goes to a log the user can paste anywhere.
+            emit log(QStringLiteral("trakt: token refresh reply was not a token (HTTP %1) — tokens kept")
+                         .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()));
+            tokenRefresh_.settle(false);   // stored tokens UNTOUCHED; the next attempt can still work
+            return;
+        }
+        // An ABSENT refresh token PRESERVES the stored one rather than rejecting the reply. Trakt
+        // rotates refresh tokens, so "" must never be written — but the two ways not to write it are
+        // not equal. Rejecting would also throw away a good access token, leaving the link just as
+        // broken as it would be otherwise; preserving keeps a working session now, and if Trakt did
+        // rotate, the stale refresh token simply fails the NEXT refresh — a recoverable ok=false on a
+        // path that already handles it. Preserving therefore never loses and sometimes wins.
+        const QString refresh = t.refreshToken.isEmpty() ? Settings::traktRefreshToken() : t.refreshToken;
+        // now + expires_in, not created_at + expires_in: created_at is Trakt's clock and this expiry
+        // is compared against ours, so basing it on the local clock keeps a skewed box honest.
+        Settings::setTraktTokens(t.accessToken, refresh,
+                                 QDateTime::currentSecsSinceEpoch() + t.expiresInSec);
         tokenRefresh_.settle(true);
     });
 }
@@ -219,6 +265,16 @@ void TraktClient::writeCalendarCache(const QVector<CalendarEntry>& entries)
     store().setValue(QLatin1String(kCacheKey), trakt::serializeCalendar(entries));
     store().setValue(QLatin1String(kCacheAtKey), QDateTime::currentSecsSinceEpoch());
     store().sync();
+}
+
+void TraktClient::clearCalendarCache()
+{
+    store().remove(QLatin1String(kCacheKey));
+    store().remove(QLatin1String(kCacheAtKey));
+    store().sync();
+    // Both keys, together. cachedCalendarAt() is what a surface uses to decide whether to LABEL the
+    // calendar as stale, so a timestamp left behind without its entries would describe a calendar
+    // that no longer exists.
 }
 
 QVector<CalendarEntry> TraktClient::cachedCalendar()

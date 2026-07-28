@@ -1,7 +1,15 @@
-// Trakt.tv scrobbling: keeps your Trakt profile in sync as you watch. Uses the OAuth device-code flow (no
-// redirect URI needed for a desktop app): connectAccount() emits a short code + URL for the user to enter at
-// trakt.tv/activate, then polls for the token. Once linked, scrobbleStart/Stop mark movies and episodes as
-// watched (Trakt counts a stop at >80% as watched). Media is identified by IMDB id, which the app already has.
+// The app's whole Trakt.tv link — both directions. Uses the OAuth device-code flow (no redirect URI needed
+// for a desktop app): connectAccount() emits a short code + URL for the user to enter at trakt.tv/activate,
+// then polls for the token.
+//
+// WRITE half — scrobbling: once linked, scrobbleStart/Pause/Stop keep your Trakt profile in sync as you
+// watch (Trakt counts a stop at >80% as watched). Media is identified by IMDB id, which the app already has.
+//
+// READ half (#23) — fetchMyShowsCalendar pulls the "my shows" calendar for the followed shows, and the last
+// good result is cached on disk (cachedCalendar/cachedCalendarAt) so an offline launch still draws something.
+// Both halves funnel through the SAME ensureValidToken gate, so refresh and Trakt's rotated refresh token
+// live in exactly one place; the wire FORMAT of everything read — the calendar, the cache, and the OAuth
+// token reply — lives in TraktRead, which is pure and probe-covered.
 //
 // The app has no built-in Trakt client id, so the user registers a free Trakt API app and pastes its
 // client id + secret into Settings; tokens are stored + refreshed automatically. All empty => Trakt is off.
@@ -27,7 +35,9 @@ public:
     static bool connected();    // an access token is stored
 
     void connectAccount();      // begin the device-code flow (emits deviceCode, then connected/connectError)
-    void disconnectAccount();   // forget the tokens
+    // Forget the tokens AND the cached calendar. The cache is per-ACCOUNT, so it cannot outlive the link
+    // that produced it: leaving it would show the previous account's shows to the next one that links.
+    void disconnectAccount();
 
     // Scrobble the current media. imdbStreamId is "tt123" (movie) or "ttShow:season:episode" (episode);
     // progressPct is 0..100. No-op unless configured + connected and the id is usable.
@@ -82,6 +92,9 @@ private:
     // Persist a freshly fetched calendar (+ the fetch time). Static and private: only the fetch writes
     // the cache, and it writes it only on a reply that actually parsed.
     static void writeCalendarCache(const QVector<CalendarEntry>& entries);
+    // Drop the cached calendar (both keys). Only disconnectAccount calls it: the cache is discarded when
+    // the account it describes is, and at no other time — a failed fetch deliberately KEEPS it.
+    static void clearCalendarCache();
 
     // Waiters on the one in-flight /oauth/token refresh. Never more than one request; every caller
     // is answered exactly once, on failure as well as success.
