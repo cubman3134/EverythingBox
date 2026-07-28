@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.101 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.109 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -192,6 +192,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
+        src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
@@ -399,6 +400,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
@@ -413,6 +415,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_onboarding tools/probe_onboarding.cpp
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
@@ -435,6 +438,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_theme PRIVATE EB_THEMECHOICE_TEST_SEAM)
     target_link_libraries(probe_theme PRIVATE Qt6::Core)
 
+    # Headless test for the settings save/discard transaction (issue #26): the scope predicate (incl. the
+    # device-local-but-in-scope cases a naive implementation gets wrong), dirty counting by VALUE, rollback
+    # fidelity, and — the assertion the whole predicate exists for — that an out-of-scope key written mid
+    # transaction survives rollback untouched. SettingsTxn.cpp is QtCore-only with its own file-local
+    # store(), so this links against Qt6::Core alone.
+    add_executable(probe_settingstxn tools/probe_settingstxn.cpp
+        src/core/SettingsTxn.cpp src/core/SettingsTxn.h)
+    target_include_directories(probe_settingstxn PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here (same rule as probe_theme's above): without the macro the setter
+    # is not declared or compiled at all, so a production call is a compile error, not a silent redirect.
+    target_compile_definitions(probe_settingstxn PRIVATE EB_SETTINGSTXN_TEST_SEAM)
+    target_link_libraries(probe_settingstxn PRIVATE Qt6::Core)
+
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
     # there is no AppPaths.cpp to add. run()'s Drive half lives in BrandMigrationDrive.cpp, which pulls
@@ -445,6 +461,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp      src/core/BrandMigration.h
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
+        src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
         third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
@@ -579,6 +596,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SaveMeta.cpp     src/core/SaveMeta.h
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
+        src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h

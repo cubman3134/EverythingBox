@@ -60,6 +60,7 @@
 #include "../core/ThemeChoice.h"
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
+#include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
 #include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
@@ -279,6 +280,17 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // instead of silently moving them to the new fallback — see ThemeChoice::legacyEffectiveGlobal.
     ThemeChoice::runMigration(installedThemeFolders());
 
+    // Discard must revert the VISIBLE change, not just the stored value. display/mode drives the form
+    // factor; the theme key drives the whole surface. Re-resolve both, then re-render.
+    //
+    // LIFETIME: SettingsTxn holds this as ONE process-wide std::function and owns nothing it captures, so the
+    // `this` below would dangle past our destruction. ~MainWindow calls setRollbackHook(nullptr) — that pairing
+    // is the whole contract (SettingsTxn.h), and the two sites must be read together.
+    SettingsTxn::setRollbackHook([this] {
+        FormFactor::instance().refresh();
+        showHomeScreen();
+    });
+
     // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
     // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.
     MetaCache::setPinnedKeysProvider([] {
@@ -431,7 +443,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                8000);
     });
     library_ = new LibraryView(addons_.get(), this);
-    connect(library_, &LibraryView::openItem, this, &MainWindow::openLibraryItem);
+    // A SETTINGS-AREA EXIT. library_ IS the classic Add-ons screen (a settings page), and activating a local
+    // game / media row here launches it — straight to the player or the emulator, without ever reaching the
+    // hub's Back. Close the transaction on the way out rather than prompting: the user asked to play
+    // something, not to answer a question about settings, and the writes already happened.
+    connect(library_, &LibraryView::openItem, this, [this](const MediaItem& it) {
+        if (SettingsTxn::active()) SettingsTxn::commit();
+        openLibraryItem(it);
+    });
     dm_ = new DownloadManager(this);
     // A finished download joins Recent + the catalogue's Downloaded folder (offline-openable).
     connect(dm_, &DownloadManager::jobCompleted, this, [this](const DownloadJob& j) {
@@ -1075,7 +1094,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(book_, &EbookView::homeRequested, this, &MainWindow::openHome);
     connect(pdf_, &PdfView::homeRequested, this, &MainWindow::openHome);
     connect(comic_, &ComicView::homeRequested, this, &MainWindow::openHome);
-    connect(library_, &LibraryView::homeRequested, this, &MainWindow::openHome);
+    // A SETTINGS-AREA EXIT, and the one that does NOT go through a panel's Back. library_ IS the classic
+    // Add-ons screen (inSettingsArea() recognises it), and it carries a permanent "‹ Home" toolbar button
+    // reachable by mouse AND by its nav ring — so this signal leaves the settings area outright. Route it
+    // through the one exit gate. Unlike the themed hub's root Back, "Keep editing" needs no restore here:
+    // nothing was torn down, library_ is still the current stack page, so declining simply leaves the user
+    // standing on Add-ons. (Its OTHER exit, activating a playable row, commits instead — see openItem above.)
+    connect(library_, &LibraryView::homeRequested, this, [this] {
+        leaveSettingsArea([this](SettingsReturn) { openHome(); });
+    });
     // Reader "‹ Back": return to the HomeView WITHOUT refreshing it, so the chapter/catalog list you came
     // from is still there (openHome() rebuilds Home from the root, which loses that position).
     auto returnFromReader = [this] {
@@ -1175,7 +1202,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     auto* fsShortcut = new QShortcut(QKeySequence(Qt::Key_F11), this);
     connect(fsShortcut, &QShortcut::activated, this, &MainWindow::toggleFullScreen);
     auto* splitShortcut = new QShortcut(QKeySequence(Qt::Key_F8), this);
-    connect(splitShortcut, &QShortcut::activated, this, [this] { if (splitMode_) exitSplitScreen(); else enterSplitScreen(); });
+    connect(splitShortcut, &QShortcut::activated, this, [this] {
+        if (splitMode_) { exitSplitScreen(); return; }
+        // F8 pressed while STANDING IN the settings area is the same exit as the hub's "Split Screen" row, so
+        // it takes the same gate. Gated on inSettingsArea() rather than unconditionally: from a player or the
+        // home screen there is no transaction to close, and leaveSettingsArea's dirtyCount() is an O(ini) scan
+        // that a shortcut with nothing to do with settings must not pay.
+        if (inSettingsArea()) { leaveSettingsArea([this](SettingsReturn) { enterSplitScreen(); }); return; }
+        enterSplitScreen();
+    });
 
     // Form-factor adaptivity (D1 Task 3): re-derive every widget-side size whenever the mode changes, and once
     // now so the initial build carries the current tokens (desktop identity: a pixel-for-pixel no-op).
@@ -1237,7 +1272,15 @@ void MainWindow::rescanLocalLibrary()
     }));
 }
 
-MainWindow::~MainWindow() = default; // AddonManager is complete in this translation unit
+// Out-of-line (not `= default` in the header) because AddonManager is only complete in this translation unit.
+MainWindow::~MainWindow()
+{
+    // MANDATORY, not tidiness (SettingsTxn.h's lifetime contract). The rollback hook installed in the ctor
+    // captures `this`; SettingsTxn stores it in a file-scope std::function that outlives us. Leaving it
+    // installed means the next rollback() — a Discard, from a code path that has no idea a window ever
+    // existed — calls FormFactor/showHomeScreen through freed memory. Uninstalling here is the only fix.
+    SettingsTxn::setRollbackHook(nullptr);
+}
 
 bool MainWindow::eventFilter(QObject* obj, QEvent* event)
 {
@@ -5056,6 +5099,11 @@ void MainWindow::showThemedBrowse()
 // Changes save as you make them and preview live; backing out (-> the settings hub -> home) applies them.
 void MainWindow::openAppearance()
 {
+    // A SETTINGS ENTRY POINT IN ITS OWN RIGHT — the only open* that is reachable without the hub: Ctrl+Shift+A
+    // from anywhere, the grid home's Appearance tile, and a theme's own "appearance" button all land here. The
+    // transaction must exist before the first theme write, so open it here too; begin() no-ops when the user
+    // arrived the ordinary way (hub -> Appearance), so the visit still shares ONE transaction.
+    enterSettingsArea();
     // Themed mode: render Appearance as a flat PanelRow list on the Nav Contract (ThemedPanelHost), instead of
     // the classic QWidget builder — the last classic surface reachable in themed mode (B2 Task 6.75). Same setters
     // verbatim: the themed-home Toggle writes themedHome/enabled; the theme Choice goes through ThemeChoice,
@@ -8259,9 +8307,88 @@ QVariantMap MainWindow::settingsPanelStyle() const
     return out;
 }
 
+// ---- Settings save/discard transaction: the entry and exit gates (issue #26) ------------------------------
+// Every settings screen writes IMMEDIATELY (all 34 Settings::set* accessors are set+sync), so there is no
+// pending buffer to flush — SettingsTxn snapshots on the way in and RESTORES on Discard. That means the UI
+// only has to get two things right: open a transaction whenever the user enters the settings area, and close
+// it exactly once whenever they leave.
+
+// Is the page currently on the stack part of the settings area? The classic Add-ons screen is the LibraryView
+// page and the theme picker is its own host, so "settings" is more than the two panel surfaces.
+bool MainWindow::inSettingsArea() const
+{
+    QWidget* cw = stack_->currentWidget();
+    if (cw == panelPage_ || cw == library_) return true;
+#ifdef EB_HAVE_QML
+    if (themedPanelHost_ && cw == themedPanelHost_) return true;
+    if (themePickerHost_ && cw == themePickerHost_) return true;
+#endif
+    return false;
+}
+
+void MainWindow::enterSettingsArea()
+{
+    // A transaction still open while we are standing OUTSIDE the settings area belongs to a previous visit
+    // that got out by a door the gate does not cover. Every door a USER can walk through is gated now — the
+    // two hub Split Screen rows and the F8 shortcut, the classic Add-ons "‹ Home" button, classic Stats' Back
+    // and both hub roots; the classic Add-ons play-a-row exit commits explicitly. What is left is navigation
+    // the user did not initiate from the settings screen: an Android lifecycle jump, a cast/channel handoff,
+    // an async completion that navigates. commit() those: the writes already happened and are what the user
+    // is looking at. Inheriting the stale snapshot instead would be the worst failure available here — begin()
+    // no-ops while active, so a Discard in THIS visit would silently revert changes from the abandoned one.
+    // This is a bool read and a map clear; it deliberately does NOT consult dirtyCount().
+    if (SettingsTxn::active() && !inSettingsArea()) SettingsTxn::commit();
+    SettingsTxn::begin();   // no-op while active: hub -> panel -> picker all share ONE transaction
+}
+
+bool MainWindow::leaveSettingsArea(std::function<void(SettingsReturn)> proceed)
+{
+    // Classify the return page BEFORE anything closes the transaction. Discard's rollback() fires the hook
+    // installed in the ctor, which calls showHomeScreen() -> showThemedHome(): that reassigns themedHome_ and
+    // deleteLater()s the widget panelReturnTo_ may be holding. Re-reading the pointer afterwards would compare
+    // a stale themed home against the NEW one, miss the Home branch, and setCurrentWidget() a widget already
+    // removed from the stack. `proceed` therefore receives this classification and never re-reads the pointer.
+    SettingsReturn where = SettingsReturn::Page;
+    if (!panelReturnTo_)                                                    where = SettingsReturn::None;
+    else if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_)      where = SettingsReturn::Home;
+
+    // THE ONLY dirtyCount()/isDirty() call in the UI, and it sits on a discrete navigation event — the cost
+    // contract in SettingsTxn.h (O(all keys in the ini)) forbids anything finer-grained.
+    const int n = SettingsTxn::dirtyCount();
+    if (n <= 0) { SettingsTxn::commit(); proceed(where); return true; }   // a clean exit NEVER prompts
+
+    // The message states a COUNT, never the values — masked credential rows must not be rendered into a diff.
+    const QString msg = tr("%n setting(s) changed.", "", n);
+    const int choice = NavConfirm::ask(tr("Save changes?"), msg,
+                                       { tr("Save"), tr("Discard"), tr("Keep editing") },
+                                       /*focusIndex*/ 0,        // Save: the common case is one keypress
+                                       /*cancelIndex*/ 2,       // Esc == Keep editing: dismissing changes nothing
+                                       this);
+    if (choice == 2) return false;                 // Keep editing: stay put, transaction still open
+    if (choice == 0) { SettingsTxn::commit(); }    // Save: the writes already happened
+    else             { SettingsTxn::rollback(); }  // Discard: restore + the hook re-renders (see `where` above)
+    proceed(where);
+    return true;
+}
+
+// The destination a SettingsReturn names. Home is REBUILT on the way out so an Appearance/display-mode change
+// applies; a remembered page is re-checked for liveness first (panelReturnTo_ is a QPointer, so a page destroyed
+// after the classification was taken reads null here) and degrades to the home screen rather than dangling.
+void MainWindow::returnFromSettings(SettingsReturn where)
+{
+    if (where == SettingsReturn::Page && panelReturnTo_) { stack_->setCurrentWidget(panelReturnTo_); return; }
+    showHomeScreen();
+}
+
 void MainWindow::openSettingsHub()
 {
     if (!parentalUnlock(tr("Enter the parental PIN to open Settings."))) return;
+    enterSettingsArea();   // open (or inherit) the transaction the exit gate will close
+    presentSettingsHub();
+}
+
+void MainWindow::presentSettingsHub()
+{
     // Entering the settings area from a real page: remember it so the top-level Back returns there. (Coming back
     // from a child panel — classic panelPage_ or the themed host — must NOT clobber the remembered return page.)
     QWidget* cw = stack_->currentWidget();
@@ -8313,7 +8440,10 @@ void MainWindow::openSettingsHub()
                 else if (id == QStringLiteral("addons"))     openLibrary();
                 else if (id == QStringLiteral("downloads"))  openDownloadManager();
                 else if (id == QStringLiteral("cloud"))      openCloudSync();
-                else if (id == QStringLiteral("split"))      enterSplitScreen();
+                // Split Screen is the ONE hub row that LEAVES the settings area instead of drilling into it,
+                // so it is an exit and goes through the gate. (Staying needs no restore: we are inside
+                // onGraphActivated, not a pop — the hub panel is still on the stack.)
+                else if (id == QStringLiteral("split"))      leaveSettingsArea([this](SettingsReturn) { enterSplitScreen(); });
                 else if (id == QStringLiteral("retroach"))   openRetroAchievements();
                 else if (id == QStringLiteral("standalone")) openEmulatorManager();
                 else if (id == QStringLiteral("libretro"))   openEmulatorSettings();
@@ -8325,11 +8455,28 @@ void MainWindow::openSettingsHub()
             [this] {
                 // The last panel dismissed (Back at the hub root): return to the home screen (rebuilt so an
                 // Appearance/theme change applies), exactly like the classic hub's onBack. Leaving the settings
-                // area is the other lifetime BOUNDARY: drop any armed panel listeners with it.
-                clearPanelPageConns();
-                if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
-                else if (panelReturnTo_) stack_->setCurrentWidget(panelReturnTo_);
-                else showHomeScreen();
+                // area is the other lifetime BOUNDARY: drop any armed panel listeners with it — and it is the
+                // settings TRANSACTION's boundary too, so it goes through the one exit gate.
+                const bool left = leaveSettingsArea([this](SettingsReturn where) {
+                    clearPanelPageConns();
+                    returnFromSettings(where);
+                });
+                if (left) return;
+                // "Keep editing". ThemedPanelHost::onLevelPopped took this level OFF the stack before calling
+                // us, so staying means putting the hub root back. It must be DEFERRED: we are inside
+                // NavGraph::popLevel, which ignores a pushLevel from inside an onPop (m_popping) — a synchronous
+                // re-present would stack a panel with no matching graph level and desync Back. One turn later
+                // the pop has unwound. presentSettingsHub (not openSettingsHub) so a restricted profile is not
+                // asked for its PIN again just for declining to leave.
+                QTimer::singleShot(0, this, [this] {
+                    // The one-turn window: onLevelPopped already took the hub level off, so until this fires
+                    // themedPanelHost_ is current with an EMPTY panel stack and graph depth 0. A Back landing
+                    // in there finds nothing to pop (the host's rootBack is a deliberate no-op), and any other
+                    // navigation would have moved the stack on. Re-present only if the host is still the page
+                    // the user is looking at — otherwise this would yank them back into Settings.
+                    if (!themedPanelHost_ || stack_->currentWidget() != themedPanelHost_) return;
+                    presentSettingsHub();
+                });
             });
         stack_->setCurrentWidget(themedPanelHost_);
         updateNavForPage();
@@ -8350,7 +8497,9 @@ void MainWindow::openSettingsHub()
         add(tr("Add-ons"),            [this] { openLibrary(); });
         add(tr("Downloads"),          [this] { openDownloadManager(); });   // resume / retry / cancel stalled downloads
         add(tr("Cloud Sync"),         [this] { openCloudSync(); });
-        add(tr("Split Screen"),       [this] { enterSplitScreen(); });    // two media side by side (F8)
+        // Split Screen LEAVES the settings area (it is not a settings panel), so it is an exit — gate it,
+        // exactly like the themed hub's "split" row above.
+        add(tr("Split Screen"),       [this] { leaveSettingsArea([this](SettingsReturn) { enterSplitScreen(); }); }); // F8
         add(tr("RetroAchievements"),  [this] { openRetroAchievements(); });
 #if !defined(Q_OS_ANDROID)
         add(tr("Stand Alone Emulators Settings"), [this] { openEmulatorManager(); }); // standalone emulators (Dolphin…) - desktop only
@@ -8362,8 +8511,9 @@ void MainWindow::openSettingsHub()
         add(tr("Uninstall EverythingBox…"), [this] { confirmUninstall(); }); // remove the app + all its data
     }, [this] {
         // Returning to a home screen rebuilds it, so an Appearance/theme change applies on the way out.
-        if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
-        else stack_->setCurrentWidget(panelReturnTo_);
+        // The settings TRANSACTION closes here too — this is the classic hub's only exit. Nothing to restore
+        // on "Keep editing": showPanel's Back just invokes panelOnBack_, so the panel is still standing.
+        leaveSettingsArea([this](SettingsReturn where) { returnFromSettings(where); });
     });
 }
 
@@ -8448,8 +8598,10 @@ void MainWindow::openStats()
             }
         }
     }, [this] {
-        if (panelReturnTo_ == home_ || panelReturnTo_ == themedHome_) showHomeScreen();
-        else stack_->setCurrentWidget(panelReturnTo_);
+        // THE OUTLIER among the classic panels: every other one's Back returns to the hub (openSettingsHub),
+        // but classic Stats leaves the settings area DIRECTLY, bypassing the hub's onBack. So it needs the
+        // gate itself, or a visit that ends here would strand the transaction open.
+        leaveSettingsArea([this](SettingsReturn where) { returnFromSettings(where); });
     });
 }
 

@@ -1,0 +1,99 @@
+// The settings save/discard transaction (issue #26). Before this, every settings row was immediate-apply —
+// all 34 Settings::set* accessors are `store().setValue(k,v); store().sync();` — so there was no pending
+// state, nothing to discard, and Back was indistinguishable from Save.
+//
+// The design is SNAPSHOT AND RESTORE, not buffer and flush. Immediate-apply is kept completely unchanged,
+// which is the point: the rows most worth protecting are the ones that MUST apply live (the theme previews
+// live; display mode re-lays out the surface you are standing on). A pending map would have to special-case
+// exactly those, and Discard would then be a lie for them. Snapshotting instead means live rows need NO
+// special case at all — the theme previews because the write genuinely happened — and Discard is a restore.
+//
+// QtCore only, own file-local store(), so probe_settingstxn links lean.
+#pragma once
+#include <QString>
+#include <functional>
+
+namespace SettingsTxn
+{
+    // THREAD AFFINITY: every function here is UI-THREAD ONLY. The transaction state (the active flag and the
+    // snapshot map) is plain unguarded process-wide state — there is no mutex — so calling any of these off
+    // the UI thread is a data race on THAT state.
+    //
+    // This is deliberately NOT a claim that the ini is UI-thread only. It is not: stats accrual, play-time
+    // accrual and download progress write the SAME file from background threads while a settings panel is
+    // open. That stays safe for two separate reasons — QSettings guards its own QConfFile internally, and
+    // those families are out of scope (see inScope) so the transaction never reads or restores them. What
+    // must stay on the UI thread is this module's state, not the file it talks to.
+    //
+    // Is this key owned by the settings screens? THE LOAD-BEARING PREDICATE. A whole-ini snapshot would be
+    // a DATA-LOSS bug: cloud sync, stats accrual, resume positions and the download catalog are all written
+    // while a settings panel is open, and rollback would clobber them.
+    //
+    // Note this is deliberately NOT "exclude everything device-local" — display/mode, roms/folder,
+    // library/folder and emulators/root are per-device AND are settings rows a user must be able to
+    // discard. CloudSync::isDeviceLocalKey is the precedent for this SHAPE of predicate, not its contents.
+    bool inScope(const QString& key);
+
+    // Snapshot every in-scope key. A begin() while already active is a NO-OP, not a reset: hub ->
+    // Appearance -> theme picker all call it, and they must share ONE transaction so Discard from any depth
+    // reverts the whole visit. Re-snapshotting would silently make earlier changes permanent.
+    void begin();
+    bool active();
+
+    // How many in-scope keys differ from the snapshot. Compares VALUES, not edits, so changing something
+    // and changing it back reads clean and never prompts. The prompt states this count — never the values,
+    // which would leak masked credential rows.
+    //
+    // COST CONTRACT — CALL ON NAVIGATION EVENTS ONLY. dirtyCount() is O(ALL KEYS IN THE INI), not O(settings
+    // keys), and isDirty() is dirtyCount() so it costs exactly the same. Noticing a key CREATED since begin()
+    // can only be done by scanning, and QSettings::allKeys() materialises a fresh QString for every key in
+    // the file. The scan is load-bearing and must stay — but note the families it walks are precisely the
+    // ones the transaction IGNORES (resume/, recent/, marks/, stats/, playstats/, pcgames/, downloads/), and
+    // those are the UNBOUNDED ones: the cost grows with the size of the user's library, not with the size of
+    // the settings screen.
+    //
+    // So call these from a discrete navigation event — a Back / Save / Discard handler, a panel close. NEVER
+    // bind them to a QML property, a paint or layout path, a focus-changed handler, or anything else that
+    // runs per keypress. On the 32-bit armv7 Android TV box with a multi-thousand-key ini, that shape costs a
+    // full-file scan plus thousands of QString allocations on EVERY arrow press. This is the contract
+    // Tasks 2-3 must honour.
+    int  dirtyCount();
+    bool isDirty();
+
+    void commit();     // drop the snapshot
+    void rollback();   // restore every differing in-scope key; remove in-scope keys created during the txn
+
+    // Run after a rollback that ATTEMPTED to restore something. The UI installs this to re-apply side
+    // effects: FormFactor::instance().refresh() for display/mode, and a re-render for the theme key.
+    // A Discard that leaves the app LOOKING different is the failure this whole design exists to
+    // prevent — restoring the stored value is only half the job.
+    //
+    // ATTEMPTED, NOT VERIFIED — read the word precisely. The trigger is "rollback wrote something back",
+    // not "the settings file now holds the old values". On a read-only or locked ini the setValue() calls
+    // happen, sync() then fails, nothing lands on disk — and the hook STILL FIRES, so the UI re-renders to
+    // reflect a restore that did not persist. That failure is not swallowed: rollback() logs it (qWarning
+    // with the QSettings status) and firing anyway is the deliberate choice, because the in-memory store
+    // does hold the restored values, so the side effects still match what the rest of the process reads.
+    //
+    // Fired ONCE per rollback, however many keys it touched, and NOT AT ALL when the transaction was clean:
+    // re-rendering the whole surface because a user opened and closed Settings is a visible cost for no
+    // reason. It is invoked after the transaction has been closed, so the hook observes active() == false
+    // and cannot re-enter a live transaction. Pass nullptr to uninstall.
+    //
+    // LIFETIME CONTRACT — WHOEVER INSTALLS A HOOK THAT CAPTURES AN OBJECT MUST UNINSTALL IT
+    // (setRollbackHook(nullptr)) IN THAT OBJECT'S DESTRUCTOR. This is one process-wide std::function and it
+    // owns nothing it captures: a hook capturing a window's `this` that outlives the window makes the next
+    // rollback() call through freed memory, from a code path (Discard) that has no idea a UI object ever
+    // existed. Reinstalling from INSIDE a running hook is safe — rollback() invokes through a local copy, so
+    // an assignment mid-call cannot destroy the callable that is running — but that copy does nothing for a
+    // capture whose target is already gone. The destructor is the only place that fixes it.
+    void setRollbackHook(std::function<void()> hook);
+
+#ifdef EB_SETTINGSTXN_TEST_SEAM
+    // Probe-only: redirect the store to a scratch ini. Gated so production cannot call it — an unguarded
+    // call would silently redirect every settings read/write for the process lifetime. The whole seam (the
+    // statics, this setter, and the branch in store()) is compiled ONLY for probe_settingstxn, matching the
+    // EB_THEMECHOICE_TEST_SEAM precedent in ThemeChoice.h.
+    void setIniPathForTesting(const QString& path);
+#endif
+}
