@@ -57,17 +57,24 @@ namespace ProfilePasscode
     // LOCKOUT RECOVERY, decided here rather than left emergent (see the report for the reasoning):
     //   * a global parental PIN is set  -> that PIN is the override, and the timed reset is NOT offered.
     //     Otherwise a kid could walk around the parent's PIN by waiting a minute.
-    //   * no parental PIN is set        -> a TIMED SELF-SERVICE RESET (kResetWaitSecs of on-screen waiting,
-    //     cancellable, no data touched) removes the passcode. "Reinstall" is not a recovery story, and a
-    //     recovery code the user must write down is a worse one for a lock this soft. The wait is friction,
-    //     which is all this lock has ever been.
+    //   * no parental PIN, ORDINARY profile -> a TIMED SELF-SERVICE RESET (kResetWaitSecs of on-screen
+    //     waiting, cancellable, no data touched) removes the passcode. "Reinstall" is not a recovery story,
+    //     and a recovery code the user must write down is a worse one for a lock this soft. The wait is
+    //     friction, which is all this lock has ever been.
+    //   * RESTRICTED (kids) profile -> the timed reset is NEVER offered, with or without a parental PIN.
+    //     A self-service reset on a kids profile is a self-service way out of the kids profile: the child it
+    //     is aimed at is exactly the person sitting in front of the countdown with sixty seconds to spare.
+    //     Recovery for a restricted profile is the parental-PIN override, full stop. That deliberately
+    //     creates an unrecoverable state for a household that sets a kid passcode with NO parental PIN, so
+    //     the UI must say so at the moment the passcode is SET (MainWindow::profilePasscodeMenu warns and
+    //     offers to set a PIN there and then) — the cost is accepted, being surprised by it is not.
     struct EntryOptions
     {
         bool needCode         = false;  // this profile has a passcode at all
         bool offerParentalPin = false;  // show "Use the parental PIN" on the pad
         bool offerTimedReset  = false;  // show "Forgot passcode?" on the pad
     };
-    EntryOptions entryOptions(bool hasPasscode, bool parentalPinSet);
+    EntryOptions entryOptions(bool hasPasscode, bool parentalPinSet, bool restricted);
 
     // ---- Rate limiting ----------------------------------------------------------------------------
     // Per-profile, PER-DEVICE and PERSISTED: an in-memory counter is reset by quitting the app, which is one
@@ -80,6 +87,20 @@ namespace ProfilePasscode
 
     bool   lockedOut(const Attempts& a, qint64 nowMs);
     qint64 lockRemainingMs(const Attempts& a, qint64 nowMs);   // 0 when not locked
+
+    // Make a STORED state safe to act on. Pure, so the probe pins it without a clock or an ini.
+    //   * a negative fail count clamps to 0 (a hand-edited one would otherwise grant unlimited free tries);
+    //   * a lockedUntilMs further out than nowMs + kMaxLockoutMs clamps to nowMs + kMaxLockoutMs.
+    // The second one is not paranoia about hand-editing: TV boxes routinely boot with a wildly wrong clock
+    // and correct it from the network seconds later. A lockout stamped during that window is written with a
+    // deadline years in the future, and it SURVIVES the correction — a permanent lock on a real user's
+    // profile, produced by nothing but a clock. kMaxLockoutMs is the longest lockout this policy can ever
+    // legitimately impose, so anything beyond it cannot be one.
+    //
+    // attempts() applies this on read AND PERSISTS the result. Clamping without persisting would be worse
+    // than not clamping: every read would re-clamp to now + kMaxLockoutMs, so the deadline would walk
+    // forward with the clock and the lockout would never expire at all.
+    Attempts sanitized(const Attempts& raw, qint64 nowMs);
 
     // The escalation: the first kFreeAttempts failures cost nothing, then kBaseLockoutMs doubling per further
     // failure, capped at kMaxLockoutMs. Pure — `nowMs` is the caller's clock.
@@ -99,6 +120,8 @@ namespace ProfilePasscode
     // must not follow you to the phone) and out of SettingsTxn (a settings Discard must not clear a lockout).
     // The HASH itself is not here: it lives in the profile record (ProfileStore), which SYNCS, so setting a
     // passcode once covers every device.
+    //
+    // attempts() returns sanitized() state and writes the clamp back when it changed anything — see above.
     Attempts attempts(const QString& profileId);
     void     setAttempts(const QString& profileId, const Attempts& a);
     void     clearAttempts(const QString& profileId);

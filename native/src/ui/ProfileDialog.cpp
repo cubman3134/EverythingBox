@@ -29,8 +29,8 @@ QStringList ProfileDialog::iconChoices()
     return out;
 }
 
-ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
-    : QDialog(parent), mustChoose_(mustChoose)
+ProfileDialog::ProfileDialog(bool mustChoose, std::function<bool(const QString&)> unlockGate, QWidget* parent)
+    : QDialog(parent), mustChoose_(mustChoose), unlockGate_(std::move(unlockGate))
 {
     setWindowTitle(tr("Who's using EverythingBox?"));
     setMinimumWidth(360);
@@ -67,6 +67,20 @@ ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
     rebuild();
 }
 
+// THE gate for the two escape routes on this page. Copies the callable before invoking it because the call
+// spins a nested overlay loop on the main window, inside which this dialog can be torn down (a navigation
+// away, the panel host closing); the QPointer then stops us walking back into a freed object. A missing
+// gate is treated as REFUSED — a dead button is a bug, an ungated Delete on a locked profile is the defect
+// this exists to close, and the constructor makes the missing case unreachable anyway.
+bool ProfileDialog::allowAction(const QString& id)
+{
+    auto gate = unlockGate_;
+    if (!gate) return false;
+    QPointer<ProfileDialog> self(this);
+    const bool ok = gate(id);
+    return ok && !self.isNull();
+}
+
 void ProfileDialog::rebuild()
 {
     while (QLayoutItem* it = rows_->takeAt(0)) { delete it->widget(); delete it; }
@@ -87,7 +101,10 @@ void ProfileDialog::rebuild()
         auto* edit = new QPushButton(tr("✎"), this);
         edit->setFixedWidth(36);
         edit->setToolTip(tr("Edit this profile"));
-        connect(edit, &QPushButton::clicked, this, [this, id] { editProfile(id); });
+        // GATED: the edit page carries the "Passcode…" row, so an ungated ✎ on a locked profile is a way to
+        // remove the code and walk in. The themed row menu gates the same action; this is not a second copy
+        // of the policy, it is the same MainWindow::profilePasscodeUnlock reached through unlockGate_.
+        connect(edit, &QPushButton::clicked, this, [this, id] { if (allowAction(id)) editProfile(id); });
         row->addWidget(edit);
 
         if (canDelete)
@@ -97,6 +114,11 @@ void ProfileDialog::rebuild()
             del->setToolTip(tr("Delete this profile"));
             const QString name = p.name;
             connect(del, &QPushButton::clicked, this, [this, id, name] {
+                // GATED, and BEFORE the confirm page is even built: deleting a locked profile does not open
+                // it, but it does defeat "this profile cannot be entered" for anyone who only wanted it
+                // gone — the same escape the themed row menu closes. At the STARTUP picker this was the
+                // whole lock: anyone could delete a passcode-protected profile outright.
+                if (!allowAction(id)) return;
                 // Inline confirm page (no popup): push it onto the stack with Delete / Cancel.
                 auto* page = new QWidget(stack_);
                 auto* v = new QVBoxLayout(page);

@@ -17,6 +17,7 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QSettings>
@@ -146,20 +147,37 @@ int main(int argc, char** argv)
 
     // ---- 5. entryOptions: the recovery-route rule --------------------------------------------------
     {
-        const EntryOptions none = entryOptions(/*hasPasscode*/ false, /*parentalPinSet*/ false);
+        const EntryOptions none = entryOptions(/*hasPasscode*/ false, /*parentalPinSet*/ false,
+                                               /*restricted*/ false);
         CHECK(!none.needCode && !none.offerParentalPin && !none.offerTimedReset);
-        const EntryOptions noneWithPin = entryOptions(false, true);
+        const EntryOptions noneWithPin = entryOptions(false, true, false);
         CHECK(!noneWithPin.needCode && !noneWithPin.offerParentalPin && !noneWithPin.offerTimedReset);
         // With a parental PIN set, THAT is the override and the timed reset is withheld — otherwise a kid
         // walks around the parent's PIN by waiting out a countdown.
-        const EntryOptions withPin = entryOptions(true, true);
+        const EntryOptions withPin = entryOptions(true, true, false);
         CHECK(withPin.needCode && withPin.offerParentalPin && !withPin.offerTimedReset);
         // With no parental PIN there must still be a way out that keeps the profile's data, so the timed
         // self-service reset appears. The two routes are mutually exclusive by construction.
-        const EntryOptions noPin = entryOptions(true, false);
+        const EntryOptions noPin = entryOptions(true, false, false);
         CHECK(noPin.needCode && !noPin.offerParentalPin && noPin.offerTimedReset);
         CHECK(!(noPin.offerParentalPin && noPin.offerTimedReset));
         CHECK(!(withPin.offerParentalPin && withPin.offerTimedReset));
+
+        // A RESTRICTED (kids) profile is NEVER self-service resettable — the user's decision, fix round
+        // finding 4. The timed reset is the one route a child could walk themselves, so it is withheld
+        // whether or not a parental PIN exists; recovery is the parental-PIN override, full stop.
+        const EntryOptions kidNoPin = entryOptions(true, /*parentalPinSet*/ false, /*restricted*/ true);
+        CHECK(kidNoPin.needCode);
+        CHECK(!kidNoPin.offerTimedReset);          // THE assertion: no countdown on a kids profile...
+        CHECK(!kidNoPin.offerParentalPin);         // ...and with no PIN set there is no other route either
+        const EntryOptions kidWithPin = entryOptions(true, /*parentalPinSet*/ true, /*restricted*/ true);
+        CHECK(kidWithPin.needCode && kidWithPin.offerParentalPin && !kidWithPin.offerTimedReset);
+        // Stated as the invariant rather than case-by-case: restricted implies no timed reset, always.
+        for (int pin = 0; pin <= 1; ++pin)
+            CHECK(!entryOptions(true, pin != 0, /*restricted*/ true).offerTimedReset);
+        // ...and the ordinary-profile behaviour is UNCHANGED by the new argument (guards a fix that
+        // accidentally withheld the reset from everyone).
+        CHECK(entryOptions(true, false, /*restricted*/ false).offerTimedReset);
     }
 
     // ---- 6. Rate limiting --------------------------------------------------------------------------
@@ -233,6 +251,36 @@ int main(int argc, char** argv)
         CHECK(b.lockedUntilMs >= t0 + kMaxLockoutMs);
     }
     CHECK(cleared().fails == 0 && cleared().lockedUntilMs == 0);
+    {
+        // ---- 6b. sanitized(): a stored state can never mean a lock longer than the policy allows -------
+        // Fix round finding 3. TV boxes boot with a wrong clock and correct it seconds later; a lockout
+        // stamped in that window carries a deadline years out and SURVIVES the correction — a permanent lock
+        // on a real profile with no in-app way back. kMaxLockoutMs is the longest lockout the escalation can
+        // produce, so anything past now + that did not come from this policy.
+        const qint64 kYear = 365LL * 24 * 60 * 60 * 1000;
+
+        Attempts skewed; skewed.fails = kFreeAttempts + 1; skewed.lockedUntilMs = t0 + 5 * kYear;
+        const Attempts fixed = sanitized(skewed, t0);
+        CHECK(fixed.lockedUntilMs == t0 + kMaxLockoutMs);          // THE clamp
+        CHECK(lockRemainingMs(fixed, t0) <= kMaxLockoutMs);        // ...so the wait is always survivable
+        CHECK(!lockedOut(fixed, t0 + kMaxLockoutMs));              // ...and it genuinely expires
+        CHECK(fixed.fails == skewed.fails);                        // the counter itself is not touched
+
+        // A legitimate in-policy deadline is left EXACTLY alone — the clamp must not shorten a real lockout
+        // (that would hand a guesser time back), and must not move the boundary case.
+        Attempts legit; legit.lockedUntilMs = t0 + kBaseLockoutMs;
+        CHECK(sanitized(legit, t0).lockedUntilMs == t0 + kBaseLockoutMs);
+        Attempts atCap; atCap.lockedUntilMs = t0 + kMaxLockoutMs;
+        CHECK(sanitized(atCap, t0).lockedUntilMs == t0 + kMaxLockoutMs);
+        Attempts overCap; overCap.lockedUntilMs = t0 + kMaxLockoutMs + 1;
+        CHECK(sanitized(overCap, t0).lockedUntilMs == t0 + kMaxLockoutMs);
+
+        // The negative-fail-count clamp moved in here from attempts(); it is the same rule and still holds.
+        Attempts neg; neg.fails = -5;
+        CHECK(sanitized(neg, t0).fails == 0);
+        // A clean state is a fixed point.
+        CHECK(sanitized(cleared(), t0).fails == 0 && sanitized(cleared(), t0).lockedUntilMs == 0);
+    }
 
     // ---- 7. evaluate(): the composite ---------------------------------------------------------------
     {
@@ -323,6 +371,40 @@ int main(int argc, char** argv)
         s.sync();
         setIniPathForTesting(iniPath());   // re-open so the seeded value is read
         CHECK(attempts(kIdA).fails == 0);
+    }
+    freshIni();
+    {
+        // A deadline stamped under a forward-skewed clock (the TV-box case, fix round finding 3) must not
+        // survive as a years-long lock. attempts() clamps on read AND PERSISTS the clamp: read-only clamping
+        // would re-derive the ceiling from the current clock every time, so the deadline would walk forward
+        // with the clock and the lockout would never expire at all. The write-back is what makes it finite,
+        // so it is asserted against the FILE, not just the returned struct.
+        CHECK(!iniHas(QStringLiteral("profilepass/") + kIdA + QStringLiteral("/until")));
+        const qint64 farFuture = 4102444800000LL;   // 2100-01-01, well past any real lockout
+        {
+            QSettings s(iniPath(), QSettings::IniFormat);
+            s.setValue(QStringLiteral("profilepass/") + kIdA + QStringLiteral("/fails"), kFreeAttempts + 1);
+            s.setValue(QStringLiteral("profilepass/") + kIdA + QStringLiteral("/until"), farFuture);
+            s.sync();
+        }
+        setIniPathForTesting(iniPath());   // re-open so the seeded values are read
+        const qint64 readAt = QDateTime::currentMSecsSinceEpoch();
+        const Attempts got = attempts(kIdA);
+        CHECK(got.lockedUntilMs < farFuture);
+        CHECK(got.lockedUntilMs <= readAt + kMaxLockoutMs);
+        // Persisted: a SECOND reader (a fresh QSettings on the same file) sees the clamped value, which is
+        // what makes the lockout actually count down instead of being re-clamped forward forever.
+        {
+            QSettings s2(iniPath(), QSettings::IniFormat);
+            CHECK(s2.value(QStringLiteral("profilepass/") + kIdA + QStringLiteral("/until")).toLongLong()
+                  < farFuture);
+        }
+        // And an ordinary in-policy state is round-tripped BYTE-FOR-BYTE — the write-back must fire only
+        // when the clamp actually changed something, or every read would rewrite the ini.
+        const qint64 sane = QDateTime::currentMSecsSinceEpoch() + kBaseLockoutMs;
+        Attempts ok; ok.fails = kFreeAttempts + 1; ok.lockedUntilMs = sane;
+        setAttempts(kIdB, ok);
+        CHECK(attempts(kIdB).lockedUntilMs == sane);
     }
 
     // ---- 9. isAttemptKey: what the carve-outs match ------------------------------------------------

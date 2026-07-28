@@ -4,6 +4,7 @@
 #include "AppPaths.h"
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QSettings>
 
 namespace {
@@ -88,13 +89,17 @@ bool ProfilePasscode::mustShowPicker(int profileCount, bool skipWhenSingle, bool
     return !(skipWhenSingle && !singleHasPasscode);
 }
 
-ProfilePasscode::EntryOptions ProfilePasscode::entryOptions(bool hasPasscode, bool parentalPinSet)
+ProfilePasscode::EntryOptions ProfilePasscode::entryOptions(bool hasPasscode, bool parentalPinSet,
+                                                            bool restricted)
 {
     EntryOptions o;
     if (!hasPasscode) return o;                   // no gate at all: no code, no recovery rows
     o.needCode         = true;
     o.offerParentalPin = parentalPinSet;
-    o.offerTimedReset  = !parentalPinSet;         // exclusive by design — see the header
+    // Exclusive with the parental PIN by design, and withheld OUTRIGHT on a kids profile — a sixty-second
+    // countdown is not an obstacle to the one person a kids profile exists to hold, who has the remote and
+    // the afternoon. See the header for why that unrecoverable corner is accepted (and warned about).
+    o.offerTimedReset  = !parentalPinSet && !restricted;
     return o;
 }
 
@@ -136,6 +141,18 @@ ProfilePasscode::Attempts ProfilePasscode::cleared()
     return Attempts{};
 }
 
+ProfilePasscode::Attempts ProfilePasscode::sanitized(const Attempts& raw, qint64 nowMs)
+{
+    Attempts a = raw;
+    if (a.fails < 0) a.fails = 0;                 // a hand-edited negative would grant unlimited free tries
+    // kMaxLockoutMs is the longest lockout the escalation can produce, so a deadline beyond now + that came
+    // from something other than this policy — a forward-skewed clock at boot being the realistic one. Left
+    // alone it is a years-long lock that survives the clock correction with no in-app way out.
+    const qint64 ceiling = nowMs + kMaxLockoutMs;
+    if (a.lockedUntilMs > ceiling) a.lockedUntilMs = ceiling;
+    return a;
+}
+
 ProfilePasscode::Outcome ProfilePasscode::evaluate(const QString& storedHash, const QString& profileId,
                                                    const QString& code, Attempts& io, qint64 nowMs)
 {
@@ -150,10 +167,13 @@ ProfilePasscode::Outcome ProfilePasscode::evaluate(const QString& storedHash, co
 
 ProfilePasscode::Attempts ProfilePasscode::attempts(const QString& profileId)
 {
-    Attempts a;
-    a.fails         = store().value(failKey(profileId), 0).toInt();
-    a.lockedUntilMs = store().value(untilKey(profileId), 0).toLongLong();
-    if (a.fails < 0) a.fails = 0;                 // a hand-edited negative would grant unlimited free tries
+    Attempts raw;
+    raw.fails         = store().value(failKey(profileId), 0).toInt();
+    raw.lockedUntilMs = store().value(untilKey(profileId), 0).toLongLong();
+    const Attempts a = sanitized(raw, QDateTime::currentMSecsSinceEpoch());
+    // PERSIST the clamp. Read-only clamping would re-derive the ceiling from the current clock on every
+    // read, so a skew-stamped deadline would slide forward forever and never expire — see the header.
+    if (a.fails != raw.fails || a.lockedUntilMs != raw.lockedUntilMs) setAttempts(profileId, a);
     return a;
 }
 
