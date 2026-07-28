@@ -1245,6 +1245,84 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
     // site with the Settings folder-picker / Rescan action.
     rescanLocalLibrary();
+
+    // Trakt calendar (#23). The home already drew whatever was CACHED (HomeView's ctor), so this is only
+    // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
+    // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
+    QTimer::singleShot(3000, this, [this] { refreshTraktCalendar(); });
+    // ...and then keep topping it up for as long as the app runs. Without this the shelf is a one-shot: on a
+    // set-top box left on for days, every entry drains out of the future-only window (airsAtUtc <= nowUtc, in
+    // traktCalendarCatalog) and nothing ever replaces it, so "Airing Soon" is silently EMPTY by Thursday and
+    // only refills on a restart.
+    updateTraktCalendarTimer();
+    // Linking or unlinking an account is the one event that flips whether the shelf/folder exist at all:
+    // tell the home either way (connected -> they appear, disconnected -> they vanish), pull a fresh calendar
+    // on the connect, and start/stop the periodic top-up with the link.
+    connect(trakt_, &TraktClient::connectedChanged, this, [this](bool conn) {
+        // Drop the refresh debounce on EITHER edge. The cooldown exists to stop redundant fetches of
+        // ONE account's calendar; a link or unlink means the next fetch is about a different account
+        // (or none), so the previous attempt's timestamp says nothing about it. Without this reset,
+        // disconnecting and linking a DIFFERENT account inside 15 minutes has the connect's fetch
+        // below silently swallowed, and the surfaces sit on whatever the cache holds until the
+        // periodic top-up fires — up to another 30 minutes. disconnectAccount() now clears that cache
+        // too, so the visible symptom would be an empty shelf rather than the wrong account's shows;
+        // both fixes are still needed, since clearing alone leaves the shelf empty for half an hour
+        // and resetting alone would have refilled it from a stale cache in the meantime.
+        traktCalFetchedAt_ = 0;
+        if (home_) home_->onTraktCalendarChanged();
+        if (conn) refreshTraktCalendar();
+        updateTraktCalendarTimer();
+    });
+}
+
+// The periodic top-up's ON/OFF, in one place. The timer is DORMANT unless Trakt is configured AND connected,
+// so an install that never linked an account owns no running timer at all — belt and braces on top of
+// refreshTraktCalendar's own first-line gate, which would return anyway.
+void MainWindow::updateTraktCalendarTimer()
+{
+    // 30 minutes. The fetched window is a WEEK wide and advances a day at a time, so wire freshness is not
+    // what sets this — the drain is. 30 min bounds how long a shelf can sit stale (and how long a just-added
+    // show stays missing) to half an hour, which is under the granularity anyone reads a "what's on tonight"
+    // list at, while costing 48 requests a day: nothing against Trakt's limits.
+    //
+    // It is deliberately LONGER than refreshTraktCalendar's 15-minute cooldown, and that is the whole
+    // anti-stacking story — no second debounce here. A repeating QTimer cannot re-enter itself, every tick
+    // funnels through the one cooldown, and because the period exceeds the cooldown a tick is never silently
+    // swallowed (which would halve the real rate to 60 min). The cooldown keeps its actual job: absorbing the
+    // startup + account-link burst, which fire within seconds of each other.
+    static constexpr int kTraktCalPeriodMs = 30 * 60 * 1000;
+    const bool want = TraktClient::calendarAvailable() && trakt_;
+    if (!want) { if (traktCalTimer_) traktCalTimer_->stop(); return; }
+    if (!traktCalTimer_)
+    {
+        traktCalTimer_ = new QTimer(this);
+        traktCalTimer_->setInterval(kTraktCalPeriodMs);
+        connect(traktCalTimer_, &QTimer::timeout, this, [this] { refreshTraktCalendar(); });
+    }
+    if (!traktCalTimer_->isActive()) traktCalTimer_->start();
+}
+
+void MainWindow::refreshTraktCalendar()
+{
+    // Trakt off = nothing to refresh and nothing to show. Checked first so an unconfigured install never
+    // reaches the client at all.
+    if (!TraktClient::calendarAvailable() || !trakt_) return;
+    // The debounce, stamped BEFORE the request rather than on completion. fetchMyShowsCalendar's callback
+    // is documented as possibly never arriving (the client dies with the request in flight), so a guard
+    // cleared only in the callback could latch on forever; a timestamp taken up front cannot.
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const qint64 kCooldownSec = 15 * 60;   // a week's calendar does not change minute to minute
+    if (traktCalFetchedAt_ > 0 && now - traktCalFetchedAt_ < kCooldownSec) return;
+    traktCalFetchedAt_ = now;
+    // The window the surfaces show: from today (daysBack = 0) through the coming week. Past episodes are
+    // #25's job, so nothing is asked for behind today.
+    trakt_->fetchMyShowsCalendar(/*daysBack*/ 0, /*daysForward*/ 7,
+                                 [this](bool ok, QVector<CalendarEntry>) {
+        // ok=false leaves the cache deliberately intact (TraktClient.h) — the surfaces keep showing the
+        // last good calendar rather than blanking on a flaky network. Nothing to redraw in that case.
+        if (!ok) return;
+        if (home_) home_->onTraktCalendarChanged();   // re-reads the cache the fetch just wrote
+    });
 }
 
 // Read the configured library root on the MAIN thread (QSettings is not thread-safe — a prior review caught

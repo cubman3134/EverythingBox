@@ -91,6 +91,15 @@ private slots:
     // Local video library: read the configured root on the MAIN thread, then scan off-thread and install
     // the rebuilt index + refresh the home on completion. Single async-scan site (startup + settings picker).
     void rescanLocalLibrary();
+    // Trakt calendar (#23): refresh the cached "my shows" calendar and tell the home to redraw. DEBOUNCED —
+    // stamped before the request, not in the callback, so it rate-limits even though fetchMyShowsCalendar's
+    // callback may never arrive (see TraktClient.h). Called from startup, from a fresh account link, and on
+    // the PERIODIC tick below; never per navigation — the surfaces read TraktClient's on-disk cache, which
+    // does not need a live fetch to be drawn. No-op when Trakt is not configured/connected.
+    void refreshTraktCalendar();
+    // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
+    // timer exists (a box left running for days; an account linked mid-session) share one definition.
+    void updateTraktCalendarTimer();
     // Documents (CBZ/EPUB/PDF) open through file-based readers, so a remote http(s) url must be
     // fetched to a local cache file first; this downloads then re-enters openLibraryItem locally.
     void fetchRemoteDocumentThenOpen(const MediaItem& item, const QString& ext);
@@ -515,6 +524,8 @@ private:
     void applyThemeMusic(const QString& themeDir); // theme.json "music" -> BGM default track (out-of-box music)
     HomeView* home_ = nullptr;
     quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
+    qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
+    QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
     // explicit stored `false` still selects classic). showHomeScreen() routes Home to it or the classic
