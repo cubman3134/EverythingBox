@@ -1257,6 +1257,16 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // tell the home either way (connected -> they appear, disconnected -> they vanish), pull a fresh calendar
     // on the connect, and start/stop the periodic top-up with the link.
     connect(trakt_, &TraktClient::connectedChanged, this, [this](bool conn) {
+        // Drop the refresh debounce on EITHER edge. The cooldown exists to stop redundant fetches of
+        // ONE account's calendar; a link or unlink means the next fetch is about a different account
+        // (or none), so the previous attempt's timestamp says nothing about it. Without this reset,
+        // disconnecting and linking a DIFFERENT account inside 15 minutes has the connect's fetch
+        // below silently swallowed, and the surfaces sit on whatever the cache holds until the
+        // periodic top-up fires — up to another 30 minutes. disconnectAccount() now clears that cache
+        // too, so the visible symptom would be an empty shelf rather than the wrong account's shows;
+        // both fixes are still needed, since clearing alone leaves the shelf empty for half an hour
+        // and resetting alone would have refilled it from a stale cache in the meantime.
+        traktCalFetchedAt_ = 0;
         if (home_) home_->onTraktCalendarChanged();
         if (conn) refreshTraktCalendar();
         updateTraktCalendarTimer();

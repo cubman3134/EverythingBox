@@ -135,6 +135,72 @@ bool trakt::looksLikeCalendarPayload(const QByteArray& json)
     return QJsonDocument::fromJson(json).isArray();
 }
 
+namespace {
+// A whole-seconds count off the wire, bounded by the caller. Trakt sends `expires_in` / `created_at`
+// as JSON numbers, but a tolerant read of a string is free and costs nothing in strictness. Anything
+// that is not a finite, positive, in-range count yields 0, which the caller treats as "absent/invalid".
+//
+// `maxSeconds` is not paranoia about Trakt: the two fields are ADDED TOGETHER by the caller, and a
+// body carrying 1e18 would overflow that sum (undefined behaviour), so the range has to be closed
+// here while the value is still a double. It is a per-field bound because the two fields are not the
+// same KIND of number — see the constants below.
+qint64 secondsField(const QJsonValue& v, qint64 maxSeconds)
+{
+    if (v.isDouble())
+    {
+        const double d = v.toDouble();
+        if (!std::isfinite(d) || d <= 0.0 || d > static_cast<double>(maxSeconds)) return 0;
+        return static_cast<qint64>(d);
+    }
+    if (v.isString())
+    {
+        bool ok = false;
+        const qint64 n = v.toString().trimmed().toLongLong(&ok);
+        return (ok && n > 0 && n <= maxSeconds) ? n : 0;
+    }
+    return 0;
+}
+
+// `expires_in` is a DURATION. Trakt's access tokens last 90 days, so a decade is already far outside
+// anything a token reply legitimately says.
+constexpr qint64 kMaxExpiresInSec = 10LL * 365 * 24 * 60 * 60;
+// `created_at` is an ABSOLUTE unix timestamp — about 1.75e9 today — so it must NOT share the duration
+// bound; treating it as one would reject every real reply Trakt sends. This ceiling only has to keep
+// created_at + expires_in inside qint64, which it does with eight orders of magnitude to spare.
+constexpr qint64 kMaxCreatedAtUnix = 1000000000000LL;   // year 33658
+} // namespace
+
+trakt::TokenReply trakt::parseTokenReply(const QByteArray& json)
+{
+    TokenReply t;   // valid=false, everything empty — the "do not touch the stored tokens" answer
+
+    const QJsonDocument d = QJsonDocument::fromJson(json);
+    if (!d.isObject()) return t;            // HTML, an array, a bare string, garbage, an empty body
+    const QJsonObject o = d.object();
+
+    // access_token must be a STRING and must be non-empty. `isString()` matters as much as the
+    // emptiness test: a null or a number read with toString() also yields "", and "" is precisely the
+    // value that must never reach the store.
+    const QJsonValue av = o.value(QStringLiteral("access_token"));
+    if (!av.isString()) return t;
+    const QString access = av.toString().trimmed();
+    if (access.isEmpty()) return t;
+
+    const qint64 expiresIn = secondsField(o.value(QStringLiteral("expires_in")), kMaxExpiresInSec);
+    if (expiresIn <= 0) return t;           // see the header: no expiry, no token reply
+
+    t.valid         = true;
+    t.accessToken   = access;
+    t.expiresInSec  = expiresIn;
+    t.createdAtUnix = secondsField(o.value(QStringLiteral("created_at")), kMaxCreatedAtUnix);
+    // Reported as-is, INCLUDING empty. Empty is not a failure of the reply — it is the caller's
+    // instruction to keep the refresh token it already holds. Deciding that here would mean this pure
+    // function had to know the store, and the store is exactly what it must not touch.
+    const QJsonValue rv = o.value(QStringLiteral("refresh_token"));
+    if (rv.isString()) t.refreshToken = rv.toString().trimmed();
+    return t;
+}
+
 QString trakt::imdbStreamIdFor(const TraktIds& showIds, int season, int episode)
 {
     // No imdb id -> "", the "not playable" signal. Never fall back to tmdb/tvdb: nothing downstream

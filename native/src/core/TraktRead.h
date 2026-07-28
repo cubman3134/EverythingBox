@@ -64,6 +64,43 @@ namespace trakt
     // construct a QJsonDocument of its own and no second place has an opinion about the shape.
     bool looksLikeCalendarPayload(const QByteArray& json);
 
+    // ---- the OAuth token reply (the one body the WRITE path has to read) -------------------------
+    // What /oauth/token (refresh) and /oauth/device/token (device flow) hand back. Both endpoints
+    // return the same shape, so it is modelled once.
+    struct TokenReply
+    {
+        // false => the body was NOT a token reply. The caller must then leave the STORED tokens
+        // exactly as they were: this is the one parse in the app whose failure is unrecoverable if
+        // mishandled, because writing an empty pair over a good one unlinks the account for good and
+        // no later reply can put it back. Compare looksLikeCalendarPayload, which guards the cache —
+        // the same class of body, but a loss the next fetch repairs.
+        bool    valid = false;
+        QString accessToken;    // non-empty whenever valid
+        // "" is a LEGITIMATE value here and means "the reply carried no refresh token", NOT "the
+        // refresh token is empty". Trakt ROTATES refresh tokens, so storing "" would destroy the only
+        // credential that can ever mint another access token. A caller must keep whatever it already
+        // has when this is empty; it must never write it through.
+        QString refreshToken;
+        qint64  expiresInSec = 0;   // > 0 whenever valid
+        qint64  createdAtUnix = 0;  // Trakt's issue time; 0 when absent (the device flow prefers it)
+    };
+
+    // Parse a token reply, TOTALLY: any body that is not one — an HTML captive-portal interstitial, a
+    // TLS-intercepting proxy's error page, a JSON error object, a 200 that simply omits the token —
+    // yields valid=false rather than a half-filled struct.
+    //
+    // "Is a token reply" means: a JSON object, carrying a NON-EMPTY string `access_token`, and a
+    // POSITIVE `expires_in`. The expiry is part of the test and not a detail: a reply without one
+    // parses to an already-expired token, so every later call would re-refresh immediately, and each
+    // of those spends a rotated refresh token. Rejecting a valid-but-odd reply costs one failed
+    // refresh that is retried; accepting an invalid one costs the account link.
+    //
+    // Lives here, beside looksLikeCalendarPayload, for the same reason: TraktClient.cpp is Qt Network
+    // plus the app's ini, so a check written inside it could only ever be exercised by running the
+    // app against a hostile network. Here it is pure QByteArray-in/struct-out and probe_trakt §13
+    // pins every leg with no I/O.
+    TokenReply parseTokenReply(const QByteArray& json);
+
     // "ttShow:season:episode" — keyed on the SHOW's imdb id, which is the form the scrobbler already
     // emits and the stream resolver already consumes.
     //

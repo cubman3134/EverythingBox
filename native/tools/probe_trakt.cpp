@@ -1,6 +1,7 @@
-// Headless check of the Trakt read layer (issue #23). TraktClient is a scrobbler — write-only — and
-// this is the first read piece: a TOLERANT parser for the "my shows" calendar and the identity mapper
-// the watchlist/collection and history-backfill follow-ups will both reuse.
+// Headless check of the Trakt read layer (issue #23). TraktClient scrobbles AND now reads; TraktRead is
+// where every wire format it touches lives — a TOLERANT parser for the "my shows" calendar, the identity
+// mapper the watchlist/collection and history-backfill follow-ups will both reuse, the on-disk cache
+// format, and the OAuth token reply.
 //
 // The fixtures below are written from the shape Trakt's current API reference documents for
 // GET /calendars/{target}/shows/{start_date}/{days} (docs.trakt.tv/reference/getcalendarsshows):
@@ -12,9 +13,11 @@
 //   * imdbStreamIdFor returns "" — not an error, not a guess — when Trakt gave no show IMDB id.
 //     That empty string is the documented signal for "show it, but it is not playable".
 //
-// §11 and §12 pin the two properties the FETCH path depends on and could not otherwise reach without a
-// network: that "an empty calendar" and "not a calendar at all" are distinguishable before the offline
-// cache is overwritten, and that the token-refresh queue issues one refresh for any number of callers.
+// §11-§13 pin the three properties the NETWORK paths depend on and could not otherwise reach without a
+// socket: that "an empty calendar" and "not a calendar at all" are distinguishable before the offline
+// cache is overwritten (§11); that the token-refresh queue issues one refresh for any number of callers
+// (§12); and — the one whose failure is unrecoverable — that a 200 which is not a token reply can never
+// blank the stored access AND refresh tokens, which permanently unlinks the account (§13).
 //
 // Prints TRAKT-OK on success; any failure prints TRAKT-FAIL <cond> and exits non-zero.
 #include "SingleFlight.h"
@@ -501,6 +504,151 @@ int main(int argc, char** argv)
             CHECK(calls == 1);
             sf.settle(true);            // a second settle on the same reply calls nobody again
             CHECK(calls == 1);
+        }
+    }
+
+    // ---- 13. the OAuth token reply: never write an empty pair over a good one -----------------
+    // The token-refresh handler used to parse its 200 straight into setTraktTokens(). A NoError reply
+    // whose body is not a token reply — a TLS-intercepting proxy's page, a captive-portal
+    // interstitial, a 200 that omits the token — parses to an EMPTY object, so that wrote
+    // setTraktTokens("", "", exp): the access token AND the refresh token blanked, and the refresh
+    // token is the only credential that can mint another. The account is unlinked permanently and the
+    // user must re-link by hand.
+    //
+    // It is the same hazard §11 guards the CACHE against, one severity up: the cache's loss is
+    // repaired by the next fetch and this one is not repairable at all. And the branch made it
+    // unattended — a 30-minute top-up timer plus a startup fetch now drive refreshes at every expiry,
+    // on whatever network the box is on, which is exactly the population that serves these bodies.
+    //
+    // valid=false is the "leave the store alone" answer, so it is what every hostile body must yield.
+    {
+        // --- bodies that are NOT a token reply. Each must be valid=false, and — the property that
+        // actually protects the account — must carry no access token to write.
+        const char* kNotTokens[] = {
+            // The captive portal / intercepting proxy, verbatim in shape: HTTP 200, no transport error.
+            "<!DOCTYPE html><html><head><title>Sign in to the network</title></head>"
+            "<body>Please accept the terms to continue.</body></html>",
+            R"({"error":"invalid_grant","error_description":"refresh token revoked"})", // no token key
+            R"({"expires_in":7776000,"refresh_token":"rrr","created_at":1750000000})",  // omits access_token
+            R"({"access_token":"","refresh_token":"rrr","expires_in":7776000})",        // PRESENT but EMPTY
+            R"({"access_token":"   ","refresh_token":"rrr","expires_in":7776000})",     // whitespace only
+            R"({"access_token":null,"expires_in":7776000})",                            // JSON null
+            R"({"access_token":12345,"expires_in":7776000})",     // a NUMBER: toString() would give ""
+            R"([{"access_token":"aaa","expires_in":7776000}])",   // right object, wrong top-level shape
+            R"("just a string")",
+            "null",
+            "42",
+            "[]",
+            "",                                                  // empty body
+            "not json at all",
+            R"({"access_token":"aaa","expires_in":)",             // truncated mid-value
+        };
+        for (const char* body : kNotTokens)
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(QByteArray(body));
+            CHECK(t.valid == false);
+            CHECK(t.accessToken.isEmpty());     // nothing a caller could be tempted to store
+            CHECK(t.refreshToken.isEmpty());
+            CHECK(t.expiresInSec == 0);
+        }
+
+        // --- the expiry is part of the test. A reply without a usable one parses to an ALREADY
+        // EXPIRED token, so the very next call re-refreshes — and each of those spends a rotated
+        // refresh token. Rejecting costs one retried refresh; accepting costs the link.
+        const char* kBadExpiry[] = {
+            R"({"access_token":"aaa","refresh_token":"rrr"})",                    // absent
+            R"({"access_token":"aaa","refresh_token":"rrr","expires_in":0})",     // zero
+            R"({"access_token":"aaa","refresh_token":"rrr","expires_in":-1})",    // negative
+            R"({"access_token":"aaa","refresh_token":"rrr","expires_in":null})",
+            R"({"access_token":"aaa","refresh_token":"rrr","expires_in":"soon"})",// unparseable string
+            // 1e18 seconds would OVERFLOW the `now + expires_in` the caller computes, which is
+            // undefined — the range has to close here, while the value is still a double.
+            R"({"access_token":"aaa","refresh_token":"rrr","expires_in":1e18})",
+        };
+        for (const char* body : kBadExpiry)
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(QByteArray(body));
+            CHECK(t.valid == false);
+            CHECK(t.accessToken.isEmpty());
+        }
+
+        // --- a well-formed reply: accepted, every field carried through intact.
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(QByteArray(
+                R"({"access_token":"acc-1","token_type":"bearer","expires_in":7776000,)"
+                R"("refresh_token":"ref-2","scope":"public","created_at":1750000000})"));
+            CHECK(t.valid == true);
+            CHECK(t.accessToken == QStringLiteral("acc-1"));
+            CHECK(t.refreshToken == QStringLiteral("ref-2"));
+            CHECK(t.expiresInSec == 7776000);
+            CHECK(t.createdAtUnix == 1750000000);
+        }
+        // created_at is optional — its absence is not a rejection, it just means the caller falls
+        // back to the local clock for the issue time.
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(
+                QByteArray(R"({"access_token":"acc-1","refresh_token":"ref-2","expires_in":90})"));
+            CHECK(t.valid == true);
+            CHECK(t.createdAtUnix == 0);
+            CHECK(t.expiresInSec == 90);
+        }
+        // created_at is an ABSOLUTE unix timestamp, expires_in is a DURATION, and they must not share
+        // a bound — an earlier draft of this parser capped both at ten years and silently dropped
+        // created_at from EVERY real reply (1.75e9 seconds), which the device flow uses as its issue
+        // time. Pinned with a present-day timestamp so the two bounds can never be merged again.
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(
+                QByteArray(R"({"access_token":"acc-1","expires_in":7776000,"created_at":1753574400})"));
+            CHECK(t.valid == true);
+            CHECK(t.createdAtUnix == 1753574400);          // NOT rejected as an out-of-range duration
+            CHECK(t.expiresInSec == 7776000);
+            // ...while a timestamp-sized value in expires_in IS still rejected: 1.75e9 seconds is 55
+            // years, not an access-token lifetime, so the duration bound must still bite.
+            CHECK(trakt::parseTokenReply(
+                      QByteArray(R"({"access_token":"acc-1","expires_in":1753574400})")).valid == false);
+        }
+
+        // expires_in as a STRING is tolerated — strictness is about the TOKEN, not the encoding.
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(
+                QByteArray(R"({"access_token":"acc-1","expires_in":"7776000"})"));
+            CHECK(t.valid == true);
+            CHECK(t.expiresInSec == 7776000);
+        }
+
+        // --- the refresh token: "" is REPORTED, never a rejection, and never something to store.
+        // Trakt rotates refresh tokens, so writing "" is as fatal as writing an empty access token.
+        // The parser's job is to say the reply carried none; the CALLER keeps the one it already has
+        // (TraktClient.cpp), which is strictly better than rejecting — rejecting would also discard a
+        // perfectly good access token and leave the link no less broken.
+        {
+            const char* kNoRefresh[] = {
+                R"({"access_token":"acc-1","expires_in":7776000})",                     // absent
+                R"({"access_token":"acc-1","refresh_token":"","expires_in":7776000})",  // empty string
+                R"({"access_token":"acc-1","refresh_token":null,"expires_in":7776000})",
+                R"({"access_token":"acc-1","refresh_token":99,"expires_in":7776000})",  // a number
+            };
+            for (const char* body : kNoRefresh)
+            {
+                const trakt::TokenReply t = trakt::parseTokenReply(QByteArray(body));
+                CHECK(t.valid == true);                    // the ACCESS token is what makes it valid
+                CHECK(t.accessToken == QStringLiteral("acc-1"));
+                CHECK(t.refreshToken.isEmpty());           // "carried none" — the caller preserves
+            }
+        }
+
+        // --- the discriminator property, stated directly: the empty-token body and the good one are
+        // the SAME HTTP 200 with the same transport result, and only this predicate separates them.
+        CHECK(trakt::parseTokenReply(QByteArray(R"({"access_token":"","expires_in":1})")).valid
+              != trakt::parseTokenReply(QByteArray(R"({"access_token":"a","expires_in":1})")).valid);
+        // Tokens are trimmed, not rejected, for incidental whitespace — a value that is ONLY
+        // whitespace is empty and was rejected above.
+        {
+            const trakt::TokenReply t = trakt::parseTokenReply(
+                QByteArray("{\"access_token\":\" acc-1 \",\"refresh_token\":\"\\tref-2\\n\",\"expires_in\":5}"));
+            CHECK(t.valid == true);
+            CHECK(t.accessToken == QStringLiteral("acc-1"));
+            CHECK(t.refreshToken == QStringLiteral("ref-2"));
         }
     }
 
