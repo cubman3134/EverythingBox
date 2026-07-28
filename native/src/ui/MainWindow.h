@@ -67,6 +67,11 @@ public:
     explicit MainWindow(bool chooseProfileAtStart = false, QWidget* parent = nullptr);
     ~MainWindow() override; // out-of-line so unique_ptr<AddonManager> is destroyed where it's complete
 
+    // What panelReturnTo_ WAS, classified at the moment the settings exit gate closed — see leaveSettingsArea,
+    // which is where this is produced and consumed. It lives up here only because moc will not parse a type
+    // declaration inside the `private slots:` block below.
+    enum class SettingsReturn { Home, Page, None };
+
 private slots:
     void openFile();
     void openAudio();
@@ -136,7 +141,19 @@ private slots:
     //
     // COST: this is the ONLY caller of SettingsTxn::dirtyCount()/isDirty() in the UI. That is deliberate —
     // dirtyCount() is O(all keys in the ini), so it may only ever run on a discrete navigation event.
-    bool leaveSettingsArea(std::function<void()> proceed);
+    //
+    // What panelReturnTo_ WAS, classified at the moment the gate closed — handed to `proceed` so nothing
+    // downstream has to re-read the pointer. Discard runs SettingsTxn::rollback(), whose hook calls
+    // showHomeScreen() -> showThemedHome(), which reassigns themedHome_ and deleteLater()s the previous widget.
+    // A `proceed` that then compared panelReturnTo_ against themedHome_ would be testing the STALE pointer
+    // against the NEW home: the equality fails, so it falls into the "some other page" branch and calls
+    // setCurrentWidget() on a widget already removed from the stack. Classify FIRST, act on the classification.
+    // (SettingsReturn itself is declared at the top of the class — moc rejects a type inside `private slots:`.)
+    bool leaveSettingsArea(std::function<void(SettingsReturn)> proceed);
+    // The destination the classification names: the home screen (rebuilt, so an Appearance change applies), or
+    // the remembered page — which is re-checked for liveness, so a return page destroyed after the classification
+    // was taken degrades to the home screen instead of a dangling setCurrentWidget().
+    void returnFromSettings(SettingsReturn where);
 
     QVariantMap settingsPanelStyle() const; // the active theme's `settingsPanel` block (themed panels; B2)
     void openGeneralSettings(); // general playback options (subtitle defaults)
@@ -798,7 +815,10 @@ private:
     QScrollArea* panelScroll_ = nullptr;
     QLabel* panelTitle_ = nullptr;
     QPushButton* panelBack_ = nullptr;     // the panel header's Back button (arrow-key reachable from the top)
-    QWidget* panelReturnTo_ = nullptr;     // the page to return to when the top-level panel's Back is hit
+    // The page to return to when the top-level panel's Back is hit. A QPointer, not a raw one: the pages it can
+    // hold (the themed home/browse QQuickWidgets) are destroyed and rebuilt under it by showHomeScreen(), so a
+    // raw pointer here is a dangle waiting for a destination change. See leaveSettingsArea's SettingsReturn note.
+    QPointer<QWidget> panelReturnTo_;
     QWidget* panelDialog_ = nullptr;       // an embedded dialog hosted in the panel (owns keyboard nav), or null
     std::function<void()> panelOnBack_;
     double duration_ = 0.0;
