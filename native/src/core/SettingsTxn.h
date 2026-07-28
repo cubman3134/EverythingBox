@@ -11,6 +11,7 @@
 // QtCore only, own file-local store(), so probe_settingstxn links lean.
 #pragma once
 #include <QString>
+#include <functional>
 
 namespace SettingsTxn
 {
@@ -61,6 +62,17 @@ namespace SettingsTxn
 
     void commit();     // drop the snapshot
     void rollback();   // restore every differing in-scope key; remove in-scope keys created during the txn
+
+    // Run after a rollback that actually restored something. The UI installs this to re-apply side
+    // effects: FormFactor::instance().refresh() for display/mode, and a re-render for the theme key.
+    // A Discard that leaves the app LOOKING different is the failure this whole design exists to
+    // prevent — restoring the stored value is only half the job.
+    //
+    // Fired ONCE per rollback, however many keys it touched, and NOT AT ALL when the transaction was clean:
+    // re-rendering the whole surface because a user opened and closed Settings is a visible cost for no
+    // reason. It is invoked after the transaction has been closed, so the hook observes active() == false
+    // and cannot re-enter a live transaction. Pass nullptr to uninstall.
+    void setRollbackHook(std::function<void()> hook);
 
 #ifdef EB_SETTINGSTXN_TEST_SEAM
     // Probe-only: redirect the store to a scratch ini. Gated so production cannot call it — an unguarded
