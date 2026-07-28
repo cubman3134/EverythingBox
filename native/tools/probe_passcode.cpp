@@ -13,6 +13,7 @@
 //
 // Prints PASSCODE-OK on success; any failure prints PASSCODE-FAIL <cond> and exits non-zero.
 #include "ProfilePasscode.h"
+#include "AppBrand.h"   // both salts, compared as constants (see §2) — never as re-typed literals
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -93,15 +94,26 @@ int main(int argc, char** argv)
     CHECK(hash(kIdA, kCodeAlpha).isEmpty());
     CHECK(hash(kIdA, QString()).isEmpty());
 
-    // SALT SEPARATION — the constraint the whole feature is built around. AppBrand::Legacy::kParentalPinSalt
-    // ("mmv-parental:") is an input to a hash already written to every existing user's ini; this scheme must
-    // use its OWN salt and leave that one alone. Recomputed here from the literal rather than by including
-    // AppBrand.h, so that a future edit which "unifies" the two salts fails HERE instead of silently making
-    // every parental PIN in the field equal to a profile passcode.
+    // SALT SEPARATION — the constraint the whole feature is built around, asserted ON THE CONSTANTS.
+    //
+    // The obvious version of this test does not work, and finding that out is the point: comparing this
+    // scheme's hash against a recomputed parental-PIN hash of the same digits PASSES even when the two salts
+    // are made identical, because the profile id sits in the passcode input and the parental input has none.
+    // Verified by mutation — pointing kProfilePasscodeSalt at the parental salt left that assertion green. An
+    // assertion that survives the bug it is named after is not coverage, so the real property is pinned
+    // directly: the two constants must be different strings, and this one must still be the value it shipped
+    // as. Both are DATA, not names. The parental salt is an input to a hash in every existing user's ini
+    // (renaming it makes no PIN match again); this one is an input to a hash in the SYNCED profile record
+    // (renaming it makes no passcode match again, on every device at once).
     {
-        const QByteArray parentalIn = QByteArray("mmv-parental:") + kCodeA.toUtf8();
-        const QString parentalHash =
-            QString::fromLatin1(QCryptographicHash::hash(parentalIn, QCryptographicHash::Sha256).toHex());
+        const QByteArray mine     = QByteArray(AppBrand::kProfilePasscodeSalt);
+        const QByteArray parental = QByteArray(AppBrand::Legacy::kParentalPinSalt);
+        CHECK(mine != parental);
+        CHECK(mine == QByteArray("eb-profile-pass:"));
+        CHECK(!mine.isEmpty());
+        // ...and the hashes differ too, which is the consequence users actually feel.
+        const QString parentalHash = QString::fromLatin1(
+            QCryptographicHash::hash(parental + kCodeA.toUtf8(), QCryptographicHash::Sha256).toHex());
         CHECK(hA != parentalHash);
         CHECK(hOther != parentalHash);
     }

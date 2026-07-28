@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QFrame>
 #include <QStackedWidget>
+#include <QPointer>
 #include <QVector>
 #include <memory>
 
@@ -128,7 +129,8 @@ void ProfileDialog::rebuild()
 }
 
 void ProfileDialog::showPicker(const QString& title, const QString& name, const QString& icon,
-                               const std::function<void(const QString&, const QString&)>& onAccept)
+                               const std::function<void(const QString&, const QString&)>& onAccept,
+                               const QString& passcodeFor)
 {
     auto* page = new QWidget(stack_);
     auto* v = new QVBoxLayout(page);
@@ -170,6 +172,34 @@ void ProfileDialog::showPicker(const QString& title, const QString& name, const 
     }
     v->addWidget(gridHost);
     highlight(chosenBtn ? chosenBtn : (iconButtons->isEmpty() ? nullptr : iconButtons->first()));
+
+    // Passcode row (edit only — a profile being created has no id to key the hash to). The label reports the
+    // current state; the flow itself is MainWindow's, raised by the signal. NOT bound to this page's OK: the
+    // chooser applies immediately, exactly as it does in the themed builder, so the two agree.
+    if (!passcodeFor.isEmpty())
+    {
+        auto* pcRow = new QHBoxLayout();
+        auto* pcLabel = new QLabel(page);
+        auto* pcBtn = new QPushButton(tr("Passcode…"), page);
+        pcBtn->setMinimumHeight(32);
+        // QPointer, not a raw capture: the flow the receiver runs is a nested event loop, and this page can
+        // be torn down inside it (Back, a profile deletion, a navigation away). A callback that wrote to a
+        // freed QLabel would crash in the receiver's code, nowhere near this line.
+        QPointer<QLabel> safeLabel(pcLabel);
+        auto refresh = [safeLabel, passcodeFor] {
+            if (!safeLabel) return;
+            safeLabel->setText(ProfileStore::hasPasscode(passcodeFor) ? tr("A passcode is set.")
+                                                                      : tr("No passcode set."));
+        };
+        refresh();
+        pcLabel->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        QObject::connect(pcBtn, &QPushButton::clicked, page, [this, passcodeFor, refresh] {
+            emit passcodeRequested(passcodeFor, refresh);
+        });
+        pcRow->addWidget(pcBtn);
+        pcRow->addWidget(pcLabel, 1);
+        v->addLayout(pcRow);
+    }
 
     auto* err = new QLabel(page);
     err->setStyleSheet(QStringLiteral("color:#c0392b;"));
@@ -216,5 +246,5 @@ void ProfileDialog::editProfile(const QString& id)
     showPicker(tr("Edit Profile"), target.name, target.icon, [this, id](const QString& name, const QString& icon) {
         ProfileStore::update(id, name, icon);
         rebuild(); // reflect the new name/icon in the list
-    });
+    }, /*passcodeFor*/ id);
 }

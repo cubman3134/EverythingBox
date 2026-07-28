@@ -723,6 +723,39 @@ private:
     // Parental gate: true if the action may proceed. When a restricted (kids) profile is active and a PIN is
     // set, prompt for it; otherwise allow. `reason` is shown in the prompt.
     bool parentalUnlock(const QString& reason);
+
+    // ---- Per-profile passcode (issue #30) ----------------------------------------------------------
+    // DELIBERATELY A DIFFERENT GATE FROM parentalUnlock ABOVE, not an extension of it. That one asks "may
+    // this kid LEAVE their profile / open Settings?" and is answered by the one global PIN; this asks "may
+    // this person ENTER this profile?" and is answered by that profile's own code. A user may reasonably
+    // want either without the other, so they never share a value, a salt or a prompt.
+    //
+    // On a RESTRICTED (kids) profile the two compose rather than merge, and the combination is spelled out
+    // here so it is not left emergent:
+    //   * entering it       -> the profile passcode (this gate). The parental PIN also opens it, as the
+    //                          documented override; the kid's own passcode does NOT open anything else.
+    //   * leaving it, or opening Settings from inside it -> the parental PIN, exactly as before. Knowing the
+    //                          profile passcode buys a kid nothing here — parentalUnlock never consults it.
+    //   * forgetting it     -> with a parental PIN set, only the parent's PIN resets it. With NO parental PIN
+    //                          set, the timed self-service reset applies to a kids profile as well: with no
+    //                          PIN nothing else in the app is protected either, and a permanent lockout with
+    //                          no way back to the data is a worse outcome than a resettable soft lock.
+    //
+    // Returns true when the profile may be opened: no passcode set, a live ticket (below), the correct code,
+    // the parental-PIN override, or a completed timed reset. False means the caller must not proceed.
+    bool profilePasscodeUnlock(const QString& profileId);
+    // The Set / Change / Remove chooser, opened from a profile's edit surface in BOTH the themed and the
+    // classic builder. Every branch goes through profilePasscodeUnlock first, so all three require the code.
+    // `onDone` runs after the chosen branch resolves (or immediately-ish on a back-out) — the chooser is a
+    // NavMenu, whose callback fires AFTER the overlay closes, so a caller that refreshed its "Passcode: set"
+    // label on the next line would be reading the state from before the user had chosen anything.
+    void profilePasscodeMenu(const QString& profileId, const std::function<void()>& onDone = {});
+    // A SHORT-LIVED grant, keyed by profile id (value = the ms-epoch of the successful unlock). It exists so
+    // one unlock covers the action it was asked for plus the immediate follow-on — unlock to edit a profile,
+    // then change its passcode on the next screen — instead of prompting twice in four seconds for the same
+    // secret. Cleared wholesale when a profile actually becomes current, so ENTERING a profile always asks.
+    QHash<QString, qint64> passcodeTickets_;
+    static constexpr qint64 kPasscodeTicketMs = 90000;
     // The player bar's single subtitle button opens a full-player overlay panel (Stremio-style): track pick,
     // sync/size, load-from-file, download. subOverlay_ is the scrim+panel (null when closed); the focusable
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.

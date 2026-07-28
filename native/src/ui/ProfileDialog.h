@@ -20,13 +20,29 @@ public:
     // (ThemedPanelHost) so both surfaces offer the SAME icon list from one source of truth.
     static QStringList iconChoices();
 
+signals:
+    // "Open the passcode chooser for this profile" (issue #30). A SIGNAL rather than the flow itself: the
+    // Set/Change/Remove chooser is a NavOverlay stack that has to live on the main window, and duplicating it
+    // here would give the classic builder a second, drifting copy of a security-shaped flow. MainWindow owns
+    // the one implementation and both builders raise it. Emitted only from the EDIT page (a profile being
+    // created has no id yet, and the passcode is keyed to one).
+    //
+    // `onDone` is how this page learns the answer. The chooser is a stack of overlays that resolve
+    // asynchronously — read the store back on the line after the emit and you get the state from BEFORE the
+    // user chose anything — so the receiver runs this once its flow has unwound. Carrying a std::function
+    // through a signal is safe here and only here: the connection is same-thread and DIRECT, so no metatype
+    // registration and no cross-thread copy of a capturing callable is involved.
+    void passcodeRequested(const QString& profileId, std::function<void()> onDone);
+
 private:
     void rebuild();         // (re)draw the list of profile rows
     void createProfile();   // prompt for a name + icon and add it (auto-selects the new profile)
     void editProfile(const QString& id); // rename / re-pick the icon of an existing profile
     // Shared name + cute-icon picker shown as an in-place page (no popup); onAccept(name, icon) runs on OK.
+    // `passcodeFor` non-empty adds the "Passcode…" row and emits passcodeRequested with it (edit only).
     void showPicker(const QString& title, const QString& name, const QString& icon,
-                    const std::function<void(const QString& name, const QString& icon)>& onAccept);
+                    const std::function<void(const QString& name, const QString& icon)>& onAccept,
+                    const QString& passcodeFor = QString());
 
     bool mustChoose_ = false;
     QString selectedId_;
