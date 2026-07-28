@@ -253,6 +253,18 @@ static QPushButton* panelRow(const QString& label); // large TV-friendly menu ro
 // purpose: this is a decision, not a hover, and the user may be reaching for a remote.
 static constexpr int kChipMs = 8000;
 
+// The installed theme folders, in the form ThemeChoice's migration needs (it is QtCore-only and takes the list
+// as an argument rather than reading the disk itself). Guarded because ThemeEngine is not compiled AT ALL in a
+// non-QML build — where there is no themed home, so "nothing installed" is the honest answer.
+static QStringList installedThemeFolders()
+{
+#ifdef EB_HAVE_QML
+    return ThemeEngine::availableThemes();
+#else
+    return {};
+#endif
+}
+
 MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     : QMainWindow(parent), startupChooseProfile_(chooseProfileAtStart)
 {
@@ -263,7 +275,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // needs ProfileStore::list(), which reads the ini directly (no MainWindow state). Flag-guarded AND
     // naturally idempotent. Nothing writes the legacy global any more (every write goes through
     // ThemeChoice::setForProfile), so the one-shot flag can never strand a later-recreated global.
-    ThemeChoice::runMigration();
+    // The installed list is what lets the migration preserve an UPGRADE user's old effective theme ("Default")
+    // instead of silently moving them to the new fallback — see ThemeChoice::legacyEffectiveGlobal.
+    ThemeChoice::runMigration(installedThemeFolders());
 
     // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
     // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.
@@ -2287,6 +2301,14 @@ void MainWindow::showEvent(QShowEvent* event)
                 promptStartupProfile();                  // pick a user before anything else (unchanged path)
             return;
         }
+#ifdef EB_HAVE_QML
+        // NO startup picker: main.cpp found exactly ONE profile and made it current itself, so chooseProfile —
+        // until now the only evaluator of the forced theme gate — never ran on this launch. Evaluate it here or
+        // a one-profile install can never be asked again: a user who backed out of the first-run step would get
+        // the silent fallback home forever, which is precisely the behaviour the feature exists to remove.
+        // A profile that already has a theme falls straight through with no prompt and no extra rebuild.
+        if (maybeForceThemePick(ProfileStore::currentId(), /*startup*/ true)) return;
+#endif
         if (stack_->currentWidget() == home_ && home_) home_->focusContent();
         // No startup picker in the way: offer TV mode once, a tick later so any pending overlay settles first
         // (maybeOfferTvMode itself bails if a modal/overlay is up — same "no modal up" guard as the picker path).
@@ -5616,6 +5638,14 @@ void MainWindow::onboardingRestorePull()
             cloud_->applyRemote(st.fileId, st.modifiedIso, st.remoteHash, [this](bool ok) {
                 if (!onboardingChoiceIsTop()) return;         // navigated away mid-apply — drop
                 if (!ok) { finishOnboardingRestore(/*restoreOk*/ false, /*remoteHasProfiles*/ false); return; }
+                // The bundle has just landed in the ini — RE-RUN the theme migration over it. The ctor already
+                // migrated (against an empty first-run ini) and set ThemeChoice's migrated flag, and that flag is
+                // device-local so nothing in the bundle can clear it. Without this, a bundle written by an
+                // OLD-version device (the synced legacy `themedHome/theme` scalar, no per-profile keys) is never
+                // migrated: the restored profile arrives UNthemed and gets force-prompted for a choice it already
+                // made, and the dead global stays in the ini and syncs onward. Idempotent, and it cannot clobber
+                // per-profile values the bundle supplied — planMigration never overwrites an existing bucket.
+                ThemeChoice::rerunMigrationAfterRestore(installedThemeFolders());
                 pullAndMergeProgress();                       // merge the per-item stores the bundle doesn't carry
                 finishOnboardingRestore(/*restoreOk*/ true, /*remoteHasProfiles*/ !ProfileStore::list().isEmpty());
             });
@@ -5849,6 +5879,35 @@ void MainWindow::presentThemePick(std::function<void()> afterPick, bool startup)
     updateBackgroundMusic();
 }
 
+// THE forced-pick gate — the ONE place ThemeChoice::needsPick is evaluated, and the reason it is a function
+// rather than two lines inside chooseProfile: chooseProfile is not the only way a profile becomes current.
+// main.cpp makes the SINGLE profile of a one-profile install current itself (profiles.size() == 1 -> no
+// startup picker -> chooseProfile never runs), and that is what every install becomes the moment its first
+// profile exists. With the check living only in chooseProfile, a user who backed out of the first-run step
+// would never be asked again: needsPick stayed true forever while home silently rendered the fallback, so the
+// headline behaviour only ever worked on the very first launch. showEvent calls this on that path too.
+//
+// Returns TRUE when the step was PRESENTED — the caller must then do nothing more, because the continuation
+// owns the rest of startup. A profile that already has a theme returns false and costs nothing: no prompt, no
+// rebuild, no flicker.
+bool MainWindow::maybeForceThemePick(const QString& profileId, bool startup)
+{
+    if (!themedHomeEnabled() || !themePickerHost_) return false;
+    if (!ThemeChoice::needsPick(ThemeChoice::forProfile(profileId))) return false;
+    presentThemePick([this] { finishToHome(); }, startup);
+    return true;
+}
+
+// openHome() plus the one-time TV-mode offer: the continuation shared by chooseProfile's fall-through and by
+// every forced-pick path. When this resolves a PRE-HOME startup step, showEvent already returned before its own
+// maybeOfferTvMode singleShot — offer it now. Idempotent: it bails once prompted / outside its guards, so
+// scheduling it here on the runtime profile switcher too is harmless.
+void MainWindow::finishToHome()
+{
+    openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
+    QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
+}
+
 void MainWindow::chooseProfile(const QString& id, bool startup)
 {
     ProfileStore::setCurrent(id);
@@ -5862,22 +5921,15 @@ void MainWindow::chooseProfile(const QString& id, bool startup)
     // means "quit" pre-home and "keep the default and go home" mid-session.
     //
     // A migrated or RESTORED profile normally arrives with a stored theme and never sees this. The exception is an
-    // UPGRADE user who never set the old device-wide theme: planMigration writes NOTHING for an empty legacy
-    // global (ThemeChoice.cpp — "no per-profile value, no global, write nothing"), so needsPick stays true and
-    // they DO get prompted at their next profile switch. That is intended: they have never chosen a theme, so
-    // asking once is exactly right, and it is a mid-session prompt with a working Back.
-    auto finish = [this] {
-        openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
-        // When this resolves the pre-home startup picker, showEvent already returned before its own
-        // maybeOfferTvMode singleShot — offer TV mode now. Idempotent: it bails once prompted / outside its guards,
-        // so scheduling it here on the runtime profile switcher too is harmless.
-        QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
-    };
+    // UPGRADE user whose old effective theme could not be preserved (ThemeChoice::legacyEffectiveGlobal: no legacy
+    // global AND the retired "Default" folder is not installed here), so needsPick stays true and they DO get
+    // prompted at their next profile switch. That is intended: they have never chosen a theme, so asking once is
+    // exactly right, and it is a mid-session prompt with a working Back.
+    //
     // `id`, not ProfileStore::currentId(): they are equal here (setCurrent ran above) but naming the id being
     // switched TO makes the dependency explicit and survives a future reorder.
-    if (themedHomeEnabled() && themePickerHost_ && ThemeChoice::needsPick(ThemeChoice::forProfile(id)))
-    { presentThemePick(finish, startup); return; }
-    finish();
+    if (maybeForceThemePick(id, startup)) return;
+    finishToHome();
 }
 
 // mustChoose Back: the classic must-choose dialog exited the app on close. Themed rendering: confirm the quit

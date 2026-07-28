@@ -49,6 +49,18 @@ QString ThemeChoice::renameLegacyFolder(const QString& stored)
     return stored == QLatin1String(kRenamedFrom) ? QString::fromLatin1(kFallbackTheme) : stored;
 }
 
+QString ThemeChoice::legacyEffectiveGlobal(const QString& legacyGlobal, bool isUpgrade,
+                                           const QStringList& installed)
+{
+    if (!legacyGlobal.isEmpty()) return legacyGlobal;   // an explicit choice always wins
+    if (!isUpgrade)              return QString();      // fresh install: nothing to preserve — take the pick
+    // Upgrade with no stored global: pre-#57 they were rendering the hardcoded "Default". Preserve it, but
+    // only if it is really installed — seeding a folder that isn't on disk would store a choice they never
+    // made AND skip the pick, leaving them on resolve()'s fallback with no way to notice.
+    const QString legacyDefault = QString::fromLatin1(kLegacyDefaultTheme);
+    return installed.contains(legacyDefault) ? legacyDefault : QString();
+}
+
 bool ThemeChoice::needsPick(const QString& stored)
 {
     // Stored-but-not-installed is NOT a pick — this key syncs, so re-asking here would overwrite the other
@@ -100,14 +112,22 @@ void ThemeChoice::setForProfile(const QString& profileId, const QString& folder)
     store().sync();
 }
 
-void ThemeChoice::runMigration()
+void ThemeChoice::runMigration(const QStringList& installedThemes)
 {
     QStringList ids;
     for (const Profile& p : ProfileStore::list()) ids << p.id;
-    runMigrationForIds(ids);
+    runMigrationForIds(ids, installedThemes);
 }
 
-void ThemeChoice::runMigrationForIds(const QStringList& profileIds)
+void ThemeChoice::rerunMigrationAfterRestore(const QStringList& installedThemes)
+{
+    // The bundle was written through CloudSync's own QSettings on the same file; re-read before deciding.
+    store().sync();
+    store().remove(QLatin1String(kMigratedFlag));
+    runMigration(installedThemes);
+}
+
+void ThemeChoice::runMigrationForIds(const QStringList& profileIds, const QStringList& installedThemes)
 {
     if (store().value(QLatin1String(kMigratedFlag), false).toBool()) return;
 
@@ -124,10 +144,6 @@ void ThemeChoice::runMigrationForIds(const QStringList& profileIds)
     //     made one. The default bucket is a real bucket on every install; migrate it like any other.
     QStringList ids = profileIds;
     ids << QString();
-    // A duplicate id would make `existing` (a hash, so deduped) smaller than `ids`, and the "covered" guard
-    // below would then read a fully-covered ini as UNcovered: it early-returns without setting the flag, so
-    // the migration re-runs on every launch, forever. Harmless, but permanent.
-    ids.removeDuplicates();
 
     QHash<QString, QString> existing;
     for (const QString& id : ids)
@@ -136,17 +152,17 @@ void ThemeChoice::runMigrationForIds(const QStringList& profileIds)
         if (!v.isEmpty()) existing.insert(id, v);
     }
 
-    const QString legacyGlobal = store().value(QLatin1String(kLegacyGlobalKey)).toString();
+    // UPGRADE vs. FRESH INSTALL is decided by "does this install already have profiles?", because the ONLY
+    // caller (MainWindow's ctor) runs this before any profile can exist on a fresh install: main.cpp's startup
+    // picker is presented from showEvent, i.e. after the ctor, so a first-run ini reaches here with an empty
+    // ProfileStore::list(). An upgrade, by construction, already made its profile on a previous launch. There
+    // is no other signal — the ini is otherwise indistinguishable, and a "was any key ever written?" probe
+    // would be fooled by the keys main.cpp's own startup writes before us.
+    const QString legacyGlobal = legacyEffectiveGlobal(store().value(QLatin1String(kLegacyGlobalKey)).toString(),
+                                                       /*isUpgrade*/ !profileIds.isEmpty(), installedThemes);
     const QHash<QString, QString> plan = planMigration(legacyGlobal, ids, existing);
     for (auto it = plan.constBegin(); it != plan.constEnd(); ++it)
         store().setValue(keyFor(it.key()), it.value());
-
-    // Did the legacy value actually land somewhere? Either the plan wrote at least one bucket, or every
-    // bucket already held its own value and there was nothing to carry. Anything else means the fan-out
-    // covered NO bucket — so leave the global in place and leave the flag UNSET, and the next launch retries.
-    // Deleting it there would destroy the user's choice permanently, with the flag guaranteeing no retry.
-    const bool covered = !plan.isEmpty() || (!ids.isEmpty() && existing.size() == ids.size());
-    if (!legacyGlobal.isEmpty() && !covered) { store().sync(); return; }
 
     // The global is gone once its value has been fanned out. Removing it is what makes a later accidental
     // read of the legacy key fail loudly instead of silently serving a stale device-wide theme.

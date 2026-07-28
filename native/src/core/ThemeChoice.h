@@ -20,7 +20,17 @@ namespace ThemeChoice
     // The theme2 folder that was renamed. The folder's theme.json already declared "name": "Triple" and the
     // community registry already used the folder name Triple — the local tree was the odd one out. A folder
     // name is a STORED VALUE, so the rename is only safe because the migration carries it.
+    //
+    // The DISK side of the same rename is AssetBootstrap::retireRenamedTheme(): AssetBootstrap is additive, so
+    // an upgraded install keeps themes2/XMB beside the new themes2/Triple and — because XMB/theme.json already
+    // said "name": "Triple" — the picker offered "Triple" TWICE, one of them a folder no fresh device has.
     inline constexpr const char* kRenamedFrom = "XMB";
+
+    // The theme the pre-#57 render path fell back to: the old read was literally
+    // store().value("themedHome/theme", "Default"). It is NOT bundled any more, but AssetBootstrap is additive
+    // so it is still on disk for every upgraded install — which is exactly why an upgrade must be able to keep
+    // rendering it. Never a fallback for a fresh install (see legacyEffectiveGlobal / kFallbackTheme).
+    inline constexpr const char* kLegacyDefaultTheme = "Default";
 
     // The live key's group prefix — the base keyFor() builds "<base>/<profileId>" from. It happens to spell
     // the same string as kLegacyGlobalKey, but they are DIFFERENT things: this one is a live group prefix,
@@ -56,6 +66,18 @@ namespace ThemeChoice
     // kRenamedFrom -> kFallbackTheme; every other value (including empty) passes through unchanged.
     QString renameLegacyFolder(const QString& stored);
 
+    // What the legacy GLOBAL key EFFECTIVELY resolved to before #57, which is the value the migration must
+    // carry forward. The old render path was `store().value("themedHome/theme", "Default")` — so a user who
+    // never touched the setting was rendering "Default", not nothing. planMigration seeds nothing for an empty
+    // global, and resolve("") now prefers "Triple", so without this an UPGRADE user's appearance would change
+    // on update — the one thing the feature promised would never happen.
+    //   * a non-empty global always wins (it is what they explicitly chose);
+    //   * !isUpgrade (a genuinely fresh install) -> empty, so needsPick stays true and they get the pick;
+    //   * an upgrade with no global -> kLegacyDefaultTheme, but ONLY if that folder is actually installed here.
+    //     Seeding a folder that is not on disk would store a choice the user never made AND rob them of the
+    //     pick, so an absent Default yields empty and they get the pick instead.
+    QString legacyEffectiveGlobal(const QString& legacyGlobal, bool isUpgrade, const QStringList& installed);
+
     // The migration table. Given the legacy global value, the profile ids, and the per-profile values already
     // stored, return ONLY the per-profile values that need WRITING. An existing value is never replaced by
     // the global — it just gets renameLegacyFolder applied. Naturally idempotent: feeding the result back in
@@ -67,13 +89,30 @@ namespace ThemeChoice
     // ---- ini-backed accessors ---------------------------------------------------------------------------
     QString forProfile(const QString& profileId);                          // "" when unset
     void    setForProfile(const QString& profileId, const QString& folder);
-    void    runMigration();   // flag-guarded AND naturally idempotent; safe to call on every startup
+
+    // Flag-guarded AND naturally idempotent; safe to call on every startup. `installedThemes` is the caller's
+    // ThemeEngine::availableThemes() — passed IN rather than read here so this TU stays QtCore-only and the
+    // "is Default still on disk?" question stays testable without a filesystem.
+    void    runMigration(const QStringList& installedThemes);
+
+    // Re-run the migration against settings that ARRIVED after this device was already migrated — i.e. a cloud
+    // restore. kMigratedFlag is device-local (it lives under "device/", so CloudSync never syncs it): on a new
+    // machine the startup migration runs against an empty ini and sets the flag, and the bundle that lands
+    // afterwards can never clear it. Without this, a bundle written by an OLD-version device — carrying the
+    // synced legacy scalar and no per-profile keys — is never migrated: the user's choice is ignored, they get
+    // force-prompted for a theme they already picked, and the dead global lingers in the ini and syncs onward.
+    // Still idempotent, and it cannot clobber the per-profile values the bundle itself supplied: planMigration
+    // never overwrites an existing bucket.
+    void    rerunMigrationAfterRestore(const QStringList& installedThemes);
 
     // runMigration()'s body, with the profile ids passed in instead of read from ProfileStore::list(). Split
     // out because the ZERO-profiles case is the one that used to DESTROY the legacy value (an empty id list
     // fanned it out to nothing and then deleted it), and it can only be pinned by driving the id list
     // directly — ProfileStore reads its own ini, which a hermetic probe has no way to seed.
-    void    runMigrationForIds(const QStringList& profileIds);
+    //
+    // A NON-EMPTY id list is also the upgrade-vs-fresh discriminator legacyEffectiveGlobal needs; see the
+    // comment at the call site for why.
+    void    runMigrationForIds(const QStringList& profileIds, const QStringList& installedThemes);
 
     // ---- test-only seam ---------------------------------------------------------------------------------
     // Redirects THIS unit's ini to `path`; an empty path restores the app's real ini. It exists so

@@ -360,6 +360,15 @@ private:
     void chooseProfile(const QString& id, bool startup);
     void quitConfirmFromStartup();                               // mustChoose Back: confirm quit, or re-present the list
 
+    // THE forced-pick gate (roadmap #57) — the ONE place ThemeChoice::needsPick is evaluated. Called from
+    // chooseProfile AND from showEvent's single-profile startup path, where main.cpp set the profile current
+    // itself and chooseProfile never runs. Returns true when the step was PRESENTED (the caller must then do
+    // nothing more — the continuation owns the rest of startup); false costs nothing. QML builds only, like
+    // presentThemePick itself, so the showEvent call site is #ifdef'd.
+    bool maybeForceThemePick(const QString& profileId, bool startup);
+    // openHome() + the one-time TV-mode offer: the continuation shared by chooseProfile and every pick path.
+    void finishToHome();
+
     // ---- The forced first-run theme step (roadmap #57) ----
     // Presented from chooseProfile when the newly-current profile has no theme stored yet; on pick it stores the
     // choice and runs the openHome() it displaced.

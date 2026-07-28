@@ -1,5 +1,7 @@
 #include "AssetBootstrap.h"
 
+#include "ThemeChoice.h"   // header-only constants: the ONE place the folder names XMB/Triple are spelled
+
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -102,6 +104,24 @@ namespace AssetBootstrap
 
         qInfo("AssetBootstrap: extracted assets from %s into %s (version %s)",
               qUtf8Printable(sourceRoot), qUtf8Printable(dataDir), qUtf8Printable(appVersion));
+        return true;
+    }
+
+    bool retireRenamedTheme(const QString& dataDir)
+    {
+        const QString root  = dataDir + QStringLiteral("/themes2");
+        const QString kept  = root + QLatin1Char('/') + QLatin1String(ThemeChoice::kFallbackTheme);
+        const QString stale = root + QLatin1Char('/') + QLatin1String(ThemeChoice::kRenamedFrom);
+
+        // THE GUARD, and the whole reason this is safe: the new name must be a REAL installed theme before the
+        // old one may go. Without it a device that only ever had XMB (Triple never extracted — a broken/partial
+        // install, or a themes2 the user curates by hand) would silently lose the theme it renders.
+        if (!QFile::exists(kept + QStringLiteral("/theme.json"))) return false;
+        if (!QDir(stale).exists()) return false;
+
+        if (!QDir(stale).removeRecursively()) return false;
+        qInfo("AssetBootstrap: retired the renamed theme folder %s (superseded by %s)",
+              ThemeChoice::kRenamedFrom, ThemeChoice::kFallbackTheme);
         return true;
     }
 }
