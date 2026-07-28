@@ -2104,12 +2104,6 @@ MediaCatalog HomeView::traktCalendarItems() const
     return browse::traktCalendarCatalog(traktCal_, QDateTime::currentDateTimeUtc()); // UTC, like the entries
 }
 
-bool HomeView::atTraktCalendarLevel() const
-{
-    return !stack_.isEmpty() && stack_.last().detail
-        && stack_.last().item.type == QStringLiteral("_traktcal");
-}
-
 void HomeView::openTraktCalendarLevel()
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }

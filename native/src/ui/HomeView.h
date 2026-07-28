@@ -329,7 +329,6 @@ private:
     MediaCatalog traktCalendarItems() const;             // the built catalog, or an EMPTY one when Trakt is off
     void openTraktCalendarLevel();                       // drill it -> the episodes airing soon
     void populateTraktCalendar();                        // (re)build that list from the cached calendar
-    bool atTraktCalendarLevel() const;                   // the current level is that folder
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT

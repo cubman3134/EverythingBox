@@ -341,11 +341,16 @@ MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const Q
         it.mime = QStringLiteral("trakt:cal"); // marks the row on the Home list, which has no level context
         // "" is the DOCUMENTED "not playable" signal, never an error (TraktRead.h) — the row still ships.
         it.imdbStreamId = trakt::imdbStreamIdFor(e.showIds, e.season, e.episode);
-        // "S01E04 · Tue 21 Jul". UTC, like every other time on this calendar: bucketing the day in local
-        // time would print a different day than the one the entry was selected into.
+        // "S01E04 · Tue 21 Jul". The DAY IS LOCAL — deliberately the one thing here that is not UTC.
+        // Selection above is an INSTANT range and is correctly UTC; the day a viewer reads off a shelf is
+        // a LOCAL-CALENDAR concept. A US prime-time episode airing Tuesday 21:00 ET is Wednesday 01:00
+        // UTC, so a UTC-formatted day tells a New York viewer "Wed 22 Jul" for a Tuesday-night show —
+        // the common case for US television, not an edge case, and unrecoverable by the user because no
+        // clock time is printed beside it. probe_browse pins BOTH the format and the local conversion.
         const QString code = QStringLiteral("S%1E%2").arg(e.season, 2, 10, QLatin1Char('0'))
                                                      .arg(e.episode, 2, 10, QLatin1Char('0'));
-        it.subtitle = code + QStringLiteral(" · ") + e.airsAtUtc.toString(QStringLiteral("ddd d MMM"));
+        it.subtitle = code + QStringLiteral(" · ")
+                    + e.airsAtUtc.toLocalTime().toString(QStringLiteral("ddd d MMM"));
         // Say so, rather than leaving a row that simply does nothing when pressed.
         if (it.imdbStreamId.isEmpty()) it.subtitle += QStringLiteral(" · ") + QObject::tr("No source");
         // Identity: the stream id when there is one, else a stable synthetic key from the show + episode,
