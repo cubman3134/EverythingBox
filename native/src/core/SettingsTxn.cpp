@@ -8,6 +8,7 @@
 #include <QSettings>
 #include <QStringList>
 #include <QVariant>
+#include <utility>   // std::move for the installed hook
 
 namespace {
 
@@ -41,6 +42,11 @@ QSettings& store()
 bool g_active = false;
 QHash<QString, QVariant> g_snapshot;   // key -> value at begin(); absent-at-begin keys are simply not here
 QStringList g_snapshotKeys;            // the in-scope keys present at begin(), for removal detection
+
+// Installed by the UI (see the header). Held here rather than passed to rollback() because the caller that
+// discards — a Back handler, a prompt's Discard button — is not the layer that knows how to re-apply a form
+// factor or re-render a theme.
+std::function<void()> g_rollbackHook;
 
 } // namespace
 
@@ -149,8 +155,13 @@ void SettingsTxn::rollback()
         for (auto it = beneath.cbegin(); it != beneath.cend(); ++it) store().setValue(it.key(), it.value());
     }
     // Restore every changed key.
+    int changed = 0;
     for (const QString& k : g_snapshotKeys)
-        if (store().value(k) != g_snapshot.value(k)) store().setValue(k, g_snapshot.value(k));
+        if (store().value(k) != g_snapshot.value(k)) { store().setValue(k, g_snapshot.value(k)); ++changed; }
+    // Did this rollback actually undo anything? Counted from the two passes above rather than by re-reading
+    // dirtyCount() — that is O(all keys in the ini) (see the header's cost contract) and would be a second
+    // full scan for a number both loops already know.
+    const bool restored = !created.isEmpty() || changed > 0;
     store().sync();
     // A read-only or locked ini makes sync() a no-op: without this, Discard would silently keep every change
     // while the UI reported success. There is nothing useful to DO about it here — the values are already
@@ -160,4 +171,14 @@ void SettingsTxn::rollback()
         qWarning("SettingsTxn: rollback could not write the settings file (QSettings status %d) — the "
                  "discarded changes are still live and may persist", int(store().status()));
     commit();
+    // AFTER commit(), deliberately: the hook re-applies side effects (a FormFactor refresh, a re-render) and
+    // those paths can call back into settings code. Running it here means it observes active() == false, so a
+    // hook that touches a settings row cannot mutate a still-open snapshot — and a hook that called
+    // rollback() would hit the inactive-guard no-op instead of recursing.
+    if (restored && g_rollbackHook) g_rollbackHook();
+}
+
+void SettingsTxn::setRollbackHook(std::function<void()> hook)
+{
+    g_rollbackHook = std::move(hook);
 }

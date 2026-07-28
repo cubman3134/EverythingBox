@@ -220,6 +220,43 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::isDirty() == false);
     CHECK(SettingsTxn::dirtyCount() == 0);
 
+    // ---- 8. the rollback hook fires exactly once, and ONLY when something was restored -------------
+    // Restoring the stored value is half of Discard. display/mode drives the form factor and the theme key
+    // drives the whole surface, so a Discard that reverts the value but leaves the app LOOKING different is
+    // the exact failure this design exists to prevent — hence the hook. Both halves of its contract are
+    // load-bearing, so both are pinned here.
+    {
+        freshIni();
+        CHECK(has(QStringLiteral("subs/language")) == false);   // independence: case 7's ini is not in play
+        int hookCalls = 0;
+        SettingsTxn::setRollbackHook([&hookCalls] { ++hookCalls; });
+
+        // A rollback with nothing changed must NOT fire the hook — re-rendering the whole UI because a
+        // user opened and closed Settings is a visible cost for no reason.
+        put(QStringLiteral("subs/language"), QStringLiteral("en"));
+        SettingsTxn::begin();
+        SettingsTxn::rollback();
+        CHECK(hookCalls == 0);
+
+        // A rollback that restored something fires it exactly once, however many keys changed.
+        SettingsTxn::begin();
+        put(QStringLiteral("subs/language"), QStringLiteral("fr"));
+        put(QStringLiteral("playback/autoplayNext"), QStringLiteral("false"));
+        SettingsTxn::rollback();
+        CHECK(hookCalls == 1);
+
+        // The hook runs on a CLOSED transaction, so it can re-apply side effects (a FormFactor refresh, a
+        // re-render) without mutating a still-open snapshot.
+        bool sawActive = true;
+        SettingsTxn::setRollbackHook([&sawActive] { sawActive = SettingsTxn::active(); });
+        SettingsTxn::begin();
+        put(QStringLiteral("subs/language"), QStringLiteral("de"));
+        SettingsTxn::rollback();
+        CHECK(sawActive == false);
+
+        SettingsTxn::setRollbackHook(nullptr);   // leave no dangling capture for later cases
+    }
+
     // ---- residue: every scratch ini this run created must be gone ---------------------------------
     // Drop the store's handle first, otherwise its cached QConfFile re-writes the file on destruction. Park
     // it on ANOTHER SCRATCH PATH, never on QString(): an empty path re-arms the PRODUCTION ini, and any
