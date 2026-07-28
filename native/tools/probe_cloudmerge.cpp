@@ -28,6 +28,7 @@
 #include "Tombstones.h"
 #include "CloudMerge.h"
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
 #include "ProfileStore.h"
 #include "AppPaths.h"
 #include "AppBrand.h"
@@ -780,6 +781,24 @@ int main(int argc, char** argv)
             CHECK(!raw.contains(QStringLiteral("marks/pX/items/deadbeef")));                           // per-item never written
             CHECK(raw.value(QStringLiteral("display/theme")).toString() == QStringLiteral("light"));   // plain synced updated
             CHECK(raw.value(QStringLiteral("some/newKey")).toString() == QStringLiteral("hello"));     // plain synced added
+        }
+
+        // 16c. applySettingsJson CLOSES an open settings transaction (#26). A remote bundle writes in-scope
+        // settings keys; if one lands while a settings visit is open, the snapshot predates it, so a later
+        // Discard would read the PEER's values as "the user's changes" and put the local ones back —
+        // silently reverting another device. The guard commits first: losing the ability to discard this
+        // visit is the correct trade against clobbering a peer.
+        //
+        // This case lives here rather than in probe_settingstxn because the guard is in CloudSync's TU, and
+        // probe_settingstxn does not link it — without this assertion, deleting the guard passed CI.
+        {
+            SettingsTxn::begin();
+            CHECK(SettingsTxn::active() == true);            // precondition: a visit really is open
+            QJsonObject mid;
+            mid[QStringLiteral("display/theme")] = QStringLiteral("midnight"); // plain in-scope settings key
+            CloudSync::applySettingsJson(QJsonDocument(mid).toJson(QJsonDocument::Compact));
+            CHECK(SettingsTxn::active() == false);           // the apply closed the transaction
+            SettingsTxn::commit();                           // belt-and-braces: leave no txn open for §17/18
         }
 
         // Good-citizen cleanup: probes share this portable ini (all live in the same build dir), and the

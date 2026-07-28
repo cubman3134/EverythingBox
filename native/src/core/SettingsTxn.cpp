@@ -72,12 +72,57 @@ bool SettingsTxn::inScope(const QString& key)
         "cloud/",      // OAuth tokens — signing in is not a setting you discard
         "device/",     // this install's identity + one-shot migration flags
         "pcgames/",    // catalog written by the PC-game importer
+        // Addon caches filled from NETWORK REPLIES. AddonManager::refreshRemoteManifests() and
+        // checkAddonUpdates() are kicked from the AddonManager constructor and write whenever their reply
+        // lands — which is arbitrarily later, including in the middle of a settings visit. In scope they
+        // would make the exit prompt claim "N settings changed" that the user never touched, and a Discard
+        // would revert the manifest cache AFTER reload() had already rebuilt the source list from it,
+        // leaving the loaded sources and the cache disagreeing until the next launch.
+        //
+        // Both prefixes are deliberately LONG. "addon." alone would sweep up addon.enabled.<id> and
+        // addon.remote.urls, which ARE settings rows (the Add-ons screen's per-source toggle and its
+        // add/remove URL list) and must stay discardable — see the paired in-scope assertions in
+        // probe_settingstxn §1.
+        "addon.remote.manifest.",   // <md5 of the source base URL> -> the cached manifest bytes
+        "addon.update.etag.",       // <addon id> -> the last self-update package ETag
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;
     // "downloads" is a bare key AND a family; both are the background download catalog. Matched exactly or
     // as "downloads/..." so a sibling like "downloadsPanel/x" is NOT swept up.
     if (key == QLatin1String("downloads") || key.startsWith(QLatin1String("downloads/"))) return false;
+
+    // Keys written by an ASYNC CALLBACK rather than by a settings row. Matched EXACTLY, never by prefix:
+    // every one of these sits in a group whose OTHER keys are genuine user-entered settings, so a prefix
+    // here would silently make those undiscardable. probe_settingstxn §1 pins both halves of each pair.
+    static const char* kExcludedExactKeys[] = {
+        // Trakt OAuth tokens. Settings::setTraktTokens is called from the QNetworkReply::finished lambda in
+        // TraktClient::ensureValidToken — i.e. during scrobbling, which runs while a settings panel is open.
+        // Trakt ROTATES the refresh token on every refresh, so restoring the snapshot would put a CONSUMED
+        // token back and permanently break the account link, on top of a prompt reporting changes the user
+        // never made. trakt/clientId and trakt/clientSecret are typed into Settings and STAY in scope.
+        "trakt/access", "trakt/refresh", "trakt/expiry",
+        // RetroAchievements session credentials, written from rcheevos' async login callback (loginCb in
+        // Achievements.cpp). Sign in, then Discard, and the stored token reverts while the in-memory session
+        // stays logged in. ra/apikey — the web-API key typed in Settings — STAYS in scope.
+        "ra/user", "ra/token",
+        // AddonManager::seedDefaultStremioSources()'s one-shot seed/migration latches. Exactly the shape of
+        // the device/ flags above: not settings rows, nothing in the UI writes them, and a Discard that
+        // removed one (they are created, not changed, on the run that sets them) would re-run the migration
+        // on the next launch — re-seeding Torrentio, or re-removing a source the user had deliberately
+        // re-added. They are written from the constructor rather than a reply, so the window is narrow; they
+        // are listed because they belong to the same background-written family, not because they race.
+        "addon.stremio.seeded", "addon.debridio.removed", "addon.cinemeta.removed",
+        "addon.cinemeta.removed2", "addon.torrentio.seeded", "addon.torrentio.host.migrated",
+    };
+    for (const char* k : kExcludedExactKeys)
+        if (key == QLatin1String(k)) return false;
+
+    // player/volume is IN scope and stays that way. It is written from the player page's volume slider, not
+    // from a settings row, so in principle it could move mid-transaction — but the player page and the
+    // settings area are different surfaces the user cannot be on at once, so the write cannot land during a
+    // visit. Worst case a Discard restores a volume the user set earlier in the session; the slider re-reads
+    // the stored value on the next player open, so nothing ends up inconsistent. Not worth a carve-out.
     return true;
 }
 
