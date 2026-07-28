@@ -15,6 +15,7 @@
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
+#include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include <functional>
 
 namespace browse
@@ -91,4 +92,21 @@ namespace browse
     // (the GOG mechanic). A non-empty query scopes by name. poster defaults to empty (no local capsule).
     MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
                                        const std::function<QString(const BattleNetGame&)>& poster = {});
+
+    // Episodes airing soon, from a connected Trakt account. Sorted by air time, soonest first.
+    // PAST entries are excluded: recently-aired episodes are issue #25's job ("You missed"), and two
+    // surfaces both claiming the same episode is worse than either alone. The boundary is CLOSED on the
+    // past side — airsAtUtc <= nowUtc is excluded, so an episode airing exactly now belongs to #25, not
+    // here. probe_browse pins that exact tick so a later change to it cannot pass silently.
+    //
+    // An entry whose show has no IMDB id is INCLUDED but left with no imdbStreamId and no url — the
+    // app's existing representation of "nothing to play" — and says so in its subtitle. Omitting it
+    // would be worse: the user would silently lose a third of their calendar with no way to tell.
+    //
+    // nowUtc is a PARAMETER, not QDateTime::currentDateTimeUtc(): the exclusion boundary is the one rule
+    // here worth pinning, and a builder that read the clock itself could only be tested by waiting.
+    // Everything on a CalendarEntry is UTC (see CalendarEntry::airsAtUtc), including the day printed in
+    // the subtitle, so pass a UTC `nowUtc` — a local-clock one compares two different clocks and slips
+    // the boundary by the offset.
+    MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const QDateTime& nowUtc);
 }

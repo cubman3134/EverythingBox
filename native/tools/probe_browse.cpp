@@ -1,6 +1,8 @@
-// Headless test for the synthetic browse-catalog builders (Recent / Downloaded / Favorites):
-// kind+system filtering, the pcgame-in-games rule, and missing-file hiding. Prints BROWSE-OK.
+// Headless test for the synthetic browse-catalog builders (Recent / Downloaded / Favorites / Trakt
+// "Airing soon"): kind+system filtering, the pcgame-in-games rule, missing-file hiding, and the Trakt
+// calendar's air-time ordering + past-exclusion boundary + unplayable-row rule. Prints BROWSE-OK.
 #include <QCoreApplication>
+#include <QDateTime>
 #include "../src/browse/SyntheticCatalogs.h"
 #include "../src/browse/SearchAggregator.h"
 #include "../src/core/PlaylistStore.h"
@@ -148,6 +150,72 @@ int main(int argc, char** argv)
         CHECK(!SearchAggregator::acceptResult(open, seen), "search: _open synthetic row skipped");
         MediaItem noTitle; noTitle.title = ""; noTitle.type = "game";
         CHECK(!SearchAggregator::acceptResult(noTitle, seen), "search: empty-title row skipped");
+    }
+
+    // ---- Trakt "Airing soon" (#23): ordering, the past/boundary exclusion, and the unplayable row ----------
+    // Every time here is UTC, like CalendarEntry::airsAtUtc, and `nowUtc` is injected so the boundary is a
+    // pinned tick rather than whatever the clock said when the suite ran.
+    {
+        const QDateTime now = QDateTime::fromString(QStringLiteral("2026-07-20T12:00:00Z"), Qt::ISODate);
+        auto entry = [](const char* airs, const char* show, const char* imdb, int s, int e) {
+            CalendarEntry c;
+            c.airsAtUtc = QDateTime::fromString(QString::fromLatin1(airs), Qt::ISODate);
+            c.showTitle = QString::fromLatin1(show);
+            c.showIds.imdb = QString::fromLatin1(imdb);
+            c.season = s; c.episode = e;
+            return c;
+        };
+        // Deliberately NOT in air order, and deliberately straddling the boundary in both directions.
+        QVector<CalendarEntry> cal;
+        cal << entry("2026-07-23T20:00:00Z", "Zeta",     "tt300", 2, 5);   // latest  -> last
+        cal << entry("2026-07-19T12:00:00Z", "Past",     "tt200", 1, 1);   // aired a day ago -> dropped
+        cal << entry("2026-07-21T01:30:00Z", "Alpha",    "tt100", 1, 4);   // soonest -> first
+        cal << entry("2026-07-20T12:00:00Z", "Boundary", "tt400", 1, 1);   // EXACTLY nowUtc  -> dropped
+        cal << entry("2026-07-22T09:00:00Z", "NoIds",    "",      3, 10);  // no imdb id -> kept, unplayable
+        { CalendarEntry c; c.showTitle = QStringLiteral("Undated"); c.showIds.imdb = QStringLiteral("tt500");
+          c.season = 1; c.episode = 1; cal << c; }                          // invalid air time -> dropped
+
+        const MediaCatalog cat = browse::traktCalendarCatalog(cal, now);
+
+        CHECK(cat.items.size() == 3, "traktcal: three of six entries survive the window");
+        CHECK(cat.items.size() == 3 && cat.items[0].title == "Alpha"
+              && cat.items[1].title == "NoIds" && cat.items[2].title == "Zeta",
+              "traktcal: sorted by air time ascending regardless of input order");
+        auto has = [&cat](const char* t) {
+            for (const MediaItem& i : cat.items) if (i.title == QString::fromLatin1(t)) return true;
+            return false;
+        };
+        CHECK(!has("Past"), "traktcal: an episode that already aired is excluded");
+        // The boundary is CLOSED on the past side: airsAtUtc <= nowUtc is #25's job, not this shelf's.
+        CHECK(!has("Boundary"), "traktcal: airsAtUtc exactly equal to nowUtc is excluded");
+        CHECK(has("Alpha") && has("Zeta"), "traktcal: future episodes are kept");
+        CHECK(!has("Undated"), "traktcal: an entry with no valid air time is dropped");
+
+        CHECK(cat.items.size() == 3 && cat.items[0].imdbStreamId == "tt100:1:4",
+              "traktcal: a show with an imdb id yields ttShow:season:episode");
+        // The contract that is easiest to get wrong: "" means SHOW IT, unplayable — never skip it.
+        CHECK(has("NoIds"), "traktcal: a show with no imdb id is still PRESENT in cat.items");
+        CHECK(cat.items.size() == 3 && cat.items[1].imdbStreamId.isEmpty(),
+              "traktcal: a show with no imdb id yields an empty imdbStreamId");
+        CHECK(cat.items.size() == 3 && !cat.items[1].id.isEmpty()
+              && cat.items[1].id == "trakt:NoIds:3:10",
+              "traktcal: an unplayable row still has a stable synthetic identity");
+        CHECK(cat.items.size() == 3 && cat.items[1].subtitle.contains(QStringLiteral("No source")),
+              "traktcal: an unplayable row says so in its subtitle");
+        CHECK(cat.items.size() == 3 && cat.items[0].subtitle.startsWith(QStringLiteral("S01E04"))
+              && cat.items[2].subtitle.startsWith(QStringLiteral("S02E05")),
+              "traktcal: subtitle leads with the zero-padded SxxEyy code");
+        bool allUrlless = true, allEpisodes = true;
+        for (const MediaItem& i : cat.items)
+        { if (!i.url.isEmpty()) allUrlless = false; if (i.type != "episode") allEpisodes = false; }
+        CHECK(allUrlless, "traktcal: every item has an empty url (the resolver fills it at play time)");
+        CHECK(allEpisodes, "traktcal: every item is typed episode");
+
+        // Empty in -> a well-formed empty catalog, not a malformed one. The SURFACE gates on this being
+        // empty (no shelf, no folder), so a title-less or hasMore=true result would be a real defect.
+        const MediaCatalog none = browse::traktCalendarCatalog({}, now);
+        CHECK(none.items.isEmpty() && !none.title.isEmpty() && !none.hasMore,
+              "traktcal: empty input -> empty catalog with a valid title");
     }
 
     if (fails == 0) printf("BROWSE-OK\n");
