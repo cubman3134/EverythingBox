@@ -89,3 +89,13 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Licence
+
+EverythingBox is free software under the **[GNU General Public License v3.0](LICENSE)** — use it,
+study it, change it, and share it, including commercially. Derivative works must stay under the same
+licence and ship their source.
+
+[`NOTICE`](NOTICE) carries the copyright statement and the third-party terms. A built binary links
+Qt, libmpv and SDL2, and the app downloads emulator cores and add-ons at runtime — none of which the
+GPL grant here can relicense. Read it before redistributing builds.

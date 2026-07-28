@@ -1,0 +1,60 @@
+EverythingBox
+Copyright (C) 2026 Parker Holt
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program. If not, see <https://www.gnu.org/licenses/>.
+
+The full text is in LICENSE. It is kept verbatim and unmodified there so that
+automated licence detection (GitHub, package scanners) identifies this project
+correctly — which is why these notes live in this file instead.
+
+---
+
+A note on dependencies
+
+The GPL grant covers the source code in this repository. It does not, and
+cannot, relicense the third-party components a built binary links or bundles.
+If you redistribute a build, those licences apply to it alongside this one.
+
+Linked libraries:
+
+  Qt 6            LGPL v3 (open-source edition). Widgets, Qml/Quick, Multimedia,
+                  Network, Concurrent, Pdf — see native/CMakeLists.txt.
+  mpv / libmpv    LGPL v2.1 or later, plus whatever its own bundled media stack
+                  (FFmpeg, libass, …) carries in the build you ship. If you
+                  redistribute binaries, check what your libmpv was built with:
+                  an FFmpeg configured with GPL components carries GPL terms of
+                  its own, and a GPL-2-only component would not combine with
+                  the GPL-3 grant here.
+  SDL2            zlib licence. Optional at configure time, but the released
+                  desktop binaries link it — see .github/workflows/release.yml.
+
+Vendored sources (native/third_party/, native/src/libretro/):
+
+  Duktape 2.7.0   MIT.
+  miniz 3.0.0     MIT.
+  LZMA SDK        Public domain (Igor Pavlov).
+  rcheevos        MIT — see native/third_party/rcheevos/LICENSE.
+  libretro.h      Permissive notice from The RetroArch team, in the header
+                  itself; it covers that API header only, not any core you load.
+
+Bundled data and assets:
+
+  Varela Round    SIL Open Font License 1.1 — see
+                  native/themes2/Channels/fonts/OFL.txt.
+  SDL_GameControllerDB
+                  native/gamecontrollerdb.txt, under its upstream terms
+                  (https://github.com/mdqinc/SDL_GameControllerDB).
+
+Libretro cores, standalone emulators, and add-ons that the app downloads at
+runtime are not part of this repository and are not covered by any of the above.
+Each carries its own licence.
