@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.101 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.102 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -192,6 +192,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
+        src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
@@ -434,6 +435,19 @@ if(EVERYTHINGBOX_BUILD_APP)
     # silent process-wide redirect of every theme read and write.
     target_compile_definitions(probe_theme PRIVATE EB_THEMECHOICE_TEST_SEAM)
     target_link_libraries(probe_theme PRIVATE Qt6::Core)
+
+    # Headless test for the settings save/discard transaction (issue #26): the scope predicate (incl. the
+    # device-local-but-in-scope cases a naive implementation gets wrong), dirty counting by VALUE, rollback
+    # fidelity, and — the assertion the whole predicate exists for — that an out-of-scope key written mid
+    # transaction survives rollback untouched. SettingsTxn.cpp is QtCore-only with its own file-local
+    # store(), so this links against Qt6::Core alone.
+    add_executable(probe_settingstxn tools/probe_settingstxn.cpp
+        src/core/SettingsTxn.cpp src/core/SettingsTxn.h)
+    target_include_directories(probe_settingstxn PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here (same rule as probe_theme's above): without the macro the setter
+    # is not declared or compiled at all, so a production call is a compile error, not a silent redirect.
+    target_compile_definitions(probe_settingstxn PRIVATE EB_SETTINGSTXN_TEST_SEAM)
+    target_link_libraries(probe_settingstxn PRIVATE Qt6::Core)
 
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
