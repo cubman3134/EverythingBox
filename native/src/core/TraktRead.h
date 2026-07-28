@@ -32,8 +32,11 @@ struct CalendarEntry
     QDateTime airsAtUtc;
     QString   showTitle;
     TraktIds  showIds;
-    int       season = 0;
-    int       episode = 0;
+    // -1 is the parser's "missing" sentinel, so the defaults must BE that sentinel: a
+    // default-constructed entry that read season 0 would look like a valid special (Trakt's
+    // specials really are season 0) carrying an invalid episode.
+    int       season = -1;
+    int       episode = -1;
     QString   episodeTitle;
     TraktIds  episodeIds;
     QString   posterUrl;   // "" when Trakt gave none
@@ -49,9 +52,16 @@ namespace trakt
     // "ttShow:season:episode" — keyed on the SHOW's imdb id, which is the form the scrobbler already
     // emits and the stream resolver already consumes.
     //
-    // Returns "" when the show has no imdb id, or when season/episode are out of range. That empty
-    // string is the DOCUMENTED SIGNAL for "show this entry but mark it not playable" — it is not an
-    // error, and it must never be substituted with a tmdb/tvdb id, which nothing downstream can use.
+    // Returns "" when the show has no USABLE imdb id, or when season/episode are out of range. That
+    // empty string is the DOCUMENTED SIGNAL for "show this entry but mark it not playable" — it is
+    // not an error, and it must never be substituted with a tmdb/tvdb id, which nothing downstream
+    // can use.
+    //
+    // "Usable" means the id both starts with "tt" and carries no ':' of its own. The colon is this
+    // format's field separator, so an id containing one would emit more than three fields; and a
+    // value that is not an IMDB title id at all (a bare number, a person's "nm…" id) would emit a
+    // well-formed-looking id no resolver can ever satisfy. Both are the same failure the range
+    // guard exists to prevent — an entry that LOOKS playable and is not.
     //
     // Season 0 is valid (Trakt uses it for specials). Episode numbers start at 1.
     QString imdbStreamIdFor(const TraktIds& showIds, int season, int episode);
