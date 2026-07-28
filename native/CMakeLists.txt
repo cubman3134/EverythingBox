@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.120 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.121 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -702,9 +702,15 @@ if(EVERYTHINGBOX_BUILD_APP)
             # §19 (D1 Task 2) drives the REAL FormFactor singleton (which reads the display/mode setting) so the
             # `form` context property + the TV scale/insets on the ThemeView surface are pinned end to end.
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h
-            src/core/Settings.cpp     src/core/Settings.h)
+            src/core/Settings.cpp     src/core/Settings.h
+            # §21 (issue #38) drives the REAL ThemeEngine::buildView on a scratch theme.json, so the sidebar
+            # assertions ride the whole shipped path — theme parse, graph-shape choice, ThemeBridge write-back
+            # and the qrc QML — instead of a probe-local replica of any of it.
+            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h)
         # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
-        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test)
+        # Qt6::Multimedia is ThemeEngine's QSoundEffect (a theme's optional UI sounds; §21's fixture declares none).
+        target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test
+                                                   Qt6::Multimedia)
         target_compile_definitions(probe_navqml PRIVATE EB_HAVE_QML)
     endif()
 
