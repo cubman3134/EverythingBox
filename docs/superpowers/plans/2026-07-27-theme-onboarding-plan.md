@@ -27,6 +27,24 @@ truth.** Two contract changes bind the remaining tasks:
 Also fixed there, for context: `QSettings::remove("themedHome/theme")` removes the key *and its whole
 subtree*, so the migration was deleting the per-profile values it had just written.
 
+**From the Task 3 review (binding on Task 4):**
+
+3. **`ThemePickerHost::present(...)` is `[[nodiscard]] bool`.** It returns `false` — without touching
+   any member — when `ThemeEngine::hasInstalledTheme()` is false. `availableThemes()` pads an empty
+   result with the fallback name even when that folder is not on disk, so an unguarded picker would
+   offer one bogus row and commit an uninstalled theme. **Task 4 must check the return and fall
+   through**, never leaving the user on a dead screen (in `mustChoose` mode Back is a quit-confirm,
+   so a dead screen pins them).
+4. **The picker does not persist anything.** `onPicked(folder)` hands the folder to the caller;
+   Task 4 owns the `ThemeChoice::setForProfile` call.
+5. **`NavGraph::indexFor()` does not exist** — Task 1's brief invented it. Use `zone()`/`index()`,
+   and `activate()` takes no arguments (`select()` then `activate()`).
+6. **Write on activation UNCONDITIONALLY.** Carried from the Task 2 review: the classic Appearance
+   list ticks the *resolved* folder while nothing is stored, and `currentItemChanged` fires only on a
+   *change* — so confirming the already-highlighted theme writes nothing and `needsPick` stays true,
+   re-prompting a user who just chose. Activation must always write, even when the folder is
+   unchanged.
+
 ## Global Constraints
 
 These bind every task. Values are verbatim from the spec.
