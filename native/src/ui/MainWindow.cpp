@@ -1248,13 +1248,46 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
     // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
     QTimer::singleShot(3000, this, [this] { refreshTraktCalendar(); });
+    // ...and then keep topping it up for as long as the app runs. Without this the shelf is a one-shot: on a
+    // set-top box left on for days, every entry drains out of the future-only window (airsAtUtc <= nowUtc, in
+    // traktCalendarCatalog) and nothing ever replaces it, so "Airing Soon" is silently EMPTY by Thursday and
+    // only refills on a restart.
+    updateTraktCalendarTimer();
     // Linking or unlinking an account is the one event that flips whether the shelf/folder exist at all:
-    // tell the home either way (connected -> they appear, disconnected -> they vanish), and only pull a
-    // fresh calendar on the connect.
+    // tell the home either way (connected -> they appear, disconnected -> they vanish), pull a fresh calendar
+    // on the connect, and start/stop the periodic top-up with the link.
     connect(trakt_, &TraktClient::connectedChanged, this, [this](bool conn) {
         if (home_) home_->onTraktCalendarChanged();
         if (conn) refreshTraktCalendar();
+        updateTraktCalendarTimer();
     });
+}
+
+// The periodic top-up's ON/OFF, in one place. The timer is DORMANT unless Trakt is configured AND connected,
+// so an install that never linked an account owns no running timer at all — belt and braces on top of
+// refreshTraktCalendar's own first-line gate, which would return anyway.
+void MainWindow::updateTraktCalendarTimer()
+{
+    // 30 minutes. The fetched window is a WEEK wide and advances a day at a time, so wire freshness is not
+    // what sets this — the drain is. 30 min bounds how long a shelf can sit stale (and how long a just-added
+    // show stays missing) to half an hour, which is under the granularity anyone reads a "what's on tonight"
+    // list at, while costing 48 requests a day: nothing against Trakt's limits.
+    //
+    // It is deliberately LONGER than refreshTraktCalendar's 15-minute cooldown, and that is the whole
+    // anti-stacking story — no second debounce here. A repeating QTimer cannot re-enter itself, every tick
+    // funnels through the one cooldown, and because the period exceeds the cooldown a tick is never silently
+    // swallowed (which would halve the real rate to 60 min). The cooldown keeps its actual job: absorbing the
+    // startup + account-link burst, which fire within seconds of each other.
+    static constexpr int kTraktCalPeriodMs = 30 * 60 * 1000;
+    const bool want = TraktClient::calendarAvailable() && trakt_;
+    if (!want) { if (traktCalTimer_) traktCalTimer_->stop(); return; }
+    if (!traktCalTimer_)
+    {
+        traktCalTimer_ = new QTimer(this);
+        traktCalTimer_->setInterval(kTraktCalPeriodMs);
+        connect(traktCalTimer_, &QTimer::timeout, this, [this] { refreshTraktCalendar(); });
+    }
+    if (!traktCalTimer_->isActive()) traktCalTimer_->start();
 }
 
 void MainWindow::refreshTraktCalendar()
