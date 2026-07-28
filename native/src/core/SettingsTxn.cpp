@@ -2,6 +2,7 @@
 
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -88,6 +89,14 @@ bool SettingsTxn::inScope(const QString& key)
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;
+    // Per-profile passcode ATTEMPT state (issue #30): the consecutive-failure count and the lockout expiry,
+    // written by the profile picker's entry pad — a surface reachable while a settings visit is open (Settings
+    // -> switch profile). In scope, a Discard would roll a live lockout back to whatever it was when the
+    // panel opened, i.e. hand a guesser their attempts back for free; and a lockout the user triggered would
+    // show up in the exit prompt as "1 setting changed" that they never touched. The passcode HASH is not
+    // matched here and stays in scope by virtue of living in profiles/list, which is a genuine settings row.
+    if (ProfilePasscode::isAttemptKey(key)) return false;
+
     // "downloads" is a bare key AND a family; both are the background download catalog. Matched exactly or
     // as "downloads/..." so a sibling like "downloadsPanel/x" is NOT swept up.
     if (key == QLatin1String("downloads") || key.startsWith(QLatin1String("downloads/"))) return false;
