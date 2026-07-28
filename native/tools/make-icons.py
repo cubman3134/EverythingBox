@@ -43,6 +43,7 @@ MOUTH     = (58, 46, 30)      # interior, in shadow away from the beam
 RIM       = (255, 216, 146)
 LIGHT     = (255, 203, 104)   # gold: must read on a light background too
 EB_INK    = (255, 247, 231)
+IOS_PLATE = (18, 21, 33)      # opaque backing for iOS, which forbids alpha in app icons
 
 
 FONTS = (r"C:\Windows\Fonts\segoeuib.ttf", r"C:\Windows\Fonts\arialbd.ttf",
@@ -213,10 +214,15 @@ def main():
     for pt, s in specs:
         n = int(round(pt * s))
         fn = f"icon-{pt}x{pt}@{s}x.png".replace(".0", "")
-        img = padded.resize((n, n), Image.LANCZOS)
-        if pt == 1024:                      # App Store art must be opaque
-            flat = Image.new("RGBA", (n, n), (18, 21, 33, 255))
-            flat.alpha_composite(img); img = flat
+        # EVERY iOS icon is flattened, not just the 1024 store art. iOS app icons may not carry
+        # an alpha channel at all — the asset compiler rejects them and the home screen has no
+        # notion of a transparent icon. Flattening only the store size (the first version of this
+        # script) shipped eleven icons with alpha, which looked correct in any preview that
+        # composited them itself and would have failed on a real device.
+        art = padded.resize((n, n), Image.LANCZOS)
+        img = Image.new("RGB", (n, n), IOS_PLATE)
+        img.paste(art, (0, 0), art)
+        if pt == 1024:
             fn = "icon-1024.png"
         save(img, os.path.join(ios, fn))
         images.append({"size": f"{pt:g}x{pt:g}", "idiom": "universal" if pt == 1024 else
