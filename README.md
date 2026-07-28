@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="native/resources/appicon.png" width="132" alt="EverythingBox">
+</p>
+
 # EverythingBox
 
 A native, cross-platform **media hub** — video, audio (with playlists), libretro

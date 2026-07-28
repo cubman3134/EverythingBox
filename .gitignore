@@ -37,3 +37,7 @@ node_modules/
 /native/secrets/*
 !/native/secrets/README.md
 
+
+# Python bytecode (native/tools/*.py helpers)
+__pycache__/
+*.pyc
