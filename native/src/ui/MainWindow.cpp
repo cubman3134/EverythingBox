@@ -1919,6 +1919,21 @@ void MainWindow::updateUiTestServer()
             }
             o.insert(QStringLiteral("panelFocus"), themedPanelHost_->focusedRowLabel());
         }
+        // The theme picker (roadmap #57) — same shape as the themed panel above, and for the same reason: its
+        // QQuickWidget focus is opaque, so without this the FORCED first-run step is invisible to uitest.py and
+        // cannot be asserted at all. `pickerTitle` distinguishes the two modes ("Pick your look" = the forced
+        // step, "Theme" = entered from Appearance); pickerZone/pickerIndex are the graph selection; pickerFocus is
+        // the selected row's display label.
+        if (themePickerHost_ && cur == themePickerHost_)
+        {
+            o.insert(QStringLiteral("pickerTitle"), themePickerHost_->title());
+            if (NavGraph* kg = themePickerHost_->graph())
+            {
+                o.insert(QStringLiteral("pickerZone"), kg->zone());
+                o.insert(QStringLiteral("pickerIndex"), kg->index());
+            }
+            o.insert(QStringLiteral("pickerFocus"), themePickerHost_->focusedRowLabel());
+        }
 #endif
         if (cur == playerPage_)
         {
@@ -5090,6 +5105,7 @@ void MainWindow::openAppearance()
                 else if (id == QStringLiteral("appr.theme")) {
                     // The real preview lives in ThemePickerHost. This replaces the old "recolour this panel and
                     // call that the preview" approximation.
+                    if (!themePickerHost_) return;   // consistency with every other themePickerHost_ call site
                     themePickerHost_->setStyle(settingsPanelStyle());
                     // REFUSAL (present() == false): no theme is installed, so there is nothing to offer and
                     // nothing to preview — nothing was shown and no callback will fire. STAY on Appearance (the
@@ -5138,9 +5154,10 @@ void MainWindow::openAppearance()
 
     // A representative stand-in for the preview: the real categories when we have them, else the SHARED synthetic
     // set ThemePickerHost previews — one source, so the two previews cannot drift.
-    // The `home_ ?` guard is load-bearing: openAppearance is now reachable from a pre-home state (the forced theme
-    // step runs before openHome), where home_ does not exist yet.
-    QVariantList previewItems = home_ ? home_->categoryItems() : QVariantList();
+    // home_ is constructed unconditionally in the ctor, so it always EXISTS here even pre-home (the forced theme
+    // step runs before openHome); what is empty before openHome is its category list, and that is exactly what the
+    // synthetic fallback below covers.
+    QVariantList previewItems = home_->categoryItems();
     if (previewItems.isEmpty()) previewItems = ThemePickerHost::previewItems();
     QVariantMap previewSystem; previewSystem.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
 
@@ -5211,18 +5228,27 @@ void MainWindow::openAppearance()
                 { r->setProperty("categories", previewItems); r->setProperty("catIndex", 0); }
             pv->addWidget(p);
         };
-        // The commit path. It writes UNCONDITIONALLY — even when the picked folder is the one already highlighted.
-        // The list highlights the RESOLVED folder (currentThemeFolder()) while nothing may actually be stored, and
-        // currentItemChanged only fires on a CHANGE: a user who opened this panel and clicked the already-selected
-        // theme would otherwise write nothing, needsPick would stay true, and the forced first-run step would
-        // re-prompt them for the choice they just made. Hence itemClicked/itemActivated are wired too — those DO
-        // fire on the current row. The preview rebuild is what's deduped (it is expensive), never the write.
+        // The commit path. The list highlights the RESOLVED folder (currentThemeFolder()) while nothing may
+        // actually be stored, and currentItemChanged only fires on a CHANGE: a user who opened this panel and
+        // clicked the already-selected theme would otherwise write nothing, needsPick would stay true, and the
+        // forced first-run step would re-prompt them for the choice they just made. Hence itemClicked/itemActivated
+        // are wired too — those DO fire on the current row.
+        //
+        // ONE USER ACTION IS ONE WRITE. Those three signals overlap: a single click emits currentItemChanged AND
+        // itemClicked (and a double-click emits itemClicked twice plus itemActivated), so an unconditional write
+        // stored the same key two or three times per click. `written` is the dedupe key: it starts EMPTY (opening
+        // the panel is not a commit), so the first interaction always writes — including a click on the
+        // already-highlighted row, which is the case the extra signals exist for. Re-picking a row after visiting
+        // another one writes again, because the key moved. Deduping on the WRITTEN folder, not on a "has written"
+        // flag, is what keeps that true.
         auto shown = std::make_shared<QString>();
-        auto commit = [this, rebuildPreview, shown](QListWidgetItem* it) {
+        auto written = std::make_shared<QString>();
+        auto commit = [this, rebuildPreview, shown, written](QListWidgetItem* it) {
             if (!it) return;
             const QString folder = it->data(Qt::UserRole).toString();
             if (folder.isEmpty()) return;
-            ThemeChoice::setForProfile(ProfileStore::currentId(), folder); // save on selection — always
+            if (*written != folder)
+            { *written = folder; ThemeChoice::setForProfile(ProfileStore::currentId(), folder); }
             if (*shown != folder) { *shown = folder; rebuildPreview(folder); }
         };
         connect(list, &QListWidget::currentItemChanged, this,
@@ -5651,7 +5677,7 @@ void MainWindow::presentProfileList(bool mustChoose, bool replace)
         {
             // Startup: picking a profile IS the answer to "Who's using?" — switch immediately.
             // Edit/Delete stay on the in-app Profiles switcher, where the menu still opens.
-            if (mustChoose) chooseProfile(id.mid(8));
+            if (mustChoose) chooseProfile(id.mid(8), /*startup*/ true);   // mustChoose here IS the startup path
             else            profileRowMenu(id.mid(8), mustChoose);
         }
     };
@@ -5700,7 +5726,9 @@ void MainWindow::editProfilePanel(const QString& id, bool mustChoose)
                 if (isNew)
                 {
                     const Profile p = ProfileStore::add(entered, *icon);   // add + auto-select (classic parity)
-                    chooseProfile(p.id);                                   // finish: setCurrent + openHome
+                    // mustChoose is the startup discriminator: creating the FIRST profile at startup is pre-home
+                    // (no escape), creating a second one from the in-app switcher is mid-session.
+                    chooseProfile(p.id, /*startup*/ mustChoose);           // finish: setCurrent + openHome
                 }
                 else
                 {
@@ -5734,7 +5762,9 @@ void MainWindow::profileRowMenu(const QString& profileId, bool mustChoose)
         if (row < 0 || row >= acts.size()) return;  // backed out
         switch (acts[row])
         {
-        case A_Switch: chooseProfile(profileId);                break;  // setCurrent + openHome
+        // The row menu is only reachable from the !mustChoose switcher, but forward the flag rather than hardcode
+        // it so a future startup entry point cannot silently get the wrong Back semantics.
+        case A_Switch: chooseProfile(profileId, /*startup*/ mustChoose); break;  // setCurrent + openHome
         case A_Edit:   editProfilePanel(profileId, mustChoose); break;  // nested picker
         case A_Delete: confirmDeleteProfile(profileId, mustChoose); break;
         }
@@ -5763,33 +5793,50 @@ QString MainWindow::themePickTitle() { return tr("Pick your look"); }
 
 // The forced first-run theme step. See MainWindow.h for the contract; the load-bearing half is the refusal
 // fall-through below.
-void MainWindow::presentThemePick(std::function<void()> afterPick)
+void MainWindow::presentThemePick(std::function<void()> afterPick, bool startup)
 {
     clearPanelPageConns();   // startup BOUNDARY: no stale async listener may outlive this present
     themePickerHost_->setStyle(settingsPanelStyle());
     NavOverlay::setThemeColors(settingsPanelStyle());  // this screen's own menus/confirms match the theme
+
+    // THE "runs at most once" LATCH, shared by every branch below (refusal, pick, mid-session Back). The host
+    // disarms its callbacks before dispatching them, so a second Enter cannot reach us — but the latch is what
+    // makes the guarantee a property of THIS function rather than of a collaborator, and it also covers the
+    // Back-after-pick ordering. `afterPick` is openHome() + a queued maybeOfferTvMode; running it twice would
+    // rebuild the home under itself.
+    auto fired = std::make_shared<bool>(false);
+    auto once = [afterPick, fired] { if (*fired) return; *fired = true; afterPick(); };
+
     // REFUSAL (present() == false): nothing is installed, so nothing was shown, no state was touched and neither
     // callback will ever fire. Run the continuation instead of leaving a dead screen up — openHome() ->
     // showHomeScreen() already handles "themed home on, no themes on disk" by falling back to the classic home
     // and saying so once. Dropping `afterPick` here would strand the user on an empty picker whose only Back is a
     // quit-confirm.
     if (!themePickerHost_->present(
-            themePickTitle(), currentThemeFolder(), /*mustChoose*/ true,
-            [this, afterPick](const QString& folder) {
+            themePickTitle(), currentThemeFolder(), /*mustChoose*/ startup,
+            [this, once](const QString& folder) {
                 // UNCONDITIONAL write. The picker highlights the RESOLVED folder while nothing is stored, so a
                 // user who simply confirms the already-highlighted row must still commit it — otherwise
                 // needsPick stays true and we re-prompt them for the choice they just made.
                 ThemeChoice::setForProfile(ProfileStore::currentId(), folder);
-                afterPick();
+                once();
             },
-            [this] { quitConfirmFromStartup(); }))   // forced step: no escape, same contract as the profile picker
-    { afterPick(); return; }
+            [this, once, startup] {
+                // STARTUP ONLY is the force real. Pre-home there is no other surface to fall back to, so Back is
+                // the same quit-confirm the startup profile picker uses.
+                if (startup) { quitConfirmFromStartup(); return; }
+                // MID-SESSION: setCurrent() has already run, so this user is not "missing a profile" and the
+                // quit-confirm's own copy would be a lie. Accept the resolved default WITHOUT writing it and go
+                // home — the same continuation the pick runs. See MainWindow.h for why not writing is correct.
+                once();
+            }))
+    { once(); return; }
     stack_->setCurrentWidget(themePickerHost_);
     updateNavForPage();
     updateBackgroundMusic();
 }
 
-void MainWindow::chooseProfile(const QString& id)
+void MainWindow::chooseProfile(const QString& id, bool startup)
 {
     ProfileStore::setCurrent(id);
     ItemMarks::invalidate(); // drop the previous profile's marks cache NOW (no signal fires) so the fresh home
@@ -5797,8 +5844,15 @@ void MainWindow::chooseProfile(const QString& id)
     ConsumptionStats::invalidate(); // likewise drop the previous profile's stats cache so accrual/display key off
                                     // the new profile from here on (stats are separately per-profile)
     // Roadmap #57: a profile with no theme picks one BEFORE its home renders. Keying off the profile (not a device
-    // flag) is what makes a SECOND profile created months later get its own pick, while a migrated or restored
-    // profile — both of which carry a stored theme — never sees this.
+    // flag) is what makes a SECOND profile created months later get its own pick — and that second profile is
+    // reached through the RUNTIME switcher, which is why `startup` has to be threaded down to the step: its Back
+    // means "quit" pre-home and "keep the default and go home" mid-session.
+    //
+    // A migrated or RESTORED profile normally arrives with a stored theme and never sees this. The exception is an
+    // UPGRADE user who never set the old device-wide theme: planMigration writes NOTHING for an empty legacy
+    // global (ThemeChoice.cpp — "no per-profile value, no global, write nothing"), so needsPick stays true and
+    // they DO get prompted at their next profile switch. That is intended: they have never chosen a theme, so
+    // asking once is exactly right, and it is a mid-session prompt with a working Back.
     auto finish = [this] {
         openHome();   // render for the chosen profile (also the pre-home startup finish: builds the themed home now)
         // When this resolves the pre-home startup picker, showEvent already returned before its own
@@ -5809,7 +5863,7 @@ void MainWindow::chooseProfile(const QString& id)
     // `id`, not ProfileStore::currentId(): they are equal here (setCurrent ran above) but naming the id being
     // switched TO makes the dependency explicit and survives a future reorder.
     if (themedHomeEnabled() && themePickerHost_ && ThemeChoice::needsPick(ThemeChoice::forProfile(id)))
-    { presentThemePick(finish); return; }
+    { presentThemePick(finish, startup); return; }
     finish();
 }
 
@@ -5830,6 +5884,12 @@ void MainWindow::quitConfirmFromStartup()
         { onboarding ? tr("Go back") : tr("Choose a profile"), tr("Quit") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
     if (choice == 1) { mwLog(QStringLiteral("quit: startup-picker quit-confirm")); QApplication::quit(); return; }
     if (onboarding) { presentOnboardingChoice(); return; }       // re-present the choice screen (Back popped its level)
+    // Reached from TWO Backs now. From the profile list's own Back the panel host is already the current page and
+    // Back popped its level, so rebuilding the rows in place is right. From the FORCED THEME STEP's Back the
+    // current page is themePickerHost_ and NOTHING was popped — the panel host still holds the startup list under
+    // a stale level, and rebuilding rows there would leave the user staring at a picker the host has already
+    // disarmed. Go through the full presenter instead: it reset()s the levels and switches the stack back.
+    if (stack_->currentWidget() != themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
     presentProfileList(/*mustChoose*/ true, /*replace*/ false);  // the level was popped by Back — present afresh
 }
 #endif // EB_HAVE_QML

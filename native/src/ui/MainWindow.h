@@ -354,21 +354,35 @@ private:
     void editProfilePanel(const QString& id, bool mustChoose);   // nested name(TextField)+icon(Choice) picker; id "" = create
     void profileRowMenu(const QString& profileId, bool mustChoose); // Switch/Edit/Delete chooser for a profile row
     void confirmDeleteProfile(const QString& profileId, bool mustChoose);
-    void chooseProfile(const QString& id);                       // setCurrent + openHome (the finish for both variants)
+    // setCurrent + openHome (the finish for both variants). `startup` is the caller's mustChoose: it is the ONLY
+    // thing that distinguishes the pre-home startup path (no escape) from the runtime profile switcher, and it is
+    // forwarded to presentThemePick, whose Back means two different things in the two cases (see below).
+    void chooseProfile(const QString& id, bool startup);
     void quitConfirmFromStartup();                               // mustChoose Back: confirm quit, or re-present the list
 
     // ---- The forced first-run theme step (roadmap #57) ----
     // Presented from chooseProfile when the newly-current profile has no theme stored yet; on pick it stores the
     // choice and runs the openHome() it displaced.
     //
-    // VOID, and `afterPick` runs EXACTLY ONCE on EVERY path that does not present: this method owns the
-    // "the user always reaches a home screen" guarantee, so no caller can drop the continuation. The one such
-    // path today is ThemePickerHost::present() REFUSING (nothing installed — see its contract): with no theme on
-    // disk there is nothing to pick and nothing to preview, and showHomeScreen() already falls back to the classic
-    // home with a "No themes found" notice. Leaving the user on a refused picker would PIN them — in mustChoose
-    // mode Back is a quit-confirm and there is no other exit. Defined with the rest of the themed startup surfaces
-    // (QML builds only), like chooseProfile itself.
-    void presentThemePick(std::function<void()> afterPick);
+    // VOID, and `afterPick` runs AT MOST ONCE and never more — on every path that reaches a home screen. This
+    // method owns the "the user always reaches a home screen" guarantee, so no caller can drop the continuation.
+    // The four paths:
+    //   * REFUSAL — ThemePickerHost::present() returns false (nothing installed; see its contract): nothing was
+    //     shown and no callback will fire, so run afterPick here. showHomeScreen() already falls back to the
+    //     classic home with a "No themes found" notice.
+    //   * PICK — store the folder, then afterPick.
+    //   * BACK, startup == true — the PRE-HOME path, where there genuinely is no escape: the quit-confirm, exactly
+    //     as the startup profile picker does. afterPick does NOT run; the user quits or returns to the profile
+    //     list, which re-enters chooseProfile and presents a fresh step with a fresh continuation.
+    //   * BACK, startup == false — the RUNTIME profile switcher (e.g. a second profile created months later).
+    //     ProfileStore::setCurrent has ALREADY run, so the quit-confirm here would tell a mid-session user they
+    //     "need to choose a profile", and cancelling it would strand them in a mustChoose profile picker with the
+    //     new profile already current. Instead ACCEPT the resolved default (which is what the picker highlighted)
+    //     WITHOUT writing a theme, and run afterPick — they reach home and can change it in Appearance at any
+    //     time. Not writing is deliberate: the stored value syncs across devices, so a Back must not persist a
+    //     per-device resolution (ThemeChoice::needsPick's note). needsPick stays true and they are asked again.
+    // Defined with the rest of the themed startup surfaces (QML builds only), like chooseProfile itself.
+    void presentThemePick(std::function<void()> afterPick, bool startup);
     static QString themePickTitle();                             // one title source for the forced step
 
     // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----

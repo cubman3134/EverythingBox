@@ -81,6 +81,11 @@ public:
     NavGraph* graph() const { return graph_; }
     QWidget* quickWidget() const;   // the QQuickWidget key events are delivered to (MainWindow key routing)
 
+    // The DISPLAY name of the row Enter would commit right now ("Name — Author"), for the uitest state snapshot.
+    // Mirrors ThemedPanelHost::focusedRowLabel: the QQuickWidget's focus is opaque, so the surface has to report
+    // its own selection or automation cannot see this screen at all. Empty when nothing is presented.
+    QString focusedRowLabel() const;
+
     // The synthetic sample data both this surface and the classic Appearance preview render. At first run
     // there is no library and no home_, so the synthetic path is the ONLY path that works there — sharing it
     // is what stops the two previews drifting.
@@ -88,6 +93,10 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent* e) override;
+    // present() runs its first rebuildPreview/layoutPreview while this page is still HIDDEN (both callers switch
+    // the stack afterwards), so the QML slot's anchored geometry is still zero and the preview would be laid out
+    // at 0x0. Re-layout on show rather than relying on the QML's slotMoved push happening to fire again.
+    void showEvent(QShowEvent* e) override;
 
 private:
     void rebuildPreview();          // tear down + rebuild the live preview for the selected row
