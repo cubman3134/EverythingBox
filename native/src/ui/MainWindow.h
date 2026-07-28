@@ -436,8 +436,9 @@ private:
     void showHomeScreen();
     bool themedHomeEnabled() const;
     // The ONE widget-side theme resolution (roadmap #57). Every site that used to read
-    // themedHome/theme and hand-roll a "not installed -> first" fallback now calls this; ThemeChoice
-    // owns the key and the ordering, so the eleven copies of that logic cannot drift apart again.
+    // the old global theme key and hand-roll a "not installed -> first" fallback now calls this;
+    // ThemeChoice owns the key and the ordering, so the twelve copies of that logic cannot drift
+    // apart again.
     QString currentThemeFolder() const;
     void showThemedHome();
     void showThemedXmb();    // themed PS3-style XMB home (cross of categories + the active category's column)
