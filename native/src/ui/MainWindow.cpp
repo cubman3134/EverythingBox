@@ -4792,8 +4792,21 @@ void MainWindow::showThemedXmb()
             const QString id = m.value(QStringLiteral("profileId")).toString();
             if (!id.isEmpty())
             {
-                if (id != ProfileStore::currentId()) { ProfileStore::setCurrent(id); home_->refresh(); }
-                showHomeScreen(); // rebuild for the chosen profile (stays on the Profiles category)
+                // A switch from HERE is the same switch the profile picker performs, so it goes through the same
+                // door. A bare setCurrent()+rebuild used to live here and silently skipped everything chooseProfile
+                // owns: the ItemMarks/ConsumptionStats invalidations (without them the new profile's home renders
+                // against the PREVIOUS profile's hidden items / completion marks / tags and stats) and roadmap
+                // #57's forced theme pick for a profile that has never chosen one. Never re-copy its body.
+                //
+                // "Stays on the Profiles category" still holds: chooseProfile finishes through openHome(), whose
+                // themed rebuild starts at themedHomeIndex_ — already profilesIdx, because onCategory recorded it
+                // when the user moved onto this column. Pin it anyway so the intent survives a future reorder.
+                // /*startup*/ false: mid-session, so the theme step's Back means "keep the resolved default and go
+                // home", not "quit". (chooseProfile also schedules maybeOfferTvMode; it is guard-bailing and
+                // one-shot — auto display mode, not yet prompted, themed, full screen, no overlay — so firing it
+                // on this route is as harmless as on the picker's, which has always done it.)
+                if (id != ProfileStore::currentId()) { themedHomeIndex_ = profilesIdx; chooseProfile(id, /*startup*/ false); }
+                else showHomeScreen(); // re-picking the current profile: nothing to switch, just rebuild in place
             }
             else if (m.value(QStringLiteral("profileAction")).toString() == QStringLiteral("manage"))
             {
