@@ -5,6 +5,7 @@
 // Prints NAV-OK on success; any failure prints NAV-FAIL <what> and exits non-zero.
 #include "nav/Nav.h"
 #include "nav/NavGraph.h"
+#include "nav/NavThemeGraph.h"   // §20: the ONE builder of the themed surface's zones/edges (both cats shapes)
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 
@@ -26,6 +27,9 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <cstdio>
+#include <deque>     // §20: the arrow-reachability walk over both themed graph shapes
+#include <set>
+#include <utility>
 
 static int failures = 0;
 #define CHECK(cond, what) do { \
@@ -849,6 +853,84 @@ int main(int argc, char** argv)
         // The drill level beneath is still fully live: one real Back pops it and runs its onPop.
         graph.back();
         CHECK(browsePopped && graph.levelDepth() == 0, "the surviving browse level pops normally afterwards");
+    }
+
+    // ------------------------------------------- 20. the themed surface's TWO categories shapes (issue #38)
+    {
+        // The themed home reaches its `categories` zone two ways, and both are built by the ONE shared builder
+        // (buildThemedNavGraph, NavThemeGraph.h) so a probe can never assert a shape the app no longer ships:
+        // the XMB CROSS (a horizontal axis co-located with the item column) and the SIDEBAR (a vertical list
+        // beside a grid, the non-XMB route). This section pins the property that made the second one necessary
+        // — entering and leaving the sidebar must not disturb the grid cursor — and the reachability both
+        // shapes owe Invariant 2. The detailed key-by-key routing lives in probe_navqml §21, which drives the
+        // real ThemeView.qml on top of these graphs; here we pin the pure model both of them stand on.
+        auto reachable = [](NavGraph& g) {
+            std::set<QString> seenZ;
+            std::set<std::pair<QString, int>> seen;
+            std::deque<std::pair<QString, int>> q;
+            g.select(QStringLiteral("items"), 0);
+            q.push_back({ g.zone(), g.index() });
+            seen.insert({ g.zone(), g.index() });
+            seenZ.insert(g.zone());
+            static const Qt::Key arr[] = { Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right };
+            while (!q.empty())
+            {
+                auto [z, i] = q.front(); q.pop_front();
+                for (Qt::Key k : arr)
+                {
+                    g.select(z, i);
+                    g.move(k);
+                    auto st = std::make_pair(g.zone(), g.index());
+                    if (!seen.count(st)) { seen.insert(st); seenZ.insert(st.first); q.push_back(st); }
+                }
+            }
+            return seenZ;
+        };
+
+        NavGraph gs;
+        buildThemedNavGraph(gs, 12, {}, CategoriesNav::Sidebar);
+        gs.setZoneCount(QStringLiteral("categories"), 5);
+        gs.setZoneCount(QStringLiteral("buttons"), 2);
+        QString why;
+        CHECK(gs.validate(&why), "themed(sidebar): the Sidebar-shaped graph passes validate()");
+        const std::set<QString> rs = reachable(gs);
+        CHECK(rs.count(QStringLiteral("items")) && rs.count(QStringLiteral("categories"))
+              && rs.count(QStringLiteral("buttons")),
+              "themed(sidebar): arrows alone reach items + categories + buttons from the default zone");
+
+        // THE property: a sidebar visit is non-destructive to the grid. Park the grid on cell 7, go into the
+        // sidebar, walk it, come back — the grid must be exactly where it was left (the model's per-zone
+        // memory, reached because the Left/Right legs are CROSS-axis for their Vertical target and so carry
+        // no fused step).
+        gs.select(QStringLiteral("categories"), 0);
+        gs.select(QStringLiteral("items"), 7);
+        gs.move(Qt::Key_Left);
+        CHECK(gs.zone() == QStringLiteral("categories"), "themed(sidebar): Left off the grid enters the sidebar");
+        for (int i = 0; i < 7; ++i) gs.move(Qt::Key_Down);   // past the last row of 5: the strip WRAPS
+        CHECK(gs.zone() == QStringLiteral("categories"),
+              "themed(sidebar): the sidebar's Up/Down step the list and WRAP — they never fall through into "
+              "the button bar a row below (which would be a one-way trapdoor)");
+        gs.move(Qt::Key_Right);
+        CHECK(gs.zone() == QStringLiteral("items") && gs.index() == 7,
+              "themed(sidebar): Right comes back to the grid's remembered cell (7) — the round trip costs nothing");
+
+        // The CROSS shape is untouched by all of this (the regression bar for Triple, whose home is an XMB).
+        NavGraph gc;
+        buildThemedNavGraph(gc, 12);                      // default = CategoriesNav::Cross
+        gc.setZoneCount(QStringLiteral("categories"), 5);
+        gc.setZoneCount(QStringLiteral("buttons"), 2);
+        CHECK(gc.validate(&why), "themed(cross): the XMB-shaped graph still passes validate()");
+        const std::set<QString> rc = reachable(gc);
+        CHECK(rc.count(QStringLiteral("items")) && rc.count(QStringLiteral("categories"))
+              && rc.count(QStringLiteral("buttons")),
+              "themed(cross): arrows alone still reach items + categories + buttons");
+        gc.select(QStringLiteral("categories"), 2);
+        gc.select(QStringLiteral("items"), 4);            // leave categories (memory = 2)
+        CHECK(gc.move(Qt::Key_Right) && gc.zone() == QStringLiteral("categories") && gc.index() == 3,
+              "themed(cross): one Right from the column still switches + steps the axis (2 -> 3, fused)");
+        gc.move(Qt::Key_Down);
+        CHECK(gc.zone() == QStringLiteral("items"),
+              "themed(cross): Down from the category axis still crosses back into the item column");
     }
 
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
