@@ -154,9 +154,37 @@ int main(int argc, char** argv)
     CHECK(has(QStringLiteral("resume")) == false);                          // created in-scope key removed
     CHECK(get(QStringLiteral("resume/movie1")) == QStringLiteral("120"));    // its child SURVIVES
 
-    // ---- 5. rollback REMOVES an in-scope key that did not exist at begin() ------------------------
+    // ---- 4c. Discard leaves NO in-scope descendant of a created key behind ------------------------
+    // 4b pins that rollback() re-adds the out-of-scope keys it had to wipe. This pins the other side: the
+    // in-scope ones must stay gone, however the removal pass gets there.
+    //
+    // Read the mutation result honestly. Dropping the !inScope(d) half of that capture — which re-adds every
+    // in-scope descendant straight after remove() deleted it — leaves this case GREEN, because `created` is
+    // built from allKeys() and comes out ancestor-first, so each resurrected key is removed again on its own
+    // later iteration. It is only when the iteration order changes too that the rows survive: dropping the
+    // filter AND reversing `created` fails the three checks below. So this is a pin on the OUTCOME, and it
+    // catches the filter loss the moment anything perturbs the order — it is not a live pin on the filter in
+    // today's order, and no assertion over this API can be, since the resurrection is always undone.
     freshIni();
     CHECK(has(QStringLiteral("resume/movie1")) == false);      // independence: case 4b's ini is not in play
+    put(QStringLiteral("audio/device"), QStringLiteral("hdmi"));    // in scope, pre-existing, NOT a descendant
+    SettingsTxn::begin();
+    put(QStringLiteral("subs"), QStringLiteral("bare"));           // in scope, created — the parent
+    put(QStringLiteral("subs/language"), QStringLiteral("de"));    // IN SCOPE, created, beneath it
+    put(QStringLiteral("subs/style/size"), QStringLiteral("40"));  // IN SCOPE, created, two levels beneath
+    put(QStringLiteral("subs/marks"), QStringLiteral("x"));        // in scope too ("marks/" only excludes at
+                                                                   // the START of a key), created, beneath
+    CHECK(SettingsTxn::dirtyCount() == 4);
+    SettingsTxn::rollback();
+    CHECK(has(QStringLiteral("subs")) == false);
+    CHECK(has(QStringLiteral("subs/language")) == false);      // NOT resurrected by the descendant capture
+    CHECK(has(QStringLiteral("subs/style/size")) == false);    // NOT resurrected by the descendant capture
+    CHECK(has(QStringLiteral("subs/marks")) == false);         // NOT resurrected by the descendant capture
+    CHECK(get(QStringLiteral("audio/device")) == QStringLiteral("hdmi"));   // untouched
+
+    // ---- 5. rollback REMOVES an in-scope key that did not exist at begin() ------------------------
+    freshIni();
+    CHECK(has(QStringLiteral("audio/device")) == false);       // independence: case 4c's ini is not in play
     SettingsTxn::begin();
     put(QStringLiteral("subs/language"), QStringLiteral("de"));
     CHECK(SettingsTxn::dirtyCount() == 1);
@@ -193,8 +221,13 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::dirtyCount() == 0);
 
     // ---- residue: every scratch ini this run created must be gone ---------------------------------
-    // Drop the store's handle first, otherwise its cached QConfFile re-writes the file on destruction.
-    SettingsTxn::setIniPathForTesting(QString());
+    // Drop the store's handle first, otherwise its cached QConfFile re-writes the file on destruction. Park
+    // it on ANOTHER SCRATCH PATH, never on QString(): an empty path re-arms the PRODUCTION ini, and any
+    // assertion later added below this line would then construct — and potentially WRITE — the developer's or
+    // the CI runner's real everythingbox.ini. The parking path is numbered like every other case, so the
+    // sweep below also proves nothing ever created it.
+    ++g_case;
+    SettingsTxn::setIniPathForTesting(iniPath());
     for (int n = 0; n <= g_case; ++n)
     {
         QFile::remove(iniPathFor(n));

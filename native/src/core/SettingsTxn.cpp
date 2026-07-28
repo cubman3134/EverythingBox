@@ -3,6 +3,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 
+#include <QDebug>
 #include <QHash>
 #include <QSettings>
 #include <QStringList>
@@ -111,10 +112,16 @@ void SettingsTxn::commit()
 void SettingsTxn::rollback()
 {
     if (!g_active) return;
+    // ONE allKeys() for the whole removal pass. It is O(all keys) and allocates a QString per key (see the
+    // cost contract in the header), and the per-created-key descendant scan below used to re-walk it once per
+    // created key — O(created x keys) for no benefit. Reusing the list is safe because the only keys removed
+    // below and NOT written straight back are in-scope created ones, and the descendant scan skips in-scope
+    // keys anyway; every out-of-scope key it does read is restored before the next iteration looks at it.
+    const QStringList allAtRollback = store().allKeys();
     // Remove in-scope keys that did not exist at begin(). Collect first — removing while iterating
     // allKeys() would be mutating the container being read.
     QStringList created;
-    for (const QString& k : store().allKeys())
+    for (const QString& k : allAtRollback)
         if (inScope(k) && !g_snapshot.contains(k)) created << k;
     for (const QString& k : created)
     {
@@ -124,9 +131,19 @@ void SettingsTxn::rollback()
         // NOT self-heal is an out-of-scope key beneath a created in-scope one (a bare "resume" over
         // "resume/<id>"), which is exactly the data loss this whole predicate exists to prevent. Capture and
         // put back, rather than leaving the guarantee resting on today's key names.
+        //
+        // The !inScope(d) half of that capture is DEFENCE, not an optimisation, and it is worth knowing that
+        // it currently has no observable effect: dropping it re-adds in-scope created descendants right after
+        // remove() correctly deleted them, but `created` comes out of allKeys() ancestor-first (allKeys()
+        // returns a sorted list, and a key always sorts before key + '/'), so each of those descendants is
+        // itself later in `created` and gets removed on its own iteration. Qt documents no ordering for
+        // allKeys(), so that self-correction is an implementation detail, not a guarantee — this filter is
+        // what keeps Discard's correctness from resting on it. Verified by mutation: dropping the filter
+        // alone keeps probe_settingstxn green; dropping it AND reversing `created` fails case 4c on three
+        // resurrected keys.
         const QString prefix = k + QLatin1Char('/');
         QHash<QString, QVariant> beneath;
-        for (const QString& d : store().allKeys())
+        for (const QString& d : allAtRollback)
             if (d.startsWith(prefix) && !inScope(d)) beneath.insert(d, store().value(d));
         store().remove(k);
         for (auto it = beneath.cbegin(); it != beneath.cend(); ++it) store().setValue(it.key(), it.value());
@@ -135,5 +152,12 @@ void SettingsTxn::rollback()
     for (const QString& k : g_snapshotKeys)
         if (store().value(k) != g_snapshot.value(k)) store().setValue(k, g_snapshot.value(k));
     store().sync();
+    // A read-only or locked ini makes sync() a no-op: without this, Discard would silently keep every change
+    // while the UI reported success. There is nothing useful to DO about it here — the values are already
+    // live and the snapshot is the only copy of the old ones — but it must not vanish, so it goes to the log
+    // the same way every other core unit reports a store it could not write.
+    if (store().status() != QSettings::NoError)
+        qWarning("SettingsTxn: rollback could not write the settings file (QSettings status %d) — the "
+                 "discarded changes are still live and may persist", int(store().status()));
     commit();
 }
