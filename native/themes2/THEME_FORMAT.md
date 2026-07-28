@@ -4,8 +4,8 @@ A theme is a folder under the app's `themes2/` directory containing a `theme.jso
 
 ```
 <app>/themes2/
-  Default/theme.json
-  Midnight/theme.json
+  Channels/theme.json
+  Triple/theme.json
   MyTheme/theme.json      <- your theme
 ```
 
@@ -108,7 +108,7 @@ Use the element's own `opacity` to dim the whole field. Note `dotSize`/`speed` a
 
 ### XMB (the PlayStation cross)
 
-A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. An xmb home needs no `browse`/`detail` view; the cross is the whole screen. Pair it with a `wave` and a `datetime` for the full look (see the shipped **XMB** theme).
+A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. An xmb home needs no `browse`/`detail` view; the cross is the whole screen. Pair it with a `wave` and a `datetime` for the full look (see the shipped **Triple** theme).
 
 Note: the front end is software-rendered (so it coexists with the video engine). Stacking several heavy animated elements (e.g. a high-`segments` `wave` **and** `particles` **and** the `xmb` cross) can exceed the renderer's budget — keep `wave.segments` modest and avoid piling animated fields on an xmb home.
 
@@ -136,7 +136,7 @@ A theme can play a short sound when you act. Add a top-level **`sounds`** object
 | `theme` | **T** cycles the theme |
 | `volume` | 0..1 applied to all of this theme's sounds (default `0.7`) |
 
-Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). The shipped **Midnight** theme has a `sounds/` folder you can copy.
+Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). Both shipped themes (**Channels** and **Triple**) have a `sounds/` folder you can copy.
 
 ## Minimal example
 
@@ -157,4 +157,8 @@ Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) —
 
 A top-level **`"hideAppearanceTile": true`** stops the app adding its Appearance catalog tile to the home grid — use it when your theme provides its own settings/appearance `button` (so it isn't offered twice).
 
-Copy one of the shipped themes (`Default`, `Grid`, `Lumen`, `Midnight`, `Channels`) as a starting point and edit away — the home updates as you save.
+Copy one of the shipped themes (`Channels`, `Triple`) as a starting point and edit away — the home updates as you save.
+
+More themes — including ones that used to ship with the app — live in the community theme registry at
+<https://github.com/cubman3134/everythingbox-themes>. Drop a downloaded theme folder into `themes2/` and it
+shows up in **Appearance** alongside the shipped two.
