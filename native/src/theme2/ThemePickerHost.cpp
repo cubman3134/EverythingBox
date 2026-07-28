@@ -9,6 +9,8 @@
 #include <QQuickItem>
 #include <QQuickWidget>
 #include <QResizeEvent>
+#include <QShowEvent>
+#include <QTimer>
 #include <QUrl>
 
 // ---- PickerBridge ------------------------------------------------------------------------------------------
@@ -85,17 +87,36 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         const QString folder = folders_.value(index);
         if (folder.isEmpty()) return;
         const std::function<void(const QString&)> fn = onPicked_;
-        if (fn) fn(folder);
+        if (!fn) return;                    // already fired (or never armed): a disarmed surface answers nothing
+        // DISARM BEFORE DISPATCH, never after. `fn` is a by-value copy so the closure survives its own handler
+        // re-presenting (or tearing down) this surface — that part is unchanged. But clearing AFTER the call would
+        // wipe the callbacks a re-entrant present() had just installed, leaving the new presentation dead. Clearing
+        // first also makes a second Enter (or a Back arriving after a pick) a no-op, so the caller's continuation
+        // cannot run twice off one presentation.
+        onPicked_ = nullptr; onBack_ = nullptr;
+        fn(folder);
     });
     // No levels are pushed by this host, so every Back bottoms out here: the caller owns what leaving means
-    // (Appearance returns to the panel; the forced first-run step wires a quit-confirm).
+    // (Appearance returns to the panel; the forced first-run step wires a quit-confirm or accepts the default).
     connect(graph_, &NavGraph::rootBack, this, [this] {
         const std::function<void()> fn = onBack_;
-        if (fn) fn();
+        if (!fn) return;
+        onPicked_ = nullptr; onBack_ = nullptr;   // same disarm-before-dispatch rule as the pick path above
+        fn();
     });
 }
 
 QWidget* ThemePickerHost::quickWidget() const { return view_; }
+
+QString ThemePickerHost::focusedRowLabel() const
+{
+    // The DISPLAY name, not the folder: this mirrors what the row actually reads on screen, which is what a test
+    // asserting "the Lumen row is selected" wants. Rebuilt from the folder (the authoritative list) rather than
+    // cached, so it can never drift from what present() fed the bridge.
+    if (!graph_ || graph_->zone() != QStringLiteral("themeRows")) return QString();
+    const QString folder = folders_.value(graph_->index());
+    return folder.isEmpty() ? QString() : ThemeEngine::themeDisplayName(folder);
+}
 
 void ThemePickerHost::setStyle(const QVariantMap& style)
 {
@@ -225,4 +246,18 @@ void ThemePickerHost::resizeEvent(QResizeEvent* e)
     QWidget::resizeEvent(e);
     if (view_) view_->setGeometry(rect());
     layoutPreview();   // the slot moved with the chrome (the QML also pushes, whichever lands first)
+}
+
+void ThemePickerHost::showEvent(QShowEvent* e)
+{
+    QWidget::showEvent(e);
+    // BOTH callers present() us and only THEN switch the stack to this page, so present()'s first
+    // rebuildPreview()/layoutPreview() ran against a hidden page whose QML anchor chain had not resolved —
+    // previewW/previewH read 0 and the geometry write was skipped. Recovery used to depend on the QML's
+    // slotMoved push happening to fire again once we were shown; that is incidental, and this screen's whole
+    // job is the preview. Lay out again here, and once more after this show has been processed (the anchored
+    // slot settles during the show, so the immediate call can still read stale values — whichever of the two
+    // lands on real geometry wins, and layoutPreview is idempotent).
+    layoutPreview();
+    QTimer::singleShot(0, this, [this] { layoutPreview(); });
 }
