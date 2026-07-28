@@ -249,6 +249,133 @@ int main(int argc, char** argv)
         CHECK(e.value(0).showIds.trakt == QStringLiteral("42"));   // the sane sibling still lands
     }
 
+    // ---- 9. the disk cache ROUND-TRIPS every field -------------------------------------------
+    // TraktClient persists the last good calendar so an offline launch still shows something. That is
+    // only worth doing if what comes back is what went in: a field silently dropped here is a title or
+    // an id that is present on a live launch and missing on an offline one — the hardest kind of bug to
+    // see, because the offline path is the one nobody looks at. So every field is asserted, on an entry
+    // built to exercise the awkward ones rather than on a parse result alone.
+    {
+        QVector<CalendarEntry> in = trakt::parseMyShowsCalendar(QByteArray(kNormal));
+        CHECK(in.size() == 2);
+
+        // posterUrl is never set by the parser (Trakt's calendar carries no image), so a round trip
+        // over parse output alone would never touch it. Set it here, or the cache could drop the field
+        // and every test would still pass.
+        in[0].posterUrl = QStringLiteral("https://example.invalid/a.jpg");
+        // Non-ASCII, an apostrophe and a '=' — the characters an ini-backed store is most likely to
+        // mangle, since QSettings has to escape them to survive the file format.
+        in[1].showTitle = QStringLiteral("Bêta Show: “quoted” = ünïcodé");
+
+        // A third entry pinning the SENTINELS. An episode whose season/number Trakt omitted reads back
+        // as -1, not 0 — 0 is a real season (specials), so a cache that defaulted to it would resurrect
+        // unknown episodes as valid-looking specials.
+        CalendarEntry sentinel;
+        sentinel.airsAtUtc = QDateTime::fromString(QStringLiteral("2026-08-09T20:00:00.000Z"),
+                                                   Qt::ISODateWithMs).toUTC();
+        sentinel.showTitle = QStringLiteral("Sentinel");
+        in.push_back(sentinel);
+
+        const QVector<CalendarEntry> out = trakt::deserializeCalendar(trakt::serializeCalendar(in));
+        CHECK(out.size() == in.size());
+        for (int i = 0; i < qMin(out.size(), in.size()); ++i)
+        {
+            CHECK(out[i].airsAtUtc == in[i].airsAtUtc);
+            CHECK(out[i].showTitle == in[i].showTitle);
+            CHECK(out[i].season == in[i].season);
+            CHECK(out[i].episode == in[i].episode);
+            CHECK(out[i].episodeTitle == in[i].episodeTitle);
+            CHECK(out[i].posterUrl == in[i].posterUrl);
+            CHECK(out[i].showIds.imdb == in[i].showIds.imdb);
+            CHECK(out[i].showIds.tmdb == in[i].showIds.tmdb);
+            CHECK(out[i].showIds.tvdb == in[i].showIds.tvdb);
+            CHECK(out[i].showIds.trakt == in[i].showIds.trakt);
+            CHECK(out[i].episodeIds.imdb == in[i].episodeIds.imdb);
+            CHECK(out[i].episodeIds.tmdb == in[i].episodeIds.tmdb);
+            CHECK(out[i].episodeIds.tvdb == in[i].episodeIds.tvdb);
+            CHECK(out[i].episodeIds.trakt == in[i].episodeIds.trakt);
+        }
+        // Spot-check the two that carry the most meaning downstream, so a broken loop above cannot
+        // pass by comparing an empty vector against itself.
+        CHECK(out.value(2).season == -1);
+        CHECK(out.value(2).episode == -1);
+        CHECK(trakt::imdbStreamIdFor(out.value(0).showIds, out.value(0).season, out.value(0).episode)
+              == QStringLiteral("tt1000001:1:4"));
+        // ...and the entry that had no show imdb id is STILL not playable after a round trip. A cache
+        // that invented an id here would make an unplayable row look playable only on offline launches.
+        CHECK(trakt::imdbStreamIdFor(out.value(1).showIds, out.value(1).season, out.value(1).episode)
+              .isEmpty());
+        // An empty calendar is a legitimate answer ("nothing airs this week") and must survive the
+        // round trip as empty rather than as a parse failure the caller would retry forever.
+        CHECK(trakt::serializeCalendar({}).isEmpty() == false);
+        CHECK(trakt::deserializeCalendar(trakt::serializeCalendar({})).isEmpty() == true);
+    }
+
+    // ---- 10. a CORRUPT cache yields empty, never a crash or a half-read entry -----------------
+    // This input is a file on disk: a crash mid-write, a full disk or a hand-edited ini can truncate it
+    // arbitrarily. Every shape below must land on the same empty vector the absent-cache case does, so
+    // the caller simply re-fetches. A half-populated entry would instead be RENDERED as if it were real.
+    {
+        for (const char* bad : {
+                 "",                                        // absent / never written
+                 "   ",                                     // whitespace
+                 "not json at all",                         // not JSON
+                 "{",                                       // truncated at the first byte
+                 R"({"v":1,"entries":[{"airsAtUtc":"2026-)", // truncated mid-entry
+                 "null", "42", R"("a string")",             // valid JSON, wrong top-level type
+                 R"([{"airsAtUtc":"2026-08-04T01:00:00.000Z"}])",       // a BARE array: not our shape
+                 R"({"entries":[]})",                                    // version missing entirely
+                 R"({"v":0,"entries":[]})",                              // version 0
+                 R"({"v":2,"entries":[{"airsAtUtc":"2026-08-04T01:00:00.000Z"}]})", // a FUTURE version
+                 R"({"v":"1","entries":[]})",                            // version as a string
+                 R"({"v":1})",                                           // no entries key
+                 R"({"v":1,"entries":{}})",                              // entries as an object
+                 R"({"v":1,"entries":"nope"})",                          // entries as a string
+             })
+            CHECK(trakt::deserializeCalendar(QByteArray(bad)).isEmpty() == true);
+
+        // A well-formed document whose ENTRIES are individually broken: each bad row is dropped and the
+        // one good row survives. Same totality the wire parser has — one corrupt row must not cost the
+        // user the rest of a cache that is otherwise fine.
+        const char* mixed = R"({"v":1,"entries":[
+          "a bare string",
+          123,
+          {},
+          {"showTitle":"No date at all"},
+          {"airsAtUtc":"","showTitle":"Empty date"},
+          {"airsAtUtc":"not a date","showTitle":"Junk date"},
+          {"airsAtUtc":"2026-08-04T01:00:00.000Z","showTitle":"Good",
+           "showIds":{"imdb":"tt9"},"season":3,"episode":2}
+        ]})";
+        const QVector<CalendarEntry> e = trakt::deserializeCalendar(QByteArray(mixed));
+        CHECK(e.size() == 1);
+        CHECK(e.value(0).showTitle == QStringLiteral("Good"));
+        CHECK(e.value(0).showIds.imdb == QStringLiteral("tt9"));
+        CHECK(e.value(0).season == 3);
+        CHECK(e.value(0).episode == 2);
+        // Fields the row never carried come back as the documented absences, not as junk.
+        CHECK(e.value(0).episodeTitle.isEmpty());
+        CHECK(e.value(0).posterUrl.isEmpty());
+        CHECK(e.value(0).episodeIds.imdb.isEmpty());
+
+        // A row whose ids bag is the WRONG TYPE (a number where the cache always writes a string, or a
+        // scalar where an object belongs) still yields an entry — with no ids, which imdbStreamIdFor
+        // already reads as "not playable". This is the one place a lenient read could manufacture a
+        // bogus id, so it is pinned.
+        const char* wrongTypes = R"({"v":1,"entries":[
+          {"airsAtUtc":"2026-08-04T01:00:00.000Z","showTitle":42,"showIds":7,
+           "episodeIds":{"imdb":1234},"season":"3","episode":null}
+        ]})";
+        const QVector<CalendarEntry> w = trakt::deserializeCalendar(QByteArray(wrongTypes));
+        CHECK(w.size() == 1);
+        CHECK(w.value(0).showTitle.isEmpty());
+        CHECK(w.value(0).showIds.imdb.isEmpty());
+        CHECK(w.value(0).episodeIds.imdb.isEmpty());   // a NUMBER is not an id the cache ever wrote
+        CHECK(w.value(0).season == -1);                // a string season is absent, not 3
+        CHECK(w.value(0).episode == -1);
+        CHECK(trakt::imdbStreamIdFor(w.value(0).showIds, w.value(0).season, w.value(0).episode).isEmpty());
+    }
+
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }
     std::fprintf(stderr, "TRAKT: %d check(s) failed\n", failures);
     return 1;

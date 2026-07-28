@@ -45,6 +45,43 @@ TraktIds idsFrom(const QJsonObject& owner)
     return ids;
 }
 
+// The ONE air-time reader, shared by the wire parser and the cache reader. Both face the same hazard —
+// a string with no zone designator, which Qt reads as LOCAL time — and if only one of them applied the
+// UTC guard, a cached entry would drift by the machine's offset relative to the fetch that wrote it.
+// Returns an invalid QDateTime for anything unparseable; both callers drop such an entry.
+QDateTime airTimeUtc(const QString& s)
+{
+    QDateTime dt = QDateTime::fromString(s, Qt::ISODateWithMs);
+    if (!dt.isValid()) return QDateTime();
+    if (dt.timeSpec() == Qt::LocalTime) dt.setTimeZone(QTimeZone::UTC);
+    return dt.toUTC();
+}
+
+// The cache's own id shape. Deliberately NOT idsFrom(): that one is tolerant of Trakt's wire types
+// (numbers for trakt/tvdb/tmdb, nulls anywhere) because it has to be. The cache is written by
+// serializeCalendar and every id in it is already a normalised string, so reading one as anything else
+// means the file is not ours — toString() yields "" and the id is simply absent, which is a shape the
+// whole read layer already handles.
+TraktIds cachedIds(const QJsonObject& o)
+{
+    TraktIds ids;
+    ids.imdb  = o.value(QStringLiteral("imdb")).toString();
+    ids.tmdb  = o.value(QStringLiteral("tmdb")).toString();
+    ids.tvdb  = o.value(QStringLiteral("tvdb")).toString();
+    ids.trakt = o.value(QStringLiteral("trakt")).toString();
+    return ids;
+}
+
+QJsonObject idsJson(const TraktIds& ids)
+{
+    return { { QStringLiteral("imdb"),  ids.imdb },
+             { QStringLiteral("tmdb"),  ids.tmdb },
+             { QStringLiteral("tvdb"),  ids.tvdb },
+             { QStringLiteral("trakt"), ids.trakt } };
+}
+
+constexpr int kCacheVersion = 1;
+
 } // namespace
 
 QVector<CalendarEntry> trakt::parseMyShowsCalendar(const QByteArray& json)
@@ -62,19 +99,16 @@ QVector<CalendarEntry> trakt::parseMyShowsCalendar(const QByteArray& json)
         // that cannot be placed on a date has nothing to say. The reference pins these as UTC ISO 8601
         // strings but does not pin the fractional-second part, so parse the with-ms form — Qt's ISO
         // parser treats the fraction as optional, which probe §6 holds it to.
-        QDateTime airs =
-            QDateTime::fromString(o.value(QStringLiteral("first_aired")).toString(), Qt::ISODateWithMs);
+        //
+        // The zone handling lives in airTimeUtc(): Qt reads a string with NO zone designator as LOCAL
+        // time, so converting it to UTC would shift it by this machine's offset — enough to move a
+        // late-evening episode onto the wrong calendar day, differently in summer and winter. The
+        // reference pins first_aired as nothing more than {"type":"string"}, so a dropped Z (or a
+        // reformatting proxy) is a shape we have to survive; Trakt states the times ARE UTC, so that
+        // is what a bare string means. An EXPLICIT offset, by contrast, is real information — Qt gives
+        // it Qt::OffsetFromUTC, not Qt::LocalTime, so it is converted rather than stamped over. Probe §7.
+        const QDateTime airs = airTimeUtc(o.value(QStringLiteral("first_aired")).toString());
         if (!airs.isValid()) continue;
-
-        // Qt reads a string with NO zone designator as LOCAL time, so converting it to UTC would
-        // shift it by this machine's offset — enough to move a late-evening episode onto the wrong
-        // calendar day, differently in summer and winter. The reference pins first_aired as nothing
-        // more than {"type":"string"}, so a dropped Z (or a reformatting proxy) is a shape we have
-        // to survive; Trakt states the times ARE UTC, so that is what a bare string means. An
-        // EXPLICIT offset, by contrast, is real information — Qt gives it Qt::OffsetFromUTC, not
-        // Qt::LocalTime, so it falls past this and is converted properly below. Probe §7.
-        if (airs.timeSpec() == Qt::LocalTime) airs.setTimeZone(QTimeZone::UTC);
-        airs = airs.toUTC();
 
         const QJsonObject show = o.value(QStringLiteral("show")).toObject();
         const QJsonObject ep   = o.value(QStringLiteral("episode")).toObject();
@@ -109,4 +143,65 @@ QString trakt::imdbStreamIdFor(const TraktIds& showIds, int season, int episode)
     if (season < 0 || episode < 1) return QString();   // season 0 is valid (specials); episodes are 1-based
     return imdb + QStringLiteral(":") + QString::number(season)
                 + QStringLiteral(":") + QString::number(episode);
+}
+
+QByteArray trakt::serializeCalendar(const QVector<CalendarEntry>& entries)
+{
+    QJsonArray arr;
+    for (const CalendarEntry& e : entries)
+    {
+        // The air time is written in the SAME form the wire uses (UTC ISO 8601 with milliseconds, so
+        // the trailing Z is explicit) — which means the reader's zone guard never has to fire on our
+        // own output, and a cache file is readable by eye against a raw Trakt response.
+        arr.append(QJsonObject{
+            { QStringLiteral("airsAtUtc"),    e.airsAtUtc.toUTC().toString(Qt::ISODateWithMs) },
+            { QStringLiteral("showTitle"),    e.showTitle },
+            { QStringLiteral("showIds"),      idsJson(e.showIds) },
+            { QStringLiteral("season"),       e.season },
+            { QStringLiteral("episode"),      e.episode },
+            { QStringLiteral("episodeTitle"), e.episodeTitle },
+            { QStringLiteral("episodeIds"),   idsJson(e.episodeIds) },
+            { QStringLiteral("posterUrl"),    e.posterUrl },
+        });
+    }
+    // Versioned so a future format change is a clean miss (deserializeCalendar returns empty and the
+    // caller re-fetches) rather than a silent half-read of fields that no longer mean what they did.
+    const QJsonObject doc{ { QStringLiteral("v"), kCacheVersion },
+                           { QStringLiteral("entries"), arr } };
+    return QJsonDocument(doc).toJson(QJsonDocument::Compact);
+}
+
+QVector<CalendarEntry> trakt::deserializeCalendar(const QByteArray& json)
+{
+    QVector<CalendarEntry> out;
+    const QJsonDocument doc = QJsonDocument::fromJson(json);
+    if (!doc.isObject()) return out;                          // empty, truncated, non-JSON, or a bare array
+    const QJsonObject root = doc.object();
+    // toInt(0) rather than toInt(kCacheVersion): a MISSING version must not be read as the current one.
+    if (root.value(QStringLiteral("v")).toInt(0) != kCacheVersion) return out;
+    const QJsonValue entriesVal = root.value(QStringLiteral("entries"));
+    if (!entriesVal.isArray()) return out;
+
+    for (const QJsonValue& v : entriesVal.toArray())
+    {
+        if (!v.isObject()) continue;
+        const QJsonObject o = v.toObject();
+        const QDateTime airs = airTimeUtc(o.value(QStringLiteral("airsAtUtc")).toString());
+        if (!airs.isValid()) continue;   // same rule as the parser: an unplaceable entry is dropped
+
+        CalendarEntry e;
+        e.airsAtUtc    = airs;
+        e.showTitle    = o.value(QStringLiteral("showTitle")).toString();
+        e.showIds      = cachedIds(o.value(QStringLiteral("showIds")).toObject());
+        // -1, not 0. The header pins -1 as the "missing" sentinel precisely because a 0 read back for a
+        // missing season is indistinguishable from a real special, so the default here must BE that
+        // sentinel or a truncated cache would resurrect entries as season-0 specials.
+        e.season       = o.value(QStringLiteral("season")).toInt(-1);
+        e.episode      = o.value(QStringLiteral("episode")).toInt(-1);
+        e.episodeTitle = o.value(QStringLiteral("episodeTitle")).toString();
+        e.episodeIds   = cachedIds(o.value(QStringLiteral("episodeIds")).toObject());
+        e.posterUrl    = o.value(QStringLiteral("posterUrl")).toString();
+        out.push_back(e);
+    }
+    return out;
 }

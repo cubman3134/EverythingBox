@@ -1,17 +1,40 @@
 #include "TraktClient.h"
+#include "AppBrand.h"
+#include "AppPaths.h"
 #include "Settings.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
+#include <QByteArray>
+#include <QDate>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QTimer>
 #include <QDateTime>
 #include <QUrl>
 
 namespace {
 constexpr const char* kBase = "https://api.trakt.tv";
+
+// The calendar cache lives in the shared portable ini, alongside everything else this app persists.
+// Opened here rather than routed through Settings:: because these two keys are not settings — nothing in
+// the Settings UI reads or writes them, they are a background fetch's output, and SettingsTxn excludes
+// them from the save/discard transaction for exactly that reason (see SettingsTxn::inScope).
+//
+// A second QSettings on the same path is safe and is the established idiom in this tree (Settings.cpp and
+// SettingsTxn.cpp each hold their own): QSettings shares one QConfFile per path process-wide, so a synced
+// write through this handle is visible through the others.
+constexpr const char* kCacheKey   = "trakt/calendarCache";
+constexpr const char* kCacheAtKey = "trakt/calendarCachedAt";
+
+QSettings& store()
+{
+    static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
+                       QSettings::IniFormat);
+    return s;
+}
 
 QNetworkRequest req(const QString& path, bool auth)
 {
@@ -151,6 +174,77 @@ void TraktClient::scrobble(const QString& action, const QString& imdbStreamId, d
             r->deleteLater();
             emit log(QStringLiteral("trakt: scrobble %1 -> HTTP %2").arg(action)
                          .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()));
+        });
+    });
+}
+
+// ---- the read side: the "my shows" calendar (#23) ------------------------------------------------
+
+bool TraktClient::calendarAvailable() { return configured() && connected(); }
+
+void TraktClient::writeCalendarCache(const QVector<CalendarEntry>& entries)
+{
+    store().setValue(QLatin1String(kCacheKey), trakt::serializeCalendar(entries));
+    store().setValue(QLatin1String(kCacheAtKey), QDateTime::currentSecsSinceEpoch());
+    store().sync();
+}
+
+QVector<CalendarEntry> TraktClient::cachedCalendar()
+{
+    // No guard needed for an absent key: value() yields an invalid QVariant, toByteArray() an empty
+    // one, and deserializeCalendar is total over that — "never cached" and "cache is garbage" are the
+    // same empty result to the caller, which is the honest answer in both cases.
+    return trakt::deserializeCalendar(store().value(QLatin1String(kCacheKey)).toByteArray());
+}
+
+qint64 TraktClient::cachedCalendarAt()
+{
+    return store().value(QLatin1String(kCacheAtKey)).toLongLong();   // 0 when absent or unparseable
+}
+
+void TraktClient::fetchMyShowsCalendar(int daysBack, int daysForward,
+                                       std::function<void(bool, QVector<CalendarEntry>)> cb)
+{
+    // Trakt being off is NOT a failure — it is the default state of an install nobody linked. The
+    // callback still fires (ok=false, empty) so a caller can fall back to the cache and finish its
+    // layout instead of waiting on a reply that will never come.
+    if (!calendarAvailable()) { if (cb) cb(false, {}); return; }
+
+    // Every read goes through the SAME gate the scrobbler uses. Refresh, expiry and Trakt's ROTATED
+    // refresh token are handled in exactly one place; a read path that built its own request would
+    // duplicate that logic and would eventually get the rotation wrong, which permanently breaks the
+    // account link rather than failing one call.
+    ensureValidToken([this, daysBack, daysForward, cb](bool ok) {
+        if (!ok) { if (cb) cb(false, {}); return; }
+        const int back = qMax(0, daysBack);
+        const int fwd  = qMax(0, daysForward);
+        const QString start = QDate::currentDate().addDays(-back).toString(Qt::ISODate);
+        // Trakt's `days` COUNTS the start date, so a window inclusive of both today-back and
+        // today+fwd is back + fwd + 1 days, not back + fwd — the latter silently drops the last
+        // day forward, which is the one a "what's on this week" surface cares most about.
+        const int days = back + fwd + 1;
+        QNetworkReply* r = nam_->get(req(QStringLiteral("/calendars/my/shows/") + start
+                                         + QStringLiteral("/") + QString::number(days), true));
+        connect(r, &QNetworkReply::finished, this, [this, r, cb] {
+            r->deleteLater();
+            if (r->error() != QNetworkReply::NoError)
+            {
+                // The HTTP status and nothing else. No token, no client id, no secret, and not
+                // errorString() either — a diagnostic string is exactly where a credential leaks into
+                // a log by accident, and the status is what actually distinguishes "not authorised"
+                // from "no network".
+                emit log(QStringLiteral("trakt: calendar fetch failed (HTTP %1)")
+                             .arg(r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()));
+                if (cb) cb(false, {});
+                return;
+            }
+            // The parser is tolerant, so a partly-malformed body still yields the entries it could
+            // read. Cached unconditionally on a successful reply — including an empty result, which
+            // is a legitimate answer ("nothing airs this week") and must be able to REPLACE a stale
+            // non-empty cache, or the user would keep seeing last month's calendar forever.
+            const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(r->readAll());
+            writeCalendarCache(e);
+            if (cb) cb(true, e);
         });
     });
 }

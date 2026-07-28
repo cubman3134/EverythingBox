@@ -65,4 +65,24 @@ namespace trakt
     //
     // Season 0 is valid (Trakt uses it for specials). Episode numbers start at 1.
     QString imdbStreamIdFor(const TraktIds& showIds, int season, int episode);
+
+    // ---- the disk-cache format (#23 task 2) ------------------------------------------------------
+    // TraktClient persists the last good calendar so an offline launch still shows something, but the
+    // FORMAT lives here rather than there: TraktClient.cpp pulls Qt Network and the app's ini, so a
+    // serialiser written inside it could only ever be exercised by running the app against Trakt. Here
+    // it is the same pure QJson-in/structs-out shape as the parser, and probe_trakt pins the round trip
+    // and the corrupt-input behaviour with no I/O at all. TraktClient keeps only the store read/write.
+    //
+    // The document is {"v":1,"entries":[...]}, one object per entry with every CalendarEntry field named
+    // explicitly — no implicit conversions, and adding a field later cannot silently reorder anything.
+    QByteArray serializeCalendar(const QVector<CalendarEntry>& entries);
+
+    // TOTAL, exactly like the parser, and for a stronger reason: this input is a file on disk that a
+    // crash mid-write, a disk error or a hand-edited ini can truncate. Empty/garbage/truncated input, a
+    // wrong top-level shape and an unrecognised version all yield an EMPTY vector — a caller that gets
+    // nothing falls back to a live fetch, whereas a half-read entry would be rendered as if it were real.
+    // Individual entries follow the parser's own rule: an entry whose air time will not parse is dropped
+    // (it cannot be placed on a calendar), and a missing season/episode reads back as the -1 sentinel
+    // rather than 0, so a round trip through the cache is value-identical to the parse that produced it.
+    QVector<CalendarEntry> deserializeCalendar(const QByteArray& json);
 }
