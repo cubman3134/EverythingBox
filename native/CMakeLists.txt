@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.82 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.83 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -191,6 +191,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
@@ -418,6 +419,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_onboarding PRIVATE src src/core src/theme2 third_party)
     target_compile_definitions(probe_onboarding PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_onboarding PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
+
+    # Headless test for the per-profile theme choice (roadmap #57): the key format, needsPick, resolve's
+    # four-step ordering, the XMB->Triple rename, and the migration table incl. idempotence. ThemeChoice.cpp
+    # is QtCore-only (its own file-local store(), AppPaths/AppBrand are header-only), and the only other TU it
+    # needs is ProfileStore for the profile id list — so this links leaner than any other probe here.
+    add_executable(probe_theme tools/probe_theme.cpp
+        src/core/ThemeChoice.cpp src/core/ThemeChoice.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
+    target_include_directories(probe_theme PRIVATE src src/core)
+    target_link_libraries(probe_theme PRIVATE Qt6::Core)
 
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
