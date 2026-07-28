@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.92 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.93 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -254,6 +254,7 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/ReaderChromeHost.cpp src/theme2/ReaderChromeHost.h
             src/theme2/ThemedPanelHost.cpp src/theme2/ThemedPanelHost.h
+            src/theme2/ThemePickerHost.cpp src/theme2/ThemePickerHost.h
             # FormFactor is now in the unconditional app source list above (Settings/RetroView need it in
             # the no-QML build too). It still drives `form` + TV scale/insets on the QML surfaces here.
             ${EB_THEME2_RCC})
