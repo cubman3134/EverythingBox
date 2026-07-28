@@ -2477,7 +2477,10 @@ void MainWindow::promptStartupProfile()
     // which openHome builds AFTER a profile is chosen) — so it can present pre-home. mustChoose = no Back escape.
     if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
 #endif
-    auto* dlg = new ProfileDialog(/*mustChoose*/ true, this);
+    // The dialog's ✎ / ✕ escapes carry the SAME gate as its pick-to-enter (issue #30 fix round): both are
+    // ways out of the lock, and the gate is MainWindow's one implementation, injected rather than reimplemented.
+    auto* dlg = new ProfileDialog(/*mustChoose*/ true,
+                                  [this](const QString& id) { return profilePasscodeUnlock(id); }, this);
     // Classic mode's passcode surface: the dialog has no idea what a passcode is, it just asks to open one
     // (its edit page's button). Handled here so BOTH builders run the identical flow.
     connect(dlg, &ProfileDialog::passcodeRequested, this,
@@ -2489,8 +2492,7 @@ void MainWindow::promptStartupProfile()
             // quitting: at startup there is no home to fall back to, and "wrong code ⇒ the app exits" would
             // make a mistyped digit look like a crash.
             if (!profilePasscodeUnlock(dlg->selectedId())) { startupChooseProfile_ = true; promptStartupProfile(); return; }
-            ProfileStore::setCurrent(dlg->selectedId());
-            passcodeTickets_.clear();      // entering a profile spends every outstanding grant
+            markProfileEntered(dlg->selectedId());
             openHome();                    // render for the chosen profile
             // The startup picker took this path, so showEvent returned before its own maybeOfferTvMode
             // singleShot — make the one-time offer now that home has landed (guards keep it idempotent).
@@ -4107,6 +4109,11 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
 
 void MainWindow::openHome()
 {
+    // THE LANDING GATE (issue #30): a profile's home is never rendered until that profile's passcode has been
+    // passed in this session, however `profiles/current` came to point at it — including the deletion that
+    // repoints it with nobody switching. See ensureActiveProfileUnlocked; it is a QString compare on every
+    // ordinary return-to-home and re-presents the picker on a refusal.
+    if (!ensureActiveProfileUnlocked()) return;
     playRouteOverride_ = PlayRoute::Default; // defensive: a one-off armed but abandoned can't leak past home
     exitChannel();      // returning Home is a hard channel stop — the shared choke for every stop/Back path that
                         // lands on Home (goBack's player branch, the player stop buttons, waitPageDone, …)
@@ -5623,6 +5630,84 @@ static QString profileNameOf(const QString& profileId)
     return QString();
 }
 
+static bool profileRestricted(const QString& profileId)
+{
+    for (const Profile& p : ProfileStore::list())
+        if (p.id == profileId) return p.restricted;
+    return false;
+}
+
+// THE one place "this profile is now the active, unlocked one" is recorded, so the three front doors
+// (startup picker, runtime switcher, chooseProfile) cannot drift apart on what entering a profile means.
+void MainWindow::markProfileEntered(const QString& id)
+{
+    ProfileStore::setCurrent(id);
+    enteredProfile_ = id;
+    // A profile has actually been entered — every outstanding grant is spent. Without this, switching away
+    // and back inside the ticket window would walk straight in, which is precisely the moment the lock is
+    // for (someone picks up the remote after you leave the room).
+    passcodeTickets_.clear();
+}
+
+// THE LANDING GATE (issue #30 fix round, finding 2).
+//
+// Every DELIBERATE profile switch already unlocks first — but `profiles/current` also moves with nobody
+// deciding to switch: ProfileStore::remove() repoints it at the first surviving profile when the deleted one
+// was current. So "unlock A with A's own code, delete A" silently made locked profile B current, and Back out
+// of the switcher rendered B's home with B's passcode never asked. mustShowPicker only covers the NEXT
+// launch, so it does not close that at all.
+//
+// Gating HERE — the single point where a profile's home actually becomes the thing on screen — closes it
+// however `current` got there, rather than bolting a check onto each writer of profiles/current (there are
+// five, and the one that caused this is inside the core store where no pad can be raised). It is the same
+// reasoning that put the forced theme pick on the entry seam instead of on its callers.
+//
+// Cost on the hot path is one QString compare: openHome() runs on every return from content, and
+// enteredProfile_ already names the current profile on all of those.
+bool MainWindow::ensureActiveProfileUnlocked()
+{
+    if (profileGateBusy_) return true;              // the gate's own overlays must not re-enter it
+    const QString id = ProfileStore::currentId();
+    if (id.isEmpty()) return true;                  // nothing active yet — the startup picker owns that case
+    if (id == enteredProfile_) return true;         // this session already proved THIS profile's code
+    if (passHashOf(id).isEmpty()) { enteredProfile_ = id; return true; }   // no passcode -> no gate
+
+    profileGateBusy_ = true;
+    const bool ok = profilePasscodeUnlock(id);
+    profileGateBusy_ = false;
+    if (ok) { markProfileEntered(id); return true; }
+
+    // Refused. There is no profile this person may be shown, so go back to the must-choose picker instead of
+    // rendering a home nobody unlocked. Queued, because the caller (openHome) is mid-navigation and the
+    // picker wants a settled stack; the caller returns immediately on our false.
+    enteredProfile_.clear();
+    QTimer::singleShot(0, this, [this] {
+#ifdef EB_HAVE_QML
+        if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ true); return; }
+#endif
+        startupChooseProfile_ = true;
+        promptStartupProfile();
+    });
+    return false;
+}
+
+// Set the GLOBAL parental PIN from outside Settings. Offered at the one moment the user is committing to a
+// state that only that PIN can undo (a passcode on a kids profile — see profilePasscodeMenu). Deliberately
+// only the SET half: changing or clearing an existing PIN stays in Settings, behind the current PIN, so this
+// can never become a way to overwrite a PIN the caller could not produce. Returns true if a PIN now exists.
+bool MainWindow::promptSetParentalPin(NavGraph* graph)
+{
+    if (Settings::hasParentalPin()) return true;
+    const QString a = Osk::getText(tr("New parental PIN:"), QString(), QLineEdit::Password, this, graph);
+    if (a.isNull() || a.isEmpty()) return false;
+    const QString b = Osk::getText(tr("Confirm PIN:"), QString(), QLineEdit::Password, this, graph);
+    if (b.isNull()) return false;
+    if (a != b) { notify(tr("PINs didn't match — no parental PIN was set."), kFeedbackLong); return false; }
+    Settings::setParentalPin(a);
+    notify(tr("Parental PIN set."));
+    return true;
+}
+
 bool MainWindow::profilePasscodeUnlock(const QString& profileId)
 {
     const QString stored = passHashOf(profileId);
@@ -5643,7 +5728,8 @@ bool MainWindow::profilePasscodeUnlock(const QString& profileId)
     // WHICH RECOVERY ROWS APPEAR is not decided here — ProfilePasscode::entryOptions owns that rule and
     // probe_passcode pins it, so the "parental PIN set ⇒ no timed reset" property cannot drift into the UI.
     const ProfilePasscode::EntryOptions opts =
-        ProfilePasscode::entryOptions(/*hasPasscode*/ true, Settings::hasParentalPin());
+        ProfilePasscode::entryOptions(/*hasPasscode*/ true, Settings::hasParentalPin(),
+                                      profileRestricted(profileId));
     QStringList extras;
     int xParental = -1, xReset = -1;
     if (opts.offerParentalPin) { xParental = int(extras.size()); extras << tr("Use the parental PIN"); }
@@ -5658,18 +5744,21 @@ bool MainWindow::profilePasscodeUnlock(const QString& profileId)
     {
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         ProfilePasscode::Attempts att = ProfilePasscode::attempts(profileId);
-        if (ProfilePasscode::lockedOut(att, now))
-        {
-            const int secs = int((ProfilePasscode::lockRemainingMs(att, now) + 999) / 1000);
-            NavConfirm::ask(tr("Too many tries"),
-                            tr("Wait %n second(s), then try again.", "", secs),
-                            { tr("OK") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
-            return false;
-        }
+        // A LOCKOUT DOES NOT CLOSE THIS PAD (issue #30 fix round, finding 3). It used to show "Too many
+        // tries" and return, which meant the lockout blocked its own recovery: the pad is the ONLY surface
+        // carrying "Use the parental PIN" and "Forgot the passcode?", so a child's five wrong guesses locked
+        // the PARENT out of their own override for up to five minutes. The pad opens either way; what the
+        // lockout costs is that a code typed into it is refused (evaluate() decides that, and leaves the
+        // attempt state untouched, so hammering still cannot extend the wait).
+        const qint64 waitMs = ProfilePasscode::lockRemainingMs(att, now);
+        const QString message = waitMs > 0
+            ? tr("Too many tries — wait %n second(s). Recovery below still works.", "",
+                 int((waitMs + 999) / 1000))
+            : tr("This profile is locked.");
 
         int extra = -1;
         const QString code = PasscodePad::ask(
-            tr("Enter %1's passcode").arg(name), tr("This profile is locked."), extras, &extra, this, graph);
+            tr("Enter %1's passcode").arg(name), message, extras, &extra, this, graph);
 
         if (extra >= 0 && extra == xParental)
         {
@@ -5722,7 +5811,9 @@ bool MainWindow::profilePasscodeUnlock(const QString& profileId)
             ProfilePasscode::evaluate(passHashOf(profileId), profileId, code, att, now);
         ProfilePasscode::setAttempts(profileId, att);
         if (out == ProfilePasscode::Outcome::Accepted) return grant();
-        if (out == ProfilePasscode::Outcome::LockedOut) continue;   // the loop top reports the remaining wait
+        // LockedOut: nothing was compared and nothing moved. Re-open the pad — its message line reports the
+        // remaining wait, and the recovery rows are right there.
+        if (out == ProfilePasscode::Outcome::LockedOut) continue;
         notify(tr("That's not the passcode."), kFeedbackLong);
     }
 }
@@ -5732,10 +5823,7 @@ void MainWindow::profilePasscodeMenu(const QString& profileId, const std::functi
     const QString name = profileNameOf(profileId);
     if (name.isEmpty()) return;
     const bool isSet = !passHashOf(profileId).isEmpty();
-    const bool restricted = [&] {
-        for (const Profile& p : ProfileStore::list()) if (p.id == profileId) return p.restricted;
-        return false;
-    }();
+    const bool restricted = profileRestricted(profileId);
 
     QStringList labels; QVector<int> acts;
     enum { A_Set, A_Change, A_Remove };
@@ -5763,6 +5851,28 @@ void MainWindow::profilePasscodeMenu(const QString& profileId, const std::functi
             return;
         }
 
+        // A KIDS PROFILE IS NEVER SELF-SERVICE RESETTABLE (issue #30 fix round, finding 4): entryOptions
+        // withholds the timed reset on a restricted profile whether or not a parental PIN exists. With NO
+        // parental PIN that leaves exactly no in-app way back, which is a real and accepted cost — but it is
+        // only acceptable if the user meets it HERE, deciding, rather than at the lock screen months later.
+        // So: say it plainly, offer the missing PIN on the spot, and let them proceed either way.
+        NavGraph* pinGraph = nullptr;
+#ifdef EB_HAVE_QML
+        if (themedPanelHost_) pinGraph = themedPanelHost_->navGraph();
+#endif
+        if (restricted && !Settings::hasParentalPin())
+        {
+            const int c = NavConfirm::ask(
+                tr("No parental PIN is set"),
+                tr("“%1” is a kids profile, and a kids profile's passcode can only be reset with the parental "
+                   "PIN — there is no timed reset here. With no PIN set, forgetting this code locks the "
+                   "profile for good: the only way back would be editing the app's settings file by hand.")
+                    .arg(name),
+                { tr("Set a parental PIN first"), tr("Continue without one") },
+                /*focusIndex*/ 0, /*cancelIndex*/ 1, this);
+            if (c == 0) promptSetParentalPin(pinGraph);   // declined or mistyped -> they simply proceed
+        }
+
         // Set / Change: enter it twice. No "show the digits" affordance — a shared-room TV is exactly where
         // one would be read over the user's shoulder, and re-entry costs four presses.
         const QString help = tr("A 4-digit code that keeps other people in the house out of this profile. "
@@ -5781,10 +5891,12 @@ void MainWindow::profilePasscodeMenu(const QString& profileId, const std::functi
         ProfilePasscode::clearAttempts(profileId);
         passcodeTickets_.remove(profileId);            // the new code must be proved before the next action
         notify(tr("Passcode set for “%1”. You'll be asked for it when you pick this profile.").arg(name));
-        // The kids-profile combination, stated rather than left for the user to discover at the worst moment.
+        // Re-read hasParentalPin(): the warning above may have just set one. If it still isn't set, restate
+        // the consequence now that the code exists — this is the state that cannot be undone from inside the
+        // app, and it must never be something the user only discovers at the lock screen.
         if (restricted && !Settings::hasParentalPin())
-            notify(tr("No parental PIN is set, so this passcode can be reset from the lock screen after a "
-                      "short wait. Set a parental PIN in Settings if you don't want that."), kFeedbackLong);
+            notify(tr("No parental PIN is set — this passcode cannot be reset from the lock screen. Set a "
+                      "parental PIN in Settings ▸ Parental controls."), kFeedbackLong);
     }, this);
 #ifdef EB_HAVE_QML
     menu->setNavGraph(themedPanelHost_ ? themedPanelHost_->navGraph() : nullptr);
@@ -5799,7 +5911,8 @@ void MainWindow::onSwitchProfile()
     // classic Cancel button (which mustChoose hides). The classic ProfileDialog path below stays for classic mode.
     if (themedHomeEnabled() && themedPanelHost_) { presentProfilePicker(/*mustChoose*/ false); return; }
 #endif
-    auto* dlg = new ProfileDialog(/*mustChoose*/ false, this);
+    auto* dlg = new ProfileDialog(/*mustChoose*/ false,
+                                  [this](const QString& id) { return profilePasscodeUnlock(id); }, this);
     connect(dlg, &ProfileDialog::passcodeRequested, this,
             [this](const QString& id, std::function<void()> onDone) { profilePasscodeMenu(id, onDone); });
     showDialogPanel(tr("Profiles"), dlg, [this, dlg](int result) {
@@ -5808,8 +5921,7 @@ void MainWindow::onSwitchProfile()
         if (result == QDialog::Accepted && !dlg->selectedId().isEmpty()
             && profilePasscodeUnlock(dlg->selectedId()))
         {
-            ProfileStore::setCurrent(dlg->selectedId());
-            passcodeTickets_.clear();
+            markProfileEntered(dlg->selectedId());
         }
         // This entry point lives on Home; openHome() switches back and refreshes for the active profile
         // (covers a switched user, a deletion repointing "current", or an edited name/icon).
@@ -6279,11 +6391,7 @@ void MainWindow::chooseProfile(const QString& id, bool startup)
     // the pad puts the user back on the profile list with their selection intact, and mustChoose's no-escape
     // contract still holds because nothing was popped.
     if (!profilePasscodeUnlock(id)) return;
-    ProfileStore::setCurrent(id);
-    // A profile has actually been entered — every outstanding grant is spent. Without this, switching away
-    // and back inside the ticket window would walk straight in, which is precisely the moment the lock is
-    // for (someone picks up the remote after you leave the room).
-    passcodeTickets_.clear();
+    markProfileEntered(id);
     ItemMarks::invalidate(); // drop the previous profile's marks cache NOW (no signal fires) so the fresh home
                              // filters/labels against the new profile's hidden/completion/tags, not the old one's
     ConsumptionStats::invalidate(); // likewise drop the previous profile's stats cache so accrual/display key off

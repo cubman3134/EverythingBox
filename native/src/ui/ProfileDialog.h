@@ -13,7 +13,15 @@ class ProfileDialog : public QDialog
 {
     Q_OBJECT
 public:
-    explicit ProfileDialog(bool mustChoose, QWidget* parent = nullptr);
+    // `unlockGate` is the per-profile passcode gate (issue #30), and it is a REQUIRED constructor argument
+    // rather than an optional signal ON PURPOSE. Edit and Delete on a passcode-locked profile are escapes
+    // from the lock — Edit reaches the passcode rows (remove the code, walk in) and Delete defeats "this
+    // profile cannot be entered" for anyone who only wanted it gone — so they carry the same gate the themed
+    // row menu applies. A signal with no connection would silently mean "no gate", which is exactly the
+    // defect this closes; a required argument makes a future third call site a COMPILE error instead.
+    // It runs a nested overlay loop and returns true only when the profile may be acted on.
+    explicit ProfileDialog(bool mustChoose, std::function<bool(const QString& profileId)> unlockGate,
+                           QWidget* parent = nullptr);
     QString selectedId() const { return selectedId_; }
 
     // The set of cute avatar glyphs offered in the name/icon picker — shared with the themed Profiles panel
@@ -35,6 +43,7 @@ signals:
     void passcodeRequested(const QString& profileId, std::function<void()> onDone);
 
 private:
+    bool allowAction(const QString& profileId); // run unlockGate_ (safe against this dialog dying inside it)
     void rebuild();         // (re)draw the list of profile rows
     void createProfile();   // prompt for a name + icon and add it (auto-selects the new profile)
     void editProfile(const QString& id); // rename / re-pick the icon of an existing profile
@@ -45,6 +54,7 @@ private:
                     const QString& passcodeFor = QString());
 
     bool mustChoose_ = false;
+    std::function<bool(const QString&)> unlockGate_;
     QString selectedId_;
     QVBoxLayout* rows_ = nullptr;
     QStackedWidget* stack_ = nullptr; // page 0 = profile list, page 1 = (transient) name/icon picker
