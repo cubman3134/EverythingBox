@@ -14,6 +14,16 @@
 
 namespace SettingsTxn
 {
+    // THREAD AFFINITY: every function here is UI-THREAD ONLY. The transaction state (the active flag and the
+    // snapshot map) is plain unguarded process-wide state — there is no mutex — so calling any of these off
+    // the UI thread is a data race on THAT state.
+    //
+    // This is deliberately NOT a claim that the ini is UI-thread only. It is not: stats accrual, play-time
+    // accrual and download progress write the SAME file from background threads while a settings panel is
+    // open. That stays safe for two separate reasons — QSettings guards its own QConfFile internally, and
+    // those families are out of scope (see inScope) so the transaction never reads or restores them. What
+    // must stay on the UI thread is this module's state, not the file it talks to.
+    //
     // Is this key owned by the settings screens? THE LOAD-BEARING PREDICATE. A whole-ini snapshot would be
     // a DATA-LOSS bug: cloud sync, stats accrual, resume positions and the download catalog are all written
     // while a settings panel is open, and rollback would clobber them.
@@ -32,6 +42,20 @@ namespace SettingsTxn
     // How many in-scope keys differ from the snapshot. Compares VALUES, not edits, so changing something
     // and changing it back reads clean and never prompts. The prompt states this count — never the values,
     // which would leak masked credential rows.
+    //
+    // COST CONTRACT — CALL ON NAVIGATION EVENTS ONLY. dirtyCount() is O(ALL KEYS IN THE INI), not O(settings
+    // keys), and isDirty() is dirtyCount() so it costs exactly the same. Noticing a key CREATED since begin()
+    // can only be done by scanning, and QSettings::allKeys() materialises a fresh QString for every key in
+    // the file. The scan is load-bearing and must stay — but note the families it walks are precisely the
+    // ones the transaction IGNORES (resume/, recent/, marks/, stats/, playstats/, pcgames/, downloads/), and
+    // those are the UNBOUNDED ones: the cost grows with the size of the user's library, not with the size of
+    // the settings screen.
+    //
+    // So call these from a discrete navigation event — a Back / Save / Discard handler, a panel close. NEVER
+    // bind them to a QML property, a paint or layout path, a focus-changed handler, or anything else that
+    // runs per keypress. On the 32-bit armv7 Android TV box with a multi-thousand-key ini, that shape costs a
+    // full-file scan plus thousands of QString allocations on EVERY arrow press. This is the contract
+    // Tasks 2-3 must honour.
     int  dirtyCount();
     bool isDirty();
 
