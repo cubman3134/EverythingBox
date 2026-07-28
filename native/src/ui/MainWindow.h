@@ -22,6 +22,7 @@ class RetroView;
 class EbookView;
 class ReaderChromeHost;
 class ThemedPanelHost;
+class ThemePickerHost;
 class PdfView;
 class ComicView;
 class LibraryView;
@@ -356,6 +357,20 @@ private:
     void chooseProfile(const QString& id);                       // setCurrent + openHome (the finish for both variants)
     void quitConfirmFromStartup();                               // mustChoose Back: confirm quit, or re-present the list
 
+    // ---- The forced first-run theme step (roadmap #57) ----
+    // Presented from chooseProfile when the newly-current profile has no theme stored yet; on pick it stores the
+    // choice and runs the openHome() it displaced.
+    //
+    // VOID, and `afterPick` runs EXACTLY ONCE on EVERY path that does not present: this method owns the
+    // "the user always reaches a home screen" guarantee, so no caller can drop the continuation. The one such
+    // path today is ThemePickerHost::present() REFUSING (nothing installed — see its contract): with no theme on
+    // disk there is nothing to pick and nothing to preview, and showHomeScreen() already falls back to the classic
+    // home with a "No themes found" notice. Leaving the user on a refused picker would PIN them — in mustChoose
+    // mode Back is a quit-confirm and there is no other exit. Defined with the rest of the themed startup surfaces
+    // (QML builds only), like chooseProfile itself.
+    void presentThemePick(std::function<void()> afterPick);
+    static QString themePickTitle();                             // one title source for the forced step
+
     // ---- Themed core picker (B2 Task 5): SettingsDialog surface on the Nav Contract. ----
     void presentEmulatorCorePicker();                            // per-system core Choice rows (nested on the hub)
     void editCoreOptions(const QString& systemId);               // per-core options page as a nested panel level
@@ -409,6 +424,10 @@ private:
     // a non-themed origin falls back to the classic home_ (the original behaviour). (B2 Task 6, item 1.)
     QWidget* readerOrigin_ = nullptr;
     ThemedPanelHost* themedPanelHost_ = nullptr; // themed settings-panel surface (B2); null without QML
+    // The ONE theme-chooser surface (roadmap #57): the forced first-run step AND Appearance ▸ Theme. A persistent
+    // stack page like themedPanelHost_, because it must be presentable PRE-HOME (at first run home_ does not exist
+    // yet). Null without QML.
+    ThemePickerHost* themePickerHost_ = nullptr;
     // Async signal hookups the themed General panel installs (Trakt live status). The host persists across
     // presentations, so — unlike classic's child-label connections that auto-drop on panel teardown — we own
     // these and disconnect them on each (re)present of General.
