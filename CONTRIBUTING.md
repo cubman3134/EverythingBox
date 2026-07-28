@@ -158,4 +158,4 @@ Use the issue templates in `.github/ISSUE_TEMPLATE/`. For a bug, the log at
 diagnosis — Settings ▸ Debug shows its tail in-app and can open its folder.
 
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
-Contributions are accepted under the [MIT licence](LICENSE).
+Contributions are accepted under the [GNU General Public License v3.0](LICENSE).
