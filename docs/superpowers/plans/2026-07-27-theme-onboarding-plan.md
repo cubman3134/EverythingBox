@@ -1244,8 +1244,8 @@ ls "$SCRATCH"/themes2
 
 Expected: `Channels`, `THEME_FORMAT.md`, `Triple`.
 
-Then remove every `cloud/*` and `sync/*` line from `$SCRATCH/everythingbox.ini` (and the legacy
-`mymediavault.ini` if present). Verify none remain:
+Then remove every `cloud/*` and `sync/*` line from **every** `.ini` in `$SCRATCH` — the current one
+and any pre-rebrand file still sitting beside it. Verify none remain:
 
 ```bash
 grep -c -E '^(cloud|sync)/' "$SCRATCH"/*.ini
