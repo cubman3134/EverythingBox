@@ -63,15 +63,39 @@ clobber them.
 "exclude everything device-local" — `display/mode`, `roms/folder`, `library/folder` and
 `emulators/root` are all device-local *and* are settings rows a user must be able to discard.
 
-Excluded:
+Excluded — **prefix** matches:
 
 - Everything `CloudMerge` owns, matching `CloudSync::isPerItemStoreKey` exactly: `resume/`,
   `recent/`, `marks/`, `favorites/`, `playlists/`, `stats/`, `playstats/`, `deleted/`.
 - `cloud/` — OAuth tokens written by the sign-in flow. Signing in is not a setting you discard.
 - `device/` — this install's identity and one-shot migration flags.
-- `downloads*` and `pcgames/` — catalogs written by background download and import.
+- `pcgames/` — catalog written by the PC-game importer.
+- `addon.remote.manifest.` and `addon.update.etag.` — addon caches written when a background network
+  reply lands (`AddonManager::refreshRemoteManifests` / `checkAddonUpdates`, both kicked from the
+  constructor). Discarding the manifest cache after `reload()` already rebuilt the source list from it
+  leaves the two disagreeing until the next launch. The prefixes are long on purpose: a bare `addon.`
+  would swallow the settings rows below.
+- `downloads` and `downloads/` — the background download catalog, matched as an exact key **and** a
+  family so a sibling like `downloadsPanel/x` is not swept up.
 
-Everything else is in scope.
+Excluded — **exact** key matches. Each of these is written by an async callback but sits in a group
+whose other keys are genuine user-entered settings, so a prefix would make those undiscardable:
+
+- `trakt/access`, `trakt/refresh`, `trakt/expiry` — rewritten from the `QNetworkReply::finished`
+  lambda in `TraktClient::ensureValidToken`, i.e. during scrobbling, which runs while a settings panel
+  is open. Trakt **rotates** the refresh token, so restoring the snapshot puts a consumed token back
+  and permanently breaks the account link. `trakt/clientId` / `trakt/clientSecret` stay **in** scope.
+- `ra/user`, `ra/token` — written from rcheevos' async login callback. `ra/apikey` stays **in** scope.
+- `addon.stremio.seeded`, `addon.debridio.removed`, `addon.cinemeta.removed`,
+  `addon.cinemeta.removed2`, `addon.torrentio.seeded`, `addon.torrentio.host.migrated` — the one-shot
+  seed/migration latches from `seedDefaultStremioSources()`, the same shape as the `device/` flags.
+  `addon.enabled.<id>` and `addon.remote.urls` stay **in** scope.
+
+Everything else is in scope. `player/volume` is a deliberate keep: the player-page slider writes it,
+but that surface and the settings area cannot be open at once, so it cannot move mid-visit.
+
+Every exclusion is pinned in `probe_settingstxn` §1 **as a pair** — the excluded key out of scope, and
+the neighbouring user-entered row still in it. The pairing is what stops a future sloppy prefix.
 
 `CloudSync::isDeviceLocalKey` / `isPerItemStoreKey` are the precedent for this *shape* of
 classification — a pure key predicate with a documented rationale per family. `inScope` reuses the
@@ -116,7 +140,9 @@ is one keypress, and neither destructive option sits under the default cursor.
 **A remote bundle applying mid-panel.** `CloudSync::applySettingsJson` writes in-scope keys. If that
 lands while a txn is open, a later rollback would silently undo another device's changes. So an apply
 while `active()` **commits** the transaction first. Losing the ability to discard is the correct
-trade against clobbering a peer.
+trade against clobbering a peer. That guard lives in `CloudSync`'s translation unit, which
+`probe_settingstxn` does not link, so it is pinned in `probe_cloudmerge` §16c instead — without that
+case, deleting the guard passed CI.
 
 **Masked credential rows** revert like any other key. They cannot be shown in a diff, and nothing may
 special-case them into being displayed — the prompt says how many settings changed, never which

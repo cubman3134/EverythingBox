@@ -82,6 +82,44 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::inScope(QStringLiteral("downloads/items")) == false);
     CHECK(SettingsTxn::inScope(QStringLiteral("pcgames/abc/exe")) == false);
 
+    // ---- 1b. inScope: keys written by an ASYNC CALLBACK, and their in-scope NEIGHBOURS ------------
+    // Each pair is the whole point: the excluded key must be out, AND the user-entered row sitting next to
+    // it in the same group must still be IN. Without the second half of each pair, a future "just exclude
+    // trakt/ / ra/ / addon." would look correct here while silently making real settings undiscardable.
+
+    // Trakt OAuth tokens: rewritten from TraktClient::ensureValidToken's QNetworkReply::finished lambda
+    // (i.e. during scrobbling) while a settings visit is open. Trakt rotates the refresh token, so a Discard
+    // that restored the consumed one would permanently break the account link.
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/access")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/refresh")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/expiry")) == false);
+    // ...but the credentials the USER types in Settings must stay discardable.
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientId")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientSecret")) == true);
+
+    // RetroAchievements session credentials, written from rcheevos' async login callback.
+    CHECK(SettingsTxn::inScope(QStringLiteral("ra/user")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("ra/token")) == false);
+    // ...but the web-API key typed in Settings is an ordinary settings row.
+    CHECK(SettingsTxn::inScope(QStringLiteral("ra/apikey")) == true);
+
+    // Addon caches written when a background network reply lands (refreshRemoteManifests /
+    // checkAddonUpdates), plus the one-shot seed/migration latches.
+    CHECK(SettingsTxn::inScope(QStringLiteral("addon.remote.manifest.9f8e7d6c5b4a39281706")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("addon.update.etag.com.example.addon")) == false);
+    for (const char* k : { "addon.stremio.seeded", "addon.debridio.removed", "addon.cinemeta.removed",
+                           "addon.cinemeta.removed2", "addon.torrentio.seeded",
+                           "addon.torrentio.host.migrated" })
+        CHECK(SettingsTxn::inScope(QString::fromLatin1(k)) == false);
+    // ...but the Add-ons screen's own rows are settings: the per-source enable toggle and the URL list a
+    // user adds to / removes from. A blanket "addon." prefix would swallow both.
+    CHECK(SettingsTxn::inScope(QStringLiteral("addon.enabled.com.example.addon")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("addon.remote.urls")) == true);
+    // And a key that merely STARTS like an excluded one is not swept up by the long prefixes.
+    CHECK(SettingsTxn::inScope(QStringLiteral("addon.remote.manifestPolicy")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("traktUi/lastTab")) == true);
+    CHECK(SettingsTxn::inScope(QStringLiteral("raBrowse/sort")) == true);
+
     // ---- 2. inScope: DEVICE-LOCAL BUT IN SCOPE ----------------------------------------------------
     // These are the cases a naive "exclude everything CloudSync::isDeviceLocalKey covers" implementation
     // gets WRONG. They are per-device AND they are settings rows a user must be able to discard.
@@ -93,6 +131,9 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::inScope(QStringLiteral("subs/language")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("themedHome/theme/p1")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("playback/autoplayNext")) == true);
+    // Written by the player page's volume slider rather than a settings row, and deliberately left in scope
+    // — the two surfaces cannot be open at once, so the write cannot land mid-visit (see SettingsTxn.cpp).
+    CHECK(SettingsTxn::inScope(QStringLiteral("player/volume")) == true);
     // A prefix that merely STARTS like an excluded one must not be excluded by a sloppy startsWith.
     CHECK(SettingsTxn::inScope(QStringLiteral("statsPanel/lastTab")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("recentlyUsed/x")) == true);
