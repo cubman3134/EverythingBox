@@ -1,6 +1,7 @@
 <RCC>
   <qresource prefix="/theme2">
     <file alias="ThemeView.qml">../src/theme2/qml/ThemeView.qml</file>
+    <file alias="ThemePicker.qml">../src/theme2/qml/ThemePicker.qml</file>
     <file alias="Theme.js">../src/theme2/qml/Theme.js</file>
     <file alias="elements/Text.qml">../src/theme2/qml/elements/Text.qml</file>
     <file alias="elements/DateTime.qml">../src/theme2/qml/elements/DateTime.qml</file>
