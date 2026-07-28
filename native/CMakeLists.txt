@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.77 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.78 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -262,6 +262,21 @@ if(EVERYTHINGBOX_BUILD_APP)
     set_target_properties(everythingbox PROPERTIES OUTPUT_NAME "EverythingBox") # the on-disk exe is EverythingBox.exe
     # On macOS, produce an EverythingBox.app bundle so macdeployqt can bundle Qt + libmpv into a .dmg.
     set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE TRUE)
+    # macOS app icon. Two halves, and BOTH are required — a bundle with only one of them shows the
+    # generic app tile: the .icns has to be COPIED into Contents/Resources (that is what
+    # MACOSX_PACKAGE_LOCATION on the source file does; the RESOURCE property would also install the
+    # source file itself), and CFBundleIconFile has to NAME it. Qt's stock macOS Info.plist template
+    # already carries `<key>CFBundleIconFile</key><string>${MACOSX_BUNDLE_ICON_FILE}</string>`, so
+    # setting that property is enough here and no custom plist is needed (iOS is a different story —
+    # see the IOS block below). The value is the basename WITHOUT the extension per Apple's plist
+    # convention; the loader appends .icns.
+    if(APPLE AND NOT IOS)
+        target_sources(everythingbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/resources/appicon.icns")
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/resources/appicon.icns"
+            TARGET_DIRECTORY everythingbox
+            PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+        set_target_properties(everythingbox PROPERTIES MACOSX_BUNDLE_ICON_FILE "appicon")
+    endif()
     # On Windows, build as a GUI-subsystem app so no console window opens alongside the main window.
     # qt_add_executable links Qt's EntryPoint, which supplies the WinMain that forwards to main(); all
     # diagnostics go to the log file instead of the console (see main.cpp's message handler).
@@ -823,6 +838,25 @@ if(EVERYTHINGBOX_BUILD_APP)
             MACOSX_BUNDLE_BUNDLE_NAME "EverythingBox"
             MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
             MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}")
+
+        # iOS app icon. iOS is the one platform that will NOT take a file: it ignores .icns entirely
+        # and ignores loose PNGs in the bundle, and finds the icon only via a COMPILED asset catalog
+        # named by CFBundleIconName. So all three of these are load-bearing:
+        #   1. the .xcassets is a bundle RESOURCE, so Xcode runs actool over it (adding the bare
+        #      .appiconset instead compiles nothing — hence native/ios/Assets.xcassets/);
+        #   2. ASSETCATALOG_COMPILER_APPICON_NAME tells actool WHICH set in the catalog is the app
+        #      icon (without it the images are compiled but never marked as the icon);
+        #   3. CFBundleIconName tells the springboard to look for it — and Qt's stock iOS plist
+        #      template has no such key, which is why we hand Qt our own template (it keeps every Qt
+        #      key incl. the @qt_ios_launch_screen_plist_entry@ substitution; see the file's header).
+        # Miss any one and the app ships with a blank default tile.
+        set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets"
+            TARGET_DIRECTORY everythingbox
+            PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+        target_sources(everythingbox PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ios/Assets.xcassets")
+        set_target_properties(everythingbox PROPERTIES
+            XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "AppIcon"
+            MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in")
 
         # Stage the stock themes2/ + first-party addons into the bundle (iOS bundles are shallow — resources
         # sit at the bundle root). AssetBootstrap extracts them into the writable data dir on first launch,
