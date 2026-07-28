@@ -93,7 +93,13 @@ int main(int argc, char** argv)
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/access")) == false);
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/refresh")) == false);
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/expiry")) == false);
-    // ...but the credentials the USER types in Settings must stay discardable.
+    // The Trakt calendar cache (#23), written from TraktClient::fetchMyShowsCalendar's finished lambda —
+    // a background fetch whose reply can land mid-settings-visit. In scope it would put a phantom dirty
+    // count in the exit prompt and let Discard throw away a good calendar.
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/calendarCache")) == false);
+    CHECK(SettingsTxn::inScope(QStringLiteral("trakt/calendarCachedAt")) == false);
+    // ...but the credentials the USER types in Settings must stay discardable. This is the half that
+    // fails if anyone ever "simplifies" the four exclusions above into a "trakt/" prefix.
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientId")) == true);
     CHECK(SettingsTxn::inScope(QStringLiteral("trakt/clientSecret")) == true);
 

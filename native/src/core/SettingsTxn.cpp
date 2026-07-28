@@ -102,6 +102,19 @@ bool SettingsTxn::inScope(const QString& key)
         // token back and permanently break the account link, on top of a prompt reporting changes the user
         // never made. trakt/clientId and trakt/clientSecret are typed into Settings and STAY in scope.
         "trakt/access", "trakt/refresh", "trakt/expiry",
+        // The Trakt calendar cache (#23), written by TraktClient::fetchMyShowsCalendar's
+        // QNetworkReply::finished lambda — a BACKGROUND fetch kicked at startup and on refresh, whose
+        // reply lands at an arbitrary moment including mid-settings-visit. Exactly the addon.remote.*
+        // hazard: in scope, a reply landing during a visit would add a phantom dirty count to the exit
+        // prompt ("2 settings changed" the user never touched), and a Discard would revert a good
+        // calendar to the previous one — throwing away the fetch and leaving an offline launch showing
+        // staler data than it had already downloaded. Nothing in Settings reads or writes these.
+        //
+        // EXACT keys, deliberately, and this is the whole reason this list is separate from the prefix
+        // one above: a "trakt/" prefix would also swallow trakt/clientId and trakt/clientSecret, which
+        // the user TYPES into Settings and must be able to discard. probe_settingstxn §1b pins both
+        // halves.
+        "trakt/calendarCache", "trakt/calendarCachedAt",
         // RetroAchievements session credentials, written from rcheevos' async login callback (loginCb in
         // Achievements.cpp). Sign in, then Discard, and the stored token reverts while the in-memory session
         // stays logged in. ra/apikey — the web-API key typed in Settings — STAYS in scope.
