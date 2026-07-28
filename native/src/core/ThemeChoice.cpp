@@ -6,8 +6,11 @@
 
 #include <QSettings>
 
-// Test-only redirect (see ThemeChoice.h). Empty means "production", which is the ONLY state the app ever
-// sees — the check below costs one isEmpty() and leaves the production static exactly as it was.
+// Test-only redirect (see ThemeChoice.h). The whole seam — the statics, the setter, and the branch in
+// store() — is compiled ONLY for probe_theme, which is the only target that defines the macro. In the app
+// build none of it exists, so store() is byte-for-byte the plain production static it always was and there is
+// no way, accidental or otherwise, to point this unit at another file.
+#ifdef EB_THEMECHOICE_TEST_SEAM
 static QString    gTestIniPath;
 static QSettings* gTestStore = nullptr;
 
@@ -17,16 +20,19 @@ void ThemeChoice::setIniPathForTesting(const QString& path)
     gTestStore   = nullptr;
     gTestIniPath = path;
 }
+#endif
 
 // The file-local store() idiom every other core unit uses (ProfileStore.cpp:14, CloudMerge.cpp:21) — the
 // shared portable ini, opened once. Keeping it local is what lets this TU stay QtCore-only.
 static QSettings& store()
 {
+#ifdef EB_THEMECHOICE_TEST_SEAM
     if (!gTestIniPath.isEmpty())
     {
         if (!gTestStore) gTestStore = new QSettings(gTestIniPath, QSettings::IniFormat);
         return *gTestStore;
     }
+#endif
     static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
                        QSettings::IniFormat);
     return s;
@@ -105,12 +111,23 @@ void ThemeChoice::runMigrationForIds(const QStringList& profileIds)
 {
     if (store().value(QLatin1String(kMigratedFlag), false).toBool()) return;
 
-    // The implicit DEFAULT bucket. ProfileStore::list() is EMPTY on any install that never created a named
-    // profile — the common case, not an edge case — and that install's theme lives at ".../default", the
-    // bucket keyFor("") produces and the one ThemeStore::currentName() uses (Theme.cpp:116). Without this,
-    // an empty id list made the plan empty, so the legacy value was fanned out to NOTHING and then deleted.
+    // The implicit DEFAULT bucket, seeded UNCONDITIONALLY — alongside any real profiles, not only when there
+    // are none. Two independent reasons, and only the first is about the empty list:
+    //   * ProfileStore::list() is EMPTY on any install that never created a named profile — the common case,
+    //     not an edge case — and that install's theme lives at ".../default", the bucket keyFor("") produces
+    //     and the one ThemeStore::currentName() uses (Theme.cpp:116). Without this, an empty id list made the
+    //     plan empty, so the legacy value was fanned out to NOTHING and then deleted.
+    //   * A device with profiles can STILL read from ".../default": `profiles/current` is device-local
+    //     (CloudSync.cpp:501) while `profiles/list` SYNCS, so a cloud-restored device legitimately has
+    //     profiles and an empty ProfileStore::currentId(). Seeding the default bucket only when the list is
+    //     empty leaves that device's every read unset, and Task 4 then forces a pick on a user who already
+    //     made one. The default bucket is a real bucket on every install; migrate it like any other.
     QStringList ids = profileIds;
-    if (ids.isEmpty()) ids << QString();
+    ids << QString();
+    // A duplicate id would make `existing` (a hash, so deduped) smaller than `ids`, and the "covered" guard
+    // below would then read a fully-covered ini as UNcovered: it early-returns without setting the flag, so
+    // the migration re-runs on every launch, forever. Harmless, but permanent.
+    ids.removeDuplicates();
 
     QHash<QString, QString> existing;
     for (const QString& id : ids)
@@ -140,6 +157,9 @@ void ThemeChoice::runMigrationForIds(const QStringList& profileIds)
     // migration just wrote, and any the user already had. Snapshot the group, remove, put it back. This is
     // load-bearing; probe_theme section 7 (a)/(b)/(e) fail without it.
     QHash<QString, QString> buckets;
+    // childKeys() is DIRECT children only — safe solely because a profile id is a brace-less UUID
+    // (ProfileStore.cpp:139) and so can never contain a '/'; an id that did would sit in a nested group, be
+    // missed by this snapshot, and be destroyed by the remove() below.
     store().beginGroup(QLatin1String(kKeyBase));
     for (const QString& child : store().childKeys()) buckets.insert(child, store().value(child).toString());
     store().endGroup();

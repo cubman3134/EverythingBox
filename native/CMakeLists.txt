@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.86 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.87 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -428,6 +428,10 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ThemeChoice.cpp src/core/ThemeChoice.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_theme PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here. The app target must never define this: without it the setter is
+    # not declared or compiled at all, so an accidental production call is a compile error rather than a
+    # silent process-wide redirect of every theme read and write.
+    target_compile_definitions(probe_theme PRIVATE EB_THEMECHOICE_TEST_SEAM)
     target_link_libraries(probe_theme PRIVATE Qt6::Core)
 
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the

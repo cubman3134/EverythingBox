@@ -79,6 +79,13 @@ namespace ThemeChoice
     // Redirects THIS unit's ini to `path`; an empty path restores the app's real ini. It exists so
     // probe_theme can exercise the ini-backed half (forProfile/setForProfile/runMigrationForIds) against a
     // scratch file in the temp dir, hermetically — that half is where the destructive-migration bug lived and
-    // it had no coverage at all. PRODUCTION MUST NEVER CALL THIS: unset is the app's real ini.
+    // it had no coverage at all.
+    //
+    // PRODUCTION CANNOT CALL THIS: only probe_theme defines EB_THEMECHOICE_TEST_SEAM (native/CMakeLists.txt),
+    // so in the app the symbol does not exist and a call is a compile error. A comment alone was not enough —
+    // an accidental production call would silently redirect every theme read and write for the whole process
+    // lifetime, and the assert that would have caught it is compiled out of the Release build we ship.
+#ifdef EB_THEMECHOICE_TEST_SEAM
     void    setIniPathForTesting(const QString& path);
+#endif
 }

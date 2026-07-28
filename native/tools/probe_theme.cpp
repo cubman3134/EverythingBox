@@ -250,6 +250,39 @@ int main()
             CHECK(has(p, kLegacy) == false);
         }
 
+        // (f) THE CLOUD-RESTORE CASE: profiles EXIST and the default bucket still has to be migrated.
+        //     `profiles/current` is device-local (CloudSync.cpp:501) while `profiles/list` SYNCS, so a device
+        //     restored from the cloud legitimately has profiles with an EMPTY currentId() — every read then
+        //     goes to ".../default". If the default bucket is only seeded when the profile list is empty, that
+        //     bucket stays unwritten here, forProfile("") returns empty, and the user who already picked a
+        //     theme is forced to pick again. The default bucket must be covered ALONGSIDE the real profiles.
+        {
+            const QString p = ini("f");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Channels"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Channels"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Channels"));
+            CHECK(has(p, kLegacy) == false);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+            CHECK(ThemeChoice::forProfile(QString()) == QStringLiteral("Channels"));
+        }
+
+        // (g) A duplicated id must not wedge the migration. Duplicates make `existing` (a hash, deduped)
+        //     smaller than `ids`, so the "covered" guard reads a fully-covered ini as UNcovered, early-returns
+        //     without setting the flag, and re-runs on every launch forever. Harmless but permanent.
+        {
+            const QString p = ini("g");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            seed(p, QStringLiteral("themedHome/theme/p1"), QStringLiteral("Grid"));
+            seed(p, QStringLiteral("themedHome/theme/default"), QStringLiteral("Grid"));
+            ThemeChoice::setIniPathForTesting(p);
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p1") });
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Grid"));
+            CHECK(has(p, kLegacy) == false);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+        }
+
         // Back to production, then wipe every scratch file: this probe leaves NOTHING on disk.
         ThemeChoice::setIniPathForTesting(QString());
         for (const QString& p : scratch)
