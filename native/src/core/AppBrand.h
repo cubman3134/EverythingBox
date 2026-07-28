@@ -21,6 +21,13 @@ namespace AppBrand
     inline constexpr const char* kConfigHeader= "X-EB-Config";
     inline constexpr const char* kEnvPrefix   = "EB_";
 
+    // The project's website. Used for the pages the OAuth loopback server hands the browser off
+    // to after Google sign-in (see CloudSync::signIn). Kept here with the other identity strings
+    // so a domain change is a one-file edit, same as the rename this file exists for.
+    inline constexpr const char* kSiteUrl        = "https://everything-box.com";
+    inline constexpr const char* kAuthSuccessUrl = "https://everything-box.com/auth/success";
+    inline constexpr const char* kAuthErrorUrl   = "https://everything-box.com/auth/error";
+
     // The previous identity. Referenced ONLY by BrandMigration and by the lookups that tolerate it until
     // migration is confirmed. Nothing else in the tree may name these — the probe gate enforces that.
     namespace Legacy
