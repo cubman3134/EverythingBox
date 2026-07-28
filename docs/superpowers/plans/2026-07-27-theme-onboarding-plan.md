@@ -8,6 +8,25 @@
 
 **Tech Stack:** Qt 6.8.3 (Widgets, Qml/Quick, QuickWidgets), C++17, CMake. Headless console probes for verification. No new dependencies.
 
+## Amendment (after Task 1 review — binding on Tasks 2–5)
+
+Task 1's review found two Critical defects in this plan's own Task 1 code. Both are fixed in the
+shipped `ThemeChoice`, and **the code in Task 1 below is now historical — the header on disk is the
+truth.** Two contract changes bind the remaining tasks:
+
+1. **`needsPick` takes ONE argument: `bool needsPick(const QString& stored)`,** and returns true only
+   when nothing is stored. It no longer consults the installed list. Reason: the theme key is not in
+   `CloudSync::isDeviceLocalKey`'s carve-out, so it SYNCS — under the old two-argument rule a device
+   missing a theme folder would force a pick, write, and silently overwrite the other device's
+   choice. `resolve()` already covers a missing folder invisibly, which is the correct behaviour.
+   Do not restore the old rule; it looks more thorough and is wrong.
+2. **`ThemeChoice` gained two seams:** `runMigrationForIds(const QStringList&)` and
+   `setIniPathForTesting(const QString&)`, both used by `probe_theme` to exercise the ini-backed half
+   hermetically. Leave them alone.
+
+Also fixed there, for context: `QSettings::remove("themedHome/theme")` removes the key *and its whole
+subtree*, so the migration was deleting the per-profile values it had just written.
+
 ## Global Constraints
 
 These bind every task. Values are verbatim from the spec.
@@ -1120,8 +1139,7 @@ comment above it with:
         QTimer::singleShot(0, this, [this] { maybeOfferTvMode(); });
     };
 #ifdef EB_HAVE_QML
-    if (themedHomeEnabled() && themePickerHost_
-        && ThemeChoice::needsPick(ThemeChoice::forProfile(id), ThemeEngine::availableThemes()))
+    if (themedHomeEnabled() && themePickerHost_ && ThemeChoice::needsPick(ThemeChoice::forProfile(id)))
         { presentThemePick(finish); return; }
 #endif
     finish();
