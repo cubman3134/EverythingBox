@@ -1,7 +1,8 @@
 // Headless check of the per-profile theme choice (roadmap #57). ThemeChoice owns the theme setting: the
 // per-profile key, whether a profile still owes us a pick, what to actually render, and the one-time
 // migration that carries both the global->per-profile move and the XMB->Triple folder rename. Sections 1-6
-// pin the PURE decisions (no ini, no filesystem) verbatim, so the UI layers can never drift from them.
+// pin the PURE decisions (no ini, no filesystem) verbatim, so the UI layers can never drift from them —
+// including legacyEffectiveGlobal (4b), the "an upgrade's appearance never changes on update" guarantee.
 //
 // Section 7 covers the INI-BACKED half — forProfile/setForProfile/runMigrationForIds. That half had no
 // coverage at all, which is exactly why a migration that could destroy the legacy value survived review and
@@ -77,6 +78,24 @@ int main()
     CHECK(ThemeChoice::renameLegacyFolder(QStringLiteral("Channels")) == QStringLiteral("Channels"));
     CHECK(ThemeChoice::renameLegacyFolder(QStringLiteral("Grid")) == QStringLiteral("Grid"));
     CHECK(ThemeChoice::renameLegacyFolder(QString()).isEmpty());
+
+    // ---- 4b. legacyEffectiveGlobal: what an UPGRADE was actually rendering before #57 ----------------
+    // The pre-#57 read was store().value("themedHome/theme", "Default"), so an upgrade user who never touched
+    // the setting was rendering "Default". planMigration seeds nothing for an empty global and resolve("")
+    // now prefers "Triple", so without this the spec's "nobody's appearance changes on update" would be false.
+    const QStringList kUpgraded = { QStringLiteral("Channels"), QStringLiteral("Default"),
+                                    QStringLiteral("Triple") };
+    // (a) An explicit global always wins, upgrade or not, installed or not.
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QStringLiteral("Grid"), true,  kUpgraded) == QStringLiteral("Grid"));
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QStringLiteral("Grid"), false, kUpgraded) == QStringLiteral("Grid"));
+    // (b) Upgrade, no global, "Default" still on disk -> preserve "Default".
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QString(), true, kUpgraded) == QStringLiteral("Default"));
+    // (c) Upgrade, no global, "Default" NOT installed -> empty, so they get the pick rather than a broken theme.
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QString(), true, kShipped).isEmpty());
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QString(), true, {}).isEmpty());
+    // (d) FRESH install, no global -> empty even when "Default" happens to be installed. A fresh install has
+    //     nothing to preserve; it owes a pick.
+    CHECK(ThemeChoice::legacyEffectiveGlobal(QString(), false, kUpgraded).isEmpty());
 
     // ---- 5. planMigration: the table --------------------------------------------------------------
     const QStringList twoProfiles = { QStringLiteral("p1"), QStringLiteral("p2") };
@@ -176,7 +195,7 @@ int main()
         {
             const QString p = ini("a");
             seed(p, kLegacy, QStringLiteral("XMB"));
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") }, kShipped);
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Triple"));
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Triple"));
             CHECK(has(p, kLegacy) == false);
@@ -193,7 +212,7 @@ int main()
         {
             const QString p = ini("b");
             seed(p, kLegacy, QStringLiteral("Channels"));
-            ThemeChoice::runMigrationForIds({});
+            ThemeChoice::runMigrationForIds({}, kShipped);
             CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Channels"));
             CHECK(has(p, kLegacy) == false);
             CHECK(readBack(p, kFlag) == QStringLiteral("true"));
@@ -206,17 +225,17 @@ int main()
         {
             const QString p = ini("c");
             seed(p, kLegacy, QStringLiteral("Channels"));
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kShipped);
             const QString after = readBack(p, QStringLiteral("themedHome/theme/p1"));
             CHECK(after == QStringLiteral("Channels"));
 
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });         // flag-guarded
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kShipped);         // flag-guarded
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == after);
             CHECK(has(p, kLegacy) == false);
 
             seed(p, kFlag, QStringLiteral("false"));                          // simulate a lost flag
             ThemeChoice::setIniPathForTesting(p);                             // re-read the file we just poked
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kShipped);
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == after);
             CHECK(has(p, kLegacy) == false);
             CHECK(readBack(p, kFlag) == QStringLiteral("true"));
@@ -244,7 +263,7 @@ int main()
             seed(p, kLegacy, QStringLiteral("Channels"));
             seed(p, QStringLiteral("themedHome/theme/p1"), QStringLiteral("Grid"));
             ThemeChoice::setIniPathForTesting(p);
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") }, kShipped);
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Grid"));   // kept
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Channels"));
             CHECK(has(p, kLegacy) == false);
@@ -259,7 +278,7 @@ int main()
         {
             const QString p = ini("f");
             seed(p, kLegacy, QStringLiteral("Channels"));
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") }, kShipped);
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Channels"));
             CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Channels"));
             CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Channels"));
@@ -268,20 +287,80 @@ int main()
             CHECK(ThemeChoice::forProfile(QString()) == QStringLiteral("Channels"));
         }
 
-        // (g) A duplicated id must not wedge the migration. Duplicates make `existing` (a hash, deduped)
-        //     smaller than `ids`, so the "covered" guard reads a fully-covered ini as UNcovered, early-returns
-        //     without setting the flag, and re-runs on every launch forever. Harmless but permanent.
+        // (g) THE UPGRADE WHO NEVER SET A THEME, with "Default" still on disk. No legacy global, so
+        //     planMigration alone would write nothing — and resolve("") prefers "Triple", so their home would
+        //     silently change appearance on update. AssetBootstrap is additive, so "Default" IS still installed
+        //     for them: the migration must seed it. Profiles EXIST here, which is the upgrade discriminator.
         {
             const QString p = ini("g");
-            seed(p, kLegacy, QStringLiteral("Channels"));
-            seed(p, QStringLiteral("themedHome/theme/p1"), QStringLiteral("Grid"));
-            seed(p, QStringLiteral("themedHome/theme/default"), QStringLiteral("Grid"));
-            ThemeChoice::setIniPathForTesting(p);
-            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p1") });
-            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Grid"));
-            CHECK(has(p, kLegacy) == false);
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kUpgraded);
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Default"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Default"));
+            CHECK(ThemeChoice::needsPick(ThemeChoice::forProfile(QStringLiteral("p1"))) == false);
             CHECK(readBack(p, kFlag) == QStringLiteral("true"));
         }
+
+        // (h) The SAME upgrade, but "Default" is NOT installed (they deleted it, or a mobile install whose
+        //     assets never carried it). Seeding a folder that is nowhere on disk would store a choice the user
+        //     never made and rob them of the pick, so nothing is written and needsPick stays true.
+        {
+            const QString p = ini("h");
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kShipped);
+            CHECK(has(p, QStringLiteral("themedHome/theme/p1")) == false);
+            CHECK(has(p, QStringLiteral("themedHome/theme/default")) == false);
+            CHECK(ThemeChoice::needsPick(ThemeChoice::forProfile(QStringLiteral("p1"))) == true);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+        }
+
+        // (i) A genuinely FRESH install — NO profiles yet (the ctor migration runs before main.cpp's startup
+        //     picker can create one) — must NOT inherit "Default" even though it is sitting there installed.
+        //     Nothing has been chosen on this device, so the forced pick is the correct outcome.
+        {
+            const QString p = ini("i");
+            ThemeChoice::runMigrationForIds({}, kUpgraded);
+            CHECK(has(p, QStringLiteral("themedHome/theme/default")) == false);
+            CHECK(ThemeChoice::needsPick(ThemeChoice::forProfile(QString())) == true);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+        }
+
+        // (j) An explicit legacy global still beats the "Default" preservation — the user's own choice wins
+        //     over the pre-#57 hardcoded fallback, whatever is installed.
+        {
+            const QString p = ini("j");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            ThemeChoice::setIniPathForTesting(p);
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") }, kUpgraded);
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Channels"));
+            CHECK(has(p, kLegacy) == false);
+        }
+
+        // (k) THE CLOUD-RESTORE RE-RUN (rerunMigrationAfterRestore). The device migrated at startup against an
+        //     empty ini and set the flag; the flag is device-local, so the bundle that lands afterwards — here
+        //     an OLD-version device's synced legacy scalar plus its profile, and no per-profile keys — can
+        //     never clear it and would never be migrated. The re-run must carry the value, drop the global, and
+        //     leave a per-profile key the bundle DID supply alone.
+        {
+            const QString p = ini("k");
+            ThemeChoice::runMigrationForIds({}, kShipped);                 // startup, empty ini -> flag set
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+            seed(p, kLegacy, QStringLiteral("Grid"));                      // ...then the bundle lands
+            seed(p, QStringLiteral("themedHome/theme/p2"), QStringLiteral("Channels")); // bundle's own per-profile key
+            ThemeChoice::setIniPathForTesting(p);
+            // rerunMigrationAfterRestore() reads ProfileStore, which this hermetic probe cannot seed — drive
+            // the same two steps it performs (clear the flag, migrate over the restored ids) directly.
+            { QSettings s(p, QSettings::IniFormat); s.remove(kFlag); s.sync(); }
+            ThemeChoice::setIniPathForTesting(p);
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") }, kShipped);
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Grid"));    // carried
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Channels"));// NOT clobbered
+            CHECK(has(p, kLegacy) == false);                                // the dead global stops syncing onward
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+        }
+
+        // NOTE: the old duplicate-id case is gone with the "covered" guard it existed for. Duplicates could only
+        // ever wedge that guard (a deduped `existing` reading as UNcovered); with the guard removed a repeated
+        // id just writes the same bucket twice, so `ids.removeDuplicates()` guarded nothing real either and both
+        // are gone. Keeping the test would have been keeping a test to justify dead code.
 
         // Back to production, then wipe every scratch file: this probe leaves NOTHING on disk.
         ThemeChoice::setIniPathForTesting(QString());

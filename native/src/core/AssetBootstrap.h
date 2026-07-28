@@ -21,4 +21,17 @@
 namespace AssetBootstrap
 {
     bool run(const QString& sourceRoot, const QString& dataDir, const QString& appVersion);
+
+    // Finish the themes2/XMB -> themes2/Triple rename ON DISK (roadmap #57). run() is additive by design (it
+    // never deletes a theme dir, so user themes survive an upgrade), which means an upgraded install keeps the
+    // retired themes2/XMB folder beside the freshly-extracted themes2/Triple. XMB/theme.json already declared
+    // "name": "Triple", so ThemeEngine::availableThemes() returns TWO folders whose display name is identical
+    // and the picker offers "Triple" twice — the stale row storing a folder no fresh device will ever have.
+    //
+    // This is completing a rename, not deleting a user's theme, and the guard is what makes that true: it
+    // removes ThemeChoice::kRenamedFrom ONLY when ThemeChoice::kFallbackTheme is genuinely installed (a
+    // theme.json on disk). If Triple is absent, XMB is the user's only copy of that theme and is left alone.
+    //
+    // Returns true iff it removed the stale folder.
+    bool retireRenamedTheme(const QString& dataDir);
 }
