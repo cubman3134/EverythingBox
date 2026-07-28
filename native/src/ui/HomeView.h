@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QPointer>
 #include "../addons/AddonModels.h"
+#include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 
 class AddonManager;
 class BingeStore;
@@ -179,6 +180,15 @@ public:
     // level so the "Local Library" folder appears / updates. Cheap no-op if that root isn't showing.
     void onLocalLibraryChanged();
 
+    // The Trakt calendar cache changed — a fetch landed, or the account was connected/disconnected. Re-reads
+    // TraktClient::cachedCalendar() and refreshes whichever surface is showing. HomeView never touches the
+    // network: TraktClient owns the fetch and WRITES the cache, and both statics this reads (cachedCalendar /
+    // calendarAvailable) are the only Trakt API this class needs, so no client pointer is lent here.
+    //
+    // Also the DISCONNECT path: after it, calendarAvailable() is false, traktCal_ is emptied, and the shelf
+    // and folder disappear on the same refresh — there is no state left behind to be shown by a later render.
+    void onTraktCalendarChanged();
+
 signals:
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
     void toastHideRequested();                        // ask MainWindow to dismiss it
@@ -312,6 +322,13 @@ private:
     // The synthetic "Local Library" folder (video category only): this machine's scanned local videos.
     void openLocalLibraryLevel(const QString& marker);   // drill it -> the scanned local videos
     void populateLocalLibrary(const QString& marker);    // (re)build that list from the cached index
+    // The synthetic "Airing Soon" folder + Home shelf (video category only): the connected Trakt account's
+    // episodes airing in the next week. EVERY one of these is gated on traktCalendarItems() being non-empty,
+    // which is itself false whenever TraktClient::calendarAvailable() is false — so an install that never
+    // heard of Trakt gets no folder, no shelf, no header and no placeholder anywhere.
+    MediaCatalog traktCalendarItems() const;             // the built catalog, or an EMPTY one when Trakt is off
+    void openTraktCalendarLevel();                       // drill it -> the episodes airing soon
+    void populateTraktCalendar();                        // (re)build that list from the cached calendar
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT
@@ -463,6 +480,11 @@ private:
     QVector<Level> stack_;       // navigation breadcrumb (top = current view)
     QVector<MediaItem> items_;   // items in the current view (parallel to grid_ rows)
     QVector<int> browseRowMap_;  // themed-browse index -> items_ row (skips synthetic _open/info rows)
+    // The Trakt calendar as last read from TraktClient's on-disk cache. Loaded in the ctor so an OFFLINE
+    // launch already has last week's calendar to draw, and replaced by onTraktCalendarChanged() when a
+    // fetch lands. EMPTY whenever Trakt is not configured/connected — that emptiness is what makes the
+    // shelf and the folder vanish, on top of the calendarAvailable() gate itself.
+    QVector<CalendarEntry> traktCal_;
     bool recentView_ = false;    // true = showing the local "Recent" list (not an addon catalog)
     bool searchEditing_ = false; // search box: false = highlighted (arrows navigate), true = typing
     QVector<int> thumbQueue_;    // item rows awaiting a remote poster load (throttled)
