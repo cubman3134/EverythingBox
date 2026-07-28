@@ -1,13 +1,22 @@
 // Headless check of the per-profile theme choice (roadmap #57). ThemeChoice owns the theme setting: the
 // per-profile key, whether a profile still owes us a pick, what to actually render, and the one-time
-// migration that carries both the global->per-profile move and the XMB->Triple folder rename. Every decision
-// below is a pure function over its arguments (no ini, no filesystem), so this pins the tables verbatim and
-// the UI layers can never drift from them.
+// migration that carries both the global->per-profile move and the XMB->Triple folder rename. Sections 1-6
+// pin the PURE decisions (no ini, no filesystem) verbatim, so the UI layers can never drift from them.
+//
+// Section 7 covers the INI-BACKED half — forProfile/setForProfile/runMigrationForIds. That half had no
+// coverage at all, which is exactly why a migration that could destroy the legacy value survived review and
+// six mutations: every pure-table assertion passed while the ini path threw the value away. It runs against a
+// scratch ini in the temp dir (ThemeChoice::setIniPathForTesting), never the app's real everythingbox.ini,
+// and deletes every file it made before exiting.
 //
 // Prints THEME-OK on success; any failure prints THEME-FAIL <cond> and exits non-zero.
 #include "ThemeChoice.h"
 
+#include <QCoreApplication>
+#include <QDir>
+#include <QFile>
 #include <QHash>
+#include <QSettings>
 #include <QString>
 #include <QStringList>
 #include <cstdio>
@@ -25,24 +34,28 @@ int main()
     CHECK(ThemeChoice::keyFor(QStringLiteral("abc123")) == QStringLiteral("themedHome/theme/abc123"));
     CHECK(ThemeChoice::keyFor(QString()) == QStringLiteral("themedHome/theme/default"));
 
-    // ---- 2. needsPick: unset, set-and-installed, set-but-UNINSTALLED --------------------------------
+    // ---- 2. needsPick: stored-or-not, and NOTHING else ----------------------------------------------
     // A profile with nothing stored owes a pick.
-    CHECK(ThemeChoice::needsPick(QString(), kShipped) == true);
-    // A profile whose theme is installed does not.
-    CHECK(ThemeChoice::needsPick(QStringLiteral("Triple"), kShipped) == false);
-    CHECK(ThemeChoice::needsPick(QStringLiteral("Channels"), kShipped) == false);
-    // A profile whose stored theme is no longer on disk DOES owe a pick — this is the case a naive
-    // "is it empty" check gets wrong, and it is why `installed` is a parameter at all.
-    CHECK(ThemeChoice::needsPick(QStringLiteral("Grid"), kShipped) == true);
-    // ...but not if that theme is still installed (the migrated-user case: cut from the shipped set,
-    // still on their disk, must NOT be re-asked).
-    CHECK(ThemeChoice::needsPick(QStringLiteral("Grid"),
-                                 { QStringLiteral("Channels"), QStringLiteral("Grid"),
-                                   QStringLiteral("Triple") }) == false);
+    CHECK(ThemeChoice::needsPick(QString()) == true);
+    // A profile with a stored choice does not.
+    CHECK(ThemeChoice::needsPick(QStringLiteral("Triple")) == false);
+    CHECK(ThemeChoice::needsPick(QStringLiteral("Channels")) == false);
+    // THE CONTRACT: a stored theme that is NOT installed on this device still does not force a pick.
+    // "themedHome/theme/<id>" SYNCS (it is not in CloudSync::isDeviceLocalKey), so re-asking on a device
+    // that merely lacks the folder would write an answer that syncs back and overwrites the choice made on
+    // the other device. The missing folder is a rendering fact, and resolve() is what covers it:
+    CHECK(ThemeChoice::needsPick(QStringLiteral("Grid")) == false);
+    CHECK(ThemeChoice::resolve(QStringLiteral("Grid"), kShipped) == QStringLiteral("Triple"));
+    // ...and the user's stored choice is still there, untouched, for the device that does have the folder.
+    CHECK(ThemeChoice::resolve(QStringLiteral("Grid"),
+                               { QStringLiteral("Channels"), QStringLiteral("Grid"),
+                                 QStringLiteral("Triple") }) == QStringLiteral("Grid"));
 
     // ---- 3. resolve: all four ordering steps --------------------------------------------------------
-    // (a) stored, when installed.
+    // (a) stored, when installed. Both entries of kShipped, because a `installed.value(0)` mutation makes
+    //     the index-0 name ("Channels") pass by coincidence — "Triple" at index 1 is what actually pins it.
     CHECK(ThemeChoice::resolve(QStringLiteral("Channels"), kShipped) == QStringLiteral("Channels"));
+    CHECK(ThemeChoice::resolve(QStringLiteral("Triple"), kShipped) == QStringLiteral("Triple"));
     // (b) the fallback, when the stored theme is gone.
     CHECK(ThemeChoice::resolve(QStringLiteral("Grid"), kShipped) == QStringLiteral("Triple"));
     CHECK(ThemeChoice::resolve(QString(), kShipped) == QStringLiteral("Triple"));
@@ -109,7 +122,7 @@ int main()
         const QHash<QString, QString> out =
             ThemeChoice::planMigration(QString(), { QStringLiteral("p1") }, {});
         CHECK(out.isEmpty());
-        CHECK(ThemeChoice::needsPick(QString(), kShipped) == true);
+        CHECK(ThemeChoice::needsPick(QString()) == true);
     }
 
     // (f) No profiles at all -> nothing to write, no crash.
@@ -129,6 +142,121 @@ int main()
         CHECK(second.isEmpty());
         // ...and a third run over the SAME state is still empty.
         CHECK(ThemeChoice::planMigration(QStringLiteral("XMB"), twoProfiles, existing).isEmpty());
+    }
+
+    // ---- 7. THE INI-BACKED HALF: forProfile / setForProfile / runMigrationForIds -------------------
+    // Hermetic: every case gets its own scratch ini under QDir::tempPath(), driven through
+    // ThemeChoice::setIniPathForTesting, and all of them are deleted below. The app's real everythingbox.ini
+    // is never opened — nothing here calls AppPaths::dataDir(), and the probe has no QCoreApplication.
+    {
+        const QString stem = QDir::tempPath() + QStringLiteral("/eb-probe-theme-%1-")
+                                                    .arg(QCoreApplication::applicationPid());
+        QStringList scratch;                     // every file made, for the cleanup assert at the end
+        auto ini = [&](const char* tag) {
+            const QString p = stem + QLatin1String(tag) + QStringLiteral(".ini");
+            QFile::remove(p);                    // a previous run must never leak into this one
+            scratch << p;
+            ThemeChoice::setIniPathForTesting(p);
+            return p;
+        };
+        auto seed = [](const QString& path, const QString& key, const QString& value) {
+            QSettings s(path, QSettings::IniFormat); s.setValue(key, value); s.sync();
+        };
+        auto readBack = [](const QString& path, const QString& key) {
+            QSettings s(path, QSettings::IniFormat); s.sync(); return s.value(key).toString();
+        };
+        auto has = [](const QString& path, const QString& key) {
+            QSettings s(path, QSettings::IniFormat); s.sync(); return s.contains(key);
+        };
+        const QString kLegacy  = QStringLiteral("themedHome/theme");
+        const QString kFlag    = QStringLiteral("device/themeChoiceMigrated");
+
+        // (a) A legacy global with TWO profiles: both buckets written (with the rename applied), the global
+        //     gone, the flag set.
+        {
+            const QString p = ini("a");
+            seed(p, kLegacy, QStringLiteral("XMB"));
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Triple"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Triple"));
+            CHECK(has(p, kLegacy) == false);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+            // ...and the accessor agrees with the file.
+            CHECK(ThemeChoice::forProfile(QStringLiteral("p1")) == QStringLiteral("Triple"));
+        }
+
+        // (b) A legacy global with ZERO profiles — the install that never created a named profile, i.e. the
+        //     COMMON case, since ProfileStore::list() returns empty until one is made. The value must land in
+        //     the implicit ".../default" bucket. Before the fix the plan was empty here, so the global was
+        //     fanned out to nothing and then DELETED, with the migrated flag guaranteeing no retry: the
+        //     user's theme choice was gone irrecoverably.
+        {
+            const QString p = ini("b");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            ThemeChoice::runMigrationForIds({});
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Channels"));
+            CHECK(has(p, kLegacy) == false);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+            CHECK(ThemeChoice::forProfile(QString()) == QStringLiteral("Channels"));
+        }
+
+        // (c) Running twice changes nothing — the flag short-circuits the second run, and even with the flag
+        //     cleared the migration is naturally idempotent (the global is already gone, the bucket already
+        //     holds the user's value, and nothing overwrites it).
+        {
+            const QString p = ini("c");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });
+            const QString after = readBack(p, QStringLiteral("themedHome/theme/p1"));
+            CHECK(after == QStringLiteral("Channels"));
+
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });         // flag-guarded
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == after);
+            CHECK(has(p, kLegacy) == false);
+
+            seed(p, kFlag, QStringLiteral("false"));                          // simulate a lost flag
+            ThemeChoice::setIniPathForTesting(p);                             // re-read the file we just poked
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1") });
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == after);
+            CHECK(has(p, kLegacy) == false);
+            CHECK(readBack(p, kFlag) == QStringLiteral("true"));
+        }
+
+        // (d) setForProfile / forProfile round-trip, for a named id and for the empty (default) id.
+        {
+            const QString p = ini("d");
+            CHECK(ThemeChoice::forProfile(QStringLiteral("p9")).isEmpty());     // unset reads empty
+            ThemeChoice::setForProfile(QStringLiteral("p9"), QStringLiteral("Channels"));
+            CHECK(ThemeChoice::forProfile(QStringLiteral("p9")) == QStringLiteral("Channels"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p9")) == QStringLiteral("Channels"));
+            ThemeChoice::setForProfile(QString(), QStringLiteral("Triple"));
+            CHECK(ThemeChoice::forProfile(QString()) == QStringLiteral("Triple"));
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/default")) == QStringLiteral("Triple"));
+            // A stored value is a stored value: no pick owed, whatever this device has installed.
+            CHECK(ThemeChoice::needsPick(ThemeChoice::forProfile(QStringLiteral("p9"))) == false);
+        }
+
+        // (e) An existing per-profile value SURVIVES the migration that removes the legacy global. The two
+        //     live in the same ini group ("themedHome/theme" is both a scalar and the buckets' prefix), so
+        //     this is the assertion that keeps the removal from taking the buckets with it.
+        {
+            const QString p = ini("e");
+            seed(p, kLegacy, QStringLiteral("Channels"));
+            seed(p, QStringLiteral("themedHome/theme/p1"), QStringLiteral("Grid"));
+            ThemeChoice::setIniPathForTesting(p);
+            ThemeChoice::runMigrationForIds({ QStringLiteral("p1"), QStringLiteral("p2") });
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p1")) == QStringLiteral("Grid"));   // kept
+            CHECK(readBack(p, QStringLiteral("themedHome/theme/p2")) == QStringLiteral("Channels"));
+            CHECK(has(p, kLegacy) == false);
+        }
+
+        // Back to production, then wipe every scratch file: this probe leaves NOTHING on disk.
+        ThemeChoice::setIniPathForTesting(QString());
+        for (const QString& p : scratch)
+        {
+            QFile::remove(p);
+            CHECK(QFile::exists(p) == false);
+        }
     }
 
     if (failures == 0) { std::puts("THEME-OK"); return 0; }
