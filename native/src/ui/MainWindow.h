@@ -111,6 +111,33 @@ private slots:
     // then hand it to the comic reader (which gives natural page order + resume for free).
     void openImagePages(const QString& title, const QString& key, const QStringList& pageUrls);
     void openSettingsHub();   // centralized "Settings" area (emulator + input)
+    // The hub's rendering, WITHOUT the parental gate. Split out of openSettingsHub so the "Keep editing"
+    // branch of the exit gate can put the popped hub root back without re-prompting for the PIN
+    // (parentalUnlock does not cache — it asks every call).
+    void presentSettingsHub();
+
+    // ---- Settings save/discard transaction (issue #26) -------------------------------------------------
+    // Entering the settings area. begin()s the transaction; begin() is a no-op while one is active, so every
+    // entry point calls this unconditionally and hub -> panel -> picker all share ONE transaction. Also
+    // CLOSES a transaction left open by a previous visit that escaped without passing the gate (see the
+    // definition) — cheap, no dirtyCount scan.
+    void enterSettingsArea();
+    // True when the current stack page is part of the settings area. Used only to tell "entering from
+    // outside" from "navigating within"; never a dirtiness query.
+    bool inSettingsArea() const;
+    // The ONE settings-area exit gate (issue #26). If the transaction is dirty, ask Save / Discard / Keep
+    // editing and act on it; otherwise run `proceed` straight through. Both hub builders route their root
+    // onBack through this, so all thirteen screens are covered in both modes at once.
+    //
+    // Returns TRUE when the settings area was actually left (`proceed` ran), FALSE for "Keep editing" — the
+    // transaction is then still open and the caller must restore whatever its Back already tore down. The
+    // brief specified void; the bool is needed because ThemedPanelHost pops the panel level BEFORE invoking
+    // onBack, so the themed hub has to re-present itself when the user stays.
+    //
+    // COST: this is the ONLY caller of SettingsTxn::dirtyCount()/isDirty() in the UI. That is deliberate —
+    // dirtyCount() is O(all keys in the ini), so it may only ever run on a discrete navigation event.
+    bool leaveSettingsArea(std::function<void()> proceed);
+
     QVariantMap settingsPanelStyle() const; // the active theme's `settingsPanel` block (themed panels; B2)
     void openGeneralSettings(); // general playback options (subtitle defaults)
     void openStats();           // per-profile consumption stats (Watched/Listened/Read/Played + top titles)
