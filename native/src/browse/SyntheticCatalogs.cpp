@@ -2,7 +2,9 @@
 #include "../core/MetaCache.h"
 #include <QFileInfo>
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QSet>
+#include <algorithm>
 
 namespace browse
 {
@@ -301,6 +303,63 @@ MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const 
         // the info page and Play builds the URI); a code-less one rides its exe like a GOG tile.
         if (g.code.isEmpty()) it.url = g.exe;
         if (poster) it.thumbnailUrl = poster(g);
+        cat.items.push_back(it);
+    }
+    cat.hasMore = false;
+    return cat;
+}
+
+// The Trakt "airing soon" list (#23). Pure like every builder above: entries in, MediaCatalog out — no
+// TraktClient, no network, no ini. The SURFACE decides whether to show this at all (TraktClient::
+// calendarAvailable()); this only decides what the list looks like once it is shown.
+MediaCatalog traktCalendarCatalog(const QVector<CalendarEntry>& entries, const QDateTime& nowUtc)
+{
+    MediaCatalog cat; cat.title = QObject::tr("Airing Soon");
+    // Future-only, then sorted. Both halves matter: the window Trakt was asked for starts TODAY, so its
+    // first rows are episodes that already aired hours ago, and Trakt does not promise the array is
+    // ordered. An invalid air time is dropped rather than sorted to one end — it cannot be placed on a
+    // calendar at all, which is the same rule the parser applies (TraktRead.h).
+    QVector<CalendarEntry> soon;
+    soon.reserve(entries.size());
+    for (const CalendarEntry& e : entries)
+    {
+        if (!e.airsAtUtc.isValid()) continue;
+        if (e.airsAtUtc <= nowUtc) continue;   // the CLOSED past boundary — see the header
+        soon.push_back(e);
+    }
+    // stable_sort, not sort: two episodes of the same show airing on the same tick (a double-bill, which
+    // Trakt really does return) keep the order Trakt gave them instead of shuffling per run.
+    std::stable_sort(soon.begin(), soon.end(),
+                     [](const CalendarEntry& a, const CalendarEntry& b) { return a.airsAtUtc < b.airsAtUtc; });
+
+    for (const CalendarEntry& e : soon)
+    {
+        MediaItem it;
+        it.type = QStringLiteral("episode");
+        it.title = e.showTitle;
+        it.thumbnailUrl = e.posterUrl;
+        it.mime = QStringLiteral("trakt:cal"); // marks the row on the Home list, which has no level context
+        // "" is the DOCUMENTED "not playable" signal, never an error (TraktRead.h) — the row still ships.
+        it.imdbStreamId = trakt::imdbStreamIdFor(e.showIds, e.season, e.episode);
+        // "S01E04 · Tue 21 Jul". The DAY IS LOCAL — deliberately the one thing here that is not UTC.
+        // Selection above is an INSTANT range and is correctly UTC; the day a viewer reads off a shelf is
+        // a LOCAL-CALENDAR concept. A US prime-time episode airing Tuesday 21:00 ET is Wednesday 01:00
+        // UTC, so a UTC-formatted day tells a New York viewer "Wed 22 Jul" for a Tuesday-night show —
+        // the common case for US television, not an edge case, and unrecoverable by the user because no
+        // clock time is printed beside it. probe_browse pins BOTH the format and the local conversion.
+        const QString code = QStringLiteral("S%1E%2").arg(e.season, 2, 10, QLatin1Char('0'))
+                                                     .arg(e.episode, 2, 10, QLatin1Char('0'));
+        it.subtitle = code + QStringLiteral(" · ")
+                    + e.airsAtUtc.toLocalTime().toString(QStringLiteral("ddd d MMM"));
+        // Say so, rather than leaving a row that simply does nothing when pressed.
+        if (it.imdbStreamId.isEmpty()) it.subtitle += QStringLiteral(" · ") + QObject::tr("No source");
+        // Identity: the stream id when there is one, else a stable synthetic key from the show + episode,
+        // so an unplayable row can still be focused, marked and re-selected across a rebuild.
+        it.id = it.imdbStreamId.isEmpty()
+                    ? QStringLiteral("trakt:%1:%2:%3").arg(e.showTitle).arg(e.season).arg(e.episode)
+                    : it.imdbStreamId;
+        // it.url stays EMPTY, always: the stream resolver fills it at play time from imdbStreamId. A url
+        // here would make activateItem's generic "a file is associated" branch claim the row.
         cat.items.push_back(it);
     }
     cat.hasMore = false;
