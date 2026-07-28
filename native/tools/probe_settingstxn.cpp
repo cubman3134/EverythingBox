@@ -257,6 +257,47 @@ int main(int argc, char** argv)
         SettingsTxn::setRollbackHook(nullptr);   // leave no dangling capture for later cases
     }
 
+    // ---- 9. a hook that REINSTALLS the hook from inside itself must not destroy itself mid-call ----
+    // g_rollbackHook is ONE process-wide std::function, and rollback() calls it. Task 3's hook re-renders
+    // the settings surface — and a re-render that rebuilds that surface can call setRollbackHook() again,
+    // while the hook it is replacing is still on the stack. Assigning to g_rollbackHook there destroys the
+    // live target: a small closure is stored INSIDE the std::function, so the replacement is constructed
+    // over the running lambda's own captures and the rest of its body reads clobbered storage. That is UB
+    // that crashes inside the hook's own code, nowhere near the assignment. rollback() therefore invokes
+    // through a local COPY, and this case pins that.
+    //
+    // The three checks are ordered weakest-to-strongest on purpose: reaching them at all proves the process
+    // survived, outerCalls/innerCalls prove exactly one hook ran, and seenTag proves the running lambda's
+    // captures were still its own AFTER the swap. seenTag is the only one that can see a silent corruption
+    // rather than a crash: kTag is captured BY VALUE so it lives in the closure the replacement lands on,
+    // and it is read back through a volatile lvalue so the compiler must reload it from that closure
+    // instead of keeping it in a register across the opaque setRollbackHook() call.
+    {
+        freshIni();
+        CHECK(has(QStringLiteral("subs/language")) == false);   // independence: case 8's ini is not in play
+        const unsigned kTag = 0x5A5A5A5Au;
+        unsigned seenTag   = 0;
+        int outerCalls     = 0;
+        int innerCalls     = 0;
+        SettingsTxn::setRollbackHook([kTag, &seenTag, &outerCalls, &innerCalls] {
+            // Replace the hook that is running, from inside it, with a DIFFERENT callable.
+            SettingsTxn::setRollbackHook([&innerCalls] { ++innerCalls; });
+            seenTag = *static_cast<const volatile unsigned*>(&kTag);
+            ++outerCalls;
+        });
+
+        put(QStringLiteral("subs/language"), QStringLiteral("en"));
+        SettingsTxn::begin();
+        put(QStringLiteral("subs/language"), QStringLiteral("fr"));
+        SettingsTxn::rollback();                 // must return normally
+        CHECK(outerCalls == 1);                  // the installed hook ran, exactly once
+        CHECK(innerCalls == 0);                  // its replacement did NOT run for this same rollback
+        CHECK(seenTag == 0x5A5A5A5Au);           // its captures were still intact after the swap
+        CHECK(get(QStringLiteral("subs/language")) == QStringLiteral("en"));   // and the restore happened
+
+        SettingsTxn::setRollbackHook(nullptr);   // drop the replacement; leave no capture for later cases
+    }
+
     // ---- residue: every scratch ini this run created must be gone ---------------------------------
     // Drop the store's handle first, otherwise its cached QConfFile re-writes the file on destruction. Park
     // it on ANOTHER SCRATCH PATH, never on QString(): an empty path re-arms the PRODUCTION ini, and any

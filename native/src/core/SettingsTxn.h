@@ -63,15 +63,30 @@ namespace SettingsTxn
     void commit();     // drop the snapshot
     void rollback();   // restore every differing in-scope key; remove in-scope keys created during the txn
 
-    // Run after a rollback that actually restored something. The UI installs this to re-apply side
+    // Run after a rollback that ATTEMPTED to restore something. The UI installs this to re-apply side
     // effects: FormFactor::instance().refresh() for display/mode, and a re-render for the theme key.
     // A Discard that leaves the app LOOKING different is the failure this whole design exists to
     // prevent — restoring the stored value is only half the job.
+    //
+    // ATTEMPTED, NOT VERIFIED — read the word precisely. The trigger is "rollback wrote something back",
+    // not "the settings file now holds the old values". On a read-only or locked ini the setValue() calls
+    // happen, sync() then fails, nothing lands on disk — and the hook STILL FIRES, so the UI re-renders to
+    // reflect a restore that did not persist. That failure is not swallowed: rollback() logs it (qWarning
+    // with the QSettings status) and firing anyway is the deliberate choice, because the in-memory store
+    // does hold the restored values, so the side effects still match what the rest of the process reads.
     //
     // Fired ONCE per rollback, however many keys it touched, and NOT AT ALL when the transaction was clean:
     // re-rendering the whole surface because a user opened and closed Settings is a visible cost for no
     // reason. It is invoked after the transaction has been closed, so the hook observes active() == false
     // and cannot re-enter a live transaction. Pass nullptr to uninstall.
+    //
+    // LIFETIME CONTRACT — WHOEVER INSTALLS A HOOK THAT CAPTURES AN OBJECT MUST UNINSTALL IT
+    // (setRollbackHook(nullptr)) IN THAT OBJECT'S DESTRUCTOR. This is one process-wide std::function and it
+    // owns nothing it captures: a hook capturing a window's `this` that outlives the window makes the next
+    // rollback() call through freed memory, from a code path (Discard) that has no idea a UI object ever
+    // existed. Reinstalling from INSIDE a running hook is safe — rollback() invokes through a local copy, so
+    // an assignment mid-call cannot destroy the callable that is running — but that copy does nothing for a
+    // capture whose target is already gone. The destructor is the only place that fixes it.
     void setRollbackHook(std::function<void()> hook);
 
 #ifdef EB_SETTINGSTXN_TEST_SEAM
