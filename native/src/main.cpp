@@ -34,7 +34,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.82";
+static constexpr const char* kAppVersion = "0.5.99";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -275,6 +275,12 @@ int main(int argc, char** argv)
         AssetBootstrap::run(qEnvironmentVariable("EB_TEST_BOOTSTRAP_SRC"), AppPaths::dataDir(),
                             QString::fromLatin1(kAppVersion));
 #endif
+    // The DISK half of the XMB -> Triple theme rename (roadmap #57), deliberately OUTSIDE the platform #if
+    // above: the duplicate "Triple" row is an UPGRADE artefact, and a desktop upgrade never runs
+    // AssetBootstrap::run at all (it overlays a new themes2/ into the data dir instead), so folding this into
+    // run() would fix Android/iOS and leave every desktop install showing the theme twice. Runs before any
+    // theme is read — MainWindow's ctor is what first calls ThemeEngine::availableThemes().
+    AssetBootstrap::retireRenamedTheme(AppPaths::dataDir());
 
     migrateLegacySettings(); // carry over the old goliath.ini before any setting is read
     brandMigrationAtStartup(); // then move that install onto the CURRENT brand — still before any read

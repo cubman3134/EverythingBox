@@ -1,5 +1,6 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
+#include "../core/ThemeChoice.h"
 #include "FormFactor.h"
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
@@ -230,7 +231,9 @@ QStringList availableThemes()
     const QFileInfoList subs = QDir(themesRoot()).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
     for (const QFileInfo& d : subs)
         if (QFile::exists(d.absoluteFilePath() + QStringLiteral("/theme.json"))) out << d.fileName();
-    if (out.isEmpty()) out << QStringLiteral("Default");
+    // "Default" is no longer a bundled theme (the shipped set is Triple + Channels), so a fallback naming it
+    // would hand callers a folder that is nowhere on disk. ThemeChoice::kFallbackTheme is the one name.
+    if (out.isEmpty()) out << QString::fromLatin1(ThemeChoice::kFallbackTheme);
     return out;
 }
 
