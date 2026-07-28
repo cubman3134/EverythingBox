@@ -21,6 +21,14 @@ namespace AppBrand
     inline constexpr const char* kConfigHeader= "X-EB-Config";
     inline constexpr const char* kEnvPrefix   = "EB_";
 
+    // DATA-BEARING, and now frozen for the same reason Legacy::kParentalPinSalt is: the per-profile passcode
+    // (issue #30) is stored as SHA-256(salt + profileId + ':' + code) in the profile record, which SYNCS. It
+    // is a NEW constant rather than a reuse of the parental salt precisely because the two are different
+    // questions with different values — and because touching the parental one would redefine a hash already
+    // written to every existing user's ini. Renaming this one has the same effect for every passcode set
+    // since it shipped: no code ever matches again, and the only way in becomes the documented recovery.
+    inline constexpr const char* kProfilePasscodeSalt = "eb-profile-pass:";
+
     // The previous identity. Referenced ONLY by BrandMigration and by the lookups that tolerate it until
     // migration is confirmed. Nothing else in the tree may name these — the probe gate enforces that.
     namespace Legacy

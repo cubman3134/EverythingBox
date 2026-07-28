@@ -87,6 +87,18 @@ bool Settings::checkParentalPin(const QString& pin)
     return !h.isEmpty() && h == pinHash(pin);
 }
 
+// Default FALSE = always show the picker (issue #30). The old behaviour — a one-profile install jumping
+// straight in — is now the opt-in, not the default: "who's using this?" is the question a shared TV box has
+// to ask, and the previous code answered it silently whenever the answer looked obvious.
+bool Settings::skipProfilePickerWhenSingle()
+{
+    return store().value(QStringLiteral("profiles/skipPickerWhenSingle"), false).toBool();
+}
+void Settings::setSkipProfilePickerWhenSingle(bool on)
+{
+    store().setValue(QStringLiteral("profiles/skipPickerWhenSingle"), on); store().sync();
+}
+
 QString Settings::traktClientId() { return store().value(QStringLiteral("trakt/clientId")).toString(); }
 void Settings::setTraktClientId(const QString& v) { store().setValue(QStringLiteral("trakt/clientId"), v.trimmed()); store().sync(); }
 QString Settings::traktClientSecret() { return store().value(QStringLiteral("trakt/clientSecret")).toString(); }
