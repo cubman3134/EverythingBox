@@ -22,6 +22,12 @@ namespace ThemeChoice
     // name is a STORED VALUE, so the rename is only safe because the migration carries it.
     inline constexpr const char* kRenamedFrom = "XMB";
 
+    // The live key's group prefix — the base keyFor() builds "<base>/<profileId>" from. It happens to spell
+    // the same string as kLegacyGlobalKey, but they are DIFFERENT things: this one is a live group prefix,
+    // that one is a dead scalar key. Building the live key out of the legacy constant would make the
+    // migration's "nothing else may name it" rule a lie and would tie the two together forever.
+    inline constexpr const char* kKeyBase = "themedHome/theme";
+
     // The legacy GLOBAL key. Read by the migration, then removed. Nothing else may name it.
     inline constexpr const char* kLegacyGlobalKey = "themedHome/theme";
 
@@ -33,10 +39,14 @@ namespace ThemeChoice
     QString keyFor(const QString& profileId);
 
     // ---- pure decisions (no ini, no filesystem) ---------------------------------------------------------
-    // Does this profile still owe us a pick? True when nothing is stored, OR the stored folder is no longer
-    // installed. The second case matters: a user who deleted their theme must be asked again, not silently
-    // moved. It is also why `installed` is a parameter — an "is it empty" check gets this wrong.
-    bool needsPick(const QString& stored, const QStringList& installed);
+    // Does this profile still owe us a pick? ONLY when nothing is stored. Deliberately NOT "…or the stored
+    // folder isn't installed here", which looks more thorough and is wrong: "themedHome/theme/<profileId>"
+    // is not in CloudSync::isDeviceLocalKey's carve-out (CloudSync.cpp:486), so this value SYNCS. A device
+    // that merely lacks the theme folder would force a pick, write the answer, and that write would sync
+    // back and silently overwrite the choice the user made on their other device. A missing folder is a
+    // per-device rendering fact, not a lost choice — resolve() already covers it gracefully and invisibly.
+    // Do not restore the `installed` check here; put it in resolve(), where it belongs.
+    bool needsPick(const QString& stored);
 
     // What to actually render, in order: the stored folder if installed; else kFallbackTheme if installed;
     // else the first installed folder; else empty (nothing is installed — callers already handle that, see
@@ -58,4 +68,17 @@ namespace ThemeChoice
     QString forProfile(const QString& profileId);                          // "" when unset
     void    setForProfile(const QString& profileId, const QString& folder);
     void    runMigration();   // flag-guarded AND naturally idempotent; safe to call on every startup
+
+    // runMigration()'s body, with the profile ids passed in instead of read from ProfileStore::list(). Split
+    // out because the ZERO-profiles case is the one that used to DESTROY the legacy value (an empty id list
+    // fanned it out to nothing and then deleted it), and it can only be pinned by driving the id list
+    // directly — ProfileStore reads its own ini, which a hermetic probe has no way to seed.
+    void    runMigrationForIds(const QStringList& profileIds);
+
+    // ---- test-only seam ---------------------------------------------------------------------------------
+    // Redirects THIS unit's ini to `path`; an empty path restores the app's real ini. It exists so
+    // probe_theme can exercise the ini-backed half (forProfile/setForProfile/runMigrationForIds) against a
+    // scratch file in the temp dir, hermetically — that half is where the destructive-migration bug lived and
+    // it had no coverage at all. PRODUCTION MUST NEVER CALL THIS: unset is the app's real ini.
+    void    setIniPathForTesting(const QString& path);
 }
