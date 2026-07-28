@@ -1243,6 +1243,41 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
     // site with the Settings folder-picker / Rescan action.
     rescanLocalLibrary();
+
+    // Trakt calendar (#23). The home already drew whatever was CACHED (HomeView's ctor), so this is only
+    // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
+    // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
+    QTimer::singleShot(3000, this, [this] { refreshTraktCalendar(); });
+    // Linking or unlinking an account is the one event that flips whether the shelf/folder exist at all:
+    // tell the home either way (connected -> they appear, disconnected -> they vanish), and only pull a
+    // fresh calendar on the connect.
+    connect(trakt_, &TraktClient::connectedChanged, this, [this](bool conn) {
+        if (home_) home_->onTraktCalendarChanged();
+        if (conn) refreshTraktCalendar();
+    });
+}
+
+void MainWindow::refreshTraktCalendar()
+{
+    // Trakt off = nothing to refresh and nothing to show. Checked first so an unconfigured install never
+    // reaches the client at all.
+    if (!TraktClient::calendarAvailable() || !trakt_) return;
+    // The debounce, stamped BEFORE the request rather than on completion. fetchMyShowsCalendar's callback
+    // is documented as possibly never arriving (the client dies with the request in flight), so a guard
+    // cleared only in the callback could latch on forever; a timestamp taken up front cannot.
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const qint64 kCooldownSec = 15 * 60;   // a week's calendar does not change minute to minute
+    if (traktCalFetchedAt_ > 0 && now - traktCalFetchedAt_ < kCooldownSec) return;
+    traktCalFetchedAt_ = now;
+    // The window the surfaces show: from today (daysBack = 0) through the coming week. Past episodes are
+    // #25's job, so nothing is asked for behind today.
+    trakt_->fetchMyShowsCalendar(/*daysBack*/ 0, /*daysForward*/ 7,
+                                 [this](bool ok, QVector<CalendarEntry>) {
+        // ok=false leaves the cache deliberately intact (TraktClient.h) — the surfaces keep showing the
+        // last good calendar rather than blanking on a flaky network. Nothing to redraw in that case.
+        if (!ok) return;
+        if (home_) home_->onTraktCalendarChanged();   // re-reads the cache the fetch just wrote
+    });
 }
 
 // Read the configured library root on the MAIN thread (QSettings is not thread-safe — a prior review caught
