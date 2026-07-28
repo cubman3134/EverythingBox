@@ -130,6 +130,28 @@ int main(int argc, char** argv)
         CHECK(trakt::imdbStreamIdFor(full, -1, 4).isEmpty());
         CHECK(trakt::imdbStreamIdFor(full, 1, 0).isEmpty());
         CHECK(trakt::imdbStreamIdFor(full, 1, -3).isEmpty());
+
+        // …and neither must a nonsense ID. The range guard above exists to stop a stream id that
+        // LOOKS playable and is not; an unvalidated imdb field is the same failure through another
+        // door. A "tt" prefix and NO embedded ':' are both required — the first rejects an id that
+        // is not an IMDB id at all, the second rejects one that would silently add extra fields.
+        TraktIds numeric;   numeric.imdb   = QStringLiteral("123");        // a number that reached idString()
+        TraktIds colons;    colons.imdb    = QStringLiteral("tt1:9:9");    // would yield FIVE fields
+        TraktIds blank;     blank.imdb     = QStringLiteral("   ");        // present but empty after trim
+        TraktIds wrongKind; wrongKind.imdb = QStringLiteral("nm0000001");  // a plausible IMDB *person* id
+        CHECK(trakt::imdbStreamIdFor(numeric, 1, 1).isEmpty());
+        CHECK(trakt::imdbStreamIdFor(colons, 1, 1).isEmpty());
+        CHECK(trakt::imdbStreamIdFor(blank, 1, 1).isEmpty());
+        CHECK(trakt::imdbStreamIdFor(wrongKind, 1, 1).isEmpty());
+    }
+
+    // ---- 5b. the struct's own defaults must agree with the parser's sentinels ------------------
+    // The parser writes -1 for a missing season/episode. If the struct defaulted to 0, a
+    // default-constructed entry would read as a VALID special (season 0) with an invalid episode.
+    {
+        CalendarEntry fresh;
+        CHECK(fresh.season == -1);
+        CHECK(fresh.episode == -1);
     }
 
     // ---- 6. shapes the API reference documents that the sketch above did not ------------------
@@ -168,6 +190,63 @@ int main(int argc, char** argv)
         CHECK(e.value(1).showTitle == QStringLiteral("No Millis Show"));
         CHECK(e.value(1).airsAtUtc.isValid());
         CHECK(e.value(1).airsAtUtc.toString(Qt::ISODate) == QStringLiteral("2026-08-08T05:00:00Z"));
+    }
+
+    // ---- 7. first_aired zone handling: the wall-clock must never move ------------------------
+    // Trakt states every calendar time is UTC, but the API reference pins first_aired only as
+    // {"type":"string"} with NO format annotation — so a response that drops the trailing Z, or a
+    // proxy that reformats the field, is a shape we must survive. Qt parses a zone-less ISO string
+    // as LOCAL time; converting that to UTC shifts it by the machine's offset, which puts a late
+    // evening episode on the wrong calendar DAY for every non-UTC user (and moves with DST).
+    //
+    // So: a designator-free string is read as the UTC the API promises, while an EXPLICIT offset is
+    // honoured rather than overridden. This section runs on whatever zone the machine is in — that
+    // is the point; on a UTC machine it is a tautology, everywhere else it is the regression.
+    {
+        const char* zones = R"([
+          { "first_aired": "2026-08-08T23:30:00Z",
+            "episode": { "season": 1, "number": 1 }, "show": { "title": "Zulu" } },
+          { "first_aired": "2026-08-08T23:30:00.250Z",
+            "episode": { "season": 1, "number": 2 }, "show": { "title": "Zulu millis" } },
+          { "first_aired": "2026-08-09T01:30:00+02:00",
+            "episode": { "season": 1, "number": 3 }, "show": { "title": "Offset" } },
+          { "first_aired": "2026-08-08T23:30:00",
+            "episode": { "season": 1, "number": 4 }, "show": { "title": "Naked time" } },
+          { "first_aired": "2026-08-08",
+            "episode": { "season": 1, "number": 5 }, "show": { "title": "Naked date" } }
+        ])";
+        const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(QByteArray(zones));
+        CHECK(e.size() == 5);
+        // Every one of these denotes the SAME instant, 2026-08-08T23:30Z — except the bare date,
+        // which is midnight UTC on the 8th.
+        CHECK(e.value(0).airsAtUtc.toString(Qt::ISODate) == QStringLiteral("2026-08-08T23:30:00Z"));
+        CHECK(e.value(1).airsAtUtc.toString(Qt::ISODateWithMs) == QStringLiteral("2026-08-08T23:30:00.250Z"));
+        // An explicit offset is REAL information: 01:30+02:00 is 23:30Z. It must be converted, not
+        // stamped over with UTC — this is the assertion an over-eager "force everything to UTC" fix
+        // trips on.
+        CHECK(e.value(2).airsAtUtc.toString(Qt::ISODate) == QStringLiteral("2026-08-08T23:30:00Z"));
+        // No designator at all: the wall clock must survive untouched.
+        CHECK(e.value(3).airsAtUtc.toString(Qt::ISODate) == QStringLiteral("2026-08-08T23:30:00Z"));
+        CHECK(e.value(4).airsAtUtc.toString(Qt::ISODate) == QStringLiteral("2026-08-08T00:00:00Z"));
+        // And the day itself — the thing a shifted time actually costs the user.
+        CHECK(e.value(3).airsAtUtc.date().toString(Qt::ISODate) == QStringLiteral("2026-08-08"));
+    }
+
+    // ---- 8. a numeric id that cannot be a qint64 is dropped, not wrapped ----------------------
+    // qint64(double) is UNDEFINED for an out-of-range value; on MSVC 1e300 lands on
+    // -9223372036854775808, a bogus id later joins could match on. An unrepresentable number is
+    // no id at all.
+    {
+        const char* huge = R"([
+          { "first_aired": "2026-08-04T01:00:00.000Z",
+            "episode": { "season": 1, "number": 1 },
+            "show": { "title": "Huge", "ids": { "imdb": "tt6", "tmdb": 1e300, "tvdb": -1e300, "trakt": 42 } } }
+        ])";
+        const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(QByteArray(huge));
+        CHECK(e.size() == 1);
+        CHECK(e.value(0).showIds.tmdb.isEmpty());
+        CHECK(e.value(0).showIds.tvdb.isEmpty());
+        CHECK(e.value(0).showIds.trakt == QStringLiteral("42"));   // the sane sibling still lands
     }
 
     if (failures == 0) { std::puts("TRAKT-OK"); return 0; }
