@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "BrandMigration.h"  // the Drive lookups tolerate the previous brand until its flag is set
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
+#include "SettingsTxn.h"  // a remote apply must close any open settings transaction (#26) — QtCore-only TU
 
 #include <QCoreApplication>
 #include <QSet>
@@ -537,6 +538,12 @@ QByteArray CloudSync::buildSettingsJson()
 
 void CloudSync::applySettingsJson(const QByteArray& settingsJson)
 {
+    // A remote bundle writes settings-scope keys. If it lands while a settings transaction is open, a later
+    // Discard would revert ANOTHER DEVICE's changes, not the user's — the snapshot predates this write, so
+    // rollback() would see the peer's values as "changed" and put the local ones back. Commit the transaction
+    // first: losing the ability to discard this visit is the correct trade against clobbering a peer.
+    if (SettingsTxn::active()) SettingsTxn::commit();
+
     const QJsonObject so = QJsonDocument::fromJson(settingsJson).object();
     for (auto it = so.begin(); it != so.end(); ++it)
     {
