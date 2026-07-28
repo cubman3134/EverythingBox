@@ -175,7 +175,20 @@ void SettingsTxn::rollback()
     // those paths can call back into settings code. Running it here means it observes active() == false, so a
     // hook that touches a settings row cannot mutate a still-open snapshot — and a hook that called
     // rollback() would hit the inactive-guard no-op instead of recursing.
-    if (restored && g_rollbackHook) g_rollbackHook();
+    //
+    // Invoked through a LOCAL COPY, never as g_rollbackHook() directly. The hook exists to re-apply UI side
+    // effects, and a re-render that rebuilds the settings surface can reinstall the hook as part of that
+    // rebuild — assigning to g_rollbackHook would then destroy the callable whose operator() is still on the
+    // stack, and the lambda would run out its body over freed or overwritten capture storage. That is UB and
+    // it crashes inside the hook's OWN code, nowhere near the assignment that caused it. The copy costs one
+    // std::function copy per rollback that restored something, on a navigation event. Note what it does NOT
+    // buy: a hook whose captured object was already destroyed is still a dangling call — the header's
+    // lifetime contract (uninstall in the owner's destructor) is the only fix for that half.
+    if (restored && g_rollbackHook)
+    {
+        const std::function<void()> hook = g_rollbackHook;
+        hook();
+    }
 }
 
 void SettingsTxn::setRollbackHook(std::function<void()> hook)
