@@ -2,6 +2,7 @@
 #include "Nav.h"
 #include "../../core/ProfilePasscode.h"   // kLength — the pad and the policy agree on ONE number
 
+#include <QApplication>
 #include <QEventLoop>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -94,6 +95,7 @@ PasscodePad::PasscodePad(const QString& title, const QString& message, const QSt
         b->setFocusPolicy(Qt::StrongFocus);
         connect(b, &QPushButton::clicked, this, [this, i] { finish(false, i); });
         v->addWidget(b);
+        extras_.push_back(b);
     }
 
     auto* hint = new QLabel(tr("B: delete   (a real keyboard's number keys type directly)"), panel());
@@ -165,6 +167,22 @@ bool PasscodePad::handleNavKey(int key)
     case Qt::Key_Escape:
         finish(false, -1);
         return true;
+    case Qt::Key_Down:
+    {
+        // THE BOTTOM EDGE OF THE GRID HOPS TO THE RECOVERY ROWS, and this screen has to own that rather than
+        // the ring. NavRing::pickNext scores by widget CENTRES and drops any candidate that is more sideways
+        // than it is in-direction — which is what stops every other screen drifting diagonally, so it must
+        // not be loosened. But a full-width recovery button's centre sits under the MIDDLE grid column, so
+        // from "⌫" or "✕" it is ~89px sideways against ~60px down and loses: Down did nothing and the
+        // selection dead-ended in the bottom corner. That corner is exactly where a user who has forgotten
+        // their code ends up, and "Forgot the passcode?" was one row below, unreachable. Found on hardware,
+        // not in review; probe_nav §22(c) now walks down from EVERY column.
+        QWidget* before = QApplication::focusWidget();
+        NavOverlay::handleNavKey(key);                 // always returns true (it swallows for the page behind)
+        if (QApplication::focusWidget() == before && !extras_.isEmpty() && extras_.first())
+            extras_.first()->setFocus(Qt::OtherFocusReason);
+        return true;
+    }
     default:
         return NavOverlay::handleNavKey(key);   // arrows + Enter drive the key grid
     }

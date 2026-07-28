@@ -52,6 +52,7 @@ private:
 
     QString entered_;
     QVector<QLabel*> boxes_;
+    QVector<QWidget*> extras_;   // the recovery rows, in order (see handleNavKey's bottom-edge hop)
     std::function<void(const QString&, bool, int)> onDone_;
     bool done_ = false;   // finish() runs at most once (auto-submit + a queued key must not both fire)
 };

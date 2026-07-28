@@ -899,28 +899,53 @@ int main(int argc, char** argv)
         CHECK(NavOverlay::topmost() == nullptr, "Back on an empty pad backs out");
         CHECK(closes == 1 && !backOk && backExtra < 0, "backing out reports neither a code nor a recovery row");
 
-        // c) The digit grid is arrow-navigable and the recovery rows are ring members too (a pad whose rows
-        //    a D-pad cannot reach is a pad a remote user cannot recover from).
-        int chosen = -2;
-        auto* pad3 = new PasscodePad(QStringLiteral("Enter the passcode"), QString(),
-                                     { QStringLiteral("Use the parental PIN") },
-                                     [&](const QString&, bool, int x) { chosen = x; }, &win);
-        pump();
-        QWidget* first = QApplication::focusWidget();
-        CHECK(first != nullptr, "the pad always has a selection when it opens");
-        ctx.routeKey(Qt::Key_Right);
-        pump();
-        CHECK(QApplication::focusWidget() != first, "arrows move the selection across the digit grid");
-        for (int i = 0; i < 12 && !qobject_cast<QPushButton*>(QApplication::focusWidget())
-                                       ->text().contains(QStringLiteral("parental")); ++i)
-            ctx.routeKey(Qt::Key_Down);
-        pump();
-        CHECK(qobject_cast<QPushButton*>(QApplication::focusWidget())->text().contains(QStringLiteral("parental")),
-              "the recovery row is reachable with the D-pad alone");
-        ctx.routeKey(Qt::Key_Return);
-        pump();
-        CHECK(chosen == 0, "choosing a recovery row reports its index");
-        CHECK(NavOverlay::topmost() == nullptr, "…and closes the pad");
+        // c) The digit grid is arrow-navigable, and the recovery row is reachable by pressing Down from EVERY
+        //    column — not just the middle one. This assertion is written per-column because the first draft
+        //    walked down from ONE column, passed, and shipped a pad whose bottom-left key was a dead end:
+        //    NavRing::pickNext scores by centres and rejects a candidate that is more sideways than it is
+        //    in-direction, so a full-width recovery button (centre under the MIDDLE column) loses from the
+        //    outer two. A user who has forgotten their code arrives at exactly that corner.
+        for (int startCol = 0; startCol < 3; ++startCol)
+        {
+            int chosen = -2;
+            auto* pad3 = new PasscodePad(QStringLiteral("Enter the passcode"), QString(),
+                                         { QStringLiteral("Use the parental PIN") },
+                                         [&](const QString&, bool, int x) { chosen = x; }, &win);
+            pump();
+            QWidget* first = QApplication::focusWidget();
+            CHECK(first != nullptr, "the pad always has a selection when it opens");
+            for (int i = 0; i < startCol; ++i) ctx.routeKey(Qt::Key_Right);
+            pump();
+            CHECK(startCol == 0 || QApplication::focusWidget() != first,
+                  "arrows move the selection across the digit grid");
+            auto onRecoveryRow = [] {
+                auto* b = qobject_cast<QPushButton*>(QApplication::focusWidget());
+                return b && b->text().contains(QStringLiteral("parental"));
+            };
+            for (int i = 0; i < 12 && !onRecoveryRow(); ++i) ctx.routeKey(Qt::Key_Down);
+            pump();
+            CHECK(onRecoveryRow(), "the recovery row is reachable by pressing Down from this column");
+            ctx.routeKey(Qt::Key_Return);
+            pump();
+            CHECK(chosen == 0, "choosing a recovery row reports its index");
+            CHECK(NavOverlay::topmost() == nullptr, "…and closes the pad");
+            (void)pad3;
+        }
+        // ...and Up from a recovery row goes back into the grid, so the hop is not one-way.
+        {
+            auto* pad4 = new PasscodePad(QStringLiteral("Enter the passcode"), QString(),
+                                         { QStringLiteral("Use the parental PIN") },
+                                         nullptr, &win);
+            pump();
+            for (int i = 0; i < 6; ++i) ctx.routeKey(Qt::Key_Down);
+            pump();
+            ctx.routeKey(Qt::Key_Up);
+            pump();
+            auto* b = qobject_cast<QPushButton*>(QApplication::focusWidget());
+            CHECK(b && b->text().size() == 1, "Up from the recovery row lands back on a digit key");
+            pad4->dismiss(-1);
+            pump();
+        }
     }
 
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
