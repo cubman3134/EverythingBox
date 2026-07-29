@@ -33,9 +33,10 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
   same data:
   - `home` — the main screen (the media-type catalogs as a carousel/grid). **/** opens the highlighted
     catalog and searches within it.
-  - `browse` — the "gamelist" shown when you open a catalog: a `grid` of that catalog's items plus a detail
-    panel bound to `selected.*` (`title`, `subtitle`, `image`). Navigate to focus, **Enter** to open/drill,
-    **Esc** to go up, **/** to search within the catalog (large catalogs page in as you scroll near the end).
+  - `browse` — the "gamelist" shown when you open a catalog: a `grid` of that catalog's items plus a details
+    pane bound to `selectedMeta.*` (the live metadata for the hovered row — see **Data bindings**). Navigate
+    to focus, **Enter** to open/drill, **Esc** to go up, **/** to search within the catalog (large catalogs
+    page in as you scroll near the end).
   - `detail` — shown for the focused item when you press **I** (Info); **Esc** returns. Typically a big
     `selected.image`, `selected.title`, `selected.rating`, `selected.overview`.
   - `nowplayingAudio` — optional: the audiobook/music now-playing page (audio has no picture, so this screen
@@ -60,7 +61,10 @@ So an element's screen rectangle is: `x = pos.x*W − origin.x*(size.w*W)`, like
 
 Text/image/video/rating elements can show **live data** instead of a literal, via `"binding"` — a path into the data context:
 
-- `selected.title`, `selected.subtitle`, `selected.image`, `selected.rating` — the currently-focused row.
+- `selected.*` — the currently-focused row: `title`, `subtitle`, `image`, `rating`. In the **detail** view
+  `selected` is that item's *full* metadata instead, so the same paths work there and carry more:
+  `overview`, `factsText`, and the artwork roles (`logo`, `box`, `hero`, `images.screenshot`, …).
+- `selectedMeta.*` — the live metadata for the row you are hovering (see below).
 - `system.name`, `index`, `count`.
 
 Example: `{ "type": "text", "binding": "selected.title" }`.
@@ -70,8 +74,8 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 `selected.*` is the row itself (in the `detail` view, the full detail record). **`selectedMeta.*`** is the
 richer metadata fetched *for the row you are hovering*: a skeleton appears the instant the selection moves
 (`title`, `subtitle`, `image`, `type`, `accent`, `favorite`) and is enriched a moment later with `overview`,
-art roles (`logo`, `box`, `hero`, `screenshot`, … plus the full `images` / `videos` / `audio` lists) and
-`lastPlayed` / `timePlayed` where they exist. This is what a **details pane beside a grid** binds:
+`factsText`, art roles (`logo`, `box`, `hero`, `screenshot`, … plus the full `images` / `videos` / `audio`
+lists) and `lastPlayed` / `timePlayed` where they exist. This is what a **details pane beside a grid** binds:
 
 ```json
 { "type": "text", "binding": "selectedMeta.overview", "wrap": true, "lines": 16 }
@@ -83,6 +87,22 @@ grid **`home`** is deliberately not one: its rows are catalogs, not items, and h
 A pane bound to `selectedMeta` on a grid home therefore renders **empty**, silently — bind `selected.*` there
 instead. The shipped **Night** theme does exactly that: `selected.*` on its home pane, `selectedMeta.*` on its
 browse pane.
+
+### Facts, and other structured data
+
+An item's labelled facts — Developer, Genre, Players, Rating, … — are published as a ready-to-draw string
+under **`factsText`**: `"Developer: Square     •     Genre: RPG"`. It exists on both metadata shapes,
+formatted identically, so the same line works on either surface:
+
+```json
+{ "type": "text", "binding": "selectedMeta.factsText", "wrap": true, "lines": 3 }
+{ "type": "text", "binding": "selected.factsText",     "wrap": true, "lines": 4 }
+```
+
+A `text` element renders a **scalar**. Bindings that resolve to structured data instead — `facts` (the raw
+list of label/value pairs behind `factsText`) or `images` (the artwork role map) — render as **nothing**
+rather than as garbled object text. So if a facts line comes up blank, check that you bound `factsText` and
+not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 
 ## Colours & fonts
 
