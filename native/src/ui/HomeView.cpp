@@ -658,6 +658,14 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
             FavoritesStore::remove(top.item.id);
             favBtn_->setText(tr("☆ Favorite"));
         }
+        else if (top.item.id.startsWith(QStringLiteral("pcgame:")))
+        {
+            // A merged PC game stars through the SAME builder the game action menu uses, so it is stamped
+            // system = "pc" and lands in the PC console's ★ Favorites folder. Starring the identical game from
+            // its info page and from its row must not produce two differently-shaped records.
+            FavoritesStore::add(browse::localGameFavorite(top.item, QStringLiteral("pc")));
+            favBtn_->setText(tr("★ Favorited"));
+        }
         else
         {
             FavoriteItem f;
@@ -3897,6 +3905,12 @@ bool HomeView::bridgeStreamId(int idx, const QString& streamId)
 // path+console like the game action menu does; its identity is gameFavId (stable key, else path), not it.id.
 static bool isLocalGameLeaf(const MediaItem& it)
 {
+    // A MERGED PC game counts even though it has no url: it is a game that lives on THIS machine, it belongs
+    // to the PC console, and starring it must stamp the same system the console's ★ Favorites folder filters
+    // on. Without this the themed star writes a system-less record and the game the user just starred does
+    // not appear in that folder, while the identical star pressed on its info page (which routes through
+    // localGameFavorite) does — two surfaces disagreeing about one action.
+    if (isMergedPcGame(it)) return true;
     return (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty();
 }
 
