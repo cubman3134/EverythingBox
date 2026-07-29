@@ -288,6 +288,19 @@ void NavGraph::select(const QString& zone, int index)
     setSelection(zone, snapIndex(zone, index));
 }
 
+// The memory half of select(), for the one thing select() structurally cannot do: tell a HIDDEN zone where its
+// cursor was. A rebuilt screen seeds its cursors before the QML has counted the zones up (see the header), so
+// this must be legal on a count-0 zone — and must NOT move the selection, or it would be select() with a
+// different name and would steal focus onto the zone it is seeding. Deliberately no snap here: the zone's
+// count is not final yet, and every consumer (crossByEdge, reassignFrom, removeZone) snaps `memory` against
+// the live count at the moment it reads it.
+void NavGraph::seedIndex(const QString& zone, int index)
+{
+    auto it = m_zones.find(zone);
+    if (it == m_zones.end()) return;
+    it->memory = std::max(0, index);
+}
+
 void NavGraph::activate()
 {
     if (m_zone.isEmpty()) return;
