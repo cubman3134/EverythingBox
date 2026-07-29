@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.131 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.141 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -228,6 +228,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
+        src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
+        src/core/PcGameRemap.cpp  src/core/PcGameRemap.h   # marks/stats/favourites follow the merged id (pc-games T3)
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -479,6 +481,24 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
 
+    # Headless test for PC-game identity + source selection (the merged PC Games folder), and for the
+    # remap that moves the user's per-item records onto the merged id (pc-games T3). PcGameRemap works at
+    # the QSettings layer rather than through ItemMarks/ConsumptionStats/PlayStats/FavoritesStore — see the
+    # note at the top of PcGameRemap.cpp — so both units stay QtCore-only and this links against Qt6::Core
+    # alone, with no ProfileStore/Settings/Tombstones/RecentStore dragged into a probe about identity.
+    add_executable(probe_pcgames tools/probe_pcgames.cpp
+        src/core/PcGameId.cpp    src/core/PcGameId.h
+        src/core/PcGameRemap.cpp src/core/PcGameRemap.h)
+    target_include_directories(probe_pcgames PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn /
+    # probe_passcode): the alias override store persists, so without a scratch ini a run reads back what
+    # the PREVIOUS run wrote and the probe stops being repeatable. PcGameRemap gates its own seam on the
+    # SAME define, and needs it for the harder reason — its store is the real everythingbox.ini, which on
+    # desktop lives next to the exe (issue #42), so an un-redirected run would write records into
+    # build/Release and leave them for the next one.
+    target_compile_definitions(probe_pcgames PRIVATE EB_PCGAMEID_TEST_SEAM)
+    target_link_libraries(probe_pcgames PRIVATE Qt6::Core)
+
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
     # there is no AppPaths.cpp to add. run()'s Drive half lives in BrandMigrationDrive.cpp, which pulls
@@ -565,6 +585,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for the synthetic browse-catalog builders (Recent/Downloaded/Favorites).
     add_executable(probe_browse tools/probe_browse.cpp
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
+        # The catalog builder and the record remap must agree on ONE item id. probe_browse is the only
+        # probe that can build both sides, so it links the remap purely to assert they do (remapTable is
+        # pure; applyRemap, which touches the ini, is never called from here).
+        src/core/PcGameRemap.cpp src/core/PcGameRemap.h
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
@@ -577,6 +602,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_locallib tools/probe_locallib.cpp
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/core/Settings.cpp src/core/Settings.h                # LocalLibrary::root() -> Settings::libraryFolder()
@@ -657,6 +683,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GogLibrary.cpp src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
@@ -672,6 +699,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_perf tools/probe_perf.cpp
         src/core/PerfTrace.cpp src/core/PerfTrace.h
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
+        src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()

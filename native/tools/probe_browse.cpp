@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include "../src/browse/SyntheticCatalogs.h"
 #include "../src/browse/SearchAggregator.h"
+#include "../src/core/PcGameRemap.h"   // the drift assertion: catalog item id == remap destination
 #include "../src/core/PlaylistStore.h"
 
 static int fails = 0;
@@ -40,6 +41,26 @@ int main(int argc, char** argv)
     { FavoriteItem f; f.path = "";               f.title = "NoPath"; favs << f; } // streamed fav: no console home
     auto snes = browse::favoritesCatalog(favs, "snes");
     CHECK(snes.items.size() == 1 && snes.items[0].title == "Zelda", "favorites: system scope + path-only");
+
+    // ---- The gate a MIGRATED PC favourite has to satisfy ---------------------------------------------------
+    // A merged PC game has no path on purpose (which copy runs is decided at activation), so its id gets it
+    // past the path test — but `system` is a SECOND key, and this folder is scoped on it. That is why
+    // pcgame::applyRemap stamps a migrated record rather than only rewriting its id: the legacy per-launcher
+    // star carried no system, and an id-only migration produces the record below that this folder DROPS,
+    // which the user reads as their star having been deleted. probe_pcgames pins the stamp; this pins the
+    // rule the stamp exists for, so neither half can be "fixed" by weakening the other.
+    {
+        QList<FavoriteItem> pcf;
+        { FavoriteItem f; f.itemId = "pcgame:hades"; f.title = "Hades";
+          f.system = "pc"; f.kind = "pcgame"; pcf << f; }              // migrated AND stamped
+        { FavoriteItem f; f.itemId = "pcgame:hades ii"; f.title = "Hades II"; pcf << f; } // id rewritten ONLY
+        const MediaCatalog folder = browse::favoritesCatalog(pcf, "pc");
+        CHECK(folder.items.size() == 1 && folder.items[0].id == "pcgame:hades"
+              && folder.items[0].url.isEmpty() && folder.items[0].mime == "pcgame",
+              "favorites: a stamped path-less merged PC favourite IS listed in the pc folder");
+        CHECK(folder.items.size() == 1,
+              "favorites: an id-only migrated favourite (no system) is INVISIBLE here — hence the stamp");
+    }
 
     // ---- Favorites write side: starring a local game must stamp the console (else the per-console ----------
     // ---- ★ Favorites folder never matches it). Hint (from the Recent/Downloads store) wins; a ROM ----------
@@ -118,19 +139,455 @@ int main(int argc, char** argv)
           && plItems.items[2].mime == "localgame:game",
           "playlistItems: local-path entry -> url + localgame:<kind>");
 
-    // ---- Steam games level: SteamGame -> MediaItem mapping + the in-console query filter -------------------
+    // ---- PC games level: SteamGame -> MediaItem mapping + the in-folder query filter -----------------------
+    // (This was browse::steamGamesCatalog until the four per-launcher folders became one. The mapping it
+    // pinned still matters — a Steam library entry has to reach the grid as a playable tile — it is just
+    // pinned through the builder that now performs it.)
     QList<SteamGame> steam;
     { SteamGame g; g.appid = "440"; g.name = "Team Fortress 2"; steam << g; }
     { SteamGame g; g.appid = "570"; g.name = "Dota 2";          steam << g; }
-    auto poster = [](const SteamGame& g) { return QStringLiteral("poster:") + g.appid; }; // inject: no I/O
-    auto allSteam = browse::steamGamesCatalog(steam, QString(), poster);
+    auto poster = [](const QVector<pcgame::PcGameSource>& v) {
+        return v.isEmpty() ? QString() : QStringLiteral("poster:") + v.first().launchId; // inject: no I/O
+    };
+    auto allSteam = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), poster);
     CHECK(allSteam.items.size() == 2, "steam: empty query -> all installed");
-    auto tf2 = browse::steamGamesCatalog(steam, "fortress", poster);
-    CHECK(tf2.items.size() == 1 && tf2.items[0].id == "steam:440"
-          && tf2.items[0].mime == "steamgame" && tf2.items[0].type == "game"
+    auto tf2 = browse::pcGamesCatalog(steam, {}, {}, {}, {}, "fortress", QString(), poster);
+    CHECK(tf2.items.size() == 1 && tf2.items[0].id == "pcgame:team fortress 2"
+          && tf2.items[0].mime == "pcgame" && tf2.items[0].type == "game"
           && tf2.items[0].title == "Team Fortress 2" && tf2.items[0].thumbnailUrl == "poster:440"
-          && tf2.items[0].url.isEmpty(),
+          && tf2.items[0].url.isEmpty() && tf2.items[0].pcSources.size() == 1
+          && tf2.items[0].pcSources[0].launchId == "440",
           "steam: query filter -> one game with exact id/mime/poster/type mapping");
+
+    // ---- The merged PC Games folder: ONE entry per game, every launcher a SOURCE --------------------------
+    // The property this builder exists for: a game present in two launchers plus a downloaded copy is ONE
+    // item with THREE sources, while "Hades" and "Hades II" across two launchers stay TWO items. Merging
+    // those would remove a game from the user's library, which is strictly worse than showing it twice.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "1145360"; g.name = "Hades";    st << g; }
+        { SteamGame g; g.appid = "2074920"; g.name = "Hades II"; st << g; }
+        { SteamGame g; g.appid = "620";     g.name = "Portal 2"; st << g; }
+        QList<EpicGame> ep;
+        { EpicGame g; g.appName = "Pewter"; g.name = "Hades II"; ep << g; }  // the SAME sequel, second launcher
+        { EpicGame g; g.appName = "Fort";   g.name = "Fortnite"; ep << g; }
+        QList<GogGame> gg;
+        { GogGame g; g.id = "1207658930"; g.name = "Hades"; g.exe = "C:/gog/hades.exe"; gg << g; }
+        { GogGame g; g.id = "42";         g.name = "Portal 2";                          gg << g; } // no exe
+        QList<BattleNetGame> bn;
+        { BattleNetGame g; g.code = "wow"; g.name = "World of Warcraft";      bn << g; } // protocol launch
+        { BattleNetGame g; g.name = "Hearthstone"; g.exe = "C:/bn/hs.exe";    bn << g; } // code-less, has exe
+        { BattleNetGame g; g.name = "Ghost";                                  bn << g; } // code-less, NO exe
+        QVector<pcgame::PcGameSource> dl;
+        { pcgame::PcGameSource s; s.kind = pcgame::PcGameSource::Downloaded;
+          s.addonItemId = "dl-1"; s.exePath = "C:/dl/Hades.exe"; s.ready = true;
+          s.label = "HADES (2020)"; dl << s; }                    // a release name: loses the title contest
+        // Injected like steamGamesCatalog's poster, so the probe stays I/O-free (the default reads the local
+        // Steam librarycache).
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QStringLiteral("art:x"); };
+
+        const MediaCatalog pc = browse::pcGamesCatalog(st, ep, gg, bn, dl, QString(), QString(), art);
+        auto find = [&pc](const char* t) {
+            for (const MediaItem& i : pc.items) if (i.title == QString::fromLatin1(t)) return i;
+            return MediaItem();
+        };
+        auto count = [&pc](const char* t) {
+            int n = 0;
+            for (const MediaItem& i : pc.items) if (i.title == QString::fromLatin1(t)) ++n;
+            return n;
+        };
+        const MediaItem hades  = find("Hades");
+        const MediaItem hades2 = find("Hades II");
+        const MediaItem portal = find("Portal 2");
+
+        // 3 Steam + 2 Epic + 2 GOG + 3 Battle.net + 1 downloaded = eleven rows in; Hades' three copies and
+        // Hades II's two collapse, so seven games out.
+        CHECK(pc.items.size() == 7, "pcgames: seven distinct games out of eleven library rows");
+        // THE assertion: Steam + GOG + a downloaded copy collapse to one entry carrying all three.
+        CHECK(count("Hades") == 1 && hades.pcSources.size() == 3,
+              "pcgames: Steam + GOG + downloaded -> exactly ONE item with THREE sources");
+        // A game in only one launcher is still exactly one item, with exactly one source.
+        CHECK(count("Fortnite") == 1 && find("Fortnite").pcSources.size() == 1,
+              "pcgames: a game in one launcher only -> one item, one source");
+        // The regression that would LOSE a game: sequel numerals must not merge, even across launchers.
+        CHECK(count("Hades") == 1 && count("Hades II") == 1 && !hades.id.isEmpty()
+              && hades.id != hades2.id,
+              "pcgames: Hades and Hades II stay TWO items with different ids");
+        CHECK(hades2.pcSources.size() == 2, "pcgames: Hades II merges its Steam and Epic copies");
+
+        // Item shape: the merged id, the ONE routing kind, and an EMPTY url (the picker resolves the launch).
+        CHECK(hades.id == "pcgame:hades" && hades.mime == "pcgame" && hades.type == "game"
+              && hades.url.isEmpty() && hades.systemHint == "pc" && hades.thumbnailUrl == "art:x",
+              "pcgames: id/mime/type/systemHint/art set and url left EMPTY");
+
+        // Source order: ready before not-ready, then by launcher name. Hades' three are all ready, so they
+        // order by launcher — the downloaded copy has an empty launcher and leads.
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[0].launcher.isEmpty()
+              && hades.pcSources[1].launcher == "gog" && hades.pcSources[2].launcher == "steam",
+              "pcgames: ready sources ordered by launcher name (empty launcher first)");
+        // Portal 2's GOG copy has no exe, so it is NOT ready and must sort AFTER the Steam one. This is the
+        // half a picker gets wrong: an unlaunchable row must never be the first thing offered.
+        CHECK(portal.pcSources.size() == 2 && portal.pcSources[0].launcher == "steam"
+              && portal.pcSources[0].ready && portal.pcSources[1].launcher == "gog"
+              && !portal.pcSources[1].ready,
+              "pcgames: a ready source sorts before a not-ready one");
+        // And what Play would do with it: exactly one ready source, so no menu — and it is the ready one.
+        CHECK(pcgame::pickAutoSource(portal.pcSources) == 0,
+              "pcgames: pickAutoSource takes Portal 2's single READY source");
+
+        // Launch payloads. Steam/Epic/Battle.net carry a protocol url; GOG carries an exe.
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[2].launchUrl == "steam://rungameid/1145360"
+              && hades.pcSources[2].launchId == "1145360"
+              && hades.pcSources[1].exePath == "C:/gog/hades.exe"
+              && hades.pcSources[1].launchUrl.isEmpty(),
+              "pcgames: steam:// url on the Steam source, an exe on the GOG one");
+        CHECK(hades2.pcSources.size() == 2
+              && hades2.pcSources[0].launchUrl
+                     == "com.epicgames.launcher://apps/Pewter?action=launch&silent=true",
+              "pcgames: the Epic source carries the launcher URI");
+        CHECK(find("World of Warcraft").pcSources.size() == 1
+              && find("World of Warcraft").pcSources[0].launchUrl == "battlenet://wow"
+              && find("World of Warcraft").pcSources[0].label == "Battle.net"
+              && find("World of Warcraft").pcSources[0].ready,
+              "pcgames: a coded Battle.net title launches by protocol, labelled plainly");
+
+        // A code-less Battle.net title is a GUESS at an exe. It must not be presented at parity with a real
+        // protocol launch, and with no exe at all it must not be READY either.
+        const MediaItem hs = find("Hearthstone"), ghost = find("Ghost");
+        CHECK(hs.pcSources.size() == 1 && hs.pcSources[0].ready
+              && hs.pcSources[0].exePath == "C:/bn/hs.exe" && hs.pcSources[0].launchUrl.isEmpty()
+              && hs.pcSources[0].label != "Battle.net"
+              && hs.pcSources[0].label.contains("exe"),
+              "pcgames: a code-less Battle.net title is labelled a best-effort exe, not \"Battle.net\"");
+        CHECK(ghost.pcSources.size() == 1 && !ghost.pcSources[0].ready
+              && ghost.pcSources[0].label != hs.pcSources[0].label
+              && pcgame::pickAutoSource(ghost.pcSources) == -1,
+              "pcgames: a code-less Battle.net title with no exe is NOT ready (Play must ask, not no-op)");
+
+        // Display title: a launcher's own name beats the downloaded release name (scene tokens and all),
+        // while the release name is still kept verbatim on its own picker row.
+        CHECK(count("HADES (2020)") == 0 && hades.title == "Hades",
+              "pcgames: the launcher's name wins the display title over the release name");
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[0].label == "HADES (2020)",
+              "pcgames: the downloaded source keeps its own label for the picker row");
+
+        // launcherFilter narrows WHICH GAMES appear, not which sources they carry — "what I own on Steam"
+        // still launches by whichever copy is ready.
+        const MediaCatalog only = browse::pcGamesCatalog(st, ep, gg, bn, dl, QString(), "steam", art);
+        bool everyHasSteam = !only.items.isEmpty();
+        for (const MediaItem& i : only.items)
+        {
+            bool s = false;
+            for (const pcgame::PcGameSource& x : i.pcSources) if (x.launcher == "steam") s = true;
+            if (!s) everyHasSteam = false;
+        }
+        CHECK(only.items.size() == 3 && everyHasSteam,
+              "pcgames: launcherFilter=steam keeps only games WITH a Steam source");
+        CHECK(only.items.size() == 3 && only.items[0].pcSources.size() == 3,
+              "pcgames: the filter narrows games, not the sources on them");
+
+        // query filters on the NORMALISED title, and matches any contributing title, not just the shown one.
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "hades", QString(), art).items.size() == 2,
+              "pcgames: query matches on the normalised title");
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "Portal 2 - Game of the Year Edition",
+                                     QString(), art).items.size() == 1,
+              "pcgames: a query carrying edition noise still finds the game");
+        // A query that normalises to NOTHING would be a substring of every title; it must not match all.
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "!!!", QString(), art).items.isEmpty(),
+              "pcgames: a query that normalises to empty does not match the whole library");
+
+        // Determinism: the same library in a different scan order yields the same folder and the same rows.
+        QList<SteamGame> rev; for (int i = st.size() - 1; i >= 0; --i) rev << st[i];
+        const MediaCatalog again = browse::pcGamesCatalog(rev, ep, gg, bn, dl, QString(), QString(), art);
+        bool sameOrder = again.items.size() == pc.items.size();
+        for (int i = 0; sameOrder && i < again.items.size(); ++i)
+            if (again.items[i].id != pc.items[i].id) sameOrder = false;
+        CHECK(sameOrder, "pcgames: item order does not depend on the order the launchers were scanned in");
+
+        const MediaCatalog none = browse::pcGamesCatalog({}, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(none.items.isEmpty() && !none.title.isEmpty() && !none.hasMore,
+              "pcgames: empty input -> empty catalog with a valid title");
+
+        // ---- THE DRIFT ASSERTION: the catalog's item id IS the remap's destination -----------------
+        // Two different files decide one thing, and the user's entire per-item history rides on them
+        // agreeing: the catalog decides which key a tile's favourite / marks / play time are READ under,
+        // and PcGameRemap decides which key those records are MOVED to. Disagree by one character and
+        // every migrated record lands where nothing will ever look for it — silently, and strictly worse
+        // than not migrating at all. This is the one probe that can build BOTH sides, so the property is
+        // pinned here rather than left to a reviewer noticing.
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : st)     lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            for (const EpicGame& g : ep)      lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
+            for (const GogGame& g : gg)       lib << qMakePair(QStringLiteral("gog:") + g.id, g.name);
+            for (const BattleNetGame& g : bn) lib << qMakePair(QStringLiteral("bnet:") + g.name, g.name);
+            for (const pcgame::PcGameSource& s : dl)
+                lib << qMakePair(QStringLiteral("dl:") + s.addonItemId, s.label);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+            // Every destination the remap would move a record TO is an id the catalog actually builds.
+            bool everyDestReachable = !t.isEmpty();
+            for (auto it = t.cbegin(); it != t.cend(); ++it)
+            {
+                bool built = false;
+                for (const MediaItem& i : pc.items) if (i.id == it.value()) { built = true; break; }
+                if (!built) everyDestReachable = false;
+            }
+            CHECK(everyDestReachable,
+                  "pcgames: every remap destination is an id the catalog actually builds");
+
+            // ...and the mirror: every tile the catalog builds is a destination the remap would reach.
+            // Without this half a remap that mapped everything onto ONE valid id would still pass above.
+            bool everyTileReached = !pc.items.isEmpty();
+            for (const MediaItem& i : pc.items)
+            {
+                bool reached = false;
+                for (auto it = t.cbegin(); it != t.cend(); ++it)
+                    if (it.value() == i.id) { reached = true; break; }
+                if (!reached) everyTileReached = false;
+            }
+            CHECK(everyTileReached,
+                  "pcgames: every catalog tile id is a destination the remap would move records to");
+        }
+    }
+
+    // ---- THE LAUNCH ID: what a launch banks under must be what the remap migrates FROM --------------------
+    // launchPcSource routes a merged tile through the per-launcher launch path, so this session's play time,
+    // marks and resume land under the PRE-MERGE id — and the next refresh migrates them only if that id is a
+    // key of the table populatePcGames builds. Three of the four launchers key on an id the source carries.
+    // The fourth does not: a code-less Battle.net title has no product code, so its id is a NAME — and the
+    // launch site used to mint it from the MERGED DISPLAY TITLE, which is the best-ranked name across every
+    // launcher. For a code-less title that loses that contest the two names differ, the records accrue under
+    // an id the remap never visits, and they are stranded permanently and silently. pcgame::legacyLaunchId is
+    // now the one construction both sides use; this pins that it lands inside the table.
+    {
+        QList<SteamGame> st;
+        // Same game, same normalised key, DIFFERENT raw name — and Steam outranks Battle.net, so this is the
+        // name the tile shows. That divergence is the whole failure mode; without it the bug is invisible.
+        { SteamGame g; g.appid = "1234"; g.name = "HEARTHSTONE™"; st << g; }
+        QList<BattleNetGame> bn;
+        { BattleNetGame g; g.name = "Hearthstone"; g.exe = "C:/bn/hs.exe"; bn << g; }   // no code
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, {}, bn, {}, QString(), QString(), art);
+
+        MediaItem tile;
+        for (const MediaItem& i : pc.items) if (i.id == "pcgame:hearthstone") tile = i;
+        pcgame::PcGameSource bnetSrc;
+        for (const pcgame::PcGameSource& s : tile.pcSources)
+            if (s.launcher == "battlenet") bnetSrc = s;
+
+        CHECK(pc.items.size() == 1 && tile.pcSources.size() == 2 && bnetSrc.launchId.isEmpty()
+              && tile.title != "Hearthstone",
+              "launchid: the premise — one merged tile whose title is NOT Battle.net's own name");
+
+        // The candidate table, built exactly the way populatePcGames builds it.
+        QVector<QPair<QString, QString>> lib;
+        for (const SteamGame& g : st)     lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+        for (const BattleNetGame& g : bn)
+            lib << qMakePair(QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code), g.name);
+        const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+        CHECK(pcgame::legacyLaunchId(bnetSrc) == "bnet:Hearthstone",
+              "launchid: a code-less Battle.net source keys on BATTLE.NET's name, not the merged title");
+        CHECK(t.contains(pcgame::legacyLaunchId(bnetSrc))
+              && t.value(pcgame::legacyLaunchId(bnetSrc)) == tile.id,
+              "launchid: that id IS a table key, and the remap moves it onto this very tile");
+        // The mirror, and the actual regression guard: the id the launch site used to mint is NOT migratable.
+        CHECK(!t.contains(QStringLiteral("bnet:") + tile.title),
+              "launchid: an id built from the MERGED title is in no table — the stranding this pins against");
+
+        // Not a Battle.net special case: EVERY launcher source's launch id has to be a table key, or that
+        // launcher is the next one to strand a session's play time.
+        bool allMigratable = !tile.pcSources.isEmpty();
+        for (const pcgame::PcGameSource& s : tile.pcSources)
+        {
+            if (s.launcher.isEmpty()) continue;                 // a downloaded copy keys on addonItemId
+            const QString id = pcgame::legacyLaunchId(s);
+            if (id.isEmpty() || t.value(id) != tile.id) allMigratable = false;
+        }
+        CHECK(allMigratable,
+              "launchid: every launcher source's launch id maps to this tile in the remap table");
+        // A source with no launcher (downloaded / addon) claims no pre-merge id at all, rather than
+        // inventing one — rule 1: an id with no destination must be absent, never an empty key.
+        pcgame::PcGameSource dlSrc;
+        dlSrc.kind = pcgame::PcGameSource::Downloaded; dlSrc.addonItemId = "dl-1"; dlSrc.sourceName = "Hades";
+        CHECK(pcgame::legacyLaunchId(dlSrc).isEmpty(),
+              "launchid: a launcher-less source has NO pre-merge id (it is keyed by addonItemId)");
+    }
+
+    // ---- A TITLELESS DOWNLOAD MUST NOT BE STRANDED OFF ITS OWN TILE --------------------------------------
+    // Same failure class as the Battle.net one above, on the other kind of source. DownloadedItem::title is
+    // OPTIONAL, so the catalog falls back to the file's base name to have something to group on. The remap's
+    // candidate was built from the raw title instead — so for a record with an EMPTY title the two sides
+    // disagreed completely: the catalog built a tile keyed on the base name, while the remap's destination
+    // was pcgame::itemId("") = empty, i.e. the entry was absent from the table (rule 1) and NOTHING was ever
+    // migrated onto that tile. The user's marks and play time accrue under the launch id forever, on a tile
+    // that shows none of them, with nothing logged.
+    //
+    // Both sides now call pcgame::downloadedTitle, and this pins that they land on ONE id. Reverting either
+    // side to its own fallback fails this check.
+    {
+        // The Downloads records as the store hands them over. Three shapes: a titled one, a TITLELESS one
+        // (the stranded case), and one with neither a title NOR a key — DownloadsStore documents `key` as
+        // "empty -> use path", and the path is the id such a copy's launches actually bank under, so it is
+        // a candidate too rather than being skipped.
+        QList<DownloadedItem> dls;
+        { DownloadedItem d; d.path = "C:/dl/hades/Hades.exe"; d.title = "Hades Repack";
+          d.kind = "pcgame"; d.key = "dl-hades";   dls << d; }
+        { DownloadedItem d; d.path = "C:/dl/Celeste.Deluxe.exe"; d.title = "";
+          d.kind = "pcgame"; d.key = "dl-celeste"; dls << d; }
+        { DownloadedItem d; d.path = "C:/dl/Tunic.exe"; d.title = "";
+          d.kind = "pcgame"; d.key = "";           dls << d; }
+
+        // HomeView::pcLibraryCatalog's downloaded-source construction, verbatim.
+        QVector<pcgame::PcGameSource> dl;
+        for (const DownloadedItem& d : dls)
+        {
+            pcgame::PcGameSource s;
+            s.kind        = pcgame::PcGameSource::Downloaded;
+            s.addonItemId = d.key.isEmpty() ? d.path : d.key;
+            s.exePath     = d.path;
+            s.label       = pcgame::downloadedTitle(d.title, d.path);
+            s.ready       = true;
+            dl << s;
+        }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog({}, {}, {}, {}, dl, QString(), QString(), art);
+
+        // HomeView::populatePcGames' candidate list, verbatim.
+        QVector<QPair<QString, QString>> lib;
+        for (const DownloadedItem& d : dls)
+        {
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            if (oldId.isEmpty()) continue;
+            lib << qMakePair(oldId, pcgame::downloadedTitle(d.title, d.path));
+        }
+        const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+        CHECK(pc.items.size() == 3 && t.size() == 3,
+              "dltitle: the premise — three downloaded copies, three tiles, three remap candidates");
+
+        // THE ASSERTION. For every downloaded record: the tile that CARRIES this copy as a source, and the
+        // id the remap would move this copy's records TO, are the same string. Both halves matter — a check
+        // that only compared ids would pass a build that put the source on some other tile.
+        bool everyCopyLandsOnItsOwnTile = !pc.items.isEmpty();
+        for (const DownloadedItem& d : dls)
+        {
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            const QString dest  = t.value(oldId);
+            bool onTile = false;
+            for (const MediaItem& i : pc.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    if (s.addonItemId == oldId && !dest.isEmpty() && i.id == dest) onTile = true;
+            if (!onTile) everyCopyLandsOnItsOwnTile = false;
+        }
+        CHECK(everyCopyLandsOnItsOwnTile,
+              "dltitle: every downloaded copy's tile id IS the remap destination for that same copy");
+
+        // The titleless case spelled out, because it is the one the two fallbacks got wrong and a blanket
+        // loop would not say which record failed.
+        {
+            const QString dest = t.value(QStringLiteral("dl-celeste"));
+            QString tileId;
+            for (const MediaItem& i : pc.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    if (s.addonItemId == "dl-celeste") tileId = i.id;
+            CHECK(!dest.isEmpty() && !tileId.isEmpty() && dest == tileId,
+                  "dltitle: an EMPTY-title download has a tile id AND a remap destination, and they are equal");
+            CHECK(dest == pcgame::itemId(QStringLiteral("Celeste.Deluxe")),
+                  "dltitle: ...and that id is the one derived from the file's base name, not from nothing");
+        }
+        // A record with no key either is still migratable — it keys on the path, exactly as its launch does.
+        {
+            const QString dest = t.value(QStringLiteral("C:/dl/Tunic.exe"));
+            CHECK(dest == pcgame::itemId(QStringLiteral("Tunic")),
+                  "dltitle: a download with NO key keys on its path, which is what its launches bank under");
+        }
+    }
+
+    // ---- pcGamesCatalog: two copies from the SAME launcher must not read as identical picker rows ---------
+    // The year strip merges a remake with its original ("Prey (2006)" / "Prey (2017)" both normalise to
+    // "prey"). That merge is documented and deliberate. What is NOT acceptable is the consequence: both
+    // sources are Steam, both ready, so pickAutoSource asks — and the menu would offer two rows with the
+    // same text, over a tile titled just "Prey", leaving the user no way to reach the remake on purpose.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "3970";   g.name = "Prey (2006)"; st << g; }
+        { SteamGame g; g.appid = "480490"; g.name = "Prey (2017)"; st << g; }
+        { SteamGame g; g.appid = "620";    g.name = "Portal 2";    st << g; }
+        QList<GogGame> gg;
+        { GogGame g; g.id = "42"; g.name = "Portal 2"; g.exe = "C:/gog/p2.exe"; gg << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, gg, {}, {}, QString(), QString(), art);
+        MediaItem prey, portal;
+        for (const MediaItem& i : pc.items)
+        {
+            if (i.id == "pcgame:prey")  prey   = i;
+            if (i.title == "Portal 2")  portal = i;
+        }
+        // Both launches survive the merge, and Play must ask rather than guess between two ready copies.
+        CHECK(prey.pcSources.size() == 2 && prey.pcSources[0].launchId == "3970"
+              && prey.pcSources[1].launchId == "480490"
+              && pcgame::pickAutoSource(prey.pcSources) == -1,
+              "pcgames: two same-launcher copies survive the merge as two ready sources");
+        // THE assertion: the two rows must be distinguishable, and each must name the copy it launches.
+        CHECK(prey.pcSources.size() == 2 && prey.pcSources[0].label != prey.pcSources[1].label
+              && prey.pcSources[0].label.contains("Prey (2006)")
+              && prey.pcSources[1].label.contains("Prey (2017)"),
+              "pcgames: two Steam sources in one group get DISTINCT labels naming each copy");
+        // One source per launcher is the common case and must NOT gain the suffix. Sorted by launcher name,
+        // so GOG leads Steam.
+        CHECK(portal.pcSources.size() == 2 && portal.pcSources[0].label == "GOG"
+              && portal.pcSources[1].label == "Steam",
+              "pcgames: one source per launcher keeps its plain label");
+    }
+
+    // ---- pcGamesCatalog: the title contest and launcherFilter key on KIND, not on the `launcher` string --
+    // A Downloaded source may legitimately record where its copy came from. If the rules read `launcher`
+    // alone, that one field would let a scene release name win the tile AND make the game answer "what I own
+    // on Steam" — two different wrong claims from the same slip.
+    {
+        QVector<pcgame::PcGameSource> dl;
+        { pcgame::PcGameSource s; s.kind = pcgame::PcGameSource::Downloaded;
+          s.launcher = "steam";                       // the launcher this copy came FROM — not a Steam entry
+          s.addonItemId = "dl-9"; s.exePath = "C:/dl/Control.exe"; s.ready = true;
+          s.label = "CONTROL (2019)"; dl << s; }      // normalises to "control", so it merges with the GOG row
+        QList<GogGame> gg;
+        { GogGame g; g.id = "7"; g.name = "Control"; g.exe = "C:/gog/control.exe"; gg << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+
+        const MediaCatalog pc = browse::pcGamesCatalog({}, {}, gg, {}, dl, QString(), QString(), art);
+        CHECK(pc.items.size() == 1 && pc.items[0].pcSources.size() == 2 && pc.items[0].title == "Control",
+              "pcgames: a Downloaded source carrying launcher=\"steam\" still loses the display title");
+        // The same field must not answer the ownership question either.
+        CHECK(browse::pcGamesCatalog({}, {}, gg, {}, dl, QString(), "steam", art).items.isEmpty(),
+              "pcgames: launcherFilter=steam ignores a Downloaded source that carries launcher=\"steam\"");
+        // The real Steam entry still matches, so the filter narrowed on kind and not by ignoring launcher.
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "870780"; g.name = "Control"; st << g; }
+        CHECK(browse::pcGamesCatalog(st, {}, gg, {}, dl, QString(), "steam", art).items.size() == 1,
+              "pcgames: launcherFilter=steam still matches a real LauncherInstalled Steam source");
+    }
+
+    // ---- pcGamesCatalog degenerate titles: the id must not double-prefix, and nameless rows must not fuse --
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "1"; g.name = "GOTY";             st << g; } // ALL edition noise -> normalises
+        { SteamGame g; g.appid = "2"; g.name = "Enhanced Edition"; st << g; } // to nothing, both of them
+        { SteamGame g; g.appid = "3"; g.name = "";                 st << g; } // nothing to group on at all
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(),
+                                                       [](const QVector<pcgame::PcGameSource>&) {
+                                                           return QString();
+                                                       });
+        // mergeKey ALREADY namespaces its raw-title fallback, so pcgame::itemId prefixing unconditionally
+        // would emit "pcgame:pcgame:rawtitle/goty" — a different id from the one every per-item store keys on.
+        CHECK(pc.items.size() == 2, "pcgames: two empty-normalising titles stay two items; the nameless one is dropped");
+        CHECK(pc.items.size() == 2 && pc.items[1].id == "pcgame:rawtitle/goty"
+              && !pc.items[1].id.startsWith("pcgame:pcgame:"),
+              "pcgames: an empty-normalising title keeps mergeKey's own namespaced id, not a doubled prefix");
+        CHECK(pc.items.size() == 2 && pc.items[0].id != pc.items[1].id,
+              "pcgames: two all-noise titles do NOT collapse into one bucket");
+    }
 
     // ---- SearchAggregator dedup/skip rule: the merge path's pure helper (see SearchAggregator::onCatalogReady).
     {

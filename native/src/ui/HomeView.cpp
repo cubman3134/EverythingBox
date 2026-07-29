@@ -16,6 +16,8 @@
 #include "../core/Achievements.h"
 #include "../core/SteamAchievements.h"
 #include "../core/PcGameStore.h"
+#include "../core/PcGameRemap.h"   // the PC-game id migration, re-run on every PC Games refresh
+#include "../addons/StremioTranslate.h" // kMaxDescribeChars — the picker's one-row budget
 #include "../core/PlayStats.h"
 #include "../core/ProfileStore.h"
 #include "../core/ExternalPlayer.h"
@@ -655,6 +657,14 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
         {
             FavoritesStore::remove(top.item.id);
             favBtn_->setText(tr("☆ Favorite"));
+        }
+        else if (top.item.id.startsWith(QStringLiteral("pcgame:")))
+        {
+            // A merged PC game stars through the SAME builder the game action menu uses, so it is stamped
+            // system = "pc" and lands in the PC console's ★ Favorites folder. Starring the identical game from
+            // its info page and from its row must not produce two differently-shaped records.
+            FavoritesStore::add(browse::localGameFavorite(top.item, QStringLiteral("pc")));
+            favBtn_->setText(tr("★ Favorited"));
         }
         else
         {
@@ -1660,109 +1670,357 @@ void HomeView::selectRecent()
     renderRecents();
 }
 
-// Drill into the synthetic "Steam" console (a child of the Games catalog): list the local Steam library as
-// games. Pushed as a detail level so Back returns to the Games console list.
-void HomeView::openSteamConsole(const MediaItem& consoleItem)
+// ---- The ONE PC Games folder --------------------------------------------------------------------------
+//
+// This replaced four folders (Steam / Epic Games / GOG / Battle.net), each built by its own catalog builder.
+// The same game appeared in as many of them as owned it, under four unrelated ids, so the user's star, marks
+// and play time attached to whichever copy they happened to launch it from and the other copies looked
+// untouched. One folder, one item per game, every copy a SOURCE on that item.
+
+// ONE sweep of every launcher. It is a struct rather than four calls at each use site because there are two
+// consumers per refresh — the folder itself and the remap's candidate ids — and they were each doing their
+// own full scan: two enumerations of Steam's steamapps, Epic's manifests, GOG's registry and Battle.net's
+// install records for one keypress. The scans are disk/registry work proportional to the library, so the
+// duplicate is exactly the cost that grows with the user who has the most to lose.
+struct PcLibScan
+{
+    QList<SteamGame>       steam;
+    QList<EpicGame>        epic;
+    QList<GogGame>         gog;
+    QList<BattleNetGame>   bnet;
+    QVector<DownloadedItem> downloads;
+    // Owned-but-not-installed on Steam. ownedGamesCached is network-free (populatePcGames arms the
+    // background refresh separately), so gathering it here never blocks the GUI thread.
+    QList<SteamGame>       steamOwned;
+};
+
+static PcLibScan scanPcLibrary()
+{
+    PcLibScan s;
+    s.steam      = SteamLibrary::installedGames();
+    s.epic       = EpicLibrary::installedGames();
+    s.gog        = GogLibrary::installedGames();
+    s.bnet       = BattleNetLibrary::installedGames();
+    s.downloads  = DownloadsStore::list();
+    s.steamOwned = SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId());
+    return s;
+}
+
+// Every ingredient the folder is built from, gathered HERE and nowhere else. populatePcGames and the
+// re-derivation path (pcSourcesForId) both call this, so a tile's sources and a re-derived game's sources are
+// the same function of the same library — the property the whole feature rests on, since the re-derived list
+// is what Play uses for a favourite that outlived the session that built the tile.
+//
+// `pre` is a scan the caller already holds (see the header); without one this does its own, which is what
+// every re-derivation call does.
+MediaCatalog HomeView::pcLibraryCatalog(const QString& query, const QString& launcherFilter,
+                                        const PcLibScan* pre) const
+{
+    PcLibScan own;
+    if (!pre) { own = scanPcLibrary(); pre = &own; }
+    // Downloaded copies (PcGameStore's record of what we fetched and where it landed). The Downloads store is
+    // the enumerable half — PcGameStore is keyed by id with no listing — so it names the games and the store
+    // supplies the CURRENT exe, which survives the game being reinstalled somewhere else. `label` doubles as
+    // the copy's title (pcGamesCatalog groups on it and shows it as the picker row), so the release name is
+    // kept verbatim.
+    QVector<pcgame::PcGameSource> downloaded;
+    for (const DownloadedItem& d : pre->downloads)
+    {
+        if (d.kind != QStringLiteral("pcgame")) continue;
+        pcgame::PcGameSource s;
+        s.kind        = pcgame::PcGameSource::Downloaded;
+        s.addonItemId = d.key.isEmpty() ? d.path : d.key;
+        const PcGameStore::Entry e = PcGameStore::get(s.addonItemId);
+        s.exePath = !e.exe.isEmpty() ? e.exe : d.path;
+        // pcgame::downloadedTitle and NOT an inline ternary: this string is what pcGamesCatalog GROUPS
+        // this copy under (its tile id is pcgame::itemId of it), and populatePcGames feeds the SAME call
+        // to remapTable as this copy's destination. Written out twice they drifted for exactly the
+        // titleless records — see the header note on downloadedTitle.
+        s.label   = pcgame::downloadedTitle(d.title, d.path);
+        // Ready means "launches NOW, with no download". A recorded exe that no longer exists does not.
+        s.ready   = !s.exePath.isEmpty() && QFileInfo::exists(s.exePath);
+        downloaded.push_back(s);
+    }
+    // The owned-but-not-installed Steam list rides the scan (creds-gated, TTL-cached, network-free);
+    // populatePcGames arms the background refresh that fills it.
+    return browse::pcGamesCatalog(pre->steam, pre->epic, pre->gog, pre->bnet,
+                                  downloaded, query, launcherFilter, {}, pre->steamOwned);
+}
+
+// Drill into the synthetic "PC Games" console (a child of the Games catalog). Pushed as a detail level so
+// Back returns to the Games console list.
+void HomeView::openPcGamesConsole(const MediaItem& consoleItem)
 {
     if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
     Level lvl;
-    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Steam");
+    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("PC Games");
     stack_.push_back(lvl);
-    populateSteamGames(); // also re-run by loadTop() when Back returns to this level
+    populatePcGames(); // also re-run by loadTop() when Back returns to this level
 }
 
-// The top level is still the synthetic Steam console — the async owned-games re-present only fires while it is
-// (the browse-side analogue of MainWindow::themedPanelIsTop: a late reply must never rebuild an unrelated view).
-bool HomeView::atSteamConsole() const
+// The top level is still the synthetic PC Games console — the async owned-games re-present only fires while it
+// is (the browse-side analogue of MainWindow::themedPanelIsTop: a late reply must never rebuild an unrelated
+// view).
+bool HomeView::atPcGamesConsole() const
 {
     return !stack_.isEmpty() && stack_.last().detail
-        && stack_.last().item.mime == QStringLiteral("steam:console");
+        && stack_.last().item.mime == QStringLiteral("pcgames:console");
 }
 
-// (Re)build the Steam games grid/column natively from the local library (no addon request).
-void HomeView::populateSteamGames()
+// (Re)build the PC Games grid/column natively from the local library (no addon request).
+void HomeView::populatePcGames(bool runRemap)
 {
-    // Pure builder owns the SteamGame->MediaItem mapping + the in-console query filter (see probe_browse/probe_importers).
     const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    // Owned-but-not-installed (creds-gated): a Steam Web API key + SteamID appends the owned library as "Not
-    // installed" tiles. No key/id -> installed-only (today's zero-friction behavior).
-    const QString key = Settings::steamWebApiKey();
-    const QString sid = Settings::steamId();
-    // INSTANT: installed + any TTL-cached owned. ownedGamesCached() is network-free, so console-open never blocks
-    // the GUI thread — the zero-key path shows installed the moment you drill in.
-    const QList<SteamGame> owned = SteamLibrary::ownedGamesCached(key, sid);
-    showSyntheticCatalog(browse::steamGamesCatalog(SteamLibrary::installedGames(), query, {}, owned));
 
-    // BACKGROUND: with a key+SteamID configured and the cache stale, fetch owned off the GUI thread (async, 8s
-    // reply timeout). On completion — ONLY if the Steam console is STILL the top level — re-present so the owned
-    // entries append. A fresh cache / no key -> ownedGamesFetch no-ops (also what stops the re-present loop).
-    // Failures stay silent + TTL-cached (the console never surfaces an error).
-    // In-flight dedup: a generation stamp bumped on every populateSteamGames. A late reply from a superseded
-    // populate (rapid Back/re-enter or filter typing fires several) is dropped — only the latest fetch re-presents,
-    // so stale replies can't stack rebuilds or fight over the cursor. (The TTL cache separately breaks the
-    // re-present→fetch loop: after this fetch lands the cache is fresh, so the re-present's own fetch no-ops.)
-    const int gen = ++ownedFetchGen_;
-    SteamLibrary::ownedGamesFetch(key, sid, this, [this, gen](const QVector<SteamGame>&) {
-        if (gen != ownedFetchGen_ || !atSteamConsole()) return; // superseded / navigated away
-        // Cursor preserve: the owned tiles APPEND after the installed ones, so existing row indices are stable.
-        // Capture the selection before the re-present and restore it after so an async append never yanks the
-        // user back to the first tile mid-navigation.
-        const int keepRow = grid_ ? grid_->currentRow() : -1;
-        populateSteamGames();
-        if (keepRow > 0 && grid_ && keepRow < grid_->count())
+    // ONE scan of every launcher, shared by the remap's candidate ids and the folder itself. Both used to do
+    // their own, which meant enumerating Steam, Epic, GOG and Battle.net TWICE per refresh.
+    const PcLibScan scan = scanPcLibrary();
+
+    // THE REMAP, on every REFRESH that populates this folder — not once behind a schema stamp. Records are
+    // stored under a HASH of the id, so the only way to find a game's old records is to derive its old ids
+    // from the library it is in RIGHT NOW; a game that is not installed today contributes no candidate, and a
+    // one-shot pass would mark itself done and strand those records forever. Running it every refresh costs a
+    // few hundred hash lookups and migrates a reinstalled game the moment it reappears. applyRemap is
+    // idempotent by construction, so running it always is safe (see PcGameRemap.h).
+    //
+    // NOT on a query change (runRemap == false; see the header). Typing in the in-folder search box
+    // repopulates every 300 ms, and a keystroke cannot alter the library the table is derived from — that
+    // pass would rebuild and re-apply an identical table, walking the ini once per letter.
+    //
+    // It is deliberately fed the UNFILTERED library: the table must not depend on what the user typed into the
+    // search box, or a filtered refresh would migrate only the games matching that query.
+    if (runRemap)
+    {
+        QVector<QPair<QString, QString>> lib;
+        for (const SteamGame& g : scan.steam)
+            lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+        for (const EpicGame& g : scan.epic)
+            lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
+        for (const GogGame& g : scan.gog)
+            lib << qMakePair(QStringLiteral("gog:") + g.id, g.name);
+        // The code-less form is the one pcgame::legacyLaunchId reproduces for a Battle.net source, so the id
+        // a launch banks its records under is a key of this table by construction (probe_browse pins it).
+        for (const BattleNetGame& g : scan.bnet)
+            lib << qMakePair(QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code), g.name);
+        // OWNED-but-not-installed on Steam. It is in the same scan and it keys exactly like an installed
+        // Steam entry ("steam:<appid>"), so leaving it out meant a pre-branch favourite on a game the user
+        // owns and has not installed stayed under its per-launcher id — a second, stale star sitting beside
+        // the merged tile until the day they install it. An appid that is BOTH owned and installed
+        // contributes the same pair twice, which a QHash collapses; the destination is the same either way.
+        for (const SteamGame& g : scan.steamOwned)
+            lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+        for (const DownloadedItem& d : scan.downloads)
         {
-            grid_->setCurrentRow(keepRow);
-            grid_->scrollToItem(grid_->item(keepRow), QAbstractItemView::PositionAtCenter);
+            if (d.kind != QStringLiteral("pcgame")) continue;
+            // THE ID THIS COPY'S RECORDS ACTUALLY BANK UNDER. A downloaded copy launches through
+            // openRecent with `addonItemId`, which pcLibraryCatalog builds as `key` when there is one and
+            // the PATH otherwise (DownloadsStore documents `key` as "empty -> use path"). Requiring a
+            // non-empty key here therefore excluded a whole class of real records — keyless downloads —
+            // from the table while the folder happily built tiles for them. The same fallback the launch
+            // uses is the only candidate that can migrate them, so it is the one used. With NEITHER a key
+            // nor a path there is no id at all, and rule 1 says such an entry is absent from the table,
+            // never mapped from an empty key.
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            if (oldId.isEmpty()) continue;
+            // The title half is downloadedTitle, the SAME call pcLibraryCatalog groups the tile on.
+            lib << qMakePair(oldId, pcgame::downloadedTitle(d.title, d.path));
+        }
+        pcgame::applyRemap(pcgame::remapTable(lib));
+    }
+
+    showSyntheticCatalog(pcLibraryCatalog(query, QString(), &scan));
+
+    // BACKGROUND: with a key+SteamID configured and the cache stale, fetch the owned library off the GUI
+    // thread (async, 8s reply timeout). On completion — ONLY if this console is STILL the top level — re-present
+    // so the owned entries appear. A fresh cache / no key -> ownedGamesFetch no-ops (also what stops the
+    // re-present loop). Failures stay silent + TTL-cached (the folder never surfaces an error).
+    // In-flight dedup: a generation stamp bumped on every populatePcGames. A late reply from a superseded
+    // populate (rapid Back/re-enter or filter typing fires several) is dropped — only the latest fetch
+    // re-presents, so stale replies can't stack rebuilds or fight over the cursor.
+    const int gen = ++ownedFetchGen_;
+    SteamLibrary::ownedGamesFetch(Settings::steamWebApiKey(), Settings::steamId(), this,
+                                  [this, gen](const QVector<SteamGame>&) {
+        if (gen != ownedFetchGen_ || !atPcGamesConsole()) return; // superseded / navigated away
+        // Cursor preserve: an owned game can MERGE INTO an existing tile (it is a source, not a row of its
+        // own), so unlike the old Steam console the re-present is not a pure append and row indices can move.
+        // Keep the selection on the same GAME by id, falling back to the row when the id has gone.
+        const int keepRow = grid_ ? grid_->currentRow() : -1;
+        const QString keepId = (keepRow >= 0 && keepRow < items_.size()) ? items_[keepRow].id : QString();
+        populatePcGames();
+        int row = -1;
+        if (!keepId.isEmpty())
+            for (int i = 0; i < items_.size(); ++i) if (items_[i].id == keepId) { row = i; break; }
+        if (row < 0 && keepRow > 0 && grid_ && keepRow < grid_->count()) row = keepRow;
+        if (row > 0 && grid_ && row < grid_->count())
+        {
+            grid_->setCurrentRow(row);
+            grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
         }
     });
 }
 
-// Drill into the synthetic "Epic Games" console (mirrors openSteamConsole): list the local Epic library.
-void HomeView::openEpicConsole(const MediaItem& consoleItem)
+// ---- The source picker --------------------------------------------------------------------------------
+
+// Is this row a MERGED PC game? The id is the test, not the mime: "pcgame" is ALSO the routing kind of a
+// downloaded PC game (a Recent/Downloads row whose url is its exe), and those launch by path exactly as they
+// always did. Only an id minted by pcgame::itemId names a game with no launch encoded in it.
+static bool isMergedPcGame(const MediaItem& it)
 {
-    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    Level lvl;
-    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Epic Games");
-    stack_.push_back(lvl);
-    populateEpicGames(); // also re-run by loadTop() when Back returns to this level
+    return it.id.startsWith(QStringLiteral("pcgame:"));
 }
 
-void HomeView::populateEpicGames()
+QVector<pcgame::PcGameSource> HomeView::pcSourcesForId(const QString& itemId) const
 {
-    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    showSyntheticCatalog(browse::epicGamesCatalog(EpicLibrary::installedGames(), query));
+    if (!itemId.startsWith(QStringLiteral("pcgame:"))) return {};
+    // Rebuild the whole folder and take this game's sources out of it. Deliberately the SAME builder the
+    // folder uses rather than a hand-rolled "find every copy of this title": the grouping rule, the label
+    // disambiguation and the source ordering are all in that builder, and a second implementation of them
+    // here would drift — and would drift SILENTLY, since the only symptom is a picker that offers different
+    // rows than the tile did. The cost is one library scan per Play, which is what a launch already pays.
+    const MediaCatalog cat = pcLibraryCatalog(QString(), QString());
+    for (const MediaItem& i : cat.items) if (i.id == itemId) return i.pcSources;
+    return {};
 }
 
-// Drill into the synthetic "GOG" console (mirrors openSteamConsole): list the local GOG library.
-void HomeView::openGogConsole(const MediaItem& consoleItem)
+QVector<pcgame::PcGameSource> HomeView::pcSourcesFor(const MediaItem& it) const
 {
-    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    Level lvl;
-    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("GOG");
-    stack_.push_back(lvl);
-    populateGogGames();
+    // A live tile carries its sources; a row rebuilt from a store (a favourite, a recent, a search result)
+    // does not, because MediaItem::pcSources is not persisted — on purpose, since sources are machine state
+    // and a stored copy would eventually name an install that is gone.
+    if (!it.pcSources.isEmpty()) return it.pcSources;
+    return pcSourcesForId(it.id);
 }
 
-void HomeView::populateGogGames()
+void HomeView::playPcGame(const MediaItem& it)
 {
-    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    showSyntheticCatalog(browse::gogGamesCatalog(GogLibrary::installedGames(), query));
+    const QVector<pcgame::PcGameSource> sources = pcSourcesFor(it);
+    if (sources.isEmpty())
+    {
+        // Not a failure to launch — the game genuinely is not in this machine's library any more (uninstalled
+        // from every launcher, download deleted). Say so, rather than doing nothing.
+        showToast(tr("“%1” isn't in your PC library any more — install it again, or re-download it.")
+                      .arg(it.title), kFeedbackLong);
+        return;
+    }
+    const int auto_ = pcgame::pickAutoSource(sources);
+    if (auto_ >= 0) { launchPcSource(it, sources.at(auto_)); return; }
+
+    // Ambiguous (several ready) or unsafe (none ready) -> ask. A NavMenu from the nav kit: an in-window child
+    // overlay, controller-navigable, never a QDialog.
+    QStringList rows;
+    rows.reserve(sources.size());
+    for (const pcgame::PcGameSource& s : sources)
+    {
+        // A not-ready row SAYS so. Without it the two states are indistinguishable and the user presses what
+        // looks like Play and gets a download — the exact outcome pickAutoSource refuses to cause silently.
+        QString row = s.label.isEmpty() ? tr("Unnamed source") : s.label;
+        if (!s.ready) row = tr("%1  —  needs downloading first").arg(row);
+        // The stream picker's one-row budget, for the same reason: a downloaded copy's label is a release
+        // name, NavMenu word-wraps, and an unelided row occupies two lines and stops the list being scannable.
+        if (row.size() > StremioTranslate::kMaxDescribeChars)
+            row = row.left(StremioTranslate::kMaxDescribeChars - 1).trimmed() + QChar(0x2026);
+        rows << row;
+    }
+    const MediaItem copy = it; // the overlay outlives items_ (a repopulate can run under it)
+    const QVector<pcgame::PcGameSource> keep = sources;
+    // Built on a fresh event-loop turn: in the themed modes this can run inside the QML view's `activated`
+    // handler, and building/showing widgets from there is best deferred (the game-menu precedent).
+    QMetaObject::invokeMethod(this, [this, copy, keep, rows] {
+        new NavMenu(tr("Play “%1” from:").arg(copy.title), rows, [this, copy, keep](int row) {
+            if (row >= 0 && row < keep.size()) launchPcSource(copy, keep.at(row));
+        }, window());
+    }, Qt::QueuedConnection);
 }
 
-// Drill into the synthetic "Battle.net" console (mirrors openGogConsole): list the local Blizzard library.
-void HomeView::openBattleNetConsole(const MediaItem& consoleItem)
+void HomeView::launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s)
 {
-    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
-    Level lvl;
-    lvl.addon = nullptr; lvl.detail = true; lvl.item = consoleItem; lvl.title = tr("Battle.net");
-    stack_.push_back(lvl);
-    populateBattleNetGames();
-}
+    // Route by the source's OWN launcher, rebuilding the tile the per-launcher folders used to hand over. That
+    // is not nostalgia: openLibraryItem's steam:// / Epic-URI / goggame / battlenetgame branches are the
+    // launch paths this app has always used, each with its own Recent bookkeeping and (for the exe routes) the
+    // monitored process that banks play time. A merged item that invented a fifth route would be the only
+    // untested one.
+    //
+    // The records this launch accrues land under the PER-LAUNCHER id, and the remap moves the hashed ones —
+    // marks, consumption, play time, the star, the resume position — onto the merged id on the next refresh
+    // of this folder. The RECENT is NOT among them: applyRemap does not touch RecentStore, so this launch's
+    // Recent row stays under its per-launcher key and relaunches by its own path/kind, exactly as it did
+    // before the merge. That is benign (it is how every per-launcher Recent has always worked) but it is not
+    // the migration, and this comment used to claim it was.
+    MediaItem m;
+    m.title        = it.title;
+    m.thumbnailUrl = it.thumbnailUrl;
+    m.type         = QStringLiteral("game");
+    m.systemHint   = QStringLiteral("pc");
 
-void HomeView::populateBattleNetGames()
-{
-    const QString query = stack_.isEmpty() ? QString() : stack_.last().query;
-    showSyntheticCatalog(browse::battleNetGamesCatalog(BattleNetLibrary::installedGames(), query));
+    if (s.kind == pcgame::PcGameSource::Downloaded || s.kind == pcgame::PcGameSource::AddonAvailable)
+    {
+        // A downloaded copy re-opens exactly as its Downloads row does: through PcGameStore's remembered
+        // install, falling back to the recorded path. An AddonAvailable row has no local file yet, so the
+        // same call is its download/install handoff — MainWindow asks or re-fetches. This is the user
+        // explicitly choosing that row, which is what makes starting a download here legitimate.
+        //
+        // NOTE — AddonAvailable has NO PRODUCER anywhere in the tree today (pcGamesCatalog mints
+        // LauncherInstalled / LauncherOwned / Downloaded only), so that half of this arm is written but
+        // UNEXERCISED: nothing in the app, and no probe, has ever taken it. Read it as untested code, not
+        // as covered behaviour.
+        emit openRecent(s.exePath, QStringLiteral("pcgame"),
+                        s.addonItemId.isEmpty() ? it.id : s.addonItemId, it.title, it.thumbnailUrl);
+        return;
+    }
+    // THE ID THIS LAUNCH BANKS ITS RECORDS UNDER — built by pcgame::legacyLaunchId and nowhere else, so it
+    // is the same string populatePcGames feeds remapTable as this copy's candidate. Built by hand here it
+    // came apart exactly once and invisibly: the Battle.net arm used the MERGED display title, which for a
+    // code-less title that loses the title contest to another launcher is not the name the remap keys on, so
+    // the play time accrued under an id nothing would ever migrate. probe_browse pins the equality.
+    const QString legacyId = pcgame::legacyLaunchId(s);
+
+    if (s.launcher == QStringLiteral("steam"))
+    {
+        m.id = legacyId;
+        m.mime = QStringLiteral("steamgame");
+        m.url = s.launchUrl;   // rungameid to play, or install/<appid> for an owned-not-installed row
+    }
+    else if (s.launcher == QStringLiteral("epic"))
+    {
+        m.id = legacyId;
+        m.mime = QStringLiteral("epicgame");
+        m.url = s.launchUrl;
+    }
+    else if (s.launcher == QStringLiteral("gog"))
+    {
+        m.id = legacyId;
+        m.mime = QStringLiteral("goggame");
+        m.url = s.exePath;     // DRM-free: the monitored launchPcExe path
+    }
+    else if (s.launcher == QStringLiteral("battlenet"))
+    {
+        // Both routes on one mime, told apart by the url, exactly as openLibraryItem expects: a coded title
+        // carries battlenet://<code>, a code-less one carries its best-effort exe. A code-less title keys on
+        // BATTLE.NET'S OWN NAME for it (legacyLaunchId's fallback), which is what battleNetGamesCatalog's id
+        // did, what the Recent dispatch re-resolves on, and what the remap can actually migrate.
+        m.id = legacyId;
+        m.mime = QStringLiteral("battlenetgame");
+        m.url = s.launchUrl.isEmpty() ? s.exePath : s.launchUrl;
+    }
+    else
+    {
+        // A launcher source from a store with no route here (nothing produces one today). Fall back to
+        // whatever it carries rather than silently doing nothing.
+        m.id = it.id;
+        m.mime = QStringLiteral("pcgame");
+        m.url = s.launchUrl.isEmpty() ? s.exePath : s.launchUrl;
+    }
+    if (m.url.isEmpty())
+    {
+        showToast(tr("“%1” has no way to launch from %2.").arg(it.title, s.label), kFeedbackLong);
+        return;
+    }
+    // Defensive: every source pcGamesCatalog builds carries either a launchId or the launcher's own name, so
+    // legacyLaunchId cannot come back empty for one. Launching under an EMPTY id would key this session's
+    // records on "" — the failure the remap's rule 1 exists to prevent — so fall back to the merged id, which
+    // is at least the id the tile itself uses.
+    if (m.id.isEmpty()) m.id = it.id;
+    emit openItem(m);
 }
 
 // ---- Playlists: synthetic (addon-less) levels rooted at each catalogue's "Playlists" folder --------------
@@ -2394,9 +2652,7 @@ QString HomeView::openKindForView() const
     const Level& top = stack_.last();
     if (top.detail)
     {
-        if (top.item.mime == QStringLiteral("steam:console") || top.item.mime == QStringLiteral("epic:console")
-            || top.item.mime == QStringLiteral("gog:console")
-            || top.item.mime == QStringLiteral("battlenet:console")) return QString(); // store games aren't ROM files
+        if (top.item.mime == QStringLiteral("pcgames:console")) return QString(); // PC games aren't ROM files
         return (top.item.type == QStringLiteral("platform")) ? QStringLiteral("game") : QString(); // games per-console
     }
     const QString& t = top.catalogType;
@@ -2635,11 +2891,8 @@ void HomeView::activateItem(int row)
         || it.type == QStringLiteral("_hiddenshelf"))
         { openShelfLevel(it); return; }
 
-    // The synthetic Steam console drills into the local library natively (not via the addon).
-    if (it.mime == QStringLiteral("steam:console")) { openSteamConsole(it); return; }
-    if (it.mime == QStringLiteral("epic:console"))  { openEpicConsole(it);  return; }
-    if (it.mime == QStringLiteral("gog:console"))   { openGogConsole(it);   return; }
-    if (it.mime == QStringLiteral("battlenet:console")) { openBattleNetConsole(it); return; }
+    // The synthetic PC Games console drills into the local library natively (not via the addon).
+    if (it.mime == QStringLiteral("pcgames:console")) { openPcGamesConsole(it); return; }
 
     // The synthetic Recent folder drills into this catalogue's recently-opened items.
     if (it.type == QStringLiteral("_recents"))
@@ -2925,7 +3178,10 @@ void HomeView::showGameItemMenu(MediaItem it, bool isDownloads)
     new NavMenu(it.title, rows, [this, it, isDownloads](int row) {
         switch (row)
         {
-        case 0: emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl); break;
+        // A merged PC game carries no url — which copy runs is decided now, from the library as it is now.
+        case 0: if (isMergedPcGame(it)) playPcGame(it);
+                else emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
+                break;
         case 1: toggleGameFavorite(it); break;
         case 2: addGameToPlaylistInteractive(it); break;
         case 3: uninstallGameItem(it, isDownloads); break;
@@ -3035,6 +3291,19 @@ void HomeView::showItemContextMenu(int row, const QPoint& globalPos)
 
 void HomeView::openFavorite(const MediaItem& favItem)
 {
+    // A favourited MERGED PC game. THE case this whole re-derivation path exists for, and the one that was
+    // broken by construction: a FavoriteItem stores an id, a title and a path, and a merged PC game has no
+    // path (which copy runs is decided at activation) and an id — "pcgame:hades" — that, unlike
+    // "steam:1145360", encodes no launch. Reconstructing the launch FROM THE ID, which is what every other
+    // branch below does, cannot work here: there is nothing in the id to reconstruct from. Favourite a PC
+    // game, restart the app, press Play and nothing at all would happen.
+    //
+    // So the sources are rebuilt from the library as it is NOW and the same picker runs. That is also the
+    // right answer rather than a workaround: the Steam copy may have been uninstalled and the GOG one moved
+    // since the star was set, and a persisted source list would faithfully launch something that is gone.
+    // It is checked FIRST because a merged favourite can also be reached by the path loop below once a
+    // downloaded copy has stamped a path onto it.
+    if (isMergedPcGame(favItem)) { playPcGame(favItem); return; }
     // A favourited local game (starred from the Recent/Downloads menu) re-opens by path — openRecent recovers
     // its console from the Recent/Downloads store.
     for (const FavoriteItem& f : FavoritesStore::list())
@@ -3109,16 +3378,24 @@ void HomeView::doSearch()
     // Searching while drilled into a console scopes the search to THAT console's games (not the whole
     // catalog): keep the console level and re-run it with the query. Clearing the box restores the full
     // list. Covers addon consoles (getDetail applies the query - e.g. an IGDB name filter) and the native
-    // Steam library (filtered locally in populateSteamGames).
+    // PC library (filtered locally in populatePcGames).
     Level& cur = stack_.last();
     if (cur.detail && (cur.item.type == QStringLiteral("platform")
-                       || cur.item.mime == QStringLiteral("steam:console")
-                       || cur.item.mime == QStringLiteral("epic:console")
-                       || cur.item.mime == QStringLiteral("gog:console")
-                       || cur.item.mime == QStringLiteral("battlenet:console")))
+                       || cur.item.mime == QStringLiteral("pcgames:console")))
     {
         cur.query = q;
         cur.childRow = -1;
+        // The PC folder repopulates DIRECTLY here rather than through loadTop, to say the one thing loadTop
+        // cannot know: this is a filter keystroke, not a library refresh. loadTop's branch runs the id remap
+        // (correct when you enter or Back into the folder); doing it per debounced keystroke is an ini pass
+        // per letter over a table that cannot have changed. Everything else loadTop would do for this level
+        // is the repopulate itself.
+        if (cur.item.mime == QStringLiteral("pcgames:console"))
+        {
+            pendingRestoreRow_ = -1;               // fresh view, exactly as loadTop() does
+            populatePcGames(/*runRemap*/ false);
+            return;
+        }
         loadTop();
         return;
     }
@@ -3212,11 +3489,8 @@ void HomeView::loadTop()
     pendingRestoreRow_ = -1; // fresh view: any in-progress "page toward the drilled item" restore is moot
     const Level& top = stack_.last();
 
-    // Returning to the Steam console (e.g. Back from a game's info page): repopulate natively, not via addon.
-    if (top.detail && top.item.mime == QStringLiteral("steam:console")) { populateSteamGames(); return; }
-    if (top.detail && top.item.mime == QStringLiteral("epic:console"))  { populateEpicGames();  return; }
-    if (top.detail && top.item.mime == QStringLiteral("gog:console"))   { populateGogGames();   return; }
-    if (top.detail && top.item.mime == QStringLiteral("battlenet:console")) { populateBattleNetGames(); return; }
+    // Returning to the PC Games console (e.g. Back from a game's info page): repopulate natively, not via addon.
+    if (top.detail && top.item.mime == QStringLiteral("pcgames:console")) { populatePcGames(); return; }
     // Returning to a cross-addon search (Back out of a result): re-run the fan-out.
     if (top.detail && top.item.type == QStringLiteral("_search"))
         { startSearch(top.item.mime.mid(QStringLiteral("search:").size())); return; }
@@ -3298,6 +3572,15 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
             return;
         }
     }
+    // A merged PC game (the PC Games folder's tile, or a favourite/recent row rebuilt from a store): pick a
+    // source and launch it. This is the classic detail page's Play button and the themed action row's, so it
+    // must not assume the row still carries its sources — playPcGame re-derives when it does not.
+    //
+    // NOT a cross-catalog search row: SearchAggregator fans out to ADDONS only and there is no native-PC leg,
+    // so a merged game cannot appear in a _search result at all. This arm would handle one correctly if a leg
+    // were ever added; nothing produces one today. (Parity with the four folders it replaced — they were not
+    // searchable either — so it is not a regression, just not the coverage it looks like.)
+    if (isMergedPcGame(it)) { playPcGame(it); return; }
     if (it.mime == QStringLiteral("steamgame"))
     {
         MediaItem m = it;
@@ -3730,6 +4013,12 @@ bool HomeView::bridgeStreamId(int idx, const QString& streamId)
 // path+console like the game action menu does; its identity is gameFavId (stable key, else path), not it.id.
 static bool isLocalGameLeaf(const MediaItem& it)
 {
+    // A MERGED PC game counts even though it has no url: it is a game that lives on THIS machine, it belongs
+    // to the PC console, and starring it must stamp the same system the console's ★ Favorites folder filters
+    // on. Without this the themed star writes a system-less record and the game the user just starred does
+    // not appear in that folder, while the identical star pressed on its info page (which routes through
+    // localGameFavorite) does — two surfaces disagreeing about one action.
+    if (isMergedPcGame(it)) return true;
     return (it.mime == QStringLiteral("game") || it.mime == QStringLiteral("pcgame")) && !it.url.isEmpty();
 }
 
@@ -3961,6 +4250,8 @@ void HomeView::playThemedLeaf(int idx, int routeHint)
     // them like the classic list does, instead of trying to resolve them as catalog items via resolvePlay.
     if (atRecentsLevel() || atDownloadsLevel())
     {
+        // A merged PC game row has no url to re-open — it names a game, not a file (see playPcGame).
+        if (isMergedPcGame(it)) { playPcGame(it); return; }
         if (!it.url.isEmpty()) emit openRecent(it.url, it.mime, resumeKeyFor(it), it.title, it.thumbnailUrl);
         return;
     }
@@ -4045,9 +4336,12 @@ HomeView::ActionGates HomeView::classicActionGates(const MediaItem& item) const
     ActionGates g;
     // A store game launched by URI (steam:// / com.epicgames.launcher:// / battlenet://) carries no url and no
     // addon — the launch is a client handoff in openLibraryItem, so Play must be offered on its mime alone.
+    // A merged PC game is the same shape: no url, no addon, and the launch is decided by the source picker at
+    // Play time — so Play has to be offered on its identity alone or its info page has no way to start it.
     const bool isStoreLaunch = (item.mime == QStringLiteral("steamgame"))
                             || (item.mime == QStringLiteral("epicgame"))
-                            || (item.mime == QStringLiteral("battlenetgame"));
+                            || (item.mime == QStringLiteral("battlenetgame"))
+                            || isMergedPcGame(item);
     const bool remoteLeaf = !stack_.isEmpty() && stack_.last().addon && !item.expandable
         && stack_.last().addon->transport == LoadedAddon::RemoteHttp;
     const bool isRemotePlayable = remoteLeaf
@@ -4169,7 +4463,15 @@ void HomeView::requestMeta(const MediaItem& item)
     // movie/episode -> "▶ Play", comic/manga/book document -> "📖 Read". Both resolve via the addon's /stream
     // on click. A specific MangaDex chapter also gets "Read". Steam games get "▶ Play". Containers get none.
     // The gates themselves live in classicActionGates() — shared with the themed detail action row.
-    const bool isSteam = (item.mime == QStringLiteral("steamgame"));
+    // Steam's store API is keyed on an appid, which a merged PC game has only inside its Steam SOURCE. Hand
+    // that source's id over so a merged game's info page still gets the synopsis/genres/Metacritic the Steam
+    // console's tiles used to show — a merged item has no addon behind it, so without this its page is bare.
+    QString steamAppId;
+    if (item.mime == QStringLiteral("steamgame")) steamAppId = item.id.mid(QStringLiteral("steam:").size());
+    else if (isMergedPcGame(item))
+        for (const pcgame::PcGameSource& s : pcSourcesFor(item))
+            if (s.launcher == QStringLiteral("steam") && !s.launchId.isEmpty()) { steamAppId = s.launchId; break; }
+    const bool isSteam = !steamAppId.isEmpty();
     const ActionGates gates = classicActionGates(item);
     playImdbId_.clear(); playStremioType_.clear(); // a bridged Play (if any) is established in showMeta()
     if (playBtn_)
@@ -4188,7 +4490,9 @@ void HomeView::requestMeta(const MediaItem& item)
     if (isSteam)
     {
         pendingMetaReqId_ = (steamMetaSeq_ -= 1); // a unique (negative) id for the async store fetch guard
-        requestSteamMeta(item, pendingMetaReqId_);
+        MediaItem probe = item;
+        probe.id = QStringLiteral("steam:") + steamAppId; // requestSteamMeta reads the appid off the id
+        requestSteamMeta(probe, pendingMetaReqId_);
         return;
     }
     pendingMetaReqId_ = mgr_->requestMeta(stack_.last().addon, item);
@@ -4672,8 +4976,12 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         {
             const QString name = stack_.last().item.title.trimmed();
             const QString low = name.toLower();
+            // "pc games" is the native folder that replaced the four launcher consoles; the others are the
+            // names an addon catalog gives the same platform. Without the first name the folder would be the
+            // one PC console with no Recent / ★ Favorites / Downloaded sub-folders in it.
             const bool pc = low == QStringLiteral("pc (windows)") || low == QStringLiteral("pc windows")
-                            || low == QStringLiteral("windows") || low == QStringLiteral("pc");
+                            || low == QStringLiteral("windows") || low == QStringLiteral("pc")
+                            || low == QStringLiteral("pc games");
             QString kind, system;
             if (pc) { kind = QStringLiteral("pcgame"); system = QStringLiteral("pc"); }
             else if (const GameSystem* s = SystemCatalog::forConsoleName(name))
@@ -4686,7 +4994,11 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                         && r.system == system) { hasRec = true; break; }
                 bool hasFav = false;
                 for (const FavoriteItem& f : FavoritesStore::list())
-                    if (!f.path.isEmpty() && f.system == system) { hasFav = true; break; }
+                    // Same rule as browse::favoritesCatalog, which builds the folder this gate reveals: a
+                    // merged PC game has no path on purpose, and testing the path alone would hide the ★
+                    // folder from a console whose favourites it would then have happily listed.
+                    if ((!f.path.isEmpty() || f.itemId.startsWith(QStringLiteral("pcgame:")))
+                        && f.system == system) { hasFav = true; break; }
                 bool hasDown = false;
                 for (const DownloadedItem& d : DownloadsStore::list())
                     if (d.kind == kind && d.system == system) { hasDown = true; break; }
@@ -4719,56 +5031,40 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             stream.url = QStringLiteral("stream");  // the kind handled by onRequestOpenFile
             items_.push_back(stream);
         }
-        // On the Games console list, surface the local Steam library as a native "Steam" console.
-        if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty()
-            && stack_.last().catalogType == QStringLiteral("game")
-            && SteamLibrary::isAvailable() && !SteamLibrary::installedGames().isEmpty())
-        {
-            MediaItem steam;
-            steam.id = QStringLiteral("steam:console");
-            steam.type = QStringLiteral("platform"); // a console (drills into its games)
-            steam.title = tr("Steam");
-            steam.expandable = true;
-            steam.mime = QStringLiteral("steam:console"); // marker -> drilled natively, not via the addon
-            items_.push_back(steam);
-        }
-        // Alongside Steam: native Epic and GOG consoles, each shown only when its local library is non-empty
-        // (the same "appears when detected" rule). Epic launches fire-and-forget via the launcher URI (like
-        // Steam); GOG launches its DRM-free exe through the monitored PC-exe path.
+        // On the Games console list, surface this machine's PC library as ONE native "PC Games" console. It
+        // replaced four (Steam / Epic Games / GOG / Battle.net), each of which listed its own launcher and
+        // showed a game owned in two stores twice, under two ids. The same "appears when detected" rule
+        // applies, now across all of them: the folder shows when ANY PC library has something in it — so a
+        // machine with no PC games still sees no extra console.
         if (!stack_.isEmpty() && !stack_.last().detail && stack_.last().query.isEmpty()
             && stack_.last().catalogType == QStringLiteral("game"))
         {
-            if (EpicLibrary::isAvailable() && !EpicLibrary::installedGames().isEmpty())
+            const bool anyPc =
+                   (SteamLibrary::isAvailable()     && !SteamLibrary::installedGames().isEmpty())
+                || (EpicLibrary::isAvailable()      && !EpicLibrary::installedGames().isEmpty())
+                || (GogLibrary::isAvailable()       && !GogLibrary::installedGames().isEmpty())
+                || (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
+                // OWNED-but-not-installed on Steam counts as "has something in it". The folder LISTS these
+                // (pcGamesCatalog mints a LauncherOwned source for each), so a gate that ignored them hid
+                // the whole console from the user whose PC library is entirely owned-not-installed — the
+                // one folder that replaced four, absent. No isAvailable() gate: this list comes from the
+                // Web API, not a local install, and it is empty unless a key + SteamID are configured and
+                // a fetch has already succeeded. Cached, so it is network-free on the GUI thread.
+                || !SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId()).isEmpty()
+                || [] {
+                       for (const DownloadedItem& d : DownloadsStore::list())
+                           if (d.kind == QStringLiteral("pcgame")) return true;
+                       return false;
+                   }();
+            if (anyPc)
             {
-                MediaItem epic;
-                epic.id = QStringLiteral("epic:console");
-                epic.type = QStringLiteral("platform");
-                epic.title = tr("Epic Games");
-                epic.expandable = true;
-                epic.mime = QStringLiteral("epic:console");
-                items_.push_back(epic);
-            }
-            if (GogLibrary::isAvailable() && !GogLibrary::installedGames().isEmpty())
-            {
-                MediaItem gog;
-                gog.id = QStringLiteral("gog:console");
-                gog.type = QStringLiteral("platform");
-                gog.title = tr("GOG");
-                gog.expandable = true;
-                gog.mime = QStringLiteral("gog:console");
-                items_.push_back(gog);
-            }
-            // Battle.net rides the same rule: shown only when the Blizzard library is non-empty (so this machine,
-            // with no Blizzard titles installed, sees NO extra console). Its tiles carry BOTH launch routes.
-            if (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
-            {
-                MediaItem bnet;
-                bnet.id = QStringLiteral("battlenet:console");
-                bnet.type = QStringLiteral("platform");
-                bnet.title = tr("Battle.net");
-                bnet.expandable = true;
-                bnet.mime = QStringLiteral("battlenet:console");
-                items_.push_back(bnet);
+                MediaItem pc;
+                pc.id = QStringLiteral("pcgames:console");
+                pc.type = QStringLiteral("platform"); // a console (drills into its games)
+                pc.title = tr("PC Games");
+                pc.expandable = true;
+                pc.mime = QStringLiteral("pcgames:console"); // marker -> drilled natively, not via the addon
+                items_.push_back(pc);
             }
         }
         from = 0;

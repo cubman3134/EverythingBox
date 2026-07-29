@@ -101,7 +101,11 @@ int main(int argc, char** argv)
         CHECK(mapped == 5000 && ms < RECENTS_BUDGET_MS, "budget: recentsCatalog 5k under budget");
     }
 
-    // steamGamesCatalog over 5,000 synthetic games with an injected pure poster fn (no librarycache I/O).
+    // pcGamesCatalog over 5,000 synthetic games with an injected pure poster fn (no librarycache I/O). This
+    // replaced the steamGamesCatalog budget when the four per-launcher folders became one: the merged builder
+    // does strictly more per entry (normalise the title, hash it into a group, sort the sources and then the
+    // items), and it is now the ONLY thing between a launcher scan and the grid — plus the re-derivation path
+    // runs it again on every Play. A regression here is felt on every PC-library open, so it keeps a budget.
     {
         QList<SteamGame> steam;
         steam.reserve(5000);
@@ -111,12 +115,16 @@ int main(int argc, char** argv)
             g.name = QStringLiteral("Steam Game %1").arg(i);
             steam << g;
         }
-        const auto poster = [](const SteamGame& g) { return QStringLiteral("poster:") + g.appid; };
+        const auto poster = [](const QVector<pcgame::PcGameSource>& v) {
+            return v.isEmpty() ? QString() : QStringLiteral("poster:") + v.first().launchId;
+        };
         int mapped = 0;
-        const qint64 ms = worstOf3([&] { mapped = browse::steamGamesCatalog(steam, QString(), poster).items.size(); });
-        printf("MEASURE steamGamesCatalog 5k: %lld ms (%d mapped)\n", (long long)ms, mapped);
-        const int STEAM_BUDGET_MS = 50; // measured worst 3ms on 2026-07 dev box; 3x+ headroom (50ms floor dominates so CI jitter can't false-fail)
-        CHECK(mapped == 5000 && ms < STEAM_BUDGET_MS, "budget: steamGamesCatalog 5k under budget");
+        const qint64 ms = worstOf3([&] {
+            mapped = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), poster).items.size();
+        });
+        printf("MEASURE pcGamesCatalog 5k: %lld ms (%d mapped)\n", (long long)ms, mapped);
+        const int PCGAMES_BUDGET_MS = 200; // measured worst 23ms on 2026-07 dev box (per-title normalise + group + two sorts); 8x headroom for a slower CI box
+        CHECK(mapped == 5000 && ms < PCGAMES_BUDGET_MS, "budget: pcGamesCatalog 5k under budget");
     }
 
     // parseM3u on a generated 10,000-entry IPTV-style playlist string.
