@@ -306,7 +306,13 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
             g.title    = title;
             g.bestRank = rank;
         }
-        g.sources.push_back(s);
+        // Carry the launcher's OWN name onto the source. RAW, not `title`: the pre-merge id built from it
+        // (pcgame::legacyLaunchId, for a launcher with no id of its own) has to be byte-identical to the
+        // candidate populatePcGames feeds remapTable, and that candidate is the launcher's name verbatim.
+        // Trimming here would silently produce a launch id the remap never migrates.
+        pcgame::PcGameSource named = s;
+        if (named.sourceName.isEmpty()) named.sourceName = rawTitle;
+        g.sources.push_back(named);
         g.sourceTitles << title;
     };
 

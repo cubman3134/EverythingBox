@@ -380,6 +380,10 @@ void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
 // this is the one store the remap can read straight through. Two collapsing favourites become ONE entry:
 // the FIRST in list order wins its display fields (the list is newest-first, so that is the entry the user
 // most recently starred) and takes the MAX ts, so the merged star keeps the newer star date and its place.
+//
+// It also STAMPS the record, not just its id — see the comment on the stamp below. A favourite is the one
+// migrated record with a second key beside the id (`system`, which decides which console's ★ Favorites folder
+// lists it), and moving the id without it produces a star that is visible on Home and gone from the folder.
 void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
 {
     s.beginGroup(QStringLiteral("favorites"));
@@ -411,6 +415,31 @@ void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
                 changed = true;
             }
             const QString finalId = o.value(QStringLiteral("itemId")).toString();
+
+            // A favourite on a merged id BELONGS TO THE PC CONSOLE, and both surfaces that show that
+            // console's ★ Favorites folder — browse::favoritesCatalog and the hasFav gate in HomeView's
+            // populate() — filter on `system`. The legacy per-launcher star was written by the generic
+            // addon-favourite path, which stamped neither `system` nor `kind` (there was no path to derive
+            // one from), so rewriting ONLY the id migrates a record that Home and Plays show correctly and
+            // that folder silently omits: the star disappears from exactly where the user looks for it.
+            // This is the same inconsistency commit 542a023 fixed on the WRITE side (browse::
+            // localGameFavorite stamps "pc" from a pcgame: id); this is the MIGRATED side of it.
+            //
+            // Keyed on the FINAL id, not on "did this pass rewrite it": a record migrated by an earlier
+            // build already carries a pcgame: id and appears in NO table (the table's keys are per-launcher
+            // ids), so a rewrite-only condition would strand precisely the users who ran that build.
+            // EMPTY fields only — an existing value is the caller's and is never overwritten.
+            if (finalId.startsWith(QStringLiteral("pcgame:")))
+            {
+                if (o.value(QStringLiteral("system")).toString().isEmpty())
+                { o.insert(QStringLiteral("system"), QStringLiteral("pc")); changed = true; }
+                // `kind` is the row's routing mime in that folder (favoritesCatalog defaults an empty one to
+                // "game"), and localGameFavorite writes "pcgame" for the same record. Stamped for the same
+                // reason: the migrated record and the freshly starred one must be the same record.
+                if (o.value(QStringLiteral("kind")).toString().isEmpty())
+                { o.insert(QStringLiteral("kind"), QStringLiteral("pcgame")); changed = true; }
+            }
+
             const int at = seen.value(finalId, -1);
             if (at < 0) { seen.insert(finalId, out.size()); out.append(o); continue; }
 

@@ -96,8 +96,29 @@ namespace pcgame
         QString launchUrl;    // when the launch is a protocol URL
         QString addonItemId;  // Downloaded / AddonAvailable
         QString label;        // the picker row
+        // The launcher's OWN name for this copy, VERBATIM as the launcher reported it — NOT the merged
+        // tile's display title, which is the best-ranked name across every launcher and is therefore
+        // frequently some other store's spelling. It is the identity half of the pre-merge id for a source
+        // whose launcher has no id of its own (a code-less Battle.net title), so it has to be the same
+        // string the remap's candidate id is built from. See legacyLaunchId.
+        QString sourceName;
         bool    ready = false; // launches NOW, with no download
     };
+
+    // The PRE-MERGE, per-launcher id a launch through this source banks its Recent, play time and marks
+    // under — i.e. the id the remap migrates FROM ("steam:<appid>", "epic:<appName>", "gog:<id>",
+    // "bnet:<code>", and for a code-less Battle.net title "bnet:<the launcher's own name>").
+    //
+    // It exists because that last case had two independent constructions. The launch site minted
+    // "bnet:" + the MERGED DISPLAY TITLE, while the remap's candidate is built from Battle.net's own name;
+    // for a code-less game whose title loses the display-title contest to another launcher those differ,
+    // and the play time then accrues under an id the remap never visits — permanently stranded, silently.
+    // One function, called by both sides, is the only way that cannot come apart; probe_browse pins the
+    // equality against the table remapTable builds.
+    //
+    // Empty for a source with no launcher (a downloaded / addon copy: it is already keyed by addonItemId)
+    // or with nothing to key on at all. Callers treat empty as "no pre-merge id", never as a key.
+    QString legacyLaunchId(const PcGameSource& s);
 
     // Which source should Play use? Returns an index, or -1 meaning "ask the user".
     //

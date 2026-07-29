@@ -776,6 +776,112 @@ int main(int argc, char** argv)
         CHECK(recGet(dr + QStringLiteral("/ts")).toLongLong() == 200);
     }
 
+    // ---- 14. a MIGRATED favourite is STAMPED, not merely re-keyed ---------------------------------
+    // A favourite is the only migrated record with a second key beside its id: `system`, which is what
+    // decides whether the PC console's ★ Favorites folder lists it (browse::favoritesCatalog skips
+    // f.system != "pc"; HomeView's hasFav gate, which decides whether that folder is even offered, tests
+    // the same field). The legacy per-launcher star was written by the generic addon-favourite path, which
+    // stamped no `system`, no `kind` and no `path` — there was no file to point at. Rewriting ONLY its id
+    // therefore migrates a record that Home and Plays show correctly and that folder silently omits: from
+    // where the user looks for their favourite, the star vanished. Losing a star is losing user data even
+    // though every byte is technically still on disk.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp.ini"));
+        QFile::remove(gRecIni);
+
+        const QString oldId = QStringLiteral("steam:1145360");
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(oldId, QStringLiteral("Hades"));
+        const QHash<QString, QString> t = remapTable(lib);
+        const QString newId = t.value(oldId);
+        CHECK(newId == itemId(QStringLiteral("Hades")));
+
+        // favJson writes EXACTLY the legacy shape — itemId, title, ts and nothing else.
+        recSet(QStringLiteral("favorites/default/items"), favJson({ qMakePair(oldId, qint64(9)) }));
+        reseatRemapStore();
+        applyRemap(t);
+
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            const int at = favIndexOf(fav, newId);
+            CHECK(at >= 0);
+            if (at >= 0)
+            {
+                const QJsonObject o = fav.at(at).toObject();
+                CHECK(o.value(QStringLiteral("system")).toString() == QStringLiteral("pc"));
+                // …and the routing kind the WRITE side (browse::localGameFavorite) stamps on the same
+                // record, so a migrated star and a freshly pressed one are one record, not two shapes.
+                CHECK(o.value(QStringLiteral("kind")).toString() == QStringLiteral("pcgame"));
+                // THE GATE ITSELF, spelled out as favoritesCatalog applies it (probe_browse pins that this
+                // is the rule; this probe cannot link the builder — it is QtCore-only by charter). A record
+                // failing this is absent from the folder no matter how correct its id is.
+                const bool mergedPc = o.value(QStringLiteral("itemId")).toString()
+                                          .startsWith(QStringLiteral("pcgame:"));
+                const bool hasPath  = !o.value(QStringLiteral("path")).toString().isEmpty();
+                CHECK((hasPath || mergedPc)
+                      && o.value(QStringLiteral("system")).toString() == QStringLiteral("pc"));
+                // The star's own data is untouched: the stamp adds fields, it does not re-date the record
+                // (ts orders the multi-device merge — bumping it would let this rewrite beat a real peer).
+                CHECK(qint64(o.value(QStringLiteral("ts")).toDouble()) == 9);
+                CHECK(o.value(QStringLiteral("title")).toString() == oldId);  // favJson's title
+            }
+        }
+
+        // Idempotent, like every other store: a second pass adds no entry and changes no field.
+        reseatRemapStore();
+        applyRemap(t);
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            CHECK(fav.size() == 1);
+            const int at = favIndexOf(fav, newId);
+            CHECK(at >= 0);
+            if (at >= 0)
+                CHECK(fav.at(at).toObject().value(QStringLiteral("system")).toString()
+                      == QStringLiteral("pc"));
+        }
+
+        // ...AND the record an EARLIER BUILD already migrated: its id is a pcgame: id, so it is in NO
+        // table (every table key is a per-launcher id) and a stamp conditioned on "did this pass rewrite
+        // it" would never reach it — stranding precisely the users who ran the build with the bug.
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp2.ini"));
+        QFile::remove(gRecIni);
+        recSet(QStringLiteral("favorites/default/items"), favJson({ qMakePair(newId, qint64(9)) }));
+        reseatRemapStore();
+        applyRemap(t);
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            const int at = favIndexOf(fav, newId);
+            CHECK(at >= 0);
+            if (at >= 0)
+            {
+                CHECK(fav.at(at).toObject().value(QStringLiteral("system")).toString()
+                      == QStringLiteral("pc"));
+                CHECK(fav.at(at).toObject().value(QStringLiteral("kind")).toString()
+                      == QStringLiteral("pcgame"));
+            }
+        }
+
+        // The mirror: a NON-PC favourite is left exactly as it was. The stamp keys on the merged id, so a
+        // streamed/addon favourite riding in the same list must not acquire a console it does not belong
+        // to — that would file a movie under the PC games console.
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp3.ini"));
+        QFile::remove(gRecIni);
+        recSet(QStringLiteral("favorites/default/items"),
+               favJson({ qMakePair(QStringLiteral("tt0111161"), qint64(4)) }));
+        reseatRemapStore();
+        applyRemap(t);
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            const int at = favIndexOf(fav, QStringLiteral("tt0111161"));
+            CHECK(at >= 0);
+            if (at >= 0)
+            {
+                CHECK(fav.at(at).toObject().value(QStringLiteral("system")).toString().isEmpty());
+                CHECK(fav.at(at).toObject().value(QStringLiteral("kind")).toString().isEmpty());
+            }
+        }
+    }
+
     // Leave nothing behind (issue #42): every scratch ini this run created goes, so the next run — and
     // any other probe sharing build/Release — starts from a clean file.
     QFile::remove(ini);
@@ -785,6 +891,9 @@ int main(int argc, char** argv)
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-partial.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume2.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp2.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp3.ini")));
 
     if (failures == 0) { std::puts("PCGAMES-OK"); return 0; }
     std::fprintf(stderr, "PCGAMES: %d check(s) failed\n", failures);

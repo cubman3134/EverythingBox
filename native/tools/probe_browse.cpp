@@ -42,6 +42,26 @@ int main(int argc, char** argv)
     auto snes = browse::favoritesCatalog(favs, "snes");
     CHECK(snes.items.size() == 1 && snes.items[0].title == "Zelda", "favorites: system scope + path-only");
 
+    // ---- The gate a MIGRATED PC favourite has to satisfy ---------------------------------------------------
+    // A merged PC game has no path on purpose (which copy runs is decided at activation), so its id gets it
+    // past the path test — but `system` is a SECOND key, and this folder is scoped on it. That is why
+    // pcgame::applyRemap stamps a migrated record rather than only rewriting its id: the legacy per-launcher
+    // star carried no system, and an id-only migration produces the record below that this folder DROPS,
+    // which the user reads as their star having been deleted. probe_pcgames pins the stamp; this pins the
+    // rule the stamp exists for, so neither half can be "fixed" by weakening the other.
+    {
+        QList<FavoriteItem> pcf;
+        { FavoriteItem f; f.itemId = "pcgame:hades"; f.title = "Hades";
+          f.system = "pc"; f.kind = "pcgame"; pcf << f; }              // migrated AND stamped
+        { FavoriteItem f; f.itemId = "pcgame:hades ii"; f.title = "Hades II"; pcf << f; } // id rewritten ONLY
+        const MediaCatalog folder = browse::favoritesCatalog(pcf, "pc");
+        CHECK(folder.items.size() == 1 && folder.items[0].id == "pcgame:hades"
+              && folder.items[0].url.isEmpty() && folder.items[0].mime == "pcgame",
+              "favorites: a stamped path-less merged PC favourite IS listed in the pc folder");
+        CHECK(folder.items.size() == 1,
+              "favorites: an id-only migrated favourite (no system) is INVISIBLE here — hence the stamp");
+    }
+
     // ---- Favorites write side: starring a local game must stamp the console (else the per-console ----------
     // ---- ★ Favorites folder never matches it). Hint (from the Recent/Downloads store) wins; a ROM ----------
     // ---- extension is the fallback; PC games are always "pc" (.exe would else collide with psx). ----------
@@ -329,6 +349,70 @@ int main(int argc, char** argv)
             CHECK(everyTileReached,
                   "pcgames: every catalog tile id is a destination the remap would move records to");
         }
+    }
+
+    // ---- THE LAUNCH ID: what a launch banks under must be what the remap migrates FROM --------------------
+    // launchPcSource routes a merged tile through the per-launcher launch path, so this session's play time,
+    // marks and resume land under the PRE-MERGE id — and the next refresh migrates them only if that id is a
+    // key of the table populatePcGames builds. Three of the four launchers key on an id the source carries.
+    // The fourth does not: a code-less Battle.net title has no product code, so its id is a NAME — and the
+    // launch site used to mint it from the MERGED DISPLAY TITLE, which is the best-ranked name across every
+    // launcher. For a code-less title that loses that contest the two names differ, the records accrue under
+    // an id the remap never visits, and they are stranded permanently and silently. pcgame::legacyLaunchId is
+    // now the one construction both sides use; this pins that it lands inside the table.
+    {
+        QList<SteamGame> st;
+        // Same game, same normalised key, DIFFERENT raw name — and Steam outranks Battle.net, so this is the
+        // name the tile shows. That divergence is the whole failure mode; without it the bug is invisible.
+        { SteamGame g; g.appid = "1234"; g.name = "HEARTHSTONE™"; st << g; }
+        QList<BattleNetGame> bn;
+        { BattleNetGame g; g.name = "Hearthstone"; g.exe = "C:/bn/hs.exe"; bn << g; }   // no code
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, {}, bn, {}, QString(), QString(), art);
+
+        MediaItem tile;
+        for (const MediaItem& i : pc.items) if (i.id == "pcgame:hearthstone") tile = i;
+        pcgame::PcGameSource bnetSrc;
+        for (const pcgame::PcGameSource& s : tile.pcSources)
+            if (s.launcher == "battlenet") bnetSrc = s;
+
+        CHECK(pc.items.size() == 1 && tile.pcSources.size() == 2 && bnetSrc.launchId.isEmpty()
+              && tile.title != "Hearthstone",
+              "launchid: the premise — one merged tile whose title is NOT Battle.net's own name");
+
+        // The candidate table, built exactly the way populatePcGames builds it.
+        QVector<QPair<QString, QString>> lib;
+        for (const SteamGame& g : st)     lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+        for (const BattleNetGame& g : bn)
+            lib << qMakePair(QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code), g.name);
+        const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+        CHECK(pcgame::legacyLaunchId(bnetSrc) == "bnet:Hearthstone",
+              "launchid: a code-less Battle.net source keys on BATTLE.NET's name, not the merged title");
+        CHECK(t.contains(pcgame::legacyLaunchId(bnetSrc))
+              && t.value(pcgame::legacyLaunchId(bnetSrc)) == tile.id,
+              "launchid: that id IS a table key, and the remap moves it onto this very tile");
+        // The mirror, and the actual regression guard: the id the launch site used to mint is NOT migratable.
+        CHECK(!t.contains(QStringLiteral("bnet:") + tile.title),
+              "launchid: an id built from the MERGED title is in no table — the stranding this pins against");
+
+        // Not a Battle.net special case: EVERY launcher source's launch id has to be a table key, or that
+        // launcher is the next one to strand a session's play time.
+        bool allMigratable = !tile.pcSources.isEmpty();
+        for (const pcgame::PcGameSource& s : tile.pcSources)
+        {
+            if (s.launcher.isEmpty()) continue;                 // a downloaded copy keys on addonItemId
+            const QString id = pcgame::legacyLaunchId(s);
+            if (id.isEmpty() || t.value(id) != tile.id) allMigratable = false;
+        }
+        CHECK(allMigratable,
+              "launchid: every launcher source's launch id maps to this tile in the remap table");
+        // A source with no launcher (downloaded / addon) claims no pre-merge id at all, rather than
+        // inventing one — rule 1: an id with no destination must be absent, never an empty key.
+        pcgame::PcGameSource dlSrc;
+        dlSrc.kind = pcgame::PcGameSource::Downloaded; dlSrc.addonItemId = "dl-1"; dlSrc.sourceName = "Hades";
+        CHECK(pcgame::legacyLaunchId(dlSrc).isEmpty(),
+              "launchid: a launcher-less source has NO pre-merge id (it is keyed by addonItemId)");
     }
 
     // ---- pcGamesCatalog: two copies from the SAME launcher must not read as identical picker rows ---------
