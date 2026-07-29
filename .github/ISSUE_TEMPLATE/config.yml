@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and setup help
+    url: https://discord.gg/bW7KMVhgwH
+    about: "Not sure it's a bug? Ask in the Discord — #support is faster than an issue for install, emulator and add-on problems."
+  - name: Add-ons and themes
+    url: https://github.com/cubman3134/everythingbox-addons
+    about: Browse the community add-on registry, or contribute your own.
