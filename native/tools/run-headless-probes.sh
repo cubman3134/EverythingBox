@@ -253,5 +253,59 @@ else
 fi
 echo
 
+# uitest.py UTF-8 output gate (issue #36). The UI-test harness is how every UI change gets verified, and the
+# app's labels are full of non-ASCII: "▶ Play" on a detail view, "☁"/"＋"/"✎"/"✕"/"★" on the settings rows,
+# emoji profile avatars, em-dashes in theme names, and media titles in any language. When uitest.py's stdout is
+# REDIRECTED (a pipe, a file, subprocess capture — i.e. every automated caller) CPython falls back to the locale
+# encoding, and printing any of those raised UnicodeEncodeError from encodings/cp1252.py. This gate pins the fix:
+# with stdout forced to cp1252 the client must still emit the glyphs, byte-for-byte, losing nothing. No app, no
+# display, no network — it stubs the pipe with the exact bytes UiTestServer would write.
+# The python below is deliberately pure ASCII (\u escapes, ASCII comments): it is fed to the interpreter on
+# STDIN, and a CI box running under the C/POSIX locale would otherwise choke decoding this file's own glyphs.
+echo "=== uitest utf-8 output ==="
+utf8_out="$("$PY" - "$HERE/uitest.py" <<'PYEOF' 2>&1
+import importlib.util, io, json, sys
+
+spec = importlib.util.spec_from_file_location("uitest", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+payload = {
+    "panelFocus":      "\U00002601   Restore from Google Drive",  # onboarding row, CLOUD
+    "focusText":       "\U000025b6  Play",                        # the detail view's Play button
+    "themedSelection": "\U0000ff0b  Create New Profile",          # FULLWIDTH PLUS
+    "avatar":          "\U0001f3ae",                              # emoji profile icon (non-BMP)
+    "theme":           "Lumen \U00002014 Dark",                   # em-dash in a theme name
+    "glyphs":          "\U0000270e \U00002715 \U00002605",        # edit / delete / favourite
+    "title":           "\U000030cf\U000030a4\U000030ad\U000030e5\U000030fc",  # a title in another script
+}
+wire = ("ok " + json.dumps(payload, ensure_ascii=False)).encode("utf-8")  # what UiTestServer puts on the pipe
+m._send = lambda cmd: wire.decode("utf-8", "replace")
+
+buf = io.BytesIO()
+sys.stdout = io.TextIOWrapper(buf, encoding="cp1252", errors="strict")  # the pre-fix condition, on any OS
+sys.argv = ["uitest.py", "state"]
+rc = m.main()
+sys.stdout.flush()
+data = buf.getvalue()          # read BEFORE dropping the wrapper: collecting it closes the BytesIO
+sys.stdout = sys.__stdout__
+
+if rc != 0:
+    raise SystemExit("uitest.py state returned %r" % rc)
+got = json.loads(data.decode("utf-8"))  # decodes only if the bytes really are UTF-8
+if got != payload:
+    raise SystemExit("round-trip LOST characters: %r" % (got,))
+print("UITEST-UTF8-OK")
+PYEOF
+)"
+if printf '%s' "$utf8_out" | grep -q "UITEST-UTF8-OK"; then
+  echo "PASS: uitest utf-8 output"
+else
+  printf '%s\n' "$utf8_out"
+  echo "FAIL: uitest utf-8 output (a non-ASCII app label did not survive uitest.py's stdout)"
+  fail=1
+fi
+echo
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"
