@@ -119,18 +119,24 @@ int main(int argc, char** argv)
           && plItems.items[2].mime == "localgame:game",
           "playlistItems: local-path entry -> url + localgame:<kind>");
 
-    // ---- Steam games level: SteamGame -> MediaItem mapping + the in-console query filter -------------------
+    // ---- PC games level: SteamGame -> MediaItem mapping + the in-folder query filter -----------------------
+    // (This was browse::steamGamesCatalog until the four per-launcher folders became one. The mapping it
+    // pinned still matters — a Steam library entry has to reach the grid as a playable tile — it is just
+    // pinned through the builder that now performs it.)
     QList<SteamGame> steam;
     { SteamGame g; g.appid = "440"; g.name = "Team Fortress 2"; steam << g; }
     { SteamGame g; g.appid = "570"; g.name = "Dota 2";          steam << g; }
-    auto poster = [](const SteamGame& g) { return QStringLiteral("poster:") + g.appid; }; // inject: no I/O
-    auto allSteam = browse::steamGamesCatalog(steam, QString(), poster);
+    auto poster = [](const QVector<pcgame::PcGameSource>& v) {
+        return v.isEmpty() ? QString() : QStringLiteral("poster:") + v.first().launchId; // inject: no I/O
+    };
+    auto allSteam = browse::pcGamesCatalog(steam, {}, {}, {}, {}, QString(), QString(), poster);
     CHECK(allSteam.items.size() == 2, "steam: empty query -> all installed");
-    auto tf2 = browse::steamGamesCatalog(steam, "fortress", poster);
-    CHECK(tf2.items.size() == 1 && tf2.items[0].id == "steam:440"
-          && tf2.items[0].mime == "steamgame" && tf2.items[0].type == "game"
+    auto tf2 = browse::pcGamesCatalog(steam, {}, {}, {}, {}, "fortress", QString(), poster);
+    CHECK(tf2.items.size() == 1 && tf2.items[0].id == "pcgame:team fortress 2"
+          && tf2.items[0].mime == "pcgame" && tf2.items[0].type == "game"
           && tf2.items[0].title == "Team Fortress 2" && tf2.items[0].thumbnailUrl == "poster:440"
-          && tf2.items[0].url.isEmpty(),
+          && tf2.items[0].url.isEmpty() && tf2.items[0].pcSources.size() == 1
+          && tf2.items[0].pcSources[0].launchId == "440",
           "steam: query filter -> one game with exact id/mime/poster/type mapping");
 
     // ---- The merged PC Games folder: ONE entry per game, every launcher a SOURCE --------------------------

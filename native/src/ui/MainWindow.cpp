@@ -56,6 +56,7 @@
 #include "../core/OnboardingRoute.h"
 #include "../core/ItemMarks.h"
 #include "../core/ConsumptionStats.h"
+#include "../core/PcGameRemap.h"   // setRemapCacheInvalidator — the caches the remap rewrites underneath
 #include "../core/Theme.h"
 #include "../core/ThemeChoice.h"
 #include "../core/CloudSync.h"
@@ -292,6 +293,15 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         FormFactor::instance().refresh();
         showHomeScreen();
     });
+
+    // The PC-game id remap rewrites the ini UNDERNEATH ItemMarks / ConsumptionStats, which hold lazily-built
+    // in-memory caches keyed on the OLD id hashes. Without this the migrated star, completion mark and watch
+    // time keep reading from the pre-move cache until something else happens to invalidate it — i.e. the
+    // remap looks like it did nothing, which is the one failure mode indistinguishable from a real bug.
+    // PcGameRemap cannot call these itself without dragging ProfileStore/Settings into every probe that links
+    // it, so the app hands it the invalidator once, here (PcGameRemap.h). It is a process-wide std::function
+    // capturing nothing, so it has no lifetime tie to this window.
+    pcgame::setRemapCacheInvalidator([] { ItemMarks::invalidate(); ConsumptionStats::invalidate(); });
 
     // The image-cache cap may evict browsed posters, but never art of downloaded/favorited items (their
     // shelves must keep rendering offline). Queried lazily, only when an eviction actually runs.

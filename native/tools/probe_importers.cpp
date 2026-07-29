@@ -10,14 +10,17 @@
 //   * SteamLibrary::ownedFetchDecision — the async owned-games state machine's pure core (unconfigured / cache
 //     hit for the same creds inside TTL / fetch when cold, stale, or the key/id changed);
 //   * SteamLibrary::launchUrl / installUrl — the run vs install handoff URLs;
-//   * browse::steamGamesCatalog with an owned list — installed entries unchanged (no subtitle, no url), owned-not-
-//     installed appended (badge "Not installed", url steam://install/<appid>), already-installed owned skipped,
-//     the in-console query scoping both sets, and a pure injected poster so it stays I/O-free;
+//   * browse::pcGamesCatalog with a Steam owned list — installed entries unchanged (no subtitle), owned-not-
+//     installed added as a LauncherOwned SOURCE (badge "Not installed", launchUrl steam://install/<appid>, and
+//     NEVER ready, so Play cannot start a download), already-installed owned skipped, the in-folder query
+//     scoping both sets, and a pure injected poster so it stays I/O-free;
 //   * RecentStore::relaunchFor — the Recent-kind dispatch table the app's openRecent switch mirrors;
 //   * browse::iconTypeForKind — a "steamgame" Recent draws the game placeholder icon;
-//   * browse::battleNetGamesCatalog — the two-route tile split (a coded title keys on its code and carries NO
-//     url ⇒ battlenet:// launch; a code-less one keys on its name and carries its exe ⇒ launchPcExe), plus the
-//     in-console query scoping and the empty/dormant case.
+//   * browse::pcGamesCatalog's per-launcher source mapping — Epic's launcher URI, GOG's exe-on-the-source, and
+//     the Battle.net two-route split (a coded title keys on its code and carries the battlenet:// URI; a
+//     code-less one carries its exe ⇒ launchPcExe), plus the in-folder query scoping and the empty case.
+//     (These were four per-launcher builders until the four folders became one; the mappings they pinned are
+//     the same, restated on the builder that now performs them.)
 //
 // Links only QtCore-friendly units (SteamLibrary/SyntheticCatalogs/MetaCache/RecentStore/AddonModels + the
 // AppPaths/ProfileStore closure RecentStore pulls). relaunchFor/parse/TTL touch no store, so nothing here writes
@@ -128,52 +131,70 @@ int main(int argc, char** argv)
     CHECK(SteamLibrary::launchUrl(QStringLiteral("570")) == QStringLiteral("steam://rungameid/570"));
     CHECK(SteamLibrary::installUrl(QStringLiteral("570")) == QStringLiteral("steam://install/570"));
 
-    // ---- 4. steamGamesCatalog: owned-not-installed append -------------------------------------------------
+    // ---- 4. The owned-not-installed Steam library, in the merged PC Games folder ---------------------------
+    // This used to pin browse::steamGamesCatalog's owned-tile append. That builder is gone with the Steam
+    // folder, but the FEATURE is not: an owned-but-not-installed game still has to appear, still has to say
+    // it isn't installed, and must still hand its install to the Steam client — now as a LauncherOwned SOURCE
+    // on the merged item rather than a tile of its own. The properties below are the same ones, restated on
+    // the shape that replaced it, plus the one the merge adds: an owned source must never be READY, because
+    // pickAutoSource would otherwise let a single Play keypress start a multi-gigabyte download.
     {
         // A pure poster keeps the builder I/O-free (SteamLibrary::posterUrl would touch the local librarycache).
-        auto poster = [](const SteamGame& g) { return QStringLiteral("cap://") + g.appid; };
+        auto poster = [](const QVector<pcgame::PcGameSource>& v) {
+            return v.isEmpty() ? QString() : QStringLiteral("cap://") + v.first().launchId;
+        };
         QList<SteamGame> installed{ { QStringLiteral("100"), QStringLiteral("Alpha") } };
         QList<SteamGame> owned{
             { QStringLiteral("100"), QStringLiteral("Alpha") },   // already installed -> must be skipped in owned pass
             { QStringLiteral("200"), QStringLiteral("Bravo") },   // owned, not installed
             { QStringLiteral("300"), QStringLiteral("Charlie") }, // owned, not installed
         };
-        const MediaCatalog cat = browse::steamGamesCatalog(installed, QString(), poster, owned);
+        const MediaCatalog cat = browse::pcGamesCatalog(installed, {}, {}, {}, {}, QString(), QString(),
+                                                        poster, owned);
         CHECK(cat.items.size() == 3); // Alpha (installed) + Bravo + Charlie (owned-not-installed); no dup Alpha
 
-        const MediaItem* alpha = find(cat, QStringLiteral("steam:100"));
-        CHECK(alpha && alpha->mime == QStringLiteral("steamgame"));
-        CHECK(alpha && alpha->url.isEmpty());              // installed entry unchanged: no url -> info page + Play
+        const MediaItem* alpha = find(cat, QStringLiteral("pcgame:alpha"));
+        CHECK(alpha && alpha->mime == QStringLiteral("pcgame"));
+        CHECK(alpha && alpha->url.isEmpty());              // the picker decides the launch, not the tile
         CHECK(alpha && alpha->subtitle.isEmpty());         // no "Not installed" badge on an installed game
+        // The owned duplicate of an INSTALLED game is dropped, not carried as a second source: the installed
+        // copy is strictly better, and two Steam rows in the picker would be a choice with no difference.
+        CHECK(alpha && alpha->pcSources.size() == 1
+              && alpha->pcSources[0].kind == pcgame::PcGameSource::LauncherInstalled);
 
-        const MediaItem* bravo = find(cat, QStringLiteral("steam:200"));
-        CHECK(bravo && bravo->mime == QStringLiteral("steamgame"));
-        CHECK(bravo && bravo->url == QStringLiteral("steam://install/200")); // activation installs
+        const MediaItem* bravo = find(cat, QStringLiteral("pcgame:bravo"));
+        CHECK(bravo && bravo->mime == QStringLiteral("pcgame"));
+        CHECK(bravo && bravo->pcSources.size() == 1);
+        CHECK(bravo && bravo->pcSources[0].kind == pcgame::PcGameSource::LauncherOwned);
+        CHECK(bravo && bravo->pcSources[0].launchUrl == QStringLiteral("steam://install/200")); // hands off to Steam
+        CHECK(bravo && !bravo->pcSources[0].ready);        // Play must never start this by itself
+        CHECK(bravo && pcgame::pickAutoSource(bravo->pcSources) == -1); // ...and pickAutoSource agrees
         CHECK(bravo && !bravo->subtitle.isEmpty());        // badged "Not installed"
         CHECK(bravo && bravo->thumbnailUrl == QStringLiteral("cap://200"));  // poster still resolved
 
-        // Exactly one owned-not-installed carries the install url; the installed one does not.
-        int installTiles = 0;
+        int installSources = 0;
         for (const MediaItem& it : cat.items)
-            if (it.url.startsWith(QStringLiteral("steam://install/"))) ++installTiles;
-        CHECK(installTiles == 2);
+            for (const pcgame::PcGameSource& s : it.pcSources)
+                if (s.launchUrl.startsWith(QStringLiteral("steam://install/"))) ++installSources;
+        CHECK(installSources == 2);
     }
 
-    // ---- 4b. Query scopes BOTH installed and owned; no owned list == today's installed-only ---------------
+    // ---- 4b. Query scopes BOTH installed and owned; no owned list == installed-only -----------------------
     {
-        auto poster = [](const SteamGame& g) { return QString(); };
+        auto poster = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
         QList<SteamGame> installed{ { QStringLiteral("100"), QStringLiteral("Alpha") },
                                     { QStringLiteral("101"), QStringLiteral("Beta") } };
         QList<SteamGame> owned{ { QStringLiteral("200"), QStringLiteral("Alfredo") },
                                 { QStringLiteral("300"), QStringLiteral("Charlie") } };
-        const MediaCatalog scoped = browse::steamGamesCatalog(installed, QStringLiteral("al"), poster, owned);
+        const MediaCatalog scoped = browse::pcGamesCatalog(installed, {}, {}, {}, {}, QStringLiteral("al"),
+                                                           QString(), poster, owned);
         // "al" matches Alpha (installed) + Alfredo (owned), not Beta/Charlie.
         CHECK(scoped.items.size() == 2);
-        CHECK(find(scoped, QStringLiteral("steam:100")));  // Alpha
-        CHECK(find(scoped, QStringLiteral("steam:200")));  // Alfredo (owned-not-installed)
+        CHECK(find(scoped, QStringLiteral("pcgame:alpha")));    // Alpha
+        CHECK(find(scoped, QStringLiteral("pcgame:alfredo")));  // Alfredo (owned-not-installed)
 
         // No owned list -> installed-only (unchanged pre-feature behavior).
-        const MediaCatalog none = browse::steamGamesCatalog(installed, QString(), poster);
+        const MediaCatalog none = browse::pcGamesCatalog(installed, {}, {}, {}, {}, QString(), QString(), poster);
         CHECK(none.items.size() == 2);
         for (const MediaItem& it : none.items) CHECK(it.url.isEmpty() && it.subtitle.isEmpty());
     }
@@ -271,15 +292,18 @@ int main(int argc, char** argv)
     {
         QList<EpicGame> installed{ { QStringLiteral("Zed"), QStringLiteral("Zed Game"), QStringLiteral("C:/G/Zed") },
                                    { QStringLiteral("Ace"), QStringLiteral("Ace Game"), QStringLiteral("C:/G/Ace") } };
-        const MediaCatalog cat = browse::epicGamesCatalog(installed, QString());
+        const MediaCatalog cat = browse::pcGamesCatalog({}, installed, {}, {}, {}, QString(), QString());
         CHECK(cat.items.size() == 2);
-        const MediaItem* ace = find(cat, QStringLiteral("epic:Ace"));
-        CHECK(ace && ace->mime == QStringLiteral("epicgame"));
-        CHECK(ace && ace->url.isEmpty());   // no url -> info page + Play (URI launch), mirrors steamgame
+        const MediaItem* ace = find(cat, QStringLiteral("pcgame:ace game"));
+        CHECK(ace && ace->mime == QStringLiteral("pcgame"));
+        CHECK(ace && ace->url.isEmpty());   // no url -> the picker decides the launch
         CHECK(ace && ace->title == QStringLiteral("Ace Game"));
+        CHECK(ace && ace->pcSources.size() == 1 && ace->pcSources[0].launcher == QStringLiteral("epic")
+              && ace->pcSources[0].launchId == QStringLiteral("Ace") && ace->pcSources[0].ready);
         // Query scopes by name.
-        const MediaCatalog scoped = browse::epicGamesCatalog(installed, QStringLiteral("zed"));
-        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("epic:Zed")));
+        const MediaCatalog scoped = browse::pcGamesCatalog({}, installed, {}, {}, {}, QStringLiteral("zed"),
+                                                           QString());
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("pcgame:zed game")));
     }
 
     // ==== GOG (Task 2) ====================================================================================
@@ -316,18 +340,24 @@ int main(int argc, char** argv)
         CHECK(GogLibrary::installedGames(emptyIni).isEmpty());
     }
 
-    // ---- 8b. GOG console builder: exe rides the tile (launchPcExe target); mime goggame -------------------
+    // ---- 8b. GOG in the PC Games folder: the exe rides the SOURCE (the launchPcExe target) ----------------
     {
         QList<GogGame> installed{
             { QStringLiteral("100"), QStringLiteral("Alpha"), QStringLiteral("C:/G/Alpha/a.exe"), QStringLiteral("C:/G/Alpha") },
             { QStringLiteral("200"), QStringLiteral("Bravo"), QStringLiteral("C:/G/Bravo/b.exe"), QStringLiteral("C:/G/Bravo") } };
-        const MediaCatalog cat = browse::gogGamesCatalog(installed, QString());
+        const MediaCatalog cat = browse::pcGamesCatalog({}, {}, installed, {}, {}, QString(), QString());
         CHECK(cat.items.size() == 2);
-        const MediaItem* alpha = find(cat, QStringLiteral("gog:100"));
-        CHECK(alpha && alpha->mime == QStringLiteral("goggame"));
-        CHECK(alpha && alpha->url == QStringLiteral("C:/G/Alpha/a.exe")); // the exe rides on the tile
-        const MediaCatalog scoped = browse::gogGamesCatalog(installed, QStringLiteral("brav"));
-        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("gog:200")));
+        const MediaItem* alpha = find(cat, QStringLiteral("pcgame:alpha"));
+        CHECK(alpha && alpha->mime == QStringLiteral("pcgame"));
+        CHECK(alpha && alpha->url.isEmpty());              // never on the tile — the picker resolves it
+        CHECK(alpha && alpha->pcSources.size() == 1
+              && alpha->pcSources[0].launcher == QStringLiteral("gog")
+              && alpha->pcSources[0].exePath == QStringLiteral("C:/G/Alpha/a.exe") // the exe rides the source
+              && alpha->pcSources[0].launchUrl.isEmpty()   // DRM-free: an exe, not a protocol handoff
+              && alpha->pcSources[0].ready);
+        const MediaCatalog scoped = browse::pcGamesCatalog({}, {}, installed, {}, {}, QStringLiteral("brav"),
+                                                            QString());
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("pcgame:bravo")));
     }
 
     // ---- Battle.net: pure entry parse + INI-fixture registry scan --------------------------------
@@ -485,10 +515,10 @@ int main(int argc, char** argv)
         }
     }
 
-    // ---- Battle.net console builder: the TWO-ROUTE tile split (the whole point of the mime) ---------------
-    // A coded title gets id "bnet:<code>" and NO url — MainWindow reads the empty url as "launch by
-    // battlenet:// URI". A code-less one carries its exe in `url` and rides the monitored launchPcExe path,
-    // exactly like a GOG tile. Swapping either half silently breaks one of the two launch routes.
+    // ---- Battle.net in the PC Games folder: the TWO-ROUTE split (the whole point of the mime) -------------
+    // A coded title's SOURCE carries battlenet://<code> and no exe — MainWindow launches the client by URI. A
+    // code-less one carries its exe and rides the monitored launchPcExe path, exactly like a GOG source.
+    // Swapping either half silently breaks one of the two launch routes.
     {
         QList<BattleNetGame> installed;
         BattleNetGame a; a.name = QStringLiteral("World of Warcraft"); a.code = QStringLiteral("wow");
@@ -497,22 +527,28 @@ int main(int argc, char** argv)
         b.installDir = QStringLiteral("C:/Games/Arcade"); b.exe = QStringLiteral("C:/Games/Arcade/arcade.exe");
         installed << a << b;
 
-        const MediaCatalog c = browse::battleNetGamesCatalog(installed, QString());
+        const MediaCatalog c = browse::pcGamesCatalog({}, {}, {}, installed, {}, QString(), QString());
         CHECK(c.items.size() == 2);
-        const MediaItem* wow = find(c, QStringLiteral("bnet:wow"));    // keyed by CODE, not name
-        CHECK(wow && wow->mime == QStringLiteral("battlenetgame"));
+        const MediaItem* wow = find(c, QStringLiteral("pcgame:world of warcraft"));
+        CHECK(wow && wow->mime == QStringLiteral("pcgame"));
         CHECK(wow && wow->type == QStringLiteral("game"));
         CHECK(wow && wow->title == QStringLiteral("World of Warcraft"));
-        CHECK(wow && wow->systemHint == QStringLiteral("Battle.net"));
-        CHECK(wow && wow->url.isEmpty());       // coded ⇒ URI launch: the tile must carry NO url
-        const MediaItem* arc = find(c, QStringLiteral("bnet:Arcade")); // code-less ⇒ keyed by NAME
-        CHECK(arc && arc->mime == QStringLiteral("battlenetgame"));
-        CHECK(arc && arc->url == QStringLiteral("C:/Games/Arcade/arcade.exe")); // the exe rides the tile
+        CHECK(wow && wow->systemHint == QStringLiteral("pc"));
+        CHECK(wow && wow->pcSources.size() == 1);
+        CHECK(wow && wow->pcSources[0].launchId == QStringLiteral("wow"));  // keyed by CODE, not name
+        CHECK(wow && wow->pcSources[0].launchUrl == QStringLiteral("battlenet://wow")); // coded ⇒ URI launch
+        CHECK(wow && wow->pcSources[0].exePath.isEmpty());
+        const MediaItem* arc = find(c, QStringLiteral("pcgame:arcade"));
+        CHECK(arc && arc->pcSources.size() == 1);
+        CHECK(arc && arc->pcSources[0].launchUrl.isEmpty());                // code-less ⇒ no protocol launch
+        CHECK(arc && arc->pcSources[0].exePath == QStringLiteral("C:/Games/Arcade/arcade.exe"));
 
-        // Query scopes by name (the in-console search path).
-        const MediaCatalog scoped = browse::battleNetGamesCatalog(installed, QStringLiteral("arca"));
-        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("bnet:Arcade")));
-        CHECK(browse::battleNetGamesCatalog(QList<BattleNetGame>(), QString()).items.isEmpty()); // dormant
+        // Query scopes by name (the in-folder search path).
+        const MediaCatalog scoped = browse::pcGamesCatalog({}, {}, {}, installed, {}, QStringLiteral("arca"),
+                                                            QString());
+        CHECK(scoped.items.size() == 1 && find(scoped, QStringLiteral("pcgame:arcade")));
+        CHECK(browse::pcGamesCatalog({}, {}, {}, QList<BattleNetGame>(), {}, QString(), QString())
+                  .items.isEmpty()); // dormant
     }
 
     // ---- A Battle.net Recent groups under the games catalogue's Recent (like steam/epic/gog) --------------
