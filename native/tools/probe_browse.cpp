@@ -173,7 +173,9 @@ int main(int argc, char** argv)
         const MediaItem hades2 = find("Hades II");
         const MediaItem portal = find("Portal 2");
 
-        CHECK(pc.items.size() == 7, "pcgames: seven distinct games out of ten library rows");
+        // 3 Steam + 2 Epic + 2 GOG + 3 Battle.net + 1 downloaded = eleven rows in; Hades' three copies and
+        // Hades II's two collapse, so seven games out.
+        CHECK(pc.items.size() == 7, "pcgames: seven distinct games out of eleven library rows");
         // THE assertion: Steam + GOG + a downloaded copy collapse to one entry carrying all three.
         CHECK(count("Hades") == 1 && hades.pcSources.size() == 3,
               "pcgames: Steam + GOG + downloaded -> exactly ONE item with THREE sources");
@@ -278,6 +280,70 @@ int main(int argc, char** argv)
         const MediaCatalog none = browse::pcGamesCatalog({}, {}, {}, {}, {}, QString(), QString(), art);
         CHECK(none.items.isEmpty() && !none.title.isEmpty() && !none.hasMore,
               "pcgames: empty input -> empty catalog with a valid title");
+    }
+
+    // ---- pcGamesCatalog: two copies from the SAME launcher must not read as identical picker rows ---------
+    // The year strip merges a remake with its original ("Prey (2006)" / "Prey (2017)" both normalise to
+    // "prey"). That merge is documented and deliberate. What is NOT acceptable is the consequence: both
+    // sources are Steam, both ready, so pickAutoSource asks — and the menu would offer two rows with the
+    // same text, over a tile titled just "Prey", leaving the user no way to reach the remake on purpose.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "3970";   g.name = "Prey (2006)"; st << g; }
+        { SteamGame g; g.appid = "480490"; g.name = "Prey (2017)"; st << g; }
+        { SteamGame g; g.appid = "620";    g.name = "Portal 2";    st << g; }
+        QList<GogGame> gg;
+        { GogGame g; g.id = "42"; g.name = "Portal 2"; g.exe = "C:/gog/p2.exe"; gg << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, gg, {}, {}, QString(), QString(), art);
+        MediaItem prey, portal;
+        for (const MediaItem& i : pc.items)
+        {
+            if (i.id == "pcgame:prey")  prey   = i;
+            if (i.title == "Portal 2")  portal = i;
+        }
+        // Both launches survive the merge, and Play must ask rather than guess between two ready copies.
+        CHECK(prey.pcSources.size() == 2 && prey.pcSources[0].launchId == "3970"
+              && prey.pcSources[1].launchId == "480490"
+              && pcgame::pickAutoSource(prey.pcSources) == -1,
+              "pcgames: two same-launcher copies survive the merge as two ready sources");
+        // THE assertion: the two rows must be distinguishable, and each must name the copy it launches.
+        CHECK(prey.pcSources.size() == 2 && prey.pcSources[0].label != prey.pcSources[1].label
+              && prey.pcSources[0].label.contains("Prey (2006)")
+              && prey.pcSources[1].label.contains("Prey (2017)"),
+              "pcgames: two Steam sources in one group get DISTINCT labels naming each copy");
+        // One source per launcher is the common case and must NOT gain the suffix. Sorted by launcher name,
+        // so GOG leads Steam.
+        CHECK(portal.pcSources.size() == 2 && portal.pcSources[0].label == "GOG"
+              && portal.pcSources[1].label == "Steam",
+              "pcgames: one source per launcher keeps its plain label");
+    }
+
+    // ---- pcGamesCatalog: the title contest and launcherFilter key on KIND, not on the `launcher` string --
+    // A Downloaded source may legitimately record where its copy came from. If the rules read `launcher`
+    // alone, that one field would let a scene release name win the tile AND make the game answer "what I own
+    // on Steam" — two different wrong claims from the same slip.
+    {
+        QVector<pcgame::PcGameSource> dl;
+        { pcgame::PcGameSource s; s.kind = pcgame::PcGameSource::Downloaded;
+          s.launcher = "steam";                       // the launcher this copy came FROM — not a Steam entry
+          s.addonItemId = "dl-9"; s.exePath = "C:/dl/Control.exe"; s.ready = true;
+          s.label = "CONTROL (2019)"; dl << s; }      // normalises to "control", so it merges with the GOG row
+        QList<GogGame> gg;
+        { GogGame g; g.id = "7"; g.name = "Control"; g.exe = "C:/gog/control.exe"; gg << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+
+        const MediaCatalog pc = browse::pcGamesCatalog({}, {}, gg, {}, dl, QString(), QString(), art);
+        CHECK(pc.items.size() == 1 && pc.items[0].pcSources.size() == 2 && pc.items[0].title == "Control",
+              "pcgames: a Downloaded source carrying launcher=\"steam\" still loses the display title");
+        // The same field must not answer the ownership question either.
+        CHECK(browse::pcGamesCatalog({}, {}, gg, {}, dl, QString(), "steam", art).items.isEmpty(),
+              "pcgames: launcherFilter=steam ignores a Downloaded source that carries launcher=\"steam\"");
+        // The real Steam entry still matches, so the filter narrowed on kind and not by ignoring launcher.
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "870780"; g.name = "Control"; st << g; }
+        CHECK(browse::pcGamesCatalog(st, {}, gg, {}, dl, QString(), "steam", art).items.size() == 1,
+              "pcgames: launcherFilter=steam still matches a real LauncherInstalled Steam source");
     }
 
     // ---- pcGamesCatalog degenerate titles: the id must not double-prefix, and nameless rows must not fuse --

@@ -1,6 +1,10 @@
 // Data models for the addon system, ported from the Unity AddonModels. An addon is a folder with a
 // manifest.json + an entry script (main.js). A "media-source" addon's JS returns catalogs of MediaItems.
 #pragma once
+// NB on this include: it is NOT free. `core/` is not below `addons/` in the include graph — GamelistStore.h
+// and MetaCache.h both include THIS header — so there is no layering rule being broken here, and no cycle
+// (PcGameId.h is QtCore-only and includes nothing of ours). What it does mean is that PcGameId.h is now a
+// TRANSITIVE dependency of nearly every TU in the app, so editing it rebuilds effectively the whole tree.
 #include "../core/PcGameId.h"   // MediaItem::pcSources — the launch options on one merged PC game
 #include <QMap>
 #include <QString>
