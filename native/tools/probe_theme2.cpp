@@ -3,6 +3,7 @@
 // Usage: probe_theme2 <themeDir> <out.png> [sampleImage] [startIndex]
 #include "ThemeEngine.h"
 #include "MpvPreview.h"
+#include "AddonModels.h" // joinFactsText — the one facts join the app's panels publish
 #include <QApplication>
 #include <QtQml>
 #include <QWidget>
@@ -115,7 +116,20 @@ int main(int argc, char** argv)
         facts << QVariantMap{ { "label", "Genre" }, { "value", "RPG" } };
         facts << QVariantMap{ { "label", "Players" }, { "value", "1" } };
         sm["facts"] = facts;
+        // The app's hover panel publishes BOTH shapes (see MainWindow's themedMetaReady): the raw list, and
+        // the joined scalar a theme.json actually binds — a themed `text` can only render a scalar. Mirror
+        // that here through the same joiner, so a theme's `selectedMeta.factsText` row renders in the probe.
+        sm["factsText"] = joinFactsText(facts);
         root->setProperty("selectedMeta", sm);
+
+        // The DETAIL view resolves `selected` to detailData, not to the catalog row (see ThemeView's dataCtx),
+        // so without this PROBE_VIEW=detail rendered an empty page — the whole detail layout went unexercised.
+        // Mirror themedDetailData's shape: the same item, plus the joined facts line and the action verbs.
+        QVariantMap dd = sm;
+        dd["rating"] = 0.9;
+        dd["actions"] = QStringList{ QStringLiteral("play"), QStringLiteral("favorite"),
+                                     QStringLiteral("download"), QStringLiteral("playlist") };
+        root->setProperty("detailData", dd);
     }
     // Optional start selection (argv[4]) - verifies navigation moves the carousel + bound info.
     if (argc >= 5) root->setProperty("currentIndex", QString::fromLocal8Bit(argv[4]).toInt());

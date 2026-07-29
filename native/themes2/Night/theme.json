@@ -104,8 +104,10 @@
           "binding": "selectedMeta.type", "color": "#626A78", "fontSize": 0.0165 },
         { "type": "image", "id": "dpRule", "pos": [0.760, 0.466], "size": [0.221, 0.0016], "origin": [0, 0], "zIndex": 2,
           "color": "#1E232C" },
-        { "type": "text", "id": "dpOverview", "pos": [0.760, 0.480], "size": [0.221, 0.430], "origin": [0, 0], "zIndex": 2,
-          "binding": "selectedMeta.overview", "color": "#B6BECB", "fontSize": 0.0185, "wrap": true, "lines": 16 },
+        { "type": "text", "id": "dpFacts", "pos": [0.760, 0.480], "size": [0.221, 0.070], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.factsText", "color": "#8A93A2", "fontSize": 0.0175, "wrap": true, "lines": 3 },
+        { "type": "text", "id": "dpOverview", "pos": [0.760, 0.556], "size": [0.221, 0.354], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.overview", "color": "#B6BECB", "fontSize": 0.0185, "wrap": true, "lines": 14 },
 
         { "type": "button", "id": "bSettings", "pos": [0.190, 0.955], "size": [0.082, 0.042], "origin": [0, 0.5], "zIndex": 3,
           "action": "settings", "glyph": "settings", "label": "Settings", "shape": "pill",

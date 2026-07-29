@@ -730,16 +730,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                             // with the same separator so late-arriving game/addon facts actually render.
                             if (meta.contains(QStringLiteral("facts")))
                             {
-                                QStringList fl;
-                                for (const QVariant& fv : meta.value(QStringLiteral("facts")).toList())
-                                {
-                                    const QVariantMap fm = fv.toMap();
-                                    const QString l = fm.value(QStringLiteral("label")).toString();
-                                    const QString v = fm.value(QStringLiteral("value")).toString();
-                                    if (!v.isEmpty()) fl << (l.isEmpty() ? v : (l + QStringLiteral(": ") + v));
-                                }
-                                if (!fl.isEmpty())
-                                    d.insert(QStringLiteral("factsText"), fl.join(QStringLiteral("     •     ")));
+                                const QString ft = joinFactsText(meta.value(QStringLiteral("facts")).toList());
+                                if (!ft.isEmpty()) d.insert(QStringLiteral("factsText"), ft);
                             }
                             dr->setProperty("detailData", d);
                         }
@@ -750,6 +742,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             if (!r || r->property("currentIndex").toInt() != index) return; // moved on -> stale, ignore
             QVariantMap cur = r->property("selectedMeta").toMap();
             for (auto it = meta.constBegin(); it != meta.constEnd(); ++it) cur.insert(it.key(), it.value());
+            // `facts` reaches the panel as a LIST of {label,value} — a shape a theme.json cannot lay out, since
+            // a themed `text` renders a scalar and would stringify the list into object noise. Publish the same
+            // joined string the detail page binds, so selectedMeta.factsText and selected.factsText mean the
+            // same thing on either surface. Done HERE, at the single consumer, so all three producers (the
+            // gamelist/cache skeleton, the scrape aggregator, the addon /meta reply) are covered by one join.
+            // Read off `cur`, not `meta`: a later enrichment that carries no facts must not lose the joined
+            // line the earlier one established (selectedMeta is replaced wholesale per row, so never stale).
+            if (cur.contains(QStringLiteral("facts")))
+            {
+                const QString ft = joinFactsText(cur.value(QStringLiteral("facts")).toList());
+                if (!ft.isEmpty()) cur.insert(QStringLiteral("factsText"), ft);
+            }
             r->setProperty("selectedMeta", cur);
             // Per-item "theme song": duck the shuffle and loop this item's preview audio while it's hovered
             // (resume the shuffle when the selection carries none). Gated to themedPreviewAudioSurface(), NOT

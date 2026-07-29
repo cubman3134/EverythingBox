@@ -22,10 +22,29 @@ function dig(ctx, path) {
     return o
 }
 
+// Coerce a resolved binding to display text. A binding can land on a NON-scalar — `facts` is a list of
+// {label,value}, `images` is a role map — and String()-ing those paints "[object Object]" into the theme.
+// A list of primitives reads as a comma list; anything else non-scalar renders as NOTHING, so a binding
+// aimed at structured data is silent rather than noisy. Every panel that carries such a list also publishes
+// a joined scalar beside it for themes to bind (e.g. `factsText` — see themes2/THEME_FORMAT.md).
+function scalarText(v) {
+    if (v === undefined || v === null) return ""
+    if (Array.isArray(v)) {
+        var out = []
+        for (var i = 0; i < v.length; i++) {
+            if (v[i] !== null && typeof v[i] === "object") return ""
+            out.push(String(v[i]))
+        }
+        return out.join(", ")
+    }
+    if (typeof v === "object") return ""
+    return String(v)
+}
+
 // Display text: a literal `text`, else the resolved `binding`, else "".
 function textOf(el, ctx) {
     if (el && el.text !== undefined && el.text !== "") return el.text
-    if (el && el.binding) { var v = dig(ctx, el.binding); return (v === undefined || v === null) ? "" : String(v) }
+    if (el && el.binding) return scalarText(dig(ctx, el.binding))
     return ""
 }
 
