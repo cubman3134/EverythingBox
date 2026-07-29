@@ -193,6 +193,23 @@ QString pcgame::mergeKey(const QString& title, const QString& igdbId)
     return QStringLiteral("pcgame:rawtitle/") + title.simplified().toLower();
 }
 
+QString pcgame::itemId(const QString& title)
+{
+    const QString t = title.trimmed();
+    // Nothing to group on. Returning the bare "pcgame:rawtitle/" fallback here would hand EVERY nameless
+    // entry the same id and fuse unrelated games into one tile / one record, so an empty title has no id
+    // at all and both callers drop the entry instead.
+    if (t.isEmpty()) return QString();
+
+    const QString key = mergeKey(t, QString());   // title-only by decision — see the header
+    if (key.isEmpty()) return QString();           // defensive: mergeKey's own guard means this cannot fire
+
+    // mergeKey already returns a NAMESPACED key ("pcgame:rawtitle/…") for a title that normalises to
+    // nothing, so prefixing unconditionally would produce "pcgame:pcgame:rawtitle/…". A normalised title
+    // can never contain ':' (normalizeTitle strips all punctuation), so this test is exact, not a guess.
+    return key.startsWith(QStringLiteral("pcgame:")) ? key : (QStringLiteral("pcgame:") + key);
+}
+
 bool pcgame::sameGame(const QString& titleA, const QString& igdbA,
                       const QString& titleB, const QString& igdbB)
 {

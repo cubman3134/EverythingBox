@@ -78,10 +78,17 @@ QString md5Hex10(const QString& key)
 }
 
 // ---- write-then-verify ----------------------------------------------------------------------------------
-// Rule 2 in one function: a record is only ever removed after its replacement has been written, flushed and
-// READ BACK. QSettings reports a write failure asynchronously through status(), so "setValue returned" is
-// not evidence the value is on disk; a full-disk or read-only ini would otherwise turn this migration into a
-// deletion pass.
+// Rule 2 in one function: a record is only ever removed after its replacement has been written and FLUSHED
+// without error. QSettings reports a write failure asynchronously, so "setValue returned" is not evidence of
+// anything — status() after sync() is the real gate here, and without it a full-disk or read-only ini would
+// turn this migration into a deletion pass.
+//
+// WHAT THE READ-BACK DOES AND DOES NOT PROVE. It is NOT a disk read: QSettings answers value() out of the
+// in-memory map setValue just wrote, so the comparison is close to tautological and proves nothing about
+// what reached the file. It is kept for the one thing it does catch — a value whose ini round-trip is not
+// identity (a type QSettings serialises to a different string than it was handed), which would read back
+// wrong in the NEXT process, i.e. after the source has already been removed. status() is the durability
+// gate; this line is a serialisation gate. Neither substitutes for the other.
 bool writeVerified(QSettings& s, const QString& key, const QVariant& value)
 {
     s.setValue(key, value);
@@ -256,6 +263,39 @@ void remapConsumption(QSettings& s, const QHash<QString, QString>& table)
 // subgroups. total and sessions SUM (both are pure accumulators, and profileTotalSeconds is their sum, so
 // summing keeps the profile total exact); last is the MAX (the later of two "last played" stamps is the one
 // that is true of the merged game).
+//
+// THIS IS THE ONLY STORE WHOSE RETRY IS NOT FREE, AND IT NEEDS A JOURNAL.
+// Every other pass writes ONE key from values it copies or merges, so re-running it recomputes the same
+// answer. This one writes THREE keys from a SUM, and the three writes cannot fail together: if `total`
+// (= a+b) lands and `sessions` does not, the pass gives up with the source still in place — correct by rule
+// 2, nothing is lost — but the destination now holds a+b while the source still holds b, and the next
+// refresh re-sums to a+2b. Rule 4 (idempotence) breaks exactly on the failure path, which is the path
+// nobody exercises, and the symptom is inflated play time on every subsequent refresh.
+//
+// CHOSEN FIX: a per-record journal marker, written and verified BEFORE any destination leaf is touched.
+// (The brief's other option — stage every leaf, verify, then write — does not actually close the window:
+// "then write" is still three writes that can fail between each other. The marker is what survives that.)
+// The marker holds the already-computed absolute values, so a retry COMMITS them rather than re-deriving
+// them from a destination it may have half-written. Sequence per record:
+//   1. marker absent -> compute the sums, write+verify the marker. Failure here has touched nothing.
+//   2. marker present (this pass or a previous one) -> commit its values to the three leaves. The values
+//      are ABSOLUTE, so committing twice is committing once.
+//   3. remove the source, then the marker. A death between those two leaves a marker whose commit is a
+//      no-op, which the next pass performs and clears.
+// The marker lives under its own top-level group that no store reads, so a stale one cannot be mistaken for
+// a record. Residual, stated rather than hidden: if the destination accrues NEW play from actual gameplay
+// between a failed commit and the retry, the commit overwrites that increment. That needs a write error
+// (a full or read-only ini) AND a play session in the same window, and it loses one session instead of
+// inflating the total on every refresh forever.
+QString journalKey(const QString& container, const QString& srcHash, const QString& dstHash)
+{
+    // Its own namespace, hashed so the key length is bounded. The composition is pinned by probe_pcgames,
+    // which rebuilds it independently — a change here that the probe does not know about fails loudly
+    // instead of silently orphaning in-flight markers.
+    return QStringLiteral("pcgameremap/pending/")
+         + md5Hex(container + QLatin1Char('|') + srcHash + QLatin1Char('|') + dstHash);
+}
+
 void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
 {
     s.beginGroup(QStringLiteral("playstats"));
@@ -285,27 +325,52 @@ void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
             for (auto it = table.cbegin(); it != table.cend(); ++it)
             {
                 if (it.key() == it.value()) continue;
-                const QString src = c + QLatin1Char('/') + sha1Hex(it.key());
-                const QString dst = c + QLatin1Char('/') + sha1Hex(it.value());
+                const QString srcHash = sha1Hex(it.key());
+                const QString dstHash = sha1Hex(it.value());
+                const QString src = c + QLatin1Char('/') + srcHash;
+                const QString dst = c + QLatin1Char('/') + dstHash;
                 if (src == dst) continue;
-                const bool has = s.contains(src + QStringLiteral("/total"))
-                              || s.contains(src + QStringLiteral("/last"))
-                              || s.contains(src + QStringLiteral("/sessions"));
-                if (!has) continue;
 
-                const qint64 total = s.value(dst + QStringLiteral("/total"), 0).toLongLong()
-                                   + s.value(src + QStringLiteral("/total"), 0).toLongLong();
-                const qint64 sess  = s.value(dst + QStringLiteral("/sessions"), 0).toLongLong()
-                                   + s.value(src + QStringLiteral("/sessions"), 0).toLongLong();
-                const qint64 last  = std::max(s.value(dst + QStringLiteral("/last"), 0).toLongLong(),
-                                              s.value(src + QStringLiteral("/last"), 0).toLongLong());
+                const QString jk = journalKey(c, srcHash, dstHash);
+                QJsonObject staged = QJsonDocument::fromJson(s.value(jk).toString().toUtf8()).object();
 
-                // Every leaf verified before anything is removed: a partial move that dropped the source
-                // would lose the play time these three numbers ARE.
+                if (staged.isEmpty())
+                {
+                    // No marker: this record has never been half-written, so the destination is untouched
+                    // and summing it with the source is the right answer.
+                    const bool has = s.contains(src + QStringLiteral("/total"))
+                                  || s.contains(src + QStringLiteral("/last"))
+                                  || s.contains(src + QStringLiteral("/sessions"));
+                    if (!has) continue;
+
+                    staged.insert(QStringLiteral("total"),
+                                  double(s.value(dst + QStringLiteral("/total"), 0).toLongLong()
+                                       + s.value(src + QStringLiteral("/total"), 0).toLongLong()));
+                    staged.insert(QStringLiteral("sessions"),
+                                  double(s.value(dst + QStringLiteral("/sessions"), 0).toLongLong()
+                                       + s.value(src + QStringLiteral("/sessions"), 0).toLongLong()));
+                    staged.insert(QStringLiteral("last"),
+                                  double(std::max(s.value(dst + QStringLiteral("/last"), 0).toLongLong(),
+                                                  s.value(src + QStringLiteral("/last"), 0).toLongLong())));
+                    // The marker goes down FIRST and is verified. Until it is on disk nothing has been
+                    // written to the destination, so a failure here costs a retry and nothing else.
+                    if (!writeVerified(s, jk,
+                                       QString::fromUtf8(QJsonDocument(staged).toJson(QJsonDocument::Compact))))
+                        continue;
+                    s.sync();
+                }
+                // Commit ABSOLUTE values — from the marker, never re-derived from a destination that may
+                // already hold some of them. This is what makes the retry after a partial write land on
+                // a+b instead of a+2b.
+                const qint64 total = qint64(staged.value(QStringLiteral("total")).toDouble());
+                const qint64 sess  = qint64(staged.value(QStringLiteral("sessions")).toDouble());
+                const qint64 last  = qint64(staged.value(QStringLiteral("last")).toDouble());
+
                 if (!writeVerified(s, dst + QStringLiteral("/total"), total))    continue;
                 if (!writeVerified(s, dst + QStringLiteral("/sessions"), sess))  continue;
                 if (last > 0 && !writeVerified(s, dst + QStringLiteral("/last"), last)) continue;
                 s.remove(src);      // the whole game subgroup
+                s.remove(jk);       // the move is complete; the marker has nothing left to protect
                 s.sync();
             }
     }
@@ -390,14 +455,28 @@ void remapResume(QSettings& s, const QHash<QString, QString>& table)
 
         if (!dstHas || srcTs > dstTs)
         {
+            // The winner's record replaces the destination's WHOLESALE — a resume record is one point in
+            // one stream, so its leaves only mean anything together. Copying only the leaves the winner
+            // HAS would leave the loser's stale ones standing beside them: a newer `pos` of 30 next to an
+            // inherited `dur` of 100 renders a 30% resume bar for a position that was never 30% of
+            // anything. So a leaf the winner does not carry is CLEARED, not left behind.
             bool ok = true;
-            for (const char* leaf : { "/pos", "/dur", "/ts", "/title" })
+            for (const char* leaf : { "/pos", "/dur", "/title" })
             {
                 const QString lk = src + QLatin1String(leaf);
-                if (!s.contains(lk)) continue;
-                ok = writeVerified(s, dst + QLatin1String(leaf), s.value(lk)) && ok;
+                if (s.contains(lk)) ok = writeVerified(s, dst + QLatin1String(leaf), s.value(lk)) && ok;
             }
             if (!ok) continue;                       // leave BOTH in place; the next refresh retries
+            for (const char* leaf : { "/pos", "/dur", "/title" })
+                if (!s.contains(src + QLatin1String(leaf))) s.remove(dst + QLatin1String(leaf));
+
+            // `ts` LAST, deliberately: it is the field the comparison above reads. Written first, a run
+            // that then died halfway would leave the destination LOOKING newer than the source, and the
+            // retry would skip it and delete the source on top of a half-copied record. Written last, an
+            // interrupted move still reads as older and is simply redone.
+            const QString sts = src + QStringLiteral("/ts");
+            if (s.contains(sts)) { if (!writeVerified(s, dst + QStringLiteral("/ts"), s.value(sts))) continue; }
+            else                 s.remove(dst + QStringLiteral("/ts"));
         }
         // Either the destination already held the newer position, or we just wrote (and verified) it.
         s.remove(src);
@@ -421,33 +500,22 @@ void pcgame::setRemapCacheInvalidator(std::function<void()> fn)
     g_invalidate = std::move(fn);
 }
 
-QHash<QString, QString> pcgame::remapTable(const QVector<QPair<QString, QString>>& oldIdToTitle,
-                                           const QHash<QString, QString>& titleToIgdb)
+QHash<QString, QString> pcgame::remapTable(const QVector<QPair<QString, QString>>& oldIdToTitle)
 {
     QHash<QString, QString> out;
     for (const QPair<QString, QString>& e : oldIdToTitle)
     {
         const QString oldId = e.first;
-        const QString title = e.second.trimmed();
-        // RULE 1. No id, or nothing to group on -> the entry is ABSENT from the table. It is NOT mapped to
-        // an empty string: applyRemap would then hash "" and rewrite a real record under the key of every
-        // other nameless entry, which is a data-destroying bug wearing a migration's clothes. Callers read
-        // membership (contains), and value()'s empty default is a miss, not a destination.
-        if (oldId.isEmpty() || title.isEmpty()) continue;
+        // The destination is whatever the CATALOG will key this title under — same function, same
+        // arguments, no second implementation to drift. See PcGameRemap.h.
+        const QString merged = pcgame::itemId(e.second);
 
-        QString igdb = titleToIgdb.value(title);
-        if (igdb.isEmpty() && title != e.second) igdb = titleToIgdb.value(e.second); // untrimmed spelling
-
-        const QString key = pcgame::mergeKey(title, igdb);
-        if (key.isEmpty()) continue;   // defensive: mergeKey's own guard means this cannot fire today
-
-        // mergeKey already returns a NAMESPACED key ("pcgame:rawtitle/…") for a title that normalises to
-        // nothing, so prefixing unconditionally would produce "pcgame:pcgame:rawtitle/…" — an id the catalog
-        // never builds, i.e. records moved somewhere nothing will ever look. Same guard, same reason, as
-        // pcGamesCatalog's. A normalised title can never contain ':' (normalizeTitle strips all
-        // punctuation), so the test is exact rather than a heuristic.
-        const QString merged = key.startsWith(QStringLiteral("pcgame:"))
-                             ? key : (QStringLiteral("pcgame:") + key);
+        // RULE 1. No id, or nothing to group on (itemId returns empty) -> the entry is ABSENT from the
+        // table. It is NOT mapped to an empty string: applyRemap would then hash "" and rewrite a real
+        // record under the key of every other nameless entry, which is a data-destroying bug wearing a
+        // migration's clothes. Callers read membership (contains), and value()'s empty default is a miss,
+        // not a destination.
+        if (oldId.isEmpty() || merged.isEmpty()) continue;
 
         // An already-merged id maps to ITSELF and stays in the table. That is what makes the function a
         // fixed point — feed its own output back and nothing moves — which is the property that lets this

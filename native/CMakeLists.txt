@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.135 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.136 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -586,6 +586,10 @@ if(EVERYTHINGBOX_BUILD_APP)
     add_executable(probe_browse tools/probe_browse.cpp
         src/browse/SyntheticCatalogs.cpp src/browse/SyntheticCatalogs.h
         src/core/PcGameId.cpp src/core/PcGameId.h   # SyntheticCatalogs -> pcGamesCatalog's merge key
+        # The catalog builder and the record remap must agree on ONE item id. probe_browse is the only
+        # probe that can build both sides, so it links the remap purely to assert they do (remapTable is
+        # pure; applyRemap, which touches the ini, is never called from here).
+        src/core/PcGameRemap.cpp src/core/PcGameRemap.h
         src/core/TraktRead.cpp src/core/TraktRead.h   # SyntheticCatalogs -> trakt::imdbStreamIdFor (#23)
         src/core/LocalLibrary.cpp src/core/LocalLibrary.h     # SyntheticCatalogs -> LocalLibrary::displayTitle
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
