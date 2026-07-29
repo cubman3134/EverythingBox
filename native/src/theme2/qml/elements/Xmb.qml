@@ -38,11 +38,34 @@ Item {
     // Column tile size is derived from the row spacing (and stays under it even when the selected row scales
     // up 1.12x), so column items never overlap regardless of the theme's iconSize/itemSpacing.
     readonly property real rowSize: itemGap * 0.8
+    // Selected-state scales, named once and used by both the tiles themselves and the geometry below —
+    // the column's clearance depends on them, so a second spelling of either number would silently rot.
+    readonly property real catSelScale: 1.18   // the selected category tile (scales about its own centre)
+    readonly property real rowSelScale: 1.12   // the selected column row  (ditto)
+    // The category label's font size. Declared here, next to the geometry that depends on it, because
+    // catLabel itself lives inside the category Repeater's delegate where the root can't reach it.
+    readonly property real catLabelPx: Math.max(12, height * 0.03)
+    // The label's REAL laid-out height. font.pixelSize is only the em size — the text engine lays a line
+    // out at the font's line spacing (~1.25x that), and a wrapped label is taller still, so the size alone
+    // can never say where the label ends. The selected delegate's catLabel publishes its measured height
+    // here (see the Binding beside it); FontMetrics for the same font is the floor, so this is already
+    // right on the very first frame — before any delegate has been polished, and when there are no
+    // categories at all — instead of momentarily reading a not-yet-laid-out 0.
+    FontMetrics { id: catLabelFm; font.bold: true; font.pixelSize: xmb.catLabelPx }
+    property real catLabelH: catLabelFm.height
     // The column starts below the category row + its label so the first item never collides with them.
     // Derived from the label's actual extent (not a bare iconSize multiple): with the phone-clamped
     // smaller tiles, iconSize*1.7 pulled the column up over the label.
-    readonly property real catLabelBottom: crossY + iconSize / 2 + height * 0.02 + Math.max(12, height * 0.03)
-    readonly property real colTop: catLabelBottom + 8 + rowSize * 0.6
+    // The label is a CHILD of the selected tile, so it rides catSelScale, which scales about the tile's
+    // centre — its extent below crossY is (half-tile + its top margin + its height) times that scale.
+    // Reconstructing this from font.pixelSize at scale 1.0 (as it read before #37) put the estimate a
+    // fifth of the tile plus a quarter of a line-height too high, and the first row drew over the text.
+    readonly property real catLabelBottom: crossY + catSelScale * (iconSize / 2 + height * 0.02 + catLabelH)
+    // Clear the SELECTED row's tile — it scales rowSelScale about its own centre, so its top edge sits
+    // rowSize * rowSelScale / 2 above colTop — then leave the label the same breathing room beneath it
+    // that it already keeps above itself (height * 0.02). Every term is proportional, so the clearance
+    // holds at every form factor rather than only at the one a pixel constant was tuned for.
+    readonly property real colTop: catLabelBottom + rowSize * (rowSelScale / 2) + height * 0.02
 
     // Touch: swipe horizontally anywhere on the surface to move between categories (phone convention).
     // A DragHandler cooperates with the row/tile MouseAreas — it only takes the grab once the drag
@@ -110,7 +133,7 @@ Item {
             x: xmb.crossX + dx - width / 2
             y: xmb.crossY - height / 2
             opacity: sel ? 1.0 : Math.max(0.18, 0.55 - Math.abs(dx) / xmb.width * 0.6)
-            scale: sel ? 1.18 : 0.88
+            scale: sel ? xmb.catSelScale : 0.88
             Behavior on scale { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
             Rectangle {
@@ -180,10 +203,18 @@ Item {
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.top: parent.bottom; anchors.topMargin: xmb.height * 0.02
                 text: (cat.modelData && cat.modelData.title) ? cat.modelData.title : ""
-                color: xmb.textColor; font.bold: true; font.pixelSize: Math.max(12, xmb.height * 0.03)
+                color: xmb.textColor; font.bold: true; font.pixelSize: xmb.catLabelPx
                 // Long bucket names elide instead of spilling past the screen edges on a phone.
                 width: Math.min(implicitWidth, xmb.width * 0.6)
                 elide: Text.ElideRight; horizontalAlignment: Text.AlignHCenter
+                // Publish the MEASURED height up to the root, which needs it for colTop but cannot read
+                // into this Repeater's delegate. Whatever the text engine actually did — line spacing,
+                // a font substitution, a second line — the column clears it. Floored by the font's line
+                // height so a not-yet-laid-out 0 can never pull the column up over the label.
+                Binding {
+                    target: xmb; property: "catLabelH"; when: cat.sel
+                    value: Math.max(catLabelFm.height, catLabel.height)
+                }
             }
             // Loading spinner under the selected category while its column is being fetched: the cross scrolls
             // to the category right away and this shows the content is on the way (instead of an empty column).
@@ -259,7 +290,7 @@ Item {
             x: xmb.crossX - width / 2
             y: xmb.colTop + dy - height / 2
             opacity: dy < -xmb.itemGap * 0.5 ? 0.0 : (hdr ? 0.9 : (sel ? 1.0 : 0.6)) // fade rows above the column top
-            scale: hdr ? 1.0 : (sel ? 1.12 : 0.94)
+            scale: hdr ? 1.0 : (sel ? xmb.rowSelScale : 0.94)
             Behavior on scale { NumberAnimation { duration: 140 } }
 
             // Section divider label ("★ Favorites", "Games", …) shown in place of the tile for header rows.
