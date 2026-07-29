@@ -18,6 +18,7 @@
 #include "../core/ShuffleBag.h"
 
 class MpvWidget;
+class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
 class RetroView;
 class EbookView;
 class ReaderChromeHost;
@@ -559,9 +560,21 @@ private:
     bool themedXmbInCatalog_ = false; // XMB: column shows a catalog's live items (true) vs the catalog list (false)
     bool themedXmbAutoOpened_ = false; // XMB: the bucket's single catalog was opened directly (its contents ARE the root)
     int themedXmbCatalogIndex_ = 0;    // XMB: which catalog in the list we opened, so Back re-selects it
-    QTimer* themedMetaTimer_ = nullptr; // XMB: debounce the live-metadata addon fetch to the settled row
-    int themedMetaWant_ = -1;           // XMB: the browse index that pending fetch is for
-    void refreshThemedMeta(int browseIndex); // XMB: set the panel's skeleton for a row + queue the addon enrich
+    int themedGridCatIndex_ = 0;      // grid home/browse: which `categories` row a sidebar theme is showing
+    QTimer* themedMetaTimer_ = nullptr; // debounce the live-metadata addon fetch to the settled row
+    int themedMetaWant_ = -1;           // the browse index that pending fetch is for
+    void refreshThemedMeta(int browseIndex); // set selectedMeta's skeleton for a row + queue the addon enrich
+    // The ONE hover-fetch debounce, shared by every surface that drives selectedMeta (the XMB column and the
+    // grid browse). Created on first use; a dense grid moves the selection far faster than an XMB column, so a
+    // second timer would be strictly worse than reusing this one.
+    void ensureThemedMetaTimer();
+    // The themed surface whose `items` mirror HomeView's browse rows — the only place a browse-index-keyed
+    // metadata fetch is meaningful: the grid BROWSE view, or the XMB home while drilled into a catalog.
+    // Null everywhere else (the XMB catalog list, the grid home, any non-themed page).
+    QQuickItem* themedMetaSurface() const;
+    // The themed surface a hovered item's "theme song" may DUCK the menu music on — deliberately NARROWER
+    // than themedMetaSurface(): the XMB home drilled into a catalog, and nothing else. See the definition.
+    QQuickItem* themedPreviewAudioSurface() const;
     // The themed DETAIL view (on the Nav Contract, replacing the retired classic info page): open it for the
     // current selection (browseIndex < 0 = the themed root's currentIndex), run one of its action-row verbs on
     // the item it was opened for, and (grid browse) open it for an info-page leaf on Enter.

@@ -38,6 +38,9 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
     **Esc** to go up, **/** to search within the catalog (large catalogs page in as you scroll near the end).
   - `detail` — shown for the focused item when you press **I** (Info); **Esc** returns. Typically a big
     `selected.image`, `selected.title`, `selected.rating`, `selected.overview`.
+  - `nowplayingAudio` — optional: the audiobook/music now-playing page (audio has no picture, so this screen
+    replaces the classic player page). Give it one full-screen `nowplayingaudio` element; a theme that omits
+    the view keeps the classic player page instead.
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
 
 ## Positioning (every element)
@@ -62,6 +65,25 @@ Text/image/video/rating elements can show **live data** instead of a literal, vi
 
 Example: `{ "type": "text", "binding": "selected.title" }`.
 
+### `selectedMeta.*` — the live hover metadata
+
+`selected.*` is the row itself (in the `detail` view, the full detail record). **`selectedMeta.*`** is the
+richer metadata fetched *for the row you are hovering*: a skeleton appears the instant the selection moves
+(`title`, `subtitle`, `image`, `type`, `accent`, `favorite`) and is enriched a moment later with `overview`,
+art roles (`logo`, `box`, `hero`, `screenshot`, … plus the full `images` / `videos` / `audio` lists) and
+`lastPlayed` / `timePlayed` where they exist. This is what a **details pane beside a grid** binds:
+
+```json
+{ "type": "text", "binding": "selectedMeta.overview", "wrap": true, "lines": 16 }
+```
+
+**Only some surfaces drive it.** The fetch is keyed by a *browse index*, so it runs on the grid **`browse`**
+view and on an **`xmb` `home` while drilled into a catalog** — the surfaces whose rows are catalog items. The
+grid **`home`** is deliberately not one: its rows are catalogs, not items, and have no browse index to fetch.
+A pane bound to `selectedMeta` on a grid home therefore renders **empty**, silently — bind `selected.*` there
+instead. The shipped **Night** theme does exactly that: `selected.*` on its home pane, `selectedMeta.*` on its
+browse pane.
+
 ## Colours & fonts
 
 - Colours are hex strings, e.g. `"#E07A2E"`.
@@ -85,6 +107,11 @@ Example: `{ "type": "text", "binding": "selected.title" }`.
 | `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize` |
 | `particles` | animated background field | `preset`, `count`, `color`, `dotSize`, `speed`, `image` |
 | `xmb` | PlayStation-style cross (categories × items) | `color`, `subColor`, `descColor`, `crossX`, `crossY`, `catSpacing`, `itemSpacing`, `iconSize` |
+| `sidebar` | a vertical rail of the media-type **categories** beside a grid — the non-XMB way into that zone (see below) | the rail: `fill`, `radius`, `border`+`borderWidth`, `title`, `titleColor`, `titleSize`. The rows: `rowHeight`, `rowSpacing`, `rowRadius`, `fontSize`, `fontFamily`, `bold`, `color`, `selectedColor`, `selectedBg` (selected, rail unfocused), `focusBg` (selected, rail focused — the focus ring), `accentBar`, `showIcons` |
+| `gallery` | the selected item's screenshot / fanart reel, cross-fading on a timer | `role` (default `screenshot`), `fallback` (another role, or a literal path, when the item has none), `interval` (ms between images, min 800, default 4000), `fillMode` (`cover`\|`contain`), `radius`, `color` (backdrop) |
+| `actionrow` | the `detail` view's row of action pills — Play/Read, Choose source, Download, Favorite, Playlist, Hide, Status, Tags, the external-player pair. The verbs are chosen per item by the host; ←→ move between them, Enter runs one | `fontSize` |
+| `nowplaying` | the current background-music track (scrolls sideways when the name is wider than the box; hidden when nothing plays) | `color`, `fontSize`, `align`, `bold`, `prefix` (default `"♪  "`) |
+| `nowplayingaudio` | the **whole** audio now-playing page — cover, title/author, track line, progress bar, transport strip and queue list. Place one full-screen in a `nowplayingAudio` view; everything it shows is host-fed | `accent`, `color`, `dimColor`, `panelColor`, `titleSize`, `subSize`, `metaSize` |
 | `wave` | flowing translucent bands | `color`, `bands` (1-4), `amplitude`, `speed`, `segments` |
 
 `grid` and `carousel` render the home's catalog rows (each `{title, accent, image}`) and follow the selection. Exactly one of them is usually the main element; place a `text`/`image`/`rating` bound to `selected.*` nearby to show details for the focused item.
@@ -112,6 +139,74 @@ A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross
 
 Note: the front end is software-rendered (so it coexists with the video engine). Stacking several heavy animated elements (e.g. a high-`segments` `wave` **and** `particles` **and** the `xmb` cross) can exceed the renderer's budget — keep `wave.segments` modest and avoid piling animated fields on an xmb home.
 
+### Sidebar (the category rail)
+
+A view that contains a **`sidebar`** element renders the media-type **categories** as a vertical rail beside
+its grid. That declaration is the theme's **opt-in**: the engine scans every view, and one `sidebar` anywhere
+switches the whole widget's categories zone to the rail shape (exactly how an `xmb` element opts into the
+cross — there is no separate flag). Declare the element in each view that should show it; the shipped
+**Night** theme puts an identical rail on both `home` and `browse`.
+
+Until the sidebar existed, `xmb` was the only element that read `categories`, so a theme wanting a category
+rail beside a grid had to declare the cross — which cost 2-D grid stepping and disabled the bottom `buttons`
+bar. A `sidebar` costs neither. The behaviour, which is as much the contract as the knobs are:
+
+- **Left** at the grid's **leftmost column** crosses into the rail. Everywhere else Left/Right stay ordinary
+  grid steps, so 2-D stepping is exactly what it was.
+- **Up/Down** in the rail step the categories and **reload the grid live**, the same switch-as-you-move feel
+  as the cross.
+- **Right** (or **Enter**) returns to the grid at its **remembered** index — your 2-D position survives the
+  round trip. **Esc** leaves the same way, silently.
+- The bottom `buttons` bar **stays live**: Down at the grid's bottom row still reaches it, unlike on an
+  `xmb` home.
+- **/** (search), **F** (filter), **I** (info) and **T** (cycle theme) keep working from the rail.
+- The selected row is always marked, so the current section stays readable; it takes the brighter `focusBg`
+  plate only while the rail actually holds the cursor (that's the focus ring). Clicking a row switches to it.
+- A long category list scrolls inside the rail instead of overflowing it.
+
+Every knob is optional — the defaults render a plain dark rail. The fraction-valued ones are fractions of the
+**view height**, like `fontSize` everywhere else: `rowHeight` (default `0.072`), `rowSpacing` (`0.004`),
+`fontSize` (`0.026`), `titleSize` (`0.022`). `accentBar` (default `true`) draws a bar down the selected row's
+leading edge tinted by that category's own accent, and `showIcons` (default `true`) draws each row's `icon`
+image, or its accent swatch when it has none.
+
+## Settings panel styling
+
+`views` covers the screens a theme lays out. Everything else the app shows — every **settings** surface, the
+**theme picker**, and the nav **overlays** (menus, confirms, the on-screen keyboard) — is a *panel*: the app
+owns its layout, and the theme only colours it. One top-level **`settingsPanel`** block (a sibling of
+`views`) does that for all of them:
+
+```json
+"settingsPanel": {
+  "background":  "#0A0C10",
+  "panel":       "#111419",
+  "row":         "#141821",
+  "rowSelected": "#1E2A3E",
+  "accent":      "#4C8DFF",
+  "text":        "#E9EDF4",
+  "dim":         "#97A0AF",
+  "separator":   "#2A313C",
+  "warning":     "#E0574E"
+}
+```
+
+| key | what it colours |
+| --- | --- |
+| `background` | a settings page behind the rows (and its title bar) |
+| `panel` | an overlay's own panel (a menu, a confirm, the keyboard); a settings page's title-bar hairline derives from it |
+| `row` | a resting row's card, and the Back button |
+| `rowSelected` | the selected row's card / the highlighted overlay entry |
+| `accent` | the selected row's border, the Back button when it holds focus, an ON toggle, a choice value + its ▾, a progress bar's fill |
+| `text` | row labels and values |
+| `dim` | secondary values, the `›` chevron, an empty field's `—`, a log row |
+| `separator` | the spaced uppercase section headers; an overlay panel's border |
+| `warning` | a destructive row's label (Reset, Delete, …) |
+
+Every key is optional and falls back **hard** to a dark default, so a theme with no `settingsPanel` still
+renders — it just won't match the theme. All three shipped themes (`Channels`, `Triple`, `Night`) declare one;
+copy the block from the closest of them and retune it.
+
 ## Sounds
 
 A theme can play a short sound when you act. Add a top-level **`sounds`** object (sibling of `views`) mapping an action to a **WAV** file relative to the theme folder:
@@ -136,7 +231,7 @@ A theme can play a short sound when you act. Add a top-level **`sounds`** object
 | `theme` | **T** cycles the theme |
 | `volume` | 0..1 applied to all of this theme's sounds (default `0.7`) |
 
-Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). Both shipped themes (**Channels** and **Triple**) have a `sounds/` folder you can copy.
+Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). **Channels** and **Triple** both ship a `sounds/` folder you can copy.
 
 ## Minimal example
 
@@ -157,7 +252,9 @@ Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) —
 
 A top-level **`"hideAppearanceTile": true`** stops the app adding its Appearance catalog tile to the home grid — use it when your theme provides its own settings/appearance `button` (so it isn't offered twice).
 
-Copy one of the shipped themes (`Channels`, `Triple`) as a starting point and edit away — the home updates as you save.
+Copy one of the shipped themes as a starting point and edit away — the home updates as you save. `Channels`
+is a grid + corner buttons, `Triple` is the XMB cross, and `Night` is a `sidebar` rail + grid + a
+`selectedMeta` details pane (and a `nowplayingAudio` page).
 
 More themes — including ones that used to ship with the app — live in the community theme registry at
 <https://github.com/cubman3134/everythingbox-themes>. Drop a downloaded theme folder into `themes2/` and it
