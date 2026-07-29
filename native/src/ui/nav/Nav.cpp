@@ -261,13 +261,70 @@ QVector<QWidget*> NavRing::widgets() const
     return out;
 }
 
+// The band a vertical step lands in: the NEXT ROW. Up/Down are resolved in two stages — first find the row
+// (the candidate whose top/bottom edge is nearest in the pressed direction, plus everything whose vertical
+// extent overlaps it), then choose within that row by sideways distance. Two stages rather than one score,
+// because a single score has to answer "is that far-sideways widget the next row, or a stray from a row
+// further on?" and any threshold that answers it gets one of the two cases wrong: loose enough to reach a
+// left-aligned button under a wide grid, and a grid drifts diagonally; tight enough to hold the column, and
+// whole rows become unreachable. Rows are a real property of the layout, so read them off the geometry
+// instead of guessing at a tolerance.
+//
+// Left/Right deliberately do NOT use this: horizontal runs have no comparable "next column" structure (a
+// vertical list is one column of full-width rows), and the sideways-dominance test below is load-bearing
+// there — it is what stops a header Back button, sitting up-and-slightly-right of a row, winning a Right.
+static QVector<QWidget*> rowBand(QWidget* from, const QVector<QWidget*>& candidates, bool up)
+{
+    const QRect fr(from->mapToGlobal(QPoint(0, 0)), from->size());
+    // The nearest edge-to-edge gap in the pressed direction. Edges, not centres: a tall row and a short one
+    // starting at the same y are the same row, and their centres are not.
+    int bestGap = std::numeric_limits<int>::max();
+    QRect nearest;
+    for (QWidget* w : candidates)
+    {
+        if (w == from) continue;
+        const QRect r(w->mapToGlobal(QPoint(0, 0)), w->size());
+        const int gap = up ? fr.top() - r.bottom() : r.top() - fr.bottom();
+        if (gap < 0) continue;                       // overlapping our own row, or behind us: not a step
+        if (gap < bestGap) { bestGap = gap; nearest = r; }
+    }
+    QVector<QWidget*> band;
+    if (!nearest.isValid()) return band;
+    for (QWidget* w : candidates)
+    {
+        if (w == from) continue;
+        const QRect r(w->mapToGlobal(QPoint(0, 0)), w->size());
+        const int gap = up ? fr.top() - r.bottom() : r.top() - fr.bottom();
+        if (gap < 0) continue;
+        // Same row as the nearest candidate = its vertical extent overlaps that one's.
+        if (r.bottom() >= nearest.top() && r.top() <= nearest.bottom()) band.push_back(w);
+    }
+    return band;
+}
+
 QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, int key)
 {
     if (!from) return candidates.isEmpty() ? nullptr : candidates.first();
     const QPoint c = from->mapToGlobal(from->rect().center());
+    // Up/Down: only the next row competes (see rowBand). Left/Right: every candidate does, filtered by the
+    // sideways-dominance test below.
+    //
+    // An EMPTY band means nothing sits clear of this widget's own row in that direction — only widgets whose
+    // vertical extent overlaps it. There is no row to step to, so fall back to the whole list and let the
+    // pre-existing scoring answer it. That keeps this change strictly ADDITIVE: every move that worked before
+    // still works, and the rows that were unreachable now are not. (Overlapping rows are the case: a short
+    // control beside a tall one, a hand-placed widget straddling two rows.)
+    QVector<QWidget*> pool = candidates;
+    bool vertical = (key == Qt::Key_Up || key == Qt::Key_Down);
+    if (vertical)
+    {
+        const QVector<QWidget*> band = rowBand(from, candidates, key == Qt::Key_Up);
+        if (band.isEmpty()) vertical = false;   // no row to step to: score against everything, as before
+        else pool = band;
+    }
     QWidget* best = nullptr;
     double bestScore = std::numeric_limits<double>::max();
-    for (QWidget* w : candidates)
+    for (QWidget* w : pool)
     {
         if (w == from) continue;
         const QPoint p = w->mapToGlobal(w->rect().center());
@@ -283,8 +340,9 @@ QWidget* NavRing::pickNext(QWidget* from, const QVector<QWidget*>& candidates, i
         if (primary <= 0) continue;                      // not in that direction
         // A candidate that's more SIDEWAYS than in-direction isn't really "that way" (e.g. the header Back
         // button sitting up-and-slightly-right of a row must not win a Right press) — skip it so we land on
-        // the widget actually in the pressed direction.
-        if (orth > primary + 4) continue;
+        // the widget actually in the pressed direction. Vertical steps have already been narrowed to one
+        // row, where "more sideways than down" is exactly the reachable-only-from-the-middle bug.
+        if (!vertical && orth > primary + 4) continue;
         // Among the rest, prefer the nearest, weighting sideways drift heavily so a grid/row steps straight
         // (stay in the column on Up/Down, on the row for Left/Right) instead of drifting diagonally.
         const double score = primary + 4.0 * orth;

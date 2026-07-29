@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.121 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.122 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -691,7 +691,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # The 4-digit passcode pad (#30) is a NavOverlay like the OSK, so its D-pad/auto-submit/back
         # behaviour belongs in the nav suite. It needs no ProfilePasscode.cpp: the only thing it takes from
         # that unit is the constexpr kLength, which is header-only.
-        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h)
+        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h
+        # The classic Edit-Profile picker page is asserted against the REAL widget (§23), not a replica: the
+        # defect it covers was a GEOMETRY one, and a replica would drift from the layout it is meant to guard.
+        src/ui/ProfileDialog.cpp src/ui/ProfileDialog.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_nav PRIVATE src src/ui src/core)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
