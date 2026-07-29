@@ -135,21 +135,65 @@ void CloudSync::signIn()
             const QString target = QString::fromUtf8(line.mid(sp1 + 1, sp2 - sp1 - 1));
             const QUrlQuery q(QUrl::fromEncoded(("http://localhost" + target.toUtf8())).query());
 
-            // Try to auto-close the tab (works when the browser allows it); otherwise it shows a one-liner.
-            const QByteArray body = "<html><body style='font-family:sans-serif;padding:30px'>"
-                                    "Signed in to EverythingBox — you can close this tab."
-                                    "<script>window.close();</script></body></html>";
-            sock->write("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" + body);
+            const QString err = q.queryItemValue(QStringLiteral("error"));
+            const QString code = q.queryItemValue(QStringLiteral("code"));
+            const QString state = q.queryItemValue(QStringLiteral("state"));
+
+            // Work out the OUTCOME before replying, so the page the user lands on matches what
+            // actually happened. This used to write one "Signed in" body unconditionally and only
+            // then check for failure — so a declined or mismatched sign-in told the user it had
+            // worked while the app reported an error.
+            QString landing = QString::fromLatin1(AppBrand::kAuthSuccessUrl);
+            QString failure;                    // empty => success
+            if (!err.isEmpty()) {
+                failure = err;
+                landing = QStringLiteral("%1?reason=%2").arg(QString::fromLatin1(AppBrand::kAuthErrorUrl),
+                                                             QString::fromUtf8(QUrl::toPercentEncoding(err)));
+            } else if (code.isEmpty()) {
+                failure = tr("Sign-in was cancelled.");
+                landing = QStringLiteral("%1?reason=cancelled").arg(QString::fromLatin1(AppBrand::kAuthErrorUrl));
+            } else if (state != pendingState_) {
+                failure = tr("Sign-in state mismatch.");
+                landing = QStringLiteral("%1?reason=state_mismatch").arg(QString::fromLatin1(AppBrand::kAuthErrorUrl));
+            }
+
+            // Hand the browser to the website rather than rendering a bare line here.
+            //
+            // This request's URL carries the authorization code in its query string, so the
+            // hand-off must not pass it on. Measured, rather than assumed (Chromium, top-level
+            // navigation out of this loopback URL):
+            //
+            //   302                     -> no Referer sent at all
+            //   302 + Referrer-Policy   -> no Referer sent at all
+            //   HTML page + JS redirect -> Referer: http://127.0.0.1:<port>/  (origin only)
+            //
+            // So a 302 does not leak the code, and neither does the scripted variant, because
+            // current browsers default to strict-origin-when-cross-origin and drop the query.
+            // The header is therefore belt-and-braces: it costs one line and makes the guarantee
+            // explicit instead of resting on a default that a future browser or a user's
+            // hardened config could change. It is NOT patching a demonstrated leak.
+            //
+            // The 302 is preferred over serving HTML that redirects for a plainer reason: it is
+            // the variant that sends no Referer whatsoever, and there is no page to flash.
+            //
+            // Cache-Control: a cached 302 would send a later, unrelated request for this loopback
+            // port straight to the success page.
+            const QByteArray redirect =
+                "HTTP/1.1 302 Found\r\n"
+                "Location: " + landing.toUtf8() + "\r\n"
+                "Referrer-Policy: no-referrer\r\n"
+                "Cache-Control: no-store\r\n"
+                "Connection: close\r\n"
+                "Content-Length: 0\r\n\r\n";
+            sock->write(redirect);
             sock->flush();
             sock->disconnectFromHost();
             if (loopback_) { loopback_->close(); loopback_->deleteLater(); loopback_ = nullptr; }
 
-            const QString err = q.queryItemValue(QStringLiteral("error"));
-            const QString code = q.queryItemValue(QStringLiteral("code"));
-            const QString state = q.queryItemValue(QStringLiteral("state"));
-            if (!err.isEmpty()) { emit signInFailed(err); return; }
-            if (code.isEmpty()) { emit signInFailed(tr("Sign-in was cancelled.")); return; }
-            if (state != pendingState_) { emit signInFailed(tr("Sign-in state mismatch.")); return; }
+            // The redirect is only what the human sees. Sign-in itself succeeds or fails on the
+            // exchange below, so an unreachable website cannot break it — the app's own UI stays
+            // the source of truth for whether cloud sync is on.
+            if (!failure.isEmpty()) { emit signInFailed(failure); return; }
             exchangeCode(code, pendingVerifier_, redirectUri_);
         });
     });
