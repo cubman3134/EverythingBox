@@ -321,17 +321,32 @@ MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const 
 // compiles this file, so its helpers are called normally.
 namespace {
 
+// Is this source a LAUNCHER copy (a store's own installed/owned entry) rather than a downloaded/addon one?
+// The distinction is `kind`, NOT whether `launcher` happens to be set: PcGameStore is free to stamp the
+// launcher a downloaded copy came from, and a rule that read `launcher` alone would then treat a scene
+// release as if it were the Steam library entry.
+bool isLauncherSource(const pcgame::PcGameSource& s)
+{
+    return s.kind == pcgame::PcGameSource::LauncherInstalled
+        || s.kind == pcgame::PcGameSource::LauncherOwned;
+}
+
 // Launcher precedence for the DISPLAY TITLE only — it decides nothing about grouping or launching. A store's
 // own name is a curated product name; a downloaded copy's name is a release name with scene tokens in it, so
 // it loses to every launcher. The order is FIXED rather than "whichever we saw first" so the folder cannot
 // reshuffle between runs when a launcher scan comes back in a different order.
-int pcTitleRank(const QString& launcher)
+//
+// It keys on KIND FIRST and only then on `launcher`, so "a downloaded copy loses to every launcher" is a
+// property of the code and not a coincidence of `launcher` happening to be empty on those sources. A
+// Downloaded source carrying launcher = "steam" ranks last, exactly like one carrying nothing.
+int pcTitleRank(const pcgame::PcGameSource& s)
 {
-    if (launcher == QStringLiteral("steam"))     return 0;
-    if (launcher == QStringLiteral("epic"))      return 1;
-    if (launcher == QStringLiteral("gog"))       return 2;
-    if (launcher == QStringLiteral("battlenet")) return 3;
-    return 4;   // a downloaded / addon copy: a release name
+    if (!isLauncherSource(s))                       return 4;   // a downloaded / addon copy: a release name
+    if (s.launcher == QStringLiteral("steam"))      return 0;
+    if (s.launcher == QStringLiteral("epic"))       return 1;
+    if (s.launcher == QStringLiteral("gog"))        return 2;
+    if (s.launcher == QStringLiteral("battlenet"))  return 3;
+    return 4;   // a launcher copy from a store we have no precedence for
 }
 
 // One game while it is being assembled: its merged id, the best title seen so far, every title that
@@ -344,6 +359,10 @@ struct PcGroup
     int         bestRank = 99;
     QStringList titles;
     QVector<pcgame::PcGameSource> sources;
+    // Parallel to `sources`: the title THAT source was added under. Kept because the merge is lossy on
+    // purpose — the year strip fuses "Prey (2006)" with "Prey (2017)" — and this is the only place the
+    // difference between two same-launcher copies still exists once they are in one group.
+    QStringList sourceTitles;
 };
 
 } // namespace
@@ -395,6 +414,7 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
             g.bestRank = rank;
         }
         g.sources.push_back(s);
+        g.sourceTitles << title;
     };
 
     for (const SteamGame& g : steam)
@@ -406,7 +426,7 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.launchUrl = SteamLibrary::launchUrl(g.appid);   // steam://rungameid/<appid>
         s.label     = QObject::tr("Steam");
         s.ready     = true;
-        add(g.name, pcTitleRank(s.launcher), s);
+        add(g.name, pcTitleRank(s), s);
     }
     for (const EpicGame& g : epic)
     {
@@ -419,7 +439,7 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
                     + QStringLiteral("?action=launch&silent=true");
         s.label = QObject::tr("Epic Games");
         s.ready = true;
-        add(g.name, pcTitleRank(s.launcher), s);
+        add(g.name, pcTitleRank(s), s);
     }
     for (const GogGame& g : gog)
     {
@@ -430,7 +450,7 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.exePath  = g.exe;                 // DRM-free: the monitored launchPcExe path, not a URI
         s.label    = QObject::tr("GOG");
         s.ready    = !g.exe.isEmpty();
-        add(g.name, pcTitleRank(s.launcher), s);
+        add(g.name, pcTitleRank(s), s);
     }
     for (const BattleNetGame& g : bnet)
     {
@@ -456,13 +476,13 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
             s.label   = g.exe.isEmpty() ? QObject::tr("Battle.net · no launch found")
                                         : QObject::tr("Battle.net · best-effort exe (may not launch)");
         }
-        add(g.name, pcTitleRank(s.launcher), s);
+        add(g.name, pcTitleRank(s), s);
     }
     // Already-built sources (a downloaded copy from PcGameStore). Its label is its title AND its picker row;
     // the label is kept verbatim rather than rewritten — it is the caller's text, and the release name is
     // exactly what tells two downloaded copies apart in the picker.
     for (const pcgame::PcGameSource& s : downloaded)
-        add(s.label, pcTitleRank(s.launcher), s);
+        add(s.label, pcTitleRank(s), s);
 
     // The normalised query. A query that normalises to NOTHING ("!!!", "GOTY") would otherwise be a substring
     // of every title and match the whole library, so it falls back to a plain case-insensitive match.
@@ -472,9 +492,13 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
     {
         if (!launcherFilter.isEmpty())
         {
+            // "HAS a LAUNCHER source for this launcher" — isLauncherSource, not just a matching `launcher`
+            // string, so a downloaded copy that happens to record where it came from does not make the game
+            // appear under "what I own on Steam". Owning it on Steam and having pirated it are not the same
+            // claim, and the filter is the one that means the former.
             bool has = false;
             for (const pcgame::PcGameSource& s : g.sources)
-                if (s.launcher == launcherFilter) { has = true; break; }
+                if (isLauncherSource(s) && s.launcher == launcherFilter) { has = true; break; }
             if (!has) continue;
         }
         if (!q.isEmpty())
@@ -486,6 +510,42 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
                                  : pcgame::normalizeTitle(t).contains(qn)) { hit = true; break; }
             }
             if (!hit) continue;
+        }
+
+        // DISAMBIGUATE same-launcher rows. The merge key is lossy on purpose (the trailing-year strip fuses
+        // "Prey (2006)" with "Prey (2017)"), and when both copies come from the SAME launcher every field the
+        // picker shows is identical: both labelled "Steam", both ready, so pickAutoSource returns -1 and the
+        // menu offers two byte-identical rows. Nothing is lost — the launchIds differ, so both really do
+        // launch the right copy — but the user cannot tell which is which, and the display title resolves to
+        // the bare "Prey", so the remake is invisible.
+        //
+        // The fix re-attaches the per-launcher title, which is exactly what the strip removed and the only
+        // field that still differs. Only LAUNCHER sources are counted (a downloaded copy's label is already
+        // its own release name, and appending it would just print it twice), and a launcher that contributed
+        // ONE source is left alone, so the common "Steam" / "GOG" rows read as plainly as before.
+        {
+            QHash<QString, int> perLauncher;
+            for (const pcgame::PcGameSource& s : g.sources)
+                if (isLauncherSource(s) && !s.launcher.isEmpty()) perLauncher[s.launcher] += 1;
+            for (int i = 0; i < g.sources.size(); ++i)
+            {
+                pcgame::PcGameSource& s = g.sources[i];
+                if (!isLauncherSource(s) || perLauncher.value(s.launcher) < 2) continue;
+                const QString t = i < g.sourceTitles.size() ? g.sourceTitles.at(i) : QString();
+                if (t.isEmpty() || s.label.contains(t)) continue;
+                s.label = QObject::tr("%1 · %2").arg(s.label, t);
+            }
+            // Backstop: two copies can share a launcher AND a title (a store listing the same name twice).
+            // The launchId is what the merge never touches, so it is the last thing guaranteed to differ.
+            QHash<QString, int> labelCount;
+            for (const pcgame::PcGameSource& s : g.sources) labelCount[s.label] += 1;
+            for (pcgame::PcGameSource& s : g.sources)
+            {
+                if (labelCount.value(s.label) < 2) continue;
+                const QString key = s.launchId.isEmpty() ? s.addonItemId : s.launchId;
+                if (key.isEmpty()) continue;
+                s.label = QObject::tr("%1 · %2").arg(s.label, key);
+            }
         }
 
         // Ready first, then launcher name, then launchId, then label. stable_sort so two sources that are

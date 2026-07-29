@@ -110,7 +110,10 @@ namespace browse
     // every other nameless one.
     //
     // DISPLAY TITLE: a launcher's own name beats a file-provider release name (which carries scene tokens),
-    // by the fixed precedence steam > epic > gog > battlenet > downloaded; two titles at the same rank are
+    // by the fixed precedence steam > epic > gog > battlenet > downloaded. That precedence keys on the
+    // source's KIND first and only then on its `launcher`, so a Downloaded source loses whatever `launcher`
+    // it happens to carry — the rule is in the code, not in an assumption that the field is empty. Two
+    // titles at the same rank are
     // settled by comparing them, which picks the base title over its edition variant (the edition suffix
     // sorts after the bare name). Fixed, so the folder does not reshuffle between runs.
     //
@@ -122,11 +125,21 @@ namespace browse
     // best-effort exe it is, and — when even that exe is unknown — a not-ready one, so pickAutoSource can
     // never hand Play something that does nothing.
     //
+    // SAME-LAUNCHER ROWS ARE DISAMBIGUATED. The merge key is lossy by design (the trailing-year strip fuses
+    // "Prey (2006)" with "Prey (2017)"), so one group can hold two sources from the SAME launcher: both
+    // labelled "Steam", both ready, both showing the bare "Prey". The launches are fine — the launchIds
+    // differ — but the picker rows read identically. A launcher that contributed TWO OR MORE sources gets
+    // its own per-launcher title appended to each of its labels ("Steam · Prey (2017)"); a launcher that
+    // contributed one is left with its plain label. Should two such copies share a title as well, the
+    // launchId is appended as a backstop.
+    //
     // `query` filters on the NORMALISED title (any of the game's contributing titles, not just the displayed
     // one); a query that normalises to nothing ("!!!") falls back to a plain case-insensitive match rather
     // than matching everything. `launcherFilter` ("steam" | "epic" | "gog" | "battlenet") keeps only games
     // that HAVE such a source — it narrows which games appear, not which sources they carry, so "what I own
-    // on Steam" survives without a separate folder and still launches by whichever copy is ready.
+    // on Steam" survives without a separate folder and still launches by whichever copy is ready. It matches
+    // a LAUNCHER source only: a downloaded copy that records which launcher it came from does not make the
+    // game appear under "what I own on Steam".
     //
     // poster resolves the tile art from a game's sources; default {} uses SteamLibrary::posterUrl for the
     // Steam source (which touches the local librarycache) and nothing otherwise — a test injects a pure one
