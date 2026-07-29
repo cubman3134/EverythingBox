@@ -882,6 +882,85 @@ int main(int argc, char** argv)
         }
     }
 
+    // ---- 15. the first-entry migration flushes PER PASS, not per record ----------------------------
+    // The remap runs on the GUI thread the first time the PC Games folder is opened, and a
+    // QSettings::sync() is a whole-file rewrite. One sync per moved record therefore means one disk
+    // write per record, and a library with hundreds of migrating records stalls visibly — once, on
+    // first entry, which is precisely the moment the user is forming an opinion of the folder.
+    //
+    // The property pinned is not "fast" (unmeasurable repeatably on CI) but CONSTANT: the same fixture
+    // at two sizes must flush the same number of times. A bound alone would pass a version that halved
+    // the per-record count; only the two sizes agreeing says the flushes stopped scaling at all.
+    {
+        auto runBatchFixture = [](int n) {
+            gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-batch%1.ini").arg(n));
+            QFile::remove(gRecIni);
+
+            QVector<QPair<QString, QString>> lib;
+            QVector<QPair<QString, qint64>>  favs;
+            for (int i = 0; i < n; ++i)
+            {
+                const QString oldId = QStringLiteral("steam:%1").arg(900000 + i);
+                lib  << qMakePair(oldId, QStringLiteral("Batch Game %1").arg(i));
+                favs << qMakePair(oldId, qint64(i));
+                // A record in EVERY store, so every pass has work to do at both sizes.
+                recSet(QStringLiteral("marks/default/items/") + md5Full(oldId),
+                       marksBlob(true, QStringLiteral("finished"), { QStringLiteral("rpg") }, 111));
+                recSet(QStringLiteral("stats/default/devA/items/") + md5Full(oldId),
+                       statsBlob(60, 0, 900, QStringLiteral("Batch")));
+                const QString p = QStringLiteral("playstats/default/devA/") + sha1Full(oldId);
+                recSet(p + QStringLiteral("/total"), 100);
+                recSet(p + QStringLiteral("/sessions"), 2);
+                recSet(p + QStringLiteral("/last"), 500);
+                recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/pos"), 30.0);
+                recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/dur"), 100.0);
+                recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/ts"), 7);
+            }
+            recSet(QStringLiteral("favorites/default/items"), favJson(favs));
+
+            const QHash<QString, QString> t = remapTable(lib);
+            reseatRemapStore();
+            resetRemapSyncCount();
+            applyRemap(t);
+            return qMakePair(remapSyncCount(), t);
+        };
+
+        const int small = 8, large = 64;
+        const auto a = runBatchFixture(small);
+        const auto b = runBatchFixture(large);
+        std::fprintf(stderr, "PCGAMES-INFO: %d records -> %d ini sync(s); %d records -> %d ini sync(s)\n",
+                     small, a.first, large, b.first);
+
+        CHECK(a.first == b.first);          // constant in the size of the library — THE property
+        CHECK(a.first <= 16);               // 5 passes x (write-flush + remove-flush) + applyRemap's own
+
+        // ...and the batching did not cost correctness: the LARGE run's records really did move.
+        {
+            const QString oldId = QStringLiteral("steam:%1").arg(900000 + large - 1);
+            const QString newId = b.second.value(oldId);
+            CHECK(!newId.isEmpty());
+            CHECK(!recHas(QStringLiteral("marks/default/items/") + md5Full(oldId)));
+            CHECK(recObj(QStringLiteral("marks/default/items/") + md5Full(newId))
+                      .value(QStringLiteral("hidden")).toBool());
+            CHECK(recObj(QStringLiteral("stats/default/devA/items/") + md5Full(newId))
+                      .value(QStringLiteral("mediaSeconds")).toDouble() == 60.0);
+            const QString pNew = QStringLiteral("playstats/default/devA/") + sha1Full(newId);
+            CHECK(!recHas(QStringLiteral("playstats/default/devA/") + sha1Full(oldId)
+                          + QStringLiteral("/total")));
+            CHECK(recGet(pNew + QStringLiteral("/total")).toLongLong() == 100);
+            CHECK(favIndexOf(recArr(QStringLiteral("favorites/default/items")), newId) >= 0);
+            CHECK(favIndexOf(recArr(QStringLiteral("favorites/default/items")), oldId) < 0);
+            CHECK(!recHas(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/pos")));
+            CHECK(recGet(QStringLiteral("resume/") + md5Short(newId) + QStringLiteral("/pos")).toDouble()
+                  == 30.0);
+            // No journal marker survives a completed pass, at any batch size.
+            QSettings chk(gRecIni, QSettings::IniFormat);
+            chk.beginGroup(QStringLiteral("pcgameremap/pending"));
+            CHECK(chk.childKeys().isEmpty());
+            chk.endGroup();
+        }
+    }
+
     // Leave nothing behind (issue #42): every scratch ini this run created goes, so the next run — and
     // any other probe sharing build/Release — starts from a clean file.
     QFile::remove(ini);
@@ -894,6 +973,8 @@ int main(int argc, char** argv)
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp2.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-favstamp3.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-batch8.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-batch64.ini")));
 
     if (failures == 0) { std::puts("PCGAMES-OK"); return 0; }
     std::fprintf(stderr, "PCGAMES: %d check(s) failed\n", failures);

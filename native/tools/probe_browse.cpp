@@ -415,6 +415,96 @@ int main(int argc, char** argv)
               "launchid: a launcher-less source has NO pre-merge id (it is keyed by addonItemId)");
     }
 
+    // ---- A TITLELESS DOWNLOAD MUST NOT BE STRANDED OFF ITS OWN TILE --------------------------------------
+    // Same failure class as the Battle.net one above, on the other kind of source. DownloadedItem::title is
+    // OPTIONAL, so the catalog falls back to the file's base name to have something to group on. The remap's
+    // candidate was built from the raw title instead — so for a record with an EMPTY title the two sides
+    // disagreed completely: the catalog built a tile keyed on the base name, while the remap's destination
+    // was pcgame::itemId("") = empty, i.e. the entry was absent from the table (rule 1) and NOTHING was ever
+    // migrated onto that tile. The user's marks and play time accrue under the launch id forever, on a tile
+    // that shows none of them, with nothing logged.
+    //
+    // Both sides now call pcgame::downloadedTitle, and this pins that they land on ONE id. Reverting either
+    // side to its own fallback fails this check.
+    {
+        // The Downloads records as the store hands them over. Three shapes: a titled one, a TITLELESS one
+        // (the stranded case), and one with neither a title NOR a key — DownloadsStore documents `key` as
+        // "empty -> use path", and the path is the id such a copy's launches actually bank under, so it is
+        // a candidate too rather than being skipped.
+        QList<DownloadedItem> dls;
+        { DownloadedItem d; d.path = "C:/dl/hades/Hades.exe"; d.title = "Hades Repack";
+          d.kind = "pcgame"; d.key = "dl-hades";   dls << d; }
+        { DownloadedItem d; d.path = "C:/dl/Celeste.Deluxe.exe"; d.title = "";
+          d.kind = "pcgame"; d.key = "dl-celeste"; dls << d; }
+        { DownloadedItem d; d.path = "C:/dl/Tunic.exe"; d.title = "";
+          d.kind = "pcgame"; d.key = "";           dls << d; }
+
+        // HomeView::pcLibraryCatalog's downloaded-source construction, verbatim.
+        QVector<pcgame::PcGameSource> dl;
+        for (const DownloadedItem& d : dls)
+        {
+            pcgame::PcGameSource s;
+            s.kind        = pcgame::PcGameSource::Downloaded;
+            s.addonItemId = d.key.isEmpty() ? d.path : d.key;
+            s.exePath     = d.path;
+            s.label       = pcgame::downloadedTitle(d.title, d.path);
+            s.ready       = true;
+            dl << s;
+        }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        const MediaCatalog pc = browse::pcGamesCatalog({}, {}, {}, {}, dl, QString(), QString(), art);
+
+        // HomeView::populatePcGames' candidate list, verbatim.
+        QVector<QPair<QString, QString>> lib;
+        for (const DownloadedItem& d : dls)
+        {
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            if (oldId.isEmpty()) continue;
+            lib << qMakePair(oldId, pcgame::downloadedTitle(d.title, d.path));
+        }
+        const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+        CHECK(pc.items.size() == 3 && t.size() == 3,
+              "dltitle: the premise — three downloaded copies, three tiles, three remap candidates");
+
+        // THE ASSERTION. For every downloaded record: the tile that CARRIES this copy as a source, and the
+        // id the remap would move this copy's records TO, are the same string. Both halves matter — a check
+        // that only compared ids would pass a build that put the source on some other tile.
+        bool everyCopyLandsOnItsOwnTile = !pc.items.isEmpty();
+        for (const DownloadedItem& d : dls)
+        {
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            const QString dest  = t.value(oldId);
+            bool onTile = false;
+            for (const MediaItem& i : pc.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    if (s.addonItemId == oldId && !dest.isEmpty() && i.id == dest) onTile = true;
+            if (!onTile) everyCopyLandsOnItsOwnTile = false;
+        }
+        CHECK(everyCopyLandsOnItsOwnTile,
+              "dltitle: every downloaded copy's tile id IS the remap destination for that same copy");
+
+        // The titleless case spelled out, because it is the one the two fallbacks got wrong and a blanket
+        // loop would not say which record failed.
+        {
+            const QString dest = t.value(QStringLiteral("dl-celeste"));
+            QString tileId;
+            for (const MediaItem& i : pc.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    if (s.addonItemId == "dl-celeste") tileId = i.id;
+            CHECK(!dest.isEmpty() && !tileId.isEmpty() && dest == tileId,
+                  "dltitle: an EMPTY-title download has a tile id AND a remap destination, and they are equal");
+            CHECK(dest == pcgame::itemId(QStringLiteral("Celeste.Deluxe")),
+                  "dltitle: ...and that id is the one derived from the file's base name, not from nothing");
+        }
+        // A record with no key either is still migratable — it keys on the path, exactly as its launch does.
+        {
+            const QString dest = t.value(QStringLiteral("C:/dl/Tunic.exe"));
+            CHECK(dest == pcgame::itemId(QStringLiteral("Tunic")),
+                  "dltitle: a download with NO key keys on its path, which is what its launches bank under");
+        }
+    }
+
     // ---- pcGamesCatalog: two copies from the SAME launcher must not read as identical picker rows ---------
     // The year strip merges a remake with its original ("Prey (2006)" / "Prey (2017)" both normalise to
     // "prey"). That merge is documented and deliberate. What is NOT acceptable is the consequence: both

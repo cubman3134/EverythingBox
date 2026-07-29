@@ -1732,7 +1732,11 @@ MediaCatalog HomeView::pcLibraryCatalog(const QString& query, const QString& lau
         s.addonItemId = d.key.isEmpty() ? d.path : d.key;
         const PcGameStore::Entry e = PcGameStore::get(s.addonItemId);
         s.exePath = !e.exe.isEmpty() ? e.exe : d.path;
-        s.label   = d.title.isEmpty() ? QFileInfo(d.path).completeBaseName() : d.title;
+        // pcgame::downloadedTitle and NOT an inline ternary: this string is what pcGamesCatalog GROUPS
+        // this copy under (its tile id is pcgame::itemId of it), and populatePcGames feeds the SAME call
+        // to remapTable as this copy's destination. Written out twice they drifted for exactly the
+        // titleless records — see the header note on downloadedTitle.
+        s.label   = pcgame::downloadedTitle(d.title, d.path);
         // Ready means "launches NOW, with no download". A recorded exe that no longer exists does not.
         s.ready   = !s.exePath.isEmpty() && QFileInfo::exists(s.exePath);
         downloaded.push_back(s);
@@ -1798,8 +1802,29 @@ void HomeView::populatePcGames(bool runRemap)
         // a launch banks its records under is a key of this table by construction (probe_browse pins it).
         for (const BattleNetGame& g : scan.bnet)
             lib << qMakePair(QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code), g.name);
+        // OWNED-but-not-installed on Steam. It is in the same scan and it keys exactly like an installed
+        // Steam entry ("steam:<appid>"), so leaving it out meant a pre-branch favourite on a game the user
+        // owns and has not installed stayed under its per-launcher id — a second, stale star sitting beside
+        // the merged tile until the day they install it. An appid that is BOTH owned and installed
+        // contributes the same pair twice, which a QHash collapses; the destination is the same either way.
+        for (const SteamGame& g : scan.steamOwned)
+            lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
         for (const DownloadedItem& d : scan.downloads)
-            if (d.kind == QStringLiteral("pcgame") && !d.key.isEmpty()) lib << qMakePair(d.key, d.title);
+        {
+            if (d.kind != QStringLiteral("pcgame")) continue;
+            // THE ID THIS COPY'S RECORDS ACTUALLY BANK UNDER. A downloaded copy launches through
+            // openRecent with `addonItemId`, which pcLibraryCatalog builds as `key` when there is one and
+            // the PATH otherwise (DownloadsStore documents `key` as "empty -> use path"). Requiring a
+            // non-empty key here therefore excluded a whole class of real records — keyless downloads —
+            // from the table while the folder happily built tiles for them. The same fallback the launch
+            // uses is the only candidate that can migrate them, so it is the one used. With NEITHER a key
+            // nor a path there is no id at all, and rule 1 says such an entry is absent from the table,
+            // never mapped from an empty key.
+            const QString oldId = d.key.isEmpty() ? d.path : d.key;
+            if (oldId.isEmpty()) continue;
+            // The title half is downloadedTitle, the SAME call pcLibraryCatalog groups the tile on.
+            lib << qMakePair(oldId, pcgame::downloadedTitle(d.title, d.path));
+        }
         pcgame::applyRemap(pcgame::remapTable(lib));
     }
 
@@ -5019,6 +5044,13 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 || (EpicLibrary::isAvailable()      && !EpicLibrary::installedGames().isEmpty())
                 || (GogLibrary::isAvailable()       && !GogLibrary::installedGames().isEmpty())
                 || (BattleNetLibrary::isAvailable() && !BattleNetLibrary::installedGames().isEmpty())
+                // OWNED-but-not-installed on Steam counts as "has something in it". The folder LISTS these
+                // (pcGamesCatalog mints a LauncherOwned source for each), so a gate that ignored them hid
+                // the whole console from the user whose PC library is entirely owned-not-installed — the
+                // one folder that replaced four, absent. No isAvailable() gate: this list comes from the
+                // Web API, not a local install, and it is empty unless a key + SteamID are configured and
+                // a fetch has already succeeded. Cached, so it is network-free on the GUI thread.
+                || !SteamLibrary::ownedGamesCached(Settings::steamWebApiKey(), Settings::steamId()).isEmpty()
                 || [] {
                        for (const DownloadedItem& d : DownloadsStore::list())
                            if (d.kind == QStringLiteral("pcgame")) return true;

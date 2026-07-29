@@ -80,5 +80,14 @@ namespace pcgame
     // process-wide redirect. Load-bearing here for issue #42 — a probe run whose data dir is the exe's own
     // folder would otherwise leave an everythingbox.ini in build/Release for the next run to read.
     void setRemapIniPathForTesting(const QString& path);
+
+    // How many times applyRemap has flushed the ini since the last reset. The first-entry migration runs
+    // on the GUI thread, and a QSettings::sync() is a whole-file rewrite — so "one sync per record"
+    // is a per-record disk write, and a library with hundreds of migrating records stalls visibly the
+    // first time the folder is opened. The count is the cheap, deterministic way to assert the flushes
+    // are BATCHED (bounded by the number of passes) instead of scaling with the library, which is a
+    // property no wall-clock measurement can pin repeatably on CI.
+    int  remapSyncCount();
+    void resetRemapSyncCount();
 #endif
 }

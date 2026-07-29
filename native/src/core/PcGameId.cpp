@@ -3,6 +3,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 
+#include <QFileInfo>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QStringList>
@@ -208,6 +209,14 @@ QString pcgame::itemId(const QString& title)
     // nothing, so prefixing unconditionally would produce "pcgame:pcgame:rawtitle/…". A normalised title
     // can never contain ':' (normalizeTitle strips all punctuation), so this test is exact, not a guess.
     return key.startsWith(QStringLiteral("pcgame:")) ? key : (QStringLiteral("pcgame:") + key);
+}
+
+// See the header for WHY this is a function and not two inline ternaries. It is deliberately total and
+// pure: no filesystem access (QFileInfo only splits the string here), so the catalog and the remap get the
+// same answer for a path that no longer exists — which is exactly the record most in need of migrating.
+QString pcgame::downloadedTitle(const QString& title, const QString& path)
+{
+    return title.trimmed().isEmpty() ? QFileInfo(path).completeBaseName() : title;
 }
 
 bool pcgame::sameGame(const QString& titleA, const QString& igdbA,
