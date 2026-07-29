@@ -25,12 +25,31 @@
 // movie/game/book, so the `detailChildren` zone stays inert there.
 struct DetailState { bool active = false; int actionCount = 0; int childCount = 0; };
 
+// How a theme TRAVERSES the `categories` zone. The zone itself is registered unconditionally either way (its
+// live count is fed by the QML) — what differs is its AXIS and the declared edges that reach it:
+//
+//   Cross   — the XMB's horizontal category axis, CO-LOCATED with the item column: Left/Right from the column
+//             switch to + step it (the fused step), Up/Down from it switch to + step the column. This is the
+//             shape the engine has always had, and the default: every theme that does not declare a `sidebar`
+//             element gets exactly these registrations, byte for byte.
+//   Sidebar — a VERTICAL list of categories beside a grid (the Playnite shape). Up/Down step the LIST itself,
+//             so those must NOT be declared as edges: a declared edge is consulted before axis stepping and
+//             would freeze the list (the reader/queue lesson above). Left from the grid enters the sidebar and
+//             Right leaves it; the QML gates WHEN Left crosses (only at the grid's leftmost column — exactly
+//             how it gates the items->buttons bottom-row edge), so 2-D grid stepping is untouched. Both legs
+//             are CROSS-axis for their source zone, so neither freezes anything, and because Left/Right are
+//             cross-axis for the Vertical TARGET too there is no fused step — each crossing enters at the
+//             target's REMEMBERED index, which is what makes the grid cursor survive a sidebar round trip.
+enum class CategoriesNav { Cross, Sidebar };
+
 // Register the themed surface's zones + declared edges on a fresh NavGraph. `itemCount` is the item column's
 // starting count (buildView: items.size(); the probe: a fixed test count). categories/buttons/actions start
 // hidden (count 0) — their live counts arrive later via setZoneCount, keeping their edges inert until then.
 // `detail` seeds the detail-view zones' counts (the app builds with a default {inactive} and the QML feeds
 // live counts when the detail view opens; the probe supplies fixed counts to shape-test the detail surface).
-inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail = {})
+// `cats` picks the categories-zone shape (see CategoriesNav); the default is the historical XMB cross.
+inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail = {},
+                                CategoriesNav cats = CategoriesNav::Cross)
 {
     // Zone layout: `items` (the XMB column / the grid, Vertical) and `categories` (the XMB horizontal axis)
     // are CO-LOCATED at (0,0) — the two always-visible cursors of ONE surface, which pure spatial crossing
@@ -38,16 +57,37 @@ inline void buildThemedNavGraph(NavGraph& g, int itemCount, DetailState detail =
     // inline chooser overlay) is co-located too; entered by activation, its declared Esc edge documents the
     // dismissal so validate() sees it connected. `buttons` (the bottom button bar) is spatially real at row 1.
     g.registerZone(QStringLiteral("items"), itemCount, 0, 0, Qt::Vertical);
-    g.registerZone(QStringLiteral("categories"), 0, 0, 0, Qt::Horizontal);
+    // Sidebar mode WRAPS the list. Not decoration — it is the containment: the sidebar's Up/Down must stay
+    // along-axis (declaring them would freeze the list), so a boundary Down would otherwise fall through to
+    // GEOMETRY and land in the `buttons` bar a row below — a one-way trapdoor, since buttons--Up-->items goes
+    // to the grid, not back to the sidebar. Wrapping keeps a boundary along-axis arrow inside the strip, which
+    // is exactly how detailActions and the audio transport contain themselves (see their notes below).
+    g.registerZone(QStringLiteral("categories"), 0, 0, 0,
+                   cats == CategoriesNav::Sidebar ? Qt::Vertical : Qt::Horizontal,
+                   /*wraps=*/cats == CategoriesNav::Sidebar);
     g.registerZone(QStringLiteral("buttons"), 0, 1, 0, Qt::Horizontal);
     g.registerZone(QStringLiteral("actions"), 0, 0, 0, Qt::Vertical, /*wraps=*/true);
     g.setDefaultZone(QStringLiteral("items"));
-    // Two-cursor XMB surface: Left/Right switch to + step the category axis; Up/Down from the category axis
-    // switch to + step the item column (fused step = old stepCat/step parity, no eaten press).
-    g.addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
-    g.addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
-    g.addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
-    g.addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
+    if (cats == CategoriesNav::Sidebar)
+    {
+        // Sidebar surface: a vertical category list beside the grid. ONLY the two cross-axis legs are declared
+        // (see CategoriesNav) — the sidebar's own Up/Down stay along-axis so the list scrolls, and the grid's
+        // Left/Right stay axis-resolved so its 2-D stepping is untouched (the QML only asks for the Left
+        // crossing at the grid's leftmost column). `categories`--Left--> itself is the containment pin:
+        // nothing sits left of the sidebar, so a stray Left is a visible no-op, not a geometric hop.
+        g.addEdge(QStringLiteral("items"), Qt::Key_Left, QStringLiteral("categories"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Right, QStringLiteral("items"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Left, QStringLiteral("categories"));
+    }
+    else
+    {
+        // Two-cursor XMB surface: Left/Right switch to + step the category axis; Up/Down from the category axis
+        // switch to + step the item column (fused step = old stepCat/step parity, no eaten press).
+        g.addEdge(QStringLiteral("items"), Qt::Key_Left,  QStringLiteral("categories"));
+        g.addEdge(QStringLiteral("items"), Qt::Key_Right, QStringLiteral("categories"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Down, QStringLiteral("items"));
+        g.addEdge(QStringLiteral("categories"), Qt::Key_Up,   QStringLiteral("items"));
+    }
     // The bottom button bar: entered from the grid's bottom row (the QML gates WHEN — it owns the gridCols
     // geometry AND keeps `buttons` hidden in XMB mode so this edge stays inert there), left back upward with
     // the grid cursor restored from zone memory.

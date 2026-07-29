@@ -48,7 +48,11 @@
 #include <QPointingDevice>            // §20: the synthetic touchscreen device QTest::touchEvent drives
 #include <QtTest/QTest>              // §20: QTest::touchEvent — real touch sequences with real hit-testing
 #include <QtTest/QSignalSpy>         // §20(g): counts the Channels prefetch nearEnd() firings
+#include <QDir>                       // §21: a scratch theme dir for the REAL ThemeEngine::buildView
+#include <QTemporaryDir>
+#include <QFile>
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
+#include "theme2/ThemeEngine.h"       // §21: the REAL buildView — theme.json -> graph shape -> bridge -> QML
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
 #include "core/Settings.h"            // §19: setDisplayMode drives FormFactor::refresh() (TV / identity legs)
 #else
@@ -1251,6 +1255,387 @@ static void runTouchAsserts()
     Settings::setDisplayMode(QStringLiteral("auto"));
     FormFactor::instance().refresh();
 }
+
+// §21 — the SIDEBAR route into the `categories` zone (issue #38): the second way a theme reaches that zone,
+// without declaring an `xmb` element. Two legs, because the behaviour lives in two places:
+//
+//   (a) the MODEL shape, off the shared builder (buildThemedNavGraph with CategoriesNav::Sidebar) — the same
+//       NavThemeGraph.h discipline §9 uses, so this can never drift from the graph the app builds: the zone is
+//       Vertical, Left enters it, Right leaves it at the ITEM zone's remembered index (no fused step), Left
+//       inside it is a contained no-op, and its Up/Down are NOT declared (so the list actually scrolls). Plus
+//       the Cross-mode control: the XMB's categories--Up-->items edge exists there and must NOT exist here.
+//   (b) the WHOLE shipped path, through the REAL ThemeEngine::buildView on a scratch theme.json that declares
+//       a `sidebar` element: theme.json -> graph shape -> ThemeBridge write-back -> ThemeView's key routing.
+//       This is what pins the load-bearing claim — that a theme can move focus into the sidebar and back out
+//       WITHOUT losing the grid's 2-D stepping, and that (unlike an `xmb` element) it leaves `buttons` live.
+static void runSidebarAsserts()
+{
+    // ---- (a) the model shape from the shared builder -------------------------------------------------
+    {
+        NavGraph g;
+        buildThemedNavGraph(g, 12, {}, CategoriesNav::Sidebar);
+        buildAudioPageNavGraph(g);
+        g.setZoneCount(QStringLiteral("categories"), 5);
+        g.setZoneCount(QStringLiteral("buttons"), 2);
+        QString why;
+        CHECK(g.validate(&why), "sidebar: the Sidebar-shaped themed graph passes its own validator");
+
+        // Enter: Left from the grid crosses to the sidebar at the SIDEBAR's remembered index, with no fused
+        // step (Left is cross-axis for a Vertical target, so the crossing does not also step it).
+        g.select(QStringLiteral("categories"), 3);
+        g.select(QStringLiteral("items"), 6);            // leaving categories records memory 3; items memory 6
+        g.move(Qt::Key_Left);
+        CHECK(g.zone() == QStringLiteral("categories") && g.index() == 3,
+              "sidebar: Left from the grid enters the sidebar at its remembered row (3), un-stepped");
+
+        // The sidebar's own axis: Up/Down step the LIST (they are deliberately not declared as edges — a
+        // declared edge is consulted before axis stepping and would freeze it).
+        CHECK(g.move(Qt::Key_Down) && g.zone() == QStringLiteral("categories") && g.index() == 4,
+              "sidebar: Down steps the sidebar list itself (3 -> 4), it does not leave the zone");
+        CHECK(g.move(Qt::Key_Up) && g.index() == 3, "sidebar: Up steps it back (4 -> 3)");
+
+        // Containment: nothing sits left of the sidebar, so Left is a declared SELF no-op, not a geometric hop.
+        g.move(Qt::Key_Left);
+        CHECK(g.zone() == QStringLiteral("categories") && g.index() == 3,
+              "sidebar: Left inside the sidebar is a contained no-op (the declared self edge)");
+
+        // Leave: Right returns to the GRID at its remembered index — this is what makes the round trip
+        // non-destructive, and it is exactly the property a 2-D grid needs to survive a sidebar visit.
+        g.move(Qt::Key_Right);
+        CHECK(g.zone() == QStringLiteral("items") && g.index() == 6,
+              "sidebar: Right returns to the grid at ITS remembered index (6), not the carried catIndex");
+
+        // The memory seed, at the model level: a HIDDEN zone can be told where its cursor was, and select()
+        // cannot do it (it refuses a count-0 zone outright and stores nothing). This is the primitive §21(d)
+        // exercises through the whole shipped path — asserted here on a fresh graph so a regression names the
+        // model, not the QML.
+        {
+            NavGraph gs;
+            buildThemedNavGraph(gs, 12, {}, CategoriesNav::Sidebar);
+            gs.select(QStringLiteral("categories"), 3);   // hidden (count 0) -> refused, stores NOTHING
+            gs.setZoneCount(QStringLiteral("categories"), 5);
+            gs.select(QStringLiteral("items"), 6);
+            gs.move(Qt::Key_Left);
+            CHECK(gs.zone() == QStringLiteral("categories") && gs.index() == 0,
+                  "seed: select() onto a HIDDEN zone stores nothing — the crossing still enters at row 0");
+
+            NavGraph gt;
+            buildThemedNavGraph(gt, 12, {}, CategoriesNav::Sidebar);
+            gt.seedIndex(QStringLiteral("categories"), 3);   // legal while hidden — that is the whole point
+            gt.setZoneCount(QStringLiteral("categories"), 5);
+            gt.select(QStringLiteral("items"), 6);
+            gt.move(Qt::Key_Left);
+            CHECK(gt.zone() == QStringLiteral("categories") && gt.index() == 3,
+                  "seed: seedIndex() on a hidden zone survives the count-up — the crossing enters at row 3");
+            gt.move(Qt::Key_Right);
+            CHECK(gt.zone() == QStringLiteral("items") && gt.index() == 6,
+                  "seed: …and seeding one zone never moved the cursor off the other (grid still at 6)");
+            gt.seedIndex(QStringLiteral("categories"), 99);  // snapped at USE time, not at seed time
+            gt.move(Qt::Key_Left);
+            CHECK(gt.zone() == QStringLiteral("categories") && gt.index() == 4,
+                  "seed: an out-of-range seed is clamped when the crossing reads it (99 -> last row 4)");
+        }
+
+        // The Cross control: the XMB shape still declares categories--Up-->items, and the Sidebar shape must
+        // not — that difference IS the two shapes. (In Sidebar mode Up stepped the list, asserted above.)
+        NavGraph gx;
+        buildThemedNavGraph(gx, 12);                     // default = CategoriesNav::Cross, i.e. the XMB
+        gx.setZoneCount(QStringLiteral("categories"), 5);
+        gx.select(QStringLiteral("items"), 6);
+        gx.select(QStringLiteral("categories"), 3);
+        gx.move(Qt::Key_Up);
+        CHECK(gx.zone() == QStringLiteral("items"),
+              "cross control: the XMB shape still crosses categories--Up-->items (unchanged by the sidebar work)");
+        // …and the Cross shape's Left/Right from the column still switch to the category axis (the fused step).
+        gx.select(QStringLiteral("items"), 4);
+        CHECK(gx.move(Qt::Key_Right) && gx.zone() == QStringLiteral("categories"),
+              "cross control: the XMB shape's Right from the column still switches + steps the category axis");
+    }
+
+    // ---- (b) the whole shipped path: theme.json -> buildView -> bridge -> ThemeView key routing --------
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "sidebar: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        // A theme that declares a `sidebar` beside a 4-column grid AND a corner `button`. The button is the
+        // positive control for the OTHER half of the claim: an `xmb` element force-disables the `buttons` zone
+        // (§18(g)), and opting into the categories zone this way must NOT.
+        const char* themeJson =
+            "{ \"name\": \"SidebarProbe\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#101010\" },"
+            "  \"elements\": ["
+            "    { \"type\": \"sidebar\", \"pos\": [0, 0], \"size\": [0.2, 1] },"
+            "    { \"type\": \"grid\", \"columns\": 4, \"pos\": [0.2, 0], \"size\": [0.8, 0.9] },"
+            "    { \"type\": \"text\", \"binding\": \"selectedMeta.title\", \"pos\": [0.2, 0.92], \"size\": [0.6, 0.06] },"
+            "    { \"type\": \"button\", \"action\": \"settings\", \"pos\": [0.9, 0.94], \"size\": [0.08, 0.05] }"
+            "  ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        CHECK(tf.open(QIODevice::WriteOnly), "sidebar: the scratch theme.json is writable");
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        for (int i = 0; i < 12; ++i)
+            items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+
+        // The REAL app path: buildView owns the theme parse, the graph shape choice, the bridge and the QML.
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        CHECK(qw != nullptr, "sidebar: buildView returned the themed QQuickWidget");
+        NavGraph* g = ThemeEngine::navGraph(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(g && root, "sidebar: the built view carries a NavGraph and a scene root");
+        if (!qw || !g || !root) { if (w) delete w; return; }
+
+        QVariantList cats;
+        for (int i = 0; i < 5; ++i)
+            cats << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Cat %1").arg(i) } };
+        root->setProperty("catIndex", 0);
+        root->setProperty("categories", cats);
+        qw->resize(1280, 720);
+        qw->show();
+        pump(); pump();
+        qw->grabFramebuffer();      // force a render pass so the Repeater realizes the element delegates
+        pump();
+
+        CHECK(root->property("sidebarMode").toBool(), "sidebar: the `sidebar` element puts the view in sidebarMode");
+        CHECK(!root->property("xmbMode").toBool(), "sidebar: …without being xmbMode (no `xmb` element declared)");
+        // The Sidebar element is a Repeater-delegate Loader child — VISUALLY parented but not a QObject child,
+        // so walk the visual tree (findChild follows QObject parentage and never reaches it; see §20's note).
+        QQuickItem* rail = nullptr;
+        {
+            QList<QQuickItem*> stack = root->childItems();
+            while (!stack.isEmpty())
+            {
+                QQuickItem* it = stack.takeLast();
+                if (it->objectName() == QStringLiteral("themeSidebar")) { rail = it; break; }
+                stack += it->childItems();
+            }
+        }
+        CHECK(rail != nullptr, "sidebar: the Sidebar element instantiated from the qrc (it is listed in theme2.qrc)");
+        CHECK(rail && rail->property("count").toInt() == 5,
+              "sidebar: …and it renders one row per host category (5)");
+        // The button bar stays LIVE — the whole point of not having to declare an `xmb` element to reach the
+        // categories zone (compare §18(g), where xmbMode holds this zone at 0).
+        CHECK(root->property("buttonList").toList().size() == 1, "sidebar: the corner button is in buttonList");
+        g->select(QStringLiteral("buttons"), 0);
+        CHECK(g->zone() == QStringLiteral("buttons"),
+              "sidebar: the `buttons` zone is LIVE alongside a sidebar (an xmb element would have killed it)");
+        g->select(QStringLiteral("items"), 0);
+
+        root->forceActiveFocus();
+        pump();
+        // 2-D stepping, untouched: Right steps along the row, Down jumps a full row of 4.
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 1,
+              "sidebar: Right off the leftmost column steps the GRID (0 -> 1), it does not enter the sidebar");
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("currentIndex").toInt() == 5,
+              "sidebar: Down still jumps a full grid row (1 -> 5, columns = 4)");
+        sendKey(qw->quickWindow(), Qt::Key_Left);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar: Left mid-row is an ordinary grid step (5 -> 4) — the categories edge is gated by column");
+
+        // …and at the leftmost column (4 % 4 == 0) the SAME key crosses into the sidebar.
+        sendKey(qw->quickWindow(), Qt::Key_Left);
+        CHECK(g->zone() == QStringLiteral("categories"), "sidebar: Left at the leftmost column enters the sidebar");
+        CHECK(root->property("navZone").toString() == QStringLiteral("categories"),
+              "sidebar: the bridge mirrors the zone into navZone (what the element draws its focus ring from)");
+        // Inside the sidebar the arrows belong to the LIST; the grid cursor must not budge.
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("catIndex").toInt() == 1, "sidebar: Down steps the sidebar (cat 0 -> 1)");
+        CHECK(root->property("currentIndex").toInt() == 4, "sidebar: …and the grid cursor is untouched (still 4)");
+        CHECK(root->property("uitestCategory").toString() == QStringLiteral("Cat 1"),
+              "sidebar: the UI-test snapshot reports the sidebar's category (it used to be XMB-only)");
+
+        // A HOST row-set swap while the sidebar holds focus — what a real category switch does (the host
+        // reloads the grid for the newly selected section). It must NOT eject the cursor back to the grid, or
+        // one Down in the sidebar would kick you out of it; and the model must re-seat the grid cursor on the
+        // NEW list, so leaving the sidebar does not land on a stale row of the list that is gone.
+        QVariantList swapped;
+        for (int i = 0; i < 6; ++i)
+            swapped << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Swap %1").arg(i) } };
+        root->setProperty("items", swapped);
+        root->setProperty("currentIndex", 0);
+        pump();
+        CHECK(g->zone() == QStringLiteral("categories"),
+              "sidebar: a host row-set reload under a focused sidebar does NOT steal focus back to the grid");
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 0,
+              "sidebar: …and leaving lands on the NEW list's cursor (0), not the vanished list's remembered cell");
+
+        // Restore the 12-item fixture and re-park at cell 4 for the round-trip assertion below.
+        root->setProperty("items", items);
+        pump();
+        g->select(QStringLiteral("items"), 4);
+        sendKey(qw->quickWindow(), Qt::Key_Left);
+        CHECK(g->zone() == QStringLiteral("categories"), "sidebar: re-entered the sidebar from cell 4");
+
+        // Back out, then keep stepping the grid: the whole point — the round trip costs no grid position.
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar: Right leaves the sidebar back onto the grid's remembered cell (4)");
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("currentIndex").toInt() == 8,
+              "sidebar: 2-D stepping survives the round trip (4 -> 8, still a full row)");
+
+        // selectedMeta reaches the theme through dataCtx — the contract a details pane binds ("selectedMeta.x").
+        QVariantMap meta;
+        meta.insert(QStringLiteral("title"), QStringLiteral("HOVERED"));
+        root->setProperty("selectedMeta", meta);
+        pump();
+        const QVariantMap ctx = root->property("dataCtx").toMap();
+        CHECK(ctx.contains(QStringLiteral("selectedMeta")), "sidebar: dataCtx exposes selectedMeta to bindings");
+        CHECK(ctx.value(QStringLiteral("selectedMeta")).toMap().value(QStringLiteral("title")).toString()
+              == QStringLiteral("HOVERED"),
+              "sidebar: …and it carries the host's live hover data (selectedMeta.title resolves)");
+
+        delete w;
+        pump();
+    }
+
+    // ---- (c) the REGRESSION bar: a grid theme with NO sidebar, whose `categories` zone is now POPULATED ----
+    // Item 3 of the issue makes the host feed `categories` on the grid path (the previews always did; the app
+    // never did). That counts the zone UP on Channels-shaped themes too, which makes the Cross shape's declared
+    // items--Left/Right-->categories edges LIVE where they used to be inert. Nothing may change for them: the
+    // grid's Left/Right are resolved by the QML (gridSelect), never by nav.move, so the live edge is never
+    // walked. This is the assertion that keeps it that way — it is exactly the Channels home/browse behaviour.
+    {
+        QTemporaryDir dir;
+        // CHECKed, not silently skipped: this section is the ONE that pins the shared-path behaviour change
+        // (a populated `categories` zone on a theme with no sidebar), so a temp dir that cannot be created
+        // must be a visible failure — a bare `return` would retire the whole regression bar with zero
+        // failures reported, exactly the wrong failure mode. Same discipline as (b) above.
+        CHECK(dir.isValid(), "grid-no-sidebar: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"GridNoSidebar\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#101010\" },"
+            "  \"elements\": [ { \"type\": \"grid\", \"columns\": 4, \"pos\": [0, 0], \"size\": [1, 0.9] } ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "grid-no-sidebar: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        for (int i = 0; i < 12; ++i)
+            items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        NavGraph* g = ThemeEngine::navGraph(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && g && root, "grid-no-sidebar: the fixture built");
+        if (!qw || !g || !root) { if (w) delete w; return; }
+
+        QVariantList cats;                                   // the host now feeds these on the grid path
+        for (int i = 0; i < 5; ++i)
+            cats << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Cat %1").arg(i) } };
+        root->setProperty("catIndex", 0);
+        root->setProperty("categories", cats);
+        qw->resize(1280, 720);
+        qw->show();
+        pump(); pump(); qw->grabFramebuffer(); pump();
+
+        CHECK(!root->property("sidebarMode").toBool() && !root->property("xmbMode").toBool(),
+              "grid-no-sidebar: neither sidebarMode nor xmbMode (a plain grid theme)");
+        root->forceActiveFocus();
+        pump();
+        g->select(QStringLiteral("items"), 4);               // a LEFTMOST-column cell (4 % 4 == 0)
+        sendKey(qw->quickWindow(), Qt::Key_Left);
+        CHECK(g->zone() == QStringLiteral("items"),
+              "grid-no-sidebar: Left at the leftmost column stays in the grid — a POPULATED categories zone "
+              "does not make the Cross shape's Left edge reachable on a theme with no sidebar");
+        CHECK(root->property("currentIndex").toInt() == 3,
+              "grid-no-sidebar: …it is an ordinary grid step onto the previous row's last cell (4 -> 3)");
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "grid-no-sidebar: Right steps the grid too (3 -> 4), it never switches to the category axis");
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("currentIndex").toInt() == 8,
+              "grid-no-sidebar: Down still jumps a full row (4 -> 8) — 2-D stepping is untouched");
+        delete w;
+        pump();
+    }
+
+    // ---- (d) the REBUILD SEED: a NON-ZERO remembered category written while the zone is still hidden ------
+    // The host rebuilds the whole themed home on a category switch or a theme cycle and re-seeds the cursors
+    // by writing the props in a deliberate order: catIndex FIRST (the `categories` zone is still hidden at
+    // that instant, so the prop->model sync cannot hand it the cursor and park focus in the sidebar), THEN
+    // categories (which counts the zone up), THEN currentIndex. NavGraph::select is REFUSED outright on a
+    // count-0 zone and stores nothing, so the model's remembered category has to be seeded some other way —
+    // otherwise it stays 0 while the rail draws row N, and the first Left into the rail snaps the highlight
+    // to "All" over bucket N's grid (and uitestCategory reports the wrong bucket with it).
+    //
+    // Everything in (a)-(c) drives catIndex == 0, where that bug is invisible. This drives a NON-ZERO one,
+    // in the host's real write order.
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "sidebar-seed: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"SidebarSeed\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#101010\" },"
+            "  \"elements\": ["
+            "    { \"type\": \"sidebar\", \"pos\": [0, 0], \"size\": [0.2, 1] },"
+            "    { \"type\": \"grid\", \"columns\": 4, \"pos\": [0.2, 0], \"size\": [0.8, 1] }"
+            "  ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "sidebar-seed: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        for (int i = 0; i < 12; ++i)
+            items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        NavGraph* g = ThemeEngine::navGraph(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && g && root, "sidebar-seed: the fixture built");
+        if (!qw || !g || !root) { if (w) delete w; return; }
+
+        QVariantList cats;
+        for (int i = 0; i < 5; ++i)
+            cats << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Cat %1").arg(i) } };
+        // THE HOST'S WRITE ORDER, verbatim (MainWindow::showThemedHome / showThemedBrowse).
+        root->setProperty("catIndex", 3);            // zone still hidden (count 0) — select() is refused here
+        root->setProperty("categories", cats);       // …and only NOW does the zone count up
+        root->setProperty("currentIndex", 4);
+        qw->resize(1280, 720);
+        qw->show();
+        pump(); pump(); qw->grabFramebuffer(); pump();
+
+        CHECK(root->property("sidebarMode").toBool(), "sidebar-seed: the fixture is a sidebar theme");
+        // The rebuild parks focus on the GRID, not the rail — the reason catIndex is written first.
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar-seed: the rebuilt view opens with focus on the grid at the seeded cell (4)");
+        CHECK(root->property("uitestCategory").toString() == QStringLiteral("Cat 3"),
+              "sidebar-seed: the rail draws the remembered bucket (Cat 3) after the rebuild");
+
+        root->forceActiveFocus();
+        pump();
+        sendKey(qw->quickWindow(), Qt::Key_Left);    // leftmost column (4 % 4 == 0) -> into the rail
+        CHECK(g->zone() == QStringLiteral("categories"), "sidebar-seed: Left at column 0 enters the rail");
+        CHECK(g->index() == 3,
+              "sidebar-seed: …at the REMEMBERED bucket 3, not row 0 — a non-zero catIndex written while the "
+              "zone was hidden still reaches the model");
+        CHECK(root->property("catIndex").toInt() == 3,
+              "sidebar-seed: …so the highlight does not snap to \"All\" over bucket 3's grid");
+        CHECK(root->property("uitestCategory").toString() == QStringLiteral("Cat 3"),
+              "sidebar-seed: …and uitestCategory still reports the bucket the grid is showing");
+        // The seeded row is a live cursor, not a one-shot: stepping off it and back out behaves normally.
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("catIndex").toInt() == 4, "sidebar-seed: Down steps on from the seeded row (3 -> 4)");
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar-seed: Right returns to the grid's remembered cell (4)");
+        delete w;
+        pump();
+    }
+}
 #endif // EB_HAVE_QML
 
 int main(int argc, char** argv)
@@ -2365,6 +2750,10 @@ int main(int argc, char** argv)
     // §20: the touch INPUT model (D1 Task 4) — mobile one-tap activate, the Desktop two-step identity net, the
     // SettingsPanel kinetic flick, and the left-edge back-swipe, all via REAL synthetic touch (real hit-testing).
     runTouchAsserts();
+    // §21: the SIDEBAR route into the `categories` zone (issue #38) — the shared builder's Sidebar shape, and
+    // the whole shipped path (theme.json -> buildView -> bridge -> ThemeView) proving the grid keeps its 2-D
+    // stepping across a sidebar round trip and keeps its button bar. After §20, which restores the display mode.
+    runSidebarAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

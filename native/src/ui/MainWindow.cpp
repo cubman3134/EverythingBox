@@ -692,8 +692,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                 QVariantMap sys; sys.insert(QStringLiteral("name"), home_->browseTitle());
                 r->setProperty("system", sys);
             }
-            else // the XMB home column: refresh the live metadata panel for the (now current) row
-                refreshThemedMeta(r->property("currentIndex").toInt());
+            // Refresh the live metadata for the (now current) row on EITHER surface — the XMB column and the
+            // grid browse both drive selectedMeta now, and a swapped row set must not leave the previous
+            // catalog's synopsis on screen. (A selection change would fire this through selectionMoved; a
+            // fresh set that lands on the SAME index would not, which is why it is explicit here.)
+            refreshThemedMeta(r->property("currentIndex").toInt());
         });
 
         // (The classic info-page-over-themed-home swap was retired: opening info on a themed surface now stays
@@ -741,15 +744,18 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
                             dr->setProperty("detailData", d);
                         }
             }
-            if (!themedHomeIsXmb_ || !themedXmbInCatalog_ || stack_->currentWidget() != themedHome_) return;
-            QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+            // The hover panel itself: whichever surface is driving selectedMeta right now (the XMB column or
+            // the grid browse — themedMetaSurface owns that answer).
+            QQuickItem* r = themedMetaSurface();
             if (!r || r->property("currentIndex").toInt() != index) return; // moved on -> stale, ignore
             QVariantMap cur = r->property("selectedMeta").toMap();
             for (auto it = meta.constBegin(); it != meta.constEnd(); ++it) cur.insert(it.key(), it.value());
             r->setProperty("selectedMeta", cur);
             // Per-item "theme song": duck the shuffle and loop this item's preview audio while it's hovered
-            // (resume the shuffle when the selection carries none).
-            if (bgm_)
+            // (resume the shuffle when the selection carries none). Gated to themedPreviewAudioSurface(), NOT
+            // to the surface the merge above just wrote: the metadata may now flow to the grid browse too, but
+            // the audible duck stays on the surfaces that already had it (see themedPreviewAudioSurface).
+            if (bgm_ && r == themedPreviewAudioSurface())
             {
                 const QStringList au = cur.value(QStringLiteral("audio")).toStringList();
                 bgm_->setPreview(au.isEmpty() ? QString() : au.first());
@@ -1814,6 +1820,11 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
     o.insert(QStringLiteral("themedSelection"), sel);
     const QString cat = r->property("uitestCategory").toString();
     if (!cat.isEmpty()) o.insert(QStringLiteral("themedCategory"), cat);
+    // Which nav zone holds the cursor. Emitted ONLY on a sidebar theme, where "is focus in the sidebar or the
+    // grid?" is a real question a test has to be able to ask; on every other theme the snapshot stays byte-for-
+    // byte what it was, so an existing theme's before/after comparison is a clean diff.
+    if (r->property("sidebarMode").toBool())
+        o.insert(QStringLiteral("themedZone"), r->property("navZone").toString());
     // The audio now-playing page: surface its zone/cursor + live playback so audio automation is as precise as
     // the Qt panels (the QQuickWidget focus is opaque). themedFocus names what Enter would fire right now.
     if (r->property("currentView").toString() == QStringLiteral("nowplayingAudio"))
@@ -4240,26 +4251,64 @@ void MainWindow::showThemedHome()
     const QString themeName = currentThemeFolder();
     const QString themeDir = ThemeEngine::themesRoot() + QStringLiteral("/") + themeName;
 
-    QVariantList items = home_->systemItems();
-    QStringList navKeys;
-    for (const QVariant& v : items) navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
-    // The Appearance tile is a catalog-grid stand-in for the theme picker. A theme with its own settings /
-    // appearance button (e.g. Channels) sets "hideAppearanceTile": true so it isn't shown twice.
-    int appearanceIdx = -1;
-    if (!ThemeEngine::homeHidesAppearanceTile(themeDir))
-    {
-        items << QVariantMap{ { QStringLiteral("title"), tr("Appearance") },
-                              { QStringLiteral("subtitle"), tr("Themes & layout") },
-                              { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
-        navKeys << QString();
-        appearanceIdx = int(items.size()) - 1;
-    }
+    // The grid home's row set + the parallel nav keys, held in ONE mutable model the callbacks share: a
+    // `sidebar` theme narrows the grid to a single category (see cats/fillModel below), so the rows the
+    // activate/search callbacks act on must be the ones on screen NOW, not the ones captured at build time.
+    struct GridModel { QVariantList items; QStringList navKeys; int appearanceIdx = -1; };
+    const auto model = std::make_shared<GridModel>();
+    const bool showAppearanceTile = !ThemeEngine::homeHidesAppearanceTile(themeDir);
+
+    // The `categories` zone on the GRID home. Both preview paths (ThemePickerHost::rebuildPreview and the
+    // classic Appearance panel's embedded preview) have always fed this zone unconditionally, while the real
+    // grid home never did — so a sidebar bound to it rendered in the picker's live preview and was DEAD in the
+    // app, inverting the "the preview IS the real renderer" property the picker was built on. Feed it here from
+    // the SAME source the previews use (home_->categoryItems()), with an "All" row in front that is the whole
+    // catalog list — the state the grid home has always shown.
+    QVariantList cats{ QVariantMap{ { QStringLiteral("title"), tr("All") },
+                                    { QStringLiteral("accent"), QStringLiteral("#5B6470") } } };
+    QStringList catKeys{ QString() };                     // parallel: "" = the All row
+    for (const QVariant& v : home_->categoryItems())
+    { cats << v; catKeys << v.toMap().value(QStringLiteral("key")).toString(); }
+    themedGridCatIndex_ = qBound(0, themedGridCatIndex_, int(cats.size()) - 1);
+
+    // Fill the model with one category's rows: "All" is the full catalog list (+ the Appearance tile, the
+    // catalog-grid stand-in for the theme picker — a theme with its own settings/appearance button sets
+    // "hideAppearanceTile": true so it isn't shown twice); any other row is that bucket's catalogs.
+    auto fillModel = [this, model, catKeys, showAppearanceTile](int cat) {
+        const QString key = catKeys.value(qBound(0, cat, catKeys.size() - 1));
+        model->items = key.isEmpty() ? home_->systemItems() : home_->categoryCatalogs(key);
+        model->navKeys.clear();
+        for (const QVariant& v : std::as_const(model->items))
+            model->navKeys << v.toMap().value(QStringLiteral("navKey")).toString();
+        model->appearanceIdx = -1;
+        if (key.isEmpty() && showAppearanceTile)
+        {
+            model->items << QVariantMap{ { QStringLiteral("title"), tr("Appearance") },
+                                         { QStringLiteral("subtitle"), tr("Themes & layout") },
+                                         { QStringLiteral("accent"), QStringLiteral("#5B6470") } };
+            model->navKeys << QString();
+            model->appearanceIdx = int(model->items.size()) - 1;
+        }
+    };
+    fillModel(themedGridCatIndex_);
+    const QVariantList items = model->items;   // the build-time snapshot buildView is handed
 
     QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("EverythingBox"));
-    auto onActivated = [this, navKeys, appearanceIdx](int idx) {
-        if (idx == appearanceIdx) { openAppearance(); return; }
-        if (idx >= 0 && idx < navKeys.size() && !navKeys[idx].isEmpty())
-        { themedHomeIndex_ = idx; home_->activateNav(navKeys[idx]); showThemedBrowse(); } // remember + open catalog
+    auto onActivated = [this, model](int idx) {
+        if (idx == model->appearanceIdx) { openAppearance(); return; }
+        if (idx >= 0 && idx < model->navKeys.size() && !model->navKeys[idx].isEmpty())
+        { themedHomeIndex_ = idx; home_->activateNav(model->navKeys[idx]); showThemedBrowse(); } // remember + open catalog
+    };
+    // The sidebar moved to another category: narrow the grid to that bucket's catalogs (or back to the whole
+    // list on "All"). Nothing else about the surface changes — the cursor stays where the model put it and the
+    // items-zone resize is handled by the QML's onItemsChanged, exactly like any other row-set swap.
+    auto onCategory = [this, model, fillModel] {
+        QQuickItem* r = ThemeEngine::rootItem(themedHome_);
+        if (!r) return;
+        themedGridCatIndex_ = r->property("catIndex").toInt();
+        fillModel(themedGridCatIndex_);
+        r->setProperty("items", model->items);
+        r->setProperty("currentIndex", 0);   // a different bucket starts at the top of its catalog list
     };
     // Esc at the themed root: the theme is the BOTTOM of the stack — there is nothing to go "back" to, so
     // bring up the app pause menu (Resume / Exit), exactly like the XMB home. (This used to jump to the
@@ -4275,14 +4324,15 @@ void MainWindow::showThemedHome()
         showThemedHome();
     };
     // "/" on the highlighted catalog: prompt for a query, open that catalog and search within it.
-    auto onSearch = [this, navKeys, items, appearanceIdx] {
+    auto onSearch = [this, model] {
         QQuickItem* r = ThemeEngine::rootItem(themedHome_);
         const int idx = r ? r->property("currentIndex").toInt() : -1;
-        if (idx < 0 || idx == appearanceIdx || idx >= navKeys.size() || navKeys[idx].isEmpty()) return;
-        const QString name = items.value(idx).toMap().value(QStringLiteral("title")).toString();
+        if (idx < 0 || idx == model->appearanceIdx || idx >= model->navKeys.size()
+            || model->navKeys[idx].isEmpty()) return;
+        const QString name = model->items.value(idx).toMap().value(QStringLiteral("title")).toString();
         const QString q = promptThemedSearch(name);
         if (q.isNull()) return; // cancelled
-        home_->activateNav(navKeys[idx]);
+        home_->activateNav(model->navKeys[idx]);
         home_->searchInBrowse(q);
         showThemedBrowse();
     };
@@ -4297,14 +4347,22 @@ void MainWindow::showThemedHome()
 
     QWidget* w = ThemeEngine::buildView(themeDir,
                                         items, system, this, onActivated, onBack, onCycle, onSearch,
-                                        {}, {}, {}, {}, {}, onButton,
+                                        {}, onCategory, {}, {}, {}, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
                                         [this](int row) { if (session_) session_->playIndex(row); });
     // Re-highlight the system we last opened (so returning from a catalog lands back on it, not the top).
     if (QQuickItem* r = ThemeEngine::rootItem(w))
+    {
+        // catIndex BEFORE categories, deliberately: the `categories` zone is still hidden (count 0) at this
+        // point, so the QML's prop->model sync (nav.select("categories", …)) is REFUSED and the cursor stays
+        // on `items`. Writing categories first would count the zone up and then hand it the cursor — the grid
+        // home would boot with focus parked in the sidebar.
+        r->setProperty("catIndex", themedGridCatIndex_);
+        r->setProperty("categories", cats);
         r->setProperty("currentIndex", qBound(0, themedHomeIndex_, int(items.size()) - 1));
+    }
     QWidget* old = themedHome_;
     themedHome_ = w;
     applyThemeMusic(themeDir); // ship this theme's default menu music (used when the user has no music folder)
@@ -4335,13 +4393,61 @@ void MainWindow::showThemedHome()
 // Audio / Reading, + a synthetic Settings); the vertical column shows that category's catalogs, and Enter on a
 // catalog drills the column into its live items (Esc returns to the catalog list). Moving across categories
 // resets the column to that bucket's catalog list. Everything stays on the one cross screen.
-// Set the XMB metadata panel's instant skeleton for the browse-item at `idx` (the title/poster/subtitle we
-// already hold), then queue the debounced addon fetch that enriches it with the synopsis + facts. No-op when
-// not on the XMB cross inside a catalog.
+// Which themed surface a browse-index-keyed hover fetch applies to. requestThemedMeta/enrichThemedMeta index
+// HomeView's browseRowMap_, so ONLY a surface whose `items` ARE those browse rows may drive them: the grid
+// BROWSE view, or the XMB home while drilled into a catalog. The grid HOME's items are catalogs (a different
+// list entirely), so it is deliberately not one — its rows have no browse index to fetch.
+QQuickItem* MainWindow::themedMetaSurface() const
+{
+#ifdef EB_HAVE_QML
+    QWidget* cur = stack_->currentWidget();
+    if (themedBrowse_ && cur == themedBrowse_) return ThemeEngine::rootItem(themedBrowse_);
+    if (themedHome_ && cur == themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_)
+        return ThemeEngine::rootItem(themedHome_);
+#endif
+    return nullptr;
+}
+
+// Which surface may let a hovered item's "theme song" DUCK the menu music. Deliberately NARROWER than
+// themedMetaSurface(), and not a refactoring accident: the metadata FETCH is inert until a theme binds
+// selectedMeta, but ducking the music is user-AUDIBLE on every theme, bound or not. Widening the fetch to the
+// grid browse (which never had one) must not hand every shipped grid theme — Channels — a behaviour it never
+// had, arriving as a side effect of an engine change. So this stays exactly the surface the duck ran on
+// before: the XMB home while drilled into a catalog. Triple keeps its ducking verbatim; Channels' browse is
+// silent again. Widening it is a THEME-level decision (a theme knob), not something an engine change may do.
+QQuickItem* MainWindow::themedPreviewAudioSurface() const
+{
+#ifdef EB_HAVE_QML
+    if (themedHome_ && stack_->currentWidget() == themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_)
+        return ThemeEngine::rootItem(themedHome_);
+#endif
+    return nullptr;
+}
+
+// The ONE debounce behind the hover fetch, shared by every surface that drives selectedMeta. The local half
+// (session cache / gamelist / MetaCache) is resolved instantly in refreshThemedMeta; only the NETWORKED half
+// waits on this timer, so scrolling never hits the network per row. A dense desktop grid moves the selection
+// far faster than an XMB column does, which is exactly why the grid path reuses this rather than adding a
+// second timer.
+void MainWindow::ensureThemedMetaTimer()
+{
+    if (themedMetaTimer_) return;
+    themedMetaTimer_ = new QTimer(this);
+    themedMetaTimer_->setSingleShot(true);
+    themedMetaTimer_->setInterval(160);
+    connect(themedMetaTimer_, &QTimer::timeout, this, [this] {
+        if (themedMetaSurface() && themedMetaWant_ >= 0)
+            home_->enrichThemedMeta(); // the networked half, for the row we settled on
+    });
+}
+
+// Set the hover panel's instant skeleton for the browse-item at `idx` (the title/poster/subtitle we already
+// hold), then queue the debounced addon fetch that enriches it with the synopsis + facts. A no-op off a
+// browse-backed themed surface (see themedMetaSurface) — the XMB catalog list, the grid home, anywhere else.
 void MainWindow::refreshThemedMeta(int idx)
 {
-    QQuickItem* r = ThemeEngine::rootItem(themedHome_);
-    if (!r || !themedHomeIsXmb_ || !themedXmbInCatalog_) return;
+    QQuickItem* r = themedMetaSurface();
+    if (!r) return;
     const QVariantList col = r->property("items").toList();
     if (idx < 0 || idx >= col.size()) { r->setProperty("selectedMeta", QVariantMap()); return; }
     const QVariantMap it = col[idx].toMap();
@@ -4360,7 +4466,8 @@ void MainWindow::refreshThemedMeta(int idx)
     // the logo + facts + video show instantly with no plain-title flash. Only the networked enrichment
     // (online scrape + achievements) is debounced below, so fast scrolling doesn't hit the network per row.
     home_->requestThemedMeta(idx);
-    if (themedMetaTimer_) themedMetaTimer_->start();
+    ensureThemedMetaTimer();
+    themedMetaTimer_->start();
 }
 
 // Open the themed DETAIL view (on the Nav Contract) for the current selection — the replacement for the
@@ -4853,17 +4960,9 @@ void MainWindow::showThemedXmb()
     themedXmbInCatalog_ = false;
 
     // Debounce the live-metadata addon fetch: while you scroll the column the panel tracks instantly off a
-    // skeleton, and only the row you settle on triggers the (networked) synopsis/facts fetch.
-    if (!themedMetaTimer_)
-    {
-        themedMetaTimer_ = new QTimer(this);
-        themedMetaTimer_->setSingleShot(true);
-        themedMetaTimer_->setInterval(160);
-        connect(themedMetaTimer_, &QTimer::timeout, this, [this] {
-            if (themedHomeIsXmb_ && themedXmbInCatalog_ && themedMetaWant_ >= 0)
-                home_->enrichThemedMeta(); // the networked half, for the row we settled on
-        });
-    }
+    // skeleton, and only the row you settle on triggers the (networked) synopsis/facts fetch. ONE timer,
+    // shared with the grid browse path (see ensureThemedMetaTimer).
+    ensureThemedMetaTimer();
 
     QVariantList cats = home_->categoryItems(); // the buckets that have catalogs (each {title,key,glyph,accent})
     themedXmbCatKeys_.clear();
@@ -5174,14 +5273,38 @@ void MainWindow::showThemedBrowse()
 
     // "F" on the browse view emits actionRequested("filter") -> open the transient browse Filter menu.
     auto onButton = [this](const QString& v) { if (v == QStringLiteral("filter")) runThemedBrowseFilter(); };
+    // The grid browse's rows ARE HomeView's browse rows, so this is the surface a hover fetch is meaningful on
+    // — and until now it had none at all (HomeView.cpp's note: "the grid browse path has no hover fetch"). Wire
+    // the SAME refreshThemedMeta the XMB column uses: an instant local skeleton into selectedMeta plus the ONE
+    // debounced networked enrich, so a theme's details pane fills in as the grid selection moves.
+    ensureThemedMetaTimer();
+    auto onSelect = [this](int idx) { refreshThemedMeta(idx); };
+    // The `categories` zone on the browse view, same list the grid home feeds (see showThemedHome). Moving the
+    // sidebar here is a library switch: leave the catalog for that section of the home.
+    QVariantList cats{ QVariantMap{ { QStringLiteral("title"), tr("All") },
+                                    { QStringLiteral("accent"), QStringLiteral("#5B6470") } } };
+    for (const QVariant& v : home_->categoryItems()) cats << v;
+    themedGridCatIndex_ = qBound(0, themedGridCatIndex_, int(cats.size()) - 1);
+    auto onCategory = [this] {
+        QQuickItem* r = ThemeEngine::rootItem(themedBrowse_);
+        if (!r) return;
+        themedGridCatIndex_ = r->property("catIndex").toInt();
+        themedHomeIndex_ = 0;
+        showThemedHome();
+    };
     QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + themeName,
                                         home_->browseItems(), system, this, onActivated, onBack, onCycle,
-                                        onSearch, onNearEnd, {}, {}, {}, {}, onButton,
+                                        onSearch, onNearEnd, onCategory, onSelect, {}, {}, onButton,
                                         [this] { openThemedDetail(-1); },
                                         [this](const QString& v) { runThemedDetailAction(v); },
                                         [this](const QString& v) { runThemedAudioTransport(v); },
                                         [this](int row) { if (session_) session_->playIndex(row); });
-    if (QQuickItem* r = ThemeEngine::rootItem(w)) r->setProperty("currentView", QStringLiteral("browse"));
+    if (QQuickItem* r = ThemeEngine::rootItem(w))
+    {
+        r->setProperty("currentView", QStringLiteral("browse"));
+        r->setProperty("catIndex", themedGridCatIndex_);  // before `categories` — see the note in showThemedHome
+        r->setProperty("categories", cats);
+    }
     QWidget* old = themedBrowse_;
     themedBrowse_ = w;
     stack_->addWidget(w);
@@ -5189,6 +5312,10 @@ void MainWindow::showThemedBrowse()
     w->setFocus();
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
     syncThemedLevels(); // seed this view's browse-drill levels from HomeView's current stack depth
+    // Seed the hover panel for the row this view opens on. Selection CHANGES arrive through onSelect, and a
+    // fresh row set through browseItemsChanged — but a view built over rows HomeView already holds (Back out of
+    // a detail page, a theme cycle) fires neither, and would show an empty details pane until the first arrow.
+    if (QQuickItem* r = ThemeEngine::rootItem(w)) refreshThemedMeta(r->property("currentIndex").toInt());
 }
 
 // The home theme picker, as a full-screen panel page in the main window (like the other settings screens).
