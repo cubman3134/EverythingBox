@@ -113,7 +113,12 @@ MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& sys
     MediaCatalog cat; cat.title = QObject::tr("Favorites");
     for (const FavoriteItem& f : all)
     {
-        if (f.path.isEmpty()) continue;                 // only local games have a per-console home
+        // A merged PC game ("pcgame:<key>") has no path ON PURPOSE — which copy runs is decided at
+        // activation — so the path test alone would drop every starred PC game out of the PC console's
+        // ★ Favorites folder while Home still showed it, which reads as the star having failed. Its id
+        // names the game, which is all the re-open needs.
+        const bool mergedPc = f.itemId.startsWith(QStringLiteral("pcgame:"));
+        if (f.path.isEmpty() && !mergedPc) continue;    // only local games have a per-console home
         if (!system.isEmpty() && f.system != system) continue;
         MediaItem it;
         it.url = f.path;
@@ -138,7 +143,11 @@ FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint)
     f.thumbnailUrl = it.thumbnailUrl;
     f.path = it.url;   // re-open by path (openFavorite recovers the console from the stores)
     f.kind = it.mime;  // "game" | "pcgame" (openRecent routing kind)
-    f.system = systemHint.isEmpty() ? FavoritesStore::deriveSystem(f.path, f.kind) : systemHint;
+    // A merged PC game is in NO store and has no path, so neither the caller's hint nor deriveSystem can
+    // say where it lives; its id already does. Without this it would be stamped system-less and vanish
+    // from the PC console's ★ Favorites folder.
+    if (f.itemId.startsWith(QStringLiteral("pcgame:"))) f.system = QStringLiteral("pc");
+    else f.system = systemHint.isEmpty() ? FavoritesStore::deriveSystem(f.path, f.kind) : systemHint;
     return f;
 }
 
@@ -193,126 +202,9 @@ MediaCatalog playlistItemsCatalog(const Playlist& p)
     return cat;
 }
 
-MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
-                               const std::function<QString(const SteamGame&)>& poster,
-                               const QList<SteamGame>& owned)
-{
-    // A search while in the Steam console scopes to the library: keep only games whose name matches.
-    const QString q = query.trimmed();
-    MediaCatalog cat;
-    cat.title = q.isEmpty() ? QObject::tr("Steam") : QObject::tr("Steam · %1").arg(q);
-    auto posterFor = [&poster](const SteamGame& g) {
-        return poster ? poster(g) : SteamLibrary::posterUrl(g.appid);
-    };
-    QSet<QString> haveIds;
-    for (const SteamGame& g : installed)
-    {
-        haveIds.insert(g.appid);
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        it.id = QStringLiteral("steam:") + g.appid;
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.mime = QStringLiteral("steamgame"); // no url -> clicking opens the info page; Play launches it
-        it.thumbnailUrl = posterFor(g);
-        cat.items.push_back(it);
-    }
-    // Owned-but-not-installed (creds-gated): appended after the installed games, badged "Not installed", and
-    // carrying a steam://install/<appid> url so activation hands the install off to the Steam client (the same
-    // openUrl path a run uses). Skips anything already installed. Empty when no key/SteamID is configured.
-    for (const SteamGame& g : owned)
-    {
-        if (haveIds.contains(g.appid)) continue;                 // installed entries stay unchanged
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        it.id = QStringLiteral("steam:") + g.appid;
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.subtitle = QObject::tr("Not installed");             // the badge
-        it.mime = QStringLiteral("steamgame");
-        it.url = SteamLibrary::installUrl(g.appid);              // activation -> steam://install/<appid>
-        it.thumbnailUrl = posterFor(g);
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    return cat;
-}
-
-MediaCatalog epicGamesCatalog(const QList<EpicGame>& installed, const QString& query,
-                              const std::function<QString(const EpicGame&)>& poster)
-{
-    const QString q = query.trimmed();
-    MediaCatalog cat;
-    cat.title = q.isEmpty() ? QObject::tr("Epic Games") : QObject::tr("Epic Games · %1").arg(q);
-    for (const EpicGame& g : installed)
-    {
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        it.id = QStringLiteral("epic:") + g.appName;
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.mime = QStringLiteral("epicgame"); // no url -> info page; Play launches via the launcher URI
-        if (poster) it.thumbnailUrl = poster(g); // Epic has no local capsule; empty -> scrapers fill it later
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    return cat;
-}
-
-MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& query,
-                             const std::function<QString(const GogGame&)>& poster)
-{
-    const QString q = query.trimmed();
-    MediaCatalog cat;
-    cat.title = q.isEmpty() ? QObject::tr("GOG") : QObject::tr("GOG · %1").arg(q);
-    for (const GogGame& g : installed)
-    {
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        it.id = QStringLiteral("gog:") + g.id;
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.mime = QStringLiteral("goggame"); // launched through the monitored launchPcExe path
-        it.url = g.exe;                       // the resolved exe rides the tile (MainWindow runs it)
-        if (poster) it.thumbnailUrl = poster(g);
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    return cat;
-}
-
-// NB: keep this builder free of any BattleNetLibrary:: call. Several probes compile SyntheticCatalogs.cpp
-// WITHOUT BattleNetLibrary.cpp (probe_browse/probe_locallib/probe_perf), so introducing one here turns into a
-// CI-only link break — this repo has been bitten by exactly that twice.
-MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
-                                   const std::function<QString(const BattleNetGame&)>& poster)
-{
-    const QString q = query.trimmed();
-    MediaCatalog cat;
-    cat.title = q.isEmpty() ? QObject::tr("Battle.net") : QObject::tr("Battle.net · %1").arg(q);
-    for (const BattleNetGame& g : installed)
-    {
-        if (!q.isEmpty() && !g.name.contains(q, Qt::CaseInsensitive)) continue;
-        MediaItem it;
-        // A coded title keys on its launch code (stable across a reinstall/move); a code-less one on its name.
-        it.id = QStringLiteral("bnet:") + (g.code.isEmpty() ? g.name : g.code);
-        it.type = QStringLiteral("game");
-        it.title = g.name;
-        it.mime = QStringLiteral("battlenetgame");
-        it.systemHint = QStringLiteral("Battle.net");
-        // The two-route split: a coded game launches by battlenet:// URI and carries NO url (so clicking opens
-        // the info page and Play builds the URI); a code-less one rides its exe like a GOG tile.
-        if (g.code.isEmpty()) it.url = g.exe;
-        if (poster) it.thumbnailUrl = poster(g);
-        cat.items.push_back(it);
-    }
-    cat.hasMore = false;
-    return cat;
-}
-
 // ---- The merged PC Games folder -------------------------------------------------------------------------
 //
-// NB, the SAME rule as battleNetGamesCatalog above and for the same reason: no EpicLibrary:: or
+// A STANDING RULE for everything below: no EpicLibrary:: or
 // BattleNetLibrary:: call may appear below. probe_browse / probe_locallib / probe_perf compile this file
 // WITHOUT those two .cpp files, so a call here is a CI-only link break — this repo has been bitten by exactly
 // that twice. The two protocol URIs are therefore built INLINE, mirroring EpicLibrary::launchUrl and
@@ -371,7 +263,8 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
                             const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
                             const QVector<pcgame::PcGameSource>& downloaded,
                             const QString& query, const QString& launcherFilter,
-                            const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster)
+                            const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster,
+                            const QList<SteamGame>& steamOwned)
 {
     const QString q = query.trimmed();
     MediaCatalog cat;
@@ -417,8 +310,10 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         g.sourceTitles << title;
     };
 
+    QSet<QString> installedSteamIds;
     for (const SteamGame& g : steam)
     {
+        installedSteamIds.insert(g.appid);
         pcgame::PcGameSource s;
         s.kind      = pcgame::PcGameSource::LauncherInstalled;
         s.launcher  = QStringLiteral("steam");
@@ -426,6 +321,24 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         s.launchUrl = SteamLibrary::launchUrl(g.appid);   // steam://rungameid/<appid>
         s.label     = QObject::tr("Steam");
         s.ready     = true;
+        add(g.name, pcTitleRank(s), s);
+    }
+    // Owned on Steam but not installed (creds-gated; empty without a Web API key + SteamID). NOT ready: it
+    // cannot be played without a multi-gigabyte download first, and pickAutoSource exists precisely so a
+    // single Play keypress can never start one. It still carries a real launch — steam://install/<appid> —
+    // so CHOOSING its row in the picker hands the install to the Steam client, which is the user asking.
+    // An appid already installed is skipped: the installed source is strictly better and both would
+    // otherwise sit in the same group as two Steam rows.
+    for (const SteamGame& g : steamOwned)
+    {
+        if (installedSteamIds.contains(g.appid)) continue;
+        pcgame::PcGameSource s;
+        s.kind      = pcgame::PcGameSource::LauncherOwned;
+        s.launcher  = QStringLiteral("steam");
+        s.launchId  = g.appid;
+        s.launchUrl = SteamLibrary::installUrl(g.appid);  // steam://install/<appid>
+        s.label     = QObject::tr("Steam · not installed (install first)");
+        s.ready     = false;
         add(g.name, pcTitleRank(s), s);
     }
     for (const EpicGame& g : epic)
@@ -567,6 +480,17 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
         it.title      = g.title;
         it.systemHint = QStringLiteral("pc");       // the console this belongs to (favourites scope on it)
         it.pcSources  = g.sources;
+        // The badge the Steam console used to carry. It says "not installed" only when NOTHING here is
+        // installed — a game owned on Steam AND installed on GOG is installed, and badging it would be a
+        // lie about the copy that actually runs. A not-READY installed source (a code-less Battle.net title
+        // with no exe) is installed but unlaunchable, which is a different statement and gets no badge.
+        {
+            bool anyLocal = false;
+            for (const pcgame::PcGameSource& s : g.sources)
+                if (s.kind != pcgame::PcGameSource::LauncherOwned
+                    && s.kind != pcgame::PcGameSource::AddonAvailable) { anyLocal = true; break; }
+            if (!anyLocal && !g.sources.isEmpty()) it.subtitle = QObject::tr("Not installed");
+        }
         // it.url stays EMPTY on purpose: WHICH copy runs is decided at activation by the source picker, and a
         // url here would make the generic "a file is associated" branch claim the tile first.
         if (poster) it.thumbnailUrl = poster(g.sources);
