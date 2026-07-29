@@ -253,5 +253,123 @@ else
 fi
 echo
 
+# Release-asset name gate (issue #35): the README's download table links straight at
+# releases/latest/download/<asset>, so a filename that no release job actually produces is a 404 on the
+# repo's front page — for every visitor, on every platform, until someone notices. That is exactly what the
+# rebrand did: the README moved to EverythingBox-* while the assets published for v0.5.0 were still
+# MyMediaVault-*. The old-brand gate above could not catch it, because the stale names live on GitHub
+# Releases, not in the tree. This gate catches the in-tree half of the same class: a README download link
+# whose filename no `softprops/action-gh-release` step in release.yml attaches. It cannot see what is
+# already published — renaming assets on a cut release is a manual Releases operation.
+#
+# Source of truth is the `files:` list of each release-attach step (inline or `|` block), with the Android
+# job's ${{ matrix.name }} expanded over the ABIs its matrix fans out over. Direction is one-way on purpose:
+# every README link must be produced, but the workflow may publish extras the table doesn't list (the
+# armv7/x86_64 APKs and the -pdb.zip symbol archive are deliberately unlisted).
+echo "=== release asset names (README <-> release.yml) ==="
+RELYML="$HERE/../../.github/workflows/release.yml"
+RDME="$HERE/../../README.md"
+if [ ! -f "$RELYML" ]; then
+  echo "FAIL: release asset names (release.yml not found at $RELYML)"; fail=1
+elif [ ! -f "$RDME" ]; then
+  echo "FAIL: release asset names (README.md not found at $RDME)"; fail=1
+else
+  # ABIs the Android job matrixes over — these substitute into the templated .apk asset name.
+  rel_abis="$(sed -n '/^        include:/,/^    env:/p' "$RELYML" | awk '$1=="name:" && NF==2 {print $2}')"
+  # Every filename handed to a release-attach step.
+  rel_attached="$(awk '
+    /uses: softprops\/action-gh-release/            { inrel=1; next }
+    inrel && /^[[:space:]]*files:[[:space:]]*\|/    { blk=1; next }
+    inrel && blk {
+      if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*:/) { blk=0; inrel=0; next }
+      gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print
+      next
+    }
+    inrel && /^[[:space:]]*files:[[:space:]]*[^|[:space:]]/ {
+      sub(/^[[:space:]]*files:[[:space:]]*/, ""); print; inrel=0; next
+    }
+  ' "$RELYML")"
+  rel_emitted="$rel_attached"
+  for abi in $rel_abis; do
+    rel_emitted="$rel_emitted"$'\n'"$(printf '%s\n' "$rel_attached" | sed "s/\${{ matrix\.name }}/$abi/g")"
+  done
+  # Drop anything still carrying an unexpanded expression — an unknown template can't be name-checked.
+  rel_emitted="$(printf '%s\n' "$rel_emitted" | grep -v '\${' | sort -u)"
+  rel_linked="$(grep -oE 'releases/latest/download/[A-Za-z0-9._+-]+' "$RDME" | sed 's#.*/##' | sort -u)"
+  if [ -z "$(printf '%s' "$rel_emitted" | tr -d '[:space:]')" ]; then
+    echo "FAIL: release asset names (no release-attach 'files:' entries parsed out of release.yml)"; fail=1
+  elif [ -z "$(printf '%s' "$rel_linked" | tr -d '[:space:]')" ]; then
+    echo "FAIL: release asset names (no releases/latest/download links found in README.md)"; fail=1
+  else
+    rel_bad=""
+    for a in $rel_linked; do
+      printf '%s\n' "$rel_emitted" | grep -qxF -- "$a" || rel_bad="$rel_bad  $a"$'\n'
+    done
+    if [ -n "$rel_bad" ]; then
+      echo "README links these, but no release.yml job attaches them:"; printf '%s' "$rel_bad"
+      echo "release.yml attaches:"; printf '%s\n' "$rel_emitted" | sed 's/^/  /'
+      echo "FAIL: release asset names (a README download link points at an asset CI never publishes)"; fail=1
+    else
+      echo "$(printf '%s\n' "$rel_linked" | wc -l | tr -d ' ') README download link(s), all produced by release.yml"
+      echo "PASS: release asset names"
+    fi
+  fi
+fi
+echo
+
+# uitest.py UTF-8 output gate (issue #36). The UI-test harness is how every UI change gets verified, and the
+# app's labels are full of non-ASCII: "▶ Play" on a detail view, "☁"/"＋"/"✎"/"✕"/"★" on the settings rows,
+# emoji profile avatars, em-dashes in theme names, and media titles in any language. When uitest.py's stdout is
+# REDIRECTED (a pipe, a file, subprocess capture — i.e. every automated caller) CPython falls back to the locale
+# encoding, and printing any of those raised UnicodeEncodeError from encodings/cp1252.py. This gate pins the fix:
+# with stdout forced to cp1252 the client must still emit the glyphs, byte-for-byte, losing nothing. No app, no
+# display, no network — it stubs the pipe with the exact bytes UiTestServer would write.
+# The python below is deliberately pure ASCII (\u escapes, ASCII comments): it is fed to the interpreter on
+# STDIN, and a CI box running under the C/POSIX locale would otherwise choke decoding this file's own glyphs.
+echo "=== uitest utf-8 output ==="
+utf8_out="$("$PY" - "$HERE/uitest.py" <<'PYEOF' 2>&1
+import importlib.util, io, json, sys
+
+spec = importlib.util.spec_from_file_location("uitest", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+
+payload = {
+    "panelFocus":      "\U00002601   Restore from Google Drive",  # onboarding row, CLOUD
+    "focusText":       "\U000025b6  Play",                        # the detail view's Play button
+    "themedSelection": "\U0000ff0b  Create New Profile",          # FULLWIDTH PLUS
+    "avatar":          "\U0001f3ae",                              # emoji profile icon (non-BMP)
+    "theme":           "Lumen \U00002014 Dark",                   # em-dash in a theme name
+    "glyphs":          "\U0000270e \U00002715 \U00002605",        # edit / delete / favourite
+    "title":           "\U000030cf\U000030a4\U000030ad\U000030e5\U000030fc",  # a title in another script
+}
+wire = ("ok " + json.dumps(payload, ensure_ascii=False)).encode("utf-8")  # what UiTestServer puts on the pipe
+m._send = lambda cmd: wire.decode("utf-8", "replace")
+
+buf = io.BytesIO()
+sys.stdout = io.TextIOWrapper(buf, encoding="cp1252", errors="strict")  # the pre-fix condition, on any OS
+sys.argv = ["uitest.py", "state"]
+rc = m.main()
+sys.stdout.flush()
+data = buf.getvalue()          # read BEFORE dropping the wrapper: collecting it closes the BytesIO
+sys.stdout = sys.__stdout__
+
+if rc != 0:
+    raise SystemExit("uitest.py state returned %r" % rc)
+got = json.loads(data.decode("utf-8"))  # decodes only if the bytes really are UTF-8
+if got != payload:
+    raise SystemExit("round-trip LOST characters: %r" % (got,))
+print("UITEST-UTF8-OK")
+PYEOF
+)"
+if printf '%s' "$utf8_out" | grep -q "UITEST-UTF8-OK"; then
+  echo "PASS: uitest utf-8 output"
+else
+  printf '%s\n' "$utf8_out"
+  echo "FAIL: uitest utf-8 output (a non-ASCII app label did not survive uitest.py's stdout)"
+  fail=1
+fi
+echo
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"

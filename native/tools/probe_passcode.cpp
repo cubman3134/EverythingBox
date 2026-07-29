@@ -422,11 +422,16 @@ int main(int argc, char** argv)
         // against a `before` stamp alone is a race: any millisecond that ticks between the two makes the
         // clamped deadline exceed `before + kMaxLockoutMs` and fails a correct implementation. It passed
         // standalone and failed under the loaded suite run, which is exactly how that race presents.
+        //
+        // farFuture is decades past any ceiling, so the clamp ALWAYS fires and the result is exactly
+        // `clockInsideTheCall + kMaxLockoutMs`. That clock reading is bracketed by [before, after], so the
+        // deadline is pinned to a window as narrow as the call itself — no slack constant, and a stuck or
+        // partial clamp (one that landed anywhere short of the full ceiling) still fails the lower bound.
         const qint64 before = QDateTime::currentMSecsSinceEpoch();
         const Attempts got = attempts(kIdA);
         const qint64 after = QDateTime::currentMSecsSinceEpoch();
         CHECK(got.lockedUntilMs < farFuture);
-        CHECK(got.lockedUntilMs >= before);                     // clamped forward, not into the past
+        CHECK(got.lockedUntilMs >= before + kMaxLockoutMs);     // clamped forward to the FULL ceiling
         CHECK(got.lockedUntilMs <= after + kMaxLockoutMs);      // and no further than the ceiling allows
         // Persisted: a SECOND reader (a fresh QSettings on the same file) sees the clamped value, which is
         // what makes the lockout actually count down instead of being re-clamped forward forever.
