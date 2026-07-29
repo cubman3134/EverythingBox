@@ -15,6 +15,7 @@
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
+#include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include <functional>
 
@@ -39,12 +40,20 @@ namespace browse
 
     // system scopes a games console (SystemCatalog id, or "pc"); empty system matches any. Only local-file
     // favourites (a path set) have a per-console home — streamed favourites are skipped.
+    //
+    // ONE EXCEPTION: a MERGED PC game ("pcgame:<key>"). It deliberately has no path — which copy runs is
+    // decided at activation by the source picker, so there is no single file to record — and the path test
+    // alone would drop every starred PC game out of the PC console's ★ Favorites folder while still showing
+    // it on Home, which reads as the star having silently failed. Its id names the game, so it is kept and
+    // re-opened by re-deriving its sources.
     MediaCatalog favoritesCatalog(const QList<FavoriteItem>& all, const QString& system);
 
     // The FavoriteItem for starring a local game (a Recent/Downloaded/themed list row): identity is the
     // stable key, else the path; re-opens by path. Crucially stamps `system` — favoritesCatalog above only
     // shows favourites whose system matches the console — from the caller's hint (the Recent/Downloads
-    // store entry, which knows ambiguous-extension consoles) or, failing that, the ROM extension.
+    // store entry, which knows ambiguous-extension consoles) or, failing that, the ROM extension. A merged
+    // PC game has neither (no path to derive from, and it is in no Recent/Downloads store), so its "pcgame:"
+    // id stamps `system` = "pc" directly.
     FavoriteItem localGameFavorite(const MediaItem& it, const QString& systemHint);
 
     // The Playlists folder for one CATEGORY: a row per playlist (drills into playlistItemsCatalog) followed by
@@ -59,39 +68,76 @@ namespace browse
     // (mime "steamgame"); a local-file entry (path set) re-opens by path (mime "localgame:<kind>", url = path).
     MediaCatalog playlistItemsCatalog(const Playlist& p);
 
-    // The Steam console grid, built natively from the local library (no addon request). Each installed SteamGame
-    // maps to a MediaItem (id "steam:"+appid, mime "steamgame" — no url, so clicking opens the info page and Play
-    // launches it). A non-empty query scopes to games whose name matches (case-insensitive; trimmed). `owned` is
-    // the optional creds-gated owned library: any owned game NOT in `installed` is appended, badged "Not
-    // installed" (subtitle) with url steam://install/<appid> so activation hands the install to Steam; installed
-    // entries are untouched. poster resolves the vertical-capsule artwork; default {} uses SteamLibrary::posterUrl
-    // (which touches the local librarycache) — a test injects a pure one to stay I/O-free.
-    MediaCatalog steamGamesCatalog(const QList<SteamGame>& installed, const QString& query,
-                                   const std::function<QString(const SteamGame&)>& poster = {},
-                                   const QList<SteamGame>& owned = {});
-
-    // The Epic console grid, built natively from the local manifests. Each EpicGame -> a MediaItem (id
-    // "epic:"+AppName, mime "epicgame" — no url, so clicking opens the info page and Play launches it via the
-    // launcher URI, mirroring steamgame). A non-empty query scopes by name (case-insensitive). Epic has no
-    // local capsule convention, so poster defaults to empty (title-keyed scrapers fill art later); a test may
-    // inject one. Pure: no EpicLibrary I/O here.
-    MediaCatalog epicGamesCatalog(const QList<EpicGame>& installed, const QString& query,
-                                  const std::function<QString(const EpicGame&)>& poster = {});
-
-    // The GOG console grid, built natively from the registry. Each GogGame -> a MediaItem (id "gog:"+id, mime
-    // "goggame", url = the resolved exe — GOG games are DRM-free processes launched through the MONITORED
-    // launchPcExe path, so the exe rides on the tile). A non-empty query scopes by name. poster defaults to
-    // empty (no local capsule; title-keyed scrapers fill art later).
-    MediaCatalog gogGamesCatalog(const QList<GogGame>& installed, const QString& query,
-                                 const std::function<QString(const GogGame&)>& poster = {});
-
-    // The Battle.net console grid, built natively from the Uninstall registry. Each BattleNetGame -> a MediaItem
-    // (id "bnet:<code-or-name>", mime "battlenetgame"). TWO launch routes ride on one tile shape: a title with a
-    // known product code carries NO url and launches the client by battlenet://<code> (fire-and-forget, like
-    // Epic); a code-less title carries its resolved exe in `url` and runs through the MONITORED launchPcExe path
-    // (the GOG mechanic). A non-empty query scopes by name. poster defaults to empty (no local capsule).
-    MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
-                                       const std::function<QString(const BattleNetGame&)>& poster = {});
+    // The single PC Games folder: ONE MediaItem per game, with every way to launch it carried as a source on
+    // that item (MediaItem::pcSources). It replaces the four per-launcher folders this file used to build
+    // (steamGamesCatalog / epicGamesCatalog / gogGamesCatalog / battleNetGamesCatalog, all deleted with the
+    // folders themselves), where the same game appeared up to five times with unrelated ids. Pure, like every
+    // builder here: plain lists in, a
+    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::itemId (pure)
+    // and never consults the user-override ini, which is a store.
+    //
+    // Per item: id = pcgame::itemId(title) — the SAME function pcgame::remapTable moves records onto, and
+    // the only place that id is built. The two used to compute it separately and could disagree, which
+    // silently strands the user's favourites, marks and play time under a key nothing reads; probe_browse
+    // now pins them equal. mime = "pcgame", the ONE routing kind replacing steamgame /
+    // epicgame / goggame / battlenetgame; url EMPTY, because which copy runs is decided at activation.
+    //
+    // `downloaded` is the already-built source list for locally downloaded copies (PcGameStore). Its `label`
+    // doubles as that copy's TITLE — it is the only human-readable field on a PcGameSource — and is kept
+    // verbatim for the picker row. A source with no title to group on is skipped rather than bucketed with
+    // every other nameless one.
+    //
+    // DISPLAY TITLE: a launcher's own name beats a file-provider release name (which carries scene tokens),
+    // by the fixed precedence steam > epic > gog > battlenet > downloaded. That precedence keys on the
+    // source's KIND first and only then on its `launcher`, so a Downloaded source loses whatever `launcher`
+    // it happens to carry — the rule is in the code, not in an assumption that the field is empty. Two
+    // titles at the same rank are
+    // settled by comparing them, which picks the base title over its edition variant (the edition suffix
+    // sorts after the bare name). Fixed, so the folder does not reshuffle between runs.
+    //
+    // SOURCE ORDER is ready-before-not-ready, then by launcher name (a downloaded/addon source has an empty
+    // launcher and so leads the ready rows), then launchId, then label — deterministic, so the picker's rows
+    // are stable and a probe can assert them.
+    //
+    // A Battle.net title with no product code has no protocol launch: it gets a source LABELLED as the
+    // best-effort exe it is, and — when even that exe is unknown — a not-ready one, so pickAutoSource can
+    // never hand Play something that does nothing.
+    //
+    // SAME-LAUNCHER ROWS ARE DISAMBIGUATED. The merge key is lossy by design (the trailing-year strip fuses
+    // "Prey (2006)" with "Prey (2017)"), so one group can hold two sources from the SAME launcher: both
+    // labelled "Steam", both ready, both showing the bare "Prey". The launches are fine — the launchIds
+    // differ — but the picker rows read identically. A launcher that contributed TWO OR MORE sources gets
+    // its own per-launcher title appended to each of its labels ("Steam · Prey (2017)"); a launcher that
+    // contributed one is left with its plain label. Should two such copies share a title as well, the
+    // launchId is appended as a backstop.
+    //
+    // `query` filters on the NORMALISED title (any of the game's contributing titles, not just the displayed
+    // one); a query that normalises to nothing ("!!!") falls back to a plain case-insensitive match rather
+    // than matching everything. `launcherFilter` ("steam" | "epic" | "gog" | "battlenet") keeps only games
+    // that HAVE such a source — it narrows which games appear, not which sources they carry, so "what I own
+    // on Steam" survives without a separate folder and still launches by whichever copy is ready. It matches
+    // a LAUNCHER source only: a downloaded copy that records which launcher it came from does not make the
+    // game appear under "what I own on Steam".
+    //
+    // poster resolves the tile art from a game's sources; default {} uses SteamLibrary::posterUrl for the
+    // Steam source (which touches the local librarycache) and nothing otherwise — a test injects a pure one
+    // to stay I/O-free.
+    //
+    // `steamOwned` is the creds-gated Steam owned library (a Web API key + SteamID; empty without them). Any
+    // owned game NOT already installed on Steam contributes a LauncherOwned source: NOT ready, carrying
+    // steam://install/<appid>, so pickAutoSource can never launch it from a single Play keypress but choosing
+    // its picker row hands the install to the Steam client. It is the ONLY producer of a non-ready launcher
+    // source that can still be acted on, and it is why `LauncherOwned` exists — the folder that replaced the
+    // Steam console had to keep the owned-but-not-installed library that console showed. It rides last, after
+    // `poster`, for the same reason steamGamesCatalog's `owned` did: every existing call site keeps compiling.
+    // A game whose sources are ALL not-installed (owned/addon-available) is badged "Not installed" in its
+    // subtitle, which is where the old console put that badge.
+    MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                                const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                                const QVector<pcgame::PcGameSource>& downloaded,
+                                const QString& query, const QString& launcherFilter,
+                                const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
+                                const QList<SteamGame>& steamOwned = {});
 
     // Episodes airing soon, from a connected Trakt account. Sorted by air time, soonest first.
     // PAST entries are excluded: recently-aired episodes are issue #25's job ("You missed"), and two

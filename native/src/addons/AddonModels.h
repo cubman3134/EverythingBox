@@ -1,6 +1,11 @@
 // Data models for the addon system, ported from the Unity AddonModels. An addon is a folder with a
 // manifest.json + an entry script (main.js). A "media-source" addon's JS returns catalogs of MediaItems.
 #pragma once
+// NB on this include: it is NOT free. `core/` is not below `addons/` in the include graph — GamelistStore.h
+// and MetaCache.h both include THIS header — so there is no layering rule being broken here, and no cycle
+// (PcGameId.h is QtCore-only and includes nothing of ours). What it does mean is that PcGameId.h is now a
+// TRANSITIVE dependency of nearly every TU in the app, so editing it rebuilds effectively the whole tree.
+#include "../core/PcGameId.h"   // MediaItem::pcSources — the launch options on one merged PC game
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -157,6 +162,15 @@ struct MediaItem
     // screenshots, preview clips, theme music, provider facts). Optional; filled by richer providers and the
     // game-metadata aggregator. Threaded into the themed item map so themes can bind selected.logo etc.
     MediaArt art;
+    // Every way to launch this game, when the item is one merged PC Games entry (mime "pcgame"): the Steam /
+    // Epic / GOG / Battle.net copies and any downloaded one, all of the SAME game. `id` is the identity and
+    // `url` stays EMPTY — the launch lives here, and pcgame::pickAutoSource decides between them (or the
+    // picker asks). Empty for every other kind of item. Not serialized.
+    //
+    // It is a field rather than a re-derivation because the merge is what the folder just computed: rebuilding
+    // it at activation time would be a second copy of the grouping rule, free to disagree with the tile the
+    // user actually pressed.
+    QVector<pcgame::PcGameSource> pcSources;
 };
 
 struct MediaCatalog

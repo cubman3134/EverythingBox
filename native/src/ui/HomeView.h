@@ -35,6 +35,10 @@ class QBoxLayout;
 class QFrame;
 class QTextBrowser;
 class QNetworkAccessManager;
+// One sweep of the PC library (the four launcher scans + the downloads list + the TTL-cached Steam owned
+// list), defined in HomeView.cpp. Opaque here on purpose: naming its members would drag EpicLibrary.h and
+// BattleNetLibrary.h into every translation unit that includes this header.
+struct PcLibScan;
 
 class HomeView : public QWidget
 {
@@ -155,7 +159,6 @@ public:
     bool atRecentsLevel() const;             // the current level is a catalogue's synthetic Recent folder
     bool atDownloadsLevel() const;           // the current level is a catalogue's synthetic Downloaded folder
     bool atFavoritesLevel() const;           // the current level is a console's synthetic Favorites folder
-    bool atSteamConsole() const;             // the top level is still the synthetic Steam console (async guard)
 signals:
     // The current level's items changed. appended=true means a page was added to the end (keep the themed
     // selection); false means a fresh set (drill / back / search -> reset to the top).
@@ -278,14 +281,47 @@ private:
     void fillCarouselFromItems(int from); // (re)build/extend the carousel from items_[from..]
     void fillXmbFromItems(int from);      // (re)build/extend the XMB item column from items_[from..]
     void selectRecent();             // show the local "recently opened" list (not an addon catalog)
-    void openSteamConsole(const MediaItem& consoleItem); // drill the synthetic Steam console -> local games
-    void populateSteamGames();                           // (re)build the Steam games list natively
-    void openEpicConsole(const MediaItem& consoleItem);  // drill the synthetic Epic console -> local games
-    void populateEpicGames();                            // (re)build the Epic games list natively
-    void openGogConsole(const MediaItem& consoleItem);   // drill the synthetic GOG console -> local games
-    void populateGogGames();                             // (re)build the GOG games list natively
-    void openBattleNetConsole(const MediaItem& consoleItem); // drill the synthetic Battle.net console
-    void populateBattleNetGames();                           // (re)build the Blizzard games list natively
+    // ---- The ONE PC Games folder (it replaced the Steam / Epic / GOG / Battle.net folders) ---------------
+    //
+    // Those four showed the same game up to five times under unrelated ids, so a favourite or 40 hours of
+    // play time attached to whichever copy you happened to launch it from. There is now one folder built by
+    // browse::pcGamesCatalog, one item per game, and every way to launch it carried as a source on that item.
+    void openPcGamesConsole(const MediaItem& consoleItem); // drill the synthetic PC Games console
+    // (Re)build it natively. `runRemap` is what a REFRESH does and a mere QUERY CHANGE does not: the
+    // in-folder search box is debounced at 300 ms and repopulates on every keystroke, and the remap's input
+    // is the LIBRARY, which cannot have changed because the user typed a letter. Running it there was an ini
+    // pass per keystroke, unbounded in the size of the library, for a table identical to the one the last
+    // pass applied. It still runs on every genuine refresh (entering the folder, Back into it, the owned-list
+    // re-present), which is what makes a reinstalled game migrate the moment it reappears.
+    void populatePcGames(bool runRemap = true);
+    bool atPcGamesConsole() const;                         // the top level is still that console
+
+    // The library the folder is built from, gathered in ONE place: the four launcher scans, the downloaded
+    // copies and the TTL-cached Steam owned list. Both the folder and the re-derivation below call this, so
+    // a tile's sources and a re-derived game's sources cannot come from different ingredients.
+    //
+    // `pre` hands in a scan the caller ALREADY did (populatePcGames needs the same four launcher scans to
+    // build the remap's candidate ids) instead of making this repeat it — that was two full scans of every
+    // launcher per refresh. Null means "scan here", which is what the re-derivation path passes.
+    MediaCatalog pcLibraryCatalog(const QString& query, const QString& launcherFilter,
+                                  const PcLibScan* pre = nullptr) const;
+
+    // THE RE-DERIVATION PATH. MediaItem::pcSources does not survive persistence and it.url is empty by
+    // design, so a stored favourite/recent/search row for a merged PC game carries its ID and nothing else —
+    // and unlike "steam:<appid>" that id encodes no launch. Favouriting a merged game, restarting and
+    // pressing Play would therefore do NOTHING. Every such surface instead rebuilds the sources from the
+    // CURRENT library and runs the same picker.
+    //
+    // Re-deriving is not a fallback for a missing persist — it is the correct behaviour. Sources are machine
+    // state: the Steam copy is uninstalled, the GOG one moves, the download is deleted. A persisted list
+    // would launch a game that is no longer there; a re-derived one is true at the moment Play is pressed.
+    QVector<pcgame::PcGameSource> pcSourcesForId(const QString& itemId) const;   // rebuild from the library
+    QVector<pcgame::PcGameSource> pcSourcesFor(const MediaItem& it) const;       // live field, else re-derive
+    // Play a merged PC game: pick a source automatically, or offer a NavMenu of them when the pick is
+    // ambiguous (several ready) or unsafe (none ready). Never launches a not-ready source by itself.
+    void playPcGame(const MediaItem& it);
+    // Launch ONE chosen source, routed by kind through the launcher path that already exists for it.
+    void launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s);
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
