@@ -157,5 +157,14 @@ Use the issue templates in `.github/ISSUE_TEMPLATE/`. For a bug, the log at
 `stream_debug.log` in the app data directory is usually the fastest route to a
 diagnosis — Settings ▸ Debug shows its tail in-app and can open its folder.
 
+For design discussion *before* you write code — a protocol change, anything
+touching the nav kit, a settings surface you suspect has a themed twin —
+`#dev-general` on the [Discord](https://discord.gg/bW7KMVhgwH) is far lower
+latency than issue comments, and it is much cheaper to learn there that an
+approach is wrong than to learn it in review. Add-on and theme authors have
+`#addon-development` and `#theme-development`. Whatever is decided in chat still
+gets written down in the issue or the pull request: chat is where a decision is
+reached, not where it is recorded.
+
 By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 Contributions are accepted under the [GNU General Public License v3.0](LICENSE).

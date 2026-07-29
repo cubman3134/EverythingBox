@@ -2,6 +2,10 @@
   <img src="native/resources/appicon.png" width="132" alt="EverythingBox">
 </p>
 
+<p align="center">
+  <a href="https://discord.gg/bW7KMVhgwH"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+</p>
+
 # EverythingBox
 
 A native, cross-platform **media hub** — video, audio (with playlists), libretro
@@ -89,6 +93,21 @@ and the manifest/res under [`native/android/`](native/android/)). Cores download
 dir at runtime — note that downloading + `dlopen`-ing cores is against Google Play policy, so distribute via
 **sideload / F-Droid**, or bundle cores into the APK for Play. Full step-by-step plan and the remaining
 checklist: [`native/docs/android-port.md`](native/docs/android-port.md).
+
+## Community
+
+There is a Discord for EverythingBox: **[join here](https://discord.gg/bW7KMVhgwH)**.
+
+It exists because most of what people need is not a bug report. Setup problems,
+"is this supposed to happen?", which libretro core to use for a given system,
+add-on and theme authoring — those are conversations, and an issue thread is a
+poor place to have one. Ask in `#support`, and say which platform you are on and
+which area you are in (video, audio, emulation, add-ons, themes, readers); a
+vague question gets a vague answer. `#announcements` carries every release.
+
+Reproducible bugs and feature proposals still belong in the
+[issue tracker](https://github.com/cubman3134/EverythingBox/issues) — those need
+to stay searchable and stay open until they are fixed, which chat is bad at.
 
 ## Licence
 
