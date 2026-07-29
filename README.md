@@ -4,6 +4,7 @@
 
 <p align="center">
   <a href="https://discord.gg/bW7KMVhgwH"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://www.reddit.com/r/EverythingBox/"><img src="https://img.shields.io/badge/Reddit-r%2FEverythingBox-FF4500?logo=reddit&logoColor=white" alt="Reddit"></a>
 </p>
 
 # EverythingBox
