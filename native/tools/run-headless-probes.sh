@@ -253,5 +253,69 @@ else
 fi
 echo
 
+# Release-asset name gate (issue #35): the README's download table links straight at
+# releases/latest/download/<asset>, so a filename that no release job actually produces is a 404 on the
+# repo's front page — for every visitor, on every platform, until someone notices. That is exactly what the
+# rebrand did: the README moved to EverythingBox-* while the assets published for v0.5.0 were still
+# MyMediaVault-*. The old-brand gate above could not catch it, because the stale names live on GitHub
+# Releases, not in the tree. This gate catches the in-tree half of the same class: a README download link
+# whose filename no `softprops/action-gh-release` step in release.yml attaches. It cannot see what is
+# already published — renaming assets on a cut release is a manual Releases operation.
+#
+# Source of truth is the `files:` list of each release-attach step (inline or `|` block), with the Android
+# job's ${{ matrix.name }} expanded over the ABIs its matrix fans out over. Direction is one-way on purpose:
+# every README link must be produced, but the workflow may publish extras the table doesn't list (the
+# armv7/x86_64 APKs and the -pdb.zip symbol archive are deliberately unlisted).
+echo "=== release asset names (README <-> release.yml) ==="
+RELYML="$HERE/../../.github/workflows/release.yml"
+RDME="$HERE/../../README.md"
+if [ ! -f "$RELYML" ]; then
+  echo "FAIL: release asset names (release.yml not found at $RELYML)"; fail=1
+elif [ ! -f "$RDME" ]; then
+  echo "FAIL: release asset names (README.md not found at $RDME)"; fail=1
+else
+  # ABIs the Android job matrixes over — these substitute into the templated .apk asset name.
+  rel_abis="$(sed -n '/^        include:/,/^    env:/p' "$RELYML" | awk '$1=="name:" && NF==2 {print $2}')"
+  # Every filename handed to a release-attach step.
+  rel_attached="$(awk '
+    /uses: softprops\/action-gh-release/            { inrel=1; next }
+    inrel && /^[[:space:]]*files:[[:space:]]*\|/    { blk=1; next }
+    inrel && blk {
+      if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_-]*:/) { blk=0; inrel=0; next }
+      gsub(/^[[:space:]]+|[[:space:]]+$/, ""); if ($0 != "") print
+      next
+    }
+    inrel && /^[[:space:]]*files:[[:space:]]*[^|[:space:]]/ {
+      sub(/^[[:space:]]*files:[[:space:]]*/, ""); print; inrel=0; next
+    }
+  ' "$RELYML")"
+  rel_emitted="$rel_attached"
+  for abi in $rel_abis; do
+    rel_emitted="$rel_emitted"$'\n'"$(printf '%s\n' "$rel_attached" | sed "s/\${{ matrix\.name }}/$abi/g")"
+  done
+  # Drop anything still carrying an unexpanded expression — an unknown template can't be name-checked.
+  rel_emitted="$(printf '%s\n' "$rel_emitted" | grep -v '\${' | sort -u)"
+  rel_linked="$(grep -oE 'releases/latest/download/[A-Za-z0-9._+-]+' "$RDME" | sed 's#.*/##' | sort -u)"
+  if [ -z "$(printf '%s' "$rel_emitted" | tr -d '[:space:]')" ]; then
+    echo "FAIL: release asset names (no release-attach 'files:' entries parsed out of release.yml)"; fail=1
+  elif [ -z "$(printf '%s' "$rel_linked" | tr -d '[:space:]')" ]; then
+    echo "FAIL: release asset names (no releases/latest/download links found in README.md)"; fail=1
+  else
+    rel_bad=""
+    for a in $rel_linked; do
+      printf '%s\n' "$rel_emitted" | grep -qxF -- "$a" || rel_bad="$rel_bad  $a"$'\n'
+    done
+    if [ -n "$rel_bad" ]; then
+      echo "README links these, but no release.yml job attaches them:"; printf '%s' "$rel_bad"
+      echo "release.yml attaches:"; printf '%s\n' "$rel_emitted" | sed 's/^/  /'
+      echo "FAIL: release asset names (a README download link points at an asset CI never publishes)"; fail=1
+    else
+      echo "$(printf '%s\n' "$rel_linked" | wc -l | tr -d ' ') README download link(s), all produced by release.yml"
+      echo "PASS: release asset names"
+    fi
+  fi
+fi
+echo
+
 if [ "$fail" -eq 0 ]; then echo "ALL HEADLESS PROBES PASSED"; else echo "SOME HEADLESS PROBES FAILED"; fi
 exit "$fail"
