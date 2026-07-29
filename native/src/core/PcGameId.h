@@ -17,10 +17,23 @@ namespace pcgame
     // different games: merging them removes one from the user's library, while failing to merge two
     // editions only shows a game twice. That asymmetry is why the numeral rule is a hard requirement
     // and not a nicety.
+    //
+    // The edition strip is a SUFFIX rule: those phrases are stripped only off the END of the title,
+    // because mid-title they are part of the product name ("Command & Conquer Remastered Collection").
+    //
+    // KNOWN COLLISION, carried on purpose: the trailing-year strip merges a REMAKE with its original.
+    // "Prey (2006)" and "Prey (2017)" both normalise to "prey", as do "Resident Evil 2" and "Resident
+    // Evil 2 (2019)". The igdb id is what disambiguates them (see sameGame / mergeKey); a TITLE-ONLY
+    // library will show the remake and the original as ONE entry. See the note in the .cpp for why the
+    // year strip is nonetheless required.
     QString normalizeTitle(const QString& raw);
 
     // The grouping key used by the catalog builder: the igdb id when there is one, else the
     // normalised title. Two entries group together iff their mergeKey matches.
+    //
+    // A title can normalise to EMPTY ("!!!", "GOTY", "Enhanced Edition"). Such an entry gets a private
+    // fallback key derived from its raw title, so it groups with nothing but itself instead of every
+    // other empty-normalising entry landing in one bucket. Callers do not have to special-case it.
     QString mergeKey(const QString& title, const QString& igdbId);
 
     // Are these the same game? A user override wins; then, when BOTH sides carry an igdb id, that

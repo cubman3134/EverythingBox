@@ -39,12 +39,30 @@ QSettings& store()
 // and DELETES one of them from the user's library. Adding noise here is cheap and reversible; a
 // generic rule is neither. Longest-first so "game of the year edition" is not left as a stray
 // "edition" by an earlier shorter match.
-const QRegularExpression& editionRe()
+//
+// ANCHORED TO THE SUFFIX (`\s*$`), and applied repeatedly rather than globally. Edition noise is a
+// thing stores APPEND; the same words in the middle of a title are part of the product name. Measured
+// on the unanchored form: "Command & Conquer Remastered Collection" lost its "Remastered" and became
+// "command conquer collection", colliding with the genuinely different "Command & Conquer Collection"
+// — a merge, which is the direction that costs the user a game. The loop is what still handles noise
+// STACKED on the end ("... Definitive Edition Remastered"): each pass peels the last phrase off.
+const QRegularExpression& editionSuffixRe()
 {
     static const QRegularExpression re(
-        QStringLiteral("\\b(game of the year edition|game of the year|definitive edition"
-                       "|complete edition|enhanced edition|director's cut|remastered|goty)\\b"),
+        QStringLiteral("\\s*\\b(game of the year edition|game of the year|definitive edition"
+                       "|complete edition|enhanced edition|director's cut|remastered|goty)\\s*$"),
         QRegularExpression::CaseInsensitiveOption);
+    return re;
+}
+
+// A leftover trailing article, dropped ONLY when an edition phrase was actually stripped off the end.
+// "Portal 2: The Definitive Edition Remastered" peels down to "Portal 2: The", and that dangling "The"
+// belonged to the noise, not to the game. Conditioning it on a real strip is what keeps it away from
+// titles that genuinely end in an article; `^|\s` so a title that was NOTHING but "The <noise>"
+// collapses to empty (and then gets a private mergeKey) instead of bucketing under "the".
+const QRegularExpression& trailingArticleRe()
+{
+    static const QRegularExpression re(QStringLiteral("(?:^|\\s)(?:the|a|an)$"));
     return re;
 }
 
@@ -101,6 +119,18 @@ void pcgame::setIniPathForTesting(const QString& path)
 }
 #endif
 
+// KNOWN, DELIBERATE COLLISION — a remake normalises onto its original. The trailing-year strip is what
+// makes "Prey (2017)" merge with the "Prey" a store lists bare, and it cannot tell that apart from
+// "Prey (2017)" vs the 2006 game: both sides land on "prey", as do "Resident Evil 2" and "Resident
+// Evil 2 (2019)". The year is precisely the thing stores use to disambiguate, and stripping it is a
+// hard requirement (most catalogues carry the year on ONE of the two copies, so keeping it would split
+// every ordinary game in two) — so the collision is priced in, not a bug to fix here.
+//
+// The igdb id is what actually separates them: sameGame() returns false for two different ids even
+// when the titles agree, and mergeKey() keys on the id whenever there is one. The consequence for
+// callers, and the reason this note exists: a TITLE-ONLY library — no metadata provider, or entries
+// the provider did not resolve — will show a remake and its original as ONE entry. That is not
+// recoverable inside this function; the cures are an igdb id or the user override store.
 QString pcgame::normalizeTitle(const QString& raw)
 {
     QString s = raw;
@@ -111,11 +141,19 @@ QString pcgame::normalizeTitle(const QString& raw)
     // Typographic apostrophes, so "Director’s Cut" matches the same phrase as "Director's Cut".
     s.replace(QChar(0x2019), QLatin1Char('\''));
 
-    // 2. A trailing parenthesised year.
+    // 2. A trailing parenthesised year. See the note above this function: this is what merges a remake
+    //    with its original, and the igdb id is what tells them apart again.
     s.remove(trailingYearRe());
 
-    // 3. Edition noise — explicit phrases only. See editionRe().
-    s.remove(editionRe());
+    // 3. Edition noise — explicit phrases, at the END only, peeled one at a time. See editionSuffixRe().
+    bool strippedEdition = false;
+    for (int pass = 0; pass < 8; ++pass)  // bounded: the list is finite and each pass shortens s
+    {
+        const QRegularExpressionMatch m = editionSuffixRe().match(s);
+        if (!m.hasMatch()) break;
+        s.truncate(m.capturedStart(0));
+        strippedEdition = true;
+    }
 
     // 4. Remaining punctuation becomes a space (not nothing), so "Diablo II:Resurrected" does not fuse
     //    into one token.
@@ -124,12 +162,35 @@ QString pcgame::normalizeTitle(const QString& raw)
     // 5. Collapse and case-fold. Numerals — "2", "II", "V", "VI" — survive all of the above untouched,
     //    which is the whole point of this function.
     s = s.replace(wsRe(), QStringLiteral(" ")).trimmed().toLower();
+
+    // 6. The article the stripped phrase left behind ("Portal 2: The" -> "portal 2"). Only after a real
+    //    strip. See trailingArticleRe().
+    if (strippedEdition) s = s.remove(trailingArticleRe()).trimmed();
     return s;
 }
 
 QString pcgame::mergeKey(const QString& title, const QString& igdbId)
 {
-    return igdbId.isEmpty() ? normalizeTitle(title) : igdbId;
+    if (!igdbId.isEmpty()) return igdbId;
+
+    const QString norm = normalizeTitle(title);
+    if (!norm.isEmpty()) return norm;
+
+    // The empty-key guard, and it is load-bearing. A title can normalise to NOTHING — "!!!" is all
+    // punctuation, "GOTY" and "Enhanced Edition" are all edition noise — and grouping is defined as
+    // "equal mergeKey", so returning "" here would drop every such id-less entry into ONE bucket and
+    // the catalog builder would fuse unrelated games into a single tile. sameGame() already refuses to
+    // match two empty titles; this is the same rule, stated where grouping actually reads it, so no
+    // caller has to know about the case.
+    //
+    // The fallback is derived from the RAW title rather than being unique-per-call on purpose: it must
+    // be STABLE (mergeKey is a pure key, re-derived per scan, so a counter or a random value would make
+    // an entry stop matching itself) while still separating two different noise titles. The prefix
+    // carries ':' and '/', neither of which normalizeTitle can ever emit — it strips all punctuation —
+    // so a fallback key cannot collide with a real title key, and the namespace keeps it clear of a
+    // provider id. A title that is genuinely empty has nothing to derive from and keys on the bare
+    // prefix; there is no information here to separate two nameless entries with.
+    return QStringLiteral("pcgame:rawtitle/") + title.simplified().toLower();
 }
 
 bool pcgame::sameGame(const QString& titleA, const QString& igdbA,

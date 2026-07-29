@@ -71,10 +71,45 @@ int main(int argc, char** argv)
     CHECK(normalizeTitle(QStringLiteral("Portal 2"))
           == normalizeTitle(QStringLiteral("Portal 2 - Game of the Year Edition")));
 
+    // ---- 2b. the edition strip is a SUFFIX rule, not a search-and-destroy ----------------------
+    // Both shapes below were measured against the unanchored strip and both were wrong.
+    //
+    // Under-merge: "Portal 2: The Definitive Edition Remastered" normalised to "portal 2 the" — the
+    // inner phrase went, the article it was attached to did not, and the result then failed to merge
+    // with plain "Portal 2". Safe direction, but it is a real store title shape, so it is pinned.
+    CHECK(normalizeTitle(QStringLiteral("Portal 2: The Definitive Edition Remastered"))
+          == normalizeTitle(QStringLiteral("Portal 2")));
+    CHECK(normalizeTitle(QStringLiteral("Portal 2: The Definitive Edition Remastered"))
+          == QStringLiteral("portal 2"));
+    // Over-merge (the dangerous mirror): "Remastered" sitting MID-title is part of the product name,
+    // not noise on the end of it. Eating it made "Command & Conquer Remastered Collection" collide
+    // with the genuinely different "Command & Conquer Collection" — a merge, i.e. a lost game.
+    CHECK(normalizeTitle(QStringLiteral("Command & Conquer Remastered Collection"))
+          == QStringLiteral("command conquer remastered collection"));
+    CHECK(normalizeTitle(QStringLiteral("Command & Conquer Remastered Collection"))
+          != normalizeTitle(QStringLiteral("Command & Conquer Collection")));
+    // The suffix anchor must not cost the ordinary cases: noise at the end still goes, including two
+    // phrases stacked up, and a title whose ONLY content is noise still collapses to empty (which §5d
+    // then has to give a private key to).
+    CHECK(normalizeTitle(QStringLiteral("Dishonored - Definitive Edition Remastered"))
+          == QStringLiteral("dishonored"));
+    // The dangling-article drop is CONDITIONAL on a phrase actually having been stripped, so a title
+    // that simply ends in an article keeps it. Without the condition this rule would start editing
+    // ordinary titles, which is the same over-merge direction as the unanchored strip.
+    CHECK(normalizeTitle(QStringLiteral("Danganronpa: Trigger Happy Havoc The"))
+          == QStringLiteral("danganronpa trigger happy havoc the"));
+    // ...and the sequel numeral is still untouched by any of it, including with noise stacked on.
+    CHECK(normalizeTitle(QStringLiteral("Diablo III: The Definitive Edition"))
+          != normalizeTitle(QStringLiteral("Diablo II: The Definitive Edition")));
+
     // ---- 3. degenerate input ------------------------------------------------------------------
     CHECK(normalizeTitle(QString()).isEmpty());
     CHECK(normalizeTitle(QStringLiteral("   ")).isEmpty());
     CHECK(normalizeTitle(QStringLiteral("!!!")).isEmpty());
+    // A title made ENTIRELY of edition noise normalises to nothing at all. That is correct for this
+    // function and lethal for grouping — see §5d.
+    CHECK(normalizeTitle(QStringLiteral("GOTY")).isEmpty());
+    CHECK(normalizeTitle(QStringLiteral("Enhanced Edition")).isEmpty());
 
     // ---- 4. sameGame: IGDB wins when BOTH sides have one ---------------------------------------
     // Same igdb id, wildly different titles -> same game (a regional rename).
@@ -133,6 +168,35 @@ int main(int argc, char** argv)
         CHECK(mergeKey(QStringLiteral("Portal 2"), QString())
               == mergeKey(QStringLiteral("Portal 2 - Game of the Year Edition"), QString()));
         CHECK(mergeKey(QStringLiteral("Portal"), QString()) != mergeKey(QStringLiteral("Portal 2"), QString()));
+    }
+
+    // ---- 5d. mergeKey: an EMPTY normalised title must not become one giant bucket ---------------
+    // sameGame already refuses to match two empty normalised titles (`!na.isEmpty() && na == nb`).
+    // mergeKey had no such guard, and the header defines grouping as "two entries group together iff
+    // their mergeKey matches" — so every id-less entry that normalises to empty shared ONE key and the
+    // catalog builder would fuse them all into a single tile. That is the same class of harm as the
+    // sequel-numeral rule prevents (games vanish from the library), arriving by a different door, so
+    // the two functions are made to agree here rather than in the caller.
+    {
+        // Punctuation-only titles: both normalise to empty, and must still be distinct entries.
+        CHECK(normalizeTitle(QStringLiteral("!!!")) == normalizeTitle(QStringLiteral("?!?")));  // both empty
+        CHECK(mergeKey(QStringLiteral("!!!"), QString()) != mergeKey(QStringLiteral("?!?"), QString()));
+        // All-edition-noise titles: same story via a completely different route.
+        CHECK(mergeKey(QStringLiteral("GOTY"), QString())
+              != mergeKey(QStringLiteral("Enhanced Edition"), QString()));
+        CHECK(mergeKey(QStringLiteral("GOTY"), QString()) != mergeKey(QStringLiteral("!!!"), QString()));
+        // The fallback key is still a KEY: the same entry, keyed twice, groups with itself. (A random
+        // or counter-based fallback would pass the two checks above and break this one.)
+        CHECK(mergeKey(QStringLiteral("GOTY"), QString()) == mergeKey(QStringLiteral("GOTY"), QString()));
+        // ...and it can never be mistaken for a real normalised title or a provider id.
+        CHECK(!mergeKey(QStringLiteral("GOTY"), QString()).isEmpty());
+        CHECK(mergeKey(QStringLiteral("GOTY"), QString()) != mergeKey(QStringLiteral("Hades"), QString()));
+        CHECK(mergeKey(QStringLiteral("GOTY"), QString()) != normalizeTitle(QStringLiteral("GOTY")));
+        // An entry WITH an igdb id is untouched by all of this — the id still wins outright, even when
+        // the title is pure noise, so two noise-titled entries sharing an id still group.
+        CHECK(mergeKey(QStringLiteral("GOTY"), QStringLiteral("igdb:7")) == QStringLiteral("igdb:7"));
+        CHECK(mergeKey(QStringLiteral("!!!"), QStringLiteral("igdb:7"))
+              == mergeKey(QStringLiteral("?!?"), QStringLiteral("igdb:7")));
     }
 
     // ---- 6. pickAutoSource: NEVER returns a not-ready source ------------------------------------
