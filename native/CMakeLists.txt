@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.121 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.122 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -153,6 +153,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/nav/NavGraph.cpp   src/ui/nav/NavGraph.h
         src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
         src/ui/nav/Osk.cpp        src/ui/nav/Osk.h
+        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h  # 4-digit numeric entry overlay (#30)
         src/input/Gamepad.cpp     src/input/Gamepad.h
         src/input/Keymap.cpp      src/input/Keymap.h
         src/core/Settings.cpp     src/core/Settings.h
@@ -193,6 +194,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
+        src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
@@ -453,6 +455,20 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_compile_definitions(probe_settingstxn PRIVATE EB_SETTINGSTXN_TEST_SEAM)
     target_link_libraries(probe_settingstxn PRIVATE Qt6::Core)
 
+    # Headless test for the per-profile passcode core (issue #30): format, hashing + the SALT SEPARATION from
+    # the frozen parental-PIN salt, the always-ask-at-launch decision, the recovery-route rule, the rate-limit
+    # escalation + cap, the evaluate() lockout-before-compare composite, and the device-local attempt-state
+    # persistence. ProfilePasscode.cpp is QtCore-only with its own file-local store() (AppPaths/AppBrand are
+    # header-only), so this links against Qt6::Core alone — leaner than every probe except probe_theme.
+    add_executable(probe_passcode tools/probe_passcode.cpp
+        src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h)
+    target_include_directories(probe_passcode PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn): without the macro
+    # the setter is not declared or compiled at all, so a production call is a compile error, not a silent
+    # process-wide redirect of every passcode read and write.
+    target_compile_definitions(probe_passcode PRIVATE EB_PROFILEPASSCODE_TEST_SEAM)
+    target_link_libraries(probe_passcode PRIVATE Qt6::Core)
+
     # Headless test for the Trakt read layer (issue #23): the tolerant calendar parser and the
     # identity mapper. TraktRead.cpp is QtCore-only (QJson + QDateTime), so this links leanest of all.
     # SingleFlight.h is header-only and Qt-free on purpose: it is the token-refresh queue TraktClient
@@ -671,8 +687,12 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/ui/nav/Nav.cpp src/ui/nav/Nav.h
         src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h
         src/ui/nav/NavOverlay.cpp src/ui/nav/NavOverlay.h
-        src/ui/nav/Osk.cpp src/ui/nav/Osk.h)
-    target_include_directories(probe_nav PRIVATE src src/ui)
+        src/ui/nav/Osk.cpp src/ui/nav/Osk.h
+        # The 4-digit passcode pad (#30) is a NavOverlay like the OSK, so its D-pad/auto-submit/back
+        # behaviour belongs in the nav suite. It needs no ProfilePasscode.cpp: the only thing it takes from
+        # that unit is the constexpr kLength, which is header-only.
+        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h)
+    target_include_directories(probe_nav PRIVATE src src/ui src/core)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
     # Headless test for NavGraph (the pure selection model + back stack — no QML, no widgets). Proves the

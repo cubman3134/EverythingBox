@@ -25,6 +25,7 @@
 #include <clocale>
 #include "ui/MainWindow.h"
 #include "ui/ProfileDialog.h"
+#include "core/ProfilePasscode.h"   // mustShowPicker — the pure always-ask-at-launch decision (#30)
 #include "core/ProfileStore.h"
 #include "core/CloudSync.h"
 #include "core/Settings.h"
@@ -34,7 +35,7 @@
 #include "core/PerfTrace.h"
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.121";
+static constexpr const char* kAppVersion = "0.5.122";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -291,11 +292,20 @@ int main(int argc, char** argv)
     SaveMeta::sweepStrays();      // one-time: core save files left loose in the app dir move into saves/,
                                   // before any core runs — after this, saveDir points cores there anyway
 
-    // A profile must be active before the app is usable. One profile -> use it. With none or several, the
-    // picker is shown inline once the window is up (chooseProfile); set a provisional current first so the
-    // shell can build, then the inline picker confirms/creates the real choice.
+    // A profile must be active before the app is usable, and — since issue #30 — the app ALWAYS asks which
+    // one, the way a streaming app does. The old rule was `profiles.size() != 1`: a one-profile install (which
+    // every install becomes the moment its first profile exists) jumped straight in, so the picker was
+    // effectively a multi-user-only screen and a passcode on that profile would have been unreachable.
+    //
+    // The decision now lives in ProfilePasscode::mustShowPicker, pure and probe-pinned, because it has three
+    // inputs that must compose in exactly one way: the count, the user's opt-out preference, and whether that
+    // single profile is passcode-protected (which overrides the preference — skipping the picker would skip
+    // the only surface that asks for the code). The provisional setCurrent below is unchanged: the picker is
+    // shown inline once the window is up, pre-home, so a provisional current only lets the shell build.
     const QVector<Profile> profiles = ProfileStore::list();
-    const bool chooseProfile = (profiles.size() != 1);
+    const bool chooseProfile = ProfilePasscode::mustShowPicker(
+        int(profiles.size()), Settings::skipProfilePickerWhenSingle(),
+        profiles.size() == 1 && !profiles.first().passHash.isEmpty());
     if (profiles.size() == 1)
     {
         ProfileStore::setCurrent(profiles.first().id);

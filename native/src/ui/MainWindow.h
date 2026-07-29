@@ -734,6 +734,84 @@ private:
     // Parental gate: true if the action may proceed. When a restricted (kids) profile is active and a PIN is
     // set, prompt for it; otherwise allow. `reason` is shown in the prompt.
     bool parentalUnlock(const QString& reason);
+
+    // ---- Per-profile passcode (issue #30) ----------------------------------------------------------
+    // DELIBERATELY A DIFFERENT GATE FROM parentalUnlock ABOVE, not an extension of it. That one asks "may
+    // this kid LEAVE their profile / open Settings?" and is answered by the one global PIN; this asks "may
+    // this person ENTER this profile?" and is answered by that profile's own code. A user may reasonably
+    // want either without the other, so they never share a value, a salt or a prompt.
+    //
+    // On a RESTRICTED (kids) profile the two compose rather than merge, and the combination is spelled out
+    // here so it is not left emergent:
+    //   * entering it       -> the profile passcode (this gate). The parental PIN also opens it, as the
+    //                          documented override; the kid's own passcode does NOT open anything else.
+    //   * leaving it, or opening Settings from inside it -> the parental PIN, exactly as before. Knowing the
+    //                          profile passcode buys a kid nothing here — parentalUnlock never consults it.
+    //   * forgetting it     -> THE PARENTAL PIN ONLY. A restricted profile never gets the timed self-service
+    //                          reset, with or without a PIN set (ProfilePasscode::entryOptions owns that
+    //                          rule): a sixty-second countdown is no obstacle to the one person a kids
+    //                          profile exists to hold. A household that sets a kid passcode with no parental
+    //                          PIN therefore has no in-app way back, and profilePasscodeMenu says exactly
+    //                          that — and offers to set the PIN — at the moment the passcode is set.
+    //
+    // A LOCKOUT NEVER CLOSES THE PAD. The recovery rows live on the pad and nowhere else, so refusing to draw
+    // it during a lockout made a child's wrong guesses block the parent's own override. The pad opens; the
+    // lockout only makes a typed code be refused without comparison (ProfilePasscode::evaluate).
+    //
+    // Returns true when the profile may be opened: no passcode set, a live ticket (below), the correct code,
+    // the parental-PIN override, or a completed timed reset. False means the caller must not proceed.
+    bool profilePasscodeUnlock(const QString& profileId);
+    // Record that `id` is now the active, UNLOCKED profile: setCurrent + enteredProfile_ + spend the tickets.
+    // The one definition of "a profile was entered", shared by all three front doors.
+    void markProfileEntered(const QString& id);
+    // THE LANDING GATE. Called from openHome() — the single point where a profile's home becomes what is on
+    // screen — so that landing on a profile always passes the gate however `profiles/current` got there,
+    // including ProfileStore::remove()'s silent repoint onto a survivor. See the .cpp for the full case.
+    // False means the caller must NOT render: the picker has been queued instead.
+    bool ensureActiveProfileUnlocked();
+    // The same question WITHOUT prompting — for the renderers that rebuild the home out of band (a cloud pull
+    // landing) rather than navigating to it, where raising a pad from a network reply would be wrong.
+    bool activeProfileEntered() const;
+    // Set the GLOBAL parental PIN from outside Settings (offered when a kids passcode is being set with no
+    // PIN in place). SET only — changing/clearing an existing PIN stays in Settings behind the current PIN.
+    bool promptSetParentalPin(class NavGraph* graph);
+    // May the `restricted` flag on this profile be changed? That flag is credential-bearing since the timed
+    // reset is withheld from kids profiles: un-restricting hands the reset back, so it is a passcode-reset
+    // bypass unless gated. Parental PIN when one exists (both directions); otherwise the profile's OWN
+    // passcode to turn it OFF. False means the caller must put its toggle back. See the .cpp for the rule.
+    bool allowRestrictedChange(const QString& profileId, bool turningOn);
+    // The shared "no parental PIN ⇒ this is unrecoverable" card, raised from BOTH sides of the pair that
+    // creates that state: setting a passcode on a restricted profile, and restricting one that already has a
+    // passcode. Offers to set the PIN on the spot. NEVER blocks.
+    void warnKidsPasscodeUnrecoverable(const QString& profileId, class NavGraph* graph);
+    // The profile whose gate this session has actually passed. Not "the current profile": that is exactly the
+    // distinction the landing gate turns on. Cleared on a refusal so the next landing asks again.
+    QString enteredProfile_;
+    // Re-entrancy guard, and it DENIES. The pad runs a nested event loop, so anything dispatched inside it
+    // re-enters the gate; answering "true" there rendered the locked profile's home out from under the pad
+    // still asking for its code. Set only inside ensureActiveProfileUnlocked, which only openHome() calls —
+    // so "busy" implies an openHome is in flight and will land, and a denied re-entrant call is a duplicate,
+    // not a lost navigation.
+    bool    profileGateBusy_ = false;
+    // The Set / Change / Remove chooser, opened from a profile's edit surface in BOTH the themed and the
+    // classic builder. Every branch goes through profilePasscodeUnlock first, so all three require the code.
+    // `onDone` runs after the chosen branch resolves (or immediately-ish on a back-out) — the chooser is a
+    // NavMenu, whose callback fires AFTER the overlay closes, so a caller that refreshed its "Passcode: set"
+    // label on the next line would be reading the state from before the user had chosen anything.
+    void profilePasscodeMenu(const QString& profileId, const std::function<void()>& onDone = {});
+    // A SHORT-LIVED grant, keyed by profile id (value = the ms-epoch of the successful unlock). It exists so
+    // one unlock covers the action it was asked for plus the immediate follow-on — unlock to edit a profile,
+    // then change its passcode on the next screen — instead of prompting twice in four seconds for the same
+    // secret. Cleared wholesale by markProfileEntered, i.e. when a profile actually becomes current.
+    //
+    // PRECISELY what that buys, because an earlier version of this comment overstated it as "ENTERING a
+    // profile always asks": a ticket is spent on the FIRST thing that happens after it is granted, and that
+    // thing may be an entry. Unlock to Delete a profile, back out of the confirm, then pick that same profile
+    // within the window and you walk in without being asked again. Defensible — the person demonstrably knew
+    // the code seconds ago, and the alternative is asking twice in four seconds for the same secret — but it
+    // is "one unlock covers one burst of actions", NOT "entry is always challenged".
+    QHash<QString, qint64> passcodeTickets_;
+    static constexpr qint64 kPasscodeTicketMs = 90000;
     // The player bar's single subtitle button opens a full-player overlay panel (Stremio-style): track pick,
     // sync/size, load-from-file, download. subOverlay_ is the scrim+panel (null when closed); the focusable
     // controls are collected in subPanelButtons_ for arrow/remote navigation, like the transport row.

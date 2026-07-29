@@ -35,6 +35,13 @@ namespace Settings
     void setParentalPin(const QString& pin); // empty pin clears it
     bool checkParentalPin(const QString& pin);
 
+    // "Who's using EverythingBox?" at launch (issue #30). Always-ask is the DEFAULT — this is the opt-out for
+    // a single-user install that finds the extra press pointless, and it speaks ONLY for the exactly-one-
+    // profile case. The picker-or-not decision itself is ProfilePasscode::mustShowPicker, which also refuses
+    // to honour this when that one profile has a passcode; this accessor is just the stored preference.
+    bool skipProfilePickerWhenSingle();          // key "profiles/skipPickerWhenSingle", default false
+    void setSkipProfilePickerWhenSingle(bool on);
+
     // Trakt.tv scrobbling. Client id/secret come from a Trakt API app the user registers; the tokens are
     // obtained via the device-code OAuth flow and refreshed automatically. All empty => Trakt is off.
     QString traktClientId();

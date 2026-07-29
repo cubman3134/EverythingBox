@@ -93,6 +93,7 @@ QVector<Profile> ProfileStore::list()
         p.name = o.value(QStringLiteral("name")).toString();
         p.icon = repairMojibakeIcon(o.value(QStringLiteral("icon")).toString()); // legacy mojibake -> emoji
         p.restricted = o.value(QStringLiteral("restricted")).toBool();
+        p.passHash = o.value(QStringLiteral("passHash")).toString();  // absent (older device / no passcode) -> ""
         if (!p.id.isEmpty()) out.push_back(p);
     }
     return out;
@@ -126,6 +127,10 @@ static void save(const QVector<Profile>& items)
         o.insert(QStringLiteral("name"), p.name);
         o.insert(QStringLiteral("icon"), p.icon);
         o.insert(QStringLiteral("restricted"), p.restricted);
+        // Written ONLY when set. An unconditional "passHash": "" would rewrite profiles/list for every
+        // install that has never used the feature, flipping CloudSync's stateHash and re-uploading the whole
+        // bundle on the next launch after the upgrade — a full re-sync for a field nobody set.
+        if (!p.passHash.isEmpty()) o.insert(QStringLiteral("passHash"), p.passHash);
         arr.append(o);
     }
     store().setValue(QStringLiteral("profiles/list"),
@@ -162,6 +167,19 @@ void ProfileStore::setRestricted(const QString& id, bool restricted)
     QVector<Profile> items = list();
     for (Profile& p : items) if (p.id == id) p.restricted = restricted;
     save(items);
+}
+
+void ProfileStore::setPasscodeHash(const QString& id, const QString& passHash)
+{
+    QVector<Profile> items = list();
+    for (Profile& p : items) if (p.id == id) p.passHash = passHash;
+    save(items);
+}
+
+bool ProfileStore::hasPasscode(const QString& id)
+{
+    for (const Profile& p : list()) if (p.id == id) return !p.passHash.isEmpty();
+    return false;
 }
 
 void ProfileStore::remove(const QString& id)

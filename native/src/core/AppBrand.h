@@ -21,6 +21,14 @@ namespace AppBrand
     inline constexpr const char* kConfigHeader= "X-EB-Config";
     inline constexpr const char* kEnvPrefix   = "EB_";
 
+    // DATA-BEARING, and now frozen for the same reason Legacy::kParentalPinSalt is: the per-profile passcode
+    // (issue #30) is stored as SHA-256(salt + profileId + ':' + code) in the profile record, which SYNCS. It
+    // is a NEW constant rather than a reuse of the parental salt precisely because the two are different
+    // questions with different values — and because touching the parental one would redefine a hash already
+    // written to every existing user's ini. Renaming this one has the same effect for every passcode set
+    // since it shipped: no code ever matches again, and the only way in becomes the documented recovery.
+    inline constexpr const char* kProfilePasscodeSalt = "eb-profile-pass:";
+
     // The project's website. Used for the pages the OAuth loopback server hands the browser off
     // to after Google sign-in (see CloudSync::signIn). Kept here with the other identity strings
     // so a domain change is a one-file edit, same as the rename this file exists for.
