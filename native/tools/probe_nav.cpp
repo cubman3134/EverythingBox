@@ -8,6 +8,8 @@
 #include "nav/NavOverlay.h"
 #include "nav/Osk.h"
 #include "nav/PasscodePad.h"
+#include "ProfileDialog.h"
+#include "ProfileStore.h"
 
 #include <QApplication>
 #include <QCheckBox>
@@ -19,6 +21,9 @@
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QFrame>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSlider>
@@ -45,6 +50,33 @@ public:
 };
 
 static void pump() { QApplication::processEvents(); QApplication::processEvents(); }
+
+// Every ring member that arrow keys can NEVER land on, starting from the ring's own initial selection.
+// This is a CLOSURE, not a walk: from each reached widget it presses all four arrows and follows wherever
+// focus goes, until nothing new appears. A hand-written walk can only prove the paths its author thought
+// of — which is how §22's first draft passed while shipping a dead-end corner (see there). A closure has no
+// such blind spot: anything it does not reach genuinely cannot be reached with a D-pad.
+static QVector<QWidget*> navUnreachable(NavRing& ring, NavContext& ctx)
+{
+    const QVector<QWidget*> members = ring.widgets();
+    QVector<QWidget*> seen;
+    QWidget* start = ring.ensureSelection();
+    if (!start) return members;
+    seen.push_back(start);
+    for (int i = 0; i < seen.size(); ++i)   // grows as the frontier expands
+        for (int key : { Qt::Key_Up, Qt::Key_Down, Qt::Key_Left, Qt::Key_Right })
+        {
+            seen[i]->setFocus(Qt::OtherFocusReason);
+            pump();
+            ctx.routeKey(key);
+            pump();
+            QWidget* now = QApplication::focusWidget();
+            if (now && members.contains(now) && !seen.contains(now)) seen.push_back(now);
+        }
+    QVector<QWidget*> out;
+    for (QWidget* w : members) if (!seen.contains(w)) out.push_back(w);
+    return out;
+}
 
 int main(int argc, char** argv)
 {
@@ -946,6 +978,135 @@ int main(int argc, char** argv)
             pad4->dismiss(-1);
             pump();
         }
+    }
+
+    // ------------------------------------------- 23. the classic Edit-Profile picker: no D-pad orphans
+    // The REAL ProfileDialog picker page, inside a replica of the panel that hosts it. Not a stand-in
+    // layout: the defect this covers was pure geometry (a left-aligned button under a wide icon grid), and
+    // a stand-in would drift from the page it is supposed to be guarding until it stopped describing it.
+    //
+    // This is also the page that shows why the kit resolves Up/Down by ROW and not by a single distance
+    // score. Its shape — an 8-column grid of 42px icons, then a left-aligned "Passcode…", then a
+    // right-aligned OK/Cancel — puts three consecutive rows under each other with no two of them sharing a
+    // centre. Scoring by centres alone, every column of the grid rejected the row beneath it as "more
+    // sideways than down", and the page came apart: Down did nothing at all from seven of eight columns.
+    {
+        // An overlay left open by a FAILING earlier section would swallow every key routed here (routeKey
+        // hands the topmost overlay input first), turning this section's report into "nothing is reachable"
+        // no matter what the ring does. Start from a clean stack so a failure here names its own cause.
+        for (int i = 0; i < 8 && NavOverlay::topmost(); ++i) NavOverlay::topmost()->dismiss(-1);
+        pump();
+
+        ProfileStore::add(QStringLiteral("Kid"), QString::fromUtf8("🐱"));
+        ProfileStore::add(QStringLiteral("Grown-up"), QString::fromUtf8("🦊"));
+        const QString kidId = ProfileStore::list().first().id;
+
+        // MainWindow::showDialogPanel's shape, replicated: a dark header (‹ Back + title) over a
+        // widget-resizable QScrollArea whose content carries the embedded dialog. The ring's container is
+        // the whole panel page, header included — so the Back button is a ring member here exactly as it is
+        // in the app, and the geometry the picker is laid out into is the real one.
+        auto* host = new QWidget(&win);
+        auto* pv = new QVBoxLayout(host);
+        pv->setContentsMargins(0, 0, 0, 0);
+        pv->setSpacing(0);
+        auto* header = new QWidget(host);
+        auto* phl = new QHBoxLayout(header);
+        phl->setContentsMargins(16, 10, 16, 10);
+        auto* hdr = new QPushButton(QStringLiteral("‹ Back"), header);
+        hdr->setStyleSheet(QStringLiteral("QPushButton{padding:10px 18px;font-size:16px;font-weight:bold;}"));
+        phl->addWidget(hdr);
+        phl->addSpacing(12);
+        phl->addWidget(new QLabel(QStringLiteral("Profiles"), header), 1);
+        pv->addWidget(header);
+        auto* scroll = new QScrollArea(host);
+        scroll->setWidgetResizable(true);
+        scroll->setFrameShape(QFrame::NoFrame);
+        auto* content = new QWidget;
+        auto* cv = new QVBoxLayout(content);
+        cv->setContentsMargins(28, 24, 28, 24);
+        cv->setSpacing(14);
+        auto* dlg = new ProfileDialog(false, [](const QString&) { return true; }, content);
+        dlg->setWindowFlags(Qt::Widget);
+        cv->addWidget(dlg);
+        cv->addStretch(1);
+        scroll->setWidget(content);
+        pv->addWidget(scroll, 1);
+        host->setGeometry(0, 0, 1280, 760);
+        host->show(); host->activateWindow();
+        pump();
+
+        // Reach the picker: click the ✎ on the first row.
+        for (QPushButton* b : dlg->findChildren<QPushButton*>())
+            if (b->text() == QString::fromUtf8("✎")) { b->click(); break; }
+        pump(); pump();
+
+        NavRing ring(host);
+        ctx.setActiveRing(&ring);
+        pump();
+
+        auto named = [&](const QString& t) -> QWidget* {
+            for (QWidget* w : ring.widgets())
+                if (auto* b = qobject_cast<QAbstractButton*>(w); b && b->text() == t) return w;
+            return nullptr;
+        };
+        auto press = [&](QWidget* from, int key) -> QString {
+            if (!from) return QStringLiteral("<missing>");
+            from->setFocus(Qt::OtherFocusReason);
+            pump();
+            ctx.routeKey(key);
+            pump();
+            QWidget* now = QApplication::focusWidget();
+            if (now == from) return QStringLiteral("<unchanged>");
+            auto* b = qobject_cast<QAbstractButton*>(now);
+            return b ? b->text() : QStringLiteral("<non-button>");
+        };
+
+        QWidget* pcBtn = named(QStringLiteral("Passcode…"));
+        QWidget* okBtn = named(QStringLiteral("OK"));
+        CHECK(pcBtn && okBtn && named(QStringLiteral("Cancel")),
+              "the picker page really is up (Passcode… / OK / Cancel are ring members)");
+
+        // a) NOTHING on this page is a D-pad orphan. The closure, not a walk: the defect that prompted this
+        //    section hid from a walk that only ever pressed Down and Up. (It was NOT strictly unreachable —
+        //    a Left from the bottom-LEFT icon did land on it — which is exactly why the assertion below is
+        //    about ORDER, not just reachability. Reachable-by-a-press-nobody-would-try is not reachable.)
+        const QVector<QWidget*> orphans = navUnreachable(ring, ctx);
+        for (QWidget* w : orphans)
+        {
+            auto* b = qobject_cast<QAbstractButton*>(w);
+            std::fprintf(stderr, "NAV-FAIL picker: no arrow key reaches %s '%s'\n",
+                         w->metaObject()->className(),
+                         (b ? b->text() : w->objectName()).toUtf8().constData());
+        }
+        failures += orphans.size();
+
+        // b) Down off the BOTTOM ROW OF THE ICON GRID reaches the row beneath it — from every one of the
+        //    eight columns, not just the one whose centre happens to line up. This is the ProfileDialog twin
+        //    of §22(c): "Passcode…" is left-aligned in an HBox (its centre sits under column 0), so scoring
+        //    by centres alone rejected it from all eight columns — seven of which had nothing else below and
+        //    simply dead-ended, while the eighth leapt past it to OK. Rows, then columns.
+        QVector<QWidget*> icons;
+        for (QWidget* w : ring.widgets())
+            if (auto* b = qobject_cast<QPushButton*>(w); b && b->size() == QSize(42, 42)) icons.push_back(w);
+        CHECK(icons.size() == 24, "the icon grid is the expected 24 buttons");
+        const int cols = 8;
+        for (int c = 0; c < cols && icons.size() == 24; ++c)
+            CHECK(press(icons[icons.size() - cols + c], Qt::Key_Down) == QStringLiteral("Passcode…"),
+                  "Down from the icon grid's bottom row reaches Passcode… from THIS column");
+
+        // c) …and the rows below it keep going, in order, both ways. Without this the Passcode… row is a
+        //    pocket: you can get in, but OK/Cancel are only reachable by going back UP into the grid first.
+        CHECK(press(pcBtn, Qt::Key_Down) == QStringLiteral("OK"), "Down from Passcode… reaches the OK/Cancel row");
+        CHECK(press(okBtn, Qt::Key_Right) == QStringLiteral("Cancel"), "Right from OK reaches Cancel");
+        CHECK(press(okBtn, Qt::Key_Up) == QStringLiteral("Passcode…"),
+              "Up from OK comes back to Passcode… — the hop is not one-way, and it skips no row");
+        CHECK(press(pcBtn, Qt::Key_Up) == QString::fromUtf8("🐝"),
+              "Up from Passcode… lands on the icon row directly above, not the one above that");
+
+        ctx.setActiveRing(nullptr);
+        (void)kidId;
+        delete host;
+        pump();
     }
 
     if (failures) { std::fprintf(stderr, "NAV-FAIL %d check(s) failed\n", failures); return 1; }
