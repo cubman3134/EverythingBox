@@ -23,6 +23,50 @@ Design spec: [`docs/superpowers/specs/2026-07-29-discord-community-design.md`](.
 
 ---
 
+## Status — Tasks 1–4 built; the repo is the source of truth
+
+Tasks 1–4 are **done** and live at `C:/Users/cubma/everythingbox-discord` (local
+commits only — nothing is pushed, because the GitHub repo does not exist yet).
+48 tests pass under `node --test`.
+
+**The code listings in Tasks 1–4 below are the starting point, not the shipped
+code.** Three review rounds found real defects in them, and the repo has since
+diverged. Read the repo, not these listings. What changed and why:
+
+- **`plan.js` compared the config name against the name Discord *stored*.**
+  Discord slugifies text, announcement, forum and media channel names
+  (lowercase, whitespace to dashes), so any name not already in that form never
+  re-matched and created a duplicate **every run** — unbounded, in a tool that
+  by design cannot delete. Fixed by comparing on a normalized key. The property
+  worth testing here turned out to be **convergence** (re-planning against the
+  post-apply state emits zero operations), not "the operations look right": the
+  original five tests all passed while the thing duplicated forever.
+- **`type` was a patchable field**, emitting PATCHes Discord rejects with 400
+  forever; it moved into the match predicate instead.
+- **`payload` aliased the caller's config**, so attaching `parent_id` would have
+  corrupted `server.json` in memory. Now `structuredClone`.
+- **Three of the five AutoMod phrases could never fire.** Discord honours `*`
+  only as a leading or trailing wildcard; mid-phrase it is a literal. They moved
+  to `regex_patterns`.
+- **The Moderator bitfield was wrong** — no `MODERATE_MEMBERS` (no timeout) and
+  no `MANAGE_THREADS`, which mattered because the whole support system is a
+  forum. Recomputed, and `MANAGE_ROLES` deliberately dropped as a
+  privilege-escalation path.
+- **A non-numeric `Retry-After`** (an RFC-legal HTTP-date, which Cloudflare
+  sends) became `NaN`, and `setTimeout(NaN)` fires in 1 ms — 6 requests in 63 ms
+  while already rate-limited.
+- **Duplicate category names never converged**, because `plan.js` took the first
+  match and `apply.js` the last.
+- Added beyond the plan: a COMMUNITY-feature preflight, `readToken` tests,
+  proactive rate-limit handling, numeric Discord error codes in failures, and
+  allowlisted create bodies.
+
+**Tasks 5–7 are unstarted and blocked on the prerequisites below.** Their
+listings are unaffected by the above, except that Task 5's `--dry-run` step now
+also reports a COMMUNITY warning when the guild lacks the feature.
+
+---
+
 ## Prerequisites (manual — the user does these, not the implementer)
 
 These require account access and cannot be scripted. Tasks 1–4 can be written before they are done, but Task 5 (apply) blocks on all of them.
