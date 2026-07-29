@@ -180,6 +180,36 @@ int main(int argc, char** argv)
         CHECK(entryOptions(true, false, /*restricted*/ false).offerTimedReset);
     }
 
+    // ---- 5b. restrictedChangeGate: the flag that protects the no-self-reset rule -------------------
+    // Fix round 2, finding 2. §5 withholds the timed reset from restricted profiles — which makes the
+    // `restricted` flag itself credential-bearing, because clearing it hands that reset straight back.
+    // Un-gated, the entire kids rule was "enter any unlocked profile -> Settings -> un-restrict -> wait".
+    {
+        using G = RestrictedGate;
+        // A parental PIN answers it in BOTH directions, whatever the passcode state.
+        for (int on = 0; on <= 1; ++on)
+            for (int pass = 0; pass <= 1; ++pass)
+                CHECK(restrictedChangeGate(/*parentalPinSet*/ true, on != 0, pass != 0) == G::ParentalPin);
+
+        // THE anti-bypass: no PIN, turning it OFF, profile has a passcode -> that profile's own code.
+        CHECK(restrictedChangeGate(false, /*turningOn*/ false, /*hasPasscode*/ true) == G::ProfilePasscode);
+        // ...and it is specifically the OFF direction that costs. Turning it ON takes no route away from
+        // anyone who holds the code, so charging for it would be friction with nothing behind it.
+        CHECK(restrictedChangeGate(false, /*turningOn*/ true, /*hasPasscode*/ true) == G::Free);
+        // No passcode on the profile: there is no reset to bypass, so the flag is an ordinary preference
+        // again and BOTH directions stay free — the pre-existing behaviour, unchanged.
+        CHECK(restrictedChangeGate(false, false, /*hasPasscode*/ false) == G::Free);
+        CHECK(restrictedChangeGate(false, true,  /*hasPasscode*/ false) == G::Free);
+
+        // The property the whole finding reduces to, stated directly: a change that would RESTORE the timed
+        // reset can never be free. Derived from entryOptions rather than restated, so the two rules are
+        // pinned together — if either drifts, this fails.
+        const bool resetAfterUnrestrict =
+            entryOptions(/*hasPasscode*/ true, /*parentalPinSet*/ false, /*restricted*/ false).offerTimedReset;
+        CHECK(resetAfterUnrestrict);   // un-restricting really does hand the reset back...
+        CHECK(restrictedChangeGate(false, false, true) != G::Free);   // ...so it must cost something
+    }
+
     // ---- 6. Rate limiting --------------------------------------------------------------------------
     const qint64 t0 = 1700000000000LL;   // a fixed clock; nothing here reads the real one
     {

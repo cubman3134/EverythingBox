@@ -76,6 +76,24 @@ namespace ProfilePasscode
     };
     EntryOptions entryOptions(bool hasPasscode, bool parentalPinSet, bool restricted);
 
+    // ---- Who may change a profile's `restricted` flag ---------------------------------------------
+    // The flag stopped being a preference the moment entryOptions started withholding the timed reset from
+    // restricted profiles: turning it OFF hands that reset back, so an un-gated toggle IS a passcode-reset
+    // bypass — "enter any unlocked profile, Settings, un-restrict the kid, wait sixty seconds". The rule
+    // lives HERE, next to the entryOptions rule it protects, so the two cannot drift and so both settings
+    // builders ask the same question of one answer.
+    //
+    //   * a parental PIN exists -> the PIN, in BOTH directions. It is the household's answer to "who decides
+    //     what a kids profile is", and clearing the flag is as much that question as setting it.
+    //   * no PIN, turning it OFF on a profile that HAS a passcode -> THAT PROFILE'S PASSCODE. Refusing
+    //     outright would be a harder lock than the one being protected (a PIN-less household could never
+    //     un-restrict anything again); allowing it is the bypass. Charging the passcode makes un-restricting
+    //     cost exactly what the reset it restores would have cost — so it gives a person who can already
+    //     open the profile nothing new, and gives a person who cannot nothing at all.
+    //   * otherwise -> free, exactly as before. No reset exists to bypass.
+    enum class RestrictedGate { Free, ParentalPin, ProfilePasscode };
+    RestrictedGate restrictedChangeGate(bool parentalPinSet, bool turningOn, bool hasPasscode);
+
     // ---- Rate limiting ----------------------------------------------------------------------------
     // Per-profile, PER-DEVICE and PERSISTED: an in-memory counter is reset by quitting the app, which is one
     // keypress away on a TV remote and would make the limit decorative.
