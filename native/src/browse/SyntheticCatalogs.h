@@ -97,11 +97,13 @@ namespace browse
     // The single PC Games folder: ONE MediaItem per game, with every way to launch it carried as a source on
     // that item (MediaItem::pcSources). It replaces the four per-launcher folders above, where the same game
     // appeared up to five times with unrelated ids. Pure, like every builder here: plain lists in, a
-    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::mergeKey (pure)
+    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::itemId (pure)
     // and never consults the user-override ini, which is a store.
     //
-    // Per item: id = "pcgame:" + pcgame::mergeKey(title, igdbId) (no double "pcgame:" when mergeKey already
-    // returns its own namespaced fallback key); mime = "pcgame", the ONE routing kind replacing steamgame /
+    // Per item: id = pcgame::itemId(title) — the SAME function pcgame::remapTable moves records onto, and
+    // the only place that id is built. The two used to compute it separately and could disagree, which
+    // silently strands the user's favourites, marks and play time under a key nothing reads; probe_browse
+    // now pins them equal. mime = "pcgame", the ONE routing kind replacing steamgame /
     // epicgame / goggame / battlenetgame; url EMPTY, because which copy runs is decided at activation.
     //
     // `downloaded` is the already-built source list for locally downloaded copies (PcGameStore). Its `label`

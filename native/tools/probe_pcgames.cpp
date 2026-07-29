@@ -316,8 +316,7 @@ int main(int argc, char** argv)
         lib << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"))
             << qMakePair(QStringLiteral("gog:1207658930"), QStringLiteral("Hades"))
             << qMakePair(QStringLiteral("steam:2074920"), QStringLiteral("Hades II"));
-        QHash<QString, QString> igdb;              // title -> igdb id (empty here: title fallback)
-        const QHash<QString, QString> t = remapTable(lib, igdb);
+        const QHash<QString, QString> t = remapTable(lib);
 
         // Both Hades entries land on the SAME merged id...
         CHECK(t.value(QStringLiteral("steam:1145360")) == t.value(QStringLiteral("gog:1207658930")));
@@ -328,7 +327,7 @@ int main(int argc, char** argv)
         // IDEMPOTENT: feeding the already-merged ids back yields ids that map to themselves.
         QVector<QPair<QString, QString>> again;
         again << qMakePair(t.value(QStringLiteral("steam:1145360")), QStringLiteral("Hades"));
-        const QHash<QString, QString> t2 = remapTable(again, igdb);
+        const QHash<QString, QString> t2 = remapTable(again);
         CHECK(t2.value(t.value(QStringLiteral("steam:1145360")))
               == t.value(QStringLiteral("steam:1145360")));
 
@@ -337,12 +336,45 @@ int main(int argc, char** argv)
         CHECK(!t.contains(QStringLiteral("steam:999999")));
         CHECK(t.value(QStringLiteral("steam:999999")).isEmpty());   // value() default, not an entry
 
-        // The merged id is the one the CATALOG builds, not a private shape: "pcgame:" + mergeKey, with
-        // no second prefix when mergeKey already returned a namespaced raw-title fallback. Records moved
-        // to any other spelling are records nothing will ever look for again.
-        CHECK(t.value(QStringLiteral("steam:2074920"))
-              == QStringLiteral("pcgame:") + mergeKey(QStringLiteral("Hades II"), QString()));
+        // The merged id is the one the CATALOG builds, and it is built by the SAME function the catalog
+        // calls — pcgame::itemId. Records moved to any other spelling are records nothing will ever look
+        // for again, so this equality is the whole point of that function existing.
+        CHECK(t.value(QStringLiteral("steam:2074920")) == itemId(QStringLiteral("Hades II")));
         CHECK(!t.value(QStringLiteral("steam:2074920")).startsWith(QStringLiteral("pcgame:pcgame:")));
+        // (probe_browse pins the other half: that the catalog builder's tile ids and these destinations
+        // are the same strings for the same library. It is the only probe that can build both sides.)
+    }
+
+    // ---- 7c. pcgame::itemId is the ONE id builder, and it is TITLE-ONLY on purpose ------------------
+    // The remap used to take a title->igdb map and prefer the id it supplied, while the catalog keyed on
+    // the title alone; a populated map would have moved every record onto an id no lookup ever performs.
+    // The parameter is gone — a caller with metadata gets a compile error, not silent data loss — and the
+    // decision that the id is title-only is recorded HERE so that reversing it has to reckon with a test.
+    {
+        // Exactly "pcgame:" + the title-only merge key, with no second prefix when mergeKey already
+        // returned its namespaced raw-title fallback.
+        CHECK(itemId(QStringLiteral("Hades II"))
+              == QStringLiteral("pcgame:") + mergeKey(QStringLiteral("Hades II"), QString()));
+        CHECK(itemId(QStringLiteral("GOTY")) == mergeKey(QStringLiteral("GOTY"), QString()));
+        CHECK(!itemId(QStringLiteral("GOTY")).startsWith(QStringLiteral("pcgame:pcgame:")));
+        // Editions collapse, sequels do not — the same rules as the merge key, reached through the id.
+        CHECK(itemId(QStringLiteral("Portal 2"))
+              == itemId(QStringLiteral("Portal 2 - Game of the Year Edition")));
+        CHECK(itemId(QStringLiteral("Hades")) != itemId(QStringLiteral("Hades II")));
+        // Whitespace is not identity: the catalog trims before grouping, so the id function must too, or
+        // one launcher's padded spelling becomes a second tile with its own records.
+        CHECK(itemId(QStringLiteral("  Hades  ")) == itemId(QStringLiteral("Hades")));
+        // Nothing to group on -> NO id (rule 1), never the bare "pcgame:rawtitle/" bucket that every
+        // nameless entry would otherwise share.
+        CHECK(itemId(QString()).isEmpty());
+        CHECK(itemId(QStringLiteral("   ")).isEmpty());
+        // And the remap agrees, because it does not compute this itself.
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:620"), QStringLiteral("Portal 2"))
+            << qMakePair(QStringLiteral("gog:42"),    QStringLiteral("  Portal 2  "));
+        const QHash<QString, QString> t = remapTable(lib);
+        CHECK(t.value(QStringLiteral("steam:620")) == itemId(QStringLiteral("Portal 2")));
+        CHECK(t.value(QStringLiteral("gog:42"))    == itemId(QStringLiteral("Portal 2")));
     }
 
     // ---- 7b. the two mutations the §7 fixture cannot actually feel -----------------------------
@@ -362,7 +394,7 @@ int main(int argc, char** argv)
             << qMakePair(QStringLiteral("steam:620"),  QStringLiteral("Portal 2"))
             << qMakePair(QStringLiteral("gog:1207659110"),
                          QStringLiteral("Portal 2 - Game of the Year Edition"));
-        const QHash<QString, QString> t = remapTable(lib, {});
+        const QHash<QString, QString> t = remapTable(lib);
 
         // #10: an entry with nothing to group on is ABSENT — not present-with-an-empty-value. The
         // distinction is the whole safety property: applyRemap would hash "" and rewrite the record
@@ -377,11 +409,9 @@ int main(int argc, char** argv)
         // no longer builds.
         CHECK(t.value(QStringLiteral("steam:620")) == t.value(QStringLiteral("gog:1207659110")));
         CHECK(!t.value(QStringLiteral("steam:620")).isEmpty());
-        // An igdb id still wins outright over the title when one is attached.
-        QHash<QString, QString> igdb;
-        igdb.insert(QStringLiteral("Portal 2"), QStringLiteral("igdb:7"));
-        const QHash<QString, QString> ti = remapTable(lib, igdb);
-        CHECK(ti.value(QStringLiteral("steam:620")) == QStringLiteral("pcgame:igdb:7"));
+        // (The old "an igdb id wins outright" check lived here. It was the bug: it asserted the remap
+        // building an id — "pcgame:igdb:7" — that pcGamesCatalog never builds, so passing it meant the
+        // records were unreachable. See §7c for what replaced it, and the header for why.)
     }
 
     // ---- 8. applyRemap: the records follow the id, in every store and every profile -------------
@@ -393,7 +423,7 @@ int main(int argc, char** argv)
 
         QVector<QPair<QString, QString>> lib;
         lib << qMakePair(QStringLiteral("steam:2074920"), QStringLiteral("Hades II"));
-        const QHash<QString, QString> t = remapTable(lib, {});
+        const QHash<QString, QString> t = remapTable(lib);
         const QString oldId = QStringLiteral("steam:2074920");
         const QString newId = t.value(oldId);
         CHECK(!newId.isEmpty());
@@ -466,7 +496,7 @@ int main(int argc, char** argv)
         QVector<QPair<QString, QString>> lib;
         lib << qMakePair(steamId, QStringLiteral("Hades"))
             << qMakePair(gogId,   QStringLiteral("Hades"));
-        const QHash<QString, QString> t = remapTable(lib, {});
+        const QHash<QString, QString> t = remapTable(lib);
         const QString newId = t.value(steamId);
         CHECK(newId == t.value(gogId));       // the premise: both really do collide
         CHECK(!newId.isEmpty());
@@ -577,7 +607,7 @@ int main(int argc, char** argv)
         {
             QVector<QPair<QString, QString>> merged;
             merged << qMakePair(newId, QStringLiteral("Hades"));
-            const QHash<QString, QString> t3 = remapTable(merged, {});
+            const QHash<QString, QString> t3 = remapTable(merged);
             CHECK(t3.value(newId) == newId);
             reseatRemapStore();
             applyRemap(t3);
@@ -622,12 +652,139 @@ int main(int argc, char** argv)
         CHECK(recGet(QStringLiteral("marks/default/items/") + md5Full(keep)).toString() == blob);
     }
 
+    // ---- 12. a PARTIALLY WRITTEN playstats record must not be re-summed on the retry ---------------
+    // The one place idempotence could break, and only on the path nobody exercises. The playstats move
+    // writes THREE keys from a SUM, and they cannot fail together: `total` (= a+b) lands, `sessions`
+    // hits a full or read-only ini, and the pass gives up with the source still in place. Rule 2 holds —
+    // nothing is lost — but the destination now holds a+b while the source still holds b, so a retry
+    // that re-summed would write a+2b, and again on every refresh after that. The user's play time
+    // inflates, silently, forever.
+    //
+    // The state below IS that state, built by hand: it is exactly what the ini contains after the
+    // marker was written and `total` committed and `sessions` did not. Simulating it needs no seam and
+    // no fault injection — the record store is a plain ini and a half-written record is a describable
+    // arrangement of keys, so the probe writes the arrangement directly rather than trying to make a
+    // real write fail.
+    //
+    // The marker key is rebuilt here from its documented composition rather than by calling into
+    // PcGameRemap, for the same reason the three record hashes are: a probe that asked the production
+    // code where its journal lives could not notice the journal moving.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-partial.ini"));
+        QFile::remove(gRecIni);
+
+        const QString oldId = QStringLiteral("steam:1145360");
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(oldId, QStringLiteral("Hades"));
+        const QHash<QString, QString> t = remapTable(lib);
+        const QString newId = t.value(oldId);
+        CHECK(newId == itemId(QStringLiteral("Hades")));
+
+        const QString cont = QStringLiteral("playstats/default/devA");
+        const QString sp   = cont + QLatin1Char('/') + sha1Full(oldId);
+        const QString dp   = cont + QLatin1Char('/') + sha1Full(newId);
+        // PcGameRemap.cpp journalKey(): "pcgameremap/pending/" + md5(container|srcSha1|dstSha1).
+        const QString jk = QStringLiteral("pcgameremap/pending/")
+                         + md5Full(cont + QLatin1Char('|') + sha1Full(oldId) + QLatin1Char('|')
+                                 + sha1Full(newId));
+
+        // The source, still intact (the failed pass never removed it).
+        recSet(sp + QStringLiteral("/total"), 600);
+        recSet(sp + QStringLiteral("/sessions"), 3);
+        recSet(sp + QStringLiteral("/last"), 10);
+        // The destination the failed pass was merging INTO had 1200/2/50, so the sums are 1800/5/50...
+        // ...and `total` is the one leaf that made it to disk before the write error.
+        recSet(dp + QStringLiteral("/total"), 1800);
+        recSet(dp + QStringLiteral("/sessions"), 2);
+        recSet(dp + QStringLiteral("/last"), 50);
+        // The marker the pass wrote BEFORE touching any of that, carrying the absolute values.
+        recSet(jk, QStringLiteral("{\"total\":1800,\"sessions\":5,\"last\":50}"));
+
+        reseatRemapStore();
+        applyRemap(t);
+
+        // THE CHECK: 1800, not 2400. A re-sum would read the already-committed total and add the source
+        // to it a second time; committing the marker's absolute values cannot.
+        CHECK(recGet(dp + QStringLiteral("/total")).toLongLong() == 1800);
+        // ...and the leaf that never landed is finished off, so the record is whole again.
+        CHECK(recGet(dp + QStringLiteral("/sessions")).toLongLong() == 5);
+        CHECK(recGet(dp + QStringLiteral("/last")).toLongLong() == 50);
+        // The source is only now removed, and the marker with it — a completed move leaves no journal.
+        CHECK(!recHas(sp + QStringLiteral("/total")));
+        CHECK(!recHas(jk));
+
+        // And the pass after THAT is an ordinary no-op: with the source gone there is nothing to add,
+        // which is the property the every-refresh call site depends on.
+        reseatRemapStore();
+        applyRemap(t);
+        CHECK(recGet(dp + QStringLiteral("/total")).toLongLong() == 1800);
+        CHECK(recGet(dp + QStringLiteral("/sessions")).toLongLong() == 5);
+    }
+
+    // ---- 13. a resume record moves WHOLE, never leaf-by-leaf onto the loser's leftovers -------------
+    // The winner of the newest-wins comparison replaces the destination outright. Copying only the
+    // leaves the winner HAS leaves the loser's stale ones standing beside them, and the resume bar is
+    // computed from pos/dur TOGETHER: a new pos of 30 next to an inherited dur of 100 draws the bar at
+    // 30% of a duration that position was never 30% of. The title goes the same way — the row would name
+    // the wrong thing.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume.ini"));
+        QFile::remove(gRecIni);
+
+        const QString oldId = QStringLiteral("steam:1145360");
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(oldId, QStringLiteral("Hades"));
+        const QHash<QString, QString> t = remapTable(lib);
+        const QString newId = t.value(oldId);
+        const QString sr = QStringLiteral("resume/") + md5Short(oldId);
+        const QString dr = QStringLiteral("resume/") + md5Short(newId);
+
+        // The destination holds a COMPLETE older record; the source is newer but carries pos+ts only.
+        recSet(dr + QStringLiteral("/pos"), 10.0);
+        recSet(dr + QStringLiteral("/dur"), 100.0);
+        recSet(dr + QStringLiteral("/ts"), 100);
+        recSet(dr + QStringLiteral("/title"), QStringLiteral("stale"));
+        recSet(sr + QStringLiteral("/pos"), 30.0);
+        recSet(sr + QStringLiteral("/ts"), 200);
+
+        reseatRemapStore();
+        applyRemap(t);
+
+        CHECK(recGet(dr + QStringLiteral("/pos")).toDouble() == 30.0);
+        CHECK(recGet(dr + QStringLiteral("/ts")).toLongLong() == 200);
+        // The two leaves the winner does not carry are GONE, not inherited from the loser.
+        CHECK(!recHas(dr + QStringLiteral("/dur")));
+        CHECK(!recHas(dr + QStringLiteral("/title")));
+        CHECK(!recHas(sr + QStringLiteral("/pos")));
+
+        // The mirror: when the winner DOES carry every leaf, they all arrive. (Without this, "clear the
+        // destination" and "clear the destination and copy nothing" look the same.)
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume2.ini"));
+        QFile::remove(gRecIni);
+        recSet(dr + QStringLiteral("/pos"), 10.0);
+        recSet(dr + QStringLiteral("/dur"), 100.0);
+        recSet(dr + QStringLiteral("/ts"), 100);
+        recSet(sr + QStringLiteral("/pos"), 30.0);
+        recSet(sr + QStringLiteral("/dur"), 60.0);
+        recSet(sr + QStringLiteral("/ts"), 200);
+        recSet(sr + QStringLiteral("/title"), QStringLiteral("fresh"));
+        reseatRemapStore();
+        applyRemap(t);
+        CHECK(recGet(dr + QStringLiteral("/pos")).toDouble() == 30.0);
+        CHECK(recGet(dr + QStringLiteral("/dur")).toDouble() == 60.0);
+        CHECK(recGet(dr + QStringLiteral("/title")).toString() == QStringLiteral("fresh"));
+        CHECK(recGet(dr + QStringLiteral("/ts")).toLongLong() == 200);
+    }
+
     // Leave nothing behind (issue #42): every scratch ini this run created goes, so the next run — and
     // any other probe sharing build/Release — starts from a clean file.
     QFile::remove(ini);
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-collide.ini")));
     QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-empty.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-partial.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-resume2.ini")));
 
     if (failures == 0) { std::puts("PCGAMES-OK"); return 0; }
     std::fprintf(stderr, "PCGAMES: %d check(s) failed\n", failures);

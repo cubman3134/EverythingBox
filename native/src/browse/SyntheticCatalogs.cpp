@@ -383,18 +383,18 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
     auto add = [&groups, &byId](const QString& rawTitle, int rank, const pcgame::PcGameSource& s)
     {
         const QString title = rawTitle.trimmed();
-        // Nothing to group on. mergeKey's raw-title fallback would hand every nameless entry the SAME key
-        // ("pcgame:rawtitle/"), fusing unrelated games into one tile — the exact harm the merge exists to
-        // avoid — so a nameless copy is dropped instead.
-        if (title.isEmpty()) return;
 
-        // The merged identity. mergeKey already returns a NAMESPACED key ("pcgame:rawtitle/…") for a title
-        // that normalises to nothing, so prefixing unconditionally would produce "pcgame:pcgame:rawtitle/…".
-        // A normalised title can never contain ':' (normalizeTitle strips all punctuation), so this test is
-        // exact rather than a heuristic.
-        const QString key = pcgame::mergeKey(title, QString());
-        const QString id  = key.startsWith(QStringLiteral("pcgame:")) ? key
-                                                                      : (QStringLiteral("pcgame:") + key);
+        // The merged identity — from pcgame::itemId and NOWHERE else. This id is what the user's
+        // favourite, marks, play time and resume position are stored under, and PcGameRemap moves those
+        // records onto the id that same function returns; building it here by hand is how the two came
+        // apart before, so the arithmetic lives in one place and both sides call it. probe_browse pins
+        // the equality.
+        //
+        // An empty id means "nothing to group on" (a nameless copy), and such a copy is DROPPED rather
+        // than bucketed: every nameless entry would otherwise share one id and fuse into a single tile.
+        const QString id = pcgame::itemId(title);
+        if (id.isEmpty()) return;
+
         int idx = byId.value(id, -1);
         if (idx < 0)
         {

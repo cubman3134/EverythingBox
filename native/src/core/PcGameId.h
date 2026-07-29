@@ -36,6 +36,31 @@ namespace pcgame
     // other empty-normalising entry landing in one bucket. Callers do not have to special-case it.
     QString mergeKey(const QString& title, const QString& igdbId);
 
+    // THE PC-GAME ITEM ID. The single place that turns a game's title into the id everything else keys
+    // on — the catalog tile, and therefore the user's favourite, hidden/completion/tags, play time,
+    // consumption seconds and resume position, all of which are stored under a hash of THIS string.
+    //
+    // It exists because two callers used to build it independently (pcGamesCatalog and
+    // pcgame::remapTable) from the same ingredients but not the same arguments, and the failure mode of
+    // them disagreeing is invisible: the remap moves every record onto an id no lookup ever performs, so
+    // the user's stars and hours simply stop existing with nothing logged. Two functions that must agree
+    // by convention is how that happened, so there is now one function and both call it. Do not inline
+    // "pcgame:" + mergeKey(...) anywhere; call this.
+    //
+    // DELIBERATELY TITLE-ONLY, i.e. NOT igdb-aware. mergeKey will key on an igdb id when handed one, and
+    // doing that here would be a real improvement in one respect — it is what separates "Prey (2006)"
+    // from "Prey (2017)", which the year strip otherwise fuses. It is rejected anyway, on two grounds:
+    //   * NOTHING SUPPLIES ONE at the point the id is minted. The catalog builder is given four launcher
+    //     scans and a downloads list; no metadata resolver runs there, and none can, because the id has
+    //     to exist before the tile it would fetch metadata for.
+    //   * AN ID MUST NOT DEPEND ON A NETWORK RESULT. Metadata resolution is partial and varies run to
+    //     run — a game resolved today and unresolved tomorrow would change identity between two refreshes
+    //     and strand its own records, which is precisely the harm this whole unit exists to prevent. An
+    //     id has to be a pure, total function of what the local scan yields.
+    // Returns an EMPTY string for a title with nothing to group on; callers treat that as "skip", never
+    // as a key (see rule 1 in PcGameRemap.h).
+    QString itemId(const QString& title);
+
     // Are these the same game? A user override wins; then, when BOTH sides carry an igdb id, that
     // decides (equal ids -> same, different ids -> NOT same, even if the titles agree); otherwise the
     // normalised titles decide. A missing id on one side is not a mismatch — it just means fall back.

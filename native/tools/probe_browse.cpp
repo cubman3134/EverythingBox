@@ -5,6 +5,7 @@
 #include <QDateTime>
 #include "../src/browse/SyntheticCatalogs.h"
 #include "../src/browse/SearchAggregator.h"
+#include "../src/core/PcGameRemap.h"   // the drift assertion: catalog item id == remap destination
 #include "../src/core/PlaylistStore.h"
 
 static int fails = 0;
@@ -280,6 +281,48 @@ int main(int argc, char** argv)
         const MediaCatalog none = browse::pcGamesCatalog({}, {}, {}, {}, {}, QString(), QString(), art);
         CHECK(none.items.isEmpty() && !none.title.isEmpty() && !none.hasMore,
               "pcgames: empty input -> empty catalog with a valid title");
+
+        // ---- THE DRIFT ASSERTION: the catalog's item id IS the remap's destination -----------------
+        // Two different files decide one thing, and the user's entire per-item history rides on them
+        // agreeing: the catalog decides which key a tile's favourite / marks / play time are READ under,
+        // and PcGameRemap decides which key those records are MOVED to. Disagree by one character and
+        // every migrated record lands where nothing will ever look for it — silently, and strictly worse
+        // than not migrating at all. This is the one probe that can build BOTH sides, so the property is
+        // pinned here rather than left to a reviewer noticing.
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : st)     lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            for (const EpicGame& g : ep)      lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
+            for (const GogGame& g : gg)       lib << qMakePair(QStringLiteral("gog:") + g.id, g.name);
+            for (const BattleNetGame& g : bn) lib << qMakePair(QStringLiteral("bnet:") + g.name, g.name);
+            for (const pcgame::PcGameSource& s : dl)
+                lib << qMakePair(QStringLiteral("dl:") + s.addonItemId, s.label);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+
+            // Every destination the remap would move a record TO is an id the catalog actually builds.
+            bool everyDestReachable = !t.isEmpty();
+            for (auto it = t.cbegin(); it != t.cend(); ++it)
+            {
+                bool built = false;
+                for (const MediaItem& i : pc.items) if (i.id == it.value()) { built = true; break; }
+                if (!built) everyDestReachable = false;
+            }
+            CHECK(everyDestReachable,
+                  "pcgames: every remap destination is an id the catalog actually builds");
+
+            // ...and the mirror: every tile the catalog builds is a destination the remap would reach.
+            // Without this half a remap that mapped everything onto ONE valid id would still pass above.
+            bool everyTileReached = !pc.items.isEmpty();
+            for (const MediaItem& i : pc.items)
+            {
+                bool reached = false;
+                for (auto it = t.cbegin(); it != t.cend(); ++it)
+                    if (it.value() == i.id) { reached = true; break; }
+                if (!reached) everyTileReached = false;
+            }
+            CHECK(everyTileReached,
+                  "pcgames: every catalog tile id is a destination the remap would move records to");
+        }
     }
 
     // ---- pcGamesCatalog: two copies from the SAME launcher must not read as identical picker rows ---------
@@ -356,8 +399,8 @@ int main(int argc, char** argv)
                                                        [](const QVector<pcgame::PcGameSource>&) {
                                                            return QString();
                                                        });
-        // mergeKey ALREADY namespaces its raw-title fallback, so prefixing unconditionally would emit
-        // "pcgame:pcgame:rawtitle/goty" — a different id from the one every per-item store will key on.
+        // mergeKey ALREADY namespaces its raw-title fallback, so pcgame::itemId prefixing unconditionally
+        // would emit "pcgame:pcgame:rawtitle/goty" — a different id from the one every per-item store keys on.
         CHECK(pc.items.size() == 2, "pcgames: two empty-normalising titles stay two items; the nameless one is dropped");
         CHECK(pc.items.size() == 2 && pc.items[1].id == "pcgame:rawtitle/goty"
               && !pc.items[1].id.startsWith("pcgame:pcgame:"),
