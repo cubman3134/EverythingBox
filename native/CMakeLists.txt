@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.134 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.135 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -229,6 +229,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
         src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
+        src/core/PcGameRemap.cpp  src/core/PcGameRemap.h   # marks/stats/favourites follow the merged id (pc-games T3)
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -480,14 +481,21 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
 
-    # Headless test for PC-game identity + source selection (the merged PC Games folder). PcGameId.cpp
-    # is QtCore-only, so this links against Qt6::Core alone.
+    # Headless test for PC-game identity + source selection (the merged PC Games folder), and for the
+    # remap that moves the user's per-item records onto the merged id (pc-games T3). PcGameRemap works at
+    # the QSettings layer rather than through ItemMarks/ConsumptionStats/PlayStats/FavoritesStore — see the
+    # note at the top of PcGameRemap.cpp — so both units stay QtCore-only and this links against Qt6::Core
+    # alone, with no ProfileStore/Settings/Tombstones/RecentStore dragged into a probe about identity.
     add_executable(probe_pcgames tools/probe_pcgames.cpp
-        src/core/PcGameId.cpp src/core/PcGameId.h)
+        src/core/PcGameId.cpp    src/core/PcGameId.h
+        src/core/PcGameRemap.cpp src/core/PcGameRemap.h)
     target_include_directories(probe_pcgames PRIVATE src src/core)
     # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn /
     # probe_passcode): the alias override store persists, so without a scratch ini a run reads back what
-    # the PREVIOUS run wrote and the probe stops being repeatable.
+    # the PREVIOUS run wrote and the probe stops being repeatable. PcGameRemap gates its own seam on the
+    # SAME define, and needs it for the harder reason — its store is the real everythingbox.ini, which on
+    # desktop lives next to the exe (issue #42), so an un-redirected run would write records into
+    # build/Release and leave them for the next one.
     target_compile_definitions(probe_pcgames PRIVATE EB_PCGAMEID_TEST_SEAM)
     target_link_libraries(probe_pcgames PRIVATE Qt6::Core)
 

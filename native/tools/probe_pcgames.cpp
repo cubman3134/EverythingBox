@@ -10,11 +10,21 @@
 //
 // Prints PCGAMES-OK on success; any failure prints PCGAMES-FAIL <cond> and exits non-zero.
 #include "PcGameId.h"
+#include "PcGameRemap.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QPair>
+#include <QSettings>
 #include <QString>
+#include <QStringList>
+#include <QVariant>
 #include <QVector>
 #include <cstdio>
 
@@ -29,6 +39,84 @@ static PcGameSource src(PcGameSource::Kind k, const QString& launcher, bool read
 {
     PcGameSource s; s.kind = k; s.launcher = launcher; s.ready = ready; return s;
 }
+
+// ---- record-store fixture (§8-§11) ------------------------------------------------------------
+// The remap moves records between HASHED storage keys, so the probe has to build those keys too. It
+// recomputes each hash from the STORE it mirrors rather than calling a shared helper: the whole risk
+// in this migration is PcGameRemap hashing a key differently from ItemMarks / ConsumptionStats /
+// PlayStats / PlaybackSession, and a probe that reused the production helper could not see that — it
+// would agree with the bug. These three are the three DIFFERENT shapes in play, which is itself the
+// point: full MD5, SHA-1, and MD5 truncated to ten characters.
+static QString gRecIni;
+
+static QString md5Full(const QString& k)     // ItemMarks.cpp:46, ConsumptionStats.cpp:96
+{ return QString::fromLatin1(QCryptographicHash::hash(k.toUtf8(), QCryptographicHash::Md5).toHex()); }
+static QString sha1Full(const QString& k)    // PlayStats.cpp:29
+{ return QString::fromLatin1(QCryptographicHash::hash(k.toUtf8(), QCryptographicHash::Sha1).toHex()); }
+static QString md5Short(const QString& k)    // PlaybackSession.cpp:14 / HomeView.cpp:137
+{ return QString::fromLatin1(QCryptographicHash::hash(k.toUtf8(), QCryptographicHash::Md5).toHex().left(10)); }
+
+// A fresh QSettings per call. Deliberately wasteful: it makes every read a real read of the file on
+// disk, so nothing here can pass on a stale in-memory copy of what the probe itself wrote.
+static void     recSet(const QString& k, const QVariant& v)
+{ QSettings s(gRecIni, QSettings::IniFormat); s.setValue(k, v); s.sync(); }
+static QVariant recGet(const QString& k)
+{ QSettings s(gRecIni, QSettings::IniFormat); return s.value(k); }
+static bool     recHas(const QString& k)
+{ QSettings s(gRecIni, QSettings::IniFormat); return s.contains(k); }
+static QJsonObject recObj(const QString& k)
+{ return QJsonDocument::fromJson(recGet(k).toString().toUtf8()).object(); }
+static QJsonArray  recArr(const QString& k)
+{ return QJsonDocument::fromJson(recGet(k).toString().toUtf8()).array(); }
+
+static QString marksBlob(bool hidden, const QString& completion, const QStringList& tags, qint64 updatedAt)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("hidden"), hidden);
+    o.insert(QStringLiteral("completion"), completion);
+    QJsonArray a; for (const QString& t : tags) a.append(t);
+    o.insert(QStringLiteral("tags"), a);
+    o.insert(QStringLiteral("updatedAt"), double(updatedAt));
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+static QString statsBlob(qint64 secs, qint64 pages, qint64 lastActivity, const QString& title)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("mediaSeconds"), double(secs));
+    o.insert(QStringLiteral("pagesRead"),    double(pages));
+    o.insert(QStringLiteral("lastActivity"), double(lastActivity));
+    o.insert(QStringLiteral("title"),        title);
+    o.insert(QStringLiteral("category"),     QStringLiteral("video"));
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
+static QString favJson(const QVector<QPair<QString, qint64>>& idAndTs)
+{
+    QJsonArray arr;
+    for (const QPair<QString, qint64>& e : idAndTs)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("itemId"), e.first);
+        o.insert(QStringLiteral("title"),  e.first);
+        o.insert(QStringLiteral("ts"),     double(e.second));
+        arr.append(o);
+    }
+    return QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+}
+
+static int favIndexOf(const QJsonArray& a, const QString& id)
+{
+    for (int i = 0; i < a.size(); ++i)
+        if (a.at(i).toObject().value(QStringLiteral("itemId")).toString() == id) return i;
+    return -1;
+}
+
+// Point the remap's store at the scratch ini AND drop its cached QSettings, so the pass that follows
+// reads exactly what the probe just wrote. (QSettings notices an external change by file timestamp,
+// whose resolution is coarse enough on some filesystems to miss a write made milliseconds earlier —
+// re-seating the seam removes that from the equation entirely.)
+static void reseatRemapStore() { setRemapIniPathForTesting(gRecIni); }
 
 int main(int argc, char** argv)
 {
@@ -221,6 +309,325 @@ int main(int argc, char** argv)
         // empty -> ask (and must not index out of range)
         CHECK(pickAutoSource({}) == -1);
     }
+
+    // ---- 7. the remap table: old per-launcher id -> merged id ----------------------------------
+    {
+        QVector<QPair<QString, QString>> lib;      // (old id, title)
+        lib << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"))
+            << qMakePair(QStringLiteral("gog:1207658930"), QStringLiteral("Hades"))
+            << qMakePair(QStringLiteral("steam:2074920"), QStringLiteral("Hades II"));
+        QHash<QString, QString> igdb;              // title -> igdb id (empty here: title fallback)
+        const QHash<QString, QString> t = remapTable(lib, igdb);
+
+        // Both Hades entries land on the SAME merged id...
+        CHECK(t.value(QStringLiteral("steam:1145360")) == t.value(QStringLiteral("gog:1207658930")));
+        CHECK(!t.value(QStringLiteral("steam:1145360")).isEmpty());
+        // ...and Hades II lands on a DIFFERENT one. A table that merges these loses a game.
+        CHECK(t.value(QStringLiteral("steam:2074920")) != t.value(QStringLiteral("steam:1145360")));
+
+        // IDEMPOTENT: feeding the already-merged ids back yields ids that map to themselves.
+        QVector<QPair<QString, QString>> again;
+        again << qMakePair(t.value(QStringLiteral("steam:1145360")), QStringLiteral("Hades"));
+        const QHash<QString, QString> t2 = remapTable(again, igdb);
+        CHECK(t2.value(t.value(QStringLiteral("steam:1145360")))
+              == t.value(QStringLiteral("steam:1145360")));
+
+        // An id the table cannot map is ABSENT from the table — never mapped to empty, which a caller
+        // would happily write as a key and thereby destroy the record.
+        CHECK(!t.contains(QStringLiteral("steam:999999")));
+        CHECK(t.value(QStringLiteral("steam:999999")).isEmpty());   // value() default, not an entry
+
+        // The merged id is the one the CATALOG builds, not a private shape: "pcgame:" + mergeKey, with
+        // no second prefix when mergeKey already returned a namespaced raw-title fallback. Records moved
+        // to any other spelling are records nothing will ever look for again.
+        CHECK(t.value(QStringLiteral("steam:2074920"))
+              == QStringLiteral("pcgame:") + mergeKey(QStringLiteral("Hades II"), QString()));
+        CHECK(!t.value(QStringLiteral("steam:2074920")).startsWith(QStringLiteral("pcgame:pcgame:")));
+    }
+
+    // ---- 7b. the two mutations the §7 fixture cannot actually feel -----------------------------
+    // Measured, not assumed. Neither mutation in the brief's table fails against §7 as written:
+    //   #10 "map empty-title entries to ''" — §7's library contains no empty-title entry at all, so the
+    //       mutated branch is never reached and every §7 check still passes. The brief's unmappable-id
+    //       check ("steam:999999") tests an id that was never IN the library, which is a different
+    //       thing: it can only ever pass. So the library below actually contains the empty titles.
+    //   #11 "group on the raw title" — §7's three raw titles are already pairwise different, so raw-title
+    //       grouping happens to separate Hades from Hades II too. The brief flags this; the fixture that
+    //       does fail is TWO EDITIONS of one game, whose raw titles differ but whose merged id must not.
+    // An inert mutation is not coverage, so both cases are pinned here rather than left implied.
+    {
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:5000"), QString())                 // no title at all
+            << qMakePair(QStringLiteral("steam:5001"), QStringLiteral("   "))     // whitespace only
+            << qMakePair(QStringLiteral("steam:620"),  QStringLiteral("Portal 2"))
+            << qMakePair(QStringLiteral("gog:1207659110"),
+                         QStringLiteral("Portal 2 - Game of the Year Edition"));
+        const QHash<QString, QString> t = remapTable(lib, {});
+
+        // #10: an entry with nothing to group on is ABSENT — not present-with-an-empty-value. The
+        // distinction is the whole safety property: applyRemap would hash "" and rewrite the record
+        // under a key shared by every other nameless entry.
+        CHECK(!t.contains(QStringLiteral("steam:5000")));
+        CHECK(!t.contains(QStringLiteral("steam:5001")));
+        // ...and no entry ANYWHERE in the table carries an empty destination.
+        for (auto it = t.cbegin(); it != t.cend(); ++it) CHECK(!it.value().isEmpty());
+
+        // #11: two editions of ONE game — different raw titles, SAME merged id. Grouping on the raw
+        // title splits these, which leaves the second copy's play time stranded under an id the catalog
+        // no longer builds.
+        CHECK(t.value(QStringLiteral("steam:620")) == t.value(QStringLiteral("gog:1207659110")));
+        CHECK(!t.value(QStringLiteral("steam:620")).isEmpty());
+        // An igdb id still wins outright over the title when one is attached.
+        QHash<QString, QString> igdb;
+        igdb.insert(QStringLiteral("Portal 2"), QStringLiteral("igdb:7"));
+        const QHash<QString, QString> ti = remapTable(lib, igdb);
+        CHECK(ti.value(QStringLiteral("steam:620")) == QStringLiteral("pcgame:igdb:7"));
+    }
+
+    // ---- 8. applyRemap: the records follow the id, in every store and every profile -------------
+    // Each store below is keyed the way its OWNER keys it (three different hashes), and the ids used
+    // are the shapes the launcher scans actually emit.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap.ini"));
+        QFile::remove(gRecIni);
+
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(QStringLiteral("steam:2074920"), QStringLiteral("Hades II"));
+        const QHash<QString, QString> t = remapTable(lib, {});
+        const QString oldId = QStringLiteral("steam:2074920");
+        const QString newId = t.value(oldId);
+        CHECK(!newId.isEmpty());
+        CHECK(newId != oldId);
+
+        const QString mBlob = marksBlob(true, QStringLiteral("finished"), { QStringLiteral("rpg") }, 111);
+        const QString sBlob = statsBlob(60, 0, 900, QStringLiteral("Hades II"));
+        recSet(QStringLiteral("marks/default/items/") + md5Full(oldId), mBlob);
+        recSet(QStringLiteral("marks/p2/items/") + md5Full(oldId), mBlob);   // a SECOND profile
+        recSet(QStringLiteral("stats/default/devA/items/") + md5Full(oldId), sBlob);
+        const QString pOld = QStringLiteral("playstats/default/devA/") + sha1Full(oldId);
+        recSet(pOld + QStringLiteral("/total"), 100);
+        recSet(pOld + QStringLiteral("/sessions"), 2);
+        recSet(pOld + QStringLiteral("/last"), 500);
+        recSet(QStringLiteral("favorites/default/items"), favJson({ qMakePair(oldId, qint64(9)) }));
+        recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/pos"), 30.0);
+        recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/dur"), 100.0);
+        recSet(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/ts"), 7);
+
+        reseatRemapStore();
+        applyRemap(t);
+
+        // ItemMarks — moved VERBATIM when the destination is empty. updatedAt is preserved rather than
+        // restamped: the multi-device merge orders items on it, so a migration that bumped it would let
+        // a stale peer copy lose to a rewrite that added nothing.
+        CHECK(!recHas(QStringLiteral("marks/default/items/") + md5Full(oldId)));
+        CHECK(recGet(QStringLiteral("marks/default/items/") + md5Full(newId)).toString() == mBlob);
+        // ...in EVERY profile, not just the active one. A record belongs to whoever accrued it.
+        CHECK(!recHas(QStringLiteral("marks/p2/items/") + md5Full(oldId)));
+        CHECK(recGet(QStringLiteral("marks/p2/items/") + md5Full(newId)).toString() == mBlob);
+
+        // ConsumptionStats (hashed like ItemMarks, but device-namespaced).
+        CHECK(!recHas(QStringLiteral("stats/default/devA/items/") + md5Full(oldId)));
+        CHECK(recObj(QStringLiteral("stats/default/devA/items/") + md5Full(newId))
+                  .value(QStringLiteral("mediaSeconds")).toDouble() == 60.0);
+
+        // PlayStats — SHA-1, not MD5. Getting this wrong finds no record and migrates nothing, silently.
+        const QString pNew = QStringLiteral("playstats/default/devA/") + sha1Full(newId);
+        CHECK(!recHas(pOld + QStringLiteral("/total")));
+        CHECK(recGet(pNew + QStringLiteral("/total")).toLongLong() == 100);
+        CHECK(recGet(pNew + QStringLiteral("/sessions")).toLongLong() == 2);
+        CHECK(recGet(pNew + QStringLiteral("/last")).toLongLong() == 500);
+
+        // FavoritesStore — the one store that is NOT hashed; the id sits in the list verbatim.
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            CHECK(fav.size() == 1);
+            CHECK(favIndexOf(fav, newId) >= 0);
+            CHECK(favIndexOf(fav, oldId) < 0);
+        }
+
+        // resume — MD5 truncated to ten characters, a third distinct shape, and NOT per-profile.
+        CHECK(!recHas(QStringLiteral("resume/") + md5Short(oldId) + QStringLiteral("/pos")));
+        CHECK(recGet(QStringLiteral("resume/") + md5Short(newId) + QStringLiteral("/pos")).toDouble() == 30.0);
+        CHECK(recGet(QStringLiteral("resume/") + md5Short(newId) + QStringLiteral("/dur")).toDouble() == 100.0);
+    }
+
+    // ---- 9. a COLLISION must MERGE, never overwrite ---------------------------------------------
+    // Two launcher entries collapsing into one game means two RECORDS collapsing into one. Whichever
+    // is processed second must not land on top of the first: that silently deletes real play time, a
+    // star, or a completion mark, and the user has no way to notice until it is long gone. The table
+    // is a QHash, so which of the two is processed first is not even deterministic — every rule below
+    // is therefore order-independent by construction, and these checks pin that.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-collide.ini"));
+        QFile::remove(gRecIni);
+
+        const QString steamId = QStringLiteral("steam:1145360");
+        const QString gogId   = QStringLiteral("gog:1207658930");
+        QVector<QPair<QString, QString>> lib;
+        lib << qMakePair(steamId, QStringLiteral("Hades"))
+            << qMakePair(gogId,   QStringLiteral("Hades"));
+        const QHash<QString, QString> t = remapTable(lib, {});
+        const QString newId = t.value(steamId);
+        CHECK(newId == t.value(gogId));       // the premise: both really do collide
+        CHECK(!newId.isEmpty());
+
+        // marks: the Steam copy carries the completion + a tag; the GOG copy carries the HIDE + another
+        // tag and is the newer write. Neither contribution may be lost.
+        recSet(QStringLiteral("marks/default/items/") + md5Full(steamId),
+               marksBlob(false, QStringLiteral("finished"), { QStringLiteral("roguelike") }, 100));
+        recSet(QStringLiteral("marks/default/items/") + md5Full(gogId),
+               marksBlob(true, QStringLiteral("none"), { QStringLiteral("indie") }, 200));
+        // stats: two real watch/play accumulations.
+        recSet(QStringLiteral("stats/default/devA/items/") + md5Full(steamId),
+               statsBlob(100, 0, 10, QStringLiteral("Hades")));
+        recSet(QStringLiteral("stats/default/devA/items/") + md5Full(gogId),
+               statsBlob(50, 0, 20, QStringLiteral("Hades (GOG)")));
+        // playstats: 10 minutes on Steam, 20 on GOG. The merged game has 30.
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(steamId) + QStringLiteral("/total"), 600);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(steamId) + QStringLiteral("/sessions"), 3);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(steamId) + QStringLiteral("/last"), 10);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(gogId) + QStringLiteral("/total"), 1200);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(gogId) + QStringLiteral("/sessions"), 2);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(gogId) + QStringLiteral("/last"), 50);
+        // favorites: BOTH copies starred. One star out, and it keeps the newer star date.
+        recSet(QStringLiteral("favorites/default/items"),
+               favJson({ qMakePair(steamId, qint64(5)), qMakePair(gogId, qint64(9)) }));
+        // resume: the GOG copy is the newer position.
+        recSet(QStringLiteral("resume/") + md5Short(steamId) + QStringLiteral("/pos"), 10.0);
+        recSet(QStringLiteral("resume/") + md5Short(steamId) + QStringLiteral("/ts"), 100);
+        recSet(QStringLiteral("resume/") + md5Short(gogId) + QStringLiteral("/pos"), 80.0);
+        recSet(QStringLiteral("resume/") + md5Short(gogId) + QStringLiteral("/ts"), 200);
+
+        reseatRemapStore();
+        applyRemap(t);
+
+        // marks: hidden ORs, the real completion survives "none", the tag lists UNION, updatedAt is the
+        // newer of the two.
+        {
+            const QJsonObject m = recObj(QStringLiteral("marks/default/items/") + md5Full(newId));
+            CHECK(m.value(QStringLiteral("hidden")).toBool() == true);
+            CHECK(m.value(QStringLiteral("completion")).toString() == QStringLiteral("finished"));
+            QStringList tags;
+            for (const QJsonValue& v : m.value(QStringLiteral("tags")).toArray()) tags << v.toString();
+            CHECK(tags.contains(QStringLiteral("roguelike")));
+            CHECK(tags.contains(QStringLiteral("indie")));
+            CHECK(qint64(m.value(QStringLiteral("updatedAt")).toDouble()) == 200);
+            CHECK(!recHas(QStringLiteral("marks/default/items/") + md5Full(steamId)));
+            CHECK(!recHas(QStringLiteral("marks/default/items/") + md5Full(gogId)));
+        }
+
+        // stats: seconds SUM (the category rollup is the sum of the items, so nothing else keeps it
+        // coherent), lastActivity is the max, and the newer side owns the display title.
+        {
+            const QJsonObject e = recObj(QStringLiteral("stats/default/devA/items/") + md5Full(newId));
+            CHECK(qint64(e.value(QStringLiteral("mediaSeconds")).toDouble()) == 150);
+            CHECK(qint64(e.value(QStringLiteral("lastActivity")).toDouble()) == 20);
+            CHECK(e.value(QStringLiteral("title")).toString() == QStringLiteral("Hades (GOG)"));
+        }
+
+        // playstats: total and sessions SUM, last is the max. This is the check that a user's 30 minutes
+        // does not become 20.
+        {
+            const QString p = QStringLiteral("playstats/default/devA/") + sha1Full(newId);
+            CHECK(recGet(p + QStringLiteral("/total")).toLongLong() == 1800);
+            CHECK(recGet(p + QStringLiteral("/sessions")).toLongLong() == 5);
+            CHECK(recGet(p + QStringLiteral("/last")).toLongLong() == 50);
+            CHECK(!recHas(QStringLiteral("playstats/default/devA/") + sha1Full(steamId) + QStringLiteral("/total")));
+            CHECK(!recHas(QStringLiteral("playstats/default/devA/") + sha1Full(gogId) + QStringLiteral("/total")));
+        }
+
+        // favorites: two entries collapse to ONE (a duplicated star is a duplicated tile), carrying the
+        // newer star date.
+        {
+            const QJsonArray fav = recArr(QStringLiteral("favorites/default/items"));
+            CHECK(fav.size() == 1);
+            const int at = favIndexOf(fav, newId);
+            CHECK(at >= 0);
+            if (at >= 0) CHECK(qint64(fav.at(at).toObject().value(QStringLiteral("ts")).toDouble()) == 9);
+        }
+
+        // resume: newest-wins (a position is a single point, so there is nothing to add up), and both
+        // old records are gone.
+        CHECK(recGet(QStringLiteral("resume/") + md5Short(newId) + QStringLiteral("/pos")).toDouble() == 80.0);
+        CHECK(!recHas(QStringLiteral("resume/") + md5Short(steamId) + QStringLiteral("/pos")));
+        CHECK(!recHas(QStringLiteral("resume/") + md5Short(gogId) + QStringLiteral("/pos")));
+
+        // ---- 10. IDEMPOTENT: a second pass changes nothing -------------------------------------
+        // The remap runs on EVERY library refresh (records live under a one-way hash, so a game that is
+        // not installed right now cannot be found — a one-shot pass would strand its records forever).
+        // That makes "twice == once" a hard requirement, and the accumulators are where it would break:
+        // a second pass that re-summed would double the user's play time on every single refresh.
+        reseatRemapStore();
+        applyRemap(t);
+        applyRemap(t);
+        {
+            const QString p = QStringLiteral("playstats/default/devA/") + sha1Full(newId);
+            CHECK(recGet(p + QStringLiteral("/total")).toLongLong() == 1800);
+            CHECK(recGet(p + QStringLiteral("/sessions")).toLongLong() == 5);
+            const QJsonObject e = recObj(QStringLiteral("stats/default/devA/items/") + md5Full(newId));
+            CHECK(qint64(e.value(QStringLiteral("mediaSeconds")).toDouble()) == 150);
+            const QJsonObject m = recObj(QStringLiteral("marks/default/items/") + md5Full(newId));
+            CHECK(qint64(m.value(QStringLiteral("updatedAt")).toDouble()) == 200);
+            CHECK(recArr(QStringLiteral("favorites/default/items")).size() == 1);
+            CHECK(recGet(QStringLiteral("resume/") + md5Short(newId) + QStringLiteral("/pos")).toDouble() == 80.0);
+        }
+
+        // ...and the table's own output is a fixed point: re-deriving the table from the MERGED ids and
+        // applying it again is a no-op, which is what the every-refresh call site actually does.
+        {
+            QVector<QPair<QString, QString>> merged;
+            merged << qMakePair(newId, QStringLiteral("Hades"));
+            const QHash<QString, QString> t3 = remapTable(merged, {});
+            CHECK(t3.value(newId) == newId);
+            reseatRemapStore();
+            applyRemap(t3);
+            const QString p = QStringLiteral("playstats/default/devA/") + sha1Full(newId);
+            CHECK(recGet(p + QStringLiteral("/total")).toLongLong() == 1800);
+            CHECK(recObj(QStringLiteral("marks/default/items/") + md5Full(newId))
+                      .value(QStringLiteral("hidden")).toBool() == true);
+        }
+    }
+
+    // ---- 11. applyRemap never writes an empty key, and never drops what it cannot map ------------
+    // remapTable cannot emit an empty destination, but applyRemap is a public entry point taking a
+    // caller-built hash. One empty value would hash "" and fuse every affected record onto a single
+    // bogus key — the record is destroyed, and the old one is gone too. The pair must be IGNORED.
+    {
+        gRecIni = QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-empty.ini"));
+        QFile::remove(gRecIni);
+
+        const QString keep = QStringLiteral("steam:2074920");
+        const QString blob = marksBlob(false, QStringLiteral("inProgress"), {}, 55);
+        recSet(QStringLiteral("marks/default/items/") + md5Full(keep), blob);
+        recSet(QStringLiteral("playstats/default/devA/") + sha1Full(keep) + QStringLiteral("/total"), 42);
+
+        QHash<QString, QString> bad;
+        bad.insert(keep, QString());                                   // no destination
+        bad.insert(QString(), QStringLiteral("pcgame:hades"));         // no source
+        reseatRemapStore();
+        applyRemap(bad);
+
+        // Untouched, and nothing landed under the hash of an empty id.
+        CHECK(recGet(QStringLiteral("marks/default/items/") + md5Full(keep)).toString() == blob);
+        CHECK(recGet(QStringLiteral("playstats/default/devA/") + sha1Full(keep) + QStringLiteral("/total"))
+                  .toLongLong() == 42);
+        CHECK(!recHas(QStringLiteral("marks/default/items/") + md5Full(QString())));
+        CHECK(!recHas(QStringLiteral("playstats/default/devA/") + sha1Full(QString()) + QStringLiteral("/total")));
+
+        // A self-map is a no-op, not a self-destructive move-then-delete.
+        QHash<QString, QString> self;
+        self.insert(keep, keep);
+        reseatRemapStore();
+        applyRemap(self);
+        CHECK(recGet(QStringLiteral("marks/default/items/") + md5Full(keep)).toString() == blob);
+    }
+
+    // Leave nothing behind (issue #42): every scratch ini this run created goes, so the next run — and
+    // any other probe sharing build/Release — starts from a clean file.
+    QFile::remove(ini);
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-collide.ini")));
+    QFile::remove(QDir::temp().filePath(QStringLiteral("eb-probe-pcremap-empty.ini")));
 
     if (failures == 0) { std::puts("PCGAMES-OK"); return 0; }
     std::fprintf(stderr, "PCGAMES: %d check(s) failed\n", failures);
