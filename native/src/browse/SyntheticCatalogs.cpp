@@ -3,6 +3,7 @@
 #include <QFileInfo>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QHash>
 #include <QSet>
 #include <algorithm>
 
@@ -305,6 +306,223 @@ MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const 
         if (poster) it.thumbnailUrl = poster(g);
         cat.items.push_back(it);
     }
+    cat.hasMore = false;
+    return cat;
+}
+
+// ---- The merged PC Games folder -------------------------------------------------------------------------
+//
+// NB, the SAME rule as battleNetGamesCatalog above and for the same reason: no EpicLibrary:: or
+// BattleNetLibrary:: call may appear below. probe_browse / probe_locallib / probe_perf compile this file
+// WITHOUT those two .cpp files, so a call here is a CI-only link break — this repo has been bitten by exactly
+// that twice. The two protocol URIs are therefore built INLINE, mirroring EpicLibrary::launchUrl and
+// BattleNetLibrary::launchUri; probe_importers, which does link both, asserts the inline forms still equal the
+// canonical helpers, so the copies cannot drift silently. SteamLibrary IS linked into every target that
+// compiles this file, so its helpers are called normally.
+namespace {
+
+// Launcher precedence for the DISPLAY TITLE only — it decides nothing about grouping or launching. A store's
+// own name is a curated product name; a downloaded copy's name is a release name with scene tokens in it, so
+// it loses to every launcher. The order is FIXED rather than "whichever we saw first" so the folder cannot
+// reshuffle between runs when a launcher scan comes back in a different order.
+int pcTitleRank(const QString& launcher)
+{
+    if (launcher == QStringLiteral("steam"))     return 0;
+    if (launcher == QStringLiteral("epic"))      return 1;
+    if (launcher == QStringLiteral("gog"))       return 2;
+    if (launcher == QStringLiteral("battlenet")) return 3;
+    return 4;   // a downloaded / addon copy: a release name
+}
+
+// One game while it is being assembled: its merged id, the best title seen so far, every title that
+// contributed (so a search can match the GOG spelling of a game whose tile shows the Steam one), and its
+// sources.
+struct PcGroup
+{
+    QString     id;
+    QString     title;
+    int         bestRank = 99;
+    QStringList titles;
+    QVector<pcgame::PcGameSource> sources;
+};
+
+} // namespace
+
+MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                            const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                            const QVector<pcgame::PcGameSource>& downloaded,
+                            const QString& query, const QString& launcherFilter,
+                            const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster)
+{
+    const QString q = query.trimmed();
+    MediaCatalog cat;
+    cat.title = q.isEmpty() ? QObject::tr("PC Games") : QObject::tr("PC Games · %1").arg(q);
+
+    QVector<PcGroup>    groups;
+    QHash<QString, int> byId;   // merged id -> index into groups; grouping IS equality of this id
+
+    auto add = [&groups, &byId](const QString& rawTitle, int rank, const pcgame::PcGameSource& s)
+    {
+        const QString title = rawTitle.trimmed();
+        // Nothing to group on. mergeKey's raw-title fallback would hand every nameless entry the SAME key
+        // ("pcgame:rawtitle/"), fusing unrelated games into one tile — the exact harm the merge exists to
+        // avoid — so a nameless copy is dropped instead.
+        if (title.isEmpty()) return;
+
+        // The merged identity. mergeKey already returns a NAMESPACED key ("pcgame:rawtitle/…") for a title
+        // that normalises to nothing, so prefixing unconditionally would produce "pcgame:pcgame:rawtitle/…".
+        // A normalised title can never contain ':' (normalizeTitle strips all punctuation), so this test is
+        // exact rather than a heuristic.
+        const QString key = pcgame::mergeKey(title, QString());
+        const QString id  = key.startsWith(QStringLiteral("pcgame:")) ? key
+                                                                      : (QStringLiteral("pcgame:") + key);
+        int idx = byId.value(id, -1);
+        if (idx < 0)
+        {
+            PcGroup g; g.id = id;
+            groups.push_back(g);
+            idx = int(groups.size()) - 1;
+            byId.insert(id, idx);
+        }
+        PcGroup& g = groups[idx];
+        g.titles << title;
+        // Better rank wins; at equal rank the smaller string wins, which prefers the base title over its
+        // edition variant ("Portal 2" < "Portal 2 - Game of the Year Edition") and is a total order, so the
+        // result does not depend on the order the launcher scans came back in.
+        if (rank < g.bestRank || (rank == g.bestRank && QString::compare(title, g.title) < 0))
+        {
+            g.title    = title;
+            g.bestRank = rank;
+        }
+        g.sources.push_back(s);
+    };
+
+    for (const SteamGame& g : steam)
+    {
+        pcgame::PcGameSource s;
+        s.kind      = pcgame::PcGameSource::LauncherInstalled;
+        s.launcher  = QStringLiteral("steam");
+        s.launchId  = g.appid;
+        s.launchUrl = SteamLibrary::launchUrl(g.appid);   // steam://rungameid/<appid>
+        s.label     = QObject::tr("Steam");
+        s.ready     = true;
+        add(g.name, pcTitleRank(s.launcher), s);
+    }
+    for (const EpicGame& g : epic)
+    {
+        pcgame::PcGameSource s;
+        s.kind     = pcgame::PcGameSource::LauncherInstalled;
+        s.launcher = QStringLiteral("epic");
+        s.launchId = g.appName;
+        // Mirrors EpicLibrary::launchUrl — see the link-break note above; probe_importers pins the equality.
+        s.launchUrl = QStringLiteral("com.epicgames.launcher://apps/") + g.appName
+                    + QStringLiteral("?action=launch&silent=true");
+        s.label = QObject::tr("Epic Games");
+        s.ready = true;
+        add(g.name, pcTitleRank(s.launcher), s);
+    }
+    for (const GogGame& g : gog)
+    {
+        pcgame::PcGameSource s;
+        s.kind     = pcgame::PcGameSource::LauncherInstalled;
+        s.launcher = QStringLiteral("gog");
+        s.launchId = g.id;
+        s.exePath  = g.exe;                 // DRM-free: the monitored launchPcExe path, not a URI
+        s.label    = QObject::tr("GOG");
+        s.ready    = !g.exe.isEmpty();
+        add(g.name, pcTitleRank(s.launcher), s);
+    }
+    for (const BattleNetGame& g : bnet)
+    {
+        pcgame::PcGameSource s;
+        s.kind     = pcgame::PcGameSource::LauncherInstalled;
+        s.launcher = QStringLiteral("battlenet");
+        s.launchId = g.code;
+        if (!g.code.isEmpty())
+        {
+            // Mirrors BattleNetLibrary::launchUri — see the link-break note above.
+            s.launchUrl = QStringLiteral("battlenet://") + g.code;
+            s.label     = QObject::tr("Battle.net");
+            s.ready     = true;
+        }
+        else
+        {
+            // No product code means no protocol launch, only a guessed exe under the install dir. It is the
+            // least reliable source there is, so it says so instead of sitting at parity with a real launch —
+            // and with no exe either there is nothing to run at all, so it is NOT ready and pickAutoSource
+            // can never hand Play a row that silently does nothing.
+            s.exePath = g.exe;
+            s.ready   = !g.exe.isEmpty();
+            s.label   = g.exe.isEmpty() ? QObject::tr("Battle.net · no launch found")
+                                        : QObject::tr("Battle.net · best-effort exe (may not launch)");
+        }
+        add(g.name, pcTitleRank(s.launcher), s);
+    }
+    // Already-built sources (a downloaded copy from PcGameStore). Its label is its title AND its picker row;
+    // the label is kept verbatim rather than rewritten — it is the caller's text, and the release name is
+    // exactly what tells two downloaded copies apart in the picker.
+    for (const pcgame::PcGameSource& s : downloaded)
+        add(s.label, pcTitleRank(s.launcher), s);
+
+    // The normalised query. A query that normalises to NOTHING ("!!!", "GOTY") would otherwise be a substring
+    // of every title and match the whole library, so it falls back to a plain case-insensitive match.
+    const QString qn = pcgame::normalizeTitle(q);
+
+    for (PcGroup& g : groups)
+    {
+        if (!launcherFilter.isEmpty())
+        {
+            bool has = false;
+            for (const pcgame::PcGameSource& s : g.sources)
+                if (s.launcher == launcherFilter) { has = true; break; }
+            if (!has) continue;
+        }
+        if (!q.isEmpty())
+        {
+            bool hit = false;
+            for (const QString& t : g.titles)
+            {
+                if (qn.isEmpty() ? t.contains(q, Qt::CaseInsensitive)
+                                 : pcgame::normalizeTitle(t).contains(qn)) { hit = true; break; }
+            }
+            if (!hit) continue;
+        }
+
+        // Ready first, then launcher name, then launchId, then label. stable_sort so two sources that are
+        // equal on all four keep the order they were added in rather than shuffling per run.
+        std::stable_sort(g.sources.begin(), g.sources.end(),
+                         [](const pcgame::PcGameSource& a, const pcgame::PcGameSource& b) {
+                             if (a.ready != b.ready) return a.ready;   // a ready row can be pressed NOW
+                             int c = QString::compare(a.launcher, b.launcher);
+                             if (c != 0) return c < 0;
+                             c = QString::compare(a.launchId, b.launchId);
+                             if (c != 0) return c < 0;
+                             return QString::compare(a.label, b.label) < 0;
+                         });
+
+        MediaItem it;
+        it.id         = g.id;
+        it.mime       = QStringLiteral("pcgame");   // the ONE routing kind for a PC game
+        it.type       = QStringLiteral("game");
+        it.title      = g.title;
+        it.systemHint = QStringLiteral("pc");       // the console this belongs to (favourites scope on it)
+        it.pcSources  = g.sources;
+        // it.url stays EMPTY on purpose: WHICH copy runs is decided at activation by the source picker, and a
+        // url here would make the generic "a file is associated" branch claim the tile first.
+        if (poster) it.thumbnailUrl = poster(g.sources);
+        else
+            for (const pcgame::PcGameSource& s : g.sources)
+                if (s.launcher == QStringLiteral("steam"))
+                { it.thumbnailUrl = SteamLibrary::posterUrl(s.launchId); break; }
+        cat.items.push_back(it);
+    }
+
+    // A total order on what the user reads, then on identity: two different games whose titles compare equal
+    // still have different ids, so the folder never depends on the scan order.
+    std::sort(cat.items.begin(), cat.items.end(), [](const MediaItem& a, const MediaItem& b) {
+        const int c = QString::compare(a.title, b.title, Qt::CaseInsensitive);
+        return c != 0 ? c < 0 : a.id < b.id;
+    });
     cat.hasMore = false;
     return cat;
 }

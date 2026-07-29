@@ -15,6 +15,7 @@
 #include "../core/GogLibrary.h"
 #include "../core/BattleNetLibrary.h"
 #include "../core/LocalLibrary.h"
+#include "../core/PcGameId.h"     // pcGamesCatalog: the merge key + PcGameSource
 #include "../core/TraktRead.h"   // CalendarEntry + imdbStreamIdFor — the Trakt read layer (#23)
 #include <functional>
 
@@ -92,6 +93,49 @@ namespace browse
     // (the GOG mechanic). A non-empty query scopes by name. poster defaults to empty (no local capsule).
     MediaCatalog battleNetGamesCatalog(const QList<BattleNetGame>& installed, const QString& query,
                                        const std::function<QString(const BattleNetGame&)>& poster = {});
+
+    // The single PC Games folder: ONE MediaItem per game, with every way to launch it carried as a source on
+    // that item (MediaItem::pcSources). It replaces the four per-launcher folders above, where the same game
+    // appeared up to five times with unrelated ids. Pure, like every builder here: plain lists in, a
+    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::mergeKey (pure)
+    // and never consults the user-override ini, which is a store.
+    //
+    // Per item: id = "pcgame:" + pcgame::mergeKey(title, igdbId) (no double "pcgame:" when mergeKey already
+    // returns its own namespaced fallback key); mime = "pcgame", the ONE routing kind replacing steamgame /
+    // epicgame / goggame / battlenetgame; url EMPTY, because which copy runs is decided at activation.
+    //
+    // `downloaded` is the already-built source list for locally downloaded copies (PcGameStore). Its `label`
+    // doubles as that copy's TITLE — it is the only human-readable field on a PcGameSource — and is kept
+    // verbatim for the picker row. A source with no title to group on is skipped rather than bucketed with
+    // every other nameless one.
+    //
+    // DISPLAY TITLE: a launcher's own name beats a file-provider release name (which carries scene tokens),
+    // by the fixed precedence steam > epic > gog > battlenet > downloaded; two titles at the same rank are
+    // settled by comparing them, which picks the base title over its edition variant (the edition suffix
+    // sorts after the bare name). Fixed, so the folder does not reshuffle between runs.
+    //
+    // SOURCE ORDER is ready-before-not-ready, then by launcher name (a downloaded/addon source has an empty
+    // launcher and so leads the ready rows), then launchId, then label — deterministic, so the picker's rows
+    // are stable and a probe can assert them.
+    //
+    // A Battle.net title with no product code has no protocol launch: it gets a source LABELLED as the
+    // best-effort exe it is, and — when even that exe is unknown — a not-ready one, so pickAutoSource can
+    // never hand Play something that does nothing.
+    //
+    // `query` filters on the NORMALISED title (any of the game's contributing titles, not just the displayed
+    // one); a query that normalises to nothing ("!!!") falls back to a plain case-insensitive match rather
+    // than matching everything. `launcherFilter` ("steam" | "epic" | "gog" | "battlenet") keeps only games
+    // that HAVE such a source — it narrows which games appear, not which sources they carry, so "what I own
+    // on Steam" survives without a separate folder and still launches by whichever copy is ready.
+    //
+    // poster resolves the tile art from a game's sources; default {} uses SteamLibrary::posterUrl for the
+    // Steam source (which touches the local librarycache) and nothing otherwise — a test injects a pure one
+    // to stay I/O-free, exactly as steamGamesCatalog does.
+    MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                                const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                                const QVector<pcgame::PcGameSource>& downloaded,
+                                const QString& query, const QString& launcherFilter,
+                                const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {});
 
     // Episodes airing soon, from a connected Trakt account. Sorted by air time, soonest first.
     // PAST entries are excluded: recently-aired episodes are issue #25's job ("You missed"), and two

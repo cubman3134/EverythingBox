@@ -581,6 +581,30 @@ int main(int argc, char** argv)
         CHECK(addonItem && addonItem->mime.isEmpty() && addonItem->url.isEmpty()); // plain drill item, no launch
     }
 
+    // ---- pcGamesCatalog's inline protocol URIs must equal the canonical ones --------------------------
+    // browse::pcGamesCatalog builds the Epic and Battle.net launch URIs INLINE, because probe_browse /
+    // probe_locallib / probe_perf compile SyntheticCatalogs.cpp without EpicLibrary.cpp or
+    // BattleNetLibrary.cpp and a call there would be a CI-only link break. This target DOES link both, so
+    // it is the one place the two copies can be held against their originals — otherwise a change to
+    // EpicLibrary::launchUrl would silently leave the merged PC folder launching nothing.
+    {
+        QList<EpicGame> ep;      { EpicGame g; g.appName = QStringLiteral("Pewter");
+                                   g.name = QStringLiteral("Hades II"); ep << g; }
+        QList<BattleNetGame> bn; { BattleNetGame g; g.code = QStringLiteral("wow");
+                                   g.name = QStringLiteral("World of Warcraft"); bn << g; }
+        const MediaCatalog pc = browse::pcGamesCatalog({}, ep, {}, bn, {}, QString(), QString(),
+                                                       [](const QVector<pcgame::PcGameSource>&) {
+                                                           return QString();
+                                                       });
+        const MediaItem* epicItem = find(pc, QStringLiteral("pcgame:hades ii"));
+        CHECK(epicItem && epicItem->pcSources.size() == 1);
+        CHECK(epicItem && epicItem->pcSources.size() == 1
+              && epicItem->pcSources.at(0).launchUrl == EpicLibrary::launchUrl(QStringLiteral("Pewter")));
+        const MediaItem* bnetItem = find(pc, QStringLiteral("pcgame:world of warcraft"));
+        CHECK(bnetItem && bnetItem->pcSources.size() == 1
+              && bnetItem->pcSources.at(0).launchUrl == BattleNetLibrary::launchUri(QStringLiteral("wow")));
+    }
+
     if (failures == 0) { std::puts("IMPORTERS-OK"); return 0; }
     std::fprintf(stderr, "IMPORTERS: %d check(s) failed\n", failures);
     return 1;

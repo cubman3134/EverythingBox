@@ -132,6 +132,174 @@ int main(int argc, char** argv)
           && tf2.items[0].url.isEmpty(),
           "steam: query filter -> one game with exact id/mime/poster/type mapping");
 
+    // ---- The merged PC Games folder: ONE entry per game, every launcher a SOURCE --------------------------
+    // The property this builder exists for: a game present in two launchers plus a downloaded copy is ONE
+    // item with THREE sources, while "Hades" and "Hades II" across two launchers stay TWO items. Merging
+    // those would remove a game from the user's library, which is strictly worse than showing it twice.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "1145360"; g.name = "Hades";    st << g; }
+        { SteamGame g; g.appid = "2074920"; g.name = "Hades II"; st << g; }
+        { SteamGame g; g.appid = "620";     g.name = "Portal 2"; st << g; }
+        QList<EpicGame> ep;
+        { EpicGame g; g.appName = "Pewter"; g.name = "Hades II"; ep << g; }  // the SAME sequel, second launcher
+        { EpicGame g; g.appName = "Fort";   g.name = "Fortnite"; ep << g; }
+        QList<GogGame> gg;
+        { GogGame g; g.id = "1207658930"; g.name = "Hades"; g.exe = "C:/gog/hades.exe"; gg << g; }
+        { GogGame g; g.id = "42";         g.name = "Portal 2";                          gg << g; } // no exe
+        QList<BattleNetGame> bn;
+        { BattleNetGame g; g.code = "wow"; g.name = "World of Warcraft";      bn << g; } // protocol launch
+        { BattleNetGame g; g.name = "Hearthstone"; g.exe = "C:/bn/hs.exe";    bn << g; } // code-less, has exe
+        { BattleNetGame g; g.name = "Ghost";                                  bn << g; } // code-less, NO exe
+        QVector<pcgame::PcGameSource> dl;
+        { pcgame::PcGameSource s; s.kind = pcgame::PcGameSource::Downloaded;
+          s.addonItemId = "dl-1"; s.exePath = "C:/dl/Hades.exe"; s.ready = true;
+          s.label = "HADES (2020)"; dl << s; }                    // a release name: loses the title contest
+        // Injected like steamGamesCatalog's poster, so the probe stays I/O-free (the default reads the local
+        // Steam librarycache).
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QStringLiteral("art:x"); };
+
+        const MediaCatalog pc = browse::pcGamesCatalog(st, ep, gg, bn, dl, QString(), QString(), art);
+        auto find = [&pc](const char* t) {
+            for (const MediaItem& i : pc.items) if (i.title == QString::fromLatin1(t)) return i;
+            return MediaItem();
+        };
+        auto count = [&pc](const char* t) {
+            int n = 0;
+            for (const MediaItem& i : pc.items) if (i.title == QString::fromLatin1(t)) ++n;
+            return n;
+        };
+        const MediaItem hades  = find("Hades");
+        const MediaItem hades2 = find("Hades II");
+        const MediaItem portal = find("Portal 2");
+
+        CHECK(pc.items.size() == 7, "pcgames: seven distinct games out of ten library rows");
+        // THE assertion: Steam + GOG + a downloaded copy collapse to one entry carrying all three.
+        CHECK(count("Hades") == 1 && hades.pcSources.size() == 3,
+              "pcgames: Steam + GOG + downloaded -> exactly ONE item with THREE sources");
+        // A game in only one launcher is still exactly one item, with exactly one source.
+        CHECK(count("Fortnite") == 1 && find("Fortnite").pcSources.size() == 1,
+              "pcgames: a game in one launcher only -> one item, one source");
+        // The regression that would LOSE a game: sequel numerals must not merge, even across launchers.
+        CHECK(count("Hades") == 1 && count("Hades II") == 1 && !hades.id.isEmpty()
+              && hades.id != hades2.id,
+              "pcgames: Hades and Hades II stay TWO items with different ids");
+        CHECK(hades2.pcSources.size() == 2, "pcgames: Hades II merges its Steam and Epic copies");
+
+        // Item shape: the merged id, the ONE routing kind, and an EMPTY url (the picker resolves the launch).
+        CHECK(hades.id == "pcgame:hades" && hades.mime == "pcgame" && hades.type == "game"
+              && hades.url.isEmpty() && hades.systemHint == "pc" && hades.thumbnailUrl == "art:x",
+              "pcgames: id/mime/type/systemHint/art set and url left EMPTY");
+
+        // Source order: ready before not-ready, then by launcher name. Hades' three are all ready, so they
+        // order by launcher — the downloaded copy has an empty launcher and leads.
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[0].launcher.isEmpty()
+              && hades.pcSources[1].launcher == "gog" && hades.pcSources[2].launcher == "steam",
+              "pcgames: ready sources ordered by launcher name (empty launcher first)");
+        // Portal 2's GOG copy has no exe, so it is NOT ready and must sort AFTER the Steam one. This is the
+        // half a picker gets wrong: an unlaunchable row must never be the first thing offered.
+        CHECK(portal.pcSources.size() == 2 && portal.pcSources[0].launcher == "steam"
+              && portal.pcSources[0].ready && portal.pcSources[1].launcher == "gog"
+              && !portal.pcSources[1].ready,
+              "pcgames: a ready source sorts before a not-ready one");
+        // And what Play would do with it: exactly one ready source, so no menu — and it is the ready one.
+        CHECK(pcgame::pickAutoSource(portal.pcSources) == 0,
+              "pcgames: pickAutoSource takes Portal 2's single READY source");
+
+        // Launch payloads. Steam/Epic/Battle.net carry a protocol url; GOG carries an exe.
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[2].launchUrl == "steam://rungameid/1145360"
+              && hades.pcSources[2].launchId == "1145360"
+              && hades.pcSources[1].exePath == "C:/gog/hades.exe"
+              && hades.pcSources[1].launchUrl.isEmpty(),
+              "pcgames: steam:// url on the Steam source, an exe on the GOG one");
+        CHECK(hades2.pcSources.size() == 2
+              && hades2.pcSources[0].launchUrl
+                     == "com.epicgames.launcher://apps/Pewter?action=launch&silent=true",
+              "pcgames: the Epic source carries the launcher URI");
+        CHECK(find("World of Warcraft").pcSources.size() == 1
+              && find("World of Warcraft").pcSources[0].launchUrl == "battlenet://wow"
+              && find("World of Warcraft").pcSources[0].label == "Battle.net"
+              && find("World of Warcraft").pcSources[0].ready,
+              "pcgames: a coded Battle.net title launches by protocol, labelled plainly");
+
+        // A code-less Battle.net title is a GUESS at an exe. It must not be presented at parity with a real
+        // protocol launch, and with no exe at all it must not be READY either.
+        const MediaItem hs = find("Hearthstone"), ghost = find("Ghost");
+        CHECK(hs.pcSources.size() == 1 && hs.pcSources[0].ready
+              && hs.pcSources[0].exePath == "C:/bn/hs.exe" && hs.pcSources[0].launchUrl.isEmpty()
+              && hs.pcSources[0].label != "Battle.net"
+              && hs.pcSources[0].label.contains("exe"),
+              "pcgames: a code-less Battle.net title is labelled a best-effort exe, not \"Battle.net\"");
+        CHECK(ghost.pcSources.size() == 1 && !ghost.pcSources[0].ready
+              && ghost.pcSources[0].label != hs.pcSources[0].label
+              && pcgame::pickAutoSource(ghost.pcSources) == -1,
+              "pcgames: a code-less Battle.net title with no exe is NOT ready (Play must ask, not no-op)");
+
+        // Display title: a launcher's own name beats the downloaded release name (scene tokens and all),
+        // while the release name is still kept verbatim on its own picker row.
+        CHECK(count("HADES (2020)") == 0 && hades.title == "Hades",
+              "pcgames: the launcher's name wins the display title over the release name");
+        CHECK(hades.pcSources.size() == 3 && hades.pcSources[0].label == "HADES (2020)",
+              "pcgames: the downloaded source keeps its own label for the picker row");
+
+        // launcherFilter narrows WHICH GAMES appear, not which sources they carry — "what I own on Steam"
+        // still launches by whichever copy is ready.
+        const MediaCatalog only = browse::pcGamesCatalog(st, ep, gg, bn, dl, QString(), "steam", art);
+        bool everyHasSteam = !only.items.isEmpty();
+        for (const MediaItem& i : only.items)
+        {
+            bool s = false;
+            for (const pcgame::PcGameSource& x : i.pcSources) if (x.launcher == "steam") s = true;
+            if (!s) everyHasSteam = false;
+        }
+        CHECK(only.items.size() == 3 && everyHasSteam,
+              "pcgames: launcherFilter=steam keeps only games WITH a Steam source");
+        CHECK(only.items.size() == 3 && only.items[0].pcSources.size() == 3,
+              "pcgames: the filter narrows games, not the sources on them");
+
+        // query filters on the NORMALISED title, and matches any contributing title, not just the shown one.
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "hades", QString(), art).items.size() == 2,
+              "pcgames: query matches on the normalised title");
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "Portal 2 - Game of the Year Edition",
+                                     QString(), art).items.size() == 1,
+              "pcgames: a query carrying edition noise still finds the game");
+        // A query that normalises to NOTHING would be a substring of every title; it must not match all.
+        CHECK(browse::pcGamesCatalog(st, ep, gg, bn, dl, "!!!", QString(), art).items.isEmpty(),
+              "pcgames: a query that normalises to empty does not match the whole library");
+
+        // Determinism: the same library in a different scan order yields the same folder and the same rows.
+        QList<SteamGame> rev; for (int i = st.size() - 1; i >= 0; --i) rev << st[i];
+        const MediaCatalog again = browse::pcGamesCatalog(rev, ep, gg, bn, dl, QString(), QString(), art);
+        bool sameOrder = again.items.size() == pc.items.size();
+        for (int i = 0; sameOrder && i < again.items.size(); ++i)
+            if (again.items[i].id != pc.items[i].id) sameOrder = false;
+        CHECK(sameOrder, "pcgames: item order does not depend on the order the launchers were scanned in");
+
+        const MediaCatalog none = browse::pcGamesCatalog({}, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(none.items.isEmpty() && !none.title.isEmpty() && !none.hasMore,
+              "pcgames: empty input -> empty catalog with a valid title");
+    }
+
+    // ---- pcGamesCatalog degenerate titles: the id must not double-prefix, and nameless rows must not fuse --
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "1"; g.name = "GOTY";             st << g; } // ALL edition noise -> normalises
+        { SteamGame g; g.appid = "2"; g.name = "Enhanced Edition"; st << g; } // to nothing, both of them
+        { SteamGame g; g.appid = "3"; g.name = "";                 st << g; } // nothing to group on at all
+        const MediaCatalog pc = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(),
+                                                       [](const QVector<pcgame::PcGameSource>&) {
+                                                           return QString();
+                                                       });
+        // mergeKey ALREADY namespaces its raw-title fallback, so prefixing unconditionally would emit
+        // "pcgame:pcgame:rawtitle/goty" — a different id from the one every per-item store will key on.
+        CHECK(pc.items.size() == 2, "pcgames: two empty-normalising titles stay two items; the nameless one is dropped");
+        CHECK(pc.items.size() == 2 && pc.items[1].id == "pcgame:rawtitle/goty"
+              && !pc.items[1].id.startsWith("pcgame:pcgame:"),
+              "pcgames: an empty-normalising title keeps mergeKey's own namespaced id, not a doubled prefix");
+        CHECK(pc.items.size() == 2 && pc.items[0].id != pc.items[1].id,
+              "pcgames: two all-noise titles do NOT collapse into one bucket");
+    }
+
     // ---- SearchAggregator dedup/skip rule: the merge path's pure helper (see SearchAggregator::onCatalogReady).
     {
         QSet<QString> seen;
