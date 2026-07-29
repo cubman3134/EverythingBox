@@ -19,7 +19,14 @@ Usage:
 
 No third-party deps. Windows: named pipe \\\\.\\pipe\\EverythingBox-uitest; elsewhere: the QLocalServer
 unix socket (typically /tmp/EverythingBox-uitest).
+
+Everything this client prints is UTF-8 (see use_utf8_streams): the app's labels are full of non-ASCII
+(the detail view's "▶ Play", the settings rows' cloud/plus/pencil/star glyphs, emoji profile avatars,
+em-dashes in theme names, and media titles in any language), and they must survive verbatim so a test can
+assert on them.
 """
+import codecs
+import io
 import json
 import os
 import sys
@@ -28,6 +35,51 @@ import time
 # EB_UITEST_PIPE picks a non-default channel, matching the server-side override in UiTestServer — lets a
 # test build be driven while a normally-running instance owns the default pipe.
 NAME = os.environ.get("EB_UITEST_PIPE", "EverythingBox-uitest")
+
+
+def _is_utf8(enc) -> bool:
+    if not enc:
+        return False
+    try:
+        return codecs.lookup(enc).name == "utf-8"
+    except LookupError:
+        return False
+
+
+def use_utf8_streams() -> None:
+    """Force sys.stdout/sys.stderr to UTF-8 so app text prints verbatim, whatever the caller's console is.
+
+    Why this is needed at all: only a REAL Windows console gets UTF-8 for free (CPython opens it as
+    _WindowsConsoleIO and writes wide chars via WriteConsoleW). The moment stdout is redirected — a pipe,
+    a file, `x = $(uitest.py state)`, or any subprocess.run(capture_output=True), which is how automation
+    actually calls this — CPython falls back to the locale encoding, cp1252 on a US/Western Windows box.
+    Printing e.g. "▶ Play" (U+25B6) then raises UnicodeEncodeError from encodings/cp1252.py, and the
+    failure reads like a harness/pipe fault rather than an encoding one. See issue #36.
+
+    UTF-8 can encode every character the app can hand us, so this is lossless: no glyph is stripped or
+    substituted, and `uitest.py state | grep '☁ Restore from Google Drive'` stays a writable assertion.
+    (errors="backslashreplace" is a belt-and-braces guard for lone surrogates, the only thing UTF-8
+    cannot encode; it escapes rather than deletes, and no app-sourced text can reach it.)
+    """
+    for name in ("stdout", "stderr"):
+        stream = getattr(sys, name, None)
+        if stream is None:                      # pythonw / fully detached: nothing to fix
+            continue
+        if _is_utf8(getattr(stream, "encoding", None)):
+            continue                            # already UTF-8 (real console, PYTHONIOENCODING, -X utf8)
+        try:
+            stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+        except (AttributeError, io.UnsupportedOperation, ValueError):
+            # Not a TextIOWrapper (pytest capture, a StringIO shim, ...). Re-wrap the raw byte stream if
+            # there is one; if there isn't, the stream can't take bytes anyway, so leave it alone.
+            buf = getattr(stream, "buffer", None)
+            if buf is None:
+                continue
+            try:
+                setattr(sys, name, io.TextIOWrapper(
+                    buf, encoding="utf-8", errors="backslashreplace", line_buffering=True))
+            except Exception:
+                pass
 
 
 def _send(cmd: str) -> str:
@@ -57,6 +109,7 @@ def state() -> dict:
 
 
 def main() -> int:
+    use_utf8_streams()   # before ANY print: app labels are non-ASCII and cp1252 stdout would raise (#36)
     if len(sys.argv) < 2:
         print(__doc__)
         return 2
@@ -92,7 +145,11 @@ def main() -> int:
             _send(f"key {key}")
             time.sleep(0.05)
             s = state()
-            sel = s.get("overlaySelection") or s.get("focusText") or s.get("focus")
+            # Most specific selection wins. panelFocus/themedSelection were missing, so on the themed
+            # panel host and the themed home — i.e. most of the app — every step printed the useless
+            # "QQuickWidget" (the opaque focus CLASS) instead of the row label a test wants to assert on.
+            sel = (s.get("overlaySelection") or s.get("panelFocus") or s.get("themedSelection")
+                   or s.get("focusText") or s.get("focus"))
             print(f"{i + 1:2d}. {sel}")
     else:
         print(__doc__)

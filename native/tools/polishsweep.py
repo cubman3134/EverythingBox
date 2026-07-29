@@ -80,16 +80,17 @@ def _shot(path):
 
 
 def _desc(st):
-    # A compact, ascii-safe one-liner of what the state JSON says is on screen (encode-safe: the
-    # themed category/selection can carry non-cp1252 glyphs that would crash a raw stdout print).
+    # A compact one-liner of what the state JSON says is on screen. Kept VERBATIM: the themed
+    # category/selection carries glyphs ("▶ Play", "☁ Restore ...") that identify the row, and notes.md
+    # is written as UTF-8. This used to squash to ascii ("?? Play") because a cp1252 stdout would crash
+    # on them; uitest.use_utf8_streams() (issue #36) removes that constraint.
     parts = []
     for f in ("page", "themedCategory", "themedSelection", "themedView", "overlay",
               "overlaySelection", "escMenu"):
         v = st.get(f)
         if v not in (None, "", False):
             parts.append(f"{f}={v}")
-    s = " ".join(parts)
-    return s.encode("ascii", "replace").decode("ascii")
+    return " ".join(parts)
 
 
 def still(slug, msg=""):
@@ -353,6 +354,7 @@ def write_notes(outdir):
 
 
 def main():
+    uitest.use_utf8_streams()   # app labels are non-ASCII; a redirected cp1252 stdout would raise (#36)
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
