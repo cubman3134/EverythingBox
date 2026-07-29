@@ -257,6 +257,9 @@ static QPushButton* panelRow(const QString& label); // large TV-friendly menu ro
 // purpose: this is a decision, not a hover, and the user may be reaching for a remote.
 static constexpr int kChipMs = 8000;
 
+// The community server. Permanent, non-expiring invite — see the Discord design spec.
+static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
+
 // The installed theme folders, in the form ThemeChoice's migration needs (it is QtCore-only and takes the list
 // as an argument rather than reading the disk itself). Guarded because ThemeEngine is not compiled AT ALL in a
 // non-QML build — where there is no themed home, so "nothing installed" is the honest answer.
@@ -9817,6 +9820,9 @@ void MainWindow::openGeneralSettings()
         sep(tr("Streaming (Debrid)"));
         textf(QStringLiteral("debrid.torbox"), tr("TorBox API key"),
               store().value(QStringLiteral("debrid/torbox/apikey")).toString());
+        // --- Community ---
+        sep(tr("Community"));
+        action(QStringLiteral("community.discord"), tr("Join the Discord"));
 
         // Small helpers to patch a status Info / an Action label in place (updateRow replaces the whole row).
         auto setInfo = [this](const QString& id, const QString& caption, const QString& value) {
@@ -9832,6 +9838,10 @@ void MainWindow::openGeneralSettings()
                 if (id == QStringLiteral("disp.fullscreen")) {
                     Settings::setStartFullscreen(on);
                     if (on) showFullScreen(); else if (isFullScreen()) leaveFullScreen();
+                }
+                else if (id == QStringLiteral("community.discord")) {
+                    // Outward navigation to the browser — same idiom as Appearance's theme-gallery row.
+                    QDesktopServices::openUrl(QUrl(QString::fromLatin1(kDiscordInvite)));
                 }
                 else if (id == QStringLiteral("lib.showhidden")) {
                     store().setValue(QStringLiteral("library/showHidden"), on);
@@ -10585,6 +10595,22 @@ void MainWindow::openGeneralSettings()
         dNote->setWordWrap(true);
         dNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
         v->addWidget(dNote);
+
+        // --- Community: the classic twin of the themed builder's community.discord row. ---
+        v->addSpacing(10);
+        auto* cHeading = new QLabel(tr("Community"));
+        cHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(cHeading);
+        auto* cNote = new QLabel(tr("Questions, setup help, and release news. Ask in #support and tag your "
+            "platform — it gets you a faster, more specific answer than the issue tracker will."));
+        cNote->setWordWrap(true);
+        cNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(cNote);
+        auto* cJoin = panelRow(tr("Join the Discord"));
+        connect(cJoin, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(QUrl(QString::fromLatin1(kDiscordInvite)));
+        });
+        v->addWidget(cJoin);
     }, [this] { openSettingsHub(); });
 }
 
