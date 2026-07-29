@@ -3872,17 +3872,11 @@ QVariantMap HomeView::themedDetailData(int idx)
         }
     }
 
-    // A single joined "Label: value  •  …" string for the detail view's facts text element.
+    // A single joined "Label: value  •  …" string for the detail view's facts text element. joinFactsText is
+    // shared with the hover panel's merge (MainWindow's themedMetaReady) so both surfaces read identically.
     if (facts.isEmpty()) facts = out.value(QStringLiteral("facts")).toList();
-    QStringList fl;
-    for (const QVariant& fv : facts)
-    {
-        const QVariantMap fm = fv.toMap();
-        const QString l = fm.value(QStringLiteral("label")).toString();
-        const QString v = fm.value(QStringLiteral("value")).toString();
-        if (!v.isEmpty()) fl << (l.isEmpty() ? v : (l + QStringLiteral(": ") + v));
-    }
-    if (!fl.isEmpty()) out.insert(QStringLiteral("factsText"), fl.join(QStringLiteral("     •     ")));
+    const QString factsText = joinFactsText(facts);
+    if (!factsText.isEmpty()) out.insert(QStringLiteral("factsText"), factsText);
 
     // The action-row verbs: Play/Read and Download come from classicActionGates — the SAME predicate the
     // classic detail page's buttons use (one definition, no drift). Favourite + playlist are always offered,

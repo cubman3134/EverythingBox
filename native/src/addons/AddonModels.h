@@ -9,6 +9,7 @@
 #include <QMap>
 #include <QString>
 #include <QStringList>
+#include <QVariantList>
 #include <QVariantMap>
 #include <QVector>
 
@@ -185,6 +186,24 @@ struct MediaCatalog
 // Metadata about a single item, returned by an addon's getMeta(). Drives the detail-page header:
 // a cover image, a title/subtitle, a set of labelled facts (Rating, Genres, Runtime, ...) and a synopsis.
 struct MediaFact { QString label; QString value; };
+
+// The ONE display join for a facts list: "Label: value     •     Label: value". Takes the QVariantList-of-
+// {label,value} shape the themed panels publish (not QVector<MediaFact>), because that is the shape every
+// producer hands to the QML side. Both metadata surfaces carry the joined scalar under `factsText` — the
+// hover panel (selectedMeta) and the detail page (selected/detailData) — so a theme binding `factsText`
+// means the same thing on either. A theme.json cannot join a list itself: `text` renders a scalar only.
+inline QString joinFactsText(const QVariantList& facts)
+{
+    QStringList out;
+    for (const QVariant& fv : facts)
+    {
+        const QVariantMap fm = fv.toMap();
+        const QString l = fm.value(QStringLiteral("label")).toString();
+        const QString v = fm.value(QStringLiteral("value")).toString();
+        if (!v.isEmpty()) out << (l.isEmpty() ? v : (l + QStringLiteral(": ") + v));
+    }
+    return out.join(QStringLiteral("     •     "));
+}
 
 struct MediaDetail
 {

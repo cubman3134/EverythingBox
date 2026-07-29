@@ -20,7 +20,7 @@ Grab the latest build for your platform:
 | **Android / Android TV** (arm64) | [**EverythingBox-android-arm64.apk**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-android-arm64.apk) | Sideload it; runs on phones, tablets, and Android TV (Shield, Google TV, smart TVs). Media hub + in-process libretro cores; standalone emulators are desktop-only. See [Android / Android TV](#android--android-tv). |
 | **iOS / iPadOS** (arm64) | [**EverythingBox-ios-arm64.ipa**](https://github.com/cubman3134/EverythingBox/releases/latest/download/EverythingBox-ios-arm64.ipa) | Unsigned — sideload with [AltStore](https://altstore.io) or [Sideloadly](https://sideloadly.io) (they re-sign it with your Apple ID). Media hub (video/audio/readers/addons); emulation is unavailable on iOS. See [`native/docs/ios-port.md`](native/docs/ios-port.md). |
 
-Current version: **0.5.0**. All releases are listed on the [**Releases page**](https://github.com/cubman3134/EverythingBox/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
+Latest release: **0.5.0** (in-development builds carry a higher patch number — see `project(… VERSION …)` in [`native/CMakeLists.txt`](native/CMakeLists.txt)). All releases are listed on the [**Releases page**](https://github.com/cubman3134/EverythingBox/releases). Desktop builds are produced automatically by [CI](.github/workflows/release.yml) for each tagged version; Android is built from source (below).
 
 This repository is the native app. The previous Unity implementation has been
 removed; its portable logic (EPUB/PDF parsing, the addon model) was reimplemented

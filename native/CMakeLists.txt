@@ -558,7 +558,7 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/core/Settings.cpp src/core/Settings.h
             src/core/SafeAreaInsets.cpp src/core/SafeAreaInsets.h   # ThemeEngine registers `safeArea`
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${EB_THEME2_RCC_PROBE})
-        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core ${MPV_INCLUDE_DIR})
+        target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core src/addons ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
@@ -719,7 +719,11 @@ if(EVERYTHINGBOX_BUILD_APP)
         # The 4-digit passcode pad (#30) is a NavOverlay like the OSK, so its D-pad/auto-submit/back
         # behaviour belongs in the nav suite. It needs no ProfilePasscode.cpp: the only thing it takes from
         # that unit is the constexpr kLength, which is header-only.
-        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h)
+        src/ui/nav/PasscodePad.cpp src/ui/nav/PasscodePad.h
+        # The classic Edit-Profile picker page is asserted against the REAL widget (§24), not a replica: the
+        # defect it covers was a GEOMETRY one, and a replica would drift from the layout it is meant to guard.
+        src/ui/ProfileDialog.cpp src/ui/ProfileDialog.h
+        src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_nav PRIVATE src src/ui src/core)
     target_link_libraries(probe_nav PRIVATE Qt6::Widgets)
 
