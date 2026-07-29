@@ -61,6 +61,22 @@ namespace pcgame
     // as a key (see rule 1 in PcGameRemap.h).
     QString itemId(const QString& title);
 
+    // THE TITLE A DOWNLOADED COPY IS KNOWN BY — the ONE fallback for a Downloads record with no title
+    // of its own (`DownloadedItem::title` is optional; the file name is all such a record has).
+    //
+    // It exists for the same reason itemId does, and it is the same failure. The catalog GROUPS a
+    // downloaded copy under itemId(this title), while the remap's candidate destination is
+    // itemId(the title populatePcGames hands remapTable). Those were two separate expressions — the
+    // catalog fell back to the file's base name, the remap fed the raw (empty) title — so a download
+    // with an EMPTY title got a tile keyed on the base name while its remap destination was empty, i.e.
+    // absent from the table (rule 1). Its marks and play time then accrued under the launch id forever,
+    // on no tile, invisibly. One expression, called by both, is the only shape that cannot come apart;
+    // probe_browse pins the equality.
+    //
+    // Whitespace-only counts as empty: the catalog trims before grouping, so a title of " " would
+    // otherwise group on nothing while still reading as "has a title" here.
+    QString downloadedTitle(const QString& title, const QString& path);
+
     // Are these the same game? A user override wins; then, when BOTH sides carry an igdb id, that
     // decides (equal ids -> same, different ids -> NOT same, even if the titles agree); otherwise the
     // normalised titles decide. A missing id on one side is not a mismatch — it just means fall back.

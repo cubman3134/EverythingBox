@@ -41,6 +41,20 @@ QSettings* g_testStore = nullptr;
 
 std::function<void()> g_invalidate;
 
+// Every flush this unit performs goes through here, so the probe can count them (see the header). The
+// counter itself exists only under the test seam; the wrapper is unconditional so there is exactly one
+// place a sync can be issued from and none can escape the count.
+#ifdef EB_PCGAMEID_TEST_SEAM
+int g_syncCount = 0;
+#endif
+void syncStore(QSettings& s)
+{
+#ifdef EB_PCGAMEID_TEST_SEAM
+    ++g_syncCount;
+#endif
+    s.sync();
+}
+
 QSettings& store()
 {
 #ifdef EB_PCGAMEID_TEST_SEAM
@@ -77,25 +91,72 @@ QString md5Hex10(const QString& key)
         QCryptographicHash::hash(key.toUtf8(), QCryptographicHash::Md5).toHex().left(10));
 }
 
-// ---- write-then-verify ----------------------------------------------------------------------------------
-// Rule 2 in one function: a record is only ever removed after its replacement has been written and FLUSHED
-// without error. QSettings reports a write failure asynchronously, so "setValue returned" is not evidence of
-// anything — status() after sync() is the real gate here, and without it a full-disk or read-only ini would
-// turn this migration into a deletion pass.
+// ---- write-then-verify, ONE FLUSH PER PASS ----------------------------------------------------------------
+// Rule 2 is unchanged in substance — a record is never removed until its replacement has been written and
+// FLUSHED without error — but it is now enforced at PASS granularity instead of per record, because
+// QSettings::sync() is a WHOLE-FILE rewrite. Flushing inside every record turned the first-entry migration
+// into one disk write per moved record: the remap runs on the GUI thread the first time the PC Games folder
+// is opened, so a library with hundreds of migrating records stalled visibly, once, at exactly the moment
+// the user is deciding what they think of the folder. Steady state was never the problem; the first pass was.
+//
+// The batch is the same rule read at the level the flush actually operates on:
+//   * setValue accumulates into QSettings' in-memory map. No disk write, so it costs nothing per record.
+//   * commit() flushes ONCE and checks status(). Only if that reports no error are the SOURCES removed
+//     (a second flush). A durability failure therefore drops every queued removal and leaves every source
+//     standing, which is rule 2 for the whole pass rather than for one record.
+//   * A source is still never removed before its replacement is on disk. What changed is that "its
+//     replacement" is now "every replacement this pass wrote", which is strictly more conservative.
+// A torn state — destination written, source removed, only one of them on disk — is not reachable either
+// way: both live in one file, so one sync carries both or neither.
 //
 // WHAT THE READ-BACK DOES AND DOES NOT PROVE. It is NOT a disk read: QSettings answers value() out of the
 // in-memory map setValue just wrote, so the comparison is close to tautological and proves nothing about
 // what reached the file. It is kept for the one thing it does catch — a value whose ini round-trip is not
 // identity (a type QSettings serialises to a different string than it was handed), which would read back
-// wrong in the NEXT process, i.e. after the source has already been removed. status() is the durability
-// gate; this line is a serialisation gate. Neither substitutes for the other.
-bool writeVerified(QSettings& s, const QString& key, const QVariant& value)
+// wrong in the NEXT process, i.e. after the source has already been removed. It never needed a sync to do
+// that job, which is why it stays per-record while the flush does not. status() is the durability gate;
+// this line is a serialisation gate. Neither substitutes for the other.
+class Batch
 {
-    s.setValue(key, value);
-    s.sync();
-    if (s.status() != QSettings::NoError) return false;
-    return s.value(key).toString() == value.toString();
-}
+public:
+    explicit Batch(QSettings& s) : s_(s) {}
+
+    // The serialisation gate. false -> the caller skips this record and does NOT queue its source for
+    // removal, so both copies survive and the next refresh retries — exactly the old `continue`.
+    bool write(const QString& key, const QVariant& value)
+    {
+        s_.setValue(key, value);
+        dirty_ = true;
+        return s_.value(key).toString() == value.toString();
+    }
+
+    // A DESTINATION key that has to disappear as part of the write itself (resume's stale-leaf clear), not
+    // a source being retired. It rides the write flush, so the destination is never on disk half-cleared.
+    void clearNow(const QString& key) { s_.remove(key); dirty_ = true; }
+
+    // A SOURCE to retire once the writes are durable.
+    void removeLater(const QString& key) { pending_.push_back(key); }
+
+    // THE DURABILITY GATE, once for the pass. Returns false when the writes did not reach disk; the
+    // sources are then untouched.
+    bool commit()
+    {
+        if (!dirty_ && pending_.isEmpty()) return true;   // nothing to do: do not rewrite the file
+        syncStore(s_);
+        dirty_ = false;
+        if (s_.status() != QSettings::NoError) { pending_.clear(); return false; }
+        if (pending_.isEmpty()) return true;
+        for (const QString& k : pending_) s_.remove(k);   // a group key removes its subkeys too
+        pending_.clear();
+        syncStore(s_);
+        return s_.status() == QSettings::NoError;
+    }
+
+private:
+    QSettings&  s_;
+    QStringList pending_;
+    bool        dirty_ = false;
+};
 
 // ---- ItemMarks merge ------------------------------------------------------------------------------------
 // hidden: OR. Hiding is a deliberate act and un-hiding is one keypress; losing a hide silently repopulates a
@@ -182,8 +243,9 @@ QString mergeStats(const QString& dstJson, const QString& srcJson)
 
 // ---- per-store passes -----------------------------------------------------------------------------------
 // Each pass is written the same way: locate the source record, skip if absent, merge into the destination,
-// verify the write, and only then remove the source. A `continue` on a failed write leaves BOTH copies in
-// place — the next refresh retries. Nothing here can reach a state where neither copy exists.
+// stage the write, and queue the source for removal; the pass then commits ONCE. A `continue` on a failed
+// write, or a commit that reports an error, leaves BOTH copies in place — the next refresh retries. Nothing
+// here can reach a state where neither copy exists.
 
 // marks/<profile>/items/<md5(id)> -> one JSON blob per item (ItemMarks.h).
 void remapMarks(QSettings& s, const QHash<QString, QString>& table)
@@ -192,6 +254,7 @@ void remapMarks(QSettings& s, const QHash<QString, QString>& table)
     const QStringList profiles = s.childGroups();
     s.endGroup();
 
+    Batch b(s);
     for (const QString& p : profiles)
     {
         const QString items = QStringLiteral("marks/") + p + QStringLiteral("/items/");
@@ -207,11 +270,11 @@ void remapMarks(QSettings& s, const QHash<QString, QString>& table)
             // Nothing at the destination -> move the blob VERBATIM (keeps updatedAt, which the multi-device
             // merge orders on). Something there -> merge, never overwrite.
             const QString merged = dstBlob.isEmpty() ? srcBlob : mergeMarks(dstBlob, srcBlob);
-            if (!writeVerified(s, dst, merged)) continue;
-            s.remove(src);
-            s.sync();
+            if (!b.write(dst, merged)) continue;
+            b.removeLater(src);
         }
     }
+    b.commit();
 }
 
 // stats/<profile>/<device>/items/<md5(id)>, plus the pre-namespacing shape stats/<profile>/items/<md5(id)>
@@ -224,6 +287,7 @@ void remapConsumption(QSettings& s, const QHash<QString, QString>& table)
     const QStringList profiles = s.childGroups();
     s.endGroup();
 
+    Batch b(s);
     for (const QString& p : profiles)
     {
         const QString base = QStringLiteral("stats/") + p;
@@ -250,11 +314,11 @@ void remapConsumption(QSettings& s, const QHash<QString, QString>& table)
                 if (srcBlob.isEmpty()) continue;
                 const QString dstBlob = s.value(dst).toString();
                 const QString merged = dstBlob.isEmpty() ? srcBlob : mergeStats(dstBlob, srcBlob);
-                if (!writeVerified(s, dst, merged)) continue;
-                s.remove(src);
-                s.sync();
+                if (!b.write(dst, merged)) continue;
+                b.removeLater(src);
             }
     }
+    b.commit();
 }
 
 // playstats/<profile>/<device>/<sha1(id)>/{total,sessions,last} — and the pre-namespacing shape
@@ -272,21 +336,28 @@ void remapConsumption(QSettings& s, const QHash<QString, QString>& table)
 // refresh re-sums to a+2b. Rule 4 (idempotence) breaks exactly on the failure path, which is the path
 // nobody exercises, and the symptom is inflated play time on every subsequent refresh.
 //
-// CHOSEN FIX: a per-record journal marker, written and verified BEFORE any destination leaf is touched.
-// (The brief's other option — stage every leaf, verify, then write — does not actually close the window:
-// "then write" is still three writes that can fail between each other. The marker is what survives that.)
-// The marker holds the already-computed absolute values, so a retry COMMITS them rather than re-deriving
-// them from a destination it may have half-written. Sequence per record:
-//   1. marker absent -> compute the sums, write+verify the marker. Failure here has touched nothing.
+// CHOSEN FIX: a per-record journal marker carrying the already-computed ABSOLUTE values, so a retry COMMITS
+// them rather than re-deriving them from a destination it may have half-written. (The brief's other option —
+// stage every leaf, verify, then write — does not close the window: "then write" is still three writes that
+// can fail between each other. The marker is what survives that.) Sequence per record:
+//   1. marker absent -> compute the sums and stage the marker.
 //   2. marker present (this pass or a previous one) -> commit its values to the three leaves. The values
 //      are ABSOLUTE, so committing twice is committing once.
-//   3. remove the source, then the marker. A death between those two leaves a marker whose commit is a
-//      no-op, which the next pass performs and clears.
+//   3. queue the source AND the marker for removal; a completed move leaves no journal.
 // The marker lives under its own top-level group that no store reads, so a stale one cannot be mistaken for
-// a record. Residual, stated rather than hidden: if the destination accrues NEW play from actual gameplay
-// between a failed commit and the retry, the commit overwrites that increment. That needs a write error
-// (a full or read-only ini) AND a play session in the same window, and it loses one session instead of
-// inflating the total on every refresh forever.
+// a record.
+//
+// THE MARKER IS STILL LOAD-BEARING UNDER BATCHING, for a different half of the problem. It is now staged in
+// the SAME flush as the leaves, so it no longer reaches disk strictly first — it does not need to: one flush
+// carries the marker and all three leaves or none of them, which is exactly the "cannot fail together"
+// hazard the journal was invented for, closed by construction. What the marker still does is carry absolute
+// values across a FAILED commit, where this process's in-memory map holds them and the retry must not re-sum
+// a destination it already added to in memory. Removing it would re-open rule 4 the moment any future change
+// re-splits these flushes, which is a silent, permanent play-time inflation — so it stays.
+// Residual, stated rather than hidden: if the destination accrues NEW play from actual gameplay between a
+// failed commit and the retry, the commit overwrites that increment. That needs a write error (a full or
+// read-only ini) AND a play session in the same window, and it loses one session instead of inflating the
+// total on every refresh forever.
 QString journalKey(const QString& container, const QString& srcHash, const QString& dstHash)
 {
     // Its own namespace, hashed so the key length is bounded. The composition is pinned by probe_pcgames,
@@ -302,6 +373,7 @@ void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
     const QStringList profiles = s.childGroups();
     s.endGroup();
 
+    Batch b(s);
     for (const QString& p : profiles)
     {
         const QString base = QStringLiteral("playstats/") + p;
@@ -352,12 +424,11 @@ void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
                     staged.insert(QStringLiteral("last"),
                                   double(std::max(s.value(dst + QStringLiteral("/last"), 0).toLongLong(),
                                                   s.value(src + QStringLiteral("/last"), 0).toLongLong())));
-                    // The marker goes down FIRST and is verified. Until it is on disk nothing has been
-                    // written to the destination, so a failure here costs a retry and nothing else.
-                    if (!writeVerified(s, jk,
-                                       QString::fromUtf8(QJsonDocument(staged).toJson(QJsonDocument::Compact))))
+                    // The marker is staged FIRST, so a serialisation failure on it costs a retry and
+                    // nothing else — the leaves below are never reached for this record.
+                    if (!b.write(jk,
+                                 QString::fromUtf8(QJsonDocument(staged).toJson(QJsonDocument::Compact))))
                         continue;
-                    s.sync();
                 }
                 // Commit ABSOLUTE values — from the marker, never re-derived from a destination that may
                 // already hold some of them. This is what makes the retry after a partial write land on
@@ -366,14 +437,14 @@ void remapPlayStats(QSettings& s, const QHash<QString, QString>& table)
                 const qint64 sess  = qint64(staged.value(QStringLiteral("sessions")).toDouble());
                 const qint64 last  = qint64(staged.value(QStringLiteral("last")).toDouble());
 
-                if (!writeVerified(s, dst + QStringLiteral("/total"), total))    continue;
-                if (!writeVerified(s, dst + QStringLiteral("/sessions"), sess))  continue;
-                if (last > 0 && !writeVerified(s, dst + QStringLiteral("/last"), last)) continue;
-                s.remove(src);      // the whole game subgroup
-                s.remove(jk);       // the move is complete; the marker has nothing left to protect
-                s.sync();
+                if (!b.write(dst + QStringLiteral("/total"), total))    continue;
+                if (!b.write(dst + QStringLiteral("/sessions"), sess))  continue;
+                if (last > 0 && !b.write(dst + QStringLiteral("/last"), last)) continue;
+                b.removeLater(src);   // the whole game subgroup
+                b.removeLater(jk);    // the move is complete; the marker has nothing left to protect
             }
     }
+    b.commit();
 }
 
 // favorites/<profile>/items -> a JSON array whose entries carry itemId (FavoritesStore.cpp). Not hashed, so
@@ -390,6 +461,7 @@ void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
     const QStringList profiles = s.childGroups();
     s.endGroup();
 
+    Batch b(s);
     for (const QString& p : profiles)
     {
         const QString key = QStringLiteral("favorites/") + p + QStringLiteral("/items");
@@ -453,8 +525,12 @@ void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
         }
 
         if (!changed) continue;
-        writeVerified(s, key, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
+        // No source to retire: this pass REWRITES one key in place, so there is nothing to remove and the
+        // rule-2 ordering does not arise. It still goes through the batch so the rewrite rides one flush
+        // per pass rather than one per profile.
+        b.write(key, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
     }
+    b.commit();
 }
 
 // resume/<md5(id) truncated to 10>/{pos,dur,ts,title} — global, not per-profile.
@@ -466,6 +542,7 @@ void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
 // Stated explicitly because it is the one store where "merge" does discard a value.
 void remapResume(QSettings& s, const QHash<QString, QString>& table)
 {
+    Batch b(s);
     for (auto it = table.cbegin(); it != table.cend(); ++it)
     {
         if (it.key() == it.value()) continue;
@@ -493,24 +570,28 @@ void remapResume(QSettings& s, const QHash<QString, QString>& table)
             for (const char* leaf : { "/pos", "/dur", "/title" })
             {
                 const QString lk = src + QLatin1String(leaf);
-                if (s.contains(lk)) ok = writeVerified(s, dst + QLatin1String(leaf), s.value(lk)) && ok;
+                if (s.contains(lk)) ok = b.write(dst + QLatin1String(leaf), s.value(lk)) && ok;
             }
             if (!ok) continue;                       // leave BOTH in place; the next refresh retries
+            // clearNow, not removeLater: these are DESTINATION leaves being cleared as part of the write,
+            // not sources being retired, so they must ride the same flush as the leaves that replace them.
             for (const char* leaf : { "/pos", "/dur", "/title" })
-                if (!s.contains(src + QLatin1String(leaf))) s.remove(dst + QLatin1String(leaf));
+                if (!s.contains(src + QLatin1String(leaf))) b.clearNow(dst + QLatin1String(leaf));
 
             // `ts` LAST, deliberately: it is the field the comparison above reads. Written first, a run
             // that then died halfway would leave the destination LOOKING newer than the source, and the
-            // retry would skip it and delete the source on top of a half-copied record. Written last, an
-            // interrupted move still reads as older and is simply redone.
+            // retry would skip it and delete the source on top of a half-copied record. (Under batching a
+            // half-written destination cannot reach disk at all — one flush carries every leaf or none —
+            // but the order is kept: it costs nothing and it is what makes the invariant hold again
+            // immediately if these writes are ever split back up.)
             const QString sts = src + QStringLiteral("/ts");
-            if (s.contains(sts)) { if (!writeVerified(s, dst + QStringLiteral("/ts"), s.value(sts))) continue; }
-            else                 s.remove(dst + QStringLiteral("/ts"));
+            if (s.contains(sts)) { if (!b.write(dst + QStringLiteral("/ts"), s.value(sts))) continue; }
+            else                 b.clearNow(dst + QStringLiteral("/ts"));
         }
-        // Either the destination already held the newer position, or we just wrote (and verified) it.
-        s.remove(src);
-        s.sync();
+        // Either the destination already held the newer position, or we just staged it.
+        b.removeLater(src);
     }
+    b.commit();
 }
 
 } // namespace
@@ -522,6 +603,9 @@ void pcgame::setRemapIniPathForTesting(const QString& path)
     g_testStore   = nullptr;
     g_testIniPath = path;
 }
+
+int  pcgame::remapSyncCount()      { return g_syncCount; }
+void pcgame::resetRemapSyncCount() { g_syncCount = 0; }
 #endif
 
 void pcgame::setRemapCacheInvalidator(std::function<void()> fn)
@@ -574,7 +658,10 @@ void pcgame::applyRemap(const QHash<QString, QString>& table)
     remapPlayStats(s, safe);
     remapFavorites(s, safe);
     remapResume(s, safe);
-    s.sync();
+    // Each pass commits its own writes, so by here the ini is already flushed; this is the belt-and-braces
+    // that guarantees the invalidator below never fires over an unflushed file, whatever a pass does later.
+    // It is O(1) in the library, which is the whole point of the change — the per-record flushes are gone.
+    syncStore(s);
 
     // The stores cache their per-profile view keyed on the OLD hashes; the ini they read has just changed
     // underneath them. See the header for why this is a hook rather than a direct call.
