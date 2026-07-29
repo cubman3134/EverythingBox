@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.128 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.129 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -228,6 +228,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/EpicLibrary.cpp  src/core/EpicLibrary.h
         src/core/GogLibrary.cpp   src/core/GogLibrary.h
         src/core/BattleNetLibrary.cpp src/core/BattleNetLibrary.h  # Blizzard Uninstall-hive detection (bnet T1)
+        src/core/PcGameId.cpp     src/core/PcGameId.h      # ONE PC-game entry, many launcher sources (pc-games T1)
         src/core/SystemCatalog.h
         src/ui/SettingsDialog.cpp src/ui/SettingsDialog.h
         src/ui/ControllerRemapDialog.cpp src/ui/ControllerRemapDialog.h
@@ -478,6 +479,17 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
+
+    # Headless test for PC-game identity + source selection (the merged PC Games folder). PcGameId.cpp
+    # is QtCore-only, so this links against Qt6::Core alone.
+    add_executable(probe_pcgames tools/probe_pcgames.cpp
+        src/core/PcGameId.cpp src/core/PcGameId.h)
+    target_include_directories(probe_pcgames PRIVATE src src/core)
+    # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn /
+    # probe_passcode): the alias override store persists, so without a scratch ini a run reads back what
+    # the PREVIOUS run wrote and the probe stops being repeatable.
+    target_compile_definitions(probe_pcgames PRIVATE EB_PCGAMEID_TEST_SEAM)
+    target_link_libraries(probe_pcgames PRIVATE Qt6::Core)
 
     # Headless test for the one-shot brand migration: per-step flags, idempotence, resumability, and that the
     # ini step never destroys the legacy file before the new one is verified. AppPaths.h is header-only, so
