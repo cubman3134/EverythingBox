@@ -103,6 +103,16 @@ ProfilePasscode::EntryOptions ProfilePasscode::entryOptions(bool hasPasscode, bo
     return o;
 }
 
+ProfilePasscode::RestrictedGate ProfilePasscode::restrictedChangeGate(bool parentalPinSet, bool turningOn,
+                                                                      bool hasPasscode)
+{
+    if (parentalPinSet) return RestrictedGate::ParentalPin;   // both directions — see the header
+    // No PIN. Turning it ON takes nothing away that a passcode holder had; turning it OFF hands back the
+    // timed reset, which is the bypass, so it costs the profile's own code.
+    if (!turningOn && hasPasscode) return RestrictedGate::ProfilePasscode;
+    return RestrictedGate::Free;
+}
+
 bool ProfilePasscode::lockedOut(const Attempts& a, qint64 nowMs)
 {
     return a.lockedUntilMs > nowMs;
