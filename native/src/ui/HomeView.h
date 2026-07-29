@@ -35,6 +35,10 @@ class QBoxLayout;
 class QFrame;
 class QTextBrowser;
 class QNetworkAccessManager;
+// One sweep of the PC library (the four launcher scans + the downloads list + the TTL-cached Steam owned
+// list), defined in HomeView.cpp. Opaque here on purpose: naming its members would drag EpicLibrary.h and
+// BattleNetLibrary.h into every translation unit that includes this header.
+struct PcLibScan;
 
 class HomeView : public QWidget
 {
@@ -283,13 +287,24 @@ private:
     // play time attached to whichever copy you happened to launch it from. There is now one folder built by
     // browse::pcGamesCatalog, one item per game, and every way to launch it carried as a source on that item.
     void openPcGamesConsole(const MediaItem& consoleItem); // drill the synthetic PC Games console
-    void populatePcGames();                                // (re)build it natively (+ run the id remap)
+    // (Re)build it natively. `runRemap` is what a REFRESH does and a mere QUERY CHANGE does not: the
+    // in-folder search box is debounced at 300 ms and repopulates on every keystroke, and the remap's input
+    // is the LIBRARY, which cannot have changed because the user typed a letter. Running it there was an ini
+    // pass per keystroke, unbounded in the size of the library, for a table identical to the one the last
+    // pass applied. It still runs on every genuine refresh (entering the folder, Back into it, the owned-list
+    // re-present), which is what makes a reinstalled game migrate the moment it reappears.
+    void populatePcGames(bool runRemap = true);
     bool atPcGamesConsole() const;                         // the top level is still that console
 
     // The library the folder is built from, gathered in ONE place: the four launcher scans, the downloaded
     // copies and the TTL-cached Steam owned list. Both the folder and the re-derivation below call this, so
     // a tile's sources and a re-derived game's sources cannot come from different ingredients.
-    MediaCatalog pcLibraryCatalog(const QString& query, const QString& launcherFilter) const;
+    //
+    // `pre` hands in a scan the caller ALREADY did (populatePcGames needs the same four launcher scans to
+    // build the remap's candidate ids) instead of making this repeat it — that was two full scans of every
+    // launcher per refresh. Null means "scan here", which is what the re-derivation path passes.
+    MediaCatalog pcLibraryCatalog(const QString& query, const QString& launcherFilter,
+                                  const PcLibScan* pre = nullptr) const;
 
     // THE RE-DERIVATION PATH. MediaItem::pcSources does not survive persistence and it.url is empty by
     // design, so a stored favourite/recent/search row for a merged PC game carries its ID and nothing else —

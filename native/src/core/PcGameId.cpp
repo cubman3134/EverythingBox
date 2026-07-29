@@ -246,6 +246,22 @@ void pcgame::setOverride(const QString& normA, const QString& normB, bool same)
     store().sync();
 }
 
+QString pcgame::legacyLaunchId(const PcGameSource& s)
+{
+    if (s.launcher.isEmpty()) return QString();
+    // The launcher's own id when it has one; otherwise its own NAME for this copy. The fallback is the
+    // whole point (see the header): a code-less Battle.net title has no product code, so the id the old
+    // battleNetGamesCatalog minted — and the candidate populatePcGames feeds remapTable — is its name.
+    // The merged tile's display title is emphatically NOT interchangeable with it.
+    const QString key = s.launchId.isEmpty() ? s.sourceName : s.launchId;
+    if (key.isEmpty()) return QString();
+    if (s.launcher == QStringLiteral("steam"))     return QStringLiteral("steam:") + key;
+    if (s.launcher == QStringLiteral("epic"))      return QStringLiteral("epic:")  + key;
+    if (s.launcher == QStringLiteral("gog"))       return QStringLiteral("gog:")   + key;
+    if (s.launcher == QStringLiteral("battlenet")) return QStringLiteral("bnet:")  + key;
+    return QString();   // a launcher with no id scheme here: no pre-merge id to claim (rule 1)
+}
+
 int pcgame::pickAutoSource(const QVector<PcGameSource>& all)
 {
     int found = -1;
