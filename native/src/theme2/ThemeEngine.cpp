@@ -67,6 +67,21 @@ static QSoundEffect* loadEffect(QObject* /*parent*/, const QString& themeDir, co
     return e;
 }
 
+// Does this (already parsed) theme declare a `sidebar` element in ANY of its views? That is a theme's opt-in
+// to the SIDEBAR shape of the `categories` nav zone (a vertical list beside a grid) instead of the XMB cross —
+// see CategoriesNav in NavThemeGraph.h. Scanned across every view, not just `home`, because ONE graph backs a
+// whole themed widget and the same widget renders home/browse/detail; a view that has no sidebar simply leaves
+// the zone at count 0, which makes its edges inert anyway. Matches homeIsXmb()'s "look for the element type"
+// discipline, so a theme opts in by declaring the element it wants — no separate flag to keep in sync.
+static bool themeDeclaresSidebar(const QVariantMap& theme)
+{
+    const QVariantMap views = theme.value(QStringLiteral("views")).toMap();
+    for (auto v = views.constBegin(); v != views.constEnd(); ++v)
+        for (const QVariant& e : v.value().toMap().value(QStringLiteral("elements")).toList())
+            if (e.toMap().value(QStringLiteral("type")).toString() == QStringLiteral("sidebar")) return true;
+    return false;
+}
+
 // The sound effects live on the theme audio thread (not parented to this bridge, which is on the GUI
 // thread). deleteLater posts each delete to that thread, where it runs safely on the thread's event loop.
 ThemeBridge::~ThemeBridge()
@@ -102,6 +117,10 @@ void ThemeBridge::audioQueue(int row) { playEffect(sndSelect); if (onAudioQueue)
 void ThemeBridge::onNavSelection(const QString& zone, int index)
 {
     if (!root) return;
+    // Which zone holds the cursor, verbatim. Elements that render a zone need to know when that zone has
+    // FOCUS (a sidebar draws its focus ring from it) and ThemeView routes keys with it while the cursor is in
+    // the sidebar. focusZone can't answer that — it collapses items and categories to the same 0.
+    root->setProperty("navZone", zone);
     if (zone == QStringLiteral("items"))
         { root->setProperty("currentIndex", index); root->setProperty("focusZone", 0); }
     else if (zone == QStringLiteral("categories"))
@@ -292,7 +311,11 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     // (see ThemeView.qml); a hidden zone (count 0) makes its edges inert, so XMB themes (no buttons) and grid
     // themes (no categories) share this one wiring. (See NavThemeGraph.h for the per-zone rationale.)
     auto* graph = new NavGraph(qv);
-    buildThemedNavGraph(*graph, int(items.size()));
+    // A theme that declares a `sidebar` element gets the SIDEBAR shape of the `categories` zone (a vertical
+    // list beside the grid) instead of the XMB cross — the ONE non-XMB route into that zone. Every other
+    // theme (Triple, Channels, anything without the element) builds the historical Cross shape unchanged.
+    buildThemedNavGraph(*graph, int(items.size()), {},
+                        themeDeclaresSidebar(theme) ? CategoriesNav::Sidebar : CategoriesNav::Cross);
     // The audio now-playing surface's zones (transport strip + queue list) live on the SAME graph as the home,
     // registered hidden (count 0) and count-gated by syncAudioPageZone when the "nowplayingAudio" view opens —
     // exactly like the detail zones. Built by the shared buildAudioPageNavGraph (NavThemeGraph.h), the ONE

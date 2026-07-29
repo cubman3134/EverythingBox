@@ -138,8 +138,8 @@ Item {
         (items && currentIndex >= 0 && currentIndex < items.length && items[currentIndex]
          && items[currentIndex].title) ? items[currentIndex].title : ""
     readonly property string uitestCategory:
-        (xmbMode && categories && catIndex >= 0 && catIndex < categories.length && categories[catIndex]
-         && categories[catIndex].title) ? categories[catIndex].title : ""
+        ((xmbMode || sidebarMode) && categories && catIndex >= 0 && catIndex < categories.length
+         && categories[catIndex] && categories[catIndex].title) ? categories[catIndex].title : ""
 
     readonly property bool xmbMode: {
         if (view && view.elements)
@@ -147,6 +147,28 @@ Item {
                 if (view.elements[i].type === "xmb") return true
         return false
     }
+    // A theme opts into the NON-XMB route through the `categories` zone by declaring a `sidebar` element —
+    // exactly how an `xmb` element opts into the cross. That one declaration picks the zone's shape in the
+    // model (CategoriesNav::Sidebar, see NavThemeGraph.h: Vertical axis, Left in / Right out) and turns on the
+    // traversal gate below. Declaring an `xmb` element purely to unlock the categories zone used to be the
+    // only way in, and it cost 2-D grid stepping and force-disabled the `buttons` zone; sidebarMode costs
+    // neither — the grid keeps its own Left/Right and the button bar stays live.
+    readonly property bool sidebarMode: {
+        if (view && view.elements)
+            for (var i = 0; i < view.elements.length; i++)
+                if (view.elements[i].type === "sidebar") return true
+        return false
+    }
+    // Which nav zone holds the cursor ("items" / "categories" / "buttons" / a detail or audio zone). Written by
+    // the C++ bridge on every selection change; elements read it to draw focus (the sidebar's focus ring) and
+    // the key handler reads it to route arrows while the cursor is in the sidebar. Deliberately NOT in dataCtx:
+    // it is focus state the ELEMENTS need off `host`, not data a binding should resolve.
+    property string navZone: "items"
+    // The sidebar has focus: only on a sidebar theme, never on the XMB (whose categories cursor is the cross).
+    readonly property bool sidebarFocused: sidebarMode && !xmbMode && navZone === "categories"
+    // The grid's leftmost column — where Left leaves the grid for the sidebar. The QML owns this because it
+    // owns the gridCols geometry, exactly as it owns "is this the bottom row?" for the items->buttons edge.
+    readonly property bool atRowStart: (currentIndex % Math.max(1, gridCols)) === 0
     // Navigation is arbitrated by the NavGraph selection model exposed as the `nav` context object. Arrow
     // keys, the wheel and mouse clicks all become REQUESTS to `nav`; the C++ bridge writes the resolved
     // selection back into catIndex / currentIndex / buttonIndex / actionIndex (and focusZone) — the props
@@ -169,9 +191,22 @@ Item {
     function navHorizontal(d) {
         if (xmbMode) {
             if (nav.move(d > 0 ? Qt.Key_Right : Qt.Key_Left)) { navigate(); categoryChanged() }
+        } else if (sidebarMode && d < 0 && atRowStart) {
+            // At the grid's leftmost column, Left leaves for the sidebar via the declared items->categories
+            // edge. The QML decides WHEN (it owns the row geometry); the model owns WHERE the cursor lands —
+            // the sidebar's remembered index. Everywhere else Left/Right stay ordinary grid steps, so 2-D
+            // stepping is exactly what it was. (A hidden/empty sidebar makes the edge inert: nothing moves.)
+            crossZone(Qt.Key_Left)
         } else {
             gridSelect(currentIndex + d, d)                    // one item along the strip
         }
+    }
+    // Cross a zone boundary and sound it once. A crossing that lands on the target's remembered index without
+    // changing that zone's displayed index returns false from move(), so also sound when the ZONE changed —
+    // the same "no visible move, no sound, but a real crossing IS a move" rule the detail view uses.
+    function crossZone(key) {
+        var z = nav.zone
+        if (nav.move(key) || nav.zone !== z) navigate()
     }
     // Vertical move (Up/Down key, wheel). XMB: step the item column (divider-skipping lives in the model;
     // from the category cursor the declared categories->items edge switches + steps in one press).
@@ -179,6 +214,10 @@ Item {
     function navVertical(d) {
         if (xmbMode) {
             if (nav.move(d > 0 ? Qt.Key_Down : Qt.Key_Up)) navigate()
+        } else if (sidebarFocused) {
+            // The wheel over a focused sidebar steps the sidebar, not the grid behind it (the Up/Down KEYS are
+            // handled in the key router; this is the wheel's leg of the same behaviour).
+            if (nav.move(d > 0 ? Qt.Key_Down : Qt.Key_Up)) { navigate(); categoryChanged() }
         } else {
             gridSelect(currentIndex + d * gridCols, d)
         }
@@ -235,7 +274,12 @@ Item {
         var n = categories ? categories.length : 0
         if (i < 0 || i >= n) return
         if (i === catIndex) {                              // clicking the already-selected category...
-            if (!items || items.length === 0) { nav.select("items", currentIndex); nav.activate() } // no column -> open it
+            // XMB ONLY. On the cross the item column BELONGS to the selected category, so a second click on
+            // that category with an empty column means "open it" — activate is the right answer there. A
+            // sidebar theme's grid is a PEER surface, not a column the rail owns, and an empty grid there has
+            // no row to open: activating would fire onActivated(currentIndex) at an index into a list that
+            // isn't on screen. Clicking the already-selected rail row is simply a no-op instead.
+            if (xmbMode && (!items || items.length === 0)) { nav.select("items", currentIndex); nav.activate() }
             return
         }
         nav.select("categories", i); navigate(); categoryChanged()
@@ -271,13 +315,28 @@ Item {
         // it into the model so nav.move steps from the right place. A bridge-originated write is a no-op
         // here (same zone+index). Skipped while the chooser is open (its parked selection must not be
         // yanked; syncActionsZone re-syncs on close) — and a select onto a hidden zone is refused anyway.
-        if (!actionsOpen) nav.select("items", currentIndex)
+        // While the SIDEBAR holds focus the host still rewrites this prop (stepping the sidebar reloads the
+        // grid): mirror it into the model — the model has to know where the grid cursor is for the trip back —
+        // and then hand focus straight back to the sidebar. A host-side data refresh must never steal focus out
+        // of the zone the user is in; without the hand-back, one Down in the sidebar would eject you to the grid.
+        if (!actionsOpen) {
+            if (sidebarFocused) { var _sc = catIndex; nav.select("items", currentIndex); nav.select("categories", _sc) }
+            else nav.select("items", currentIndex)
+        }
         var n = items ? items.length : 0
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
         selectionMoved() // host fetches the newly-selected item's metadata for the live panel (XMB)
     }
-    // Same sync for the category cursor (the host seeds catIndex at build/restore).
-    onCatIndexChanged: if (!actionsOpen) nav.select("categories", catIndex)
+    // Same sync for the category cursor (the host seeds catIndex at build/restore). TWO calls, because the
+    // host writes this prop while the `categories` zone is still HIDDEN and select() cannot reach a hidden
+    // zone: showThemedHome/showThemedBrowse set catIndex BEFORE categories on purpose (the other order counts
+    // the zone up first and then hands it the cursor, booting the grid home with focus parked in the sidebar),
+    // and select() on a count-0 zone is refused outright and stores NOTHING. seedIndex is the memory half —
+    // it records the remembered row without moving the cursor, so once onCategoriesChanged counts the zone up
+    // the first crossing into it lands on the bucket the theme is actually drawing, instead of snapping the
+    // rail to row 0 over bucket N's grid. Once the zone IS live, select() does the real work and the seed is
+    // the no-op (a selected zone's memory is rewritten from the live index when the selection leaves it).
+    onCatIndexChanged: if (!actionsOpen) { nav.seedIndex("categories", catIndex); nav.select("categories", catIndex) }
 
     // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
     property int gridCols: {
@@ -375,6 +434,32 @@ Item {
             e.accepted = true
             return
         }
+        // The SIDEBAR has focus (the cursor sits in the `categories` zone on a non-XMB theme): Up/Down step the
+        // list itself — that is along-axis on the Vertical categories zone, which is exactly why the model
+        // declares no Up/Down edges there — and each step fires categoryChanged() so the host reloads the grid,
+        // the same live-switch feel as the cross. Right (or Enter) crosses back to the grid via the declared
+        // categories->items edge, landing on the grid's REMEMBERED index: the 2-D position survives the round
+        // trip. Esc leaves the same way but silently (a cancel makes no move sound); Left is the containment
+        // no-op (nothing sits left of the sidebar). Any OTHER key falls through to the shared handling below,
+        // so "/" search, F filter, I info and T cycle keep working from the sidebar.
+        if (sidebarFocused) {
+            if (e.key === Qt.Key_Up || e.key === Qt.Key_Down) {
+                if (nav.move(e.key)) { navigate(); categoryChanged() }
+                e.accepted = true; return
+            }
+            if (e.key === Qt.Key_Right || e.key === Qt.Key_Return || e.key === Qt.Key_Enter
+                || e.key === Qt.Key_Select || e.key === Qt.Key_Space) { crossZone(Qt.Key_Right); e.accepted = true; return }
+            if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
+                // Leave for the grid, silently. That crossing is REFUSABLE: a hidden/empty `items` zone makes
+                // the declared categories->items edge inert (a count-0 zone is never a move target), and Esc
+                // would then be consumed for nothing — a dead key, in the one place a user reaches for Back.
+                // So if nothing crossed, fall through to the ordinary Back gesture instead of eating the key.
+                var _ez = nav.zone
+                if (!nav.move(Qt.Key_Right) && nav.zone === _ez) nav.back()
+                e.accepted = true; return
+            }
+            if (e.key === Qt.Key_Left) { e.accepted = true; return }   // contained: nothing left of the sidebar
+        }
         // XMB cross: Left/Right switch category (the host reloads its column), Up/Down move within the column.
         if (xmbMode && (e.key === Qt.Key_Right || e.key === Qt.Key_Left)) {
             navHorizontal(e.key === Qt.Key_Right ? 1 : -1); e.accepted = true
@@ -453,7 +538,12 @@ Item {
                     : (currentView === "nowplayingAudio")
                     ? audioData
                     : ((items && items.length > currentIndex && currentIndex >= 0) ? items[currentIndex] : ({})),
-        "focusZone": focusZone // 1 = focus has left the grid for the bottom buttons (grid drops its selection)
+        "focusZone": focusZone, // 1 = focus has left the grid for the bottom buttons (grid drops its selection)
+        // The host-fed live metadata for the HOVERED row (a skeleton the instant the selection moves, enriched
+        // asynchronously). Distinct from `selected`, which is the raw catalog row / the detail page's data:
+        // this is what a DETAILS PANE binds ("selectedMeta.overview", "selectedMeta.factsText", …). Empty on a
+        // surface the host doesn't drive a hover fetch for, so a binding to it simply renders nothing there.
+        "selectedMeta": selectedMeta
     })
 
     // type -> exact component filename (QML files must be capitalised; filesystems may be case-sensitive).
@@ -461,7 +551,7 @@ Item {
         "text": "Text", "datetime": "DateTime", "image": "Image", "rating": "Rating",
         "grid": "Grid", "carousel": "Carousel", "video": "Video", "helpsystem": "HelpSystem",
         "particles": "Particles", "xmb": "Xmb", "wave": "Wave", "button": "Button", "panel": "Panel",
-        "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying",
+        "channels": "Channels", "clock": "Clock", "nowplaying": "NowPlaying", "sidebar": "Sidebar",
         "gallery": "Gallery", "actionrow": "ActionRow", "nowplayingaudio": "NowPlayingAudio"
     })
     function urlFor(type) { return Qt.resolvedUrl("elements/" + (elementFiles[type] ? elementFiles[type] : type) + ".qml") }

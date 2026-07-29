@@ -1,0 +1,160 @@
+{
+  "name": "Night",
+  "author": "EverythingBox",
+  "hideAppearanceTile": true,
+  "formFactors": ["desktop"],
+
+  "settingsPanel": {
+    "background": "#0A0C10",
+    "panel": "#111419",
+    "row": "#141821",
+    "rowSelected": "#1E2A3E",
+    "accent": "#4C8DFF",
+    "text": "#E9EDF4",
+    "dim": "#97A0AF",
+    "separator": "#2A313C",
+    "warning": "#E0574E"
+  },
+
+  "views": {
+    "home": {
+      "background": { "color": "#0A0C10" },
+      "elements": [
+        { "type": "sidebar", "id": "rail", "pos": [0.007, 0.014], "size": [0.172, 0.905], "origin": [0, 0], "zIndex": 2,
+          "fill": "#111419", "radius": 10, "border": "#1E232C", "borderWidth": 1,
+          "title": "LIBRARY", "titleColor": "#626A78", "titleSize": 0.0185,
+          "rowHeight": 0.058, "rowSpacing": 0.002, "rowRadius": 6, "fontSize": 0.021,
+          "color": "#97A0AF", "selectedColor": "#FFFFFF", "selectedBg": "#191E27", "focusBg": "#24406E",
+          "accentBar": true, "showIcons": true },
+
+        { "type": "text", "id": "hTitle", "pos": [0.190, 0.052], "size": [0.40, 0.055], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "system.name", "color": "#E9EDF4", "fontSize": 0.030, "bold": true },
+        { "type": "datetime", "id": "hClock", "pos": [0.738, 0.052], "size": [0.30, 0.05], "origin": [1, 0.5], "zIndex": 2,
+          "format": "ddd d MMM    hh:mm", "color": "#626A78", "fontSize": 0.020, "align": "right" },
+        { "type": "image", "id": "hRule", "pos": [0.190, 0.088], "size": [0.548, 0.0016], "origin": [0, 0], "zIndex": 2,
+          "color": "#1E232C" },
+
+        { "type": "grid", "id": "grid", "pos": [0.190, 0.100], "size": [0.548, 0.819], "origin": [0, 0], "zIndex": 2,
+          "columns": 5, "aspect": 1.42, "spacing": 0.0045,
+          "card": { "radius": 8, "fill": "#161A21", "border": "#21262F", "borderWidth": 1,
+                    "selectedBorder": "#4C8DFF", "selectedWidth": 3, "selectedScale": 1.04,
+                    "label": "overlay", "labelColor": "#FFFFFF" } },
+
+        { "type": "image", "id": "paneBg", "pos": [0.748, 0.014], "size": [0.245, 0.905], "origin": [0, 0], "zIndex": 1,
+          "color": "#111419", "radius": 10 },
+        { "type": "text", "id": "paneKicker", "pos": [0.760, 0.030], "size": [0.221, 0.030], "origin": [0, 0], "zIndex": 2,
+          "text": "SECTION", "color": "#626A78", "fontSize": 0.0155, "bold": true },
+        { "type": "image", "id": "paneArt", "pos": [0.760, 0.066], "size": [0.221, 0.110], "origin": [0, 0], "zIndex": 2,
+          "binding": "selected.image", "fillMode": "contain", "radius": 8, "color": "#00000000" },
+        { "type": "text", "id": "paneTitle", "pos": [0.760, 0.186], "size": [0.221, 0.076], "origin": [0, 0], "zIndex": 2,
+          "binding": "selected.title", "color": "#E9EDF4", "fontSize": 0.028, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text", "id": "paneSub", "pos": [0.760, 0.266], "size": [0.221, 0.056], "origin": [0, 0], "zIndex": 2,
+          "binding": "selected.subtitle", "color": "#97A0AF", "fontSize": 0.019, "wrap": true, "lines": 2 },
+        { "type": "image", "id": "paneRule", "pos": [0.760, 0.332], "size": [0.221, 0.0016], "origin": [0, 0], "zIndex": 2,
+          "color": "#1E232C" },
+        { "type": "text", "id": "paneHint", "pos": [0.760, 0.348], "size": [0.221, 0.12], "origin": [0, 0], "zIndex": 2,
+          "text": "Enter opens this section.  ← moves to the library rail, → returns to the grid.  I shows details, / searches.",
+          "color": "#626A78", "fontSize": 0.0175, "wrap": true, "lines": 5 },
+
+        { "type": "button", "id": "bSettings", "pos": [0.190, 0.955], "size": [0.082, 0.042], "origin": [0, 0.5], "zIndex": 3,
+          "action": "settings", "glyph": "settings", "label": "Settings", "shape": "pill",
+          "color": "#141821", "textColor": "#C3CBD8", "borderColor": "#2A313C" },
+        { "type": "button", "id": "bProfile", "pos": [0.282, 0.955], "size": [0.082, 0.042], "origin": [0, 0.5], "zIndex": 3,
+          "action": "profile", "glyph": "profile", "label": "Profile", "shape": "pill",
+          "color": "#141821", "textColor": "#C3CBD8", "borderColor": "#2A313C" },
+
+        { "type": "helpsystem", "id": "help", "pos": [0.993, 0.955], "size": [0.60, 0.045], "origin": [1, 0.5], "zIndex": 2,
+          "color": "#8A93A2", "fontSize": 0.019,
+          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "/", "label": "Search" }, { "button": "T", "label": "Theme" } ] }
+      ]
+    },
+
+    "browse": {
+      "background": { "color": "#0A0C10" },
+      "elements": [
+        { "type": "sidebar", "id": "rail", "pos": [0.007, 0.014], "size": [0.172, 0.905], "origin": [0, 0], "zIndex": 2,
+          "fill": "#111419", "radius": 10, "border": "#1E232C", "borderWidth": 1,
+          "title": "LIBRARY", "titleColor": "#626A78", "titleSize": 0.0185,
+          "rowHeight": 0.058, "rowSpacing": 0.002, "rowRadius": 6, "fontSize": 0.021,
+          "color": "#97A0AF", "selectedColor": "#FFFFFF", "selectedBg": "#191E27", "focusBg": "#24406E",
+          "accentBar": true, "showIcons": true },
+
+        { "type": "text", "id": "bTitle", "pos": [0.190, 0.052], "size": [0.40, 0.055], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "system.name", "color": "#E9EDF4", "fontSize": 0.030, "bold": true },
+        { "type": "datetime", "id": "bClock", "pos": [0.738, 0.052], "size": [0.30, 0.05], "origin": [1, 0.5], "zIndex": 2,
+          "format": "ddd d MMM    hh:mm", "color": "#626A78", "fontSize": 0.020, "align": "right" },
+        { "type": "image", "id": "bRule", "pos": [0.190, 0.088], "size": [0.548, 0.0016], "origin": [0, 0], "zIndex": 2,
+          "color": "#1E232C" },
+
+        { "type": "grid", "id": "bGrid", "pos": [0.190, 0.100], "size": [0.548, 0.819], "origin": [0, 0], "zIndex": 2,
+          "columns": 7, "aspect": 1.48, "spacing": 0.0035,
+          "card": { "radius": 6, "fill": "#161A21", "border": "#21262F", "borderWidth": 1,
+                    "selectedBorder": "#4C8DFF", "selectedWidth": 3, "selectedScale": 1.06,
+                    "label": "overlay", "labelColor": "#FFFFFF" } },
+
+        { "type": "image", "id": "dpBg", "pos": [0.748, 0.014], "size": [0.245, 0.905], "origin": [0, 0], "zIndex": 1,
+          "color": "#111419", "radius": 10 },
+        { "type": "image", "id": "dpArt", "pos": [0.760, 0.028], "size": [0.221, 0.280], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.image", "fillMode": "contain", "radius": 8, "color": "#161A21" },
+        { "type": "text", "id": "dpTitle", "pos": [0.760, 0.322], "size": [0.221, 0.072], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.title", "color": "#E9EDF4", "fontSize": 0.026, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text", "id": "dpSub", "pos": [0.760, 0.398], "size": [0.221, 0.032], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.subtitle", "color": "#97A0AF", "fontSize": 0.019 },
+        { "type": "text", "id": "dpType", "pos": [0.760, 0.432], "size": [0.221, 0.028], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.type", "color": "#626A78", "fontSize": 0.0165 },
+        { "type": "image", "id": "dpRule", "pos": [0.760, 0.466], "size": [0.221, 0.0016], "origin": [0, 0], "zIndex": 2,
+          "color": "#1E232C" },
+        { "type": "text", "id": "dpOverview", "pos": [0.760, 0.480], "size": [0.221, 0.430], "origin": [0, 0], "zIndex": 2,
+          "binding": "selectedMeta.overview", "color": "#B6BECB", "fontSize": 0.0185, "wrap": true, "lines": 16 },
+
+        { "type": "button", "id": "bSettings", "pos": [0.190, 0.955], "size": [0.082, 0.042], "origin": [0, 0.5], "zIndex": 3,
+          "action": "settings", "glyph": "settings", "label": "Settings", "shape": "pill",
+          "color": "#141821", "textColor": "#C3CBD8", "borderColor": "#2A313C" },
+        { "type": "button", "id": "bProfile", "pos": [0.282, 0.955], "size": [0.082, 0.042], "origin": [0, 0.5], "zIndex": 3,
+          "action": "profile", "glyph": "profile", "label": "Profile", "shape": "pill",
+          "color": "#141821", "textColor": "#C3CBD8", "borderColor": "#2A313C" },
+
+        { "type": "helpsystem", "id": "bHelp", "pos": [0.993, 0.955], "size": [0.60, 0.045], "origin": [1, 0.5], "zIndex": 2,
+          "color": "#8A93A2", "fontSize": 0.019,
+          "entries": [ { "button": "←", "label": "Rail" }, { "button": "↑↓→", "label": "Grid" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "F", "label": "Filter" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "detail": {
+      "background": { "color": "#0A0C10" },
+      "elements": [
+        { "type": "image", "id": "poster", "pos": [0.050, 0.50], "size": [0.26, 0.74], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.image", "role": "box", "fallback": "poster", "fillMode": "contain", "radius": 10, "color": "#111419" },
+
+        { "type": "text", "id": "dTitle", "pos": [0.350, 0.16], "size": [0.60, 0.10], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.title", "color": "#F2F5FA", "fontSize": 0.050, "bold": true, "wrap": true, "lines": 2 },
+        { "type": "text", "id": "dSub", "pos": [0.350, 0.255], "size": [0.60, 0.05], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.subtitle", "color": "#97A0AF", "fontSize": 0.026 },
+        { "type": "rating", "id": "dStars", "pos": [0.350, 0.315], "size": [0.16, 0.038], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.rating", "color": "#4C8DFF", "emptyColor": "#252B35" },
+
+        { "type": "actionrow", "id": "dActions", "pos": [0.350, 0.415], "size": [0.60, 0.075], "origin": [0, 0.5], "zIndex": 2,
+          "fontSize": 0.024 },
+
+        { "type": "image", "id": "dRule", "pos": [0.350, 0.475], "size": [0.60, 0.0016], "origin": [0, 0], "zIndex": 2,
+          "color": "#1E232C" },
+        { "type": "text", "id": "dFacts", "pos": [0.350, 0.565], "size": [0.60, 0.115], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.factsText", "color": "#8A93A2", "fontSize": 0.021, "wrap": true, "lines": 4 },
+        { "type": "text", "id": "dOverview", "pos": [0.350, 0.790], "size": [0.60, 0.30], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "selected.overview", "color": "#C6CEDA", "fontSize": 0.023, "wrap": true, "lines": 9 },
+
+        { "type": "helpsystem", "id": "dHelp", "pos": [0.5, 0.962], "size": [1, 0.045], "origin": [0.5, 0.5], "zIndex": 2,
+          "color": "#8A93A2", "fontSize": 0.019,
+          "entries": [ { "button": "←→", "label": "Action" }, { "button": "Enter", "label": "Select" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
+    "nowplayingAudio": {
+      "background": { "color": "#0A0C10" },
+      "elements": [
+        { "type": "nowplayingaudio", "id": "np", "pos": [0, 0], "size": [1, 1], "origin": [0, 0], "zIndex": 2,
+          "accent": "#4C8DFF", "color": "#E9EDF4", "dimColor": "#97A0AF", "panelColor": "#111419" }
+      ]
+    }
+  }
+}

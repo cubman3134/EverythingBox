@@ -96,6 +96,18 @@ public:
     // Request (clamped + divider-snapped). Refused for an unregistered or hidden (count 0) zone — selection
     // can never be steered onto a zone that isn't visible.
     Q_INVOKABLE void select(const QString& zone, int index);
+    // Seed a zone's REMEMBERED index (above) WITHOUT moving the selection — the memory half of select(),
+    // available where select() cannot go. select() is refused outright on a hidden (count 0) zone and stores
+    // nothing, but a host that REBUILDS a screen has to be able to tell a not-yet-populated zone where its
+    // cursor was: the themed home writes catIndex while the `categories` zone is still empty (deliberately —
+    // writing it after the zone counts up would hand it the cursor and park focus in the sidebar), and the
+    // zone is counted up only afterwards, by the QML. Without a seed the zone's memory stays 0 and the first
+    // declared crossing into it enters at row 0 while the theme draws row N. Valid on a hidden zone — that is
+    // the whole point — and on an unregistered one it is a no-op. The index is snapped at USE time (the
+    // crossing/reassignment snap against the live count), so seeding a row the zone cannot hold yet is fine.
+    // Never touches the live cursor: seeding the CURRENTLY selected zone is inert, since its memory is
+    // rewritten from the live index the moment the selection leaves it.
+    Q_INVOKABLE void seedIndex(const QString& zone, int index);
     Q_INVOKABLE void activate();              // emits activated(zone, index)
 
     // Back stack (Invariant 4). Root behavior: back() at empty stack emits rootBack()

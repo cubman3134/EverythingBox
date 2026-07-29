@@ -81,7 +81,7 @@ Down reaches "Passcode…" from all eight columns; Down from "Passcode…" reach
 §22(c) — which walks Down from every column of the pad — therefore becomes a regression test of the ring
 rule rather than of a special case that shadowed it.
 
-## The probe (§23)
+## The probe (§24)
 
 Asserted against the **real** `ProfileDialog`, not a stand-in layout: the defect was pure geometry, and a
 stand-in drifts from the page it is meant to guard until it stops describing it. `probe_nav` gains
@@ -96,7 +96,7 @@ Two kinds of assertion:
 - **(b,c) Order** — Down from each of the eight bottom-row columns reaches "Passcode…"; the rows below keep
   going, both ways, skipping nothing. This is the one that names the defect.
 
-§23 also dismisses any overlay left open by a failing earlier section, so its report names its own cause
+§24 also dismisses any overlay left open by a failing earlier section, so its report names its own cause
 instead of "nothing is reachable".
 
 ## Verification

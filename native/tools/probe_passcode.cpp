@@ -418,10 +418,16 @@ int main(int argc, char** argv)
             s.sync();
         }
         setIniPathForTesting(iniPath());   // re-open so the seeded values are read
-        const qint64 readAt = QDateTime::currentMSecsSinceEpoch();
+        // Bracket the call on BOTH sides. attempts() clamps against its own clock reading, so comparing
+        // against a `before` stamp alone is a race: any millisecond that ticks between the two makes the
+        // clamped deadline exceed `before + kMaxLockoutMs` and fails a correct implementation. It passed
+        // standalone and failed under the loaded suite run, which is exactly how that race presents.
+        const qint64 before = QDateTime::currentMSecsSinceEpoch();
         const Attempts got = attempts(kIdA);
+        const qint64 after = QDateTime::currentMSecsSinceEpoch();
         CHECK(got.lockedUntilMs < farFuture);
-        CHECK(got.lockedUntilMs <= readAt + kMaxLockoutMs);
+        CHECK(got.lockedUntilMs >= before);                     // clamped forward, not into the past
+        CHECK(got.lockedUntilMs <= after + kMaxLockoutMs);      // and no further than the ceiling allows
         // Persisted: a SECOND reader (a fresh QSettings on the same file) sees the clamped value, which is
         // what makes the lockout actually count down instead of being re-clamped forward forever.
         {
