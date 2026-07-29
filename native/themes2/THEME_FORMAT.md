@@ -33,9 +33,10 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
   same data:
   - `home` — the main screen (the media-type catalogs as a carousel/grid). **/** opens the highlighted
     catalog and searches within it.
-  - `browse` — the "gamelist" shown when you open a catalog: a `grid` of that catalog's items plus a detail
-    panel bound to `selected.*` (`title`, `subtitle`, `image`). Navigate to focus, **Enter** to open/drill,
-    **Esc** to go up, **/** to search within the catalog (large catalogs page in as you scroll near the end).
+  - `browse` — the "gamelist" shown when you open a catalog: a `grid` of that catalog's items plus a details
+    pane bound to `selectedMeta.*` (the live metadata for the hovered row — see **Data bindings**). Navigate
+    to focus, **Enter** to open/drill, **Esc** to go up, **/** to search within the catalog (large catalogs
+    page in as you scroll near the end).
   - `detail` — shown for the focused item when you press **I** (Info); **Esc** returns. Typically a big
     `selected.image`, `selected.title`, `selected.rating`, `selected.overview`.
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
@@ -57,10 +58,34 @@ So an element's screen rectangle is: `x = pos.x*W − origin.x*(size.w*W)`, like
 
 Text/image/video/rating elements can show **live data** instead of a literal, via `"binding"` — a path into the data context:
 
-- `selected.title`, `selected.subtitle`, `selected.image`, `selected.rating` — the currently-focused row.
+- `selected.*` — the currently-focused row: `title`, `subtitle`, `image`, `rating`. In the **detail** view
+  `selected` is that item's *full* metadata instead, so the same paths work there and carry more:
+  `overview`, `factsText`, and the artwork roles (`logo`, `box`, `hero`, `images.screenshot`, …).
+- `selectedMeta.*` — the live metadata for the **hovered** row on a `browse` grid or an `xmb` column, fetched
+  as you move: a skeleton (`title`, `subtitle`, `image`, `type`) the instant the selection lands, enriched a
+  moment later with `overview`, `factsText`, the artwork roles, and `lastPlayed` / `timePlayed` for a game
+  you have played. This is what a **details pane** beside the grid binds. It is replaced outright on every
+  move (nothing from the previous row lingers), and it is empty on views the app runs no hover fetch for —
+  a binding to it simply renders nothing there.
 - `system.name`, `index`, `count`.
 
 Example: `{ "type": "text", "binding": "selected.title" }`.
+
+### Facts, and other structured data
+
+An item's labelled facts — Developer, Genre, Players, Rating, … — are published as a ready-to-draw string
+under **`factsText`**: `"Developer: Square     •     Genre: RPG"`. It exists on both metadata shapes,
+formatted identically, so the same line works on either surface:
+
+```json
+{ "type": "text", "binding": "selectedMeta.factsText", "wrap": true, "lines": 3 }
+{ "type": "text", "binding": "selected.factsText",     "wrap": true, "lines": 4 }
+```
+
+A `text` element renders a **scalar**. Bindings that resolve to structured data instead — `facts` (the raw
+list of label/value pairs behind `factsText`) or `images` (the artwork role map) — render as **nothing**
+rather than as garbled object text. So if a facts line comes up blank, check that you bound `factsText` and
+not `facts`. The shipped **Night** theme binds it in both its `browse` pane and its `detail` page.
 
 ## Colours & fonts
 
