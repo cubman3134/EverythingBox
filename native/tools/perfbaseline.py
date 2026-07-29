@@ -37,8 +37,9 @@ def key(k, n=1, delay=0.15):
 
 
 def _state():
-    # uitest.state() decodes the pipe as utf-8 and returns a dict; safe even though the themed
-    # category list contains a non-cp1252 glyph (which only broke the CLI's stdout print path).
+    # uitest.state() decodes the pipe as utf-8 and returns a dict; the themed category list contains
+    # non-cp1252 glyphs, which used to break only the CLI's stdout print path (fixed: issue #36 /
+    # uitest.use_utf8_streams, called from main below).
     try:
         return uitest.state()
     except Exception:
@@ -148,6 +149,7 @@ def emit(spans, skipped, out):
 
 
 def main():
+    uitest.use_utf8_streams()   # app labels are non-ASCII; a redirected cp1252 stdout would raise (#36)
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
