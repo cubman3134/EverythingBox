@@ -11,6 +11,7 @@
 #include <QMessageBox>
 #include <QFrame>
 #include <QStackedWidget>
+#include <QPointer>
 #include <QVector>
 #include <memory>
 
@@ -28,8 +29,8 @@ QStringList ProfileDialog::iconChoices()
     return out;
 }
 
-ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
-    : QDialog(parent), mustChoose_(mustChoose)
+ProfileDialog::ProfileDialog(bool mustChoose, std::function<bool(const QString&)> unlockGate, QWidget* parent)
+    : QDialog(parent), mustChoose_(mustChoose), unlockGate_(std::move(unlockGate))
 {
     setWindowTitle(tr("Who's using EverythingBox?"));
     setMinimumWidth(360);
@@ -66,6 +67,20 @@ ProfileDialog::ProfileDialog(bool mustChoose, QWidget* parent)
     rebuild();
 }
 
+// THE gate for the two escape routes on this page. Copies the callable before invoking it because the call
+// spins a nested overlay loop on the main window, inside which this dialog can be torn down (a navigation
+// away, the panel host closing); the QPointer then stops us walking back into a freed object. A missing
+// gate is treated as REFUSED — a dead button is a bug, an ungated Delete on a locked profile is the defect
+// this exists to close, and the constructor makes the missing case unreachable anyway.
+bool ProfileDialog::allowAction(const QString& id)
+{
+    auto gate = unlockGate_;
+    if (!gate) return false;
+    QPointer<ProfileDialog> self(this);
+    const bool ok = gate(id);
+    return ok && !self.isNull();
+}
+
 void ProfileDialog::rebuild()
 {
     while (QLayoutItem* it = rows_->takeAt(0)) { delete it->widget(); delete it; }
@@ -86,7 +101,10 @@ void ProfileDialog::rebuild()
         auto* edit = new QPushButton(tr("✎"), this);
         edit->setFixedWidth(36);
         edit->setToolTip(tr("Edit this profile"));
-        connect(edit, &QPushButton::clicked, this, [this, id] { editProfile(id); });
+        // GATED: the edit page carries the "Passcode…" row, so an ungated ✎ on a locked profile is a way to
+        // remove the code and walk in. The themed row menu gates the same action; this is not a second copy
+        // of the policy, it is the same MainWindow::profilePasscodeUnlock reached through unlockGate_.
+        connect(edit, &QPushButton::clicked, this, [this, id] { if (allowAction(id)) editProfile(id); });
         row->addWidget(edit);
 
         if (canDelete)
@@ -96,6 +114,11 @@ void ProfileDialog::rebuild()
             del->setToolTip(tr("Delete this profile"));
             const QString name = p.name;
             connect(del, &QPushButton::clicked, this, [this, id, name] {
+                // GATED, and BEFORE the confirm page is even built: deleting a locked profile does not open
+                // it, but it does defeat "this profile cannot be entered" for anyone who only wanted it
+                // gone — the same escape the themed row menu closes. At the STARTUP picker this was the
+                // whole lock: anyone could delete a passcode-protected profile outright.
+                if (!allowAction(id)) return;
                 // Inline confirm page (no popup): push it onto the stack with Delete / Cancel.
                 auto* page = new QWidget(stack_);
                 auto* v = new QVBoxLayout(page);
@@ -128,7 +151,8 @@ void ProfileDialog::rebuild()
 }
 
 void ProfileDialog::showPicker(const QString& title, const QString& name, const QString& icon,
-                               const std::function<void(const QString&, const QString&)>& onAccept)
+                               const std::function<void(const QString&, const QString&)>& onAccept,
+                               const QString& passcodeFor)
 {
     auto* page = new QWidget(stack_);
     auto* v = new QVBoxLayout(page);
@@ -170,6 +194,34 @@ void ProfileDialog::showPicker(const QString& title, const QString& name, const 
     }
     v->addWidget(gridHost);
     highlight(chosenBtn ? chosenBtn : (iconButtons->isEmpty() ? nullptr : iconButtons->first()));
+
+    // Passcode row (edit only — a profile being created has no id to key the hash to). The label reports the
+    // current state; the flow itself is MainWindow's, raised by the signal. NOT bound to this page's OK: the
+    // chooser applies immediately, exactly as it does in the themed builder, so the two agree.
+    if (!passcodeFor.isEmpty())
+    {
+        auto* pcRow = new QHBoxLayout();
+        auto* pcLabel = new QLabel(page);
+        auto* pcBtn = new QPushButton(tr("Passcode…"), page);
+        pcBtn->setMinimumHeight(32);
+        // QPointer, not a raw capture: the flow the receiver runs is a nested event loop, and this page can
+        // be torn down inside it (Back, a profile deletion, a navigation away). A callback that wrote to a
+        // freed QLabel would crash in the receiver's code, nowhere near this line.
+        QPointer<QLabel> safeLabel(pcLabel);
+        auto refresh = [safeLabel, passcodeFor] {
+            if (!safeLabel) return;
+            safeLabel->setText(ProfileStore::hasPasscode(passcodeFor) ? tr("A passcode is set.")
+                                                                      : tr("No passcode set."));
+        };
+        refresh();
+        pcLabel->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        QObject::connect(pcBtn, &QPushButton::clicked, page, [this, passcodeFor, refresh] {
+            emit passcodeRequested(passcodeFor, refresh);
+        });
+        pcRow->addWidget(pcBtn);
+        pcRow->addWidget(pcLabel, 1);
+        v->addLayout(pcRow);
+    }
 
     auto* err = new QLabel(page);
     err->setStyleSheet(QStringLiteral("color:#c0392b;"));
@@ -216,5 +268,5 @@ void ProfileDialog::editProfile(const QString& id)
     showPicker(tr("Edit Profile"), target.name, target.icon, [this, id](const QString& name, const QString& icon) {
         ProfileStore::update(id, name, icon);
         rebuild(); // reflect the new name/icon in the list
-    });
+    }, /*passcodeFor*/ id);
 }

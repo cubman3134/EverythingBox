@@ -4,6 +4,7 @@
 #include "BrandMigration.h"  // the Drive lookups tolerate the previous brand until its flag is set
 #include "Settings.h"   // deviceId() — stamped into meta.json (mdsync T4)
 #include "SettingsTxn.h"  // a remote apply must close any open settings transaction (#26) — QtCore-only TU
+#include "ProfilePasscode.h"  // isAttemptKey (header-only) — the passcode lockout is device-local, the hash syncs
 
 #include <QCoreApplication>
 #include <QSet>
@@ -547,6 +548,12 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
     };
     if (kExact.contains(key)) return true;
     // Prefix families that are wholly device-local.
+    // Per-profile passcode ATTEMPT state (issue #30) — the failure count + lockout expiry. The passcode HASH
+    // itself is inside profiles/list and SYNCS deliberately (set it once, it covers every device); the
+    // lockout must NOT, because it is a property of who has been mashing the pad on THIS box. Syncing it
+    // would let a kid's wrong guesses in the living room lock the parent out on the phone, and would push a
+    // wall-clock deadline between devices whose clocks disagree.
+    if (ProfilePasscode::isAttemptKey(key)) return true;
     return key.startsWith(QStringLiteral("emu/virtualPad")) // emu/virtualPad* (the on-screen pad, per device)
         || key.startsWith(QStringLiteral("sync/files/"))     // per-file A/V sync offsets (sync/global/* SYNCS)
         || key.startsWith(QStringLiteral("device/"))         // device/* (this install's identity — device/id)

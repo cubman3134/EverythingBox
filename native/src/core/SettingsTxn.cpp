@@ -2,6 +2,7 @@
 
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "ProfilePasscode.h"   // isAttemptKey (header-only) — the passcode lockout state is out of scope
 
 #include <QDebug>
 #include <QHash>
@@ -88,6 +89,26 @@ bool SettingsTxn::inScope(const QString& key)
     };
     for (const char* p : kExcludedPrefixes)
         if (key.startsWith(QLatin1String(p))) return false;
+    // Per-profile passcode ATTEMPT state (issue #30): the consecutive-failure count and the lockout expiry,
+    // written by the profile picker's entry pad.
+    //
+    // CORRECTION (fix round): an earlier version of this comment justified the exclusion by claiming the pad
+    // is reachable mid-settings-visit via "Settings -> switch profile". IT IS NOT. Every route to the picker
+    // starts on HOME — HomeView's profile button, the themed XMB Profiles column, a theme's `profile` button
+    // element — and none of the settings surfaces offers a profile switch (Settings ▸ General's only Profiles
+    // row is the skip-the-picker toggle). So today these keys cannot move during an open transaction, and no
+    // phantom-dirty handling is needed for them.
+    //
+    // The exclusion STAYS, on its own merits rather than that one: this is device-local attempt state, not a
+    // setting. Nothing in a settings panel should be able to revert it, and if the picker ever did become
+    // reachable from a settings visit, a Discard would hand a guesser their attempts back for free and a
+    // lockout the user triggered would appear in the exit prompt as "1 setting changed" that they never
+    // touched. The predicate is cheap and the failure mode it forecloses is security-shaped.
+    //
+    // The passcode HASH is not matched here and stays in scope by virtue of living in profiles/list, which is
+    // a genuine settings row.
+    if (ProfilePasscode::isAttemptKey(key)) return false;
+
     // "downloads" is a bare key AND a family; both are the background download catalog. Matched exactly or
     // as "downloads/..." so a sibling like "downloadsPanel/x" is NOT swept up.
     if (key == QLatin1String("downloads") || key.startsWith(QLatin1String("downloads/"))) return false;
