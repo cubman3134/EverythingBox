@@ -572,6 +572,9 @@ private:
     // metadata fetch is meaningful: the grid BROWSE view, or the XMB home while drilled into a catalog.
     // Null everywhere else (the XMB catalog list, the grid home, any non-themed page).
     QQuickItem* themedMetaSurface() const;
+    // The themed surface a hovered item's "theme song" may DUCK the menu music on — deliberately NARROWER
+    // than themedMetaSurface(): the XMB home drilled into a catalog, and nothing else. See the definition.
+    QQuickItem* themedPreviewAudioSurface() const;
     // The themed DETAIL view (on the Nav Contract, replacing the retired classic info page): open it for the
     // current selection (browseIndex < 0 = the themed root's currentIndex), run one of its action-row verbs on
     // the item it was opened for, and (grid browse) open it for an info-page leaf on Enter.

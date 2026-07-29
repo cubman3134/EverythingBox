@@ -1305,6 +1305,37 @@ static void runSidebarAsserts()
         CHECK(g.zone() == QStringLiteral("items") && g.index() == 6,
               "sidebar: Right returns to the grid at ITS remembered index (6), not the carried catIndex");
 
+        // The memory seed, at the model level: a HIDDEN zone can be told where its cursor was, and select()
+        // cannot do it (it refuses a count-0 zone outright and stores nothing). This is the primitive §21(d)
+        // exercises through the whole shipped path — asserted here on a fresh graph so a regression names the
+        // model, not the QML.
+        {
+            NavGraph gs;
+            buildThemedNavGraph(gs, 12, {}, CategoriesNav::Sidebar);
+            gs.select(QStringLiteral("categories"), 3);   // hidden (count 0) -> refused, stores NOTHING
+            gs.setZoneCount(QStringLiteral("categories"), 5);
+            gs.select(QStringLiteral("items"), 6);
+            gs.move(Qt::Key_Left);
+            CHECK(gs.zone() == QStringLiteral("categories") && gs.index() == 0,
+                  "seed: select() onto a HIDDEN zone stores nothing — the crossing still enters at row 0");
+
+            NavGraph gt;
+            buildThemedNavGraph(gt, 12, {}, CategoriesNav::Sidebar);
+            gt.seedIndex(QStringLiteral("categories"), 3);   // legal while hidden — that is the whole point
+            gt.setZoneCount(QStringLiteral("categories"), 5);
+            gt.select(QStringLiteral("items"), 6);
+            gt.move(Qt::Key_Left);
+            CHECK(gt.zone() == QStringLiteral("categories") && gt.index() == 3,
+                  "seed: seedIndex() on a hidden zone survives the count-up — the crossing enters at row 3");
+            gt.move(Qt::Key_Right);
+            CHECK(gt.zone() == QStringLiteral("items") && gt.index() == 6,
+                  "seed: …and seeding one zone never moved the cursor off the other (grid still at 6)");
+            gt.seedIndex(QStringLiteral("categories"), 99);  // snapped at USE time, not at seed time
+            gt.move(Qt::Key_Left);
+            CHECK(gt.zone() == QStringLiteral("categories") && gt.index() == 4,
+                  "seed: an out-of-range seed is clamped when the crossing reads it (99 -> last row 4)");
+        }
+
         // The Cross control: the XMB shape still declares categories--Up-->items, and the Sidebar shape must
         // not — that difference IS the two shapes. (In Sidebar mode Up stepped the list, asserted above.)
         NavGraph gx;
@@ -1472,6 +1503,11 @@ static void runSidebarAsserts()
     // walked. This is the assertion that keeps it that way — it is exactly the Channels home/browse behaviour.
     {
         QTemporaryDir dir;
+        // CHECKed, not silently skipped: this section is the ONE that pins the shared-path behaviour change
+        // (a populated `categories` zone on a theme with no sidebar), so a temp dir that cannot be created
+        // must be a visible failure — a bare `return` would retire the whole regression bar with zero
+        // failures reported, exactly the wrong failure mode. Same discipline as (b) above.
+        CHECK(dir.isValid(), "grid-no-sidebar: a scratch theme dir exists");
         if (!dir.isValid()) return;
         const char* themeJson =
             "{ \"name\": \"GridNoSidebar\", \"views\": { \"home\": {"
@@ -1519,6 +1555,83 @@ static void runSidebarAsserts()
         sendKey(qw->quickWindow(), Qt::Key_Down);
         CHECK(root->property("currentIndex").toInt() == 8,
               "grid-no-sidebar: Down still jumps a full row (4 -> 8) — 2-D stepping is untouched");
+        delete w;
+        pump();
+    }
+
+    // ---- (d) the REBUILD SEED: a NON-ZERO remembered category written while the zone is still hidden ------
+    // The host rebuilds the whole themed home on a category switch or a theme cycle and re-seeds the cursors
+    // by writing the props in a deliberate order: catIndex FIRST (the `categories` zone is still hidden at
+    // that instant, so the prop->model sync cannot hand it the cursor and park focus in the sidebar), THEN
+    // categories (which counts the zone up), THEN currentIndex. NavGraph::select is REFUSED outright on a
+    // count-0 zone and stores nothing, so the model's remembered category has to be seeded some other way —
+    // otherwise it stays 0 while the rail draws row N, and the first Left into the rail snaps the highlight
+    // to "All" over bucket N's grid (and uitestCategory reports the wrong bucket with it).
+    //
+    // Everything in (a)-(c) drives catIndex == 0, where that bug is invisible. This drives a NON-ZERO one,
+    // in the host's real write order.
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "sidebar-seed: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"SidebarSeed\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#101010\" },"
+            "  \"elements\": ["
+            "    { \"type\": \"sidebar\", \"pos\": [0, 0], \"size\": [0.2, 1] },"
+            "    { \"type\": \"grid\", \"columns\": 4, \"pos\": [0.2, 0], \"size\": [0.8, 1] }"
+            "  ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "sidebar-seed: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        for (int i = 0; i < 12; ++i)
+            items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Item %1").arg(i) } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        NavGraph* g = ThemeEngine::navGraph(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && g && root, "sidebar-seed: the fixture built");
+        if (!qw || !g || !root) { if (w) delete w; return; }
+
+        QVariantList cats;
+        for (int i = 0; i < 5; ++i)
+            cats << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Cat %1").arg(i) } };
+        // THE HOST'S WRITE ORDER, verbatim (MainWindow::showThemedHome / showThemedBrowse).
+        root->setProperty("catIndex", 3);            // zone still hidden (count 0) — select() is refused here
+        root->setProperty("categories", cats);       // …and only NOW does the zone count up
+        root->setProperty("currentIndex", 4);
+        qw->resize(1280, 720);
+        qw->show();
+        pump(); pump(); qw->grabFramebuffer(); pump();
+
+        CHECK(root->property("sidebarMode").toBool(), "sidebar-seed: the fixture is a sidebar theme");
+        // The rebuild parks focus on the GRID, not the rail — the reason catIndex is written first.
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar-seed: the rebuilt view opens with focus on the grid at the seeded cell (4)");
+        CHECK(root->property("uitestCategory").toString() == QStringLiteral("Cat 3"),
+              "sidebar-seed: the rail draws the remembered bucket (Cat 3) after the rebuild");
+
+        root->forceActiveFocus();
+        pump();
+        sendKey(qw->quickWindow(), Qt::Key_Left);    // leftmost column (4 % 4 == 0) -> into the rail
+        CHECK(g->zone() == QStringLiteral("categories"), "sidebar-seed: Left at column 0 enters the rail");
+        CHECK(g->index() == 3,
+              "sidebar-seed: …at the REMEMBERED bucket 3, not row 0 — a non-zero catIndex written while the "
+              "zone was hidden still reaches the model");
+        CHECK(root->property("catIndex").toInt() == 3,
+              "sidebar-seed: …so the highlight does not snap to \"All\" over bucket 3's grid");
+        CHECK(root->property("uitestCategory").toString() == QStringLiteral("Cat 3"),
+              "sidebar-seed: …and uitestCategory still reports the bucket the grid is showing");
+        // The seeded row is a live cursor, not a one-shot: stepping off it and back out behaves normally.
+        sendKey(qw->quickWindow(), Qt::Key_Down);
+        CHECK(root->property("catIndex").toInt() == 4, "sidebar-seed: Down steps on from the seeded row (3 -> 4)");
+        sendKey(qw->quickWindow(), Qt::Key_Right);
+        CHECK(g->zone() == QStringLiteral("items") && root->property("currentIndex").toInt() == 4,
+              "sidebar-seed: Right returns to the grid's remembered cell (4)");
         delete w;
         pump();
     }

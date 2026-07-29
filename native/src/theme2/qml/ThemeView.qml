@@ -274,7 +274,12 @@ Item {
         var n = categories ? categories.length : 0
         if (i < 0 || i >= n) return
         if (i === catIndex) {                              // clicking the already-selected category...
-            if (!items || items.length === 0) { nav.select("items", currentIndex); nav.activate() } // no column -> open it
+            // XMB ONLY. On the cross the item column BELONGS to the selected category, so a second click on
+            // that category with an empty column means "open it" — activate is the right answer there. A
+            // sidebar theme's grid is a PEER surface, not a column the rail owns, and an empty grid there has
+            // no row to open: activating would fire onActivated(currentIndex) at an index into a list that
+            // isn't on screen. Clicking the already-selected rail row is simply a no-op instead.
+            if (xmbMode && (!items || items.length === 0)) { nav.select("items", currentIndex); nav.activate() }
             return
         }
         nav.select("categories", i); navigate(); categoryChanged()
@@ -322,8 +327,16 @@ Item {
         if (n > 0 && currentIndex >= n - 4 && currentIndex !== lastNearEnd) { lastNearEnd = currentIndex; nearEnd() }
         selectionMoved() // host fetches the newly-selected item's metadata for the live panel (XMB)
     }
-    // Same sync for the category cursor (the host seeds catIndex at build/restore).
-    onCatIndexChanged: if (!actionsOpen) nav.select("categories", catIndex)
+    // Same sync for the category cursor (the host seeds catIndex at build/restore). TWO calls, because the
+    // host writes this prop while the `categories` zone is still HIDDEN and select() cannot reach a hidden
+    // zone: showThemedHome/showThemedBrowse set catIndex BEFORE categories on purpose (the other order counts
+    // the zone up first and then hands it the cursor, booting the grid home with focus parked in the sidebar),
+    // and select() on a count-0 zone is refused outright and stores NOTHING. seedIndex is the memory half —
+    // it records the remembered row without moving the cursor, so once onCategoriesChanged counts the zone up
+    // the first crossing into it lands on the bucket the theme is actually drawing, instead of snapping the
+    // rail to row 0 over bucket N's grid. Once the zone IS live, select() does the real work and the seed is
+    // the no-op (a selected zone's memory is rewritten from the live index when the selection leaves it).
+    onCatIndexChanged: if (!actionsOpen) { nav.seedIndex("categories", catIndex); nav.select("categories", catIndex) }
 
     // Up/Down jump by a grid's column count when the view has a grid; otherwise step by one (carousels).
     property int gridCols: {
@@ -437,7 +450,13 @@ Item {
             if (e.key === Qt.Key_Right || e.key === Qt.Key_Return || e.key === Qt.Key_Enter
                 || e.key === Qt.Key_Select || e.key === Qt.Key_Space) { crossZone(Qt.Key_Right); e.accepted = true; return }
             if (e.key === Qt.Key_Escape || e.key === Qt.Key_Back || e.key === Qt.Key_Backspace) {
-                nav.move(Qt.Key_Right); e.accepted = true; return
+                // Leave for the grid, silently. That crossing is REFUSABLE: a hidden/empty `items` zone makes
+                // the declared categories->items edge inert (a count-0 zone is never a move target), and Esc
+                // would then be consumed for nothing — a dead key, in the one place a user reaches for Back.
+                // So if nothing crossed, fall through to the ordinary Back gesture instead of eating the key.
+                var _ez = nav.zone
+                if (!nav.move(Qt.Key_Right) && nav.zone === _ez) nav.back()
+                e.accepted = true; return
             }
             if (e.key === Qt.Key_Left) { e.accepted = true; return }   // contained: nothing left of the sidebar
         }

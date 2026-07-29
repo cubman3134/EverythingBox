@@ -750,8 +750,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             for (auto it = meta.constBegin(); it != meta.constEnd(); ++it) cur.insert(it.key(), it.value());
             r->setProperty("selectedMeta", cur);
             // Per-item "theme song": duck the shuffle and loop this item's preview audio while it's hovered
-            // (resume the shuffle when the selection carries none).
-            if (bgm_)
+            // (resume the shuffle when the selection carries none). Gated to themedPreviewAudioSurface(), NOT
+            // to the surface the merge above just wrote: the metadata may now flow to the grid browse too, but
+            // the audible duck stays on the surfaces that already had it (see themedPreviewAudioSurface).
+            if (bgm_ && r == themedPreviewAudioSurface())
             {
                 const QStringList au = cur.value(QStringLiteral("audio")).toStringList();
                 bgm_->setPreview(au.isEmpty() ? QString() : au.first());
@@ -4383,6 +4385,22 @@ QQuickItem* MainWindow::themedMetaSurface() const
     QWidget* cur = stack_->currentWidget();
     if (themedBrowse_ && cur == themedBrowse_) return ThemeEngine::rootItem(themedBrowse_);
     if (themedHome_ && cur == themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_)
+        return ThemeEngine::rootItem(themedHome_);
+#endif
+    return nullptr;
+}
+
+// Which surface may let a hovered item's "theme song" DUCK the menu music. Deliberately NARROWER than
+// themedMetaSurface(), and not a refactoring accident: the metadata FETCH is inert until a theme binds
+// selectedMeta, but ducking the music is user-AUDIBLE on every theme, bound or not. Widening the fetch to the
+// grid browse (which never had one) must not hand every shipped grid theme — Channels — a behaviour it never
+// had, arriving as a side effect of an engine change. So this stays exactly the surface the duck ran on
+// before: the XMB home while drilled into a catalog. Triple keeps its ducking verbatim; Channels' browse is
+// silent again. Widening it is a THEME-level decision (a theme knob), not something an engine change may do.
+QQuickItem* MainWindow::themedPreviewAudioSurface() const
+{
+#ifdef EB_HAVE_QML
+    if (themedHome_ && stack_->currentWidget() == themedHome_ && themedHomeIsXmb_ && themedXmbInCatalog_)
         return ThemeEngine::rootItem(themedHome_);
 #endif
     return nullptr;
