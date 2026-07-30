@@ -95,6 +95,16 @@ namespace
         }
     }
 
+    // "  #03 0x7ffc…" — a fixed two-digit index so the chain reads as a column even
+    // when it runs past ten frames.
+    void putFrameIndex(Sink& s, unsigned int i)
+    {
+        putStr(s, "    #");
+        put(s, char('0' + ((i / 10u) % 10u)));
+        put(s, char('0' + (i % 10u)));
+        put(s, ' ');
+    }
+
     std::size_t finish(Sink& s)
     {
         if (s.cap == 0) return 0;
@@ -117,6 +127,9 @@ std::size_t CrashReport::formatRecord(const CrashRecord& r, char* out, std::size
     putDec(s, r.sequence);
     put(s, '/');
     putDec(s, r.limit);
+    // A fatal record is written even when the cap is spent, so the sequence can legitimately
+    // exceed the limit here ("record 6/5"). Say so, or it reads as an arithmetic bug.
+    if (r.fatal) putStr(s, "  (FATAL - exempt from the cap)");
     put(s, '\n');
 
     putStr(s, "  exception : ");
@@ -169,12 +182,124 @@ std::size_t CrashReport::formatRecord(const CrashRecord& r, char* out, std::size
         putStr(s, match ? " == bad addr  (MATCH)\n" : " != bad addr  (MISMATCH)\n");
     }
 
-    if (r.limit != 0 && r.sequence >= r.limit)
+    // Suppressed on a fatal record: "further access violations will NOT be logged" is noise
+    // on the last fault this process will ever take, and it would contradict the line above.
+    if (!r.fatal && r.limit != 0 && r.sequence >= r.limit)
         putStr(s, "  (record cap reached; further access violations will NOT be logged this run)\n");
 
     putStr(s, "======================================\n");
 
     return finish(s);
+}
+
+std::size_t CrashReport::formatFramesRaw(const CrashRecord& r, char* out, std::size_t cap)
+{
+    Sink s = { out, out ? cap : 0, 0 };
+
+    if (r.frameCount == 0) return finish(s);
+
+    // Deliberately reads frames[]/frameCount and NOTHING else. This block is the one that
+    // has to be on disk before module resolution is attempted (see emitRecord), so it must
+    // be structurally incapable of needing a resolved field. Note for whoever reads the log
+    // after a resolution deadlock ate the enriched block below: these resolve offline
+    // against a module list, which is how the production #28 dump was read in the first place.
+    putStr(s, "  call chain (raw return addresses, ");
+    putDec(s, r.frameCount);
+    putStr(s, " frames; nearest the fault first):\n");
+
+    const unsigned int n = (r.frameCount > kMaxFrames) ? kMaxFrames : r.frameCount;
+    for (unsigned int i = 0; i < n; ++i)
+    {
+        putFrameIndex(s, i);
+        putHex(s, r.frames[i]);
+        put(s, '\n');
+    }
+
+    return finish(s);
+}
+
+std::size_t CrashReport::formatFramesResolved(const CrashRecord& r, char* out, std::size_t cap)
+{
+    Sink s = { out, out ? cap : 0, 0 };
+
+    // Nothing at all unless the resolution pass actually completed. If it deadlocked on the
+    // loader lock the process never got here, and if it was skipped the raw block above is
+    // the record — emitting an empty "resolved" heading would suggest the chain resolved to
+    // nothing, which is a different and wrong claim.
+    if (!r.framesResolved || r.frameCount == 0) return finish(s);
+
+    putStr(s, "  call chain (resolved):\n");
+
+    const unsigned int n = (r.frameCount > kMaxFrames) ? kMaxFrames : r.frameCount;
+    for (unsigned int i = 0; i < n; ++i)
+    {
+        putFrameIndex(s, i);
+        putHex(s, r.frames[i]);
+        // Same rule as the fault site: never an offset off a zero base. A frame whose module
+        // did not resolve keeps its bare address rather than acquiring a fake symbol.
+        if (r.frameBase[i] != 0 && r.frameModule[i][0] != '\0')
+        {
+            putStr(s, "  ");
+            putStr(s, r.frameModule[i]);
+            put(s, '+');
+            putHex(s, r.frames[i] - r.frameBase[i]);
+        }
+        put(s, '\n');
+    }
+
+    return finish(s);
+}
+
+bool CrashReport::fatalNeedsFullRecord(unsigned long long lastRecordedFault,
+                                       unsigned int       lastRecordedSequence,
+                                       unsigned int       faultsSeen,
+                                       unsigned long long fatalFaultAddress)
+{
+    // See the contract in CrashReport.h. The address alone is not enough, because a cap gets
+    // exhausted precisely by a fault that repeats at one address; the sequence counter is
+    // what separates "the handler just wrote this one" from "the handler stopped writing".
+    if (lastRecordedSequence == 0)                  return true;   // nothing has ever been written
+    if (lastRecordedSequence != faultsSeen)         return true;   // the cap (or a miss) intervened
+    if (lastRecordedFault    != fatalFaultAddress)  return true;   // the last record was a different fault
+    return false;
+}
+
+void CrashReport::emitRecord(CrashRecord& r,
+                             WriteFn write,
+                             StepFn  capture,
+                             StepFn  resolve,
+                             void*   ctx,
+                             char*   scratch,
+                             std::size_t scratchCap)
+{
+    if (!write || !scratch || scratchCap == 0) return;
+
+    // 1. The fault site — registers, bad address, module+offset — durable before any stack
+    //    work happens. Everything after this point can hang without costing the diagnosis.
+    {
+        const std::size_t n = formatRecord(r, scratch, scratchCap);
+        if (n) write(ctx, scratch, n);
+    }
+
+    // 2. Capture return addresses. Unwinding is not lock-free either, hence step 1 first.
+    if (capture) capture(ctx, r);
+
+    // 3. The raw addresses, durable before resolution is attempted. This is the write-first
+    //    safeguard: if step 4 deadlocks on the loader lock, the chain is still on disk and
+    //    still resolves offline.
+    {
+        const std::size_t n = formatFramesRaw(r, scratch, scratchCap);
+        if (n) write(ctx, scratch, n);
+    }
+
+    // 4. GetModuleHandleExW per frame — the step that can deadlock.
+    if (resolve) resolve(ctx, r);
+
+    // 5. The readable form, which is a convenience on top of a record that is already complete.
+    {
+        const std::size_t n = formatFramesResolved(r, scratch, scratchCap);
+        if (n) write(ctx, scratch, n);
+    }
 }
 
 std::size_t CrashReport::formatFatalLine(const CrashRecord& r, char* out, std::size_t cap)
@@ -212,6 +337,12 @@ std::size_t CrashReport::formatFatalLine(const CrashRecord& r, char* out, std::s
 
 namespace
 {
+    // The handler's formatting buffer, on its stack. Sized for the largest of the three
+    // blocks emitRecord emits — the resolved chain, at 32 frames of
+    // "    #00 0x7ffced04f7a5  vcruntime140_1.dll+0x30f7a5" — with room to spare, because
+    // truncation here would silently drop the tail of a call chain that is the whole point.
+    constexpr std::size_t kScratch = 2560;
+
     // Resolved ONCE at install time. The handler only ever reads it.
     wchar_t       g_logPath[MAX_PATH] = { 0 };
     volatile LONG g_avCount           = 0;   // access violations seen (may exceed kMaxRecords; only the first few are written)
@@ -219,10 +350,20 @@ namespace
     LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
     bool          g_installed         = false;
 
+    // What the last FULL record written was for. The unhandled filter reads these to decide
+    // whether this fault is already on disk or still owed a record; see fatalNeedsFullRecord.
+    volatile LONG               g_lastRecordedSeq   = 0;
+    volatile unsigned long long g_lastRecordedFault = 0;
+
     // Append `len` bytes to the log. Raw Win32: CreateFileW with FILE_APPEND_DATA gives an
     // atomic append with no seek, and no CRT stdio object to take a lock on. If anything
     // here fails there is nothing sensible to do about it inside an exception handler, so
     // every failure is silent — the alternative is a handler that makes the crash worse.
+    //
+    // FlushFileBuffers before the close is not belt-and-braces here: the whole ordering
+    // discipline in emitRecord is built on "already written" meaning "survives a hang in the
+    // next step", and a write sitting in the cache when the handler deadlocks does not.
+    // At most a handful of these run per process, so the cost is irrelevant.
     void appendLog(const char* data, std::size_t len)
     {
         if (!g_logPath[0] || len == 0) return;
@@ -236,8 +377,12 @@ namespace
         if (h == INVALID_HANDLE_VALUE) return;
         DWORD written = 0;
         ::WriteFile(h, data, static_cast<DWORD>(len), &written, nullptr);
+        ::FlushFileBuffers(h);
         ::CloseHandle(h);
     }
+
+    // The sink emitRecord writes through.
+    void writeChunk(void*, const char* data, std::size_t len) { appendLog(data, len); }
 
     void put2(char* p, int v)
     {
@@ -261,14 +406,21 @@ namespace
         ts[19] = '\0';
     }
 
-    // Faulting module basename + base. GetModuleHandleEx with UNCHANGED_REFCOUNT takes no
-    // reference (nothing to release, nothing to leak) and neither call allocates.
-    void fillModule(CrashReport::CrashRecord& rec)
+    // Resolve one code address to its module basename + base, into caller-supplied storage.
+    // GetModuleHandleEx with UNCHANGED_REFCOUNT takes no reference (nothing to release,
+    // nothing to leak) and neither call allocates.
+    //
+    // It DOES take the loader lock, which is the whole reason emitRecord flushes before any
+    // call to this. Both outputs are left untouched on failure, so an unresolved address
+    // keeps a zero base and renders as a bare address rather than a fabricated offset.
+    void resolveAddress(unsigned long long addr,
+                        char* nameOut, std::size_t nameCap,
+                        unsigned long long& baseOut)
     {
         HMODULE mod = nullptr;
         if (!::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
                                       | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                                  reinterpret_cast<LPCWSTR>(rec.faultAddress), &mod)
+                                  reinterpret_cast<LPCWSTR>(addr), &mod)
             || mod == nullptr)
             return;
 
@@ -283,11 +435,44 @@ namespace
         // Narrow by hand: no CRT conversion, no locale, no allocation. Module names are
         // ASCII in practice; anything else becomes '?' rather than mojibake.
         std::size_t i = 0;
-        for (; base[i] && i + 1 < sizeof(rec.moduleName); ++i)
-            rec.moduleName[i] = (base[i] < 0x80) ? char(base[i]) : '?';
-        rec.moduleName[i] = '\0';
+        for (; base[i] && i + 1 < nameCap; ++i)
+            nameOut[i] = (base[i] < 0x80) ? char(base[i]) : '?';
+        nameOut[i] = '\0';
 
-        rec.moduleBase = reinterpret_cast<unsigned long long>(mod);
+        baseOut = reinterpret_cast<unsigned long long>(mod);
+    }
+
+    void fillModule(CrashReport::CrashRecord& rec)
+    {
+        resolveAddress(rec.faultAddress, rec.moduleName, sizeof rec.moduleName, rec.moduleBase);
+    }
+
+    // emitRecord step 2. RETURN ADDRESSES ONLY — RtlCaptureStackBackTrace hands back code
+    // pointers and copies no stack memory, which is what keeps the no-memory-contents rule
+    // intact. FramesToSkip=1 drops this function itself, which is guaranteed noise and
+    // guaranteed not part of the fault; nothing below it is skipped, so the exception
+    // dispatch frames stay visible rather than being silently guessed at.
+    void captureFrames(void*, CrashReport::CrashRecord& rec)
+    {
+        PVOID raw[CrashReport::kMaxFrames] = { nullptr };
+        const USHORT n = ::RtlCaptureStackBackTrace(1, CrashReport::kMaxFrames, raw, nullptr);
+        rec.frameCount = (n > CrashReport::kMaxFrames)
+                             ? CrashReport::kMaxFrames
+                             : static_cast<unsigned int>(n);
+        for (unsigned int i = 0; i < rec.frameCount; ++i)
+            rec.frames[i] = reinterpret_cast<unsigned long long>(raw[i]);
+    }
+
+    // emitRecord step 4 — the one that can deadlock. By the time this runs the fault site
+    // AND the raw addresses are already flushed to disk, so a hang here costs the enriched
+    // rendering and nothing else.
+    void resolveFrames(void*, CrashReport::CrashRecord& rec)
+    {
+        for (unsigned int i = 0; i < rec.frameCount && i < CrashReport::kMaxFrames; ++i)
+            resolveAddress(rec.frames[i],
+                           rec.frameModule[i], CrashReport::kFrameModuleCap,
+                           rec.frameBase[i]);
+        rec.framesResolved = true;
     }
 
     void fillCommon(CrashReport::CrashRecord& rec, EXCEPTION_POINTERS* ep)
@@ -335,22 +520,62 @@ namespace
         rec.limit    = CrashReport::kMaxRecords;
         fillCommon(rec, ep);
 
-        char buf[1024];
-        const std::size_t len = CrashReport::formatRecord(rec, buf, sizeof buf);
-        appendLog(buf, len);
+        char buf[kScratch];
+        CrashReport::emitRecord(rec, writeChunk, captureFrames, resolveFrames,
+                                nullptr, buf, sizeof buf);
+
+        // Publish what was just written, so the unhandled filter can tell whether this same
+        // fault already has a full record. The address goes down first and the sequence
+        // second: the sequence is what the reader gates on, so it must not become visible
+        // while the address it refers to is still stale.
+        g_lastRecordedFault = rec.faultAddress;
+        ::InterlockedExchange(&g_lastRecordedSeq, n);
 
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
-    // Runs only when nothing handled the fault, i.e. this really is the crash. One line,
-    // once, then straight on to whatever filter was installed before us (normally WER's).
+    // Runs only when nothing handled the fault, i.e. this really is the crash. Then straight
+    // on to whatever filter was installed before us (normally WER's).
+    //
+    // The full record here is not redundant with the first-chance one. The per-process cap
+    // is spendable by benign handled access violations — GPU drivers and some libraries
+    // raise them as control flow — and if five of those land first, the crash we built this
+    // for arrives at an exhausted cap. The one-line marker below keeps module, offset and
+    // code but loses the bad address and the registers, which is exactly the `Rax+4`
+    // evidence the feature exists to capture. This handler holds the same EXCEPTION_POINTERS,
+    // so it can simply write the record itself. The cap still bounds first-chance noise;
+    // only this path is exempt from it.
     LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep)
     {
         if (ep && ep->ExceptionRecord && ::InterlockedExchange(&g_fatalWritten, 1) == 0)
         {
+            const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+            const LONG seen = g_avCount;
+
             CrashReport::CrashRecord rec = {};
+            rec.sequence = static_cast<unsigned int>(seen);
+            rec.limit    = CrashReport::kMaxRecords;
+            rec.fatal    = true;
             fillCommon(rec, ep);
-            char buf[512];
+
+            char buf[kScratch];
+
+            // Scoped to access violations on purpose. The record block is headed
+            // "ACCESS VIOLATION" and its operation/bad-address fields are AV-specific, so
+            // rendering it for a stack overflow or an illegal instruction would be a
+            // fabricated diagnosis. Those still get the marker line, which carries the code.
+            if (er->ExceptionCode == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION)
+                && CrashReport::fatalNeedsFullRecord(g_lastRecordedFault,
+                                                     static_cast<unsigned int>(g_lastRecordedSeq),
+                                                     static_cast<unsigned int>(seen),
+                                                     rec.faultAddress))
+            {
+                CrashReport::emitRecord(rec, writeChunk, captureFrames, resolveFrames,
+                                        nullptr, buf, sizeof buf);
+            }
+
+            // Always. When the first-chance handler already wrote the block, this line is the
+            // only thing that marks it fatal — the block itself must not be duplicated.
             const std::size_t len = CrashReport::formatFatalLine(rec, buf, sizeof buf);
             appendLog(buf, len);
         }
