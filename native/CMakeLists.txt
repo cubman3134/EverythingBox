@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.154 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.155 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -551,6 +551,16 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_include_directories(probe_bootstrap PRIVATE src src/core)
     target_link_libraries(probe_bootstrap PRIVATE Qt6::Core)
 
+    # Probe data-dir isolation (issue #42): asserts that this process's AppPaths::dataDir() is NOT the exe's
+    # folder, that state seeded in the exe's folder is invisible from it, that a write through the probe's own
+    # store leaves that folder byte-identical, and — by re-running itself as a child — that two probe
+    # PROCESSES get two different directories and that a directory dies with the process that made it.
+    # AppPaths.h and AppBrand.h are header-only, so the target is the single .cpp against Qt6::Core.
+    add_executable(probe_isolation tools/probe_isolation.cpp
+        src/core/AppPaths.h src/core/AppBrand.h)
+    target_include_directories(probe_isolation PRIVATE src src/core)
+    target_link_libraries(probe_isolation PRIVATE Qt6::Core)
+
     # Console harness for the PDF -> reflow-text reader (needs QtPdf).
     add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
     target_include_directories(probe_pdftext PRIVATE src src/ebook)
@@ -1052,3 +1062,35 @@ if(EVERYTHINGBOX_BUILD_APP)
                        "disabled on this platform.")
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Probe data-dir isolation (issue #42) — applied to EVERY probe, by name, automatically.
+#
+# On desktop AppPaths::dataDir() is the executable's own folder (the app is portable), and every probe binary
+# is built into that same folder as the GUI exe. One everythingbox.ini, one addons/, one metadata/, shared
+# between the app, the probes, and whatever a developer dropped in build/Release. Three separate debugging
+# sessions in one day went into suite failures that turned out to be that collision rather than the branch
+# under test — and each one looked like a real regression, which is the expensive part: a gate that cries
+# wolf teaches people to discount it.
+#
+# EB_ISOLATED_DATA_DIR redirects dataDir() at a per-PROCESS scratch directory that removes itself on exit
+# (native/src/core/AppPaths.h). It is applied HERE, over every already-declared target whose name begins
+# probe_, rather than at each add_executable, for one reason: a probe added next month has to get isolation
+# without its author knowing this issue ever existed. Opt-in isolation would only move the trap.
+#
+# Two properties this placement depends on:
+#   * it must stay at the END of the file — BUILDSYSTEM_TARGETS only sees targets declared above it;
+#   * the app target must never match — `everythingbox` does not begin with probe_, and the runner's
+#     "probe data-dir isolation wiring" gate fails if anything hands this define to a target by name.
+# Deleting the block does not silently un-isolate the suite: probe_isolation asserts the outcome at runtime.
+get_property(_eb_dir_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+set(_eb_isolated_probes "")
+foreach(_eb_t ${_eb_dir_targets})
+    get_target_property(_eb_t_type ${_eb_t} TYPE)
+    if(_eb_t MATCHES "^probe_" AND _eb_t_type STREQUAL "EXECUTABLE")
+        target_compile_definitions(${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)
+        list(APPEND _eb_isolated_probes ${_eb_t})
+    endif()
+endforeach()
+list(LENGTH _eb_isolated_probes _eb_isolated_count)
+message(STATUS "EverythingBox: data-dir isolation applied to ${_eb_isolated_count} probe target(s)")

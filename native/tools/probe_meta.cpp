@@ -3,6 +3,7 @@
 // makes the cache future-proof: merge() must PRESERVE keys it doesn't know about, so new metadata kinds
 // can be added later without a migration. Prints META-OK on success; META-FAIL <what> and exits non-zero.
 #include "AddonModels.h"
+#include "AppPaths.h"
 #include "MetaCache.h"
 
 #include <QCoreApplication>
@@ -24,8 +25,9 @@ static int failures = 0;
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    // AppPaths::dataDir() is the exe's own folder (portable app), so the bundles land next to the probe
-    // in the build tree; everything written here is removed again at the end.
+    // The bundles land under AppPaths::dataDir(), which for a probe build is this process's own scratch
+    // directory (issue #42) — not the exe's folder, and not any other probe's. Everything written here is
+    // removed again at the end anyway.
 
     MediaItem item;
     item.id = QStringLiteral("igdb:1068");
@@ -246,7 +248,10 @@ int main(int argc, char** argv)
     MetaCache::remove(key);
     CHECK(MetaCache::load(key).isEmpty(), "remove deletes the bundle");
     CHECK(!QDir(MetaCache::dirFor(key)).exists(), "remove deletes the folder (artwork included)");
-    QDir(QCoreApplication::applicationDirPath() + QStringLiteral("/metadata")).removeRecursively(); // probe tidy-up
+    // Tidy-up: the cache root is dataDir()/metadata. That has to be dataDir() and not applicationDirPath() —
+    // under a probe build they are deliberately different directories (issue #42), and removing the exe
+    // folder's metadata/ would both miss what this probe wrote and delete what the GUI's cache had.
+    QDir(AppPaths::dataDir() + QStringLiteral("/metadata")).removeRecursively(); // probe tidy-up
 
     if (failures) { std::fprintf(stderr, "META-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("META-OK\n");

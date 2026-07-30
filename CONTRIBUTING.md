@@ -67,8 +67,11 @@ probe executables so they find Qt's plugins without you exporting
 
 The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
-`.srm` path gate, and the old-brand gate below. Those fail on code you wrote
-even if every probe binary passes.
+`.srm` path gate, the probe data-dir isolation wiring gate, and the old-brand
+gate below. Those fail on code you wrote even if every probe binary passes. One
+more gate is a property of the run rather than of the source: `exe-folder
+contamination` compares the build folder's app-data footprint before and after
+the suite, and fails if a probe touched it.
 
 ## Rules that the review will hold you to
 
@@ -123,6 +126,43 @@ Miss any one of them and the probe silently never runs. That is not
 hypothetical: `probe_addon` was written and maintained for a long time while
 being wired into neither the runner nor CI, so every assertion in it gated
 nothing. Adding a probe target is not the same as running it.
+
+### A probe's data directory is its own — you get that for free
+
+`AppPaths::dataDir()` is where the app keeps `everythingbox.ini`, `addons/`,
+`metadata/`, `saves/` and the rest. On desktop the app is portable, so that is
+the executable's own folder — which is also `build/Release`, where every probe
+binary is built next to the GUI exe. One ini, shared between the app, the
+probes, and anything a developer dropped in that folder.
+
+Every target named `probe_*` is therefore compiled with `EB_ISOLATED_DATA_DIR`,
+which points `dataDir()` at a scratch directory created **per process** and
+removed when the process exits. You do not opt in and there is nothing to
+remember: the define is applied by name over every probe target at the bottom of
+`native/CMakeLists.txt`. Two consequences worth knowing:
+
+* a probe's `dataDir()` is empty when it starts and gone when it ends, so a
+  probe no longer has to defensively wipe the groups it uses — and a probe that
+  wants a fixture on disk must write it under `dataDir()`, not next to the exe;
+* nothing in `build/Release` can change a probe's result, and no probe can
+  change what is in `build/Release`. `probe_isolation` asserts both (the runner
+  seeds junk into that folder before running it), and the suite's
+  `=== exe-folder contamination ===` gate fails if the folder is not
+  byte-identical before and after the run.
+
+`EB_PROBE_DATA_DIR_KEEP=1` keeps the scratch directory around when you need to
+see what a failing probe wrote; `EB_PROBE_DATA_DIR=<dir>` pins it.
+
+This does **not** replace the per-unit `setIniPathForTesting` seams
+(`ThemeChoice`, `SettingsTxn`, `ProfilePasscode`, `PcGameId`, each behind its own
+`EB_*_TEST_SEAM`). They answer a different question. Isolation is per *process*,
+and every core unit caches its `QSettings` in a function-local static on first
+use — so one process gets exactly one store. A probe that needs several
+independent stores, or needs to re-open one after poking its file from outside,
+still needs the seam; `probe_theme` drives six separate scratch inis through one
+process for precisely that reason. What isolation *does* remove is the seams'
+other motive — "don't write the real ini" — so a new probe should not grow a new
+seam for that alone.
 
 ### The old brand stays gone
 

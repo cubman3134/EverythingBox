@@ -1,9 +1,13 @@
 // Headless verification of the QUEUED game-metadata aggregator (GameMetaAggregator): entering a console
 // prefetches + caches ALL its games in the background (throttled), a hover scrapes at priority, every job's
 // result is cached (a scroll-past never drops a scrape), and an already-cached game is never re-scraped.
-// Uses a canned KEYLESS provider written into the exe's addons dir, so it needs no API keys; everything lands
-// in the build tree and is cleaned up. Prints GAMEAGG-OK; GAMEAGG-FAIL <what> + non-zero on failure.
+// Uses a canned KEYLESS provider written into this probe's own addons dir, so it needs no API keys; that dir
+// is AppPaths::dataDir() + "/addons", which under a probe build is a per-process scratch directory that is
+// removed on exit (issue #42) — it used to be applicationDirPath(), i.e. build/Release, where the fixture
+// addon sat in the GUI's add-on folder for as long as the build tree lived.
+// Prints GAMEAGG-OK; GAMEAGG-FAIL <what> + non-zero on failure.
 #include "AddonManager.h"
+#include "AppPaths.h"
 #include "GameMetaAggregator.h"
 #include "MetaCache.h"
 
@@ -28,8 +32,10 @@ static void writeFile(const QString& path, const QByteArray& data)
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-    const QString exeDir = QCoreApplication::applicationDirPath();
-    const QString addonDir = exeDir + QStringLiteral("/addons/testgamemeta");
+    // AddonManager resolves its add-on root as AppPaths::dataDir() + "/addons", so the fixture has to be
+    // written where THIS process's data dir is — not where the exe happens to live.
+    const QString dataDir = AppPaths::dataDir();
+    const QString addonDir = dataDir + QStringLiteral("/addons/testgamemeta");
 
     // A canned, keyless game meta provider. Returns http urls that just get stored in the art blob (the
     // downloads to x.invalid fail harmlessly; the urls are what we assert on).
@@ -45,7 +51,7 @@ int main(int argc, char** argv)
                 facts:[{label:"Developer",value:"TestSoft"},{label:"Genre",value:"Action"}],
                 meta:{developer:"TestSoft"} }); } )JS");
 
-    QDir(exeDir + QStringLiteral("/metadata")).removeRecursively(); // fresh cache
+    QDir(dataDir + QStringLiteral("/metadata")).removeRecursively(); // fresh cache
 
     AddonManager mgr;
     CHECK(!mgr.metaProvidersFor(QStringLiteral("game")).isEmpty(), "canned game provider discovered");
@@ -92,7 +98,7 @@ int main(int argc, char** argv)
     CHECK(!logoOf(fresh).isEmpty(), "priority hover cached the result");
 
     QDir(addonDir).removeRecursively();                 // clean the build tree
-    QDir(exeDir + QStringLiteral("/metadata")).removeRecursively();
+    QDir(dataDir + QStringLiteral("/metadata")).removeRecursively();
 
     if (failures) { std::fprintf(stderr, "GAMEAGG-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("GAMEAGG-OK\n");
