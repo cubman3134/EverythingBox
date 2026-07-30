@@ -206,6 +206,12 @@ function normalizeColor(s) {
     if (c === undefined || c === null) return ""
     var h = String(c).replace("#", "")
     if (h.length === 6) h = "ff" + h                       // opaque: Qt omits the alpha pair
+    // Deliberately UNREACHABLE today, and kept: a valid QColor stringifies to "#rrggbb"/"#aarrggbb" and
+    // nothing else, so no test can currently distinguish this from a bare length check (weakening it to one
+    // survives mutation). It stays because it is the only thing standing between an outside library's
+    // output format and the parseInt calls in bgLuma, which are written to assume eight hex digits — not
+    // because a branch below it would otherwise mop up the failure. That is the difference between this and
+    // the isNaN guard that used to sit at the end of inkFor, which could never change an answer at all.
     if (!/^[0-9a-fA-F]{8}$/.test(h)) return ""
     return h
 }
