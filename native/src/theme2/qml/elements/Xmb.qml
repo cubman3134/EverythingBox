@@ -305,21 +305,26 @@ Item {
                 elide: Text.ElideRight
             }
 
+            // T.tileImage, not a bare modelData.image read: a row carrying art only under the open-ended
+            // `images` role map still gets an icon rather than the bare accent tile.
+            readonly property string art: T.tileImage(row.modelData)
             Rectangle {
-                anchors.fill: parent; radius: 8; visible: !row.hdr &&
-                    (!(row.modelData && row.modelData.image) || rowIcon.status !== Image.Ready)
+                anchors.fill: parent; radius: 8
+                visible: !row.hdr && T.tileNeedsTitle(row.modelData, rowIcon.status === Image.Ready)
                 color: (row.modelData && row.modelData.accent) ? row.modelData.accent : "#23272F"
                 // Show the accent tile until the icon is ready (and for off-screen rows whose icon isn't loaded).
+                // The column always draws the row's TITLE beside the tile (see the Column below), so an
+                // artwork-less XMB row is already readable — this tile is never the only thing on the row.
             }
             Image {
                 id: rowIcon
-                anchors.fill: parent; visible: !row.hdr && !!(row.modelData && row.modelData.image)
+                anchors.fill: parent; visible: !row.hdr && row.art !== ""
                 asynchronous: true; cache: true
                 sourceSize.width: width; sourceSize.height: height
                 // Only rasterize icons for rows near the cross: a full console list is ~56 SVGs, and decoding
                 // them all at once on the software renderer is the hitch you feel landing on a big category.
-                source: (row.modelData && row.modelData.image && xmb.host && Math.abs(row.index - xmb.itemScroll) < 9)
-                        ? xmb.host.resolve(row.modelData.image) : ""
+                source: (row.art !== "" && xmb.host && Math.abs(row.index - xmb.itemScroll) < 9)
+                        ? xmb.host.resolve(row.art) : ""
                 fillMode: Image.PreserveAspectCrop; smooth: true
             }
             // Title (and, for the selected row, a subtitle line beneath it) to the right of the icon.

@@ -44,6 +44,13 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
     the view keeps the classic player page instead.
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
 
+**Undeclared views fall back, they do not go blank.** If the app navigates to a view your theme does not
+declare (or declares with no `elements`), the engine renders a plain built-in layout for it — the view's
+title, a grid of its items and the help bar — over **your** `home` background, with ink picked light or
+dark to stay readable on it. It is a safety net, not a design: a theme that styles the view always wins.
+It exists because a missing view used to paint the background and nothing else, which is a screen the user
+can navigate and select on but cannot see (issue #29).
+
 ## Positioning (every element)
 
 | Key | Meaning |
@@ -155,7 +162,9 @@ Use the element's own `opacity` to dim the whole field. Note `dotSize`/`speed` a
 
 ### XMB (the PlayStation cross)
 
-A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. An xmb home needs no `browse`/`detail` view; the cross is the whole screen. Pair it with a `wave` and a `datetime` for the full look (see the shipped **Triple** theme).
+A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. Pair it with a `wave` and a `datetime` for the full look (see the shipped **Triple** theme).
+
+**An xmb home still needs a `browse` view.** This file used to claim the opposite — "the cross is the whole screen" — and that claim is what caused issue #29. It is nearly true: the cross replaces the browse *grid* for catalogs, because drilling into a catalog swaps the column in place. But **/** at the cross ROOT is a *cross-add-on* search, and its merged results are not one category's column — they open the **`browse`** view like any other gamelist. A theme that declares no `browse` therefore rendered that screen as a bare background: navigable, selectable and completely blank. Declare one (Triple's is a plain grid over the same wave), or accept the engine's built-in fallback below.
 
 Note: the front end is software-rendered (so it coexists with the video engine). Stacking several heavy animated elements (e.g. a high-`segments` `wave` **and** `particles` **and** the `xmb` cross) can exceed the renderer's budget — keep `wave.segments` modest and avoid piling animated fields on an xmb home.
 

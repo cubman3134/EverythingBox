@@ -85,6 +85,99 @@ function mediaList(ctx, key) {
     return []
 }
 
+// --- Tile artwork (grids, carousels, channel cells, the XMB column) ------------------------------------
+// Every element that draws a row as a TILE goes through the two functions below. They exist because each
+// element used to answer both questions for itself and they did not agree — which is how issue #29's
+// hardening half got in: a card that decided "draw the title instead" from *whether the row carries an
+// image url* hid the title for exactly the rows whose url was dead, leaving a tile with nothing readable
+// on it at all. One rule, one place, and no element gets to invent a second spelling of it.
+
+// The roles a tile falls through when a row carries no scalar `image`. Poster-shaped first: a grid /
+// carousel / channel cell is a portrait-ish card, so a poster or box beats a wide hero or a banner.
+var kTileRoles = ["poster", "box", "thumb", "hero", "banner", "logo"]
+
+// A catalog row's tile artwork url, or "" when the row carries none. Rows reach the themed model from
+// several builders; one that publishes only the open-ended `images` role map (no scalar alias) used to
+// paint a bare tile in every grid while the artwork sat right there on the row.
+function tileImage(item) {
+    if (!item) return ""
+    if (item.image) return String(item.image)
+    var imgs = item.images
+    for (var i = 0; i < kTileRoles.length; i++) {
+        var r = kTileRoles[i]
+        if (imgs && imgs[r] && imgs[r].length) return String(imgs[r][0])
+        if (item[r]) return String(item[r])
+    }
+    return ""
+}
+
+// Must this tile draw its title as a placeholder? Whenever no artwork is actually ON SCREEN — the row
+// carries none, OR the url it does carry has not loaded / has failed. `artReady` is the element's live
+// Image status (status === Image.Ready), so a dead url degrades to readable text rather than a bare tile.
+function tileNeedsTitle(item, artReady) { return !artReady || tileImage(item) === "" }
+
+// --- View selection ------------------------------------------------------------------------------------
+// Which view definition renders for `name`. A theme declares the views it styles; when the host navigates
+// to one the theme never declared, `theme.views[name]` is absent — and the renderer drew the background
+// and NOTHING else: a navigable, selectable, entirely blank screen. That is issue #29 exactly. Triple
+// ships no `browse` view (its own format doc said an xmb home does not need one), and the cross-addon
+// search from the XMB root is the single route that opens `browse` on an xmb theme, so every result grid
+// under Triple was one flat rectangle. No theme can be expected to declare every view the app will ever
+// grow — least of all the community themes in the registry, which nobody here can fix — so the renderer
+// supplies a plain legible layout for anything left unstyled instead of a blank screen.
+function viewFor(theme, name) {
+    var views = (theme && theme.views) ? theme.views : null
+    var v = views ? views[name] : undefined
+    if (v && v.elements && v.elements.length) return v
+    return defaultView(views ? views["home"] : null)
+}
+
+// The built-in layout viewFor falls back to: the view's title, a grid of its items, and the help bar.
+// Deliberately minimal and generic — no theme-specific styling to go stale — but it wears the theme's own
+// home background (and ink derived from it), so the fallback still reads as that theme rather than as a
+// foreign default screen, and is legible on a light theme as well as a dark one.
+function defaultView(homeView) {
+    var bg = (homeView && homeView.background) ? homeView.background : { "color": "#0F1216" }
+    var ink = inkFor(bg)
+    var dim = (ink === "#FFFFFF") ? "#C8CEDA" : "#4A5567"
+    return {
+        "background": bg,
+        "elements": [
+            { "type": "text", "id": "ebFallbackTitle", "pos": [0.05, 0.08], "size": [0.7, 0.06],
+              "origin": [0, 0.5], "binding": "system.name", "color": ink, "fontSize": 0.042, "bold": true },
+            { "type": "grid", "id": "ebFallbackGrid", "pos": [0.04, 0.16], "size": [0.92, 0.73],
+              "origin": [0, 0], "columns": 5, "aspect": 1.45, "spacing": 0.008, "color": ink,
+              "card": { "radius": 10, "fill": "#23272F", "label": "overlay",
+                        "selectedWidth": 4, "selectedScale": 1.04 } },
+            { "type": "helpsystem", "id": "ebFallbackHelp", "pos": [0.5, 0.955], "size": [1, 0.05],
+              "origin": [0.5, 0.5], "color": dim, "fontSize": 0.022,
+              "entries": [ { "button": "↑↓←→", "label": "Navigate" },
+                           { "button": "Enter", "label": "Open" },
+                           { "button": "I", "label": "Details" },
+                           { "button": "/", "label": "Search" },
+                           { "button": "Esc", "label": "Back" } ] }
+        ]
+    }
+}
+
+// Readable ink for a background block: white on a dark one, near-black on a light one. The fallback view
+// has no theme palette to read, so it derives one — assuming "dark" would print white on white for the
+// light themes (Channels' browse gradient starts at #EFF3F8) and swap one unreadable screen for another.
+// Takes the flat `color`, else the first gradient stop, and uses the sRGB luma coefficients.
+function inkFor(bg) {
+    var hex = ""
+    if (bg && bg.color) hex = String(bg.color)
+    else if (bg && bg.gradient && bg.gradient.length) hex = String(bg.gradient[0])
+    hex = hex.replace("#", "")
+    if (hex.length === 8) hex = hex.substring(2)   // #AARRGGBB -> RRGGBB
+    if (hex.length !== 6) return "#FFFFFF"
+    var r = parseInt(hex.substring(0, 2), 16)
+    var g = parseInt(hex.substring(2, 4), 16)
+    var b = parseInt(hex.substring(4, 6), 16)
+    if (isNaN(r) || isNaN(g) || isNaN(b)) return "#FFFFFF"
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) > 140 ? "#111820" : "#FFFFFF"
+}
+
 // Resolve an Image element's source through the role + fallback chain:
 //   literal path / binding  ->  el.role (selected.images[role])  ->  el.fallback (another role, then a
 //   literal/default path). Returns "" when nothing resolves (the element then shows its placeholder or,

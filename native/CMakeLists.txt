@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.151 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.152 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -574,6 +574,14 @@ if(EVERYTHINGBOX_BUILD_APP)
             src/ui/nav/NavGraph.cpp src/ui/nav/NavGraph.h ${EB_THEME2_RCC_PROBE})
         target_include_directories(probe_theme2 PRIVATE src src/theme2 src/ui src/core src/addons ${MPV_INCLUDE_DIR})
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
+
+        # The theme renderer's PURE decisions (issue #29): Theme.js's viewFor/inkFor/tileImage/tileNeedsTitle,
+        # evaluated out of the theme2 qrc in a bare QJSEngine — the same bytes ThemeView.qml imports, with no
+        # scene, no widgets and no host. Its own qt_add_resources call (a target_sources-added .qrc silently
+        # no-ops — see the app target's note above) so :/theme2/Theme.js is embedded and readable.
+        qt_add_resources(EB_THEME2_RCC_THEMEVIEW resources/theme2.qrc)
+        add_executable(probe_themeview tools/probe_themeview.cpp ${EB_THEME2_RCC_THEMEVIEW})
+        target_link_libraries(probe_themeview PRIVATE Qt6::Core Qt6::Qml)
 
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
         # using mpv's built-in lavfi test source so no video file/key is needed.

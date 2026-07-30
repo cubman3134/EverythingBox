@@ -79,10 +79,27 @@ GridView {
                 anchors.bottom: gv.labelMode === "below" ? belowBar.top : parent.bottom
                 clip: true
                 Image {
+                    id: poster
                     anchors.fill: parent
-                    source: (modelData && modelData.image && gv.host) ? gv.host.resolve(modelData.image) : ""
+                    // T.tileImage, not a bare modelData.image read: a row that carries its art only under
+                    // the open-ended `images` role map still gets a poster instead of a blank tile.
+                    source: (gv.host && T.tileImage(modelData) !== "") ? gv.host.resolve(T.tileImage(modelData)) : ""
                     fillMode: Image.PreserveAspectCrop
                     visible: status === Image.Ready
+                }
+                // The artwork-less fallback for `label: "none"` — the one card style that puts no title on
+                // the card at all, so a row whose art is missing OR dead draws as a bare coloured rectangle
+                // with nothing readable on it. Every other label mode already carries a title (see below),
+                // and T.tileNeedsTitle is the shared rule for "no artwork actually on screen" (issue #29).
+                Text {
+                    visible: gv.labelMode === "none" && T.tileNeedsTitle(modelData, poster.status === Image.Ready)
+                    anchors.centerIn: parent; width: parent.width * 0.88
+                    text: (modelData && modelData.title) ? modelData.title : ""
+                    color: T.val(gv.card, "labelColor", "#FFFFFF")
+                    style: Text.Outline; styleColor: Qt.rgba(0, 0, 0, 0.35)
+                    font.pixelSize: Math.max(11, 0.028 * (gv.host ? gv.host.height : 720)); font.bold: true
+                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter
+                    wrapMode: Text.WordWrap; maximumLineCount: 3; elide: Text.ElideRight
                 }
                 // Overlay label: a dark scrim + title at the bottom of the poster (the original look).
                 Rectangle {

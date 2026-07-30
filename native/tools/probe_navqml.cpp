@@ -28,6 +28,7 @@
 #include <QImage>
 #include <QSet>
 #include <cstdio>
+#include <functional>   // §22: the visual-tree walk takes a std::function predicate
 #include <deque>
 #include <random>
 #include <set>
@@ -1636,6 +1637,176 @@ static void runSidebarAsserts()
         pump();
     }
 }
+
+// §22 — a view the theme never DECLARED must still be visible (issue #29). The pure decision behind this is
+// Theme.js's viewFor, pinned by probe_themeview; what THIS section pins is that the shipped renderer asks it
+// — i.e. that ThemeView actually resolves its `view` through the fallback instead of the old direct
+// `theme.views[currentView]` read. Those are two different claims, and the pure one alone is inert: revert
+// ThemeView.qml's binding and probe_themeview stays green while every affected screen goes blank again.
+//
+// The bug's observable signature was exact: Triple declares `home`/`detail`/`nowplayingAudio` and no
+// `browse`, the cross-addon search from the XMB root is the one route that opens `browse`, and the frame
+// that came back was ONE distinct colour — #0F1216, the renderer's own default, not even the theme's
+// background — over a model that was populated and navigable the whole time. So this drives the real
+// ThemeEngine::buildView on a browse-less theme and asserts against both halves of that: the element tree
+// (a grid is instantiated) and the pixels (the frame is not one flat colour).
+//
+// The third leg is the hardening: a row with NO artwork must degrade to a readable title rather than a bare
+// tile, in the one card style that puts no title anywhere by default (`label: "none"`).
+static void runUndeclaredViewAsserts()
+{
+    // Distinct colours in a grabbed frame. One means "a flat rectangle and nothing else" — the exact
+    // signature of the blank screen, and a much harder thing to fake than an element-tree walk alone.
+    auto distinctColours = [](const QImage& im) {
+        QSet<QRgb> seen;
+        for (int y = 0; y < im.height(); y += 2)
+            for (int x = 0; x < im.width(); x += 2)
+            {
+                seen.insert(im.pixel(x, y));
+                if (seen.size() > 64) return 65;   // enough; stop scanning
+            }
+        return int(seen.size());
+    };
+    // Depth-first walk of the VISUAL tree (element delegates are Repeater/Loader children — visually
+    // parented but not QObject children, so findChild never reaches them; same note as §21).
+    auto findVisual = [](QQuickItem* from, const std::function<bool(QQuickItem*)>& pred) -> QQuickItem* {
+        QList<QQuickItem*> stack = from->childItems();
+        while (!stack.isEmpty())
+        {
+            QQuickItem* it = stack.takeLast();
+            if (pred(it)) return it;
+            stack += it->childItems();
+        }
+        return nullptr;
+    };
+
+    // ---- (a) the browse-less theme: the shape that shipped as Triple ----------------------------------
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "undeclared-view: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        // An xmb `home` and NOTHING else — theme.json as Triple's was when #29 was filed.
+        const char* themeJson =
+            "{ \"name\": \"XmbNoBrowse\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#0A1326\" },"
+            "  \"elements\": [ { \"type\": \"xmb\", \"id\": \"cross\", \"pos\": [0, 0], \"size\": [1, 1] } ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "undeclared-view: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        for (int i = 0; i < 12; ++i)
+            items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Result %1").arg(i) } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Search: up"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && root, "undeclared-view: the browse-less fixture built");
+        if (!qw || !root) { if (w) delete w; return; }
+        qw->resize(1280, 720);
+        qw->show();
+        pump(); pump(); qw->grabFramebuffer(); pump();
+
+        // The control FIRST: the theme's own `home` is what renders on the home view. If the fallback were
+        // stealing declared views too, everything below would pass for the wrong reason.
+        CHECK(root->property("xmbMode").toBool(),
+              "undeclared-view: the declared `home` still renders the theme's own xmb cross");
+
+        // The regression: switch to the view the theme never declared — exactly what showThemedBrowse does
+        // after a cross-addon search from the XMB root.
+        root->setProperty("currentView", QStringLiteral("browse"));
+        // A view switch re-fades the foreground `content` from opacity 0 (see ThemeView), so a frame grabbed
+        // on the next event-loop pass is legitimately still blank. Let the 220ms fade finish before judging
+        // the pixels — otherwise this assertion would fail for a reason that has nothing to do with #29.
+        QTest::qWait(400);
+        pump(); qw->grabFramebuffer(); pump();
+
+        const QVariantMap browseView = root->property("view").toMap();
+        CHECK(!browseView.value(QStringLiteral("elements")).toList().isEmpty(),
+              "undeclared-view: `browse` resolves to a view WITH elements, not the empty `({})` of #29");
+        CHECK(!root->property("xmbMode").toBool(),
+              "undeclared-view: …and it is not the home's cross leaking across (the fallback is its own layout)");
+        QQuickItem* grid = findVisual(root, [](QQuickItem* it) {
+            return it->objectName() == QStringLiteral("themeGrid");
+        });
+        CHECK(grid != nullptr, "undeclared-view: the fallback instantiates a grid — the items are what the screen is FOR");
+        CHECK(grid && grid->property("count").toInt() == 12,
+              "undeclared-view: …carrying every row the host handed the view (12)");
+
+        // The pixels, which is what the user actually reported. Before the fix this frame was a single
+        // colour; an element tree alone could be instantiated and still paint nothing.
+        const QImage frame = qw->grabFramebuffer();
+        CHECK(!frame.isNull(), "undeclared-view: the frame grabbed");
+        CHECK(!frame.isNull() && distinctColours(frame) > 1,
+              "undeclared-view: the browse frame is NOT one flat colour (issue #29's exact signature)");
+        // And it wears the THEME's background, not the renderer's #0F1216 default — the tell that told us
+        // the whole view object was missing rather than just its elements.
+        CHECK(!frame.isNull() && frame.pixel(4, 4) == qRgb(0x0A, 0x13, 0x26),
+              "undeclared-view: the fallback inherits the theme's own home background (#0A1326)");
+
+        delete w;
+        pump();
+    }
+
+    // ---- (b) the hardening: an artwork-less row degrades to readable text -----------------------------
+    // `label: "none"` is the one card style that puts no title on the card, so a row whose artwork is
+    // missing (or whose url is dead) used to be a bare coloured rectangle with nothing on it at all.
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "tile-placeholder: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"NoLabelGrid\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"#101010\" },"
+            "  \"elements\": [ { \"type\": \"grid\", \"columns\": 3, \"pos\": [0, 0], \"size\": [1, 1],"
+            "                    \"card\": { \"label\": \"none\" } } ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "tile-placeholder: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        // Row 0 carries NO artwork at all; row 1 carries it only under the open-ended `images` role map
+        // (no scalar `image`) — the shape a builder that publishes roles produces, which used to paint a
+        // bare tile in every grid while the artwork sat right there on the row.
+        QVariantList items;
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("ARTLESSROW") } };
+        QVariantMap roleOnly{ { QStringLiteral("title"), QStringLiteral("ROLEONLYROW") } };
+        roleOnly.insert(QStringLiteral("images"),
+                        QVariantMap{ { QStringLiteral("poster"), QVariantList{ QStringLiteral("poster.png") } } });
+        items << roleOnly;
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && root, "tile-placeholder: the label-none fixture built");
+        if (!qw || !root) { if (w) delete w; return; }
+        qw->resize(900, 600);
+        qw->show();
+        QTest::qWait(400);   // the first-appear fade of `content`, as above
+        pump(); qw->grabFramebuffer(); pump();
+
+        // A VISIBLE text item carrying the row's title — the placeholder, in the card style that has no
+        // label of its own. `isVisible()` is the load-bearing half: the Text exists either way, and the
+        // defect was precisely that it was hidden.
+        QQuickItem* placeholder = findVisual(root, [](QQuickItem* it) {
+            return it->property("text").toString() == QStringLiteral("ARTLESSROW") && it->isVisible();
+        });
+        CHECK(placeholder != nullptr,
+              "tile-placeholder: an artwork-less card in a `label: none` grid draws its TITLE, not a bare tile");
+
+        // The role-only row resolves its artwork through T.tileImage rather than the bare `image` field, so
+        // the grid asks for the poster instead of falling back to a placeholder for a row that HAS art.
+        QQuickItem* poster = findVisual(root, [](QQuickItem* it) {
+            return it->property("source").toUrl().toString().endsWith(QStringLiteral("poster.png"));
+        });
+        CHECK(poster != nullptr,
+              "tile-placeholder: a row carrying art only under `images.poster` still gets a poster source");
+
+        delete w;
+        pump();
+    }
+}
 #endif // EB_HAVE_QML
 
 int main(int argc, char** argv)
@@ -2754,6 +2925,10 @@ int main(int argc, char** argv)
     // the whole shipped path (theme.json -> buildView -> bridge -> ThemeView) proving the grid keeps its 2-D
     // stepping across a sidebar round trip and keeps its button bar. After §20, which restores the display mode.
     runSidebarAsserts();
+    // §22: a view the theme never DECLARED still renders (issue #29) — the shipped renderer resolving through
+    // Theme.js's fallback rather than the old direct theme.views[currentView] read, asserted on the element
+    // tree AND the pixels; plus the artwork-less tile placeholder. probe_themeview pins the pure decision.
+    runUndeclaredViewAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }

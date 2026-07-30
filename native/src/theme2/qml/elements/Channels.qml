@@ -102,12 +102,19 @@ Item {
                                 Behavior on scale { NumberAnimation { duration: 130; easing.type: Easing.OutBack } }
                                 // Poster cards keep a title STRIP below the artwork (text over a poster is
                                 // unreadable/confusing); plain colored tiles (no image) keep the centered label.
-                                readonly property bool hasImg: !cell.empty && !!(cell.item && cell.item.image)
+                                // T.tileImage, not a bare item.image read: a row carrying art only under the
+                                // open-ended `images` role map still gets a poster. Deliberately keyed off
+                                // whether the row HAS artwork rather than T.tileNeedsTitle's live status —
+                                // this drives the card's LAYOUT, and a strip that appeared as the image
+                                // finished loading would resize the poster under the user. A dead url is
+                                // still readable here: the strip below it carries the title either way.
+                                readonly property string art: cell.empty ? "" : T.tileImage(cell.item)
+                                readonly property bool hasImg: art !== ""
                                 readonly property real stripH: hasImg ? Math.max(30, height * 0.24) : 0
                                 Image {
                                     anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
                                     height: parent.height - parent.stripH
-                                    source: (cell.item && cell.item.image && ch.host) ? ch.host.resolve(cell.item.image) : ""
+                                    source: (parent.art !== "" && ch.host) ? ch.host.resolve(parent.art) : ""
                                     fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready
                                 }
                                 Rectangle { // the title strip under the poster
