@@ -105,8 +105,12 @@ exe_fingerprint() {
 # in build/Release failed for reasons that had nothing to do with the branch under test; this step is what
 # stops that from coming back silently.
 #
-# Runs BEFORE the fingerprint snapshot below, and restores the folder exactly, so the seeding is invisible to
-# the contamination gate — and so that gate also checks this step cleaned up after itself.
+# The snapshot is taken BEFORE the seeding, not after: this step has to sit INSIDE the contamination gate's
+# window like every other probe, or a probe writing into the exe folder from here would be baked into the
+# "before" picture and go unnoticed. The seed/restore below is exact, so the gate sees it as a no-op — and
+# checks that the restore really was exact.
+EXE_FP_BEFORE="$(exe_fingerprint)"
+
 echo "=== probe data-dir isolation (seeding the exe folder with junk first) ==="
 ISO_JUNK_INI="$EXE_DIR/everythingbox.ini"
 ISO_JUNK_ADDON="$EXE_DIR/addons/probeisolationjunk"
@@ -123,7 +127,6 @@ run "probe_isolation" ISOLATION-OK "$ISO"
 if [ -n "$ISO_INI_BAK" ]; then cp "$ISO_INI_BAK" "$ISO_JUNK_INI"; rm -f "$ISO_INI_BAK"; else rm -f "$ISO_JUNK_INI"; fi
 rm -rf "$ISO_JUNK_ADDON"
 [ "$ISO_ADDONS_ROOT_MADE" = 1 ] && rmdir "$EXE_DIR/addons" 2>/dev/null
-EXE_FP_BEFORE="$(exe_fingerprint)"
 
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
@@ -536,14 +539,21 @@ if [ ! -f "$ISO_CMAKE" ]; then
   echo "FAIL: probe data-dir isolation wiring (CMakeLists.txt not found at $ISO_CMAKE)"; fail=1
 else
   iso_bad=0
+  # CMake comments stripped FIRST, and this is load-bearing rather than tidiness: the block being checked is
+  # introduced by a comment that names BUILDSYSTEM_TARGETS, so a gate reading the raw file would go on passing
+  # after someone deleted the sweep and left the prose describing it. That is precisely how an assertion ends
+  # up gating nothing, and this one did until the mutation pass caught it.
+  iso_src="$(sed -E 's/#.*$//' "$ISO_CMAKE")"
   # The auto-apply loop must still be there, still keyed on the probe_ name prefix. Without it a new probe is
   # silently un-isolated, which is the trap this issue was about rather than a fix for it.
-  grep -q 'BUILDSYSTEM_TARGETS' "$ISO_CMAKE" \
+  printf '%s\n' "$iso_src" | grep -q 'BUILDSYSTEM_TARGETS' \
     || { echo "  the BUILDSYSTEM_TARGETS sweep is gone — isolation is no longer applied to every probe"; iso_bad=1; }
-  grep -q '_eb_t MATCHES "\^probe_"' "$ISO_CMAKE" \
+  printf '%s\n' "$iso_src" | grep -q '_eb_t MATCHES "\^probe_"' \
     || { echo "  the ^probe_ name match is gone — a new probe no longer gets isolation by default"; iso_bad=1; }
+  printf '%s\n' "$iso_src" | grep -q 'target_compile_definitions(\${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)' \
+    || { echo "  the loop no longer applies EB_ISOLATED_DATA_DIR — nothing is isolated"; iso_bad=1; }
   # Every grant of the define must go through the loop variable. Anything else names a target explicitly.
-  iso_grants="$(grep -n 'target_compile_definitions(.*EB_ISOLATED_DATA_DIR' "$ISO_CMAKE" || true)"
+  iso_grants="$(printf '%s\n' "$iso_src" | grep -n 'target_compile_definitions(.*EB_ISOLATED_DATA_DIR' || true)"
   iso_by_name="$(printf '%s\n' "$iso_grants" | grep -v 'target_compile_definitions(\${_eb_t} ' | grep . || true)"
   if [ -n "$iso_by_name" ]; then
     printf '%s\n' "$iso_by_name"

@@ -92,7 +92,9 @@ int main(int argc, char** argv)
     // (ItemMarks.cpp, CloudMerge.cpp, ThemeChoice.cpp, ...): dataDir() + "/" + kIniFile. If the runner's
     // seeded sentinel is readable through it, the probe is reading the exe folder's ini.
     const QString iniPath = data + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
-    CHECK(!QFileInfo(iniPath).canonicalPath().startsWith(canonExe),
+    // absolutePath(), not canonicalPath(): the ini does not exist yet on a first run, and canonicalPath()
+    // answers empty for a path that is not on disk — which would quietly make this check pass for free.
+    CHECK(!QFileInfo(iniPath).absolutePath().startsWith(canonExe),
           "the store's ini resolves into applicationDirPath()");
     {
         QSettings s(iniPath, QSettings::IniFormat);
