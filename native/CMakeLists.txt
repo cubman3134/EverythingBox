@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.156 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.157 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -504,12 +504,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameId.cpp    src/core/PcGameId.h
         src/core/PcGameRemap.cpp src/core/PcGameRemap.h)
     target_include_directories(probe_pcgames PRIVATE src src/core)
-    # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn /
-    # probe_passcode): the alias override store persists, so without a scratch ini a run reads back what
-    # the PREVIOUS run wrote and the probe stops being repeatable. PcGameRemap gates its own seam on the
-    # SAME define, and needs it for the harder reason — its store is the real everythingbox.ini, which on
-    # desktop lives next to the exe (issue #42), so an un-redirected run would write records into
-    # build/Release and leave them for the next one.
+    # This define does two jobs. The second is why it still exists: PcGameRemap compiles a SYNC COUNTER
+    # under it, and the probe asserts on how many flushes a remap performs — nothing about data-dir
+    # isolation can supply that. The first, the ini redirect, is now largely redundant: it was there
+    # because the alias override store persists, so an un-redirected run read back what the previous run
+    # wrote into the ini next to the exe (issue #42) — and the per-process scratch data dir every probe now
+    # gets makes each run start empty on its own. It is kept rather than unpicked from two production
+    # translation units for no behaviour change; see the note at the call site in probe_pcgames.cpp.
     target_compile_definitions(probe_pcgames PRIVATE EB_PCGAMEID_TEST_SEAM)
     target_link_libraries(probe_pcgames PRIVATE Qt6::Core)
 

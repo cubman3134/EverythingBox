@@ -122,6 +122,12 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
+    // NOTE (issue #42): this probe now also gets a per-process scratch data dir, so AppPaths::dataDir() is
+    // already empty at the start of every run and the redirect below is no longer what makes the run
+    // hermetic. It is kept because EB_PCGAMEID_TEST_SEAM is still needed for PcGameRemap's sync counter,
+    // and unpicking just the ini half from two production translation units would change no behaviour. The
+    // history is worth keeping either way:
+    //
     // The override store PERSISTS. Point it at a scratch ini and delete any leftover first, so a run is
     // hermetic: without this the probe writes into the app ini next to the exe and the NEXT run reads
     // what this one wrote. That is not hypothetical — it fired during the mutation pass here. A build
