@@ -136,10 +136,11 @@ std::size_t CrashReport::formatRecord(const CrashRecord& r, char* out, std::size
     putHex(s, r.exceptionCode);
     put(s, '\n');
 
+    // The RAW fault address only. The module + offset is a separate block written after the
+    // resolution step, because resolving it takes the loader lock — see formatFaultModule and
+    // emitRecord. Nothing in this function may read moduleName/moduleBase.
     putStr(s, "  at        : ");
     putHex(s, r.faultAddress);
-    putStr(s, "  ");
-    putModuleAndOffset(s, r);
     put(s, '\n');
 
     putStr(s, "  operation : ");
@@ -186,6 +187,17 @@ std::size_t CrashReport::formatRecord(const CrashRecord& r, char* out, std::size
     // on the last fault this process will ever take, and it would contradict the line above.
     if (!r.fatal && r.limit != 0 && r.sequence >= r.limit)
         putStr(s, "  (record cap reached; further access violations will NOT be logged this run)\n");
+
+    return finish(s);
+}
+
+std::size_t CrashReport::formatFaultModule(const CrashRecord& r, char* out, std::size_t cap)
+{
+    Sink s = { out, out ? cap : 0, 0 };
+
+    putStr(s, "  module    : ");
+    putModuleAndOffset(s, r);
+    put(s, '\n');
 
     putStr(s, "======================================\n");
 
@@ -264,8 +276,18 @@ bool CrashReport::fatalNeedsFullRecord(unsigned long long lastRecordedFault,
     return false;
 }
 
+bool CrashReport::faultMustSkipRecording(unsigned long exceptionCode)
+{
+    // See the contract in CrashReport.h. Stack overflow ONLY: it is the single code where the
+    // handler's own frame is unaffordable, and where paying it kills the process inside the
+    // filter and costs the WER dump that would otherwise have been written. Everything else
+    // arrives with a normal stack and gets the full record.
+    return exceptionCode == kExceptionStackOverflow;
+}
+
 void CrashReport::emitRecord(CrashRecord& r,
                              WriteFn write,
+                             StepFn  resolveModule,
                              StepFn  capture,
                              StepFn  resolve,
                              void*   ctx,
@@ -274,28 +296,40 @@ void CrashReport::emitRecord(CrashRecord& r,
 {
     if (!write || !scratch || scratchCap == 0) return;
 
-    // 1. The fault site — registers, bad address, module+offset — durable before any stack
-    //    work happens. Everything after this point can hang without costing the diagnosis.
+    // 1. The fault site — registers, bad address, raw fault address — durable before ANY
+    //    module or stack work happens. Everything after this point can hang without costing
+    //    the diagnosis.
     {
         const std::size_t n = formatRecord(r, scratch, scratchCap);
         if (n) write(ctx, scratch, n);
     }
 
-    // 2. Capture return addresses. Unwinding is not lock-free either, hence step 1 first.
+    // 2. One GetModuleHandleExW for the fault site. Takes the loader lock, so it goes here and
+    //    not before step 1 — a fault under an unreleasable loader lock must cost the module
+    //    name, not the whole record.
+    if (resolveModule) resolveModule(ctx, r);
+
+    // 3. The faulting module + offset, and the rule that closes the block.
+    {
+        const std::size_t n = formatFaultModule(r, scratch, scratchCap);
+        if (n) write(ctx, scratch, n);
+    }
+
+    // 4. Capture return addresses. Unwinding is not lock-free either, hence step 1 first.
     if (capture) capture(ctx, r);
 
-    // 3. The raw addresses, durable before resolution is attempted. This is the write-first
-    //    safeguard: if step 4 deadlocks on the loader lock, the chain is still on disk and
+    // 5. The raw addresses, durable before resolution is attempted. This is the write-first
+    //    safeguard: if step 6 deadlocks on the loader lock, the chain is still on disk and
     //    still resolves offline.
     {
         const std::size_t n = formatFramesRaw(r, scratch, scratchCap);
         if (n) write(ctx, scratch, n);
     }
 
-    // 4. GetModuleHandleExW per frame — the step that can deadlock.
+    // 6. GetModuleHandleExW per frame — the step that can deadlock.
     if (resolve) resolve(ctx, r);
 
-    // 5. The readable form, which is a convenience on top of a record that is already complete.
+    // 7. The readable form, which is a convenience on top of a record that is already complete.
     {
         const std::size_t n = formatFramesResolved(r, scratch, scratchCap);
         if (n) write(ctx, scratch, n);
@@ -335,16 +369,25 @@ std::size_t CrashReport::formatFatalLine(const CrashRecord& r, char* out, std::s
 #endif
 #include <windows.h>
 
+// The portable spellings in CrashReport.h are what the handler tests and what the probe
+// asserts. If either ever drifts from the real Win32 value, the reporter would skip (or fail
+// to skip) the wrong exception while every probe stayed green — so tie them together here,
+// on the only platform where the macros exist.
+static_assert(CrashReport::kExceptionAccessViolation
+                  == static_cast<unsigned long>(EXCEPTION_ACCESS_VIOLATION),
+              "kExceptionAccessViolation must be EXCEPTION_ACCESS_VIOLATION");
+static_assert(CrashReport::kExceptionStackOverflow
+                  == static_cast<unsigned long>(EXCEPTION_STACK_OVERFLOW),
+              "kExceptionStackOverflow must be EXCEPTION_STACK_OVERFLOW");
+
 namespace
 {
-    // The handler's formatting buffer, on its stack. Sized for the largest of the three
-    // blocks emitRecord emits — the resolved chain, at 32 frames of
-    // "    #00 0x7ffced04f7a5  vcruntime140_1.dll+0x30f7a5" — with room to spare, because
-    // truncation here would silently drop the tail of a call chain that is the whole point.
-    constexpr std::size_t kScratch = 2560;
-
-    // Resolved ONCE at install time. The handler only ever reads it.
-    wchar_t       g_logPath[MAX_PATH] = { 0 };
+    // Opened ONCE at install time and held for the lifetime of the process. See the header:
+    // CreateFileW converts its DOS path to an NT path via RtlDosPathNameToNtPathName_U, which
+    // allocates from the default heap and takes the heap lock, so it may not appear anywhere
+    // on the handler's path. Never closed: the process owns it until it dies, and a handler
+    // that closed it would have to reopen it.
+    HANDLE        g_logHandle         = INVALID_HANDLE_VALUE;
     volatile LONG g_avCount           = 0;   // access violations seen (may exceed kMaxRecords; only the first few are written)
     volatile LONG g_fatalWritten      = 0;   // the fatal marker is written at most once
     LPTOP_LEVEL_EXCEPTION_FILTER g_prevFilter = nullptr;
@@ -355,30 +398,26 @@ namespace
     volatile LONG               g_lastRecordedSeq   = 0;
     volatile unsigned long long g_lastRecordedFault = 0;
 
-    // Append `len` bytes to the log. Raw Win32: CreateFileW with FILE_APPEND_DATA gives an
-    // atomic append with no seek, and no CRT stdio object to take a lock on. If anything
-    // here fails there is nothing sensible to do about it inside an exception handler, so
-    // every failure is silent — the alternative is a handler that makes the crash worse.
+    // Append `len` bytes to the log. WriteFile and FlushFileBuffers ONLY — between them they
+    // touch no heap, take no CRT lock and convert no path, which is the whole requirement:
+    // this runs in a process whose heap may be exactly what is broken, and a fault taken
+    // inside malloc/free holds the heap lock while we are called. The handle was opened with
+    // FILE_APPEND_DATA, so each write still lands atomically at end of file with no seek.
     //
-    // FlushFileBuffers before the close is not belt-and-braces here: the whole ordering
-    // discipline in emitRecord is built on "already written" meaning "survives a hang in the
-    // next step", and a write sitting in the cache when the handler deadlocks does not.
-    // At most a handful of these run per process, so the cost is irrelevant.
+    // If anything here fails there is nothing sensible to do about it inside an exception
+    // handler, so every failure is silent — the alternative is a handler that makes the crash
+    // worse.
+    //
+    // FlushFileBuffers is not belt-and-braces: the whole ordering discipline in emitRecord is
+    // built on "already written" meaning "survives a hang in the next step", and a write
+    // sitting in the cache when the handler deadlocks does not. At most a handful of these run
+    // per process, so the cost is irrelevant.
     void appendLog(const char* data, std::size_t len)
     {
-        if (!g_logPath[0] || len == 0) return;
-        HANDLE h = ::CreateFileW(g_logPath,
-                                 FILE_APPEND_DATA,
-                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                 nullptr,
-                                 OPEN_ALWAYS,
-                                 FILE_ATTRIBUTE_NORMAL,
-                                 nullptr);
-        if (h == INVALID_HANDLE_VALUE) return;
+        if (g_logHandle == INVALID_HANDLE_VALUE || !data || len == 0) return;
         DWORD written = 0;
-        ::WriteFile(h, data, static_cast<DWORD>(len), &written, nullptr);
-        ::FlushFileBuffers(h);
-        ::CloseHandle(h);
+        ::WriteFile(g_logHandle, data, static_cast<DWORD>(len), &written, nullptr);
+        ::FlushFileBuffers(g_logHandle);
     }
 
     // The sink emitRecord writes through.
@@ -442,7 +481,12 @@ namespace
         baseOut = reinterpret_cast<unsigned long long>(mod);
     }
 
-    void fillModule(CrashReport::CrashRecord& rec)
+    // emitRecord step 2. ONE GetModuleHandleExW, for the fault site. It is a step rather than
+    // part of fillCommon because it takes the loader lock: run before the first write, a fault
+    // taken under a lock that never releases would cost the ENTIRE record instead of this one
+    // field. By the time this runs the registers, the bad address and the raw fault address
+    // are already flushed.
+    void resolveFaultModule(void*, CrashReport::CrashRecord& rec)
     {
         resolveAddress(rec.faultAddress, rec.moduleName, sizeof rec.moduleName, rec.moduleBase);
     }
@@ -482,7 +526,8 @@ namespace
         rec.threadId      = ::GetCurrentThreadId();
         rec.exceptionCode = er->ExceptionCode;
         rec.faultAddress  = reinterpret_cast<unsigned long long>(er->ExceptionAddress);
-        fillModule(rec);
+        // No module resolution here: it takes the loader lock, so it is emitRecord's step 2,
+        // after the fault site is already on disk. See resolveFaultModule.
         if (er->ExceptionCode == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION)
             && er->NumberParameters >= 2)
         {
@@ -501,10 +546,114 @@ namespace
 #endif
     }
 
+    // ---------------------------------------------------------------------------------
+    // The two handlers below are deliberately THIN, and everything that needs a real stack
+    // frame lives in these two noinline helpers instead.
+    //
+    // A CrashRecord is ~1.7 KB (frameModule alone is 32x32) and the scratch buffer is 2.5 KB
+    // more; resolveAddress adds a wchar_t[MAX_PATH] below them. A prologue commits that frame
+    // — through __chkstk, which PROBES it page by page — at function entry, before any branch
+    // is taken. Both handlers run for EXCEPTION_STACK_OVERFLOW, where roughly one page of
+    // stack is left and exception dispatch has already spent part of it, so a handler that
+    // declared those locals ITSELF would fault inside its own prologue on every stack
+    // overflow: nested exception, process killed on the spot, g_prevFilter (WER) never
+    // reached, not even a marker line written. A stack overflow used to produce a WER dump;
+    // it must not stop doing so because a crash reporter was added.
+    //
+    // __declspec(noinline) is load-bearing. Inlined back into the caller, the frame returns
+    // to the caller's prologue and the split buys nothing. Both this and the early
+    // faultMustSkipRecording test in unhandledFilter are needed — the test alone still pays
+    // the prologue. run-headless-probes.sh gates the shape, since CI never compiles it.
+    // ---------------------------------------------------------------------------------
+
+    // The first-chance record. Reached only for an access violation under the cap, i.e. never
+    // on a stack overflow.
+    __declspec(noinline) void writeFirstChanceRecord(EXCEPTION_POINTERS* ep, LONG n)
+    {
+        CrashReport::CrashRecord rec = {};
+        rec.sequence = static_cast<unsigned int>(n);
+        rec.limit    = CrashReport::kMaxRecords;
+        fillCommon(rec, ep);
+
+        char buf[CrashReport::kScratch];
+        CrashReport::emitRecord(rec, writeChunk,
+                                resolveFaultModule, captureFrames, resolveFrames,
+                                nullptr, buf, sizeof buf);
+
+        // Publish what was just written, so the unhandled filter can tell whether this same
+        // fault already has a full record.
+        //
+        // ORDERING, correctly attributed this time. These two stores are NOT an
+        // acquire/release pair and the reader does not pair with them either: it passes both
+        // globals as function arguments, whose evaluation order is unspecified. What actually
+        // makes the predicate safe is an invariant on the VALUES, not on the ordering:
+        // g_lastRecordedSeq only ever holds values <= kMaxRecords, because this function is
+        // the only writer and it is reached only under the cap. A fatal fault that was never
+        // given a first-chance record implies g_avCount > kMaxRecords, so in the case that
+        // matters — a record is still owed — `seq == seen` cannot hold no matter which value
+        // of the pair the reader observes, and fatalNeedsFullRecord returns true. A racy
+        // misread can therefore only produce a duplicate block, never a lost one.
+        //
+        // That invariant is the guard, so anything that breaks it breaks the safety: raising
+        // kMaxRecords is fine, but publishing from a path that is NOT under the cap (a fatal
+        // record writing its own sequence here, say) would make seq and seen coincide past
+        // the cap and start losing records. Do not add a writer here without re-deriving it.
+        g_lastRecordedFault = rec.faultAddress;
+        ::InterlockedExchange(&g_lastRecordedSeq, n);
+    }
+
+    // The fatal record + marker. Reached only after the stack-overflow test in the filter.
+    __declspec(noinline) void writeFatalRecord(EXCEPTION_POINTERS* ep)
+    {
+        const EXCEPTION_RECORD* er = ep->ExceptionRecord;
+        const LONG seen = g_avCount;
+
+        CrashReport::CrashRecord rec = {};
+        rec.sequence = static_cast<unsigned int>(seen);
+        rec.limit    = CrashReport::kMaxRecords;
+        rec.fatal    = true;
+        fillCommon(rec, ep);
+
+        char buf[CrashReport::kScratch];
+
+        // Scoped to access violations on purpose. The record block is headed
+        // "ACCESS VIOLATION" and its operation/bad-address fields are AV-specific, so
+        // rendering it for an illegal instruction would be a fabricated diagnosis. Those
+        // still get the marker line, which carries the code.
+        if (er->ExceptionCode == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION)
+            && CrashReport::fatalNeedsFullRecord(g_lastRecordedFault,
+                                                 static_cast<unsigned int>(g_lastRecordedSeq),
+                                                 static_cast<unsigned int>(seen),
+                                                 rec.faultAddress))
+        {
+            CrashReport::emitRecord(rec, writeChunk,
+                                    resolveFaultModule, captureFrames, resolveFrames,
+                                    nullptr, buf, sizeof buf);
+        }
+        else
+        {
+            // No full record is owed, so nothing has resolved this fault's module yet and the
+            // marker line carries it. Resolving here does precede this one write, but what a
+            // hang would cost is bounded to the marker: the block it refers to is already on
+            // disk above, written by the first-chance handler.
+            resolveFaultModule(nullptr, rec);
+        }
+
+        // Always. When the first-chance handler already wrote the block, this line is the
+        // only thing that marks it fatal — the block itself must not be duplicated.
+        const std::size_t len = CrashReport::formatFatalLine(rec, buf, sizeof buf);
+        appendLog(buf, len);
+    }
+
     // First-chance, installed at the FRONT of the vectored chain so it sees the fault
     // before any SEH frame can swallow it. Always returns EXCEPTION_CONTINUE_SEARCH:
     // nothing about the process's behaviour changes, WER still writes its dump, and a
     // legitimately handled AV still gets handled.
+    //
+    // Holds no CrashRecord and no scratch buffer of its own — see the block comment above.
+    // The access-violation filter is also what keeps a stack overflow out of the helper:
+    // faultMustSkipRecording(kExceptionAccessViolation) is false and every other code is
+    // rejected here, so the two tests can never disagree (probe_crashreport asserts it).
     LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* ep)
     {
         if (!ep || !ep->ExceptionRecord) return EXCEPTION_CONTINUE_SEARCH;
@@ -515,22 +664,7 @@ namespace
         if (n > static_cast<LONG>(CrashReport::kMaxRecords))
             return EXCEPTION_CONTINUE_SEARCH;   // a repeating fault must not fill the disk
 
-        CrashReport::CrashRecord rec = {};
-        rec.sequence = static_cast<unsigned int>(n);
-        rec.limit    = CrashReport::kMaxRecords;
-        fillCommon(rec, ep);
-
-        char buf[kScratch];
-        CrashReport::emitRecord(rec, writeChunk, captureFrames, resolveFrames,
-                                nullptr, buf, sizeof buf);
-
-        // Publish what was just written, so the unhandled filter can tell whether this same
-        // fault already has a full record. The address goes down first and the sequence
-        // second: the sequence is what the reader gates on, so it must not become visible
-        // while the address it refers to is still stale.
-        g_lastRecordedFault = rec.faultAddress;
-        ::InterlockedExchange(&g_lastRecordedSeq, n);
-
+        writeFirstChanceRecord(ep, n);
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -540,45 +674,25 @@ namespace
     // The full record here is not redundant with the first-chance one. The per-process cap
     // is spendable by benign handled access violations — GPU drivers and some libraries
     // raise them as control flow — and if five of those land first, the crash we built this
-    // for arrives at an exhausted cap. The one-line marker below keeps module, offset and
-    // code but loses the bad address and the registers, which is exactly the `Rax+4`
-    // evidence the feature exists to capture. This handler holds the same EXCEPTION_POINTERS,
-    // so it can simply write the record itself. The cap still bounds first-chance noise;
-    // only this path is exempt from it.
+    // for arrives at an exhausted cap. The one-line marker keeps module, offset and code but
+    // loses the bad address and the registers, which is exactly the `Rax+4` evidence the
+    // feature exists to capture. This handler holds the same EXCEPTION_POINTERS, so it can
+    // simply write the record itself. The cap still bounds first-chance noise; only this path
+    // is exempt from it.
+    //
+    // Holds no CrashRecord and no scratch buffer of its own — see the block comment above.
     LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep)
     {
+        // A stack overflow gets NOTHING from us and goes straight to the chain: there is not
+        // enough stack left to record it, and trying is what loses the WER dump. This is the
+        // first statement in the function on purpose.
+        if (ep && ep->ExceptionRecord
+            && CrashReport::faultMustSkipRecording(ep->ExceptionRecord->ExceptionCode))
+            return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
+
         if (ep && ep->ExceptionRecord && ::InterlockedExchange(&g_fatalWritten, 1) == 0)
-        {
-            const EXCEPTION_RECORD* er = ep->ExceptionRecord;
-            const LONG seen = g_avCount;
+            writeFatalRecord(ep);
 
-            CrashReport::CrashRecord rec = {};
-            rec.sequence = static_cast<unsigned int>(seen);
-            rec.limit    = CrashReport::kMaxRecords;
-            rec.fatal    = true;
-            fillCommon(rec, ep);
-
-            char buf[kScratch];
-
-            // Scoped to access violations on purpose. The record block is headed
-            // "ACCESS VIOLATION" and its operation/bad-address fields are AV-specific, so
-            // rendering it for a stack overflow or an illegal instruction would be a
-            // fabricated diagnosis. Those still get the marker line, which carries the code.
-            if (er->ExceptionCode == static_cast<DWORD>(EXCEPTION_ACCESS_VIOLATION)
-                && CrashReport::fatalNeedsFullRecord(g_lastRecordedFault,
-                                                     static_cast<unsigned int>(g_lastRecordedSeq),
-                                                     static_cast<unsigned int>(seen),
-                                                     rec.faultAddress))
-            {
-                CrashReport::emitRecord(rec, writeChunk, captureFrames, resolveFrames,
-                                        nullptr, buf, sizeof buf);
-            }
-
-            // Always. When the first-chance handler already wrote the block, this line is the
-            // only thing that marks it fatal — the block itself must not be duplicated.
-            const std::size_t len = CrashReport::formatFatalLine(rec, buf, sizeof buf);
-            appendLog(buf, len);
-        }
         return g_prevFilter ? g_prevFilter(ep) : EXCEPTION_CONTINUE_SEARCH;
     }
 }
@@ -588,10 +702,27 @@ void CrashReport::install(const char* logPathUtf8)
     if (g_installed) return;
     g_installed = true;
 
+    // Convert the path AND open the file here, while the process is healthy and allocation is
+    // still allowed. From this point the handler only ever WriteFile()s to the handle: see the
+    // header for why a per-append CreateFileW is not acceptable on a path that may run with
+    // the heap corrupted or the heap lock held.
+    //
+    // FILE_SHARE_DELETE alongside read/write so holding this open for the process lifetime
+    // does not stop anyone renaming or deleting the log while the app runs. The file is
+    // created empty at startup as a side effect; a zero-byte crash_report.log means the
+    // reporter was armed and the run was clean.
     if (logPathUtf8 && *logPathUtf8)
     {
-        const int n = ::MultiByteToWideChar(CP_UTF8, 0, logPathUtf8, -1, g_logPath, MAX_PATH);
-        if (n <= 0) g_logPath[0] = L'\0';
+        wchar_t path[MAX_PATH] = { 0 };
+        const int n = ::MultiByteToWideChar(CP_UTF8, 0, logPathUtf8, -1, path, MAX_PATH);
+        if (n > 0)
+            g_logHandle = ::CreateFileW(path,
+                                        FILE_APPEND_DATA,
+                                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                        nullptr,
+                                        OPEN_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL,
+                                        nullptr);
     }
 
     ::AddVectoredExceptionHandler(1 /* first in the chain */, vectoredHandler);

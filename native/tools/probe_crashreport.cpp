@@ -63,14 +63,27 @@ static void setNameN(char (&dst)[CrashReport::kFrameModuleCap], const char* src)
     dst[i] = '\0';
 }
 
+// The fault-site block as it reaches the log: formatRecord (everything that needs nothing
+// resolved) immediately followed by formatFaultModule (the module + offset and the closing
+// rule). They are two functions because a loader-lock hang between them must cost only the
+// second — see emitRecord — but a reader sees one block, and so do the assertions below that
+// are about the block's CONTENT rather than about the split.
+static std::size_t renderFaultBlock(const CrashReport::CrashRecord& r, char* out, std::size_t cap)
+{
+    const std::size_t a = CrashReport::formatRecord(r, out, cap);
+    const std::size_t b = CrashReport::formatFaultModule(r, out + a, cap - a);
+    return a + b;
+}
+
 // ---------------------------------------------------------------------------------------
 // Instrumentation for the emit-order assertions (case 12).
 //
-// emitRecord takes the capture and resolve steps as callbacks precisely so the ORDER it
-// guarantees can be observed. These stand-ins record the exact text that had already been
-// handed to the sink at the moment each step was entered, which is what makes "the raw
-// addresses were durable before resolution was attempted" an assertion rather than a claim
-// about a Windows-only handler CI never compiles.
+// emitRecord takes every enrichment step as a callback precisely so the ORDER it guarantees
+// can be observed. These stand-ins record the exact text that had already been handed to the
+// sink at the moment each step was entered, which is what makes "the registers were durable
+// before the module was resolved" and "the raw addresses were durable before per-frame
+// resolution was attempted" assertions rather than claims about a Windows-only handler CI
+// never compiles.
 // ---------------------------------------------------------------------------------------
 struct Trace
 {
@@ -79,12 +92,14 @@ struct Trace
     std::size_t maxChunk  = 0;
 
     // The accumulated log as it stood when each step was entered; -1 means never called.
+    char        atModule[8192];
     char        atCapture[8192];
     char        atResolve[8192];
+    int         moduleAt  = -1;      // bytes written when the fault-module step ran
     int         captureAt = -1;      // bytes written when capture ran
     int         resolveAt = -1;      // bytes written when resolve ran
 
-    Trace() { all[0] = '\0'; atCapture[0] = '\0'; atResolve[0] = '\0'; }
+    Trace() { all[0] = '\0'; atModule[0] = '\0'; atCapture[0] = '\0'; atResolve[0] = '\0'; }
 };
 
 static void traceWrite(void* ctx, const char* data, std::size_t len)
@@ -95,6 +110,16 @@ static void traceWrite(void* ctx, const char* data, std::size_t len)
     std::memcpy(t->all + t->len, data, len);
     t->len += len;
     t->all[t->len] = '\0';
+}
+
+static void traceResolveModule(void* ctx, CrashReport::CrashRecord& r)
+{
+    Trace* t = static_cast<Trace*>(ctx);
+    t->moduleAt = static_cast<int>(t->len);
+    std::memcpy(t->atModule, t->all, t->len + 1);
+
+    setName(r.moduleName, "Qt6Quick.dll");
+    r.moduleBase = 0x00007ffcecd40000ull;
 }
 
 static void traceCapture(void* ctx, CrashReport::CrashRecord& r)
@@ -160,7 +185,7 @@ int main()
     // ---- 1. the real production fault renders every field the diagnosis needs ---------------
     {
         const CrashReport::CrashRecord r = productionRecord();
-        const std::size_t n = CrashReport::formatRecord(r, buf, sizeof buf);
+        const std::size_t n = renderFaultBlock(r, buf, sizeof buf);
         CHECK(n > 0);
         CHECK(n == std::strlen(buf));
 
@@ -188,6 +213,29 @@ int main()
         // The record must never carry memory contents — see CrashReport.h. Nothing here should
         // resemble a dump of bytes; the fields above are the entire vocabulary.
         CHECK_LACKS(buf, "(MISMATCH)");
+
+        // The SPLIT, which is the write-first rule applied to the fault site itself. The first
+        // block is what reaches the disk before the one GetModuleHandleExW call that names the
+        // faulting module, so it must be structurally incapable of reading moduleName or
+        // moduleBase: a fault taken under a loader lock that never releases has to cost that
+        // one field, not the registers and the bad address as well.
+        char first[2048];
+        const std::size_t nf = CrashReport::formatRecord(r, first, sizeof first);
+        CHECK(nf > 0);
+        CHECK_HAS(first, "Rax+4=0x5 == bad addr  (MATCH)");   // the evidence survives a hang
+        CHECK_HAS(first, "bad addr  : 0x5");
+        CHECK_HAS(first, "at        : 0x7ffced04f7a5");        // ... and the raw address, which resolves offline
+        CHECK_LACKS(first, "Qt6Quick.dll");                    // ... but nothing that needed the loader lock
+        CHECK_LACKS(first, "+0x30f7a5");
+
+        // ... and the module block is the rest of it, ending the record.
+        char second[512];
+        const std::size_t ns = CrashReport::formatFaultModule(r, second, sizeof second);
+        CHECK(ns > 0);
+        CHECK(ns == std::strlen(second));
+        CHECK_HAS(second, "module    : Qt6Quick.dll+0x30f7a5");
+        CHECK_HAS(second, "======================================\n");
+        CHECK(nf + ns == n);
     }
 
     // ---- 2. a fault that is NOT this bug must render as a mismatch --------------------------
@@ -235,10 +283,26 @@ int main()
         CrashReport::CrashRecord r = productionRecord();
         r.moduleBase = 0;
         r.moduleName[0] = '\0';
-        CrashReport::formatRecord(r, buf, sizeof buf);
+        renderFaultBlock(r, buf, sizeof buf);
         CHECK_HAS(buf, "<unknown>");
         CHECK_LACKS(buf, "+0x");
         CHECK_HAS(buf, "0x7ffced04f7a5");            // the raw address is still there
+
+        // A name with no base, and a base with no name, are both "unresolved" — neither half
+        // alone may produce an offset. (GetModuleHandleExW leaves both untouched on failure,
+        // but a future edit that fills one of them from somewhere else must not slip through.)
+        r.moduleBase = 0x00007ffcecd40000ull;
+        r.moduleName[0] = '\0';
+        CrashReport::formatFaultModule(r, buf, sizeof buf);
+        CHECK_HAS(buf, "<unknown>");
+        CHECK_LACKS(buf, "+0x");
+
+        setName(r.moduleName, "Qt6Quick.dll");
+        r.moduleBase = 0;
+        CrashReport::formatFaultModule(r, buf, sizeof buf);
+        CHECK_HAS(buf, "<unknown>");
+        CHECK_LACKS(buf, "+0x");
+        CHECK_LACKS(buf, "Qt6Quick.dll");
     }
 
     // ---- 5. the rate-limit note appears on the LAST permitted record only -------------------
@@ -262,7 +326,7 @@ int main()
     {
         CrashReport::CrashRecord r = productionRecord();
         r.haveRegisters = false;
-        CrashReport::formatRecord(r, buf, sizeof buf);
+        renderFaultBlock(r, buf, sizeof buf);
         CHECK_LACKS(buf, "Rax=");
         CHECK_LACKS(buf, "QPointer check");
         CHECK_HAS(buf, "Qt6Quick.dll+0x30f7a5");     // the rest still renders
@@ -327,6 +391,33 @@ int main()
                 if (canary[i] != '\xAA') { pastEndIntact = false; break; }
             CHECK(pastEndIntact);                             // nothing written at or past out[cap]
             if (!pastEndIntact) break;                        // one report is enough; don't spam 1000 lines
+        }
+
+        // Same contract for the module block. It is written from the same scratch buffer, in
+        // the same handler, in the same corrupt process.
+        char fullMod[512];
+        const std::size_t modLen = CrashReport::formatFaultModule(r, fullMod, sizeof fullMod);
+        CHECK(modLen > 20);
+        for (std::size_t cap = 1; cap <= modLen + 2; ++cap)
+        {
+            char canary[600];
+            std::memset(canary, '\xAA', sizeof canary);
+            const std::size_t n = CrashReport::formatFaultModule(r, canary, cap);
+            CHECK(n < cap);
+            CHECK(canary[n] == '\0');
+            CHECK(n == (cap - 1 < modLen ? cap - 1 : modLen));
+            CHECK(std::memcmp(canary, fullMod, n) == 0);
+            bool intact = true;
+            for (std::size_t i = cap; i < sizeof canary; ++i)
+                if (canary[i] != '\xAA') { intact = false; break; }
+            CHECK(intact);
+            if (!intact) break;
+        }
+        {
+            char guard[8];
+            std::memset(guard, '\xAA', sizeof guard);
+            CHECK(CrashReport::formatFaultModule(r, guard, 0) == 0);
+            for (std::size_t i = 0; i < sizeof guard; ++i) CHECK(guard[i] == '\xAA');
         }
 
         // Same contract for the fatal line.
@@ -526,7 +617,22 @@ int main()
         CHECK_HAS(fullRes, "#31 ");
         // The handler's scratch buffer must actually hold the biggest of these. If this ever
         // fails, a real crash loses the tail of the chain and nothing says so.
-        CHECK(resLen < 2560);
+        //
+        // Asserted against CrashReport::kScratch, which IS the handler's buffer, not against a
+        // copy of the number: with 2560 written out here, shrinking the handler's buffer would
+        // leave this green while a real crash silently truncated the chain. The full sweep is
+        // over every block the handler emits, since they all share that one buffer.
+        CHECK(resLen < CrashReport::kScratch);
+        CHECK(rawLen < CrashReport::kScratch);
+        {
+            char big[CrashReport::kScratch * 2];
+            CrashReport::CrashRecord worst = r;
+            worst.fatal = false;
+            worst.sequence = worst.limit;              // the longest fault-site block: cap note included
+            CHECK(CrashReport::formatRecord(worst, big, sizeof big) < CrashReport::kScratch);
+            CHECK(CrashReport::formatFaultModule(worst, big, sizeof big) < CrashReport::kScratch);
+            CHECK(CrashReport::formatFatalLine(worst, big, sizeof big) < CrashReport::kScratch);
+        }
 
         for (std::size_t cap = 1; cap <= 64; ++cap)
         {
@@ -565,33 +671,53 @@ int main()
 
     // ---- 12. the emit ORDER — the write-first safeguard ------------------------------------
     // GetModuleHandleExW takes the loader lock. If the process faulted WHILE that lock was
-    // held — mid DLL load, in a static initialiser, in a TLS callback — per-frame resolution
-    // deadlocks and the handler never returns. So nothing may be undelivered when resolution
-    // starts: the fault site (registers, bad address) must be on disk before the stack is even
-    // walked, and the raw addresses must be on disk before resolution is attempted. Raw
-    // addresses resolve offline against a module list, which is how the production dump was
-    // read; a deadlock then costs the enriched rendering and nothing else.
+    // held — mid DLL load, in a static initialiser, in a TLS callback — resolution deadlocks
+    // and the handler never returns. So nothing may be undelivered when a resolution step
+    // starts: the fault site (registers, bad address, raw fault address) must be on disk
+    // before the FAULTING MODULE is even looked up, and the raw return addresses must be on
+    // disk before per-frame resolution is attempted. Raw addresses resolve offline against a
+    // module list, which is how the production dump was read; a deadlock then costs the
+    // enriched rendering and nothing else.
     //
     // That order is the contract, so it is asserted here rather than trusted to a comment on a
     // Windows-only handler that CI never compiles.
     {
         Trace t;
         CrashReport::CrashRecord r = productionRecord();
-        char scratch[2560];
-        CrashReport::emitRecord(r, traceWrite, traceCapture, traceResolve, &t,
-                                scratch, sizeof scratch);
+        // Nothing resolved yet — exactly the state the handler builds, since fillCommon no
+        // longer touches the module. traceResolveModule is what fills these in.
+        r.moduleName[0] = '\0';
+        r.moduleBase    = 0;
 
-        // Both steps ran, in order, and neither ran before anything was written.
+        char scratch[CrashReport::kScratch];
+        CrashReport::emitRecord(r, traceWrite, traceResolveModule, traceCapture, traceResolve,
+                                &t, scratch, sizeof scratch);
+
+        // All three steps ran, in order, and none ran before anything was written.
+        CHECK(t.moduleAt >= 0);
         CHECK(t.captureAt >= 0);
         CHECK(t.resolveAt >= 0);
+        CHECK(t.moduleAt < t.captureAt);
         CHECK(t.captureAt < t.resolveAt);
 
-        // The fault site was durable BEFORE the stack was walked. Not merely "some bytes" —
-        // the registers and bad address specifically, because those are what a hang would cost.
+        // The fault site was durable BEFORE the loader lock was touched at all — this is the
+        // step that used to run first, before a single byte had been written, so that a fault
+        // under an unreleasable loader lock recorded NOTHING. Not merely "some bytes": the
+        // registers, the bad address and the raw fault address specifically, because those are
+        // what the hang would have cost.
+        CHECK(t.moduleAt > 0);
+        CHECK_HAS(t.atModule, "bad addr  : 0x5");
+        CHECK_HAS(t.atModule, "Rax+4=0x5 == bad addr  (MATCH)");
+        CHECK_HAS(t.atModule, "at        : 0x7ffced04f7a5");
+        // ... and none of it depended on the module, which had not been resolved yet.
+        CHECK_LACKS(t.atModule, "Qt6Quick.dll");
+        CHECK_LACKS(t.atModule, "module    :");
+
+        // The fault site was durable BEFORE the stack was walked, module included by then.
         CHECK(t.captureAt > 0);
         CHECK_HAS(t.atCapture, "bad addr  : 0x5");
         CHECK_HAS(t.atCapture, "Rax+4=0x5 == bad addr  (MATCH)");
-        CHECK_HAS(t.atCapture, "Qt6Quick.dll+0x30f7a5");
+        CHECK_HAS(t.atCapture, "module    : Qt6Quick.dll+0x30f7a5");
 
         // Every captured return address was durable BEFORE resolution was attempted, and none
         // of what was written by then depended on a resolved field.
@@ -607,6 +733,8 @@ int main()
         CHECK_HAS(t.all, "#00 0xaa00  probe.dll+0xa00");
         // Ordering in the final text, not just in the callbacks.
         CHECK(std::strstr(t.all, "bad addr  : 0x5")
+              < std::strstr(t.all, "module    : Qt6Quick.dll+0x30f7a5"));
+        CHECK(std::strstr(t.all, "module    : Qt6Quick.dll+0x30f7a5")
               < std::strstr(t.all, "call chain (raw return addresses"));
         CHECK(std::strstr(t.all, "call chain (raw return addresses")
               < std::strstr(t.all, "call chain (resolved)"));
@@ -622,23 +750,72 @@ int main()
         // to nothing.
         Trace t;
         CrashReport::CrashRecord r = productionRecord();
-        char scratch[2560];
-        CrashReport::emitRecord(r, traceWrite, nullptr, nullptr, &t, scratch, sizeof scratch);
+        char scratch[CrashReport::kScratch];
+        CrashReport::emitRecord(r, traceWrite, nullptr, nullptr, nullptr, &t, scratch, sizeof scratch);
+        CHECK(t.moduleAt == -1);
         CHECK(t.captureAt == -1);
         CHECK(t.resolveAt == -1);
         CHECK_HAS(t.all, "bad addr  : 0x5");
         CHECK_HAS(t.all, "Rax=0x1");
         CHECK_LACKS(t.all, "call chain");
+        // The block still closes even with every step skipped — the record does not end
+        // mid-way just because nothing could be enriched.
+        CHECK_HAS(t.all, "======================================\n");
 
         // A null sink, a null buffer and a zero buffer are all no-ops rather than faults. This
         // runs in a process that is already broken; there is no configuration in which it may
         // add a second crash on top of the one it is recording.
-        CrashReport::emitRecord(r, nullptr, traceCapture, traceResolve, &t, scratch, sizeof scratch);
-        CrashReport::emitRecord(r, traceWrite, traceCapture, traceResolve, &t, nullptr, 16);
-        CrashReport::emitRecord(r, traceWrite, traceCapture, traceResolve, &t, scratch, 0);
+        CrashReport::emitRecord(r, nullptr, traceResolveModule, traceCapture, traceResolve, &t, scratch, sizeof scratch);
+        CrashReport::emitRecord(r, traceWrite, traceResolveModule, traceCapture, traceResolve, &t, nullptr, 16);
+        CrashReport::emitRecord(r, traceWrite, traceResolveModule, traceCapture, traceResolve, &t, scratch, 0);
     }
 
-    // ---- 13. install() is a no-op that cannot throw or crash on a bad path -------------------
+    // ---- 13. a stack overflow must reach the previous filter, not our record path ------------
+    // SetUnhandledExceptionFilter runs for EVERY unhandled exception, and a stack overflow is
+    // the one the handler cannot afford. When the guard page goes there is roughly one page of
+    // stack left and exception dispatch has already spent part of it; a CrashRecord is ~1.7 KB
+    // and the scratch buffer 2.5 KB more, and a prologue commits that frame — via __chkstk,
+    // which PROBES it page by page — before any branch is taken. A filter that touched it
+    // would fault inside itself, the OS would kill the process on the spot, g_prevFilter (WER)
+    // would never be called, and a stack overflow that used to produce a WER dump would
+    // produce nothing at all. Adding a crash reporter must not delete the crash report that
+    // already worked.
+    //
+    // The DECISION is pure and lives here. The other half of the fix — every large local moved
+    // into a __declspec(noinline) helper, so the filter's own prologue commits nothing — is
+    // codegen, which no portable probe can observe; run-headless-probes.sh gates its SHAPE
+    // instead ("crashreport handler discipline"), because CI never compiles that half.
+    {
+        // The one code that skips everything.
+        CHECK(CrashReport::faultMustSkipRecording(CrashReport::kExceptionStackOverflow) == true);
+        CHECK(CrashReport::faultMustSkipRecording(0xC00000FDul) == true);   // the literal, spelled out
+
+        // And nothing else does. An over-eager predicate is the silent failure here: it would
+        // disarm the reporter for whole classes of crash and no test of the FORMATTER would
+        // notice, because the formatter is never reached.
+        CHECK(CrashReport::faultMustSkipRecording(CrashReport::kExceptionAccessViolation) == false);
+        CHECK(CrashReport::faultMustSkipRecording(0xC0000005ul) == false);  // access violation
+        CHECK(CrashReport::faultMustSkipRecording(0xC000001Dul) == false);  // illegal instruction
+        CHECK(CrashReport::faultMustSkipRecording(0xC0000094ul) == false);  // integer divide by zero
+        CHECK(CrashReport::faultMustSkipRecording(0xC0000374ul) == false);  // heap corruption
+        CHECK(CrashReport::faultMustSkipRecording(0xE06D7363ul) == false);  // an uncaught C++ throw
+        CHECK(CrashReport::faultMustSkipRecording(0x80000003ul) == false);  // breakpoint
+        CHECK(CrashReport::faultMustSkipRecording(0ul) == false);
+
+        // The vectored handler filters on the access-violation code alone rather than calling
+        // this, so the two must never be able to disagree: if AV were ever skippable, the
+        // first-chance path would still walk into the big frame.
+        CHECK(CrashReport::faultMustSkipRecording(CrashReport::kExceptionAccessViolation) == false);
+
+        // The portable spellings must be the real NTSTATUS values. CrashReport.cpp
+        // static_asserts them against EXCEPTION_ACCESS_VIOLATION / EXCEPTION_STACK_OVERFLOW
+        // inside its _WIN32 half; this is the same pin on the platforms where those macros do
+        // not exist, so a typo cannot pass CI and then skip the wrong exception on Windows.
+        CHECK(CrashReport::kExceptionAccessViolation == 0xC0000005ul);
+        CHECK(CrashReport::kExceptionStackOverflow   == 0xC00000FDul);
+    }
+
+    // ---- 14. install() is a no-op that cannot throw or crash on a bad path -------------------
     // Called once, early in main(), from a process that has nothing else set up yet.
     CrashReport::install(nullptr);
     CrashReport::install("");

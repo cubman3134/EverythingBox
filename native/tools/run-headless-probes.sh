@@ -186,6 +186,95 @@ else
 fi
 echo
 
+# Crash-reporter handler-discipline gate (issue #28). Everything below the formatter in CrashReport.cpp sits
+# inside `#ifdef _WIN32`, so CI COMPILES NONE OF IT — which is precisely how two rules the handler's whole value
+# depends on came to be violated without a single assertion going red. Neither is expressible as a unit test
+# (one is codegen, the other is what a Win32 call does internally), so the SOURCE SHAPE is gated here instead.
+# Both failures are silent by construction: nobody reads crash_report.log until after the crash.
+#
+#   * appendLog must be WriteFile + FlushFileBuffers and nothing else. CreateFileW converts its DOS path to an
+#     NT path through RtlDosPathNameToNtPathName_U, which ALLOCATES from the process default heap and takes the
+#     heap lock. A per-append CreateFileW therefore puts an allocation on the handler's path — in a process
+#     whose heap may be exactly what is broken (a near neighbour of #28's garbage-vector-entry shape), or whose
+#     faulting thread is inside malloc/free holding that very lock. The handle is opened ONCE, in install().
+#     The file I/O itself is the accepted trade; the per-append path conversion is not.
+#
+#   * Neither handler may declare a CrashRecord (~1.7 KB) or the scratch buffer (2.5 KB) in its OWN frame. A
+#     prologue commits that frame through __chkstk, which probes it page by page, BEFORE any branch is taken —
+#     and both handlers run for EXCEPTION_STACK_OVERFLOW, where roughly one page of stack is left and exception
+#     dispatch has already spent part of it. A handler that paid that prologue would fault inside itself on
+#     every stack-overflow crash: the process dies in the handler, g_prevFilter (WER) is never reached, and a
+#     stack overflow that used to produce a WER dump produces nothing. So those locals live in
+#     __declspec(noinline) helpers, and unhandledFilter tests faultMustSkipRecording() before anything else.
+#     All three parts are load-bearing: the test alone still pays the prologue, and dropping `noinline` lets the
+#     optimiser fold the frame straight back into the caller.
+#
+# The DECISION in that last test is pure and asserted properly, by probe_crashreport. This gate covers only what
+# a probe cannot see.
+echo "=== crashreport handler discipline ==="
+CRCPP="$HERE/../src/core/CrashReport.cpp"
+cr_fail=0
+cr_note() { echo "  $1"; cr_fail=1; }
+if [ ! -f "$CRCPP" ]; then
+  echo "FAIL: crashreport handler discipline (CrashReport.cpp not found at $CRCPP)"; fail=1
+else
+  # Line-comments stripped first, so prose that merely NAMES CreateFileW or CrashRecord never trips the gate —
+  # the comments in that file discuss both at length, which is the point of them.
+  cr_src="$(sed -E 's://.*$::' "$CRCPP")"
+  # One function body, from its definition line to the `    }` that closes it (everything here lives in an
+  # anonymous namespace, so that indent is the function-level closing brace).
+  cr_body() { printf '%s\n' "$cr_src" | awk -v sig="$1" '
+    !on && index($0, sig) { on = 1 }
+    on                    { print }
+    on && /^    \}/       { exit }
+  '; }
+
+  cr_ap="$(cr_body 'void appendLog(const char* data, std::size_t len)')"
+  if [ -z "$cr_ap" ]; then
+    cr_note "appendLog not found — signature changed? This gate is now asserting nothing about it."
+  else
+    printf '%s' "$cr_ap" | grep -q 'CreateFile' \
+      && cr_note "appendLog calls CreateFile*: the DOS->NT path conversion allocates from the default heap and takes the heap lock, on the handler's path. Open the handle once in install()."
+    printf '%s' "$cr_ap" | grep -q 'WriteFile' \
+      || cr_note "appendLog does not call WriteFile — nothing reaches the log."
+    printf '%s' "$cr_ap" | grep -q 'FlushFileBuffers' \
+      || cr_note "appendLog does not FlushFileBuffers: emitRecord's whole ordering discipline needs 'already written' to mean 'survives a hang in the next step'."
+  fi
+
+  for cr_h in 'LONG CALLBACK vectoredHandler(EXCEPTION_POINTERS* ep)' \
+              'LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep)'; do
+    cr_b="$(cr_body "$cr_h")"
+    if [ -z "$cr_b" ]; then
+      cr_note "handler not found: $cr_h — signature changed? This gate is now asserting nothing about it."
+      continue
+    fi
+    printf '%s' "$cr_b" | grep -q 'CrashRecord' \
+      && cr_note "$cr_h declares a CrashRecord (~1.7 KB) in its own frame: the prologue commits it on EVERY exception, including the stack overflow that then faults inside the handler and loses the WER dump. Move it to a __declspec(noinline) helper."
+    printf '%s' "$cr_b" | grep -q 'kScratch' \
+      && cr_note "$cr_h declares the scratch buffer (2.5 KB) in its own frame: same prologue, same lost WER dump. Move it to a __declspec(noinline) helper."
+  done
+
+  cr_uf="$(cr_body 'LONG WINAPI unhandledFilter(EXCEPTION_POINTERS* ep)')"
+  printf '%s' "$cr_uf" | grep -q 'faultMustSkipRecording' \
+    || cr_note "unhandledFilter does not test faultMustSkipRecording: a stack overflow would walk into the record path instead of straight to the previous filter."
+  printf '%s' "$cr_uf" | grep -q 'g_prevFilter' \
+    || cr_note "unhandledFilter does not chain to g_prevFilter — WER stops getting the dump."
+
+  for cr_fn in writeFirstChanceRecord writeFatalRecord; do
+    printf '%s\n' "$cr_src" | grep -q "__declspec(noinline) void $cr_fn(" \
+      || cr_note "$cr_fn is not __declspec(noinline): inlined back into its handler, its frame returns to the handler's prologue and the split buys nothing."
+  done
+
+  cr_creates="$(printf '%s\n' "$cr_src" | grep -c 'CreateFileW' || true)"
+  [ "$cr_creates" = "1" ] \
+    || cr_note "expected exactly one CreateFileW in CrashReport.cpp (install()'s); found $cr_creates."
+
+  if [ "$cr_fail" -eq 0 ]; then echo "PASS: crashreport handler discipline"; else
+    echo "FAIL: crashreport handler discipline (the Windows half violates a rule CI cannot compile)"; fail=1
+  fi
+fi
+echo
+
 # Old-brand gate (rebrand T4): the product was renamed, and "no mentions of the previous name remain" has to be
 # a property the suite ENFORCES rather than a claim someone made once — otherwise the next person to type
 # "MyMediaVault" into a comment reintroduces it and nothing notices. Everything that still names the old brand
