@@ -387,6 +387,11 @@ private:
     void styleTypeButtons(const QString& activeKey); // colour the top tabs + tint the catalogue background
     void applyThemeFont();           // set the app font family/scale from the active theme
     void layoutMetaSections(const QString& itemType); // declarative detail-page arrangement from the theme
+    // The ONE seam every internal focus assignment goes through. The classic HomeView stays LIVE while a
+    // themed (QML) page is on screen — it is the data engine behind it — so its own focus calls must never
+    // reach across and take the keyboard off the visible page. See the definition for why "hidden" is the
+    // right gate and what a leaked focus does to a themed page.
+    void takeFocus(QWidget* w);
     void focusTypeButton(int idx);   // keyboard: move to + activate a top tab (left/right)
     void focusGridTop();             // keyboard: drop focus into the grid (down)
     void focusChromeRow(QWidget* preferred = nullptr); // keyboard/controller: jump up to the top chrome

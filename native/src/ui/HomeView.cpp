@@ -1061,7 +1061,7 @@ void HomeView::refresh()
     }
 
     // Put keyboard focus on the active tab so arrow-key navigation works immediately.
-    if (activeTypeButton_) activeTypeButton_->setFocus(Qt::OtherFocusReason);
+    if (activeTypeButton_) takeFocus(activeTypeButton_);
 }
 
 void HomeView::showCarousel()
@@ -1078,7 +1078,7 @@ void HomeView::showCarousel()
     hideMeta();
     carousel_->show();
     carousel_->raise();
-    carousel_->setFocus(Qt::OtherFocusReason);
+    takeFocus(carousel_);
     updateChrome();
 }
 
@@ -1110,7 +1110,7 @@ void HomeView::showXmb()
     carousel_->hide();
     xmb_->show();
     xmb_->raise();
-    xmb_->setFocus(Qt::OtherFocusReason);
+    takeFocus(xmb_);
     updateChrome();
     if (!activeKey.isEmpty()) activateNav(activeKey); // load the active category's column
 }
@@ -1160,7 +1160,7 @@ void HomeView::fillXmbFromItems(int from)
     grid_->hide();
     xmb_->show();
     xmb_->raise();
-    xmb_->setFocus(Qt::OtherFocusReason);
+    takeFocus(xmb_);
 }
 
 void HomeView::applyTheme()
@@ -1168,19 +1168,38 @@ void HomeView::applyTheme()
     refresh(); // re-reads the theme: font, type-icon registry, colours, background - and re-styles the view
 }
 
+// Give `w` the keyboard — but ONLY while this view is the page on screen.
+//
+// In themed mode the classic HomeView is never shown, yet it stays fully alive: it is the data engine the
+// themed home/browse run on (activateNav / browseActivate / systemItems all land here), so its own focus
+// calls keep firing from refresh() and from the async populate/fill paths while a QQuickWidget owns the
+// screen. Those calls used to reach across and take the keyboard off the visible themed page: Qt only skips
+// the app-wide focus assignment when the whole WINDOW is inactive — a hidden widget inside an active window
+// becomes QApplication::focusWidget() perfectly happily. The themed QQuickWidget then gets a focus-out, its
+// QML scene loses its active-focus item, and every key routed to it afterwards is silently dropped: arrows,
+// Enter and Back all stop working with nothing on screen to explain why (issue: themed home inert to keys).
+// Hidden ⇒ no focus. isHidden() (not isVisible()) is the gate on purpose: a stacked page that is NOT current
+// is explicitly hidden, while the current page reads as not-hidden even before the window is first shown —
+// so the classic home still takes focus on a classic-mode startup, exactly as it always did.
+void HomeView::takeFocus(QWidget* w)
+{
+    if (!w || isHidden()) return;
+    w->setFocus(Qt::OtherFocusReason);
+}
+
 void HomeView::focusContent()
 {
     searchEditing_ = false; // leaving the chrome row -> the search box is no longer in edit mode
     if (xmbMode_ && xmb_ && xmb_->isVisible())
-        xmb_->setFocus(Qt::OtherFocusReason);
+        takeFocus(xmb_);
     else if (carouselMode_ && carousel_ && carousel_->isVisible())
-        carousel_->setFocus(Qt::OtherFocusReason);
+        takeFocus(carousel_);
     else if (grid_->isVisible() && grid_->count() > 0)
-        grid_->setFocus(Qt::OtherFocusReason);
+        takeFocus(grid_);
     else if (meta_ && meta_->isVisible() && detailActionButton())
-        detailActionButton()->setFocus(Qt::OtherFocusReason); // a leaf detail page -> its action button
+        takeFocus(detailActionButton()); // a leaf detail page -> its action button
     else if (activeTypeButton_)
-        activeTypeButton_->setFocus(Qt::OtherFocusReason);
+        takeFocus(activeTypeButton_);
 }
 
 void HomeView::styleTypeButtons(const QString& activeKey)
@@ -1321,13 +1340,13 @@ void HomeView::focusTypeButton(int idx)
     if (typeButtons_.isEmpty()) return;
     idx = qBound(0, idx, typeButtons_.size() - 1);
     QPushButton* b = typeButtons_[idx];
-    b->setFocus(Qt::OtherFocusReason);
+    takeFocus(b);
     b->click(); // activate -> load that catalog (also recolours the tab + background)
 }
 
 void HomeView::focusGridTop()
 {
-    grid_->setFocus(Qt::OtherFocusReason);
+    takeFocus(grid_);
     if (grid_->count() == 0) return;
     int r = 0;
     while (r < items_.size() && items_[r].type == QStringLiteral("rechdr")) ++r; // skip recent headers
@@ -1354,7 +1373,7 @@ void HomeView::focusChromeRow(QWidget* preferred)
     const QVector<QWidget*> row = chromeRow();
     if (row.isEmpty()) return;
     QWidget* target = (preferred && row.contains(preferred)) ? preferred : row.first();
-    target->setFocus(Qt::OtherFocusReason);
+    takeFocus(target);
 }
 
 // Move Left/Right within the chrome row, clamped at the ends.
@@ -1366,7 +1385,7 @@ void HomeView::focusChrome(QWidget* from, int dir)
     if (i < 0) { focusChromeRow(); return; }
     const int j = i + (dir > 0 ? 1 : -1);
     if (j < 0 || j >= row.size()) return; // stop at the ends
-    row[j]->setFocus(Qt::OtherFocusReason);
+    takeFocus(row[j]);
 }
 
 // Up from the top of a content column: on a container detail page (meta header + child column) land on the
@@ -1374,7 +1393,7 @@ void HomeView::focusChrome(QWidget* from, int dir)
 void HomeView::focusUpFromColumn()
 {
     if (meta_ && meta_->isVisible() && detailActionButton())
-        detailActionButton()->setFocus(Qt::OtherFocusReason);
+        takeFocus(detailActionButton());
     else
         focusChromeRow();
 }
@@ -2609,7 +2628,7 @@ void HomeView::renderRecents()
 
     // Keep keyboard focus on the content. Without this, activating Home from the carousel hides the
     // (focused) carousel and Qt hands focus to the next widget in the chain - the search box.
-    if (grid_->isVisible()) grid_->setFocus(Qt::OtherFocusReason);
+    if (grid_->isVisible()) takeFocus(grid_);
 }
 
 void HomeView::applyGridMode(bool recentList)
@@ -2720,7 +2739,7 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             if (k == Qt::Key_Left || k == Qt::Key_Right) // move between Play and Favorite when both are shown
             {
                 QWidget* other = (obj == playBtn_) ? static_cast<QWidget*>(favBtn_) : static_cast<QWidget*>(playBtn_);
-                if (other && other->isVisible()) other->setFocus(Qt::OtherFocusReason);
+                if (other && other->isVisible()) takeFocus(other);
                 return true;
             }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
@@ -2768,9 +2787,9 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                     grid_->visualItemRect(cur).top() <= grid_->visualItemRect(firstItem).top())
                 {
                     if (meta_ && meta_->isVisible() && detailActionButton())
-                        detailActionButton()->setFocus(Qt::OtherFocusReason); // container detail -> action button
+                        takeFocus(detailActionButton()); // container detail -> action button
                     else if (carouselMode_)     showCarousel();        // back up to the carousel
-                    else if (activeTypeButton_) activeTypeButton_->setFocus(Qt::OtherFocusReason); // to the tabs
+                    else if (activeTypeButton_) takeFocus(activeTypeButton_); // to the tabs
                     else                        focusChromeRow();     // no tabs -> up to the chrome
                     return true;
                 }
@@ -3541,7 +3560,7 @@ void HomeView::loadTop()
         updateStatus();
         // The grid/carousel that held focus is now hidden; park focus on the Favorite button so the
         // detail page still has a keyboard target (and Backspace routes to Back via its event filter).
-        if (meta_->isVisible()) { if (QWidget* a = detailActionButton()) a->setFocus(Qt::OtherFocusReason); }
+        if (meta_->isVisible()) { if (QWidget* a = detailActionButton()) takeFocus(a); }
         return;
     }
 
@@ -5121,7 +5140,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // Live search: give focus back to the search box if rebuilding the view took it (keep the cursor there).
     if (keepSearchFocus && search_ && !search_->hasFocus())
     {
-        search_->setFocus(Qt::OtherFocusReason);
+        takeFocus(search_);
         search_->deselect();   // keep the caret at the end rather than selecting all the typed text
         searchEditing_ = true; // stay in type mode (FocusOut had flipped it off)
     }
@@ -5213,7 +5232,7 @@ void HomeView::fillCarouselFromItems(int from)
     carousel_->setWrap(!hasMore_);
     carousel_->show();
     carousel_->raise();
-    if (!(search_ && search_->hasFocus())) carousel_->setFocus(Qt::OtherFocusReason); // keep typing during live search
+    if (!(search_ && search_->hasFocus())) takeFocus(carousel_); // keep typing during live search
 }
 
 void HomeView::updateStatus()

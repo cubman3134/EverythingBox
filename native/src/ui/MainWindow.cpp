@@ -1148,7 +1148,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             if (origin && (origin == themedHome_ || origin == themedBrowse_))
             {
                 stack_->setCurrentWidget(origin);
-                origin->setFocus();
+                focusThemedPage(origin);
                 return;
             }
             // Null/foreign origin in THEMED mode (e.g. a reader opened off the Library page or before any
@@ -1501,6 +1501,22 @@ NavGraph* MainWindow::currentThemedGraph() const
     return nullptr;
 }
 
+// Hand the keyboard to a themed (QML) page — BOTH halves of it. A QQuickWidget needs the widget focus AND
+// an active-focus item inside its scene: without the second half the scene's Keys handlers never run, so
+// every key the page is handed (arrows, Enter, Back — see sendNavKey's themed branch) is silently dropped
+// and the page looks frozen with nothing on screen to explain it. Widget focus alone does not reliably
+// revive the scene, which is why MainWindow::changeEvent and NavOverlay::dismiss have always done both;
+// the page-BUILD sites only ever did the first half, so a themed page that was built (or re-shown) while
+// something else held the keyboard could come up permanently deaf. One helper, used by every such site.
+void MainWindow::focusThemedPage(QWidget* w)
+{
+    if (!w) return;
+    w->setFocus();
+#ifdef EB_HAVE_QML
+    if (QQuickItem* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
+#endif
+}
+
 // ---- Controller navigation of the menus (EmulationStation-style) ---------------------------------------
 
 // libretro RETRO_DEVICE_ID_JOYPAD_* ids used for menu navigation (B/south = confirm, A/east = back — the
@@ -1554,7 +1570,22 @@ void MainWindow::sendNavKey(int key)
     QWidget* cur = stack_->currentWidget();
     // 4. The themed home/browse is a QQuickWidget — hand it the key directly; its QML Keys handler does the
     //    arrow nav AND its own multi-level Back (drill up, then the pause menu), matching goBack's rule.
-    if (cur && (cur == themedHome_ || cur == themedBrowse_)) { deliver(cur, key); return; }
+    if (cur && (cur == themedHome_ || cur == themedBrowse_))
+    {
+#ifdef EB_HAVE_QML
+        // Last line of defence for the one failure mode a user cannot escape: a themed page whose scene holds
+        // NO active-focus item swallows every key it is handed, including Back — so there is no way off the
+        // screen and no way to tell why. If that has happened (whatever took the keyboard), revive the scene
+        // before delivering, so the very first key works instead of vanishing. Gated on "nothing in the scene
+        // has focus" rather than "the root doesn't", so a legitimate focused child (a themed text field mid-
+        // edit) is never yanked out from under the user.
+        if (QQuickItem* r = ThemeEngine::rootItem(cur))
+            if (QQuickWindow* scene = r->window(); scene && !scene->activeFocusItem())
+                focusThemedPage(cur);
+#endif
+        deliver(cur, key);
+        return;
+    }
 #ifdef EB_HAVE_QML
     // 4.2. The themed settings-panel host is a QQuickWidget too — hand it the key; SettingsPanel.qml's Keys
     //      handler drives its NavGraph (arrows / Enter) AND its own Back (nav.back() pops one panel level).
@@ -1834,6 +1865,10 @@ void MainWindow::addThemedSelection(QJsonObject& o, QWidget* page)
     o.insert(QStringLiteral("themedSelection"), sel);
     const QString cat = r->property("uitestCategory").toString();
     if (!cat.isEmpty()) o.insert(QStringLiteral("themedCategory"), cat);
+    // Does the QML scene actually HOLD the keyboard? A themed page whose root has no activeFocus drops every
+    // key it is handed (the Keys handler never runs), which is indistinguishable from "the key did nothing"
+    // in the rest of this snapshot — so report it, and let a test assert on it.
+    o.insert(QStringLiteral("themedSceneFocus"), r->hasActiveFocus());
     // Which nav zone holds the cursor. Emitted ONLY on a sidebar theme, where "is focus in the sidebar or the
     // grid?" is a real question a test has to be able to ask; on every other theme the snapshot stays byte-for-
     // byte what it was, so an existing theme's before/after comparison is a clean diff.
@@ -2476,14 +2511,11 @@ void MainWindow::changeEvent(QEvent* event)
             QWidget* w = stack_ ? stack_->currentWidget() : nullptr;
             if (w && (w == themedHome_ || w == themedBrowse_))
             {
-                w->setFocus(Qt::ActiveWindowFocusReason);
+                focusThemedPage(w); // widget focus + the scene's active-focus item (both halves)
                 // Restoring from a minimise (show() after showMinimized) can leave the themed QQuickWidget's
                 // backing image stale until something invalidates it — the software backend won't repaint a
                 // scene it thinks is clean. Schedule an explicit repaint so the home never comes back blank.
                 w->update();
-#ifdef EB_HAVE_QML
-                if (auto* r = ThemeEngine::rootItem(w)) r->forceActiveFocus();
-#endif
             }
             // Alt-Tabbing away drops the focus widget; on the way back, put the selection right back where it
             // was (or the nearest valid row) so the selector is NEVER lost to a window switch. Runs on every
@@ -4383,7 +4415,7 @@ void MainWindow::showThemedHome()
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
-    w->setFocus();
+    focusThemedPage(w);
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
     nudgeThemedHome(); // repaint the rebuilt themed home
 
@@ -4824,7 +4856,7 @@ void MainWindow::showThemedAudioPage()
     pushThemedAudioQueue();
     themedAudioPushSec_ = -1;
     updateThemedAudioProgress();
-    cur->setFocus();
+    focusThemedPage(cur);
     if (r->property("currentView").toString() == QStringLiteral("nowplayingAudio")) return; // already open (re-fired)
     r->setProperty("audioTransportIndex", 0);
     r->setProperty("audioQueueIndex", 0);
@@ -5229,7 +5261,7 @@ void MainWindow::showThemedXmb()
     updateThemedNowPlaying(); // seed the Triple theme's now-playing readout
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
-    w->setFocus();
+    focusThemedPage(w);
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
     nudgeThemedHome(); // repaint the rebuilt themed home
 
@@ -5323,7 +5355,7 @@ void MainWindow::showThemedBrowse()
     themedBrowse_ = w;
     stack_->addWidget(w);
     stack_->setCurrentWidget(w);
-    w->setFocus();
+    focusThemedPage(w);
     if (old) { stack_->removeWidget(old); old->deleteLater(); }
     syncThemedLevels(); // seed this view's browse-drill levels from HomeView's current stack depth
     // Seed the hover panel for the row this view opens on. Selection CHANGES arrive through onSelect, and a

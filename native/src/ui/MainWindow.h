@@ -347,6 +347,9 @@ private:
     class NavRing* panelRing_ = nullptr;   // covers panelPage_ (header Back button + the built rows)
     class NavRing* libraryRing_ = nullptr; // covers the Library view (lists + buttons + search)
     void updateNavForPage();
+    // Focus a themed (QML) page: widget focus AND the scene root's active focus (see the definition —
+    // half of it leaves the page deaf to every key). Every site that shows a themed page goes through this.
+    void focusThemedPage(QWidget* w);
     void presentBook(); // show book_ themed (wrapped in readerHost_) or classic (direct), per themedHomeEnabled
     void presentPdf();   // show pdf_ themed (wrapped in pdfHost_) or classic, per themedHomeEnabled (Task 4)
     void presentComic(); // show comic_ themed (wrapped in comicHost_) or classic, per themedHomeEnabled (Task 4)
