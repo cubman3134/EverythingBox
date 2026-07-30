@@ -106,6 +106,12 @@ poor place to have one. Ask in `#support`, and say which platform you are on and
 which area you are in (video, audio, emulation, add-ons, themes, readers); a
 vague question gets a vague answer. `#announcements` carries every release.
 
+There is also a subreddit: **[r/EverythingBox](https://www.reddit.com/r/EverythingBox/)**.
+Same conversations, slower and searchable — the better place for a question whose
+answer the next person should be able to find, and for showing off a setup, a
+theme, or an addon. Flair support posts `🆘 Support` and flip them to `✅ Solved`
+when they are.
+
 Reproducible bugs and feature proposals still belong in the
 [issue tracker](https://github.com/cubman3134/EverythingBox/issues) — those need
 to stay searchable and stay open until they are fixed, which chat is bad at.
