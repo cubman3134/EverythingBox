@@ -12,6 +12,11 @@ Item {
     property color fg: T.val(el, "color", "#FFFFFF")
     property color chip: Qt.rgba(fg.r, fg.g, fg.b, 0.16) // a tint of the text colour, so it reads on any bg
     property real fs: Number(T.val(el, "fontSize", 0.024)) * (host ? host.height : 720)
+    // Optional `outline`, as on the Text element: a contrasting halo for a bar drawn over a background whose
+    // brightness cannot be derived (an image). Absent on every hand-written theme -> Text.Normal, no change.
+    readonly property string outlineColor: T.val(el, "outline", "")
+    readonly property int textStyle: outlineColor !== "" ? Text.Outline : Text.Normal
+    readonly property color textStyleColor: outlineColor !== "" ? outlineColor : "transparent"
 
     Row {
         id: hintRow
@@ -36,12 +41,14 @@ Item {
                         id: btn; anchors.centerIn: parent
                         text: modelData.button ? modelData.button : ""
                         color: fg; font.pixelSize: fs * 0.85; font.bold: true
+                        style: textStyle; styleColor: textStyleColor
                     }
                 }
                 Text {
                     anchors.verticalCenter: parent.verticalCenter
                     text: modelData.label ? modelData.label : ""
                     color: fg; opacity: 0.85; font.pixelSize: fs
+                    style: textStyle; styleColor: textStyleColor
                 }
             }
         }

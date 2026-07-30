@@ -85,6 +85,165 @@ function mediaList(ctx, key) {
     return []
 }
 
+// --- Tile artwork (grids, carousels, channel cells, the XMB column) ------------------------------------
+// Every element that draws a row as a TILE goes through the two functions below. They exist because each
+// element used to answer both questions for itself and they did not agree — which is how issue #29's
+// hardening half got in: a card that decided "draw the title instead" from *whether the row carries an
+// image url* hid the title for exactly the rows whose url was dead, leaving a tile with nothing readable
+// on it at all. One rule, one place, and no element gets to invent a second spelling of it.
+
+// The roles a tile falls through when a row carries no scalar `image`. Poster-shaped first: a grid /
+// carousel / channel cell is a portrait-ish card, so a poster or box beats a wide hero or a banner.
+var kTileRoles = ["poster", "box", "thumb", "hero", "banner", "logo"]
+
+// A catalog row's tile artwork url, or "" when the row carries none. Rows reach the themed model from
+// several builders; one that publishes only the open-ended `images` role map (no scalar alias) used to
+// paint a bare tile in every grid while the artwork sat right there on the row.
+function tileImage(item) {
+    if (!item) return ""
+    if (item.image) return String(item.image)
+    var imgs = item.images
+    for (var i = 0; i < kTileRoles.length; i++) {
+        var r = kTileRoles[i]
+        if (imgs && imgs[r] && imgs[r].length) return String(imgs[r][0])
+        if (item[r]) return String(item[r])
+    }
+    return ""
+}
+
+// Must this tile draw its title as a placeholder? Whenever no artwork is actually ON SCREEN — the row
+// carries none, OR the url it does carry has not loaded / has failed. `artReady` is the element's live
+// Image status (status === Image.Ready), so a dead url degrades to readable text rather than a bare tile.
+function tileNeedsTitle(item, artReady) { return !artReady || tileImage(item) === "" }
+
+// --- View selection ------------------------------------------------------------------------------------
+// Does the THEME style this view? This is the question the HOST asks before it OFFERS a route into a view
+// ("I" only opens `detail` on a theme that has one), and it must be answered the same way viewFor answers
+// "is there a layout here" — an `elements` list that is EMPTY is not a layout. When the two disagreed, a
+// theme shipping `"detail": { "elements": [] }` passed the gate on key PRESENCE and then rendered viewFor's
+// fallback, which is an item GRID bound to ctx.items: the key router sat in detail mode over a screen
+// showing something else entirely, arrows moving an invisible action cursor and Enter firing play/download
+// verbs at it. One definition of "declared", asked in both places (ThemeView.hasView, MainWindow's gates).
+function declaresView(theme, name) {
+    var views = (theme && theme.views) ? theme.views : null
+    var v = views ? views[name] : undefined
+    return !!(v && v.elements && v.elements.length)
+}
+
+// Which view definition renders for `name`. A theme declares the views it styles; when the host navigates
+// to one the theme never declared, `theme.views[name]` is absent — and the renderer drew the background
+// and NOTHING else: a navigable, selectable, entirely blank screen. That is issue #29 exactly. Triple
+// ships no `browse` view (its own format doc said an xmb home does not need one), and the cross-addon
+// search from the XMB root is the single route that opens `browse` on an xmb theme, so every result grid
+// under Triple was one flat rectangle. No theme can be expected to declare every view the app will ever
+// grow — least of all the community themes in the registry, which nobody here can fix — so the renderer
+// supplies a plain legible layout for anything left unstyled instead of a blank screen.
+function viewFor(theme, name) {
+    if (declaresView(theme, name)) return theme.views[name]
+    return defaultView((theme && theme.views) ? theme.views["home"] : null)
+}
+
+// The built-in layout viewFor falls back to: the view's title, a grid of its items, and the help bar.
+// Deliberately minimal and generic — no theme-specific styling to go stale — but it wears the theme's own
+// home background (and ink derived from it), so the fallback still reads as that theme rather than as a
+// foreign default screen, and is legible on a light theme as well as a dark one.
+function defaultView(homeView) {
+    var bg = (homeView && homeView.background) ? homeView.background : { "color": "#0F1216" }
+    var ink = inkFor(bg)
+    var dim = (ink === "#FFFFFF") ? "#C8CEDA" : "#4A5567"
+    // A background need not be a colour at all: `{ "image": ..., "dim": ... }` is legal, and then NO ink
+    // choice is safe on its own — white over a bright photo is issue #29 again, in a shape no luminance
+    // rule can see. Every string this layout paints therefore also carries an outline in the opposite tone,
+    // the same hardening the `label: "none"` tile placeholder already uses, so the fallback stays readable
+    // over artwork it cannot inspect as well as over a colour it can.
+    var edge = (ink === "#FFFFFF") ? "#000000" : "#FFFFFF"
+    return {
+        "background": bg,
+        "elements": [
+            { "type": "text", "id": "ebFallbackTitle", "pos": [0.05, 0.08], "size": [0.7, 0.06],
+              "origin": [0, 0.5], "binding": "system.name", "color": ink, "outline": edge,
+              "fontSize": 0.042, "bold": true },
+            { "type": "grid", "id": "ebFallbackGrid", "pos": [0.04, 0.16], "size": [0.92, 0.73],
+              "origin": [0, 0], "columns": 5, "aspect": 1.45, "spacing": 0.008, "color": ink,
+              "card": { "radius": 10, "fill": "#23272F", "label": "overlay",
+                        "selectedWidth": 4, "selectedScale": 1.04 } },
+            { "type": "helpsystem", "id": "ebFallbackHelp", "pos": [0.5, 0.955], "size": [1, 0.05],
+              "origin": [0.5, 0.5], "color": dim, "outline": edge, "fontSize": 0.022,
+              "entries": [ { "button": "↑↓←→", "label": "Navigate" },
+                           { "button": "Enter", "label": "Open" },
+                           { "button": "I", "label": "Details" },
+                           { "button": "/", "label": "Search" },
+                           { "button": "Esc", "label": "Back" } ] }
+        ]
+    }
+}
+
+// The luminance the renderer will ACTUALLY PAINT for a background block, on 0..255.
+//
+// It does not parse the colour itself. `background.color` is handed straight to a QML `Rectangle.color`
+// (ThemeView's backdrop), and THEME_FORMAT.md promises only "hex" — so every form QColor accepts is already
+// legal and in the wild: `#RGB`, `#RRGGBB`, `#AARRGGBB`, the 9- and 12-digit forms, and the ~150 SVG colour
+// NAMES ("white", "whitesmoke", "darkslategray"). A hand-rolled hex reader that recognised only 6 and 8
+// digits called every one of the others "dark" and printed WHITE on them, which is issue #29 rebuilt on the
+// very layer added to fix it: a registry theme with `"home": { "background": { "color": "#EEE" } }` and no
+// `browse` rendered the cross-add-on search as a near-white screen with white text on it.
+//
+// So it asks Qt.color — the SAME parser the Rectangle uses — and is exact by construction rather than by
+// approximation. Its failure mode is exact too: Qt.color THROWS on a string QColor cannot read, and a
+// Rectangle handed that same string paints BLACK (verified against a live QML engine: "#FFF8", "nonsense"
+// and "#GGGGGG" all render #000000). An unreadable colour is therefore not a guess — the screen really is
+// black — so it scores 0 and earns white ink. Alpha counts, because the backdrop composites over the
+// window's near-black clear colour: a half-transparent white paints as mid-grey, not as white.
+// Any colour a theme may legally write, normalised to canonical "aarrggbb" — or "" when Qt cannot read it.
+// The normalising is Qt's own: Qt.color() parses the string and STRINGIFIES back to "#rrggbb" (or
+// "#aarrggbb" when it is translucent), so "#EEE", "WhiteSmoke", "#EEEFFF888" and "#FFEFF3F8" all arrive
+// here as eight plain hex digits and only one very boring reader is needed below. The round-trip is used
+// rather than the colour's r/g/b properties on purpose: those accessors come from a QML value type that is
+// only registered once a scene exists, while the string form is available anywhere the engine is.
+function normalizeColor(s) {
+    var c = null
+    try { if (typeof Qt !== "undefined" && Qt && Qt.color) c = Qt.color(s) } catch (e) { return "" }
+    if (c === undefined || c === null) return ""
+    var h = String(c).replace("#", "")
+    if (h.length === 6) h = "ff" + h                       // opaque: Qt omits the alpha pair
+    // Deliberately UNREACHABLE today, and kept: a valid QColor stringifies to "#rrggbb"/"#aarrggbb" and
+    // nothing else, so no test can currently distinguish this from a bare length check (weakening it to one
+    // survives mutation). It stays because it is the only thing standing between an outside library's
+    // output format and the parseInt calls in bgLuma, which are written to assume eight hex digits — not
+    // because a branch below it would otherwise mop up the failure. That is the difference between this and
+    // the isNaN guard that used to sit at the end of inkFor, which could never change an answer at all.
+    if (!/^[0-9a-fA-F]{8}$/.test(h)) return ""
+    return h
+}
+
+function bgLuma(bg) {
+    var s = ""
+    if (bg && bg.color) s = String(bg.color)
+    else if (bg && bg.gradient && bg.gradient.length) s = String(bg.gradient[0])
+    // Two ways to get nothing, and they deliberately share one answer rather than a sentinel each. A block
+    // with no colour at all (`{ "image": …, "dim": … }`) is genuinely unknowable, and a string QColor
+    // cannot read paints black — and BOTH want the dark end of the rule, because that is the tone
+    // defaultView haloes in black, the pairing that reads over a photograph as well as over a black box.
+    // Distinguishing them would add a branch that could never change an answer.
+    var h = normalizeColor(s)
+    if (h === "") return 0
+    var a = parseInt(h.substring(0, 2), 16) / 255
+    var r = parseInt(h.substring(2, 4), 16)
+    var g = parseInt(h.substring(4, 6), 16)
+    var b = parseInt(h.substring(6, 8), 16)
+    return (0.2126 * r + 0.7152 * g + 0.0722 * b) * a
+}
+
+// Readable ink for a background block: white on a dark one, near-black on a light one. The fallback view
+// has no theme palette to read, so it derives one — assuming "dark" would print white on white for the
+// light themes (Channels' browse gradient starts at #EFF3F8) and swap one unreadable screen for another.
+// Takes the flat `color`, else the first gradient stop, and uses the sRGB luma coefficients.
+//
+// One comparison is the whole rule. There is no NaN guard: normalizeColor establishes that all eight digits
+// are hex before bgLuma reads any of them, so parseInt cannot hand one back — and a guard whose only effect
+// would be to return the value the comparison already returns is not a guard, it is unreachable prose.
+function inkFor(bg) { return bgLuma(bg) > 140 ? "#111820" : "#FFFFFF" }
+
 // Resolve an Image element's source through the role + fallback chain:
 //   literal path / binding  ->  el.role (selected.images[role])  ->  el.fallback (another role, then a
 //   literal/default path). Returns "" when nothing resolves (the element then shows its placeholder or,

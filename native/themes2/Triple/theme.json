@@ -26,6 +26,29 @@
       ]
     },
 
+    "browse": {
+      "background": { "color": "#0A1326" },
+      "elements": [
+        { "type": "wave", "id": "bWave", "pos": [0, 0.30], "size": [1, 0.70], "origin": [0, 0], "zIndex": 0,
+          "color": "#3E6FB8", "bands": 3, "segments": 44, "amplitude": 0.05, "speed": 1.0 },
+
+        { "type": "text", "id": "bTitle", "pos": [0.05, 0.075], "size": [0.7, 0.06], "origin": [0, 0.5], "zIndex": 2,
+          "binding": "system.name", "color": "#FFFFFF", "fontSize": 0.042, "bold": true },
+
+        { "type": "datetime", "id": "bClock", "pos": [0.95, 0.075], "size": [0.32, 0.05], "origin": [1, 0.5], "zIndex": 2,
+          "format": "ddd d MMM    hh:mm", "color": "#E8EEF8", "fontSize": 0.026, "align": "right", "opacity": 0.85 },
+
+        { "type": "grid", "id": "bGrid", "pos": [0.04, 0.16], "size": [0.92, 0.72], "origin": [0, 0], "zIndex": 2,
+          "columns": 5, "aspect": 1.45, "spacing": 0.008, "color": "#3E6FB8",
+          "card": { "radius": 10, "fill": "#16243E", "label": "overlay", "labelColor": "#FFFFFF",
+                    "selectedBorder": "#3E6FB8", "selectedWidth": 4, "selectedScale": 1.05 } },
+
+        { "type": "helpsystem", "id": "bHelp", "pos": [0.5, 0.955], "size": [1, 0.05], "origin": [0.5, 0.5], "zIndex": 2,
+          "color": "#E8EEF8", "fontSize": 0.022,
+          "entries": [ { "button": "↑↓←→", "label": "Navigate" }, { "button": "Enter", "label": "Open" }, { "button": "I", "label": "Details" }, { "button": "/", "label": "Search" }, { "button": "Esc", "label": "Back" } ] }
+      ]
+    },
+
     "detail": {
       "background": { "color": "#0A1326" },
       "elements": [

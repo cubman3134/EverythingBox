@@ -4522,6 +4522,22 @@ void MainWindow::refreshThemedMeta(int idx)
     themedMetaTimer_->start();
 }
 
+// Does the theme STYLE this view? The same question Theme.js's declaresView() answers for the renderer, and
+// it has to be asked the same way in both places. These gates used to test only that the KEY was present
+// while the renderer's viewFor() tested the ELEMENT LIST, so a theme shipping `"detail": { "elements": [] }`
+// passed here and then drew viewFor's fallback — an item grid bound to the browse rows — while the key
+// router sat in detail mode: arrows moving an invisible action-row cursor, Enter firing play/download at a
+// screen showing something else. An empty element list is not a layout; a theme that ships one is a theme
+// with no such view, and the host simply does not offer the route.
+static bool themeDeclaresView(QQuickItem* r, const QString& name)
+{
+    if (!r) return false;
+    const QVariantMap v = r->property("theme").toMap()
+                           .value(QStringLiteral("views")).toMap()
+                           .value(name).toMap();
+    return !v.value(QStringLiteral("elements")).toList().isEmpty();
+}
+
 // Open the themed DETAIL view (on the Nav Contract) for the current selection — the replacement for the
 // retired classic info page. Populates the detail data FIRST (so the page never flashes empty), switches the
 // view, then pushes a "detail" nav level whose onPop restores the previous view: the Back router owns the exit.
@@ -4533,7 +4549,7 @@ void MainWindow::openThemedDetail(int browseIndex)
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r) return;
     // The theme must define a `detail` view ("I" is simply inert on a theme without one).
-    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("detail")))
+    if (!themeDeclaresView(r, QStringLiteral("detail")))
         return;
     // On the XMB home the column is only browse rows while drilled INTO a catalog; on the catalog list /
     // Profiles / Settings columns currentIndex indexes a different list entirely (browseRowMap_ would be
@@ -4586,7 +4602,7 @@ bool MainWindow::openThemedDetailForInfoLeaf(int browseIndex)
     QWidget* cur = stack_->currentWidget();
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r) return false;
-    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("detail")))
+    if (!themeDeclaresView(r, QStringLiteral("detail")))
         return false;
     if (!home_->isThemedInfoLeaf(browseIndex)) return false;
     openThemedDetail(browseIndex);
@@ -4840,7 +4856,7 @@ void MainWindow::showThemedAudioPage()
     }
     QQuickItem* r = ThemeEngine::rootItem(cur);
     if (!r) return;
-    if (!r->property("theme").toMap().value(QStringLiteral("views")).toMap().contains(QStringLiteral("nowplayingAudio")))
+    if (!themeDeclaresView(r, QStringLiteral("nowplayingAudio")))
     {
         // The theme has no audio page — keep the classic player page for this session.
         // Deprecation signal (B2 Task 6, item 2): a themed-mode audio session that falls back to the classic

@@ -44,6 +44,18 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
     the view keeps the classic player page instead.
 - `background.color` — hex. `background.image` — a path **relative to the theme folder** (optional). `background.dim` — 0..1 black overlay over the image, for readability.
 
+**Undeclared views fall back, they do not go blank.** If the app navigates to a view your theme does not
+declare (or declares with no `elements`), the engine renders a plain built-in layout for it — the view's
+title, a grid of its items and the help bar — over **your** `home` background, with ink picked light or
+dark to stay readable on it, and outlined so it stays readable over a background `image` too. It is a
+safety net, not a design: a theme that styles the view always wins. It exists because a missing view used
+to paint the background and nothing else, which is a screen the user can navigate and select on but cannot
+see (issue #29).
+
+A view declared with an **empty** `elements` list counts as not declared **everywhere**, not just in the
+renderer: `"detail": { "elements": [] }` does not switch **I** (Info) on, and an empty `nowplayingAudio`
+keeps the classic player page. Declaring the key is not enough — give the view elements or leave it out.
+
 ## Positioning (every element)
 
 | Key | Meaning |
@@ -106,14 +118,17 @@ not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 
 ## Colours & fonts
 
-- Colours are hex strings, e.g. `"#E07A2E"`.
+- Colours are hex strings, e.g. `"#E07A2E"`. Any form Qt reads is accepted, so `"#RGB"` (`"#EEE"`),
+  `"#RRGGBB"`, `"#AARRGGBB"` and the SVG colour **names** (`"white"`, `"whitesmoke"`) all work. A string Qt
+  cannot read is **not** ignored — it paints **black**, so a typo'd colour is a black box, not the default.
+  There is no 3-digit-plus-alpha form: `"#FFF8"` is a typo, not 50 % white.
 - `fontSize` is a **fraction of screen height** (e.g. `0.04` ≈ 4% tall). `fontFamily` optional. `bold` true/false. `align`: `left`|`center`|`right`.
 
 ## Elements
 
 | `type` | Purpose | Key properties |
 | --- | --- | --- |
-| `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines` |
+| `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines`, `outline` (a contrasting halo colour, for text over an image) |
 | `datetime` | live clock/date | `format` (Qt format, e.g. `"hh:mm"`, `"ddd d MMM"`), `color`, `fontSize`, `align`, `fontFile` (a bundled font in the theme folder, e.g. `"fonts/Foo.ttf"`) or `fontFamily` (a system font) |
 | `image` | poster / picture | `path` or `binding`, `fillMode` (`contain`\|`cover`\|`stretch`), `radius`, `color` (placeholder) |
 | `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth`, `card.fill`, `card.border`+`card.borderWidth` (always-on outline), `card.selectedScale` (the selected card grows + lifts), `card.label` (`overlay`\|`center` name centred on the card, no bar\|`top` title bar on the card\|`below` name-plate\|`none`), `card.labelSize`, `card.labelColor`, `card.labelBg` |
@@ -124,7 +139,7 @@ not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 | `carousel` | horizontal strip, selected centred + enlarged | `itemWidth`, `spacing`, `color` (selection), `card.radius` |
 | `rating` | five stars from a 0..1 value | `binding` (or `value`), `color`, `emptyColor` |
 | `video` | preview area: a slow Ken Burns drift over the bound poster + a play badge | `path`/`binding`, `radius` |
-| `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize` |
+| `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize`, `outline` (as `text`) |
 | `particles` | animated background field | `preset`, `count`, `color`, `dotSize`, `speed`, `image` |
 | `xmb` | PlayStation-style cross (categories × items) | `color`, `subColor`, `descColor`, `crossX`, `crossY`, `catSpacing`, `itemSpacing`, `iconSize` |
 | `sidebar` | a vertical rail of the media-type **categories** beside a grid — the non-XMB way into that zone (see below) | the rail: `fill`, `radius`, `border`+`borderWidth`, `title`, `titleColor`, `titleSize`. The rows: `rowHeight`, `rowSpacing`, `rowRadius`, `fontSize`, `fontFamily`, `bold`, `color`, `selectedColor`, `selectedBg` (selected, rail unfocused), `focusBg` (selected, rail focused — the focus ring), `accentBar`, `showIcons` |
@@ -155,7 +170,9 @@ Use the element's own `opacity` to dim the whole field. Note `dotSize`/`speed` a
 
 ### XMB (the PlayStation cross)
 
-A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. An xmb home needs no `browse`/`detail` view; the cross is the whole screen. Pair it with a `wave` and a `datetime` for the full look (see the shipped **Triple** theme).
+A theme whose **`home`** view contains an `xmb` element becomes a two-axis cross instead of a carousel/grid: the horizontal axis is your media-type categories, and the vertical axis is the highlighted category's **live** items (games under Game, music under Music, …). **←→** switch category (the column reloads), **↑↓** move through the column, **Enter** opens/drills, **Esc** goes up, **/** searches the current category. The last category on the cross is a synthetic **Settings** (opens Appearance). The `xmb` element draws categories as accent tiles (first letter as a stand-in) — drop an `icon` (relative image path) on a category for real art. Pair it with a `wave` and a `datetime` for the full look (see the shipped **Triple** theme).
+
+**An xmb home still needs a `browse` view.** This file used to claim the opposite — "the cross is the whole screen" — and that claim is what caused issue #29. It is nearly true: the cross replaces the browse *grid* for catalogs, because drilling into a catalog swaps the column in place. But **/** at the cross ROOT is a *cross-add-on* search, and its merged results are not one category's column — they open the **`browse`** view like any other gamelist. A theme that declares no `browse` therefore rendered that screen as a bare background: navigable, selectable and completely blank. Declare one (Triple's is a plain grid over the same wave), or accept the engine's built-in fallback below.
 
 Note: the front end is software-rendered (so it coexists with the video engine). Stacking several heavy animated elements (e.g. a high-`segments` `wave` **and** `particles` **and** the `xmb` cross) can exceed the renderer's budget — keep `wave.segments` modest and avoid piling animated fields on an xmb home.
 

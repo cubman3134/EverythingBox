@@ -18,8 +18,19 @@ Item {
     property string base: ""       // theme directory as a file:// URL, for resolving relative asset paths
 
     // The active view's definition (background + elements). Switching currentView re-renders everything.
-    readonly property var view: (theme && theme.views && theme.views[currentView]) ? theme.views[currentView] : ({})
-    function hasView(name) { return !!(theme && theme.views && theme.views[name]) }
+    // Goes through T.viewFor, NOT a direct theme.views[currentView] read: a view the theme never declared
+    // used to resolve to `({})` here, and an empty definition draws the background and nothing else — a
+    // navigable, selectable, entirely blank screen (issue #29). viewFor substitutes a plain built-in
+    // layout in that case; see the note beside it in Theme.js for why the renderer owns that, not a theme.
+    readonly property var view: T.viewFor(theme, currentView)
+    // DECLARED, not rendered: this asks whether the THEME styles a view, which is what the host must know
+    // before it offers a route into one (the "I" key below only opens `detail` for a theme that has one).
+    // The built-in fallback is what a view you have already entered falls back to — never a reason to
+    // offer a surface the theme never asked for. Delegates to T.declaresView so it cannot drift from what
+    // viewFor above calls "declared": this used to test the KEY while viewFor tested the ELEMENT LIST, and
+    // a theme shipping `"detail": { "elements": [] }` slipped through the gap into detail mode drawn as a
+    // browse grid. See the note beside declaresView in Theme.js.
+    function hasView(name) { return T.declaresView(theme, name) }
     // Optional vertical background gradient: background.gradient = ["#top", "#bottom"] (else a flat colour).
     readonly property var bgGradient: (view && view.background && view.background.gradient) ? view.background.gradient : null
 

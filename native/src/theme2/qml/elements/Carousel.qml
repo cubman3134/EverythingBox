@@ -46,15 +46,21 @@ ListView {
             border.width: sel ? 4 : 0
             border.color: T.val(lv.el, "color", "#E07A2E")
             Image {
+                id: poster
                 anchors.fill: parent
-                source: (modelData && modelData.image && lv.host) ? lv.host.resolve(modelData.image) : ""
+                // T.tileImage, not a bare modelData.image read: a row carrying art only under the
+                // open-ended `images` role map still gets a poster instead of a blank tile.
+                source: (lv.host && T.tileImage(modelData) !== "") ? lv.host.resolve(T.tileImage(modelData)) : ""
                 fillMode: Image.PreserveAspectCrop
                 visible: status === Image.Ready
             }
             Text {
                 anchors.centerIn: parent
                 width: parent.width - 16
-                visible: !(modelData && modelData.image)
+                // The shared "no artwork actually on screen" rule. This used to be `!modelData.image`,
+                // which hid the title for precisely the rows whose url was DEAD — the card then had
+                // nothing readable on it at all (issue #29's hardening).
+                visible: T.tileNeedsTitle(modelData, poster.status === Image.Ready)
                 text: (modelData && modelData.title) ? modelData.title : ""
                 color: "white"; horizontalAlignment: Text.AlignHCenter
                 font.pixelSize: Math.max(10, 0.026 * (lv.host ? lv.host.height : 720)); font.bold: true
