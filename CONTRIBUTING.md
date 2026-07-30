@@ -71,7 +71,8 @@ that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 gate below. Those fail on code you wrote even if every probe binary passes. One
 more gate is a property of the run rather than of the source: `exe-folder
 contamination` compares the build folder's app-data footprint before and after
-the suite, and fails if a probe touched it.
+the suite, and fails if anything changed it while the suite ran — normally a
+probe, occasionally an app or a build running out of that same folder.
 
 ## Rules that the review will hold you to
 
@@ -147,8 +148,17 @@ remember: the define is applied by name over every probe target at the bottom of
 * nothing in `build/Release` can change a probe's result, and no probe can
   change what is in `build/Release`. `probe_isolation` asserts both (the runner
   seeds junk into that folder before running it), and the suite's
-  `=== exe-folder contamination ===` gate fails if the folder is not
-  byte-identical before and after the run.
+  `=== exe-folder contamination ===` gate compares a *fingerprint* of the folder
+  before and after the run. Know what that fingerprint is, because the next
+  person debugging a suite failure will lean on it: the top-level entry names,
+  the recursive file list of the app-data subdirectories (`addons/`,
+  `metadata/`, `themes/`, `saves/`, …), and a checksum of `everythingbox.ini`,
+  its pre-rebrand counterpart, and `saves-meta.json`. So anything appearing,
+  vanishing or being renamed is caught, and so is any edit to those three
+  files — but an **in-place edit that leaves the file list unchanged** is
+  not. Rewriting `addons/<x>/main.js`, or a file under `themes/`, passes. It is
+  a heuristic aimed at the shape the real collisions took, not a byte-for-byte
+  comparison of the folder.
 
 `EB_PROBE_DATA_DIR_KEEP=1` keeps the scratch directory around when you need to
 see what a failing probe wrote; `EB_PROBE_DATA_DIR=<dir>` pins it.
