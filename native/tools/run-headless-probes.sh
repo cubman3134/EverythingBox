@@ -25,6 +25,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 
+# The suite owns the probes' data-dir configuration; the two hand-run escape hatches must not survive into it
+# (issue #42). EB_PROBE_DATA_DIR pins every probe at ONE directory that AppPaths never cleans up (owned=false),
+# so a single forgotten `export` in a developer's profile silently restores the exact collision this whole
+# scheme exists to kill — state accreting across probes AND across runs — and nothing notices: probe_isolation
+# scrubs the pin from its own child's environment and compares against the exe folder, so it passes anyway.
+# EB_PROBE_DATA_DIR_KEEP is the same shape one step down: it disables cleanup, and the suite would leave a
+# directory per probe per run behind. Both stay fully usable for running a probe by hand — this only says the
+# suite starts from a known state.
+unset EB_PROBE_DATA_DIR EB_PROBE_DATA_DIR_KEEP
+
 # A probe exe may land at build/<name>, build/<name>.exe, or build/Release/<name>[.exe] (multi-config generators).
 findexe() {
   local n="$1" p
@@ -33,6 +43,20 @@ findexe() {
   done
   return 1
 }
+
+# One scratch root per suite run (issue #42). Every probe binary is compiled with EB_ISOLATED_DATA_DIR, which
+# points AppPaths::dataDir() at a per-PROCESS directory created under this root instead of at the exe's own
+# folder — so a GUI run, a throwaway app in build/Release, and forty-odd probes stop sharing one
+# everythingbox.ini. Each probe removes its own directory on exit; owning the ROOT here is what makes cleanup
+# hold for a probe that CRASHES before its destructor runs, and it does so without a shared sweep that could
+# delete a concurrent suite run's directories.
+EB_PROBE_SCRATCH_ROOT_POSIX="$(mktemp -d "${TMPDIR:-/tmp}/eb-probe-scratch.XXXXXX")"
+EB_PROBE_SCRATCH_ROOT="$EB_PROBE_SCRATCH_ROOT_POSIX"
+# The probes are native binaries: on Windows (git-bash/MSYS) a POSIX /tmp/... path would be read by Qt as a
+# path on the current drive's root, so hand them the Windows spelling of the same directory.
+command -v cygpath >/dev/null 2>&1 && EB_PROBE_SCRATCH_ROOT="$(cygpath -m "$EB_PROBE_SCRATCH_ROOT_POSIX")"
+export EB_PROBE_SCRATCH_ROOT
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"' EXIT
 
 fail=0
 run() { # <name> <sentinel> <exe> [args...]
@@ -52,7 +76,7 @@ run() { # <name> <sentinel> <exe> [args...]
 # Bring up the relay both netplay tests rendezvous through.
 "$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
 RELAY_PID=$!
-trap '[ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
 for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
 echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
 
@@ -60,6 +84,59 @@ NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not bui
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
 NAV="$(findexe probe_nav)"               || { echo "FATAL: probe_nav not built"; exit 2; }
 META="$(findexe probe_meta)"             || { echo "FATAL: probe_meta not built"; exit 2; }
+ISO="$(findexe probe_isolation)"         || { echo "FATAL: probe_isolation not built"; exit 2; }
+
+# The folder the probe binaries were built into — which on desktop is also what AppPaths::dataDir() used to
+# resolve to, i.e. the app's whole data directory. Everything below that talks about "the exe folder" means
+# this one.
+EXE_DIR="$(cd "$(dirname "$ISO")" && pwd)"
+
+# A fingerprint of the app-data footprint inside the exe folder. Compared before and after the suite by the
+# "exe-folder contamination" gate at the bottom: no probe may create, modify or delete anything the app reads
+# there. Top-level entries catch a file or directory APPEARING (the common shape — everythingbox.ini,
+# addons/, metadata/, themes/, saves-meta.json, stream_debug.log all used to land here); the recursive walk
+# and the checksums catch a write INTO something that was already present.
+exe_fingerprint() {
+  ( cd "$EXE_DIR" 2>/dev/null && ls -A . | sort )
+  ( cd "$EXE_DIR" 2>/dev/null && for d in addons metadata themes themes2 saves states downloads cores emulators music; do
+      [ -d "$d" ] && find "$d" -type f | sort
+    done )
+  ( cd "$EXE_DIR" 2>/dev/null && for f in everythingbox.ini mymediavault.ini saves-meta.json; do
+      [ -f "$f" ] && cksum "$f"
+    done )
+  return 0
+}
+
+# ---- Probe data-dir isolation (issue #42) ------------------------------------------------------------------
+# The reproduction, made permanent. Seed the exe folder with exactly what an issue-#42 collision looks like —
+# a throwaway everythingbox.ini carrying a sentinel key, and an add-on folder — then run the probe that
+# asserts it can see NEITHER, that its own writes leave that folder byte-identical, and that a second probe
+# process gets a different directory which disappears with the process. Before the fix, a suite run with junk
+# in build/Release failed for reasons that had nothing to do with the branch under test; this step is what
+# stops that from coming back silently.
+#
+# The snapshot is taken BEFORE the seeding, not after: this step has to sit INSIDE the contamination gate's
+# window like every other probe, or a probe writing into the exe folder from here would be baked into the
+# "before" picture and go unnoticed. The seed/restore below is exact, so the gate sees it as a no-op — and
+# checks that the restore really was exact.
+EXE_FP_BEFORE="$(exe_fingerprint)"
+
+echo "=== probe data-dir isolation (seeding the exe folder with junk first) ==="
+ISO_JUNK_INI="$EXE_DIR/everythingbox.ini"
+ISO_JUNK_ADDON="$EXE_DIR/addons/probeisolationjunk"
+ISO_INI_BAK=""
+ISO_ADDONS_ROOT_MADE=0
+[ -e "$ISO_JUNK_INI" ] && { ISO_INI_BAK="$(mktemp)"; cp "$ISO_JUNK_INI" "$ISO_INI_BAK"; }
+[ -d "$EXE_DIR/addons" ] || ISO_ADDONS_ROOT_MADE=1
+printf '\n[probeIsolation]\nsentinel=EXE-DIR-JUNK\n' >> "$ISO_JUNK_INI"
+mkdir -p "$ISO_JUNK_ADDON"
+printf '%s\n' '{ "id":"com.everythingbox.probeisolationjunk","name":"Junk","version":"1.0.0","type":"media-source","entry":"main.js","permissions":[],"catalogs":[] }' > "$ISO_JUNK_ADDON/manifest.json"
+printf 'function getMeta(a){ return "{}"; }\n' > "$ISO_JUNK_ADDON/main.js"
+run "probe_isolation" ISOLATION-OK "$ISO"
+# Restore, unconditionally — a failing probe must not leave the junk behind either.
+if [ -n "$ISO_INI_BAK" ]; then cp "$ISO_INI_BAK" "$ISO_JUNK_INI"; rm -f "$ISO_INI_BAK"; else rm -f "$ISO_JUNK_INI"; fi
+rm -rf "$ISO_JUNK_ADDON"
+[ "$ISO_ADDONS_ROOT_MADE" = 1 ] && rmdir "$EXE_DIR/addons" 2>/dev/null
 
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
@@ -456,6 +533,130 @@ if printf '%s' "$utf8_out" | grep -q "UITEST-UTF8-OK"; then
 else
   printf '%s\n' "$utf8_out"
   echo "FAIL: uitest utf-8 output (a non-ASCII app label did not survive uitest.py's stdout)"
+  fail=1
+fi
+echo
+
+# Probe data-dir isolation WIRING gate (issue #42). The isolation itself is asserted at runtime by
+# probe_isolation — delete the CMake block and that probe goes red. What a probe cannot see is the other
+# direction: that the define is applied by NAME PATTERN over probe targets and to nothing else. A
+# `target_compile_definitions(everythingbox PRIVATE EB_ISOLATED_DATA_DIR)` typed by mistake would send the
+# shipped app's ini, saves and add-ons to a temp directory that deletes itself on exit — the loudest possible
+# data-loss bug, and one no probe in this suite would notice because probes never build the app target.
+echo "=== probe data-dir isolation wiring ==="
+ISO_ROOT="$(cd "$HERE/.." && pwd)"
+ISO_CMAKE="$ISO_ROOT/CMakeLists.txt"
+if [ ! -f "$ISO_CMAKE" ]; then
+  echo "FAIL: probe data-dir isolation wiring (CMakeLists.txt not found at $ISO_CMAKE)"; fail=1
+else
+  iso_bad=0
+  # CMake comments stripped FIRST, and this is load-bearing rather than tidiness: the block being checked is
+  # introduced by a comment that names BUILDSYSTEM_TARGETS, so a gate reading the raw file would go on passing
+  # after someone deleted the sweep and left the prose describing it. That is precisely how an assertion ends
+  # up gating nothing, and this one did until the mutation pass caught it.
+  iso_src="$(sed -E 's/#.*$//' "$ISO_CMAKE")"
+  # The auto-apply loop must still be there, still keyed on the probe_ name prefix. Without it a new probe is
+  # silently un-isolated, which is the trap this issue was about rather than a fix for it.
+  printf '%s\n' "$iso_src" | grep -q 'BUILDSYSTEM_TARGETS' \
+    || { echo "  the BUILDSYSTEM_TARGETS sweep is gone — isolation is no longer applied to every probe"; iso_bad=1; }
+  printf '%s\n' "$iso_src" | grep -q '_eb_t MATCHES "\^probe_"' \
+    || { echo "  the ^probe_ name match is gone — a new probe no longer gets isolation by default"; iso_bad=1; }
+  printf '%s\n' "$iso_src" | grep -q 'target_compile_definitions(\${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)' \
+    || { echo "  the loop no longer applies EB_ISOLATED_DATA_DIR — nothing is isolated"; iso_bad=1; }
+  # Every grant of the define must go through the loop variable. Anything else names a target explicitly.
+  iso_grants="$(printf '%s\n' "$iso_src" | grep -n 'target_compile_definitions(.*EB_ISOLATED_DATA_DIR' || true)"
+  iso_by_name="$(printf '%s\n' "$iso_grants" | grep -v 'target_compile_definitions(\${_eb_t} ' | grep . || true)"
+  if [ -n "$iso_by_name" ]; then
+    printf '%s\n' "$iso_by_name"
+    echo "  EB_ISOLATED_DATA_DIR is granted to a NAMED target above. It may only be applied through the"
+    echo "  probe_ name sweep; on a non-probe target it redirects the shipped app's data dir at a"
+    echo "  self-deleting temp folder."
+    iso_bad=1
+  fi
+
+  # ---- One sanctioned site, everything else is a failure ---------------------------------------------------
+  # Everything above is a BLACKLIST: it matches the one spelling of a bad grant whose comment names it, on a
+  # single line, of a single file. The catastrophic mistake has plenty of other spellings, and every one of
+  # them walks straight past those greps:
+  #   * a MULTI-LINE invocation — `target_compile_definitions(everythingbox` on one line and
+  #     `PRIVATE EB_ISOLATED_DATA_DIR)` on the next. The greps are line-based, so neither line matches both
+  #     halves of the pattern and the by-name check comes up empty;
+  #   * `add_compile_definitions(EB_ISOLATED_DATA_DIR)` — DIRECTORY scope, so it hits every target declared in
+  #     the file, the app included. This is the realistic accident: someone debugging drops it near the top
+  #     "temporarily". Every probe still passes (they are isolated either way), and the shipped app writes its
+  #     ini, saves and add-ons into a folder that deletes itself on exit;
+  #   * `set_property(TARGET everythingbox APPEND PROPERTY COMPILE_DEFINITIONS EB_ISOLATED_DATA_DIR)`;
+  #   * a grant through a variable — `set(_defs EB_ISOLATED_DATA_DIR)` … `PRIVATE ${_defs}`;
+  #   * a grant in ANY OTHER CMake file. cmake/GenerateSecrets.cmake and the two third_party subdirectory
+  #     lists were never read at all.
+  # So invert it. Scan every CMakeLists.txt and *.cmake under native/, strip comments, and treat ANY
+  # occurrence of the EB_ISOLATED_DATA_DIR token outside the ONE sanctioned line as a failure — the sweep's
+  # own `target_compile_definitions(${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)`, which must appear exactly once.
+  # A whitelist of one known-good site is far more robust here than a blacklist of spellings: it needs no
+  # updating when CMake grows another way to say it, or when someone invents a way nobody here thought of.
+  ISO_OK_LINE='target_compile_definitions\(\$\{_eb_t\} PRIVATE EB_ISOLATED_DATA_DIR\)'
+  iso_stray=""
+  iso_ok_hits=0
+  iso_scanned=0
+  # Build trees are pruned: a configured build directory is full of GENERATED cmake fragments that legitimately
+  # echo every target's compile definitions back at us (CMakeFiles/*/DependInfo.cmake and friends), and those
+  # are output, not source. No source directory under native/ is named build*.
+  while IFS= read -r f; do
+    iso_scanned=$((iso_scanned + 1))
+    iso_hits="$(sed -E 's/#.*$//' "$f" | grep -n 'EB_ISOLATED_DATA_DIR' || true)"
+    [ -n "$iso_hits" ] || continue
+    if [ "$f" = "$ISO_CMAKE" ]; then
+      iso_ok_hits=$(( iso_ok_hits + $(printf '%s\n' "$iso_hits" | grep -cE "^[0-9]+:[[:space:]]*${ISO_OK_LINE}[[:space:]]*$" || true) ))
+      iso_hits="$(printf '%s\n' "$iso_hits" | grep -vE "^[0-9]+:[[:space:]]*${ISO_OK_LINE}[[:space:]]*$" || true)"
+    fi
+    [ -n "$iso_hits" ] && iso_stray="$iso_stray"$'\n'"  $f"$'\n'"$(printf '%s\n' "$iso_hits" | sed 's/^/    /')"
+  done < <(find "$ISO_ROOT" \( -name CMakeFiles -o -name _deps -o -name 'build*' -o -name .git \) -prune -o \
+                            \( -name CMakeLists.txt -o -name '*.cmake' \) -print)
+  if [ "$iso_scanned" -eq 0 ]; then
+    echo "  no CMake files were scanned under $ISO_ROOT — this gate is reading nothing"; iso_bad=1
+  fi
+  if [ -n "$iso_stray" ]; then
+    printf '%s\n' "$iso_stray"
+    echo "  EB_ISOLATED_DATA_DIR appears above, outside the probe_ name sweep in native/CMakeLists.txt."
+    echo "  That define may ONLY be granted by that sweep. Anywhere else — a named target, a directory-scope"
+    echo "  add_compile_definitions(), a set_property(TARGET ...), a variable, another CMake file — it can"
+    echo "  reach the shipped app, and then the app's ini, saves and add-ons go to a self-deleting temp folder."
+    iso_bad=1
+  fi
+  # Exactly once: the sanctioned line is only safe because ${_eb_t} is the sweep's loop variable. Pasted a
+  # second time, somewhere else, with _eb_t left holding a different target, it grants exactly what the
+  # by-name check above exists to stop — and it would be whitelisted by the scan.
+  if [ "$iso_ok_hits" -ne 1 ]; then
+    echo "  the sweep's own grant appears $iso_ok_hits time(s) in native/CMakeLists.txt; it must appear exactly once"
+    iso_bad=1
+  fi
+
+  if [ "$iso_bad" -eq 0 ]; then echo "PASS: probe data-dir isolation wiring"; else
+    echo "FAIL: probe data-dir isolation wiring"; fail=1
+  fi
+fi
+echo
+
+# Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
+# directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
+# so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration
+# flags, no less), addons/, themes/, metadata/ and stream_debug.log behind for whatever ran there next. This
+# compares the folder's app-data footprint across the whole run: nothing may appear, change or vanish.
+echo "=== exe-folder contamination ==="
+EXE_FP_AFTER="$(exe_fingerprint)"
+if [ "$EXE_FP_BEFORE" = "$EXE_FP_AFTER" ]; then
+  echo "PASS: exe-folder contamination ($EXE_DIR unchanged across the suite)"
+else
+  echo "$EXE_DIR changed while the suite ran:"
+  diff <(printf '%s\n' "$EXE_FP_BEFORE") <(printf '%s\n' "$EXE_FP_AFTER") | sed 's/^/  /'
+  # Deliberately not "a probe did it". This gate watches a directory, not a process, and it cannot tell a
+  # probe apart from anything else that wrote there while it ran: a GUI launched from build/Release, or a
+  # concurrent session building a probe exe into it — this working tree is shared between sessions. Naming
+  # the wrong culprit confidently is the exact failure mode (a gate that cries wolf) this whole issue is
+  # about, so the message names the alternatives and lets the diff above decide.
+  echo "FAIL: exe-folder contamination — something changed the folder the app's data lives in during the run."
+  echo "  Most likely a probe wrote there. It can also be an app or a build running out of that folder at the"
+  echo "  same time (a GUI launched from it, or a concurrent build dropping a new exe in) — the diff says which."
   fail=1
 fi
 echo

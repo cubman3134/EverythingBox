@@ -124,6 +124,14 @@ namespace ThemeChoice
     // so in the app the symbol does not exist and a call is a compile error. A comment alone was not enough —
     // an accidental production call would silently redirect every theme read and write for the whole process
     // lifetime, and the assert that would have caught it is compiled out of the Release build we ship.
+    //
+    // NOT superseded by the probe data-dir isolation (issue #42), which gives every probe PROCESS its own
+    // dataDir() and therefore its own everythingbox.ini. That removed one of this seam's two motives — "do
+    // not write the app's real ini" — but not the other: store() caches its QSettings in a function-local
+    // static, so a process has exactly ONE store no matter where dataDir() points. probe_theme needs six
+    // independent scratch inis, and needs to re-open one after seeding it from outside; only a setter that
+    // destroys and re-creates the store can do that. Isolation is per process, this is within one. A NEW
+    // probe should not grow a seam like this just to avoid the real ini — it already has its own.
 #ifdef EB_THEMECHOICE_TEST_SEAM
     void    setIniPathForTesting(const QString& path);
 #endif

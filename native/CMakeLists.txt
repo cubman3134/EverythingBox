@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.154 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.162 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -504,12 +504,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/PcGameId.cpp    src/core/PcGameId.h
         src/core/PcGameRemap.cpp src/core/PcGameRemap.h)
     target_include_directories(probe_pcgames PRIVATE src src/core)
-    # The ini-redirect seam exists ONLY here (same rule as probe_theme / probe_settingstxn /
-    # probe_passcode): the alias override store persists, so without a scratch ini a run reads back what
-    # the PREVIOUS run wrote and the probe stops being repeatable. PcGameRemap gates its own seam on the
-    # SAME define, and needs it for the harder reason — its store is the real everythingbox.ini, which on
-    # desktop lives next to the exe (issue #42), so an un-redirected run would write records into
-    # build/Release and leave them for the next one.
+    # This define does two jobs. The second is why it still exists: PcGameRemap compiles a SYNC COUNTER
+    # under it, and the probe asserts on how many flushes a remap performs — nothing about data-dir
+    # isolation can supply that. The first, the ini redirect, is now largely redundant: it was there
+    # because the alias override store persists, so an un-redirected run read back what the previous run
+    # wrote into the ini next to the exe (issue #42) — and the per-process scratch data dir every probe now
+    # gets makes each run start empty on its own. It is kept rather than unpicked from two production
+    # translation units for no behaviour change; see the note at the call site in probe_pcgames.cpp.
     target_compile_definitions(probe_pcgames PRIVATE EB_PCGAMEID_TEST_SEAM)
     target_link_libraries(probe_pcgames PRIVATE Qt6::Core)
 
@@ -550,6 +551,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/AssetBootstrap.cpp src/core/AssetBootstrap.h)
     target_include_directories(probe_bootstrap PRIVATE src src/core)
     target_link_libraries(probe_bootstrap PRIVATE Qt6::Core)
+
+    # Probe data-dir isolation (issue #42): asserts that this process's AppPaths::dataDir() is NOT the exe's
+    # folder, that state seeded in the exe's folder is invisible from it, that a write through the probe's own
+    # store leaves that folder byte-identical, and — by re-running itself as a child — that two probe
+    # PROCESSES get two different directories and that a directory dies with the process that made it.
+    # AppPaths.h and AppBrand.h are header-only, so the target is the single .cpp against Qt6::Core.
+    add_executable(probe_isolation tools/probe_isolation.cpp
+        src/core/AppPaths.h src/core/AppBrand.h)
+    target_include_directories(probe_isolation PRIVATE src src/core)
+    target_link_libraries(probe_isolation PRIVATE Qt6::Core)
 
     # Console harness for the PDF -> reflow-text reader (needs QtPdf).
     add_executable(probe_pdftext tools/probe_pdftext.cpp src/ebook/PdfTextBook.cpp)
@@ -1052,3 +1063,50 @@ if(EVERYTHINGBOX_BUILD_APP)
                        "disabled on this platform.")
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Probe data-dir isolation (issue #42) — applied to EVERY probe, by name, automatically.
+#
+# On desktop AppPaths::dataDir() is the executable's own folder (the app is portable), and every probe binary
+# is built into that same folder as the GUI exe. One everythingbox.ini, one addons/, one metadata/, shared
+# between the app, the probes, and whatever a developer dropped in build/Release. Three separate debugging
+# sessions in one day went into suite failures that turned out to be that collision rather than the branch
+# under test — and each one looked like a real regression, which is the expensive part: a gate that cries
+# wolf teaches people to discount it.
+#
+# EB_ISOLATED_DATA_DIR redirects dataDir() at a per-PROCESS scratch directory that removes itself on exit
+# (native/src/core/AppPaths.h). It is applied HERE, over every already-declared target whose name begins
+# probe_, rather than at each add_executable, for one reason: a probe added next month has to get isolation
+# without its author knowing this issue ever existed. Opt-in isolation would only move the trap.
+#
+# Four properties this placement depends on. The first two are about WHERE the sweep sits; the last two are
+# constraints on everything else, and they are recorded here because nothing enforces them:
+#   * it must stay at the END of the file — BUILDSYSTEM_TARGETS only sees targets declared above it;
+#   * the app target must never match — `everythingbox` does not begin with probe_, and the runner's
+#     "probe data-dir isolation wiring" gate fails on ANY mention of EB_ISOLATED_DATA_DIR in any CMake file
+#     under native/ other than the one grant below;
+#   * PROBE TARGETS MUST BE DECLARED IN THIS FILE. BUILDSYSTEM_TARGETS is per-DIRECTORY: a probe declared in
+#     an add_subdirectory() CMakeLists is not in this list and would be built with no isolation at all,
+#     writing its ini and add-ons straight into build/Release like before the fix. If a probe ever has to
+#     live in a subdirectory, the sweep has to walk SUBDIRECTORIES too — it does not today;
+#   * A PROBE'S LINK DEPENDENCIES MUST NOT CALL AppPaths::dataDir(). The define is PRIVATE, so a library
+#     target linked into a probe compiles WITHOUT it — and dataDir() is an `inline` function whose body
+#     differs between the two settings (native/src/core/AppPaths.h). Linking both definitions into one
+#     binary is an ODR violation: the linker keeps one COMDAT and may keep the UN-isolated one, at which
+#     point that probe silently reads build/Release again. Nothing catches this — probe_isolation only tests
+#     its OWN binary, and the runner's contamination gate only sees WRITES, not reads. It is not live today:
+#     probes compile the production sources directly, and the library targets they do link
+#     (everythingbox_libretro, rcheevos, lzma7z) never touch AppPaths. Keep it that way, or give the define
+#     to those libraries too so both sides agree.
+# Deleting the block does not silently un-isolate the suite: probe_isolation asserts the outcome at runtime.
+get_property(_eb_dir_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
+set(_eb_isolated_probes "")
+foreach(_eb_t ${_eb_dir_targets})
+    get_target_property(_eb_t_type ${_eb_t} TYPE)
+    if(_eb_t MATCHES "^probe_" AND _eb_t_type STREQUAL "EXECUTABLE")
+        target_compile_definitions(${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)
+        list(APPEND _eb_isolated_probes ${_eb_t})
+    endif()
+endforeach()
+list(LENGTH _eb_isolated_probes _eb_isolated_count)
+message(STATUS "EverythingBox: data-dir isolation applied to ${_eb_isolated_count} probe target(s)")
