@@ -25,6 +25,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
 
+# The suite owns the probes' data-dir configuration; the two hand-run escape hatches must not survive into it
+# (issue #42). EB_PROBE_DATA_DIR pins every probe at ONE directory that AppPaths never cleans up (owned=false),
+# so a single forgotten `export` in a developer's profile silently restores the exact collision this whole
+# scheme exists to kill — state accreting across probes AND across runs — and nothing notices: probe_isolation
+# scrubs the pin from its own child's environment and compares against the exe folder, so it passes anyway.
+# EB_PROBE_DATA_DIR_KEEP is the same shape one step down: it disables cleanup, and the suite would leave a
+# directory per probe per run behind. Both stay fully usable for running a probe by hand — this only says the
+# suite starts from a known state.
+unset EB_PROBE_DATA_DIR EB_PROBE_DATA_DIR_KEEP
+
 # A probe exe may land at build/<name>, build/<name>.exe, or build/Release/<name>[.exe] (multi-config generators).
 findexe() {
   local n="$1" p
@@ -534,7 +544,8 @@ echo
 # shipped app's ini, saves and add-ons to a temp directory that deletes itself on exit — the loudest possible
 # data-loss bug, and one no probe in this suite would notice because probes never build the app target.
 echo "=== probe data-dir isolation wiring ==="
-ISO_CMAKE="$HERE/../CMakeLists.txt"
+ISO_ROOT="$(cd "$HERE/.." && pwd)"
+ISO_CMAKE="$ISO_ROOT/CMakeLists.txt"
 if [ ! -f "$ISO_CMAKE" ]; then
   echo "FAIL: probe data-dir isolation wiring (CMakeLists.txt not found at $ISO_CMAKE)"; fail=1
 else
@@ -562,6 +573,64 @@ else
     echo "  self-deleting temp folder."
     iso_bad=1
   fi
+
+  # ---- One sanctioned site, everything else is a failure ---------------------------------------------------
+  # Everything above is a BLACKLIST: it matches the one spelling of a bad grant whose comment names it, on a
+  # single line, of a single file. The catastrophic mistake has plenty of other spellings, and every one of
+  # them walks straight past those greps:
+  #   * a MULTI-LINE invocation — `target_compile_definitions(everythingbox` on one line and
+  #     `PRIVATE EB_ISOLATED_DATA_DIR)` on the next. The greps are line-based, so neither line matches both
+  #     halves of the pattern and the by-name check comes up empty;
+  #   * `add_compile_definitions(EB_ISOLATED_DATA_DIR)` — DIRECTORY scope, so it hits every target declared in
+  #     the file, the app included. This is the realistic accident: someone debugging drops it near the top
+  #     "temporarily". Every probe still passes (they are isolated either way), and the shipped app writes its
+  #     ini, saves and add-ons into a folder that deletes itself on exit;
+  #   * `set_property(TARGET everythingbox APPEND PROPERTY COMPILE_DEFINITIONS EB_ISOLATED_DATA_DIR)`;
+  #   * a grant through a variable — `set(_defs EB_ISOLATED_DATA_DIR)` … `PRIVATE ${_defs}`;
+  #   * a grant in ANY OTHER CMake file. cmake/GenerateSecrets.cmake and the two third_party subdirectory
+  #     lists were never read at all.
+  # So invert it. Scan every CMakeLists.txt and *.cmake under native/, strip comments, and treat ANY
+  # occurrence of the EB_ISOLATED_DATA_DIR token outside the ONE sanctioned line as a failure — the sweep's
+  # own `target_compile_definitions(${_eb_t} PRIVATE EB_ISOLATED_DATA_DIR)`, which must appear exactly once.
+  # A whitelist of one known-good site is far more robust here than a blacklist of spellings: it needs no
+  # updating when CMake grows another way to say it, or when someone invents a way nobody here thought of.
+  ISO_OK_LINE='target_compile_definitions\(\$\{_eb_t\} PRIVATE EB_ISOLATED_DATA_DIR\)'
+  iso_stray=""
+  iso_ok_hits=0
+  iso_scanned=0
+  # Build trees are pruned: a configured build directory is full of GENERATED cmake fragments that legitimately
+  # echo every target's compile definitions back at us (CMakeFiles/*/DependInfo.cmake and friends), and those
+  # are output, not source. No source directory under native/ is named build*.
+  while IFS= read -r f; do
+    iso_scanned=$((iso_scanned + 1))
+    iso_hits="$(sed -E 's/#.*$//' "$f" | grep -n 'EB_ISOLATED_DATA_DIR' || true)"
+    [ -n "$iso_hits" ] || continue
+    if [ "$f" = "$ISO_CMAKE" ]; then
+      iso_ok_hits=$(( iso_ok_hits + $(printf '%s\n' "$iso_hits" | grep -cE "^[0-9]+:[[:space:]]*${ISO_OK_LINE}[[:space:]]*$" || true) ))
+      iso_hits="$(printf '%s\n' "$iso_hits" | grep -vE "^[0-9]+:[[:space:]]*${ISO_OK_LINE}[[:space:]]*$" || true)"
+    fi
+    [ -n "$iso_hits" ] && iso_stray="$iso_stray"$'\n'"  $f"$'\n'"$(printf '%s\n' "$iso_hits" | sed 's/^/    /')"
+  done < <(find "$ISO_ROOT" \( -name CMakeFiles -o -name _deps -o -name 'build*' -o -name .git \) -prune -o \
+                            \( -name CMakeLists.txt -o -name '*.cmake' \) -print)
+  if [ "$iso_scanned" -eq 0 ]; then
+    echo "  no CMake files were scanned under $ISO_ROOT — this gate is reading nothing"; iso_bad=1
+  fi
+  if [ -n "$iso_stray" ]; then
+    printf '%s\n' "$iso_stray"
+    echo "  EB_ISOLATED_DATA_DIR appears above, outside the probe_ name sweep in native/CMakeLists.txt."
+    echo "  That define may ONLY be granted by that sweep. Anywhere else — a named target, a directory-scope"
+    echo "  add_compile_definitions(), a set_property(TARGET ...), a variable, another CMake file — it can"
+    echo "  reach the shipped app, and then the app's ini, saves and add-ons go to a self-deleting temp folder."
+    iso_bad=1
+  fi
+  # Exactly once: the sanctioned line is only safe because ${_eb_t} is the sweep's loop variable. Pasted a
+  # second time, somewhere else, with _eb_t left holding a different target, it grants exactly what the
+  # by-name check above exists to stop — and it would be whitelisted by the scan.
+  if [ "$iso_ok_hits" -ne 1 ]; then
+    echo "  the sweep's own grant appears $iso_ok_hits time(s) in native/CMakeLists.txt; it must appear exactly once"
+    iso_bad=1
+  fi
+
   if [ "$iso_bad" -eq 0 ]; then echo "PASS: probe data-dir isolation wiring"; else
     echo "FAIL: probe data-dir isolation wiring"; fail=1
   fi
@@ -580,7 +649,14 @@ if [ "$EXE_FP_BEFORE" = "$EXE_FP_AFTER" ]; then
 else
   echo "$EXE_DIR changed while the suite ran:"
   diff <(printf '%s\n' "$EXE_FP_BEFORE") <(printf '%s\n' "$EXE_FP_AFTER") | sed 's/^/  /'
-  echo "FAIL: exe-folder contamination (a probe read/wrote the folder the app's data lives in)"
+  # Deliberately not "a probe did it". This gate watches a directory, not a process, and it cannot tell a
+  # probe apart from anything else that wrote there while it ran: a GUI launched from build/Release, or a
+  # concurrent session building a probe exe into it — this working tree is shared between sessions. Naming
+  # the wrong culprit confidently is the exact failure mode (a gate that cries wolf) this whole issue is
+  # about, so the message names the alternatives and lets the diff above decide.
+  echo "FAIL: exe-folder contamination — something changed the folder the app's data lives in during the run."
+  echo "  Most likely a probe wrote there. It can also be an app or a build running out of that folder at the"
+  echo "  same time (a GUI launched from it, or a concurrent build dropping a new exe in) — the diff says which."
   fail=1
 fi
 echo

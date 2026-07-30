@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.158 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.159 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1079,10 +1079,25 @@ endif()
 # probe_, rather than at each add_executable, for one reason: a probe added next month has to get isolation
 # without its author knowing this issue ever existed. Opt-in isolation would only move the trap.
 #
-# Two properties this placement depends on:
+# Four properties this placement depends on. The first two are about WHERE the sweep sits; the last two are
+# constraints on everything else, and they are recorded here because nothing enforces them:
 #   * it must stay at the END of the file — BUILDSYSTEM_TARGETS only sees targets declared above it;
 #   * the app target must never match — `everythingbox` does not begin with probe_, and the runner's
-#     "probe data-dir isolation wiring" gate fails if anything hands this define to a target by name.
+#     "probe data-dir isolation wiring" gate fails on ANY mention of EB_ISOLATED_DATA_DIR in any CMake file
+#     under native/ other than the one grant below;
+#   * PROBE TARGETS MUST BE DECLARED IN THIS FILE. BUILDSYSTEM_TARGETS is per-DIRECTORY: a probe declared in
+#     an add_subdirectory() CMakeLists is not in this list and would be built with no isolation at all,
+#     writing its ini and add-ons straight into build/Release like before the fix. If a probe ever has to
+#     live in a subdirectory, the sweep has to walk SUBDIRECTORIES too — it does not today;
+#   * A PROBE'S LINK DEPENDENCIES MUST NOT CALL AppPaths::dataDir(). The define is PRIVATE, so a library
+#     target linked into a probe compiles WITHOUT it — and dataDir() is an `inline` function whose body
+#     differs between the two settings (native/src/core/AppPaths.h). Linking both definitions into one
+#     binary is an ODR violation: the linker keeps one COMDAT and may keep the UN-isolated one, at which
+#     point that probe silently reads build/Release again. Nothing catches this — probe_isolation only tests
+#     its OWN binary, and the runner's contamination gate only sees WRITES, not reads. It is not live today:
+#     probes compile the production sources directly, and the library targets they do link
+#     (everythingbox_libretro, rcheevos, lzma7z) never touch AppPaths. Keep it that way, or give the define
+#     to those libraries too so both sides agree.
 # Deleting the block does not silently un-isolate the suite: probe_isolation asserts the outcome at runtime.
 get_property(_eb_dir_targets DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY BUILDSYSTEM_TARGETS)
 set(_eb_isolated_probes "")

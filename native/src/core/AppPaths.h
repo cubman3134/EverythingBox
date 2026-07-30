@@ -9,6 +9,7 @@
 #include <QByteArray>
 #include <QDir>
 #include <QRandomGenerator>
+#include <cstdio>
 #endif
 
 // The app's writable base directory. On desktop this is the executable's own folder - the app is portable,
@@ -48,6 +49,29 @@ namespace Isolated
     //   EB_PROBE_SCRATCH_ROOT  - the parent to create the per-process directory under. run-headless-probes.sh
     //                            sets it to one directory per suite run and deletes that directory afterwards,
     //                            so even a probe that dies before its destructor runs leaves nothing behind.
+    //
+    // The first two are for running a probe BY HAND. run-headless-probes.sh unsets both before it starts, on
+    // purpose: EB_PROBE_DATA_DIR left in a shell profile would hand every probe in every suite run the same
+    // never-cleaned directory, which is issue #42 restored in full and invisible to every gate here.
+
+    // mkpath() returning false is not hypothetical - a full or unwritable temp volume does it - and the
+    // failure is otherwise invisible here: dataDir() hands back a path that does not exist, and every store
+    // layered on top then fails in its own obscure way ("cannot open settings", an empty cache, a save that
+    // never lands), one confusing symptom per probe. Say it once, at the source, on stderr: the runner
+    // captures each probe's stderr into the suite log, so the real cause is in front of whoever reads it.
+    // stderr rather than qFatal() deliberately - aborting the process on Windows can raise a crash dialog
+    // that would hang an unattended suite run, which is a worse failure mode than a loud line.
+    inline bool mkpathOrComplain(const QString &p)
+    {
+        if (QDir().mkpath(p))
+            return true;
+        std::fprintf(stderr,
+                     "EB_ISOLATED_DATA_DIR: could not create the probe data directory '%s'. Every store this "
+                     "probe opens will now fail; check free space and permissions on the temp volume.\n",
+                     p.toLocal8Bit().constData());
+        return false;
+    }
+
     struct Scratch
     {
         QString path;
@@ -59,7 +83,7 @@ namespace Isolated
             if (!pinned.isEmpty())
             {
                 path = QDir::fromNativeSeparators(QString::fromLocal8Bit(pinned));
-                QDir().mkpath(path);
+                mkpathOrComplain(path);
                 return;
             }
             const QByteArray rootEnv = qgetenv("EB_PROBE_SCRATCH_ROOT");
@@ -71,7 +95,7 @@ namespace Isolated
             path = root + QStringLiteral("/p%1-%2")
                               .arg(QCoreApplication::applicationPid())
                               .arg(QRandomGenerator::global()->generate(), 8, 16, QLatin1Char('0'));
-            QDir().mkpath(path);
+            mkpathOrComplain(path);
             owned = true;
         }
 
