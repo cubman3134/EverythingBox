@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.141 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.142 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -33,6 +33,17 @@ target_include_directories(everythingbox_libretro PUBLIC src/libretro)
 if(NOT ANDROID AND NOT IOS)
     add_executable(probe_core tools/probe_core.cpp)
     target_link_libraries(probe_core PRIVATE everythingbox_libretro)
+
+    # Crash-report formatter (issue #28). Declared HERE, outside the EVERYTHINGBOX_BUILD_APP gate,
+    # rather than down with the Qt probes — CrashReport's formatter is deliberately Qt-free,
+    # allocation-free and platform-free (its Windows half is #ifdef'd out entirely elsewhere), so this
+    # probe links against nothing at all and builds in any configuration, including a bare
+    # `cmake -S native -B build` with no Qt installed. That is not a convenience: the reporter is what
+    # records the next occurrence of a bug whose five WER dumps were destroyed by LocalDumps rotation,
+    # so its assertions should be the ones LEAST able to be skipped by a configuration.
+    add_executable(probe_crashreport tools/probe_crashreport.cpp
+        src/core/CrashReport.cpp src/core/CrashReport.h)
+    target_include_directories(probe_crashreport PRIVATE src src/core)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -169,6 +180,9 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BackgroundMusic.cpp src/core/BackgroundMusic.h
         src/core/Achievements.cpp src/core/Achievements.h
         src/core/PerfTrace.cpp    src/core/PerfTrace.h
+        # First-chance access-violation reporter (issue #28) — installed early in main(). Qt-free and
+        # allocation-free by design; on non-Windows the installer compiles to an empty function.
+        src/core/CrashReport.cpp  src/core/CrashReport.h
         src/core/CoreManager.cpp  src/core/CoreManager.h
         src/core/EmulatorManager.cpp src/core/EmulatorManager.h
         src/core/AppUpdater.cpp   src/core/AppUpdater.h
