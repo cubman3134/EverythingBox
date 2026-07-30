@@ -5,6 +5,7 @@
 <p align="center">
   <a href="https://discord.gg/bW7KMVhgwH"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
   <a href="https://www.reddit.com/r/EverythingBox/"><img src="https://img.shields.io/badge/Reddit-r%2FEverythingBox-FF4500?logo=reddit&logoColor=white" alt="Reddit"></a>
+  <a href="https://www.patreon.com/c/TheEverythingBox"><img src="https://img.shields.io/badge/Patreon-support-FF424D?logo=patreon&logoColor=white" alt="Patreon"></a>
 </p>
 
 # EverythingBox
@@ -115,6 +116,11 @@ when they are.
 Reproducible bugs and feature proposals still belong in the
 [issue tracker](https://github.com/cubman3134/EverythingBox/issues) — those need
 to stay searchable and stay open until they are fixed, which chat is bad at.
+
+EverythingBox is funded on **[Patreon](https://www.patreon.com/c/TheEverythingBox)**.
+The app is free and every feature ships to everyone; the $5 Supporter tier is a
+thank-you — the 💖 Supporter role and private lounge on the Discord, and the
+matching flair on the subreddit.
 
 ## Licence
 
