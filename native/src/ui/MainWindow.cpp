@@ -260,6 +260,9 @@ static constexpr int kChipMs = 8000;
 // The community server. Permanent, non-expiring invite — see the Discord design spec.
 static constexpr const char* kDiscordInvite = "https://discord.gg/bW7KMVhgwH";
 
+// The funding page. The app is free and whole either way; this row is a pointer, not a gate.
+static constexpr const char* kPatreonUrl = "https://www.patreon.com/c/TheEverythingBox";
+
 // The installed theme folders, in the form ThemeChoice's migration needs (it is QtCore-only and takes the list
 // as an argument rather than reading the disk itself). Guarded because ThemeEngine is not compiled AT ALL in a
 // non-QML build — where there is no themed home, so "nothing installed" is the honest answer.
@@ -9855,6 +9858,7 @@ void MainWindow::openGeneralSettings()
         // --- Community ---
         sep(tr("Community"));
         action(QStringLiteral("community.discord"), tr("Join the Discord"));
+        action(QStringLiteral("community.patreon"), tr("Support on Patreon"));
 
         // Small helpers to patch a status Info / an Action label in place (updateRow replaces the whole row).
         auto setInfo = [this](const QString& id, const QString& caption, const QString& value) {
@@ -9874,6 +9878,9 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("community.discord")) {
                     // Outward navigation to the browser — same idiom as Appearance's theme-gallery row.
                     QDesktopServices::openUrl(QUrl(QString::fromLatin1(kDiscordInvite)));
+                }
+                else if (id == QStringLiteral("community.patreon")) {
+                    QDesktopServices::openUrl(QUrl(QString::fromLatin1(kPatreonUrl)));
                 }
                 else if (id == QStringLiteral("lib.showhidden")) {
                     store().setValue(QStringLiteral("library/showHidden"), on);
@@ -10643,6 +10650,11 @@ void MainWindow::openGeneralSettings()
             QDesktopServices::openUrl(QUrl(QString::fromLatin1(kDiscordInvite)));
         });
         v->addWidget(cJoin);
+        auto* cSupport = panelRow(tr("Support on Patreon"));
+        connect(cSupport, &QPushButton::clicked, this, [this] {
+            QDesktopServices::openUrl(QUrl(QString::fromLatin1(kPatreonUrl)));
+        });
+        v->addWidget(cSupport);
     }, [this] { openSettingsHub(); });
 }
 
