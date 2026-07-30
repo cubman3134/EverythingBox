@@ -33,9 +33,10 @@
 #include "core/PlayStats.h"
 #include "core/SaveMeta.h"     // save-sync T4: the one-time stray core-save sweep
 #include "core/PerfTrace.h"
+#include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.148";
+static constexpr const char* kAppVersion = "0.5.149";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -231,6 +232,19 @@ int main(int argc, char** argv)
     QApplication::setApplicationDisplayName(QString::fromLatin1(AppBrand::kDisplayName));
     QApplication::setApplicationVersion(QString::fromLatin1(kAppVersion));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/appicon.png")));
+
+    // Issue #28: a ~1-in-6 access violation inside QQuickRepeater::clear() that five reproduction
+    // campaigns failed to trigger. The diagnosis came entirely from ONE full WER dump — and all five
+    // dumps were later evicted by WER's LocalDumps rotation, with no copies. So the next occurrence
+    // records itself: a first-chance vectored handler writes the faulting module+offset, the bad
+    // address and the registers into crash_report.log, beside stream_debug.log, in a file we own and
+    // nothing rotates out. It returns EXCEPTION_CONTINUE_SEARCH, so WER still writes its dump and
+    // nothing else about the process changes.
+    //
+    // Installed HERE, not earlier: the log path is resolved once, now, so the handler itself never
+    // touches AppPaths, QString or any allocator — and AppPaths::dataDir() needs the QApplication (and
+    // on mobile the application NAME, set just above) to already exist. Still long before any window.
+    CrashReport::install((AppPaths::dataDir() + QStringLiteral("/crash_report.log")).toUtf8().constData());
 
     // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
     // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
