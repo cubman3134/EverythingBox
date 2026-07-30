@@ -159,6 +159,11 @@ namespace CrashReport
 
         unsigned long      exceptionCode;   // 0xc0000005 for an access violation
         unsigned long long faultAddress;    // ExceptionAddress (== RIP)
+        // The faulting module, filled by emitRecord's step 2 — NOT up front with the rest of
+        // the fields, because resolving it takes the loader lock. Everything above this line
+        // is already on disk by the time these two are written to. Both stay zero/empty when
+        // resolution failed, and the block that renders them prints "<unknown>" rather than an
+        // offset off a zero base.
         char               moduleName[64];  // basename of the faulting module, ASCII; empty if unresolved
         unsigned long long moduleBase;      // 0 when the module could not be resolved
         int                operation;       // Operation
