@@ -36,7 +36,7 @@ config works, but a Release-configured tree with a Debug-built probe will look
 like "not built" to the suite.
 
 **Never run a target-less `cmake --build build`.** `native/CMakeLists.txt`
-declares 43 probe harnesses in addition to the app, and the default target
+declares 51 probe harnesses in addition to the app, and the default target
 builds all of them. That is many minutes of compiling you almost certainly did
 not want. Name what you need.
 
