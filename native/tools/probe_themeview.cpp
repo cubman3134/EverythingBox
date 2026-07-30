@@ -1,7 +1,7 @@
 // Headless test for the theme renderer's PURE decisions — the functions in src/theme2/qml/Theme.js that
 // answer, for a given theme and a given catalog row, "what actually gets painted?". They are plain JS with
-// no QML, no scene and no host, so this probe evaluates the SHIPPED file out of the theme2 qrc (the same
-// bytes ThemeView.qml imports) in a QJSEngine and pins the answers directly.
+// no scene and no host, so this probe evaluates the SHIPPED file out of the theme2 qrc (the same bytes
+// ThemeView.qml imports) in a QML JS engine, with no window and no scene, and pins the answers directly.
 //
 // Two decisions live here, and both of them were, until issue #29, made implicitly in a way that could
 // render a screen the user can navigate but cannot see:
@@ -22,10 +22,11 @@
 // the scene actually asks.
 //
 // Prints THEMEVIEW-OK on success; any failure prints THEMEVIEW-FAIL <what> and exits non-zero.
-#include <QCoreApplication>
 #include <QFile>
-#include <QJSEngine>
+#include <QGuiApplication>
 #include <QJSValue>
+#include <QQmlEngine>
+#include <QQuickWindow>
 #include <QString>
 #include <cstdio>
 
@@ -34,9 +35,18 @@ static int failures = 0;
     if (!(cond)) { std::fprintf(stderr, "THEMEVIEW-FAIL %s (line %d)\n", what, __LINE__); ++failures; } \
 } while (0)
 
-// Load the shipped Theme.js out of the qrc into a bare JS engine. `.pragma library` is a QML-JS directive
-// that QJSEngine does not parse, so it is stripped — it only tells the QML engine to share one instance of
-// the file, which has no meaning here and no effect on any function below.
+// Load the shipped Theme.js out of the qrc into the JS engine. `.pragma library` is a QML-JS directive that
+// the raw evaluator does not parse, so it is stripped — it only tells the QML engine to share one instance
+// of the file, which has no meaning here and no effect on any function below.
+//
+// The engine is a QQmlEngine, and the target links QtQuick, for ONE reason: inkFor resolves a background
+// colour by asking `Qt.color` — the very parser a `Rectangle { color: … }` uses — instead of hand-reading
+// hex. `Qt` is put on the JS global by the QML engine, and the colour PROVIDER behind Qt.color is installed
+// by the QtQuick module. Against a bare QJSEngine there is no `Qt` at all; against Core+Qml alone Qt.color
+// throws for every input. Either way inkFor would take its unresolvable branch every time and this file
+// would pin a function the app never runs. (`Qt` really is reachable from a `.pragma library` script —
+// verified against a live QML engine, and pinned end to end by probe_navqml §22, which reads the ink and
+// the outline off a REAL rendered fallback view rather than off a returned object.)
 static bool loadThemeJs(QJSEngine& eng)
 {
     QFile f(QStringLiteral(":/theme2/Theme.js"));
@@ -79,9 +89,20 @@ static int     evalInt(QJSEngine& eng, const char* expr) { return evalOr(eng, ex
 
 int main(int argc, char** argv)
 {
-    QCoreApplication app(argc, argv);
-    QJSEngine eng;
+    qputenv("QT_QPA_PLATFORM", "offscreen");   // no scene is built, but QtQuick wants a platform
+    QGuiApplication app(argc, argv);
+    // Touch QtQuick so the linker cannot drop the module whose static init installs the colour provider
+    // that Qt.color needs. Nothing is rendered — this probe has no window and no scene.
+    QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+    QQmlEngine eng;
     if (!loadThemeJs(eng)) return 2;
+    // The load-bearing precondition for every inkFor assertion below: if `Qt` were missing, inkFor would
+    // answer "#FFFFFF" for everything and the light-background cases would fail for a reason that has
+    // nothing to do with the rule they are testing. Say so once, up front, rather than 12 times obliquely.
+    CHECK(evalStr(eng, "typeof Qt") == QStringLiteral("object"),
+          "engine: the QML `Qt` object is on the global — inkFor resolves colours through Qt.color");
+    CHECK(evalStr(eng, "typeof Qt.color") == QStringLiteral("function"),
+          "engine: …and Qt.color is callable (the colour PROVIDER behind it comes from the QtQuick module)");
 
     // Fixtures, defined once in the engine so each assertion below reads as one question.
     //   themed   — a theme that styles `home` and `browse` (what a complete theme looks like).
@@ -165,7 +186,54 @@ int main(int argc, char** argv)
     CHECK(evalStr(eng, "inkFor({ color: '#FFEFF3F8' })") != QStringLiteral("#FFFFFF"),
           "inkFor: an #AARRGGBB colour drops the alpha instead of misreading the channels");
     CHECK(evalStr(eng, "inkFor(null)") == QStringLiteral("#FFFFFF"), "inkFor: no background -> white (safe default)");
-    CHECK(evalStr(eng, "inkFor({ color: 'nonsense' })") == QStringLiteral("#FFFFFF"), "inkFor: junk -> white, never NaN");
+
+    // ---- 4b. inkFor: every colour form a THEME can legally write ---------------------------------------
+    // `background.color` goes to a QML Rectangle, so anything QColor reads is already legal and in the wild.
+    // A reader that understood only 6 and 8 hex digits called all of the rest "dark" and printed WHITE on
+    // them — issue #29 rebuilt on the layer added to fix #29, and specifically on the shared layer whose
+    // job is protecting community-registry themes nobody here can edit. THE case: a registry theme whose
+    // home background is `#EEE` and which declares no `browse`.
+    CHECK(evalStr(eng, "inkFor({ color: '#EEE' })") != QStringLiteral("#FFFFFF"),
+          "inkFor: a 3-digit #RGB near-white is LIGHT — the registry-theme case that must not print white on white");
+    CHECK(evalStr(eng, "inkFor({ color: '#123' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: …and a 3-digit #RGB dark navy is still dark (the expansion is per-nibble, not a truncation)");
+    CHECK(evalStr(eng, "inkFor({ gradient: ['#EEE', '#111'] })") != QStringLiteral("#FFFFFF"),
+          "inkFor: a 3-digit gradient stop resolves too, not just a flat 3-digit colour");
+    // Named colours: ~150 of them are legal, and both tones must land correctly.
+    CHECK(evalStr(eng, "inkFor({ color: 'whitesmoke' })") != QStringLiteral("#FFFFFF"),
+          "inkFor: the NAME 'whitesmoke' is a light background (#F5F5F5), not an unreadable string");
+    CHECK(evalStr(eng, "inkFor({ color: 'darkslategray' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: …and the NAME 'darkslategray' is a dark one (#2F4F4F) — names are read, not defaulted");
+    CHECK(evalStr(eng, "inkFor({ color: 'WhiteSmoke' })") != QStringLiteral("#FFFFFF"),
+          "inkFor: a name is matched case-insensitively, exactly as the Rectangle matches it");
+    // The 9- and 12-digit forms QColor also accepts; nothing in the docs forbids them.
+    CHECK(evalStr(eng, "inkFor({ color: '#EEEFFF888' })") != QStringLiteral("#FFFFFF"),
+          "inkFor: the 9-digit #RRRGGGBBB form resolves (delegation, not a digit-count whitelist)");
+    // A string QColor CANNOT read is not a mystery and must not be treated as one: a Rectangle handed it
+    // paints BLACK. So the honest answer is the black one — white ink — and it is exact, not a fallback.
+    // "#FFF8" belongs here and NOT with the short forms above: Qt has no 3-digit-plus-alpha colour, so it
+    // is a typo that renders as a black box, and expanding it to a near-white would print dark ink on black.
+    CHECK(evalStr(eng, "inkFor({ color: 'nonsense' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: a string QColor cannot read paints BLACK, so it earns white ink");
+    CHECK(evalStr(eng, "inkFor({ color: '#FFF8' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: '#FFF8' is NOT 50% white — Qt has no 4-digit form, the Rectangle paints it black");
+    CHECK(evalStr(eng, "inkFor({ color: '#GGGGGG' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: six NON-hex digits are junk too — a length check alone would have read them as a colour");
+    // Alpha is not decoration: the backdrop composites over the window's near-black clear colour, so a
+    // half-transparent white paints as mid-grey. Reading #80FFFFFF as "white" would print dark ink on it.
+    CHECK(evalStr(eng, "inkFor({ color: 'transparent' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: a fully transparent background shows the near-black window behind it -> white ink");
+    CHECK(evalStr(eng, "inkFor({ color: '#80FFFFFF' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: a half-transparent white paints as mid-grey, and mid-grey takes white ink");
+    // The genuinely unknowable case, and the ONLY one delegation leaves: a background with no colour at all.
+    // An image can be any brightness, so no ink is right on its own — which is why this answer is the one
+    // defaultView pairs with a black halo (§7 below). White-with-a-dark-halo reads over anything; assuming
+    // the LIGHT end here would print near-black on a dark photograph with a near-black outline round it.
+    CHECK(evalStr(eng, "inkFor({ image: 'bg.jpg', dim: 0.3 })") == QStringLiteral("#FFFFFF"),
+          "inkFor: an image-only background takes the dark end -> white ink, which defaultView outlines in black");
+    CHECK(evalStr(eng, "inkFor({})") == QStringLiteral("#FFFFFF") &&
+          evalStr(eng, "inkFor({ color: '' })") == QStringLiteral("#FFFFFF"),
+          "inkFor: an empty background block, and an empty colour string, land there too");
 
     // ---- 5. tileImage: where a tile's artwork comes from -----------------------------------------------
     // The scalar `image` is what HomeView::browseItems() puts on every row, so it wins outright.
@@ -206,6 +274,52 @@ int main(int argc, char** argv)
     // `tileNeedsTitle(null, false)` would assert nothing about null-safety at all. This is the call that
     // actually reaches the row — delegates do run before the model lands.
     CHECK(evalBool(eng, "tileNeedsTitle(null, true)"), "tileNeedsTitle: a null row needs the title, not a crash");
+
+    // ---- 7. the fallback outlines its text, because a background can be a PICTURE ----------------------
+    // inkFor can only answer for a background it can read a colour off. `{ "image": …, "dim": … }` is legal
+    // and gives it nothing, and white over a bright photo is issue #29 again in a shape no luminance rule
+    // can see. So every string the fallback paints carries a halo in the OPPOSITE tone — the same hardening
+    // the `label: "none"` tile placeholder already had. (That the elements actually DRAW it is a separate
+    // claim, pinned in the real scene by probe_navqml §22: a knob no element reads would be inert here.)
+    evalOr(eng, "var imgOnly = { views: { home: { background: { image: 'bg.jpg', dim: 0.3 },"
+                "                                elements: [ { type: 'grid' } ] } } };"
+                "function elById(v, id) { var f = v.elements.filter(function (e) { return e.id === id });"
+                "                         return f.length ? f[0] : ({}) }");
+    CHECK(evalStr(eng, "elById(viewFor(imgOnly, 'browse'), 'ebFallbackTitle').outline") == QStringLiteral("#000000"),
+          "fallback: white ink over an unreadable background is outlined in BLACK, so it reads over any image");
+    CHECK(evalStr(eng, "elById(viewFor(imgOnly, 'browse'), 'ebFallbackHelp').outline") == QStringLiteral("#000000"),
+          "fallback: …and so is the help bar, which had neither outline nor scrim");
+    // The outline tracks the ink rather than being a constant: on a light theme the ink is dark, so a BLACK
+    // halo would be invisible and a black-on-light title would keep no safety margin at all.
+    CHECK(evalStr(eng, "elById(viewFor(lightOne, 'browse'), 'ebFallbackTitle').outline") == QStringLiteral("#FFFFFF"),
+          "fallback: dark ink on a light theme is outlined in WHITE — the halo is the opposite tone, not a constant");
+    CHECK(evalStr(eng, "elById(viewFor(xmbOnly, 'browse'), 'ebFallbackTitle').outline") == QStringLiteral("#000000"),
+          "fallback: white ink on a dark theme is outlined in black");
+
+    // ---- 8. declaresView: the gates and the renderer must mean the same thing by "declared" ------------
+    // The HOST asks "does the theme style this view?" before it OFFERS a route into one ("I" only opens
+    // `detail` on a theme that has one). That question used to be answered by testing the KEY, while
+    // viewFor answered "is there a layout here" by testing the ELEMENT LIST. A theme shipping
+    // `"detail": { "elements": [] }` fell straight through the gap: it passed the gate, so the host entered
+    // detail mode, and then the renderer drew viewFor's fallback — an item GRID bound to the browse rows —
+    // while the key router moved an invisible action cursor and fired play/download verbs at it.
+    CHECK(evalBool(eng, "declaresView(themed, 'browse')"),
+          "declaresView: a view with elements IS declared (the route is offered)");
+    CHECK(!evalBool(eng, "declaresView(xmbOnly, 'browse')"),
+          "declaresView: an absent view is not declared");
+    CHECK(!evalBool(eng, "declaresView(emptyEls, 'browse')"),
+          "declaresView: a declared-but-EMPTY view is not declared either — the exact gap the gates fell through");
+    CHECK(!evalBool(eng, "declaresView({}, 'browse')") && !evalBool(eng, "declaresView(null, 'browse')"),
+          "declaresView: no views / no theme is not declared, and does not throw");
+    // The two answers are one answer: whatever declaresView calls declared is what viewFor renders verbatim,
+    // and whatever it does not is what viewFor replaces. Assert the correspondence itself, so the pair
+    // cannot drift apart again the way key-presence and element-emptiness did.
+    CHECK(evalBool(eng, "['browse','detail','home','nowplayingAudio'].every(function (n) {"
+                        "  return [themed, xmbOnly, emptyEls, lightOne, {}].every(function (t) {"
+                        "    var declared = declaresView(t, n);"
+                        "    var isOwn = viewFor(t, n) === (t && t.views ? t.views[n] : undefined);"
+                        "    return declared === isOwn }) })"),
+          "declaresView/viewFor: declared <=> the theme's OWN object renders; undeclared <=> the fallback does");
 
     if (failures == 0) std::printf("THEMEVIEW-OK\n");
     else std::fprintf(stderr, "THEMEVIEW: %d failed\n", failures);

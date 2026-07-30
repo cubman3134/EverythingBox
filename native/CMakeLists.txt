@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.152 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.153 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -576,12 +576,22 @@ if(EVERYTHINGBOX_BUILD_APP)
         target_link_libraries(probe_theme2 PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Multimedia ${MPV_LIBRARY})
 
         # The theme renderer's PURE decisions (issue #29): Theme.js's viewFor/inkFor/tileImage/tileNeedsTitle,
-        # evaluated out of the theme2 qrc in a bare QJSEngine — the same bytes ThemeView.qml imports, with no
+        # evaluated out of the theme2 qrc in a QML JS engine — the same bytes ThemeView.qml imports, with no
         # scene, no widgets and no host. Its own qt_add_resources call (a target_sources-added .qrc silently
         # no-ops — see the app target's note above) so :/theme2/Theme.js is embedded and readable.
         qt_add_resources(EB_THEME2_RCC_THEMEVIEW resources/theme2.qrc)
         add_executable(probe_themeview tools/probe_themeview.cpp ${EB_THEME2_RCC_THEMEVIEW})
-        target_link_libraries(probe_themeview PRIVATE Qt6::Core Qt6::Qml)
+        # Qt6::Quick, for a probe with no scene in it: inkFor resolves a background colour through Qt.color,
+        # and the colour provider behind Qt.color is installed by the QtQuick module, not by QtQml. Linked
+        # against Core+Qml alone the call throws for EVERY input and inkFor answers "white" to everything —
+        # the light-background assertions then fail loudly, which is how this was found, but the point is
+        # that the probe must run Theme.js in the environment the app gives it. See probe_themeview.cpp.
+        #
+        # Declared inside if(EB_HAVE_QML) yet named UNCONDITIONALLY in ci.yml's build-probes line, so on a Qt
+        # install without qtdeclarative the BUILD step fails loudly instead of the suite quietly skipping.
+        # That is deliberate: probe_navqml §22 is the only end-to-end cover for issue #29, and a §22 that
+        # silently does not run is worse than a build that stops and says qtdeclarative is missing.
+        target_link_libraries(probe_themeview PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
 
         # Verifies MpvPreview (libmpv software-render) decodes + paints real frames on the software backend,
         # using mpv's built-in lavfi test source so no video file/key is needed.

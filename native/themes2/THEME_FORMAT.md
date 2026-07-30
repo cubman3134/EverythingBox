@@ -47,9 +47,14 @@ The whole layout is **resolution-independent**: positions, sizes and font sizes 
 **Undeclared views fall back, they do not go blank.** If the app navigates to a view your theme does not
 declare (or declares with no `elements`), the engine renders a plain built-in layout for it — the view's
 title, a grid of its items and the help bar — over **your** `home` background, with ink picked light or
-dark to stay readable on it. It is a safety net, not a design: a theme that styles the view always wins.
-It exists because a missing view used to paint the background and nothing else, which is a screen the user
-can navigate and select on but cannot see (issue #29).
+dark to stay readable on it, and outlined so it stays readable over a background `image` too. It is a
+safety net, not a design: a theme that styles the view always wins. It exists because a missing view used
+to paint the background and nothing else, which is a screen the user can navigate and select on but cannot
+see (issue #29).
+
+A view declared with an **empty** `elements` list counts as not declared **everywhere**, not just in the
+renderer: `"detail": { "elements": [] }` does not switch **I** (Info) on, and an empty `nowplayingAudio`
+keeps the classic player page. Declaring the key is not enough — give the view elements or leave it out.
 
 ## Positioning (every element)
 
@@ -113,14 +118,17 @@ not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 
 ## Colours & fonts
 
-- Colours are hex strings, e.g. `"#E07A2E"`.
+- Colours are hex strings, e.g. `"#E07A2E"`. Any form Qt reads is accepted, so `"#RGB"` (`"#EEE"`),
+  `"#RRGGBB"`, `"#AARRGGBB"` and the SVG colour **names** (`"white"`, `"whitesmoke"`) all work. A string Qt
+  cannot read is **not** ignored — it paints **black**, so a typo'd colour is a black box, not the default.
+  There is no 3-digit-plus-alpha form: `"#FFF8"` is a typo, not 50 % white.
 - `fontSize` is a **fraction of screen height** (e.g. `0.04` ≈ 4% tall). `fontFamily` optional. `bold` true/false. `align`: `left`|`center`|`right`.
 
 ## Elements
 
 | `type` | Purpose | Key properties |
 | --- | --- | --- |
-| `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines` |
+| `text` | literal or bound text | `text` or `binding`, `color`, `fontSize`, `align`, `bold`, `wrap`, `lines`, `outline` (a contrasting halo colour, for text over an image) |
 | `datetime` | live clock/date | `format` (Qt format, e.g. `"hh:mm"`, `"ddd d MMM"`), `color`, `fontSize`, `align`, `fontFile` (a bundled font in the theme folder, e.g. `"fonts/Foo.ttf"`) or `fontFamily` (a system font) |
 | `image` | poster / picture | `path` or `binding`, `fillMode` (`contain`\|`cover`\|`stretch`), `radius`, `color` (placeholder) |
 | `grid` | grid of item cards | `columns`, `aspect`, `spacing`, `card.radius`, `card.selectedBorder`, `card.selectedWidth`, `card.fill`, `card.border`+`card.borderWidth` (always-on outline), `card.selectedScale` (the selected card grows + lifts), `card.label` (`overlay`\|`center` name centred on the card, no bar\|`top` title bar on the card\|`below` name-plate\|`none`), `card.labelSize`, `card.labelColor`, `card.labelBg` |
@@ -131,7 +139,7 @@ not `facts`. **Night** binds it on both its `browse` pane and its `detail` page.
 | `carousel` | horizontal strip, selected centred + enlarged | `itemWidth`, `spacing`, `color` (selection), `card.radius` |
 | `rating` | five stars from a 0..1 value | `binding` (or `value`), `color`, `emptyColor` |
 | `video` | preview area: a slow Ken Burns drift over the bound poster + a play badge | `path`/`binding`, `radius` |
-| `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize` |
+| `helpsystem` | row of button hints | `entries: [{button,label}, …]`, `color`, `fontSize`, `outline` (as `text`) |
 | `particles` | animated background field | `preset`, `count`, `color`, `dotSize`, `speed`, `image` |
 | `xmb` | PlayStation-style cross (categories × items) | `color`, `subColor`, `descColor`, `crossX`, `crossY`, `catSpacing`, `itemSpacing`, `iconSize` |
 | `sidebar` | a vertical rail of the media-type **categories** beside a grid — the non-XMB way into that zone (see below) | the rail: `fill`, `radius`, `border`+`borderWidth`, `title`, `titleColor`, `titleSize`. The rows: `rowHeight`, `rowSpacing`, `rowRadius`, `fontSize`, `fontFamily`, `bold`, `color`, `selectedColor`, `selectedBg` (selected, rail unfocused), `focusBg` (selected, rail focused — the focus ring), `accentBar`, `showIcons` |

@@ -11,6 +11,12 @@ Text {
     readonly property real ffs: (typeof form !== "undefined" && form) ? form.uiScale : 1
     text: T.textOf(el, ctx)
     color: T.val(el, "color", "#FFFFFF")
+    // Optional `outline`: a contrasting halo, for text over something whose brightness cannot be known in
+    // advance (an image background — see Theme.js defaultView). Absent on every hand-written theme, so the
+    // default is Text.Normal and nothing about the existing look changes.
+    readonly property string outlineColor: T.val(el, "outline", "")
+    style: outlineColor !== "" ? Text.Outline : Text.Normal
+    styleColor: outlineColor !== "" ? outlineColor : "transparent"
     // An empty fontFamily must fall back to the working application default, NOT to Qt's "" -> "MS Sans Serif"
     // resolution: that legacy bitmap face fails DirectWrite (CreateFontFaceFromHDC) on many Windows systems, so
     // the whole Text paints nothing. Item-rooted elements (HelpSystem/Carousel) never set family and render fine.

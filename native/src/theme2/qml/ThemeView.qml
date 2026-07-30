@@ -26,8 +26,11 @@ Item {
     // DECLARED, not rendered: this asks whether the THEME styles a view, which is what the host must know
     // before it offers a route into one (the "I" key below only opens `detail` for a theme that has one).
     // The built-in fallback is what a view you have already entered falls back to — never a reason to
-    // offer a surface the theme never asked for.
-    function hasView(name) { return !!(theme && theme.views && theme.views[name]) }
+    // offer a surface the theme never asked for. Delegates to T.declaresView so it cannot drift from what
+    // viewFor above calls "declared": this used to test the KEY while viewFor tested the ELEMENT LIST, and
+    // a theme shipping `"detail": { "elements": [] }` slipped through the gap into detail mode drawn as a
+    // browse grid. See the note beside declaresView in Theme.js.
+    function hasView(name) { return T.declaresView(theme, name) }
     // Optional vertical background gradient: background.gradient = ["#top", "#bottom"] (else a flat colour).
     readonly property var bgGradient: (view && view.background && view.background.gradient) ? view.background.gradient : null
 

@@ -1752,6 +1752,16 @@ static void runUndeclaredViewAsserts()
     // ---- (b) the hardening: an artwork-less row degrades to readable text -----------------------------
     // `label: "none"` is the one card style that puts no title on the card, so a row whose artwork is
     // missing (or whose url is dead) used to be a bare coloured rectangle with nothing on it at all.
+    //
+    // The rule has TWO halves and this fixture has to hold both of them down, because they fail in opposite
+    // directions and a fixture where nothing ever loads cannot tell them apart. `tileNeedsTitle(item,
+    // artReady)` says "draw the title unless artwork is actually ON SCREEN": hard-wire artReady true at the
+    // call site and the DEAD-url row silently loses its placeholder again (the very regression the shared
+    // rule exists for); wire it false, or drop the artReady term, and the placeholder is painted straight
+    // over artwork that loaded perfectly well. So the grid below carries a row whose art is a REAL file
+    // written into the scratch dir NEXT TO a row whose url points at nothing, and asserts the title hidden
+    // on the first and visible on the second. The Image statuses are asserted too — without them, "no
+    // visible title on the good row" would pass just as well if the good row had never loaded either.
     {
         QTemporaryDir dir;
         CHECK(dir.isValid(), "tile-placeholder: a scratch theme dir exists");
@@ -1766,15 +1776,24 @@ static void runUndeclaredViewAsserts()
         tf.write(themeJson);
         tf.close();
 
-        // Row 0 carries NO artwork at all; row 1 carries it only under the open-ended `images` role map
-        // (no scalar `image`) — the shape a builder that publishes roles produces, which used to paint a
-        // bare tile in every grid while the artwork sat right there on the row.
+        // A REAL image, on disk beside the theme.json, so one row's artwork genuinely reaches Image.Ready.
+        // `host.resolve()` reads a relative path against the theme dir, so the file name is all the row needs.
+        QImage art(8, 8, QImage::Format_RGB32);
+        art.fill(QColor(0x20, 0x90, 0xE0));
+        CHECK(art.save(dir.filePath(QStringLiteral("real.png"))), "tile-placeholder: the scratch artwork wrote");
+
+        // Row 0 carries NO artwork at all. Row 1 carries a real file, and carries it only under the
+        // open-ended `images` role map (no scalar `image`) — the shape a builder that publishes roles
+        // produces, which used to paint a bare tile while the artwork sat right there on the row. Row 2
+        // carries a url that will never resolve: the file is deliberately NOT written.
         QVariantList items;
         items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("ARTLESSROW") } };
-        QVariantMap roleOnly{ { QStringLiteral("title"), QStringLiteral("ROLEONLYROW") } };
+        QVariantMap roleOnly{ { QStringLiteral("title"), QStringLiteral("GOODARTROW") } };
         roleOnly.insert(QStringLiteral("images"),
-                        QVariantMap{ { QStringLiteral("poster"), QVariantList{ QStringLiteral("poster.png") } } });
+                        QVariantMap{ { QStringLiteral("poster"), QVariantList{ QStringLiteral("real.png") } } });
         items << roleOnly;
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("DEADARTROW") },
+                              { QStringLiteral("image"), QStringLiteral("never-written.png") } };
         QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
         QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
         auto* qw = qobject_cast<QQuickWidget*>(w);
@@ -1786,22 +1805,173 @@ static void runUndeclaredViewAsserts()
         QTest::qWait(400);   // the first-appear fade of `content`, as above
         pump(); qw->grabFramebuffer(); pump();
 
+        // Both images settle asynchronously; give them a bounded chance to finish rather than a fixed wait.
+        auto imageFor = [&](const QString& tail) {
+            return findVisual(root, [&tail](QQuickItem* it) {
+                return it->property("source").toUrl().toString().endsWith(tail);
+            });
+        };
+        for (int i = 0; i < 40; ++i)
+        {
+            QQuickItem* g = imageFor(QStringLiteral("real.png"));
+            if (g && g->property("status").toInt() != 0 /* Image.Loading */) break;
+            QTest::qWait(25);
+            pump();
+        }
+        pump(); qw->grabFramebuffer(); pump();
+
         // A VISIBLE text item carrying the row's title — the placeholder, in the card style that has no
         // label of its own. `isVisible()` is the load-bearing half: the Text exists either way, and the
         // defect was precisely that it was hidden.
-        QQuickItem* placeholder = findVisual(root, [](QQuickItem* it) {
-            return it->property("text").toString() == QStringLiteral("ARTLESSROW") && it->isVisible();
-        });
-        CHECK(placeholder != nullptr,
+        auto titleItem = [&](const QString& title, bool wantVisible) {
+            return findVisual(root, [&title, wantVisible](QQuickItem* it) {
+                return it->property("text").toString() == title && it->isVisible() == wantVisible;
+            });
+        };
+        CHECK(titleItem(QStringLiteral("ARTLESSROW"), true) != nullptr,
               "tile-placeholder: an artwork-less card in a `label: none` grid draws its TITLE, not a bare tile");
 
         // The role-only row resolves its artwork through T.tileImage rather than the bare `image` field, so
         // the grid asks for the poster instead of falling back to a placeholder for a row that HAS art.
-        QQuickItem* poster = findVisual(root, [](QQuickItem* it) {
-            return it->property("source").toUrl().toString().endsWith(QStringLiteral("poster.png"));
-        });
+        QQuickItem* poster = imageFor(QStringLiteral("real.png"));
         CHECK(poster != nullptr,
               "tile-placeholder: a row carrying art only under `images.poster` still gets a poster source");
+        // Image.Ready == 1. This is the anti-vacuity guard for the assertion below it: if the artwork never
+        // loaded, "the good row shows no title" would pass for entirely the wrong reason.
+        CHECK(poster && poster->property("status").toInt() == 1,
+              "tile-placeholder: …and that artwork actually REACHES Image.Ready (a real file, really loaded)");
+        // Direction 1 — artwork on screen must NOT get a placeholder painted over it. The Text still exists
+        // in the delegate, so assert that it exists and is HIDDEN, never merely that no visible one is found:
+        // a delegate that failed to instantiate would satisfy the weaker claim.
+        CHECK(titleItem(QStringLiteral("GOODARTROW"), false) != nullptr,
+              "tile-placeholder: a row whose artwork LOADED keeps its title hidden — no placeholder over the art");
+        CHECK(titleItem(QStringLiteral("GOODARTROW"), true) == nullptr,
+              "tile-placeholder: …and it is hidden in the only sense that matters — nothing readable is drawn on it");
+
+        // Direction 2 — the regression the shared rule exists for. The row HAS a url, so a check that keyed
+        // off the url alone would hide the title; the url is dead, so the tile would be blank. This is the
+        // assertion that dies if any call site hard-wires artReady true.
+        QQuickItem* dead = imageFor(QStringLiteral("never-written.png"));
+        CHECK(dead != nullptr, "tile-placeholder: the dead-url row still ASKS for its (missing) artwork");
+        CHECK(dead && dead->property("status").toInt() != 1,
+              "tile-placeholder: …and that request does not reach Ready (the file was never written)");
+        CHECK(titleItem(QStringLiteral("DEADARTROW"), true) != nullptr,
+              "tile-placeholder: a row whose url is DEAD draws its title — carrying a url is not carrying artwork");
+
+        delete w;
+        pump();
+    }
+
+    // ---- (c) the fallback's text is OUTLINED, and the ink is Qt-resolved ------------------------------
+    // Two claims the pure probe cannot make, because both are about what the SCENE does with what Theme.js
+    // returns. (1) `outline` is a knob defaultView sets and the Text/HelpSystem elements have to read: a
+    // knob no element reads is inert, and this one is the whole protection for a background that is an
+    // IMAGE, where no luminance rule can pick a safe ink. (2) inkFor resolves colours through Qt.color, and
+    // `Qt` has to actually be reachable from a `.pragma library` script inside the real engine — so this
+    // uses a theme whose home background is the NAME "whitesmoke", which a hand-rolled hex reader would
+    // have called dark and printed white-on-near-white for. That is issue #29's own failure, on the layer
+    // added to fix issue #29.
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "fallback-ink: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"LightNamed\", \"views\": { \"home\": {"
+            "  \"background\": { \"color\": \"whitesmoke\" },"
+            "  \"elements\": [ { \"type\": \"grid\", \"pos\": [0, 0], \"size\": [1, 1] } ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "fallback-ink: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Row") } };
+        QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("SEARCHTITLE"));
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, system, nullptr);
+        auto* qw = qobject_cast<QQuickWidget*>(w);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(qw && root, "fallback-ink: the light-named fixture built");
+        if (!qw || !root) { if (w) delete w; return; }
+        qw->resize(1280, 720);
+        qw->show();
+        root->setProperty("currentView", QStringLiteral("browse"));   // the view it never declared
+        QTest::qWait(400);
+        pump(); qw->grabFramebuffer(); pump();
+
+        // The ink, off the REAL resolved view — not off a value handed back to a test harness.
+        const QVariantList els = root->property("view").toMap().value(QStringLiteral("elements")).toList();
+        QVariantMap title;
+        for (const QVariant& e : els)
+            if (e.toMap().value(QStringLiteral("id")).toString() == QStringLiteral("ebFallbackTitle"))
+                title = e.toMap();
+        CHECK(!title.isEmpty(), "fallback-ink: the fallback view carries its title element");
+        CHECK(title.value(QStringLiteral("color")).toString() != QStringLiteral("#FFFFFF"),
+              "fallback-ink: a NAMED light background ('whitesmoke') gets DARK ink — Qt.color is reachable "
+              "from Theme.js in the real engine, and a name is not junk");
+
+        // And the scene actually draws the halo: Text.Outline == 1. Without this the `outline` key would be
+        // a value in a map that nothing renders.
+        QQuickItem* titleText = findVisual(root, [](QQuickItem* it) {
+            return it->property("text").toString() == QStringLiteral("SEARCHTITLE") && it->isVisible();
+        });
+        CHECK(titleText != nullptr, "fallback-ink: the fallback title is on screen, bound to system.name");
+        CHECK(titleText && titleText->property("style").toInt() == 1 /* Text.Outline */,
+              "fallback-ink: …and it is drawn OUTLINED, so it survives a background image too");
+        CHECK(titleText && titleText->property("styleColor").value<QColor>() == QColor(0xFF, 0xFF, 0xFF),
+              "fallback-ink: …in the tone OPPOSITE the ink (dark ink -> white halo), not a fixed colour");
+
+        // The help bar had neither outline nor scrim; it carries one now, in the same tone.
+        QQuickItem* helpText = findVisual(root, [](QQuickItem* it) {
+            return it->property("text").toString() == QStringLiteral("Navigate") && it->isVisible();
+        });
+        CHECK(helpText != nullptr, "fallback-ink: the fallback help bar is on screen");
+        CHECK(helpText && helpText->property("style").toInt() == 1 /* Text.Outline */,
+              "fallback-ink: …and the help bar is outlined too");
+
+        delete w;
+        pump();
+    }
+
+    // ---- (d) hasView agrees with viewFor about what "declared" means ----------------------------------
+    // hasView is what the HOST asks before it OFFERS a route into a view ("I" only opens `detail` on a
+    // theme that has one), and the C++ gates in MainWindow ask the same question the same way. It used to
+    // test the KEY while viewFor tested the ELEMENT LIST, so `"detail": { "elements": [] }` passed the gate
+    // and then rendered viewFor's fallback — an item grid bound to the browse rows — with the key router
+    // sitting in detail mode over it, arrows moving an invisible action cursor and Enter firing play verbs.
+    {
+        QTemporaryDir dir;
+        CHECK(dir.isValid(), "hasview-gate: a scratch theme dir exists");
+        if (!dir.isValid()) return;
+        const char* themeJson =
+            "{ \"name\": \"EmptyDetail\", \"views\": {"
+            "  \"home\":   { \"background\": { \"color\": \"#101010\" },"
+            "                \"elements\": [ { \"type\": \"grid\", \"pos\": [0, 0], \"size\": [1, 1] } ] },"
+            "  \"detail\": { \"elements\": [] },"
+            "  \"browse\": { \"elements\": [ { \"type\": \"grid\", \"pos\": [0, 0], \"size\": [1, 1] } ] } } }";
+        QFile tf(dir.filePath(QStringLiteral("theme.json")));
+        if (!tf.open(QIODevice::WriteOnly)) { CHECK(false, "hasview-gate: scratch theme.json writable"); return; }
+        tf.write(themeJson);
+        tf.close();
+
+        QVariantList items;
+        items << QVariantMap{ { QStringLiteral("title"), QStringLiteral("Row") } };
+        QWidget* w = ThemeEngine::buildView(dir.path(), items, QVariantMap(), nullptr);
+        QQuickItem* root = ThemeEngine::rootItem(w);
+        CHECK(root, "hasview-gate: the empty-detail fixture built");
+        if (!root) { if (w) delete w; return; }
+        pump();
+
+        auto hasView = [&](const char* name) {
+            QVariant ret;
+            QMetaObject::invokeMethod(root, "hasView", Q_RETURN_ARG(QVariant, ret),
+                                      Q_ARG(QVariant, QVariant(QString::fromLatin1(name))));
+            return ret.toBool();
+        };
+        CHECK(hasView("browse"), "hasview-gate: a view WITH elements is declared (the control)");
+        CHECK(!hasView("detail"),
+              "hasview-gate: a view declared with an EMPTY element list is NOT declared — the gate and the "
+              "renderer now mean the same thing, so the host never enters detail mode over a browse grid");
+        CHECK(!hasView("nowplayingAudio"), "hasview-gate: an absent view is not declared");
 
         delete w;
         pump();
