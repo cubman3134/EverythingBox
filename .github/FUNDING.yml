@@ -1,0 +1,4 @@
+# Puts a "Sponsor" button at the top of the repository page.
+# Short form: GitHub builds https://patreon.com/TheEverythingBox, which resolves to the
+# same creator page as the /c/ URL used on the website.
+patreon: TheEverythingBox
