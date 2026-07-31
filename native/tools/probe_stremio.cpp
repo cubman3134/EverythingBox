@@ -1190,6 +1190,12 @@ int main(int argc, char** argv)
     // Runs against the probe's isolated data dir (issue #42), so this touches no real queue.
     {
         const QString downloads = AppPaths::dataDir() + QStringLiteral("/downloads");
+
+        // Section 16 leaves its own queue.json behind — jobs pointing at a folder it deliberately made
+        // unwritable. A DownloadManager constructed here would load() them, so every jobs() count below
+        // would be off by however many that section queued. Per-process isolation (#42) says nothing about
+        // what one section leaves the next; that is what an inter-section reset is for (#48).
+        QFile::remove(downloads + QStringLiteral("/queue.json"));
         StreamHeaders::Headers declaredHeaders;
         declaredHeaders.insert(QStringLiteral("Referer"), QStringLiteral("https://gated.test/watch"));
         declaredHeaders.insert(QStringLiteral("X-Token"), QStringLiteral("PROBE-TOKEN"));
