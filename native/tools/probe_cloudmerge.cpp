@@ -15,6 +15,15 @@
 //   * the wired remove-sites tombstone (FavoritesStore::remove, PlaylistStore::remove, ItemMarks tag deletion),
 //     while hiding an item is NOT a delete and records no tombstone.
 //
+// It now also owns the #34 push-on-Save decision layer (§19-22), which belongs here rather than in a probe of
+// its own: the policy is only meaningful against CloudSync's fingerprint/carve-out contract and SettingsTxn's
+// scope predicate, and both are already linked into this target.
+//   * PendingPush::backoffMs / due() — the retry schedule, the give-up cap, and the auth park;
+//   * PendingPush::resolve() — the conflict plan, incl. the property that makes it converge in one round;
+//   * PendingPush::onOutcome / classifyRefresh / classifyPush — the state transitions;
+//   * the record's durability and SHAPE — three scalars, device-local, out of transaction scope, invisible to
+//     the sync fingerprint, and provably carrying no settings value.
+//
 // Prints CLOUDMERGE-OK on success; any failure prints CLOUDMERGE-FAIL <cond> (line) and exits non-zero.
 //
 // Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so every store below
@@ -29,6 +38,7 @@
 #include "CloudMerge.h"
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
+#include "PendingPush.h"    // #34: the durable pending-push record + the retry policy (§19-22)
 #include "ProfileStore.h"
 #include "AppPaths.h"
 #include "AppBrand.h"
@@ -884,6 +894,256 @@ int main(int argc, char** argv)
         QDir(app + QStringLiteral("/states")).removeRecursively();
         QDir(app + QStringLiteral("/themes/probeT3")).removeRecursively();
         CHECK(CloudSync::stateFingerprint() == fp0);   // cleanup restored the baseline (no stray left behind)
+    }
+
+    // ---- 19. #34 backoff + due(): when a retry runs, when it waits, and when it stops --------------------
+    // The whole "durable retry" contract is here, and it is pure — no clock, no socket. Every Due value is
+    // reachable and every one of them is a DIFFERENT behaviour at the call site, which is why they exist.
+    {
+        using namespace PendingPush;
+        // Backoff doubles per consecutive failure and then flattens at the ceiling. The point of the cap is
+        // that an offline handheld makes ~10 attempts a day, not thousands.
+        CHECK(backoffMs(0) == 0);                       // nothing owed -> due immediately
+        CHECK(backoffMs(1) == kBaseDelayMs);
+        CHECK(backoffMs(2) == 2 * kBaseDelayMs);
+        CHECK(backoffMs(3) == 4 * kBaseDelayMs);
+        CHECK(backoffMs(7) == kMaxDelayMs);             // 64x base would exceed the ceiling -> clamped
+        CHECK(backoffMs(1000) == kMaxDelayMs);          // and a corrupted count cannot shift past 63 (UB)
+        CHECK(backoffMs(-5) == 0);
+
+        const qint64 t0 = 1'000'000'000'000LL;          // an arbitrary fixed "now"; nothing here reads a clock
+
+        State clean;
+        CHECK(owed(clean) == false);
+        CHECK(gaveUp(clean) == false);
+        CHECK(due(clean, /*signedIn*/true,  /*manual*/false, t0) == Due::Nothing);   // nothing owed -> no traffic
+        CHECK(due(clean, /*signedIn*/false, /*manual*/false, t0) == Due::Nothing);
+
+        State one; one.attempts = 1; one.lastAttemptMs = t0; one.failure = Failure::Offline;
+        CHECK(owed(one) == true);
+        // Signed out beats everything: a push owed to an account we no longer hold must not touch the network.
+        CHECK(due(one, /*signedIn*/false, /*manual*/false, t0 + kMaxDelayMs) == Due::Nothing);
+        CHECK(due(one, /*signedIn*/false, /*manual*/true,  t0 + kMaxDelayMs) == Due::Nothing);
+        // Inside the window -> Wait. Exactly AT the deadline -> Attempt (the boundary is inclusive, so a
+        // timer that fires precisely on time is not thrown away for one millisecond).
+        CHECK(due(one, true, false, t0) == Due::Wait);
+        CHECK(due(one, true, false, t0 + kBaseDelayMs - 1) == Due::Wait);
+        CHECK(due(one, true, false, t0 + kBaseDelayMs) == Due::Attempt);
+        // A user action overrides the backoff window.
+        CHECK(due(one, true, /*manual*/true, t0) == Due::Attempt);
+
+        // Give-up: kMaxAttempts consecutive failures parks the retry, and NO amount of waiting un-parks it.
+        State capped; capped.attempts = kMaxAttempts; capped.lastAttemptMs = t0; capped.failure = Failure::Offline;
+        CHECK(gaveUp(capped) == true);
+        CHECK(due(capped, true, false, t0 + 100 * kMaxDelayMs) == Due::GaveUp);
+        CHECK(due(capped, true, /*manual*/true, t0) == Due::Attempt);   // only a user action resumes it
+        // One short of the cap is NOT parked — the boundary is the cap itself, not "nearly".
+        State nearly; nearly.attempts = kMaxAttempts - 1; nearly.lastAttemptMs = t0; nearly.failure = Failure::Offline;
+        CHECK(gaveUp(nearly) == false);
+        CHECK(due(nearly, true, false, t0 + kMaxDelayMs) == Due::Attempt);
+
+        // Sign-in expiry is NOT offline: it is parked immediately, at the FIRST failure, because no amount of
+        // patience fixes it. This is the "retrying forever in a state that never resolves" the issue calls out.
+        State expired; expired.attempts = 1; expired.lastAttemptMs = t0; expired.failure = Failure::AuthExpired;
+        CHECK(due(expired, true, false, t0 + 100 * kMaxDelayMs) == Due::NeedsSignIn);
+        CHECK(due(expired, true, false, t0) == Due::NeedsSignIn);       // not even Wait — never automatic
+        CHECK(due(expired, true, /*manual*/true, t0) == Due::Attempt);
+        // ...and it wins over give-up, so a stale account that also burned the cap reports the ACTIONABLE
+        // state ("sign in again") rather than the generic one.
+        State both; both.attempts = kMaxAttempts + 3; both.lastAttemptMs = t0; both.failure = Failure::AuthExpired;
+        CHECK(gaveUp(both) == true);
+        CHECK(due(both, true, false, t0) == Due::NeedsSignIn);
+    }
+
+    // ---- 20. #34 resolve(): what an attempt actually does, and why it cannot oscillate -------------------
+    {
+        using namespace PendingPush;
+        // Unreachable is UNPROVEN-EMPTY, not "nothing to do". Both halves matter: a failed folder query and a
+        // failed bundle query each mean the push would upload against an empty file id and POST a DUPLICATE
+        // bundle rather than PATCH the real one.
+        CHECK(resolve(/*reached*/false, /*listReached*/true,  /*local*/true, /*remote*/false) == Plan::Unreachable);
+        CHECK(resolve(true,  /*listReached*/false, true,  false) == Plan::Unreachable);
+        CHECK(resolve(false, false, true, true) == Plan::Unreachable);
+        // THE IDEMPOTENCE GATE. Whatever the record thinks it owes, the fingerprint is the authority: a retry
+        // that finds local == the synced baseline uploads nothing and clears. This is what stops a retry from
+        // re-sending state an exit push or a manual Sync now already got up there.
+        CHECK(resolve(true, true, /*local*/false, /*remote*/false) == Plan::NothingToSend);
+        CHECK(resolve(true, true, /*local*/false, /*remote*/true)  == Plan::NothingToSend);  // peer moved, we owe nothing
+        // We have edits and the remote is where we left it -> a plain push.
+        CHECK(resolve(true, true, true, false) == Plan::Push);
+        // CONFLICT: a peer pushed while we were offline AND we have local edits. Take theirs first, then send
+        // ours. Never a blind push — that would silently revert the peer's whole bundle.
+        CHECK(resolve(true, true, true, true) == Plan::PullThenPush);
+        // NON-OSCILLATION, stated as a property rather than a story: after the pull has made local == the
+        // synced baseline (applyRemote sets cloud/syncedHash to the remote's own hash), the SAME inputs that
+        // produced PullThenPush produce NothingToSend. There is no input to resolve() for which the plan is
+        // still PullThenPush once localChanged has gone false, so the round cannot repeat itself.
+        for (int r = 0; r < 2; ++r)
+            CHECK(resolve(true, true, /*local*/false, /*remote*/r != 0) == Plan::NothingToSend);
+    }
+
+    // ---- 21. #34 outcome transitions + failure classification -------------------------------------------
+    {
+        using namespace PendingPush;
+        const qint64 t0 = 1'700'000'000'000LL;
+
+        State s;
+        s = onOutcome(s, Outcome::Offline, t0);
+        CHECK(s.attempts == 1 && s.lastAttemptMs == t0 && s.failure == Failure::Offline);
+        s = onOutcome(s, Outcome::Offline, t0 + 5);
+        CHECK(s.attempts == 2 && s.lastAttemptMs == t0 + 5);          // consecutive failures accumulate
+        // A later AUTH failure re-classifies the record without resetting the count — the attempts already
+        // spent are still spent, and the park reason is now the actionable one.
+        s = onOutcome(s, Outcome::AuthExpired, t0 + 9);
+        CHECK(s.attempts == 3 && s.failure == Failure::AuthExpired);
+        // Success ZEROES the whole record, not just the counter: a clean record must LOOK clean.
+        const State cleared = onOutcome(s, Outcome::Success, t0 + 20);
+        CHECK(cleared.attempts == 0);
+        CHECK(cleared.lastAttemptMs == 0);
+        CHECK(cleared.failure == Failure::None);
+        CHECK(owed(cleared) == false);
+
+        // classifyRefresh separates "needs a human" from "needs patience" using the only two facts the token
+        // layer actually has: did the endpoint answer, and did it say no.
+        CHECK(classifyRefresh(/*haveToken*/false, /*answered*/true,  /*rejected*/false) == Auth::Expired);  // nothing to refresh
+        CHECK(classifyRefresh(true,  /*answered*/false, false) == Auth::Offline);   // never heard back
+        CHECK(classifyRefresh(true,  true,  /*rejected*/true)  == Auth::Expired);   // answered, and said no
+        CHECK(classifyRefresh(true,  true,  false) == Auth::Ok);
+        // No stored grant is Expired even when the network is fine — the fix is a sign-in, not a retry.
+        CHECK(classifyRefresh(false, false, false) == Auth::Expired);
+
+        // classifyPush: ONLY the token layer can declare an auth failure. Every other failure is retryable,
+        // which is what keeps a plain Drive hiccup out of the "sign in again" prompt.
+        CHECK(classifyPush(/*ok*/true,  Auth::Expired) == Outcome::Success);   // success is success regardless
+        CHECK(classifyPush(false, Auth::Expired) == Outcome::AuthExpired);
+        CHECK(classifyPush(false, Auth::Offline) == Outcome::Offline);
+        CHECK(classifyPush(false, Auth::Ok)      == Outcome::Offline);         // a Drive error, not an auth one
+    }
+
+    // ---- 22. #34 durability, record SHAPE, and the carve-outs that keep credentials out of it ------------
+    // The record must survive a restart, must never travel to another device, must never be undone by a
+    // settings Discard, and must never itself look like a settings change. That last one is the load-bearing
+    // anti-oscillation property at the STORAGE level: if writing the record moved the sync fingerprint, every
+    // failed push would create the very "local changed" it is retrying, and the device would never converge.
+    {
+        using namespace PendingPush;
+
+        // Credential-shaped rows, seeded with sentinels so the assertions below can prove no VALUE was copied
+        // anywhere near the pending record. These are fake strings, not credentials.
+        const QString sentinelA = QStringLiteral("SENTINEL-ACCESS-0000");
+        const QString sentinelB = QStringLiteral("SENTINEL-RATOKEN-0000");
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("trakt/access"), sentinelA);
+            raw.setValue(QStringLiteral("trakt/refresh"), sentinelA);
+            raw.setValue(QStringLiteral("ra/token"), sentinelB);
+            raw.sync();
+        }
+
+        // (a) THE PUSH TRIGGER. Push-on-Save fires off SettingsTxn's dirty count, and that count is in-scope
+        // only — so a rotating credential landing from a background reply mid-visit cannot schedule a push.
+        // This is what "the push respects the transaction's exclusions" means operationally.
+        CHECK(SettingsTxn::inScope(QStringLiteral("trakt/access")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("trakt/refresh")) == false);
+        CHECK(SettingsTxn::inScope(QStringLiteral("ra/token")) == false);
+        SettingsTxn::begin();
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("trakt/access"), QStringLiteral("SENTINEL-ACCESS-ROTATED"));
+            raw.setValue(QStringLiteral("ra/token"), QStringLiteral("SENTINEL-RATOKEN-ROTATED"));
+            raw.sync();
+        }
+        CHECK(SettingsTxn::dirtyCount() == 0);      // a token rotation is invisible to the Save prompt...
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("trakt/clientId"), QStringLiteral("typed-by-the-user"));
+            raw.sync();
+        }
+        CHECK(SettingsTxn::dirtyCount() == 1);      // ...while a row the user TYPES is not (the trigger lives)
+        SettingsTxn::commit();
+
+        // (b) THE RECORD'S CARVE-OUTS. device/push/* is device-local (never travels) and out of transaction
+        // scope (a Discard cannot resurrect a pending state the user has no way to see).
+        for (const QString& k : { keyAttempts(), keyLastAttempt(), keyFailure() })
+        {
+            CHECK(CloudSync::isDeviceLocalKey(k) == true);
+            CHECK(SettingsTxn::inScope(k) == false);
+        }
+
+        // (c) ROUND-TRIP through the real ini, which is what "survives a restart" reduces to here.
+        const qint64 t0 = 1'700'000'123'456LL;
+        State s; s.attempts = 3; s.lastAttemptMs = t0; s.failure = Failure::AuthExpired;
+        save(s);
+        const State back = load();
+        CHECK(back.attempts == 3);
+        CHECK(back.lastAttemptMs == t0);            // a 64-bit epoch survives the ini's string round-trip
+        CHECK(back.failure == Failure::AuthExpired);
+
+        // (d) SHAPE. Exactly three scalar keys, and the failure reason is a WORD (an ini is a file a user can
+        // open, and a persisted enumerator is a number whose meaning changes the day someone edits the enum).
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.beginGroup(QStringLiteral("device/push"));
+            QStringList pushKeys = raw.childKeys(); pushKeys.sort();
+            raw.endGroup();
+            CHECK(pushKeys == (QStringList{QStringLiteral("attempts"), QStringLiteral("failure"),
+                                           QStringLiteral("lastAttemptMs")}));
+            CHECK(raw.value(QStringLiteral("device/push/failure")).toString() == QStringLiteral("auth"));
+            // NO settings value rides along. Nothing in the record equals — or contains — either sentinel.
+            for (const QString& k : { keyAttempts(), keyLastAttempt(), keyFailure() })
+            {
+                const QString v = raw.value(k).toString();
+                CHECK(!v.contains(sentinelA));
+                CHECK(!v.contains(sentinelB));
+            }
+            // §1's invariant survives the new record: `push` is a GROUP under device, not a child KEY, so the
+            // only direct child key of `device` is still `id`.
+            raw.beginGroup(QStringLiteral("device"));
+            const QStringList deviceKeys = raw.childKeys();
+            raw.endGroup();
+            CHECK(deviceKeys == QStringList{QStringLiteral("id")});
+        }
+
+        // (e) THE ANTI-OSCILLATION PROPERTY. Recording a failure must not move the sync fingerprint or the
+        // bundle bytes — otherwise the act of remembering "I owe a push" would itself be an unsynced change,
+        // and the retry would be chasing its own tail forever.
+        const QByteArray fpWithRecord = CloudSync::stateFingerprint();
+        const QByteArray bundleWithRecord = CloudSync::buildSettingsJson();
+        CHECK(!bundleWithRecord.contains("device/push"));   // the record is not in the uploaded document
+        State s2; s2.attempts = 7; s2.lastAttemptMs = t0 + 999; s2.failure = Failure::Offline;
+        save(s2);
+        CHECK(CloudSync::stateFingerprint() == fpWithRecord);      // a DIFFERENT record -> same fingerprint
+        CHECK(CloudSync::buildSettingsJson() == bundleWithRecord);
+        clear();
+        CHECK(CloudSync::stateFingerprint() == fpWithRecord);      // and clearing it -> still the same
+        CHECK(CloudSync::buildSettingsJson() == bundleWithRecord);
+
+        // (f) CLEARING REMOVES the keys rather than writing zeros, so a synced device and a fresh install look
+        // identical in the ini — and load() reports a clean record from an absent one.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.beginGroup(QStringLiteral("device/push"));
+            const QStringList afterClear = raw.childKeys();
+            raw.endGroup();
+            CHECK(afterClear.isEmpty());
+        }
+        CHECK(owed(load()) == false);
+
+        // (g) A CORRUPTED record cannot arm a retry. Hand-edit a negative count (or a failure word with no
+        // count beside it) and load() normalises to clean rather than handing due() a nonsense state.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            raw.setValue(QStringLiteral("device/push/attempts"), -4);
+            raw.setValue(QStringLiteral("device/push/lastAttemptMs"), t0);
+            raw.setValue(QStringLiteral("device/push/failure"), QStringLiteral("offline"));
+            raw.sync();
+        }
+        const State fixed = load();
+        CHECK(fixed.attempts == 0);
+        CHECK(fixed.lastAttemptMs == 0);
+        CHECK(fixed.failure == Failure::None);
+        CHECK(due(fixed, /*signedIn*/true, /*manual*/false, t0) == Due::Nothing);
+        clear();
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

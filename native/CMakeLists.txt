@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.186 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.187 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -423,6 +423,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/PendingPush.cpp     src/core/PendingPush.h        # #34: the pending-push record + retry policy (§19-22)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
