@@ -1024,12 +1024,16 @@ int main(int argc, char** argv)
         CHECK(stateA1 == stateB1);   // both ends agree — byte for byte, not merely semantically
 
         // -- Round 2: a SECOND exchange moves nothing on either end (no oscillation, nothing left stranded) --
+        // The byte check goes BEFORE the reconcile, deliberately. After it, the two are indistinguishable:
+        // a merge that wrecked the state and a repair that put it back leave exactly the bytes a merge that
+        // did nothing leaves — that IS the perpetual-repair loop this whole finding is about. Checked first,
+        // it says the merge itself was a no-op; the count after it says there was nothing left to do.
         wipeStores(); restore(stateA1); mergeDoc(docB1);
-        CHECK(reconcile(instA) == 0);
         CHECK(snapshot() == stateA1);
+        CHECK(reconcile(instA) == 0);
         wipeStores(); restore(stateB1); mergeDoc(docA1);
-        CHECK(reconcile(instB) == 0);
         CHECK(snapshot() == stateB1);
+        CHECK(reconcile(instB) == 0);
 
         // -- The ASYMMETRIC pair, which is why arming a push would not have been enough --------------------
         // Device C's copy of the add-on kept the previous namespace and always will (for a remote add-on the
@@ -1039,6 +1043,11 @@ int main(int argc, char** argv)
         // comparison stops caring. Two full rounds each way, and neither is dragged onto the other's spelling.
         const QStringList instC{ aioWas };
         wipeStores(); injRefs(aioWas, T, title);
+        // Takes a COMPOUND mutation to kill, and that is a property of the implementation rather than a
+        // weakness here: two independent guards each answer "leave it alone" for C — the stored id already
+        // resolves, AND its counterpart does not — so removing either one on its own still yields 0. Both
+        // have to go. (The same shape as the third-party favourite in probe_brand section 12; noted so the
+        // kill matrix's single entry here is not read as an oversight.)
         CHECK(reconcile(instC) == 0);                       // C is already correct: not so much as reserialized
         const QPair<QString, QString> stateC = snapshot();
         const QJsonObject docC = serializeNow();
@@ -1049,11 +1058,11 @@ int main(int argc, char** argv)
         for (int round = 0; round < 2; ++round)
         {
             wipeStores(); restore(stateA); mergeDoc(docC);
-            CHECK(reconcile(instA) == 0);
-            CHECK(snapshot() == stateA);                    // A keeps the id that resolves on A
+            CHECK(snapshot() == stateA);                    // A keeps the id that resolves on A...
+            CHECK(reconcile(instA) == 0);                   // ...and had nothing to repair to keep it
             wipeStores(); restore(stateC); mergeDoc(docA);
-            CHECK(reconcile(instC) == 0);
             CHECK(snapshot() == stateC);                    // ...and C keeps the id that resolves on C
+            CHECK(reconcile(instC) == 0);
         }
 
         // -- The normalization must not BLUNT the tie-break on real content -------------------------------
