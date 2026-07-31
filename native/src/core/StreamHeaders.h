@@ -37,7 +37,7 @@ namespace StreamHeaders
     // it would only create a second thing to accidentally send.
     //
     // Rejected on the way in, because a stream is untrusted input:
-    //   * empty names, and names/values that are not strings;
+    //   * empty names, and empty values — which is also what a number/array/object value becomes;
     //   * CR/LF anywhere in a value — otherwise a single addon field becomes header injection;
     //   * hop-by-hop and request-shaping fields (Host, Content-Length, Connection, Transfer-Encoding,
     //     Upgrade, Range). Range is the sharp one: the player issues its OWN Range for every seek, and a

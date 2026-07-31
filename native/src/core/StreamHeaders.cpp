@@ -64,7 +64,11 @@ StreamHeaders::Headers StreamHeaders::parseProxyHeaders(const QJsonObject& behav
     {
         const QString name = canonicalName(it.key());
         if (name.isEmpty() || blocked(name.toLower())) continue;
-        if (!it.value().isString()) continue;   // objects/arrays/numbers are not a header value
+        // ONE rule refuses both an empty value and a non-string one: QJsonValue::toString() is documented to
+        // return a null QString for every type that is not a string, so a number/array/object arrives here
+        // as "" and is dropped by the same line. An extra `isString()` guard above would read as defence in
+        // depth while being unkillable — removing it changes no behaviour, so no test could pin it, and the
+        // assertion that non-strings are refused would have quietly become inert. (Found by mutating it.)
         const QString value = it.value().toString().trimmed();
         if (value.isEmpty()) continue;
         // Header injection: one field carrying a newline would otherwise append arbitrary fields (or a body)

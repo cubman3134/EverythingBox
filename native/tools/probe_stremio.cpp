@@ -667,7 +667,9 @@ int main(int argc, char** argv)
         CHECK(!h.contains(QStringLiteral("X-Inject")),
               "a value containing CRLF is refused — one field must not become two");
         CHECK(!h.contains(QStringLiteral("X-Empty")), "an empty value is refused");
-        CHECK(!h.contains(QStringLiteral("X-Number")), "a non-string value is refused");
+        // A number/array/object value stringifies to "" and is refused by that same rule — asserted because
+        // it is the OBSERVABLE behaviour an addon can trip, not because a separate guard implements it.
+        CHECK(!h.contains(QStringLiteral("X-Number")), "a non-string value is refused too");
     }
 
     // ---------------------------------- 14e. forPlayUrl: headers belong to ONE origin (#43)
