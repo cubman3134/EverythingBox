@@ -352,6 +352,122 @@ else
 fi
 echo
 
+# Proxy-header log discipline (#43). A stream's behaviorHints.proxyHeaders routinely carry a signed-URL
+# token, a session cookie or an Authorization value, and stream_debug.log is a file users paste into bug
+# reports. probe_stremio pins that StreamHeaders::logSummary emits NAMES and never values; this gate pins the
+# other half — that logSummary is the ONLY way header data reaches a log. Without it the rule holds exactly
+# until someone writes the obvious .arg(headers.value("Referer")) into a trace line, which no probe can see.
+#
+# The first version of this gate caught the mutation its author tried and very little else. Every mechanism
+# below exists because a realistic spelling walked straight past it:
+#
+#   * The corpus was `src/**/*.cpp` — a glob that REQUIRES a directory component, so top-level src/*.cpp was
+#     excluded. That is 1 file out of 113, and it is main.cpp: the file that owns appLogHandler and logPath(),
+#     i.e. the log itself. Both patterns are listed now, and ph_scanned/ph_toplevel below make a corpus that
+#     silently stops matching a FAILURE rather than a pass.
+#   * Comments were stripped with `s://.*$::`, which also eats `http://` inside a string literal and truncates
+#     the line before the greps ever see it. String literals are blanked FIRST now, so a `//` that survives is
+#     genuinely a comment.
+#   * Matching was line-at-a-time, so a wrapped call was invisible. The source is folded into STATEMENTS first.
+#   * `grep -v logSummary` whitelisted the whole line, so `srLog(logSummary(h) + raw)` passed. logSummary(...)
+#     sub-expressions are now DELETED from the statement and whatever remains is matched.
+#   * The helper list named 6 of them. It is a shape now (`…Log(`), so pfLog/glLog/ieLog/videoLog/loadLog and
+#     the next one someone writes are covered, plus qCritical/qFatal/qC*.
+#   * A value assigned to a temp first (`const QString r = headers.value("Referer"); streamLog(r);`) is not
+#     something a grep for log calls can see at all. It is cut off at the source instead: reading a header
+#     VALUE is confined to StreamHeaders.cpp, so outside it there is no temp to log.
+echo "=== proxy-header log discipline ==="
+ph_fail=0
+ph_note() { echo "  $1"; ph_fail=1; }
+
+# The corpus. BOTH spellings: 'src/*.cpp' matches only top-level, 'src/**/*.cpp' matches only nested.
+ph_files="$(git -C "$HERE/.." ls-files 'src/*.cpp' 'src/*.h' 'src/**/*.cpp' 'src/**/*.h' 2>/dev/null)"
+ph_scanned="$(printf '%s\n' "$ph_files" | grep -c '[^[:space:]]' || true)"
+ph_toplevel="$(printf '%s\n' "$ph_files" | grep -cE '^src/[^/]+\.(cpp|h)$' || true)"
+# "Did I scan anything?" — the guard the neighbouring crashreport gate has and this one did not. A gate that
+# scans an empty corpus prints PASS, which is worse than having no gate: it reports a rule as enforced.
+# The floor is deliberately far below the real count (113) and far above zero: it catches a glob that broke,
+# a `git ls-files` run from the wrong directory, and a repo layout that moved out from under this script.
+if [ "$ph_scanned" -lt 50 ]; then
+  ph_note "corpus is $ph_scanned file(s) — expected the whole of src/. This gate scanned almost nothing; treat its PASS as meaningless until the file list is fixed."
+fi
+# …and specifically that top-level src/*.cpp is in it, which is the exact hole the first version had.
+if [ "$ph_toplevel" -lt 1 ]; then
+  ph_note "no top-level src/*.cpp in the corpus — the '**' glob excludes them, and that is where main.cpp (appLogHandler, logPath) lives."
+fi
+
+# The whole corpus, normalised into "path:line: statement" records, in ONE awk pass. Per-file sed|awk
+# pipelines cost a process pair each; at 240-odd files that was ~90s of the suite's wall clock, and a gate
+# slow enough to be annoying is a gate someone eventually skips. Each line is normalised before folding:
+#   1. blank the contents of string literals, so a `//` inside "http://x" cannot be mistaken for a comment
+#      and a log message's own prose cannot match a pattern;
+#   2. strip what is then genuinely a line comment;
+#   3. fold continuation lines together until the statement ends, so a wrapped call is ONE record.
+ph_blob="$(cd "$HERE/.." && awk '
+    FNR == 1 && buf != "" { print prevf ":" start ": " buf; buf = "" }
+    { s = $0
+      gsub(/"[^"]*"/, "\"\"", s)
+      sub(/\/\/.*$/, "", s)
+      sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
+      if (buf == "") { start = FNR; buf = s; prevf = FILENAME } else if (s != "") { buf = buf " " s }
+      if (s ~ /[;{}]$/ || s == "") { if (buf != "") print FILENAME ":" start ": " buf; buf = ""; start = 0 } }
+    END { if (buf != "") print prevf ":" start ": " buf }' $ph_files </dev/null)"
+# (</dev/null is not decoration: with an empty corpus awk gets no file operands and falls back to STDIN,
+# which under CI is the suite's own stdin — the gate would hang rather than report the empty corpus above.)
+
+# A log call, in any of the tree's spellings, whose statement still mentions header data after every
+# logSummary(...) sub-expression has been removed from it. The `:a;ta` loop peels nested parens.
+ph_hits="$(printf '%s\n' "$ph_blob" \
+     | grep -E '[A-Za-z_][A-Za-z0-9_]*Log[[:space:]]*\(|q(Debug|Warning|Info|Critical|Fatal|C[A-Za-z]+)[[:space:]]*\(' \
+     | sed -E ':a; s/(StreamHeaders::)?logSummary\([^()]*\)//g; ta' \
+     | grep -E 'requestHeaders|proxyHeaders|StreamHeaders::Headers|[A-Za-z_]*[Hh]eaders?[A-Za-z0-9_]*[[:space:]]*(\.[[:space:]]*value[[:space:]]*\(|\[)' || true)"
+if [ -n "$ph_hits" ]; then
+  ph_note "a log call touches header data without going through StreamHeaders::logSummary:"
+  printf '%s\n' "$ph_hits" | sed 's|^|    |'
+fi
+
+# Reading a header VALUE lives in StreamHeaders.cpp and nowhere else. This is the rule that closes the
+# temp-variable hole: no grep over log calls can see `const QString r = headers.value("Referer");` two lines
+# earlier, so the value is never allowed to become a local outside the one file whose job it is.
+ph_reads="$(printf '%s\n' "$ph_blob" | grep -v '^src/core/StreamHeaders\.cpp:' \
+     | grep -E '[A-Za-z_]*[Hh]eaders?[A-Za-z0-9_]*[[:space:]]*(\.[[:space:]]*value[[:space:]]*\(|\[)' || true)"
+if [ -n "$ph_reads" ]; then
+  ph_note "a header VALUE is read outside StreamHeaders.cpp — pass the whole container instead, or the value becomes a local nothing can trace to a log:"
+  printf '%s\n' "$ph_reads" | sed 's|^|    |'
+fi
+
+# …and the naming rule that makes the one above actually hold. The check for a value read hooks on the
+# CONTAINER'S NAME, so `const StreamHeaders::Headers& hdrs; … hdrs.value("Referer")` would sail past it. A
+# StreamHeaders::Headers therefore has to be named for what it is. Two cheap rules composing into a real
+# guarantee beats one clever rule that only looks like one.
+# ($1 is the "path:line:" prefix every blob record starts with. The qualified-return-type spelling
+# `StreamHeaders::Headers StreamHeaders::parseProxyHeaders` binds the name "StreamHeaders", which contains
+# "Headers" and so exempts itself — correctly, since it is not a variable at all.)
+ph_names="$(printf '%s\n' "$ph_blob" | awk '
+  { rest = $0
+    while (match(rest, /StreamHeaders::Headers[ \t]*[&*]?[ \t]*[A-Za-z_][A-Za-z0-9_]*/)) {
+      m = substr(rest, RSTART, RLENGTH); rest = substr(rest, RSTART + RLENGTH)
+      name = m; sub(/^StreamHeaders::Headers[ \t]*[&*]?[ \t]*/, "", name)
+      if (name !~ /[Hh]eaders?[A-Za-z0-9_]*$/) print $1 " " m
+    } }')"
+if [ -n "$ph_names" ]; then
+  ph_note "a StreamHeaders::Headers is bound to a name with no 'header' in it — the value-read check above matches on the container's name, so this one is invisible to it. Rename it:"
+  printf '%s\n' "$ph_names" | sed 's|^|    |'
+fi
+
+# logSummary itself must keep emitting keys, not values. Cheap, but it is the assertion the gate rests on,
+# and a probe cannot notice the day the file stops existing.
+if ! grep -q 'h.keys()' "$HERE/../src/core/StreamHeaders.cpp" 2>/dev/null; then
+  ph_note "StreamHeaders::logSummary no longer renders h.keys() — check it is still names-only."
+fi
+if grep -qE 'logSummary' "$HERE/../src/core/StreamHeaders.cpp" 2>/dev/null; then :; else
+  ph_note "StreamHeaders::logSummary not found — this gate is now asserting nothing."
+fi
+if [ "$ph_fail" -eq 0 ]; then echo "PASS: proxy-header log discipline ($ph_scanned files scanned)"; else
+  echo "FAIL: proxy-header log discipline"; fail=1
+fi
+echo
+
 # Old-brand gate (rebrand T4): the product was renamed, and "no mentions of the previous name remain" has to be
 # a property the suite ENFORCES rather than a claim someone made once — otherwise the next person to type
 # "MyMediaVault" into a comment reintroduces it and nothing notices. Everything that still names the old brand

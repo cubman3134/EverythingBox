@@ -22,6 +22,16 @@
 
 class QNetworkAccessManager;
 
+// The outcome of resolving a playable: the url, its mime, and the HTTP request headers that url needs
+// (behaviorHints.proxyHeaders.request — empty for every torrent/debrid source, non-empty for the
+// direct-HTTP and embed hosts that gate their CDNs on a Referer/User-Agent).
+//
+// The headers ride the CALLBACK rather than being stashed on the manager and read back afterwards. That is
+// the whole point: a member holding "the last stream's headers" is a thing that outlives its stream, and
+// the failure it produces — host A's Referer arriving at host B — is silent at both ends.
+using StreamCb = std::function<void(const QString& url, const QString& mime,
+                                    const StreamHeaders::Headers& headers)>;
+
 struct LoadedAddon
 {
     // How the addon is run: bundled JS in a folder (Duktape), or a remote HTTP service we only reference
@@ -126,7 +136,7 @@ public:
     // catalog leaf, so without it a remembered release would be honoured on the next-episode hand-off and
     // silently ignored the moment the user picked the next episode from the list themselves.
     void resolveStream(LoadedAddon* src, const MediaItem& item,
-                       std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                       StreamCb cb, int attempt = 0,
                        const QString& preferGroup = QString());
     QString resolveStreamSync(LoadedAddon* src, const MediaItem& item); // blocking variant (probe/tests)
     // The most recent /stream "notice" (e.g. a "caching started" message from Allarr), consumed once —
@@ -154,7 +164,7 @@ public:
     // rather than looked up here, so the addon layer keeps no dependency on a UI-owned store. Empty = no
     // memory, take the best candidate.
     void resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                             std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                             StreamCb cb, int attempt = 0,
                              const QString& preferGroup = QString());
 
     // Every candidate stream for an item, from every eligible provider — the picker's source of choices.
@@ -213,7 +223,7 @@ private:
     // listStremioStreams() for the candidates, pickAuto() for the choice, then play it directly or resolve
     // its infoHash through TorBox.
     void resolveStremioStream(const MediaItem& item,
-                              std::function<void(const QString& url, const QString& mime)> cb,
+                              StreamCb cb,
                               const QString& preferGroup = QString());
     // Turn a preference-ordered candidate list into a playable url. `ordered[0]` is the chosen release; a
     // direct http url there plays as-is.
@@ -223,7 +233,7 @@ private:
     // order that is PLAYABLE NOW wins — preserving the pre-pick behaviour (play the best release TorBox
     // actually has) instead of failing outright because one preferred hash was cold.
     void playStremioCandidates(std::shared_ptr<QVector<StremioTranslate::StreamCandidate>> ordered,
-                               std::function<void(const QString& url, const QString& mime)> cb);
+                               StreamCb cb);
 
     // Walk `ordered` and start the first entry that can play RIGHT NOW: a direct http url, or a torrent whose
     // hash is in `cached`. Returns false when nothing in the list qualifies.
@@ -239,12 +249,12 @@ private:
     // the cached rows are cached. Callers start at 0; only the retry continuation passes a non-zero value.
     bool playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
                            const QSet<QString>& cachedHashes,
-                           const std::function<void(const QString& url, const QString& mime)>& cb,
+                           const StreamCb& cb,
                            int from = 0);
     // Try each non-Stremio file provider (Allarr) in turn for an IMDB id; fall back to Stremio when none has it.
     void resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                   const QString& type, const QString& imdbStreamId,
-                                  std::function<void(const QString& url, const QString& mime)> cb, int attempt = 0,
+                                  StreamCb cb, int attempt = 0,
                                   const QString& preferGroup = QString());
     AddonRequest buildRequest(LoadedAddon* src, const QString& function, const QString& argJson) const;
     // Key for the catalog-result cache: source + catalog + query + page + filters (QMap iterates sorted).

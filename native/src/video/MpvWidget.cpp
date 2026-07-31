@@ -1,4 +1,5 @@
 #include "MpvWidget.h"
+#include "MpvHeaderApply.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #ifndef Q_OS_IOS
@@ -366,8 +367,15 @@ void MpvWidget::refreshNowPlaying()
     }
 }
 
-void MpvWidget::play(const QString& url)
+void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
 {
+    // Per-stream HTTP headers (behaviorHints.proxyHeaders.request). UNCONDITIONAL, before the load:
+    // MpvHeaderApply::apply writes all three properties every time, so a stream that needs none actively
+    // clears whatever the previous one set. Nothing here logs a value — only how many and which names.
+    MpvHeaderApply::apply(mpv, headers);
+    if (!headers.isEmpty())
+        videoLog(QStringLiteral("mpv: applying stream ") + StreamHeaders::logSummary(headers));
+
     // Apply the user's subtitle defaults before loading, so they take effect for this video (and changing
     // them in Settings applies to the next one). "subs-fallback=yes" makes mpv select a sub track even when
     // none is marked default; "slang" sets the preferred language so the right track is picked.

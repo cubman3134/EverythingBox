@@ -509,6 +509,15 @@ static void streamLog(const QString& msg)
         f.write((QDateTime::currentDateTime().toString(Qt::ISODate) + QStringLiteral("  ") + msg + QStringLiteral("\n")).toUtf8());
 }
 
+// Trace that a chosen source needs HTTP headers. NAMES AND COUNT ONLY — never a value. proxyHeaders
+// routinely carry a signed-URL token or a session cookie, and stream_debug.log is a file users paste into
+// bug reports; the same rule the Trakt and debrid paths follow for their keys.
+static void logStreamHeaders(const StremioTranslate::StreamCandidate& c)
+{
+    if (c.requestHeaders.isEmpty()) return;
+    streamLog(QStringLiteral("stremio: source needs ") + StreamHeaders::logSummary(c.requestHeaders));
+}
+
 // --- AddonManager ------------------------------------------------------------------------------------
 
 AddonManager::AddonManager(QObject* parent) : QObject(parent)
@@ -1362,7 +1371,7 @@ static constexpr int kMaxHashes = 60;
 // silently ranked a cached torrent above an instant url a remembered-but-cold bingeGroup had displaced.
 bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandidate>& ordered,
                                      const QSet<QString>& cachedHashes,
-                                     const std::function<void(const QString&, const QString&)>& cb,
+                                     const StreamCb& cb,
                                      int from)
 {
     for (int i = qMax(0, from); i < ordered.size(); ++i)
@@ -1371,7 +1380,11 @@ bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandi
         if (c.isDirect())
         {
             streamLog(QStringLiteral("stremio: playing direct http url"));
-            cb(c.url, c.mime);
+            logStreamHeaders(c);
+            // forPlayUrl with the SAME url is not a no-op worth skipping: it is the one place that states
+            // "these headers belong to this url", so the two lines below stay symmetrical with the debrid
+            // leg — where the url changes and the headers must therefore not survive.
+            cb(c.url, c.mime, StreamHeaders::forPlayUrl(c.requestHeaders, c.url, c.url));
             return true;
         }
         if (!c.infoHash.isEmpty() && cachedHashes.contains(c.infoHash.toLower()))
@@ -1387,10 +1400,15 @@ bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandi
             // passes a temporary `{}`), so the continuation copies both rather than capturing them.
             auto rest = std::make_shared<QVector<StremioTranslate::StreamCandidate>>(ordered);
             auto cached = std::make_shared<QSet<QString>>(cachedHashes);
-            resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, rest, cached, cb, i](const QString& url) {
-                if (!url.isEmpty()) { cb(url, QString()); return; }
+            const StremioTranslate::StreamCandidate chosen = c;   // copied: `c` is a reference into `ordered`
+            resolveTorBoxInfoHash(c.infoHash, c.fileIdx, [this, rest, cached, cb, i, chosen](const QString& url) {
+                // A debrid-resolved url is a DIFFERENT host from the one the addon declared its headers for,
+                // so forPlayUrl drops them. Passing `chosen.requestHeaders` straight through here is exactly
+                // the cross-host leak this feature has to not have.
+                if (!url.isEmpty())
+                { cb(url, QString(), StreamHeaders::forPlayUrl(chosen.requestHeaders, chosen.url, url)); return; }
                 streamLog(QStringLiteral("torbox: cached torrent failed to resolve — trying the next candidate"));
-                if (!playFirstPlayable(*rest, *cached, cb, i + 1)) cb(QString(), QString());
+                if (!playFirstPlayable(*rest, *cached, cb, i + 1)) cb(QString(), QString(), {});
             });
             return true;
         }
@@ -1399,11 +1417,17 @@ bool AddonManager::playFirstPlayable(const QVector<StremioTranslate::StreamCandi
 }
 
 void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslate::StreamCandidate>> ordered,
-                                         std::function<void(const QString&, const QString&)> cb)
+                                         StreamCb cb)
 {
-    if (ordered->isEmpty()) { cb(QString(), QString()); return; }
+    if (ordered->isEmpty()) { cb(QString(), QString(), {}); return; }
     if (ordered->first().isDirect())
-    { streamLog(QStringLiteral("stremio: playing direct http url")); cb(ordered->first().url, ordered->first().mime); return; }
+    {
+        const StremioTranslate::StreamCandidate& c = ordered->first();
+        streamLog(QStringLiteral("stremio: playing direct http url"));
+        logStreamHeaders(c);
+        cb(c.url, c.mime, StreamHeaders::forPlayUrl(c.requestHeaders, c.url, c.url));
+        return;
+    }
 
     // The pick is a torrent. Batch-check which hashes TorBox has cached in ONE request (rather than probing
     // each torrent's full resolve chain in turn), then resolve only the first hit.
@@ -1413,7 +1437,7 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
     streamLog(QStringLiteral("stremio: %1 streams, %2 torrent(s), torbox key %3")
                   .arg(ordered->size()).arg(torrents).arg(key.isEmpty() ? QStringLiteral("missing") : QStringLiteral("present")));
     if (key.isEmpty() || torrents == 0)
-    { if (!playFirstPlayable(*ordered, {}, cb)) cb(QString(), QString()); return; }
+    { if (!playFirstPlayable(*ordered, {}, cb)) cb(QString(), QString(), {}); return; }
 
     // Cap the batch (the list is preference-ordered, so the top entries are the relevant ones) to keep the
     // checkcached URL a sane length - a raw-torrent addon can return hundreds of candidates.
@@ -1450,17 +1474,17 @@ void AddonManager::playStremioCandidates(std::shared_ptr<QVector<StremioTranslat
 
         // First candidate in preference order that is playable now — an instant url or a cached hash, whichever
         // ranks higher. Nothing qualifying means nothing streamable right now.
-        if (!playFirstPlayable(*ordered, cached, cb)) cb(QString(), QString());
+        if (!playFirstPlayable(*ordered, cached, cb)) cb(QString(), QString(), {});
     });
 }
 
 void AddonManager::resolveStremioStream(const MediaItem& item,
-                                        std::function<void(const QString&, const QString&)> cb,
+                                        StreamCb cb,
                                         const QString& preferGroup)
 {
     listStremioStreams(item, [this, cb, preferGroup](const QVector<StremioTranslate::StreamCandidate>& all) {
         const int idx = StremioTranslate::pickAuto(all, preferGroup);
-        if (idx < 0) { cb(QString(), QString()); return; }
+        if (idx < 0) { cb(QString(), QString(), {}); return; }
         if (idx != 0)
             streamLog(QStringLiteral("stremio: binge memory chose row %1 over the top-ranked one").arg(idx));
         // The chosen release first, then the rest in rank order. The tail is not decoration: TorBox can only
@@ -1509,23 +1533,24 @@ static MediaItem fileProviderItem(const QString& type, const QString& imdbStream
 
 void AddonManager::resolveFromFileProviders(std::shared_ptr<QVector<LoadedAddon*>> providers, int idx,
                                             const QString& type, const QString& imdbStreamId,
-                                            std::function<void(const QString&, const QString&)> cb, int attempt,
+                                            StreamCb cb, int attempt,
                                             const QString& preferGroup)
 {
     if (idx >= providers->size()) // none of the file providers had it -> fall back to Stremio stream addons
     { MediaItem it; it.type = type; it.id = imdbStreamId; resolveStremioStream(it, cb, preferGroup); return; }
     resolveStream(providers->at(idx), fileProviderItem(type, imdbStreamId),
-                  [this, providers, idx, type, imdbStreamId, cb, attempt, preferGroup](const QString& url, const QString& mime) {
-        if (!url.isEmpty()) cb(url, mime);
+                  [this, providers, idx, type, imdbStreamId, cb, attempt, preferGroup](
+                      const QString& url, const QString& mime, const StreamHeaders::Headers& headers) {
+        if (!url.isEmpty()) cb(url, mime, headers);
         else resolveFromFileProviders(providers, idx + 1, type, imdbStreamId, cb, attempt, preferGroup);
     }, attempt);
 }
 
 void AddonManager::resolveStreamByImdb(const QString& type, const QString& imdbStreamId,
-                                       std::function<void(const QString&, const QString&)> cb, int attempt,
+                                       StreamCb cb, int attempt,
                                        const QString& preferGroup)
 {
-    if (imdbStreamId.isEmpty()) { cb(QString(), QString()); return; }
+    if (imdbStreamId.isEmpty()) { cb(QString(), QString(), {}); return; }
     // Prefer the user's file provider(s) - non-Stremio remote media-sources (e.g. Allarr) that serve the
     // actual files - then fall back to Stremio stream addons. attempt (?n=K) asks the provider for an
     // alternate source when the user rejects the current one. preferGroup only reaches the Stremio leg —
@@ -1600,15 +1625,19 @@ void AddonManager::resolveDocumentByQuery(const QString& query, const QString& c
         streamLog(QStringLiteral("doc-bridge: %1 result(s), picked id=%2").arg(cat.items.size()).arg(hit.id));
         if (hit.id.isEmpty() && hit.url.isEmpty()) { cb(QString(), QString(), QString(), true); return; } // reached, zero results
         if (!hit.url.isEmpty()) { cb(hit.url, hit.mime, QString(), false); return; } // already a direct file
-        resolveStream(prov, hit, [cb](const QString& url, const QString& mime) { cb(url, mime, QString(), false); });
+        // A document (comic/book/audiobook) fetched from a file provider — not the playback path, and a file
+        // provider declares no proxyHeaders, so there is nothing to carry here.
+        resolveStream(prov, hit, [cb](const QString& url, const QString& mime, const StreamHeaders::Headers&) {
+            cb(url, mime, QString(), false);
+        });
     });
 }
 
 void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
-                                 std::function<void(const QString&, const QString&)> cb, int attempt,
+                                 StreamCb cb, int attempt,
                                  const QString& preferGroup)
 {
-    if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString()); return; }
+    if (!src || src->transport != LoadedAddon::RemoteHttp) { cb(QString(), QString(), {}); return; }
     // Aggregate across Stremio stream addons. preferGroup only matters here: a bingeGroup is a Stremio
     // concept, and the non-Stremio /stream branch below has nothing to match it against.
     if (src->stremio) { resolveStremioStream(item, cb, preferGroup); return; }
@@ -1637,7 +1666,9 @@ void AddonManager::resolveStream(LoadedAddon* src, const MediaItem& item,
         }
         lastStreamNotice_ = notice;
         lastStreamCurl_ = curl;
-        cb(url, mime);
+        // A file provider (Allarr) serves the file from its own host and declares no proxyHeaders — this leg
+        // carries none, and must not inherit any from a Stremio candidate resolved earlier.
+        cb(url, mime, {});
     });
 }
 

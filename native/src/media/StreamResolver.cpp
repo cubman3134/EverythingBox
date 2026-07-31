@@ -100,49 +100,87 @@ bool StreamResolver::looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
 StreamResolver::StreamResolver(QObject* parent) : QObject(parent) {}
 
 // Read an .m3u/.m3u8 (local file or remote URL), then hand its text to classify() for dispatch.
-void StreamResolver::resolve(const QString& src, const QString& title)
+void StreamResolver::resolve(const QString& src, const QString& title, const StreamHeaders::Headers& headers)
 {
     if (!src.contains(QStringLiteral("://")))
     {
         QFile f(src);
         QString text;
         if (f.open(QIODevice::ReadOnly | QIODevice::Text)) text = QString::fromUtf8(f.readAll());
-        classify(src, text, title.isEmpty() ? QFileInfo(src).completeBaseName() : title);
+        classify(src, text, title.isEmpty() ? QFileInfo(src).completeBaseName() : title, {});
         return;
     }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     emit status(tr("Loading playlist…"));
-    srLog(QStringLiteral("m3u: GET %1").arg(logSafeUrl(src)));
+    srLog(QStringLiteral("m3u: GET %1%2").arg(logSafeUrl(src),
+          headers.isEmpty() ? QString() : QStringLiteral(" + ") + StreamHeaders::logSummary(headers)));
     QNetworkRequest rq{ QUrl(src) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // The source's own proxyHeaders, applied AFTER our default UA so a stream that specifies a User-Agent
+    // replaces it rather than being appended to. Without this the manifest fetch is refused by exactly the
+    // hosts this feature exists for, and the failure looks like a broken playlist rather than a missing header.
+    for (auto it = headers.begin(); it != headers.end(); ++it)
+        rq.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
+    // Redirects, when this request carries a source's own headers. Qt re-sends raw headers on the redirected
+    // request, so a gated .m3u8 that 302s to a partner CDN hands host B the Referer declared for host A —
+    // which routinely carries a token. That is the exact leak forPlayUrl exists to prevent, arriving by a
+    // route forPlayUrl never sees, and it was verified on the wire: origin B received both the Referer and
+    // the X-Token declared for A.
+    //
+    // Unlike the player's own redirect following, this one is interceptable in-process, so it is intercepted.
+    // UserVerifiedRedirectPolicy holds the redirected request until we allow it, and we allow it only when
+    // the target is the SAME origin the headers were declared for — asked of the same forPlayUrl every other
+    // consumer asks, so there is one definition of "same origin" and probe_stremio already pins it. A
+    // cross-origin redirect is aborted instead, landing on the fetch-failed path below, which hands the URL
+    // to the player exactly as an auth failure does. Nothing is ever re-sent to B with A's headers.
+    //
+    // Only when there ARE headers: an ordinary playlist keeps the policy it has always had, so this can only
+    // change the behaviour of the requests that carry a secret.
+    if (headers.isEmpty())
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    else
+        rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::UserVerifiedRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, src, title] {
+    if (!headers.isEmpty())
+        connect(reply, &QNetworkReply::redirected, this, [this, reply, src, headers](const QUrl& to) {
+            if (!StreamHeaders::forPlayUrl(headers, src, to.toString()).isEmpty())
+            {
+                srLog(QStringLiteral("m3u: same-origin redirect -> %1, headers still apply")
+                          .arg(logSafeUrl(to.toString())));
+                emit reply->redirectAllowed();
+                return;
+            }
+            srLog(QStringLiteral("m3u: cross-origin redirect -> %1, refusing to carry this source's headers "
+                                 "there -> player").arg(logSafeUrl(to.toString())));
+            reply->abort();
+        });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, src, title, headers] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
             // Couldn't fetch the manifest text (auth, headers, live-only) - let libmpv try the URL itself.
             srLog(QStringLiteral("m3u: fetch failed (%1) -> player").arg(reply->errorString()));
-            emit playDirect(src, title);
+            emit playDirect(src, title, headers);
             return;
         }
-        classify(src, QString::fromUtf8(reply->readAll()), title);
+        classify(src, QString::fromUtf8(reply->readAll()), title, headers);
     });
 }
 
-void StreamResolver::classify(const QString& src, const QString& text, const QString& title)
+void StreamResolver::classify(const QString& src, const QString& text, const QString& title,
+                              const StreamHeaders::Headers& headers)
 {
     if (isHlsManifest(text))                       // a single adaptive stream: libmpv handles the segments
     {
         srLog(QStringLiteral("m3u: HLS manifest -> player"));
-        emit playDirect(src, title);
+        emit playDirect(src, title, headers);
         return;
     }
     const QVector<M3uEntry> entries = parseM3u(text, src);
     if (entries.isEmpty())                         // not a recognisable list - best effort: play the URL
     {
         srLog(QStringLiteral("m3u: no entries -> player"));
-        emit playDirect(src, title);
+        emit playDirect(src, title, headers);
         return;
     }
     if (looksLikeDiscPlaylist(entries))            // PlayStation multi-disc: the emulator swaps discs itself

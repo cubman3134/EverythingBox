@@ -5,7 +5,8 @@
 // and MetaCache.h both include THIS header — so there is no layering rule being broken here, and no cycle
 // (PcGameId.h is QtCore-only and includes nothing of ours). What it does mean is that PcGameId.h is now a
 // TRANSITIVE dependency of nearly every TU in the app, so editing it rebuilds effectively the whole tree.
-#include "../core/PcGameId.h"   // MediaItem::pcSources — the launch options on one merged PC game
+#include "../core/PcGameId.h"       // MediaItem::pcSources — the launch options on one merged PC game
+#include "../core/StreamHeaders.h"  // MediaItem::requestHeaders — this source's proxyHeaders (QtCore-only)
 #include <QMap>
 #include <QString>
 #include <QStringList>
@@ -133,6 +134,11 @@ struct MediaItem
     QString thumbnailUrl;  // poster/cover image (http) to show in the grid
     QString url;           // playable location (file/http) - empty until a file is associated
     QString mime;
+    // HTTP request headers `url` needs (behaviorHints.proxyHeaders.request from a Stremio stream). They are
+    // bound to THIS url — anything that replaces the url must re-derive them via StreamHeaders::forPlayUrl,
+    // which drops them when the origin changes. Never serialized, never written to Recent/Resume: they are
+    // per-source, frequently token-bearing, and a stale one is a leak.
+    StreamHeaders::Headers requestHeaders;
     bool expandable = false; // a container (series/season/album): clicking fetches its children via getDetail
     // Set when a file provider (Allarr) resolved this playable and can serve an alternate source on demand
     // (its /stream supports ?n=K). Drives the player/reader's "Issue with Streaming" button. Not serialized.

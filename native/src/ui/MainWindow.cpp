@@ -952,7 +952,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     connect(streams_, &StreamResolver::status, this,
             [this](const QString& m) { statusBar()->showMessage(m); });
     connect(streams_, &StreamResolver::playDirect, this,
-            [this](const QString& url, const QString& title) { playStream(url, QString(), title); });
+            [this](const QString& url, const QString& title, const StreamHeaders::Headers& headers) {
+                playStream(url, QString(), title, headers);
+            });
     connect(streams_, &StreamResolver::openDisc, this,
             [this](const QString& src, const QString& title) { openGamePath(src, title); });
     connect(streams_, &StreamResolver::playQueue, this,
@@ -989,6 +991,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
         // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
         resetSegmentState();
+        // KNOWN GAP (#59): every queue-driven load comes through here — the IPTV/channel queue from
+        // StreamResolver::playQueue, audio queues, and every advance — and PlaybackSession carries urls only,
+        // so a header-gated entry plays bare. Not a leak: this play() clears whatever the last one set,
+        // because MpvHeaderApply writes all three properties unconditionally. Closing it means a per-track
+        // header channel on PlaybackSession, which is also what openAudioStream needs.
         player_->play(p);
     });
     connect(session_, &PlaybackSession::queueChanged, this,
@@ -2800,7 +2807,7 @@ void MainWindow::openFile()
 // app. A configured external whose launch fails (missing/broken exe) notifies once and returns false, so the
 // built-in player still gets the media. playRouteOverride_ (consumed here, one play only) lets a detail-view
 // one-off action force this play external / built-in regardless of the default.
-bool MainWindow::routePlay(const QString& urlOrPath, PlayRoute explicitRoute)
+bool MainWindow::routePlay(const QString& urlOrPath, PlayRoute explicitRoute, bool dryRun)
 {
     const PlayRoute member = playRouteOverride_;
     playRouteOverride_ = PlayRoute::Default;                // consume the member — affects exactly one play
@@ -2817,6 +2824,11 @@ bool MainWindow::routePlay(const QString& urlOrPath, PlayRoute explicitRoute)
 #ifndef Q_OS_ANDROID
     if (!forceExt && k == ExternalPlayer::Kind::AndroidIntent) return false; // no intent target on desktop
 #endif
+    // dryRun answers "would this have left the app?" without launching anything — for a stream whose HTTP
+    // headers cannot follow it out. It still runs the whole decision above (including consuming the one-shot
+    // override), because the question only has a meaningful answer if it is the SAME decision.
+    if (dryRun)
+        return forceExt ? !ExternalPlayer::resolveForceTarget().isEmpty() : ExternalPlayer::available();
     // A one-off forces a CONCRETE target even when the default is Built-in (configuredPath() would be empty):
     // resolveForceTarget() picks the configured kind, else a Custom path, else the first detected player.
     const bool ok = forceExt
@@ -3037,15 +3049,17 @@ void MainWindow::tryPlayNextEpisode()
     // that the next episode keeps using it. Both ids share the show prefix, so one lookup serves both legs.
     const QString prefer = BingeStore::preferredGroup(bingeStore_.get(), nextEp);
     addons_->resolveStreamByImdb(QStringLiteral("series"), nextEp,
-        [this, gen, nextEp, nextSeason, prefer, playLocalIfOwned](const QString& url, const QString& mime) {
+        [this, gen, nextEp, nextSeason, prefer, playLocalIfOwned](const QString& url, const QString& mime,
+                                                                 const StreamHeaders::Headers& headers) {
         if (!nextEpHandoffStillOurs(gen)) return;               // superseded, or the user navigated away
-        if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime); return; }
+        if (!url.isEmpty()) { playResolvedEpisode(nextEp, url, mime, headers); return; }
         // End of season? Try the first episode of the next one — again local before network.
         if (playLocalIfOwned(nextSeason)) return;
         addons_->resolveStreamByImdb(QStringLiteral("series"), nextSeason,
-            [this, gen, nextSeason](const QString& url2, const QString& mime2) {
+            [this, gen, nextSeason](const QString& url2, const QString& mime2,
+                                    const StreamHeaders::Headers& headers2) {
             if (!nextEpHandoffStillOurs(gen)) return;
-            if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2);
+            if (!url2.isEmpty()) playResolvedEpisode(nextSeason, url2, mime2, headers2);
             else { nextEpPending_ = false;   // the finale: nothing is in flight, and the credits branch may
                                              // legitimately try again if the user seeks back into them
                    notifier_->hidePlayerNotice();
@@ -3054,13 +3068,15 @@ void MainWindow::tryPlayNextEpisode()
     }, /*attempt=*/0, prefer);
 }
 
-void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime)
+void MainWindow::playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime,
+                                     const StreamHeaders::Headers& headers)
 {
     notifier_->hidePlayerNotice();
     const QStringList p = imdbStreamId.split(QLatin1Char(':'));
     MediaItem it;
     it.url = url;
     it.mime = mime;
+    it.requestHeaders = headers;   // the next episode's source may be a different host with its own gate
     it.type = QStringLiteral("episode");
     it.imdbStreamId = imdbStreamId;
     it.title = tr("Season %1 · Episode %2").arg(p.value(1), p.value(2));
@@ -3565,21 +3581,36 @@ void MainWindow::openStreamPrompt()
     }, [this] { openHome(); });
 }
 
-void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title)
+void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
+                               const StreamHeaders::Headers& headers)
 {
+    // KNOWN GAP (#59): the split pane takes a url and a title and has no header channel, so a gated source
+    // opened into a split view plays bare. Not a leak — the split target is a separate player whose own
+    // MpvHeaderApply pass clears everything on load — but a gated stream will 403 there. Every
+    // splitTarget_->openVideo call site in this file has the same gap; this is the one they all resemble.
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
     // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
-    if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title); return; }
-    playStream(url, resumeKey, title);
+    if (StreamResolver::isM3uRef(url)) { streams_->resolve(url, title, headers); return; }
+    playStream(url, resumeKey, title, headers);
 }
 
-void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title)
+void MainWindow::playStream(const QString& url, const QString& resumeKey, const QString& title,
+                            const StreamHeaders::Headers& headers)
 {
     PerfTrace::begin(QStringLiteral("open.video"));
-    // External-player handoff: hand the link straight to the configured external player (Recent on both routes).
-    if (routePlay(url)) {
+    // External-player handoff: hand the link straight to the configured external player (Recent on both
+    // routes) — unless this source needs HTTP headers, which cannot follow it out there. Same decision as
+    // openLibraryItem's catalog leg, and the same single routePlay call so the one-shot override is consumed
+    // exactly once either way. (See MainWindow::routePlay and StreamHeaders::externalRoute.)
+    const bool headerGated = StreamHeaders::externalRoute(headers)
+                             == StreamHeaders::ExternalRoute::FallBackToBuiltin;
+    const bool routedOut = routePlay(url, PlayRoute::Default, /*dryRun=*/headerGated);
+    if (routedOut && headerGated)
+        notify(tr("This source needs custom HTTP headers, which can't be passed to an external player — "
+                  "playing it here instead."), kFeedbackLong);
+    if (routedOut && !headerGated) {
         PerfTrace::end(QStringLiteral("open.video")); // close the span we opened above (no built-in load follows)
         const QUrl u(url);
         QString t = title;
@@ -3593,7 +3624,12 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     themedAudioSession_ = false;       // playStream is VIDEO — keep the classic player page
     stopScrobble();                    // leaving whatever was playing
-    castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
+    castUrl_ = url; castTitle_ = title; castMime_.clear(); // castable stream for the cast button
+    // …gated by whatever headers THIS stream actually needs, which is not always none: the StreamResolver
+    // playDirect route reaches here with a catalog stream's proxyHeaders (a gated .m3u8). A cast device
+    // fetches the URL itself and cannot be given them, so a hard-coded false would offer every device on
+    // the LAN for a stream that can only produce a black screen on all of them.
+    castHeaderGated_ = !headers.isEmpty();
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -3606,7 +3642,12 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     session_->beginResume(rkey);
     syncKey_ = rkey;             // sync offsets follow the stable resume key (survives a re-resolved debrid URL)
     stack_->setCurrentWidget(playerPage_);
-    player_->play(url);
+    // WITH the headers. This is the whole point of the header-gated branch above: having decided not to hand
+    // the URL to an external player *because* it needs headers, and having told the user we would play it
+    // here instead, playing it without them makes that promise false — mpv would fetch the manifest bare and
+    // take a 403 on it and on every segment. `url` is the URL the headers were declared for on every route
+    // that supplies them (StreamResolver re-emits its own src), so they need no forPlayUrl re-scoping here.
+    player_->play(url, headers);
     revealMediaControls();
     // A readable title for the Recent list: the supplied title, else the link's file name / host / raw link.
     const QUrl u(url);
@@ -3617,6 +3658,11 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
 }
 
+// KNOWN GAP (#59): this entry point has no headers parameter, so a header-gated audio/audiobook stream plays
+// bare and a gated source 403s. Not a leak — MpvHeaderApply writes all three properties on every play, so the
+// previous stream's headers are cleared here rather than inherited; it is a missing capability, not a stale
+// one. Threading them through means giving PlaybackSession a per-track header channel (see the playRequested
+// choke point in the constructor), which is the same change the IPTV queue needs.
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl)
 {
@@ -5771,6 +5817,11 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), kFeedbackLong);
         return;
     }
+    // KNOWN GAP (#59): a Recent entry is a url and a kind. proxyHeaders are deliberately never serialised —
+    // they are per-source and frequently token-bearing, and a persisted one would be a stale secret on disk —
+    // so replaying a gated stream from Recent replays it bare and it 403s. Not a leak, and not an oversight
+    // in the store: closing it means re-resolving the source through its addon rather than remembering its
+    // headers, which is a different feature.
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -7589,6 +7640,14 @@ void MainWindow::showCastMenu(QWidget* anchor)
         QAction* n = menu.addAction(tr("Nothing castable is playing"));
         n->setEnabled(false);
     }
+    else if (castHeaderGated_)
+    {
+        // Same limit as the external player: the device fetches the URL itself, and the headers its host
+        // requires cannot travel in a cast request. Say so rather than offering a cast that ends in a black
+        // screen the user has no way to explain.
+        QAction* n = menu.addAction(tr("This source can't be cast — it needs custom HTTP headers"));
+        n->setEnabled(false);
+    }
 
     const QList<CastDevice> devs = castMgr_->devices();
     if (devs.isEmpty())
@@ -7600,7 +7659,8 @@ void MainWindow::showCastMenu(QWidget* anchor)
     {
         const QString icon = d.type == CastDevice::Chromecast ? QStringLiteral("📺  ") : QStringLiteral("📡  ");
         QAction* a = menu.addAction(icon + d.name);
-        const bool ready = !castUrl_.isEmpty() && castUrl_.startsWith(QStringLiteral("http"));
+        const bool ready = !castUrl_.isEmpty() && castUrl_.startsWith(QStringLiteral("http"))
+                           && !castHeaderGated_;   // the device cannot carry this source's headers
         a->setEnabled(ready);
         const CastDevice dev = d;
         connect(a, &QAction::triggered, this, [this, dev] {
@@ -8198,10 +8258,14 @@ void MainWindow::presentStreamCandidates(const QVector<StremioTranslate::StreamC
 
 void MainWindow::playChosenStream(const MediaItem& item, const StremioTranslate::StreamCandidate& c)
 {
-    const auto play = [this, item](const QString& url, const QString& mime) {
+    const auto play = [this, item, c](const QString& url, const QString& mime) {
         MediaItem m = item;
         m.url = url;
         m.mime = mime;
+        // The chosen release's proxyHeaders, but ONLY if this really is that release's url. The debrid leg
+        // below plays a TorBox url instead, and forPlayUrl drops the headers there — the picker must not be
+        // the one path that sends host A's Referer to host B just because it kept the candidate in scope.
+        m.requestHeaders = StreamHeaders::forPlayUrl(c.requestHeaders, c.url, url);
         // The chosen release comes from a Stremio stream addon, which has no ?n= alternate-source knob —
         // only a file provider (Allarr) does. Offering "Issue with Streaming" here would be a dead button.
         m.nextSourceCapable = false;
@@ -8323,6 +8387,13 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             MediaItem local = item;
             local.url = localPath;
             local.mime = QStringLiteral("local:video");
+            // Re-pointing the url means re-deriving the headers, per the contract on MediaItem::requestHeaders.
+            // A filesystem path is not an origin, so this always clears them and the call looks pointless —
+            // which is exactly why it has to be here. This is the one place in the tree where a MediaItem is
+            // copied onto a different url, and "the copy happened to be harmless" is not the invariant; going
+            // through forPlayUrl is. The day this branch re-points to a URL instead, the guard is already in
+            // place rather than being something someone has to remember.
+            local.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, local.url);
             openLibraryItem(local);   // re-enter: filesystem url + local:video mime -> mpv branch
             return;
         }
@@ -8385,7 +8456,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (StreamResolver::isM3uRef(lower))
     {
         if (splitTarget_) { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
-        streams_->resolve(url, item.title);
+        // The item's own proxyHeaders ride along: this is a plain HTTP fetch of the STREAM URL, so a gated
+        // HLS/IPTV source is refused here — and refused before playback, so it would read as a broken
+        // playlist rather than a missing header.
+        streams_->resolve(url, item.title, item.requestHeaders);
         return;
     }
 
@@ -8514,11 +8588,26 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const QString rkey = item.id.isEmpty() ? url : item.id;
         // External-player handoff: an external player takes the resolved URL (Recent on both routes). A one-off
         // armed on this leaf rode here as item.playRouteHint (leak-free — a failed resolve never reaches here).
-        if (routePlay(url, routeFromHint(item.playRouteHint))) {
+        //
+        // A source that needs HTTP headers never goes out to an external player: we have no way to make the
+        // headers follow (VLC would take them on a command line the whole machine can read, MPC-HC has no
+        // equivalent, an Android ACTION_VIEW intent has nowhere to put them), so the handoff would 403 and
+        // the user would see nothing happen. Keep it in the built-in player, which CAN satisfy the gate, and
+        // say why — refusing outright would cost them the stream to protect a routing preference.
+        //
+        // ONE routePlay call either way, dry-run or not: it consumes the one-shot playRouteOverride_, so
+        // skipping it entirely would leave a "play externally" one-off armed for whatever plays next.
+        const bool headerGated = StreamHeaders::externalRoute(item.requestHeaders)
+                                 == StreamHeaders::ExternalRoute::FallBackToBuiltin;
+        const bool routedOut = routePlay(url, routeFromHint(item.playRouteHint), /*dryRun=*/headerGated);
+        if (routedOut && !headerGated) {
             const QString rt = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
             RecentStore::add({ url, rt, QStringLiteral("video"), item.thumbnailUrl, rkey });
             return;
         }
+        if (routedOut && headerGated)
+            notify(tr("This source needs custom HTTP headers, which can't be passed to an external player — "
+                      "playing it here instead."), kFeedbackLong);
         notePlaybackStart();     // channel guard (built-in catalog play): keep the channel iff this is its pick
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist(); session_->clearQueue();
         session_->setMediaVideo(true); // consumption-stats: a catalog movie/episode stream accrues "watch" seconds
@@ -8526,13 +8615,17 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         syncKey_ = rkey;         // catalog stream: key sync offsets by the stable id, not the volatile URL
         armSubtitleFetch(item); // auto-download a subtitle if this movie/episode has none in the preferred language
         castUrl_ = url; castTitle_ = item.title; castMime_ = item.mime; // castable stream for the cast button
+        // A cast device fetches the URL itself, so it is the external-player problem again: the headers
+        // cannot follow, and the device would sit on a black screen. Remember that this stream is gated so
+        // the cast menu can say so instead of offering a cast that cannot work.
+        castHeaderGated_ = !item.requestHeaders.isEmpty();
         castMgr_->startDiscovery();     // prime device discovery so the cast menu is populated when opened
         // Trakt: begin tracking this movie/episode. NOTE: local-library items now carry an imdbStreamId too
         // (added for subtitle matching), so files played off disk scrobble to Trakt as well — previously only
         // catalog streams did. That's the desirable behaviour (your watch history shouldn't depend on source).
         startScrobble(item.imdbStreamId);
         stack_->setCurrentWidget(playerPage_);
-        player_->play(url);
+        player_->play(url, item.requestHeaders);
         revealMediaControls();
         const QString title = !item.title.isEmpty() ? item.title : QUrl(url).fileName();
         RecentStore::add({ url, title, QStringLiteral("video"), item.thumbnailUrl, rkey });
@@ -8553,6 +8646,9 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         hideNotice(); // resolve+download feedback done; the content view takes over
         MediaItem local = item;
         local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
+        // Same re-derivation as the prefer-local re-entry, for the same reason: the url changed, so the
+        // headers bound to the old one must be asked for again rather than copied along.
+        local.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, local.url);
         openLibraryItem(local);
     };
 

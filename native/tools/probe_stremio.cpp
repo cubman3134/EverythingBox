@@ -2,6 +2,7 @@
 // Prints STREMIO-OK on success; any failure prints STREMIO-FAIL <what> and exits non-zero.
 #include "StremioTranslate.h"
 #include "BingeStore.h"
+#include "StreamHeaders.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -413,7 +414,7 @@ int main(int argc, char** argv)
             const QByteArray b = QByteArrayLiteral("{\"streams\":[{\"name\":\"x\",\"title\":\"") + title
                 + "\",\"infoHash\":\"0123456789abcdef0123456789abcdef01234567\"}]}";
             const QVector<StreamCandidate> got = parseStreams(b);
-            return got.size() == 1 ? got[0].seeders : -2;
+            return got.size() == 1 ? got.at(0).seeders : -2;
         };
         const QByteArray person = QByteArrayLiteral("\xF0\x9F\x91\xA4");   // the seeder emoji
         const QByteArray disk   = QByteArrayLiteral("\xF0\x9F\x92\xBE");   // the size emoji
@@ -589,6 +590,261 @@ int main(int argc, char** argv)
         CHECK(deep[0].seeders == 49 && deep[30].seeders == 19,
               "…including the ones past row 30, still in rank order");
         CHECK(parseStreams(body, 5).size() == 5, "and a smaller bound is honoured too");
+    }
+
+    // ---------------------------------- 14c. behaviorHints.proxyHeaders: parsing (#43)
+    {
+        const QByteArray body = R"({"streams":[{
+          "url": "https://cdn.example.test/a.mp4",
+          "name": "Direct",
+          "behaviorHints": {
+            "proxyHeaders": {
+              "request":  { "Referer": "https://embed.example.test/watch",
+                            "user-agent": "EB-Probe/1.0",
+                            "X-Token": "abc,def" },
+              "response": { "Content-Type": "video/mp4" }
+            }
+          }
+        }]})";
+        const QVector<StreamCandidate> v = parseStreams(body);
+        CHECK(v.size() == 1, "the header-gated stream parses");
+        const StreamHeaders::Headers h = v.value(0).requestHeaders;
+        CHECK(h.size() == 3, "all three request headers are carried onto the candidate");
+        CHECK(h.value(QStringLiteral("Referer")) == QStringLiteral("https://embed.example.test/watch"),
+              "Referer survives verbatim");
+        // Name canonicalisation is not cosmetic: everything downstream (the mpv split, the field list, the
+        // log summary) looks these up by name, so "user-agent" and "User-Agent" MUST be one key.
+        CHECK(h.value(QStringLiteral("User-Agent")) == QStringLiteral("EB-Probe/1.0"),
+              "a lowercase name is canonicalised, not carried as a second key");
+        CHECK(h.value(QStringLiteral("X-Token")) == QStringLiteral("abc,def"),
+              "a value containing a comma is carried whole");
+        // The `response` half describes what the addon expects BACK. Carrying it would only create a second
+        // thing to accidentally send.
+        CHECK(!h.contains(QStringLiteral("Content-Type")), "the response half is not carried");
+
+        // A stream with no behaviorHints at all carries no headers — the overwhelmingly common case, and the
+        // one that has to stay empty rather than picking up a default.
+        CHECK(parseStreams(R"({"streams":[{"url":"https://h.test/b.mp4"}]})").value(0).requestHeaders.isEmpty(),
+              "a stream without proxyHeaders carries none");
+
+        // canonicalName: mpv's option is spelled `referrer`, HTTP's header is `Referer`. Folding them means a
+        // stream cannot end up with two spellings holding two different values.
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("referrer")) == QStringLiteral("Referer"),
+              "the two-r spelling folds onto the HTTP one");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-FORWARDED-for")) == QStringLiteral("X-Forwarded-For"),
+              "each dash-separated part is capitalised");
+
+        // The RFC 7230 `token` charset, asserted on canonicalName directly because that is where the rule
+        // lives and every consumer of a header name goes through it. The parse-level fixture in 14d pins
+        // the consequence; these pin the rule, one refused character class at a time.
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-Ok_1.2*")) == QStringLiteral("X-Ok_1.2*"),
+              "the punctuation RFC 7230 actually permits is not refused");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-A\r\nRange")).isEmpty(),
+              "a name carrying CRLF is refused outright — the request-smuggling primitive");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X A")).isEmpty(), "…as is one containing a space");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X:A")).isEmpty(), "…or its own colon");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-Café")).isEmpty(),
+              "…or a non-ASCII letter, which QChar::isLetterOrNumber would have waved through");
+        CHECK(StreamHeaders::canonicalName(QString(QChar(u'\0'))).isEmpty(),
+              "…or a lone NUL, which strchr's terminator match would otherwise accept");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("  Referer  ")) == QStringLiteral("Referer"),
+              "surrounding whitespace is still tolerated — the charset rule applies to the trimmed name");
+    }
+
+    // ---------------------------------- 14d. proxyHeaders: what is REFUSED on the way in (#43)
+    {
+        const QByteArray body = R"({"streams":[{
+          "url": "https://cdn.example.test/a.mp4",
+          "behaviorHints": { "proxyHeaders": { "request": {
+            "Referer":   "https://ok.example.test/",
+            "Host":      "victim.example.test",
+            "Range":     "bytes=0-99",
+            "Content-Length": "12",
+            "Connection": "keep-alive",
+            "Transfer-Encoding": "chunked",
+            "Upgrade":   "websocket",
+            "X-Inject":  "v\r\nX-Evil: 1",
+            "X-Empty":   "",
+            "":          "nameless",
+            "X-Number":  7,
+            "X-Smuggle\r\nRange": "bytes=0-1",
+            "X Spaced":  "v",
+            "X-Colon: Y": "v",
+            "X-é":  "v"
+          } } }
+        }]})";
+        const StreamHeaders::Headers h = parseStreams(body).value(0).requestHeaders;
+        CHECK(h.keys() == QStringList{ QStringLiteral("Referer") },
+              "exactly one header survives the filter — every other entry above is refused");
+        // Named individually, because a single blanket assertion above would still pass if the filter kept
+        // the WRONG one of them, and each of these is refused for its own reason.
+        CHECK(!h.contains(QStringLiteral("Host")), "Host is refused: it re-points the request");
+        CHECK(!h.contains(QStringLiteral("Range")),
+              "Range is refused: the player issues its own per seek, and a pinned one freezes playback");
+        CHECK(!h.contains(QStringLiteral("Content-Length")) && !h.contains(QStringLiteral("Connection"))
+                  && !h.contains(QStringLiteral("Transfer-Encoding")) && !h.contains(QStringLiteral("Upgrade")),
+              "hop-by-hop / body-shaping fields are refused");
+        CHECK(!h.contains(QStringLiteral("X-Inject")),
+              "a value containing CRLF is refused — one field must not become two");
+        // The NAME half of the same guard, and the sharper one. trimmed() strips only leading/trailing
+        // whitespace, so an EMBEDDED CRLF used to survive canonicalisation, miss the blocklist (the key is
+        // not spelled `range`) and reach mpv's field list verbatim — which puts the bytes on the socket.
+        // Asserted three ways because each defeats the filter differently.
+        // Matched case-INSENSITIVELY and by substring, deliberately. Asserting `!h.contains("X-Spaced")`
+        // would be inert: canonicalName only capitalises after a dash, so a surviving mangled key is
+        // spelled "X spaced" / "X-Smuggle\r\nrange" and an exact-spelling assertion would pass while the
+        // field sat in the map. (Both of these WERE inert until mutation C1-a showed them staying green.)
+        CHECK(h.keys().filter(QStringLiteral("smuggle"), Qt::CaseInsensitive).isEmpty()
+                  && h.keys().filter(QStringLiteral("range"), Qt::CaseInsensitive).isEmpty(),
+              "a blocked field smuggled as a CRLF continuation of a permitted name does not survive — "
+              "under any spelling");
+        CHECK(h.keys().filter(QStringLiteral("spaced"), Qt::CaseInsensitive).isEmpty(),
+              "a name containing a space is refused, not repaired into a legal one");
+        CHECK(h.keys().filter(QStringLiteral("colon"), Qt::CaseInsensitive).isEmpty(),
+              "a name carrying its own colon is refused — it would write two fields");
+        CHECK(h.keys().filter(QStringLiteral("x-"), Qt::CaseInsensitive).isEmpty(),
+              "…so no X- name from this fixture reaches the map at all");
+        CHECK(!h.contains(QStringLiteral("X-Empty")), "an empty value is refused");
+        // A number/array/object value stringifies to "" and is refused by that same rule — asserted because
+        // it is the OBSERVABLE behaviour an addon can trip, not because a separate guard implements it.
+        CHECK(!h.contains(QStringLiteral("X-Number")), "a non-string value is refused too");
+    }
+
+    // ---------------------------------- 14e. forPlayUrl: headers belong to ONE origin (#43)
+    {
+        StreamHeaders::Headers h;
+        h.insert(QStringLiteral("Referer"), QStringLiteral("https://a.test/watch"));
+        const QString declared = QStringLiteral("https://cdn.a.test:8443/movie.mp4");
+
+        CHECK(StreamHeaders::forPlayUrl(h, declared, declared) == h,
+              "the url they were declared for keeps them");
+        CHECK(StreamHeaders::forPlayUrl(h, declared, QStringLiteral("https://cdn.a.test:8443/other.mp4")) == h,
+              "…as does another path on the same origin");
+        // THE hygiene assertion. A debrid/CDN substitute is a different host, and sending host A's Referer to
+        // host B both leaks where the user came from and gets refused for a reason nobody would guess.
+        CHECK(StreamHeaders::forPlayUrl(h, declared, QStringLiteral("https://cdn.b.test:8443/movie.mp4")).isEmpty(),
+              "a DIFFERENT host gets none of them");
+        CHECK(StreamHeaders::forPlayUrl(h, declared, QStringLiteral("https://cdn.a.test/movie.mp4")).isEmpty(),
+              "a different PORT on the same host gets none of them");
+        CHECK(StreamHeaders::forPlayUrl(h, declared, QStringLiteral("http://cdn.a.test:8443/movie.mp4")).isEmpty(),
+              "a downgrade to http gets none of them");
+        // Default ports are made explicit on both sides, so the two spellings of one origin still match.
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("https://a.test/x"),
+                                        QStringLiteral("https://a.test:443/x")) == h,
+              "an implicit and an explicit default port are the same origin");
+        // Two ways to be originless, pinned separately because ONE of them alone leaves the other's guard
+        // untestable: a magnet has no host at all, while an ftp url has a perfectly good host and differs
+        // only by being a scheme we do not speak. (The second case was added after mutation testing showed
+        // the magnet assertion was being satisfied by the empty-host branch, leaving the scheme check inert.)
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("magnet:?xt=urn:btih:0"),
+                                        QStringLiteral("magnet:?xt=urn:btih:0")).isEmpty(),
+              "a hostless url can never match — not even itself");
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("ftp://cdn.a.test/movie.mp4"),
+                                        QStringLiteral("ftp://cdn.a.test/movie.mp4")).isEmpty(),
+              "a non-http scheme can never match either — not even itself");
+        // …and a third: an http url whose host is missing. Without this the empty-host guard is unreachable
+        // (the magnet above is refused by the scheme check first) and two malformed urls would compare equal.
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("http:///movie.mp4"),
+                                        QStringLiteral("http:///movie.mp4")).isEmpty(),
+              "an http url with no host is not an origin either");
+        // There is deliberately NO "no headers in, none out" assertion here. It existed, and it was inert:
+        // with `declared` empty, deleting the early return, inverting it or replacing it with anything at all
+        // still yields an empty map, because every other branch returns either {} or the empty input. It
+        // pinned nothing and read as coverage. The guard it was aimed at has been removed too — same
+        // reasoning as the isString() guard in parseProxyHeaders.
+    }
+
+    // ---------------------------------- 14f. applyTo: the player assignment set, and its CLEARS (#43)
+    {
+        // Record what a player would be told. MpvWidget::play drives the identical call with an mpv-writing
+        // sink, so what is asserted here is what reaches libmpv.
+        struct Assign { QString property; QStringList values; };
+        auto record = [](const StreamHeaders::Headers& h) {
+            QVector<Assign> out;
+            StreamHeaders::applyTo(h, [&out](const QString& p, const QStringList& v) { out.push_back({ p, v }); });
+            return out;
+        };
+        // Every index below goes through this. CHECK is non-fatal by design — it counts a failure and carries
+        // on — so a size assertion does NOT protect the indexing that follows it: the exact regression these
+        // assertions exist to catch (applyTo stopping emitting one of the three) would run off the end of the
+        // vector and crash the probe instead of printing STREMIO-FAIL. Out of range yields a default Assign,
+        // which matches no expectation, so the failure stays a failure and stays readable.
+        auto at = [](const QVector<Assign>& v, int i) { return (i >= 0 && i < v.size()) ? v.at(i) : Assign{}; };
+
+        StreamHeaders::Headers h;
+        h.insert(QStringLiteral("User-Agent"), QStringLiteral("EB-Probe/1.0"));
+        h.insert(QStringLiteral("Referer"), QStringLiteral("https://embed.a.test/watch"));
+        h.insert(QStringLiteral("X-Token"), QStringLiteral("abc,def"));
+        const QVector<Assign> got = record(h);
+        CHECK(got.size() == 3, "exactly three properties are written");
+        CHECK(at(got, 0).property == QStringLiteral("user-agent")
+                  && at(got, 0).values == QStringList{ QStringLiteral("EB-Probe/1.0") },
+              "User-Agent goes to mpv's dedicated user-agent property");
+        CHECK(at(got, 1).property == QStringLiteral("referrer")
+                  && at(got, 1).values == QStringList{ QStringLiteral("https://embed.a.test/watch") },
+              "Referer goes to mpv's dedicated referrer property");
+        CHECK(at(got, 2).property == QStringLiteral("http-header-fields"),
+              "everything else goes to the header field list");
+        CHECK(at(got, 2).values == QStringList{ QStringLiteral("X-Token: abc,def") },
+              "…as one 'Name: value' entry, comma in the value and all");
+        // Lifting the two out of the field list is what stops mpv sending each of them twice.
+        CHECK(!at(got, 2).values.join(QLatin1Char('|')).contains(QStringLiteral("User-Agent"))
+                  && !at(got, 2).values.join(QLatin1Char('|')).contains(QStringLiteral("Referer")),
+              "the two dedicated ones are NOT also in the field list");
+
+        // THE clear-between-streams assertion. A stream that needs no headers must still produce all three
+        // assignments, EMPTY — because "emit nothing when there is nothing" is exactly the bug where the
+        // previous source's Referer stays live for the next stream, on a different host.
+        const QVector<Assign> cleared = record({});
+        CHECK(cleared.size() == 3, "a headerless stream still writes all three properties");
+        CHECK(at(cleared, 0).property == QStringLiteral("user-agent") && at(cleared, 0).values.isEmpty(),
+              "…user-agent cleared");
+        CHECK(at(cleared, 1).property == QStringLiteral("referrer") && at(cleared, 1).values.isEmpty(),
+              "…referrer cleared");
+        CHECK(at(cleared, 2).property == QStringLiteral("http-header-fields") && at(cleared, 2).values.isEmpty(),
+              "…and the field list cleared");
+        // The order is fixed, so a caller can never write a stale value after a fresh one.
+        CHECK(at(cleared, 0).property == at(got, 0).property && at(cleared, 1).property == at(got, 1).property
+                  && at(cleared, 2).property == at(got, 2).property,
+              "the same properties in the same order, headers or not");
+
+        // A stream carrying ONLY a User-Agent still clears the referrer the previous one set.
+        StreamHeaders::Headers uaOnly;
+        uaOnly.insert(QStringLiteral("User-Agent"), QStringLiteral("EB-Probe/2.0"));
+        const QVector<Assign> partial = record(uaOnly);
+        CHECK(partial.size() == 3, "a partial header set still writes all three properties");
+        // The property NAMES are checked alongside the emptiness, and that is not decoration: an out-of-range
+        // at() yields a default Assign whose values are also empty, so "cleared" and "never emitted" would be
+        // indistinguishable if only emptiness were asserted — the assertion would pass on exactly the
+        // regression it exists to catch.
+        CHECK(at(partial, 1).property == QStringLiteral("referrer") && at(partial, 1).values.isEmpty(),
+              "a partial header set clears the referrer it does not use");
+        CHECK(at(partial, 2).property == QStringLiteral("http-header-fields")
+                  && at(partial, 2).values.isEmpty(),
+              "…and the field list it does not use");
+    }
+
+    // ---------------------------------- 14g. logSummary is names-only, and the external-player call (#43)
+    {
+        StreamHeaders::Headers h;
+        h.insert(QStringLiteral("Referer"), QStringLiteral("https://embed.a.test/watch?token=SECRET"));
+        h.insert(QStringLiteral("Authorization"), QStringLiteral("Bearer SECRET"));
+        const QString s = StreamHeaders::logSummary(h);
+        // These values are the whole reason the rule exists: proxyHeaders routinely carry a signed-URL token
+        // or a session cookie, and stream_debug.log is a file users paste into bug reports.
+        CHECK(!s.contains(QStringLiteral("SECRET")), "no header VALUE reaches the log line");
+        CHECK(!s.contains(QStringLiteral("Bearer")), "…not even the scheme half of one");
+        CHECK(s.contains(QStringLiteral("Referer")) && s.contains(QStringLiteral("Authorization")),
+              "the header NAMES do — that is the diagnosable part");
+        CHECK(s.contains(QStringLiteral("2")), "and how many there are");
+        CHECK(StreamHeaders::logSummary({}).isEmpty(), "nothing to say about a stream with no headers");
+
+        // The external-player decision. Headers cannot follow a URL out to VLC/MPC-HC/an Android intent, so a
+        // gated stream stays in the built-in player (which can satisfy the gate) and the user is told why.
+        CHECK(StreamHeaders::externalRoute({}) == StreamHeaders::ExternalRoute::HandOff,
+              "an ordinary stream still goes to the configured external player");
+        CHECK(StreamHeaders::externalRoute(h) == StreamHeaders::ExternalRoute::FallBackToBuiltin,
+              "a header-gated stream does not");
     }
 
     // ------------------------------------------------- 15. BingeStore

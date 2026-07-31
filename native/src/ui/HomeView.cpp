@@ -2978,11 +2978,14 @@ HomeView::ChannelAir HomeView::openResolvedItem(const MediaItem& it, LoadedAddon
         const bool fileProvider = !addon->stremio; // Allarr-style provider: supports alternate sources (?n=)
         lastPlay_ = { addon, item, false, {}, {}, 0 };
         showToast(tr("Finding a source for “%1”…").arg(it.title), 0);
-        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](const QString& url, const QString& mime) {
+        mgr_->resolveStream(addon, item, [this, addon, item, fileProvider, forChannel, channelGen](
+                                             const QString& url, const QString& mime,
+                                             const StreamHeaders::Headers& headers) {
             hideToast();
             if (!url.isEmpty())
             {
                 MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider;
+                m.requestHeaders = headers;   // the headers this url's host requires (usually none)
                 if (forChannel) emit channelPickResolved(channelGen, m); // MainWindow gates on gen, then plays
                 else            emit openItem(m);
             }
@@ -3011,10 +3014,12 @@ void HomeView::requestNextSource()
     const int attempt = lastPlay_.attempt + 1; // advance only on success, so a failed try can be repeated
     const MediaItem item = lastPlay_.item;
 
-    auto onResolved = [this, item, attempt](const QString& url, const QString& mime) {
+    auto onResolved = [this, item, attempt](const QString& url, const QString& mime,
+                                            const StreamHeaders::Headers& headers) {
         if (url.isEmpty()) { emit nextSourceResult(false, tr("No other source available for “%1”.").arg(item.title)); return; }
         lastPlay_.attempt = attempt;
         MediaItem m = item; m.url = url; m.mime = mime; m.nextSourceCapable = true;
+        m.requestHeaders = headers;
         emit nextSourceResult(true, QString());
         emit openItem(m); // re-opens in the right view (player/reader); resume keys on the stable id
     };
@@ -3108,7 +3113,11 @@ void HomeView::dlResolveLeaf(const DlNode& node)
     }
     if (node.addon && node.addon->transport == LoadedAddon::RemoteHttp) // file provider OR Stremio: its /stream
     {
-        mgr_->resolveStream(node.addon, it, [this, it](const QString& url, const QString& mime) {
+        // The DOWNLOAD crawl, not playback: it writes the file to disk with the normal HTTP client. A
+        // header-gated source would need those headers on the download request too — that is a separate
+        // path from this issue's playback fix, and it is called out in the download queue's own notes.
+        mgr_->resolveStream(node.addon, it, [this, it](const QString& url, const QString& mime,
+                                                      const StreamHeaders::Headers&) {
             if (!url.isEmpty()) dlEmit(it, url, mime);
             dlNext();
         });
@@ -3758,9 +3767,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
                                                : tr("Looking for “%1”…").arg(it.title);
         showToast(lookingMsg, 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId](const QString& url, const QString& mime) {
+        mgr_->resolveStream(addon, it, [this, it, fileProvider, console, imdbId](
+                                           const QString& url, const QString& mime,
+                                           const StreamHeaders::Headers& headers) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.systemHint = console; m.cfCurl = mgr_->takeStreamCurl(); m.imdbStreamId = imdbId; m.requestHeaders = headers; emit openItem(m); }
             else {
                 // No link yet. Prefer the addon's own notice (e.g. Allarr just started caching the release
                 // on debrid — it names the title). Otherwise, for a file provider the source may still be
@@ -3788,9 +3799,11 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
         const bool fileProvider = mgr_->hasFileProvider(); // an alternate source is only offerable via Allarr
         showToast(tr("Finding a stream for “%1”…").arg(it.title), 0);
         if (playBtn_) playBtn_->setEnabled(false);
-        mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider, imdbId](const QString& url, const QString& mime) {
+        mgr_->resolveStreamByImdb(imdbType, imdbId, [this, it, fileProvider, imdbId](
+                                                        const QString& url, const QString& mime,
+                                                        const StreamHeaders::Headers& headers) {
             if (playBtn_) playBtn_->setEnabled(true);
-            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; emit openItem(m); }
+            if (!url.isEmpty()) { hideToast(); MediaItem m = it; m.url = url; m.mime = mime; m.nextSourceCapable = fileProvider; m.imdbStreamId = imdbId; m.requestHeaders = headers; emit openItem(m); }
             else showToast(tr("No sources found for “%1”. No stream addon returned a playable link "
                               "(check that Allarr is configured and returning results).").arg(it.title), kFeedbackLong);
         }, /*attempt=*/0, BingeStore::preferredGroup(bingeStore_, imdbId)); // the release already chosen, if any
@@ -4582,7 +4595,8 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         {
             const QString stremioType = (it.type == QStringLiteral("movie")) ? QStringLiteral("movie")
                                                                               : QStringLiteral("series");
-            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail](const QString& url, const QString& mime) {
+            mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail](const QString& url, const QString& mime,
+                                                                           const StreamHeaders::Headers&) {
                 if (!url.isEmpty())
                 {
                     dlEmit(it, url, mime);

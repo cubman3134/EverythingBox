@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.169 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.178 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -133,6 +133,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     qt_add_executable(everythingbox
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
+        src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
@@ -190,6 +191,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SubtitleHash.cpp src/core/SubtitleHash.h
         src/core/SubtitleCache.cpp src/core/SubtitleCache.h
         src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
+        src/core/StreamHeaders.cpp      src/core/StreamHeaders.h
         src/core/BingeStore.cpp         src/core/BingeStore.h
         src/core/MediaSegments.cpp src/core/MediaSegments.h
         src/core/SegmentStore.cpp  src/core/SegmentStore.h
@@ -688,7 +690,8 @@ if(EVERYTHINGBOX_BUILD_APP)
     # catalog classification. Pure — no network, no addon installed.
     add_executable(probe_stremio tools/probe_stremio.cpp
         src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
-        src/core/BingeStore.cpp src/core/BingeStore.h)
+        src/core/BingeStore.cpp src/core/BingeStore.h
+        src/core/StreamHeaders.cpp src/core/StreamHeaders.h)
     target_include_directories(probe_stremio PRIVATE src src/addons src/core)
     target_link_libraries(probe_stremio PRIVATE Qt6::Core)
 
@@ -756,7 +759,8 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
-        src/media/StreamResolver.cpp src/media/StreamResolver.h)
+        src/media/StreamResolver.cpp src/media/StreamResolver.h
+        src/core/StreamHeaders.cpp)  # StreamResolver applies a source's proxyHeaders to its playlist fetch
     target_include_directories(probe_perf PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_perf PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -825,7 +829,8 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # Headless test for StreamResolver's m3u classification (HLS vs IPTV vs multi-disc).
     add_executable(probe_m3u tools/probe_m3u.cpp
-        src/media/StreamResolver.cpp src/media/StreamResolver.h)
+        src/media/StreamResolver.cpp src/media/StreamResolver.h
+        src/core/StreamHeaders.cpp)  # StreamResolver applies a source's proxyHeaders to its playlist fetch
     target_include_directories(probe_m3u PRIVATE src src/media)
     target_link_libraries(probe_m3u PRIVATE Qt6::Core Qt6::Network)
 
@@ -860,6 +865,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
+        src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
         third_party/duktape/duktape.c third_party/miniz.c)
     target_include_directories(probe_addon PRIVATE src src/addons third_party third_party/duktape ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_addon PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
@@ -871,6 +877,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonModels.cpp src/addons/AddonManager.cpp src/core/MetaCache.cpp
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
+        src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
         src/core/GamelistStore.cpp src/core/Settings.cpp
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # Settings::virtualPadEnabled() resolves "auto" via FormFactor::instance() (D1)
         third_party/duktape/duktape.c third_party/miniz.c)
@@ -887,6 +894,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/addons/AddonManager.cpp src/addons/CatalogPrefetcher.cpp
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/addons/StremioTranslate.cpp   # AddonManager parses/routes Stremio through the translator
+        src/core/StreamHeaders.cpp        # …and the translator parses behaviorHints.proxyHeaders through this
         src/core/CatalogResolver.cpp src/core/CatalogMatch.cpp src/core/LocalResolveCache.cpp
         src/core/LocalLibrary.cpp src/core/Settings.cpp src/theme2/FormFactor.cpp
         third_party/duktape/duktape.c third_party/miniz.c)
