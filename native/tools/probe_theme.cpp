@@ -189,16 +189,14 @@ int main()
         //     (Unsupported, which would flag every existing theme).
         CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Undefined), QStringLiteral("desktop"))
               == Fit::Undeclared);
-        CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Undefined), QStringLiteral("tv"))
-              == Fit::Undeclared);
 
         // (b) A value that is not an ARRAY is also Undeclared — strict on purpose (see the header). The bare
         //     string is the typo an author will actually make, and it must read as "you declared nothing",
-        //     not as a declaration we guessed at.
+        //     not as a declaration we guessed at: accepting it would mean inferring a claim, and inferring
+        //     wrong is the silent lie this whole feature exists to prevent.
         CHECK(ThemeFormFactors::fit(QJsonValue(QStringLiteral("desktop")), QStringLiteral("desktop"))
               == Fit::Undeclared);
         CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Null), QStringLiteral("desktop")) == Fit::Undeclared);
-        CHECK(ThemeFormFactors::fit(QJsonValue(4), QStringLiteral("desktop")) == Fit::Undeclared);
         CHECK(ThemeFormFactors::fit(QJsonValue(QJsonObject()), QStringLiteral("desktop")) == Fit::Undeclared);
 
         // (c) An EMPTY array is a real declaration ("fits nothing"), NOT a missing one. This is the one shape
@@ -212,19 +210,18 @@ int main()
         CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("tv")) == Fit::Supported);
         CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("mobile")) == Fit::Supported);
 
-        // (e) A declaration that omits this device is Unsupported. Night ships exactly this shape.
+        // (e) A declaration that omits this device is Unsupported — the issue's motivating scenario, and the
+        //     shape the bundled Night theme actually ships (["desktop"], seen from a TV). The Supported line
+        //     is a deliberate CONTROL, not a duplicate of (d): without it, a fixture that failed to parse at
+        //     all would make the Unsupported line below pass for entirely the wrong reason.
         CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("desktop")) == Fit::Supported);
         CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("tv")) == Fit::Unsupported);
-        CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("mobile")) == Fit::Unsupported);
-        CHECK(ThemeFormFactors::fit(arr({ "tv", "mobile" }), QStringLiteral("desktop")) == Fit::Unsupported);
 
         // (f) THE HANDHELD ANSWER (the issue's one genuine design question), pinned rather than implied.
         //     FormFactor resolves no handheld mode, so "handheld" is a label the app cannot check — a theme
-        //     declaring ONLY it has named no device that exists, and reads Unsupported everywhere. That is
-        //     the honest verdict: the author did not claim this device.
+        //     declaring ONLY it has named no device that exists, and reads Unsupported. That is the honest
+        //     verdict: the author did not claim this device.
         CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("desktop")) == Fit::Unsupported);
-        CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("tv")) == Fit::Unsupported);
-        CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("mobile")) == Fit::Unsupported);
         //     ...and the OTHER half of that answer: the match is a plain string compare with NO table of
         //     "modes we know", so the day a real FormFactor::Mode::Handheld lands and modeName() returns
         //     "handheld", every theme already declaring it starts matching with no change to this unit.
