@@ -3615,8 +3615,12 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     subCtx_ = {};                      // a pasted/Recent link has no catalog metadata to match a subtitle by
     themedAudioSession_ = false;       // playStream is VIDEO — keep the classic player page
     stopScrobble();                    // leaving whatever was playing
-    castUrl_ = url; castTitle_ = title; castMime_.clear(); // a pasted/Recent link is castable as-is
-    castHeaderGated_ = false;   // …and carries no proxyHeaders, so it clears any the last stream had
+    castUrl_ = url; castTitle_ = title; castMime_.clear(); // castable stream for the cast button
+    // …gated by whatever headers THIS stream actually needs, which is not always none: the StreamResolver
+    // playDirect route reaches here with a catalog stream's proxyHeaders (a gated .m3u8). A cast device
+    // fetches the URL itself and cannot be given them, so a hard-coded false would offer every device on
+    // the LAN for a stream that can only produce a black screen on all of them.
+    castHeaderGated_ = !headers.isEmpty();
     currentNextSourceCapable_ = false; // a pasted/Recent stream link isn't a swappable Allarr source
     retro_->stop();
     book_->persist();
@@ -3629,7 +3633,12 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     session_->beginResume(rkey);
     syncKey_ = rkey;             // sync offsets follow the stable resume key (survives a re-resolved debrid URL)
     stack_->setCurrentWidget(playerPage_);
-    player_->play(url);
+    // WITH the headers. This is the whole point of the header-gated branch above: having decided not to hand
+    // the URL to an external player *because* it needs headers, and having told the user we would play it
+    // here instead, playing it without them makes that promise false — mpv would fetch the manifest bare and
+    // take a 403 on it and on every segment. `url` is the URL the headers were declared for on every route
+    // that supplies them (StreamResolver re-emits its own src), so they need no forPlayUrl re-scoping here.
+    player_->play(url, headers);
     revealMediaControls();
     // A readable title for the Recent list: the supplied title, else the link's file name / host / raw link.
     const QUrl u(url);
