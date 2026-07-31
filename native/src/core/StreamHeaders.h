@@ -63,7 +63,8 @@ namespace StreamHeaders
     Headers forPlayUrl(const Headers& declared, const QString& declaredUrl, const QString& playUrl);
 
     // Receives one player property assignment: a property name and the values it should take (an EMPTY list
-    // means "clear this property").
+    // means "clear this property" — i.e. put it back to the PLAYER'S OWN DEFAULT for that property, which is
+    // not always the empty string; mpv's user-agent defaults to "libmpv". See MpvHeaderApply::setProperty).
     using Sink = std::function<void(const QString& property, const QStringList& values)>;
 
     // Write `h` to a player through `sink`. ALWAYS emits exactly three assignments, in this order:
