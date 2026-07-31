@@ -991,6 +991,11 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
         // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
         resetSegmentState();
+        // KNOWN GAP (#59): every queue-driven load comes through here — the IPTV/channel queue from
+        // StreamResolver::playQueue, audio queues, and every advance — and PlaybackSession carries urls only,
+        // so a header-gated entry plays bare. Not a leak: this play() clears whatever the last one set,
+        // because MpvHeaderApply writes all three properties unconditionally. Closing it means a per-track
+        // header channel on PlaybackSession, which is also what openAudioStream needs.
         player_->play(p);
     });
     connect(session_, &PlaybackSession::queueChanged, this,
@@ -3579,6 +3584,10 @@ void MainWindow::openStreamPrompt()
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
                                const StreamHeaders::Headers& headers)
 {
+    // KNOWN GAP (#59): the split pane takes a url and a title and has no header channel, so a gated source
+    // opened into a split view plays bare. Not a leak — the split target is a separate player whose own
+    // MpvHeaderApply pass clears everything on load — but a gated stream will 403 there. Every
+    // splitTarget_->openVideo call site in this file has the same gap; this is the one they all resemble.
     if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
@@ -3649,6 +3658,11 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
 }
 
+// KNOWN GAP (#59): this entry point has no headers parameter, so a header-gated audio/audiobook stream plays
+// bare and a gated source 403s. Not a leak — MpvHeaderApply writes all three properties on every play, so the
+// previous stream's headers are cleared here rather than inherited; it is a missing capability, not a stale
+// one. Threading them through means giving PlaybackSession a per-track header channel (see the playRequested
+// choke point in the constructor), which is the same change the IPTV queue needs.
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
                                  const QString& thumbnailUrl)
 {
@@ -5803,6 +5817,11 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), kFeedbackLong);
         return;
     }
+    // KNOWN GAP (#59): a Recent entry is a url and a kind. proxyHeaders are deliberately never serialised —
+    // they are per-source and frequently token-bearing, and a persisted one would be a stale secret on disk —
+    // so replaying a gated stream from Recent replays it bare and it 403s. Not a leak, and not an oversight
+    // in the store: closing it means re-resolving the source through its addon rather than remembering its
+    // headers, which is a different feature.
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -8368,6 +8387,13 @@ void MainWindow::openLibraryItem(const MediaItem& item)
             MediaItem local = item;
             local.url = localPath;
             local.mime = QStringLiteral("local:video");
+            // Re-pointing the url means re-deriving the headers, per the contract on MediaItem::requestHeaders.
+            // A filesystem path is not an origin, so this always clears them and the call looks pointless —
+            // which is exactly why it has to be here. This is the one place in the tree where a MediaItem is
+            // copied onto a different url, and "the copy happened to be harmless" is not the invariant; going
+            // through forPlayUrl is. The day this branch re-points to a URL instead, the guard is already in
+            // place rather than being something someone has to remember.
+            local.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, local.url);
             openLibraryItem(local);   // re-enter: filesystem url + local:video mime -> mpv branch
             return;
         }
@@ -8620,6 +8646,9 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
         hideNotice(); // resolve+download feedback done; the content view takes over
         MediaItem local = item;
         local.url = localPath; // a local path now -> openLibraryItem dispatches to the file-based reader
+        // Same re-derivation as the prefer-local re-entry, for the same reason: the url changed, so the
+        // headers bound to the old one must be asked for again rather than copied along.
+        local.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, local.url);
         openLibraryItem(local);
     };
 
