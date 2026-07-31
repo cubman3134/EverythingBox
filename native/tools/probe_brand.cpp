@@ -67,6 +67,19 @@ static QString currentId(const QString& leaf)
     return QLatin1String(AppBrand::kAddonPrefix) + leaf;
 }
 
+// AddonManager::isEnabled's rule, re-spelled. AddonContext is linked so the addoncfg sections can assert
+// through the real readConfig; AddonManager cannot be — it drags in QuickJS, the network stack and the whole
+// addon runtime — so the on/off flag has no callable accessor here. The DEFAULT is the load-bearing half of
+// the copy: a MISSING key reads as ENABLED. That is what makes these assertions discriminate at all. An
+// add-on the user switched off, whose flag is still stranded under the other spelling, silently comes back
+// ON — so "is it off?" is a real question about the reconcile and not a restatement of a key name.
+static bool addonEnabledIn(const QString& ini, const QString& id)
+{
+    QSettings s(ini, QSettings::IniFormat);
+    s.sync();
+    return s.value(QStringLiteral("addon.enabled.") + id, true).toBool();
+}
+
 static void writeManifest(const QString& dir, const QString& id)
 {
     QDir().mkpath(dir);
@@ -374,6 +387,146 @@ int main(int argc, char** argv)
         CHECK(AddonContext::readConfig(QStringLiteral("org.someone.catalog"), QStringLiteral("token"))
                   == QStringLiteral("fixture-token-delta"),
               "a third-party addon's config is untouched");
+    }
+
+    // ---- 9. BOTH spellings of one id are loaded — neither is stranded, so neither may be touched -----------
+    //
+    // Sections 7 and 8 each describe an id that exists under exactly ONE spelling, which is what makes the
+    // counterpart a dead name whose config is safe to consume. This section is the state where that premise is
+    // false: a pre-rebrand sideloaded package (or a remote manifest reporting the previous spelling) loaded
+    // alongside its bundled counterpart, so reload() hands reconcile BOTH ids and BOTH have live config.
+    //
+    // Reachable without doing anything exotic: the reserved-namespace install guard retires the previous
+    // prefix as soon as Step::AddonIds is flagged, and addRemoteSource applies no namespace guard at all.
+    //
+    // Left unguarded the loop visits the pair twice and one credential does not survive. Pass one finds the
+    // destination occupied, carries nothing, and removes the source key anyway. Pass two — same pair, roles
+    // swapped — finds that side now vacant and moves the survivor onto it. The value that vanishes may well
+    // have been typed in AFTER the migration, in which case the legacy ini beside the exe does not hold it
+    // either and it is simply gone. Every later load then shuttles the survivor back and forth.
+    {
+        const QString ddir = AppPaths::dataDir();
+        const QString bothNow = currentId(QStringLiteral("dualspell"));   // the bundled counterpart
+        const QString bothWas = legacyId(QStringLiteral("dualspell"));    // the pre-rebrand package
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.setValue(QStringLiteral("addoncfg/") + bothNow + QStringLiteral("/apikey"),
+                       QStringLiteral("fixture-token-echo"));    // typed AFTER migration: in no backup
+            s.setValue(QStringLiteral("addoncfg/") + bothWas + QStringLiteral("/apikey"),
+                       QStringLiteral("fixture-token-foxtrot"));
+            s.setValue(QStringLiteral("addon.enabled.") + bothNow, false);  // the user switched THIS one off
+            s.setValue(QStringLiteral("addon.enabled.") + bothWas, true);
+            s.sync();
+        }
+
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { bothNow, bothWas }) == 0,
+              "two live spellings of one id reconcile to nothing — neither side is stranded");
+        // Asserted through readConfig, not through key presence: the bug class is a RENAME, so both keys are
+        // still there afterwards on the broken build and only the VALUE each id reads apart tells them apart.
+        CHECK(AddonContext::readConfig(bothNow, QStringLiteral("apikey")) == QStringLiteral("fixture-token-echo"),
+              "a loaded add-on's config is not deleted because the other spelling is also loaded");
+        CHECK(AddonContext::readConfig(bothWas, QStringLiteral("apikey")) == QStringLiteral("fixture-token-foxtrot"),
+              "the other loaded add-on still reads its OWN config, not its counterpart's");
+        CHECK(addonEnabledIn(newIniIn(ddir), bothNow) == false
+                  && addonEnabledIn(newIniIn(ddir), bothWas) == true,
+              "the on/off flags of two live spellings are left alone too");
+
+        // The launch-after-launch half. Unguarded, the pair does not settle: each run swaps the survivor to
+        // the other spelling and reports a restore, forever. Running it again must change nothing at all.
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { bothNow, bothWas }) == 0,
+              "a second run over two live spellings still reconciles nothing");
+        CHECK(AddonContext::readConfig(bothNow, QStringLiteral("apikey")) == QStringLiteral("fixture-token-echo")
+                  && AddonContext::readConfig(bothWas, QStringLiteral("apikey"))
+                         == QStringLiteral("fixture-token-foxtrot"),
+              "neither value ping-pongs between the spellings across runs");
+    }
+
+    // ---- 10. the on/off flag is reconciled too, in BOTH directions ----------------------------------------
+    //
+    // Section 7 asserts only that addon.enabled.<id> is EXCLUDED from the rewrite. That leaves the other half
+    // untested: a flag that is already stranded — either because an earlier build's rewrite moved it, or
+    // because the add-on's id legitimately moved and the exclusion left the flag behind — has to be carried
+    // onto the id in use, exactly as the config keys are. Its default is "enabled", so the failure is quiet:
+    // an add-on the user deliberately switched off just turns itself back on.
+    {
+        const QString ddir = AppPaths::dataDir();
+        // (a) an add-on that KEPT the previous id, whose flag an earlier rewrite pushed to the current one.
+        const QString keptId     = legacyId(QStringLiteral("enflag-kept"));
+        const QString keptStrand = currentId(QStringLiteral("enflag-kept"));
+        // (b) an add-on whose id genuinely MOVED, whose flag the exclusion now leaves under the previous one.
+        const QString movedId     = currentId(QStringLiteral("enflag-moved"));
+        const QString movedStrand = legacyId(QStringLiteral("enflag-moved"));
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.setValue(QStringLiteral("addon.enabled.") + keptStrand, false);
+            s.setValue(QStringLiteral("addon.enabled.") + movedStrand, false);
+            s.sync();
+        }
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { keptId, movedId }) == 2,
+              "both stranded on/off flags are reported as carried across");
+        CHECK(addonEnabledIn(newIniIn(ddir), keptId) == false,
+              "an OFF flag stranded under the rewritten id is honoured again under the id in use");
+        CHECK(addonEnabledIn(newIniIn(ddir), movedId) == false,
+              "an OFF flag left behind by an id that DID move is carried forward to it");
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.sync();
+            CHECK(!s.contains(QStringLiteral("addon.enabled.") + keptStrand)
+                      && !s.contains(QStringLiteral("addon.enabled.") + movedStrand),
+                  "the stranded flag keys are consumed, so a later run has nothing to do");
+        }
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { keptId, movedId }) == 0,
+              "a second flag reconcile carries nothing across");
+        CHECK(addonEnabledIn(newIniIn(ddir), keptId) == false && addonEnabledIn(newIniIn(ddir), movedId) == false,
+              "a second flag reconcile leaves both settled flags off");
+    }
+
+    // ---- 11. an EMPTY incumbent is not an incumbent -------------------------------------------------------
+    //
+    // The never-clobber rule protects a value the user re-entered. A blank is not that. Both Configure
+    // surfaces write blanks on Save — the classic dialog writes EVERY declared field verbatim — so the person
+    // this recovery exists for, whose Configure screen necessarily came up blank, only has to have opened it
+    // and pressed Save to have "" sitting under the id in use. Testing presence rather than content would let
+    // that blank win AND then drop the real stranded credential, leaving one copy in a file beside the exe
+    // that nobody will ever be told to open.
+    {
+        const QString ddir = AppPaths::dataDir();
+        const QString blankId  = legacyId(QStringLiteral("blankinc"));   // reports the PREVIOUS id
+        const QString blankWas = currentId(QStringLiteral("blankinc"));  // where the rewrite stranded it
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.setValue(QStringLiteral("addoncfg/") + blankWas + QStringLiteral("/apikey"),
+                       QStringLiteral("fixture-token-golf"));            // the real one, stranded
+            s.setValue(QStringLiteral("addoncfg/") + blankId + QStringLiteral("/apikey"), QString());
+            // ...and a leaf where BOTH sides are blank, which must NOT be counted as a restore: the
+            // "restored N stranded setting(s)" line has to mean something was actually given back.
+            s.setValue(QStringLiteral("addoncfg/") + blankWas + QStringLiteral("/nothing"), QString());
+            s.setValue(QStringLiteral("addoncfg/") + blankId + QStringLiteral("/nothing"), QString());
+            s.sync();
+        }
+        // The premise, stated as an assertion rather than assumed: a blank really is STORED and present.
+        // If QSettings ever stopped round-tripping an empty value the section below would pass vacuously.
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.sync();
+            CHECK(s.contains(QStringLiteral("addoncfg/") + blankId + QStringLiteral("/apikey")),
+                  "a blank written by Save is present in the ini (the incumbent this section is about)");
+        }
+
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { blankId }) == 1,
+              "the blank-vs-blank leaf is not counted; only the real value is reported as restored");
+        CHECK(AddonContext::readConfig(blankId, QStringLiteral("apikey")) == QStringLiteral("fixture-token-golf"),
+              "a stranded credential beats an EMPTY incumbent rather than being dropped for it");
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.sync();
+            CHECK(!s.contains(QStringLiteral("addoncfg/") + blankWas + QStringLiteral("/apikey")),
+                  "the stranded copy was consumed once its value had been carried across");
+        }
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { blankId }) == 0,
+              "a second run over the recovered value carries nothing");
+        CHECK(AddonContext::readConfig(blankId, QStringLiteral("apikey")) == QStringLiteral("fixture-token-golf"),
+              "a second run leaves the recovered value alone");
     }
 
     clearAllFlags();

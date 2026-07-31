@@ -76,11 +76,13 @@ bool hasUserContent(const QString& ini)
 // the user's stored API keys move to a name nothing reads — silently, with the Configure fields simply blank
 // afterwards. Left untouched here and reconciled against the ids that ACTUALLY loaded, which is the only
 // place the answer exists: see BrandMigration::reconcileAddonConfig.
-// NOT listed, and deliberately: addon.update.etag.<id>. It is keyed the same way and it does get renamed by
-// the rewrite below, so a pinned-id add-on loses it — but the entire consequence is that the next update check
-// misses its 304 and re-downloads one package, after which the etag is rewritten under the right id and the
-// problem has repaired itself. Excluding it would mean reconciling it too (or leaving a dead key behind for
-// every add-on whose id legitimately moved), which is more moving parts than a redundant download is worth.
+// NOT listed, and deliberately: addon.update.etag.<id>. It is keyed the same way and the rewrite below does
+// rename it — but for that one key the rename is CORRECT, not merely survivable. checkAddonUpdates writes an
+// etag only for a JsLocal add-on that carries an updateUrl (AddonManager::checkAddonUpdates), which is to say
+// one that lives in a folder on this device — and migrateAddonIds moves every such add-on's manifest id to
+// the current prefix. The id this key is keyed by therefore really did move, and the rewrite FOLLOWS it
+// rather than guessing at it. The add-on that keeps the previous namespace, which is the one this whole
+// exclusion list exists for, is remote: not JsLocal, no updateUrl, so it has no etag to get wrong.
 // Said out loud because an unexplained omission from a list like this is indistinguishable from an oversight.
 bool isAddonIdKeyed(const QString& key)
 {
@@ -173,14 +175,32 @@ QString counterpartId(const QString& id)
 //     (migrateLocalIni copies, never moves) holding the original.
 // `touched` records that the ini was modified AT ALL, which is not the same question as the return value:
 // the don't-clobber path writes nothing but still drops the stale key, and that removal has to be synced.
+//
+// AN EMPTY INCUMBENT IS NOT AN INCUMBENT. "A value already stored under the id in use" has to mean a value
+// the user could actually be relying on, and a blank is not one — nor is it necessarily something the user
+// typed. Both Configure surfaces write blanks: the classic dialog writes EVERY declared field verbatim on
+// Save (AddonSettingsDialog.cpp — `value = le->text()`, then an unconditional writeConfig), and the themed
+// panel writes any field that was committed. So the exact person this repair exists for — someone already
+// broken, whose Configure screen therefore came up blank — only has to have opened that screen and pressed
+// Save to end up with "" under the id in use. Testing presence rather than content would let that blank beat
+// their real stranded credential AND then drop the credential, which is the very loss the never-clobber rule
+// is written to prevent, inflicted by the rule itself. Their only remaining copy would be the legacy ini
+// beside the exe, recoverable by hand-editing a file nobody will ever be told to look for.
 bool adoptKey(QSettings& s, const QString& from, const QString& to, bool& touched)
 {
     if (!s.contains(from)) return false;
-    const bool carried = !s.contains(to);
-    if (carried) s.setValue(to, s.value(from));
+    const QVariant stale = s.value(from);
+    // Absent and empty are the same answer here, and s.value() already collapses them: a missing key returns
+    // an invalid QVariant, whose toString() is empty. A bool `false` is NOT empty ("false"), so the
+    // addon.enabled.<id> case — where OFF is the whole point of the setting — still counts as occupied.
+    const bool carried = s.value(to).toString().isEmpty();
+    if (carried) s.setValue(to, stale);
     s.remove(from);
     touched = true;
-    return carried;
+    // Only a value with something IN it is reported as restored. A blank moving onto a blank changes nothing
+    // a user could see, and counting it would put the "restored N stranded setting(s)" line on screen for a
+    // repair that did not happen.
+    return carried && !stale.toString().isEmpty();
 }
 
 } // namespace
@@ -312,6 +332,25 @@ int BrandMigration::reconcileAddonConfig(const QString& dataDir, const QStringLi
     {
         const QString other = counterpartId(id);
         if (other.isEmpty() || other == id) continue;   // third-party id, or nothing to reconcile
+
+        // BOTH SPELLINGS ARE LIVE — there is nothing stranded here, so do not touch either of them.
+        //
+        // Everything below rests on one premise: `other` is a DEAD name, so its config is orphaned and its
+        // removal costs nothing. That premise fails outright when the counterpart is itself in installedIds,
+        // because then `other` is a loaded add-on's own config, in use, being read right now. The state is
+        // reachable without doing anything unusual — the reserved-namespace install guard retires the
+        // previous prefix once Step::AddonIds is flagged, so a pre-rebrand package installs cleanly beside
+        // its bundled counterpart, and addRemoteSource applies no namespace guard at all, so any remote
+        // manifest reporting the counterpart spelling arms it too.
+        //
+        // Without this line the loop visits the pair twice and destroys a credential. First pass (id=A,
+        // other=B): A already holds a value, so nothing is carried — but B's key is removed anyway, and B's
+        // value is gone. Second pass (id=B, other=A): B is now vacant, so A's value moves onto B. Net: one
+        // credential deleted, the other reading under the wrong add-on, and — because the deleted one may
+        // well have been typed in AFTER the migration — no backup anywhere, since the legacy ini beside the
+        // exe only holds what existed before it ran. Every later load would shuttle the survivor back and
+        // forth and report a restore that never stops happening.
+        if (installedIds.contains(other)) continue;
 
         // addoncfg/<id>/<key> — the per-add-on config group. Enumerated under the SOURCE id: only keys that
         // are actually stranded are considered, so an add-on with nothing to repair costs one group lookup.
