@@ -1,4 +1,5 @@
 #include "MpvWidget.h"
+#include "MpvHeaderApply.h"
 #include "../core/AppPaths.h"
 #include "../core/Settings.h"
 #ifndef Q_OS_IOS
@@ -366,48 +367,12 @@ void MpvWidget::refreshNowPlaying()
     }
 }
 
-// Write one player property from StreamHeaders::applyTo. An EMPTY value list clears the property — which is
-// how the previous stream's headers stop existing, so it must be a real assignment, never a skip.
-//
-// http-header-fields is a string LIST, and it is set as a node array rather than as mpv's comma-separated
-// string form on purpose: header values legitimately contain commas (Accept, a multi-value Cookie), and the
-// string form would split one such value into two malformed fields.
-static void setMpvHeaderProperty(mpv_handle* mpv, const QString& property, const QStringList& values)
-{
-    if (!mpv) return;
-    if (property != QLatin1String("http-header-fields"))
-    {
-        // Scalar (user-agent / referrer): "" is each option's own default, so an empty list clears it.
-        mpv_set_property_string(mpv, property.toUtf8().constData(), values.value(0).toUtf8().constData());
-        return;
-    }
-    QVector<QByteArray> utf8;
-    utf8.reserve(values.size());
-    for (const QString& v : values) utf8.push_back(v.toUtf8());
-    QVector<mpv_node> nodes(values.size());
-    for (int i = 0; i < utf8.size(); ++i)
-    {
-        nodes[i].format   = MPV_FORMAT_STRING;
-        nodes[i].u.string = const_cast<char*>(utf8.at(i).constData());
-    }
-    mpv_node_list list{};
-    list.num    = int(nodes.size());
-    list.values = nodes.isEmpty() ? nullptr : nodes.data();
-    list.keys   = nullptr;
-    mpv_node n{};
-    n.format = MPV_FORMAT_NODE_ARRAY;
-    n.u.list = &list;
-    mpv_set_property(mpv, "http-header-fields", MPV_FORMAT_NODE, &n);
-}
-
 void MpvWidget::play(const QString& url, const StreamHeaders::Headers& headers)
 {
-    // Per-stream HTTP headers (behaviorHints.proxyHeaders.request). UNCONDITIONAL, before the load: applyTo
-    // always emits all three properties, so a stream that needs none actively clears whatever the previous
-    // one set. Nothing here logs a value — only how many and which names (see logSummary).
-    StreamHeaders::applyTo(headers, [this](const QString& property, const QStringList& values) {
-        setMpvHeaderProperty(mpv, property, values);
-    });
+    // Per-stream HTTP headers (behaviorHints.proxyHeaders.request). UNCONDITIONAL, before the load:
+    // MpvHeaderApply::apply writes all three properties every time, so a stream that needs none actively
+    // clears whatever the previous one set. Nothing here logs a value — only how many and which names.
+    MpvHeaderApply::apply(mpv, headers);
     if (!headers.isEmpty())
         videoLog(QStringLiteral("mpv: applying stream ") + StreamHeaders::logSummary(headers));
 

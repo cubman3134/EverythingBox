@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.167 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.168 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -133,6 +133,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     qt_add_executable(everythingbox
         src/main.cpp
         src/video/MpvWidget.cpp   src/video/MpvWidget.h
+        src/video/MpvHeaderApply.h
         src/emu/RetroView.cpp     src/emu/RetroView.h
         src/emu/VirtualPad.cpp    src/emu/VirtualPad.h
         src/emu/NetplaySession.cpp src/emu/NetplaySession.h
