@@ -694,9 +694,21 @@ int main(int argc, char** argv)
         CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("https://a.test/x"),
                                         QStringLiteral("https://a.test:443/x")) == h,
               "an implicit and an explicit default port are the same origin");
+        // Two ways to be originless, pinned separately because ONE of them alone leaves the other's guard
+        // untestable: a magnet has no host at all, while an ftp url has a perfectly good host and differs
+        // only by being a scheme we do not speak. (The second case was added after mutation testing showed
+        // the magnet assertion was being satisfied by the empty-host branch, leaving the scheme check inert.)
         CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("magnet:?xt=urn:btih:0"),
                                         QStringLiteral("magnet:?xt=urn:btih:0")).isEmpty(),
-              "a non-http origin can never match — not even itself");
+              "a hostless url can never match — not even itself");
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("ftp://cdn.a.test/movie.mp4"),
+                                        QStringLiteral("ftp://cdn.a.test/movie.mp4")).isEmpty(),
+              "a non-http scheme can never match either — not even itself");
+        // …and a third: an http url whose host is missing. Without this the empty-host guard is unreachable
+        // (the magnet above is refused by the scheme check first) and two malformed urls would compare equal.
+        CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("http:///movie.mp4"),
+                                        QStringLiteral("http:///movie.mp4")).isEmpty(),
+              "an http url with no host is not an origin either");
         CHECK(StreamHeaders::forPlayUrl({}, declared, declared).isEmpty(), "no headers in, none out");
     }
 
