@@ -12,6 +12,7 @@
 // Prints BRAND-OK on success; any failure prints BRAND-FAIL <what> and exits non-zero.
 #include "BrandMigration.h"
 #include "Settings.h"
+#include "AddonContext.h"   // sections 7/8 assert through the REAL per-addon config lookup, not a copy of it
 
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -236,6 +237,143 @@ int main(int argc, char** argv)
         CHECK(Settings::checkParentalPin(QStringLiteral("1234")),
               "the PIN round-trips through checkParentalPin");
         Settings::setParentalPin(QString());   // leave the probe's own ini clean
+    }
+
+    // ---- 7. per-add-on config survives the ini step for an add-on that KEPT the previous id ---------------
+    //
+    // The gap section 4 leaves. Its fixtures are id-named LOCAL FOLDERS, so the only add-on it can describe is
+    // one the migration can see and legitimately rename. The add-on this section is about is REMOTE: it has no
+    // folder, its manifest lives behind a URL that migration time never fetches, and it deliberately keeps the
+    // previous namespace forever, because for a remote add-on the id and the URL are identity rather than
+    // branding. Nothing about it is observable from disk — so a rewrite of the keys it owns is a guess, and the
+    // thing it silently destroys is the user's stored API keys.
+    //
+    // Asserted through AddonContext::readConfig — the SAME call the Configure screen and the outbound
+    // per-user config header both use — and not through a key string spelled out here. That is the point: the
+    // bug is a RENAME, so the keys do still exist afterwards and any check of the form "some addoncfg key is
+    // present" passes just as happily on the broken build. The only question that separates the two is whether
+    // the value comes back when looked up under the id the add-on ACTUALLY reports.
+    //
+    // Runs against AppPaths::dataDir() because that is where readConfig looks. Under EB_ISOLATED_DATA_DIR
+    // (every probe target, #42) that is this process's own scratch directory, created at startup and removed
+    // at exit — a fixture. No installed ini is opened here, and none can be.
+    {
+        const QString ddir = AppPaths::dataDir();
+        // A destination holding user content would make migrateLocalIni short-circuit as "already migrated"
+        // (correctly — that guard is what stops a stale snapshot landing on live settings). Earlier sections
+        // have written here, so clear the slate: this directory is probe scratch, never an install.
+        QFile::remove(newIniIn(ddir));
+        QFile::remove(legacyIniIn(ddir));
+        clearAllFlags();
+
+        const QString workerId = legacyId(QStringLiteral("aiocatalog-worker"));   // the pinned, still-legacy id
+        {
+            QSettings s(legacyIniIn(ddir), QSettings::IniFormat);
+            s.setValue(QStringLiteral("addoncfg/") + workerId + QStringLiteral("/apikey"),
+                       QStringLiteral("fixture-token-alpha"));
+            s.setValue(QStringLiteral("addon.enabled.") + workerId, false);   // the user turned it OFF
+            // A key that IS ours to rename, alongside it: the exclusion must be surgical, not a blanket
+            // "stop rewriting", or section 1's property quietly dies here.
+            s.setValue(QStringLiteral("addons/") + legacyId(QStringLiteral("igdb")) + QStringLiteral("/enabled"),
+                       QStringLiteral("true"));
+            s.sync();
+        }
+
+        CHECK(BrandMigration::migrateLocalIni(ddir), "the ini step completes with per-addon config present");
+
+        // THE assertion. On the pre-fix build the key was renamed to the current namespace while the add-on
+        // went on reporting the previous one, so this lookup returned empty and the Configure field came up
+        // blank with no error. Nothing else in this file would have noticed.
+        CHECK(AddonContext::readConfig(workerId, QStringLiteral("apikey")) == QStringLiteral("fixture-token-alpha"),
+              "an add-on that kept the previous id can still READ its stored config after migration");
+        // ...and it was not copied to the other spelling either. A rewrite that duplicated rather than moved
+        // would satisfy the line above while leaving a second copy of a user credential in the ini forever.
+        CHECK(AddonContext::readConfig(currentId(QStringLiteral("aiocatalog-worker")),
+                                       QStringLiteral("apikey")).isEmpty(),
+              "the config was not also left under the id the add-on does NOT report");
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.sync();
+            CHECK(s.value(QStringLiteral("addon.enabled.") + workerId).toString() == QStringLiteral("false"),
+                  "the per-addon enabled flag also stayed under the id the add-on reports");
+            CHECK(s.value(QStringLiteral("addons/") + currentId(QStringLiteral("igdb"))
+                          + QStringLiteral("/enabled")).toString() == QStringLiteral("true"),
+                  "a key that IS ours to rename was still rewritten (the exclusion is scoped, not a blanket)");
+        }
+    }
+
+    // ---- 8. recovery: config already stranded by an earlier build is found again --------------------------
+    //
+    // Section 7 only helps someone who has not upgraded yet. Everyone who already has was renamed on the way
+    // in, and their keys are sitting in the ini right now under a name nothing reads. That data is still
+    // there, so it is recoverable — and if it is not recovered here it never is, because the ini step is
+    // flagged and will not run again.
+    //
+    // Mutates the ini through QSettings only, never by replacing the file: readConfig's store is a long-lived
+    // static (see the flagStorePath comment in BrandMigration.cpp for why that matters), and swapping the file
+    // underneath it would leave it reading a snapshot instead of the fixture.
+    {
+        const QString ddir = AppPaths::dataDir();
+        const QString workerId  = legacyId(QStringLiteral("aiocatalog-worker"));   // reports the PREVIOUS id
+        const QString strandedTo = currentId(QStringLiteral("aiocatalog-worker")); // where the rewrite put it
+        const QString igdbNow   = currentId(QStringLiteral("igdb"));               // reports the CURRENT id
+        const QString igdbWas   = legacyId(QStringLiteral("igdb"));
+
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            // (a) the already-broken user: renamed by a previous run, nothing under the id in use.
+            s.setValue(QStringLiteral("addoncfg/") + strandedTo + QStringLiteral("/token"),
+                       QStringLiteral("fixture-token-bravo"));
+            // (b) the user who gave up and typed their key in again. BOTH spellings hold a value, and the one
+            //     they re-entered is the one that must survive.
+            s.setValue(QStringLiteral("addoncfg/") + strandedTo + QStringLiteral("/token2"),
+                       QStringLiteral("fixture-token-stale"));
+            s.setValue(QStringLiteral("addoncfg/") + workerId   + QStringLiteral("/token2"),
+                       QStringLiteral("fixture-token-reentered"));
+            // (c) the opposite direction: an add-on whose id genuinely DID move, whose config the ini step no
+            //     longer follows. Without this half, fix (1) would strand every local add-on's config instead.
+            s.setValue(QStringLiteral("addoncfg/") + igdbWas + QStringLiteral("/token"),
+                       QStringLiteral("fixture-token-charlie"));
+            s.sync();
+        }
+
+        const int restored = BrandMigration::reconcileAddonConfig(ddir, { workerId, igdbNow });
+        CHECK(restored == 2, "reconcile reports exactly the values it carried across (not the ones it kept)");
+
+        CHECK(AddonContext::readConfig(workerId, QStringLiteral("token")) == QStringLiteral("fixture-token-bravo"),
+              "config stranded under the rewritten id is READABLE again under the id in use");
+        CHECK(AddonContext::readConfig(igdbNow, QStringLiteral("token")) == QStringLiteral("fixture-token-charlie"),
+              "config left behind by an id that DID move is carried forward to it");
+        CHECK(AddonContext::readConfig(workerId, QStringLiteral("token2")) == QStringLiteral("fixture-token-reentered"),
+              "a value already stored under the id in use WINS over the stale one");
+
+        // The stale copies are gone — that is what makes a second run a no-op, and it is also what stops a
+        // user credential living on in the ini under a name nothing reads.
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.sync();
+            CHECK(!s.contains(QStringLiteral("addoncfg/") + strandedTo + QStringLiteral("/token"))
+                      && !s.contains(QStringLiteral("addoncfg/") + strandedTo + QStringLiteral("/token2")),
+                  "the stale copies were dropped, including the one that lost to a re-entered value");
+        }
+
+        // Idempotent: nothing left to carry, and nothing disturbed by asking again.
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { workerId, igdbNow }) == 0,
+              "a second reconcile carries nothing across");
+        CHECK(AddonContext::readConfig(workerId, QStringLiteral("token2")) == QStringLiteral("fixture-token-reentered"),
+              "a second reconcile leaves the winning value alone");
+
+        // A third party's id is under neither namespace and must be left completely alone.
+        {
+            QSettings s(newIniIn(ddir), QSettings::IniFormat);
+            s.setValue(QStringLiteral("addoncfg/org.someone.catalog/token"), QStringLiteral("fixture-token-delta"));
+            s.sync();
+        }
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, { QStringLiteral("org.someone.catalog") }) == 0,
+              "a third-party addon id is not reconciled against anything");
+        CHECK(AddonContext::readConfig(QStringLiteral("org.someone.catalog"), QStringLiteral("token"))
+                  == QStringLiteral("fixture-token-delta"),
+              "a third-party addon's config is untouched");
     }
 
     clearAllFlags();
