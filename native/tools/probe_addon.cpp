@@ -21,7 +21,8 @@
 #include <cstdio>
 #include <cstring>
 
-// With "--manager": construct an AddonManager (scans <exe dir>/addons), list its sources and the first
+// With "--manager": construct an AddonManager (scans AppPaths::dataDir()/addons, which under a probe build is
+// this process's own scratch directory, not the exe folder - issue #42), list its sources and the first
 // source's catalog with resolved URLs - the full discovery + resolution path the app uses.
 static int probeManager(const QString& catalogId, int page)
 {
@@ -422,7 +423,6 @@ static int probePrefetch()
     // ---- Manager A: comfortably-long TTL for the peek/disable/signal steps ----
     qputenv("EB_PREFETCH_TTL_S", "30");
     AddonManager mgr;
-    for (const QString& id : ids) mgr.setEnabled(id, true); // isEnabled persists in the shared ini across runs
     check("discovered the 3 fixtures", mgr.sources().size() == 3);
     LoadedAddon* s0 = mgr.sourceById(ids[0]);
     if (!s0) { printf("fixture 0 not loaded\n"); return 2; }

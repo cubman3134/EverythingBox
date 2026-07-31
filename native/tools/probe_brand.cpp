@@ -5,9 +5,10 @@
 // is mutation-tested: flipping QFile::copy to QFile::rename in BrandMigration.cpp must make this probe FAIL.
 //
 // Isolation: the local steps take an explicit data directory, so the ini/addon assertions run against a
-// QTemporaryDir and never touch a real install. The FLAGS are device state and live in the probe exe's own
-// AppPaths::dataDir() (its build-tree folder, like every other core probe) — so the probe clears them at
-// start, and clears the "cloud" group too so the Drive half of run() stays provably dormant.
+// QTemporaryDir and never touch a real install. The FLAGS are device state and live in AppPaths::dataDir(),
+// which for a probe build is this process's own scratch directory (issue #42): no flag is set when the probe
+// starts, no cloud credential is configured, and so the Drive half of run() is dormant by construction rather
+// than because the probe cleared up after whoever ran last.
 //
 // Prints BRAND-OK on success; any failure prints BRAND-FAIL <what> and exits non-zero.
 #include "BrandMigration.h"
@@ -120,19 +121,6 @@ static void clearAllFlags()
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
-
-    // The probe's own device state lives in the build-tree ini shared with the other core probes. Start from a
-    // known-clean slate: no migration flags, and no cloud credentials (so run()'s Drive half never engages).
-    {
-        QSettings s(newIniIn(AppPaths::dataDir()), QSettings::IniFormat);
-        s.remove(QStringLiteral("cloud"));
-        s.sync();
-    }
-    // Section 5 drives the real run() against AppPaths::dataDir(). Older builds of the sibling probes wrote a
-    // previous-brand ini into that same build-tree folder, and leaving one there would make run()'s outcome
-    // depend on build history. Drop it — it is probe scratch, never a user's install.
-    QFile::remove(legacyIniIn(AppPaths::dataDir()));
-    clearAllFlags();
 
     // ---- 1. the ini step COPIES, and never destroys the legacy file -------------------------------------
     QTemporaryDir tmp;
@@ -249,7 +237,6 @@ int main(int argc, char** argv)
               "the parental PIN hash still matches the pre-rename salt");
         CHECK(Settings::checkParentalPin(QStringLiteral("1234")),
               "the PIN round-trips through checkParentalPin");
-        Settings::setParentalPin(QString());   // leave the probe's own ini clean
     }
 
     // ---- 7. per-add-on config survives the ini step for an add-on that KEPT the previous id ---------------
@@ -529,7 +516,6 @@ int main(int argc, char** argv)
               "a second run leaves the recovered value alone");
     }
 
-    clearAllFlags();
     if (failures) { std::fprintf(stderr, "BRAND: %d failure(s)\n", failures); return 1; }
     std::printf("BRAND-OK\n");
     return 0;
