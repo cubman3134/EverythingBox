@@ -95,8 +95,9 @@ static bool setMtime(const QString& path, const QDateTime& when)
 static QString dlOf(const QString& rel) { return QStringLiteral("dl:") + SaveSync::driveNameFor(rel); }
 static QString upOf(const QString& rel) { return QStringLiteral("up:") + SaveSync::driveNameFor(rel); }
 
-// Tombstones live in the shared ini next to the exe, so every case starts from a clean deleted/saves group —
-// otherwise a tombstone written by one case silently deletes a save in the next (and across probe runs).
+// Every case starts from a clean deleted/saves group — otherwise a tombstone written by one case silently
+// deletes a save in the next. This one is NOT subsumed by the per-process data dir (issue #42): the cases all
+// run inside ONE process, and isolation says nothing about what an earlier case in the same run left behind.
 static void clearTombs()
 {
     const QVector<Tombstones::Entry> ts = Tombstones::all(kTombStore);
@@ -1024,8 +1025,6 @@ static void saveMetaChecks()
     // twice and the conflict notice would then miss it.
     CHECK(SaveMeta::titleFor(QStringLiteral("saves\\nes\\101306d4c0ffee.srm")) == QStringLiteral("Zelda II"),
           "a native-separator key finds the same entry");
-
-    QFile::remove(AppPaths::dataDir() + QStringLiteral("/saves-meta.json")); // the probe's own scratch sidecar
 }
 
 int main(int argc, char** argv)

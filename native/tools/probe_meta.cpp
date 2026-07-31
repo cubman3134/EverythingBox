@@ -40,7 +40,6 @@ int main(int argc, char** argv)
     item.altNames = { QStringLiteral("PC Genjin") };
     const QString key = MetaCache::keyFor(item);
     CHECK(key == item.id, "keyFor prefers the stable id");
-    MetaCache::remove(key); // fresh start if a previous run left state
 
     // ---------------------------------------------------------------- item round-trip
     MetaCache::saveItem(item);
@@ -248,11 +247,6 @@ int main(int argc, char** argv)
     MetaCache::remove(key);
     CHECK(MetaCache::load(key).isEmpty(), "remove deletes the bundle");
     CHECK(!QDir(MetaCache::dirFor(key)).exists(), "remove deletes the folder (artwork included)");
-    // Tidy-up: the cache root is dataDir()/metadata. That has to be dataDir() and not applicationDirPath() —
-    // under a probe build they are deliberately different directories (issue #42), and removing the exe
-    // folder's metadata/ would both miss what this probe wrote and delete what the GUI's cache had.
-    QDir(AppPaths::dataDir() + QStringLiteral("/metadata")).removeRecursively(); // probe tidy-up
-
     if (failures) { std::fprintf(stderr, "META-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("META-OK\n");
     return 0;
