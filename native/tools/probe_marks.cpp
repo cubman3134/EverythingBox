@@ -13,11 +13,10 @@
 //
 // Prints MARKS-OK on success; any failure prints MARKS-FAIL <cond> (line) and exits non-zero.
 //
-// Isolation: like the other core probes (probe_sync/probe_formfactor), AppPaths::dataDir() is the probe exe's
-// own build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and
-// never touches a deployed install. We wipe the "marks" and "profiles" groups at start and SEED our own
-// profile ids via ProfileStore::setCurrent, so ProfileStore::currentId() (which reads the real store) can't
-// leak a developer's actual profile into the asserts.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// it reads/writes starts empty, is never shared with a sibling probe or a previous run, and is removed at exit.
+// The probe still SEEDS its own profile ids via ProfileStore::setCurrent, because currentId() otherwise
+// resolves to the store's default rather than to a profile these asserts name.
 #include "ItemMarks.h"
 #include "ProfileStore.h"
 #include "AppPaths.h"
@@ -56,16 +55,6 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
 
     const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
-
-    // Reset: wipe any leftover marks/* and profiles/* so a stale ini can't skew the asserts. Shares
-    // QSettings' per-file cache with ItemMarks' own store(), so this is visible to every later read.
-    {
-        QSettings reset(iniPath, QSettings::IniFormat);
-        reset.remove(QStringLiteral("marks"));
-        reset.remove(QStringLiteral("profiles"));
-        reset.sync();
-    }
-    ItemMarks::invalidate();
 
     // ---- 1. Per-profile isolation --------------------------------------------------------------------------
     useProfile(QStringLiteral("probeA"));

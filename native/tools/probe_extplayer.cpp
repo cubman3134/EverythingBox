@@ -13,10 +13,10 @@
 //
 // Prints EXTPLAYER-OK on success; any failure prints EXTPLAYER-FAIL <cond> and exits non-zero.
 //
-// Isolation: like the other core probes (see probe_sync), AppPaths::dataDir() is the probe exe's own folder
-// in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and never
-// touches a deployed install. We wipe the "player" group at start so a leftover ini can't skew the asserts.
-// The fs/reg roots live in a QTemporaryDir wiped when the probe exits — nothing outside it is written.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// Settings opens starts empty and is removed at exit — which is what makes "no configured player" below a
+// genuine default rather than whatever the last writer left. The fs/reg roots live in a QTemporaryDir wiped
+// when the probe exits — nothing outside it is written.
 #include "ExternalPlayer.h"
 #include "Settings.h"
 #include "AppPaths.h"
@@ -56,14 +56,17 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
 
-    // Reset: wipe any leftover player/* keys so the Settings asserts start from defaults.
-    {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
-        reset.remove(QStringLiteral("player"));
-        reset.sync();
-    }
-
     using ExternalPlayer::Kind;
+
+    // 0. The UNCONFIGURED store. This has to run before anything writes player/*, and it is the assert this
+    //    probe was missing: every case below sets player/external first, so until now nothing anywhere in the
+    //    suite pinned what a user who has never opened the setting gets. That is the value deciding whether a
+    //    fresh install plays in the built-in player or hands the file to whatever is installed — mutating the
+    //    default from "builtin" to "vlc" left the whole suite green. Asserting it needs a store nobody has
+    //    written to, which is exactly what the per-process data dir (issue #42) provides.
+    CHECK(Settings::externalPlayer() == QStringLiteral("builtin"));
+    CHECK(Settings::externalPlayerPath().isEmpty());
+    CHECK(ExternalPlayer::configuredKind() == Kind::Builtin);
 
     // A fake Program-Files-style root holding both players, and an empty root, plus a fake (empty) registry
     // ini path. All under one temp dir wiped on exit — no real-system files are read or written.
@@ -181,13 +184,6 @@ int main(int argc, char** argv)
         // (d) configured VLC + detected -> resolveForceTarget picks the configured kind's exact path.
         Settings::setExternalPlayer(QStringLiteral("vlc"));
         CHECK(QFileInfo(ExternalPlayer::resolveForceTarget(fsRoot, regRoot)) == QFileInfo(vlcExe));
-    }
-
-    // Restore a clean player group so a rerun starts from defaults.
-    {
-        QSettings reset(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
-        reset.remove(QStringLiteral("player"));
-        reset.sync();
     }
 
     if (failures == 0) { std::puts("EXTPLAYER-OK"); return 0; }

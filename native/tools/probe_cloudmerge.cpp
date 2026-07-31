@@ -17,10 +17,10 @@
 //
 // Prints CLOUDMERGE-OK on success; any failure prints CLOUDMERGE-FAIL <cond> (line) and exits non-zero.
 //
-// Isolation: like the other core probes (probe_marks/probe_sync), AppPaths::dataDir() is the probe exe's own
-// build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and never
-// touches a deployed install. We wipe the groups we use at start and seed our own profile ids via
-// ProfileStore::setCurrent so a developer's real profile/data can't leak into the asserts.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so every store below
+// opens an everythingbox.ini that starts empty and is removed at exit. The probe still seeds its own profile
+// ids via ProfileStore::setCurrent -- that is the fixture the per-profile namespace asserts are written
+// against, not a defence against what some other run left behind.
 #include "Settings.h"
 #include "ItemMarks.h"
 #include "FavoritesStore.h"
@@ -75,15 +75,6 @@ int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
     const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
-
-    // Reset every group we touch so a stale ini can't skew the asserts.
-    {
-        QSettings reset(iniPath, QSettings::IniFormat);
-        for (const char* g : {"device", "marks", "favorites", "playlists", "deleted", "profiles", "stats", "playstats", "resume", "recent"})
-            reset.remove(QLatin1String(g));
-        reset.sync();
-    }
-    ItemMarks::invalidate();
 
     // ---- 1. deviceId: mint-once + persist + excluded key SHAPE ----------------------------------------------
     {

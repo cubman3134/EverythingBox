@@ -847,7 +847,7 @@ static void runFormFactorAsserts()
     qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
     QQuickItem* root = qw.rootObject();
     CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (formfactor case)");
-    if (!root) { Settings::setDisplayMode(QStringLiteral("auto")); FormFactor::instance().refresh(); return; }
+    if (!root) return;
 
     root->setProperty("items", QVariantList{});
     root->setProperty("currentIndex", 0);
@@ -912,16 +912,13 @@ static void runFormFactorAsserts()
               "formfactor(identity): Desktop pixelSize == the pre-scale baseline (fraction*host.height, ffs==1)");
     }
 
-    // Restore the stored mode so the setting the probe wrote does not leak into later runs / other consumers.
-    Settings::setDisplayMode(QStringLiteral("auto"));
-    FormFactor::instance().refresh();
 }
 
 // §20 — the touch INPUT model (D1 Task 4). Synthesizes REAL touch sequences (QTest::touchEvent → real
 // hit-testing through the QML scene, NOT a shortcut into the graph) against the two themed surfaces and pins
-// the mobile tap/flick/edge-back contract, plus the Desktop identity net (two-step click frozen). Runs LAST +
-// restores the stored mode. Everything is gated on FormFactor mode, so the Desktop leg proves a pixel/behaviour
-// no-op with default settings.
+// the mobile tap/flick/edge-back contract, plus the Desktop identity net (two-step click frozen). Everything
+// is gated on FormFactor mode, so the Desktop leg proves a pixel/behaviour no-op with default settings. It
+// puts the mode back to "auto" on the way out because §21 and §22 run after it and never set one themselves.
 //
 //   (a) MOBILE grid tap on a non-selected item: selection MOVES to it AND activated fires (one-tap activate).
 //   (b) DESKTOP grid tap: first tap SELECTS only (no activate); a second tap on the now-selected item activates.
@@ -1252,7 +1249,9 @@ static void runTouchAsserts()
         }
     }
 
-    // Restore the stored mode so the setting the probe wrote does not leak into later runs / other consumers.
+    // Put the mode back for §21 and §22, which run after this one and never set a mode of their own. This is
+    // NOT about later runs — the data dir is this process's alone (issue #42) — it is about the rest of this
+    // one, which per-process isolation says nothing about.
     Settings::setDisplayMode(QStringLiteral("auto"));
     FormFactor::instance().refresh();
 }

@@ -14,10 +14,10 @@
 //
 // Prints PLAYLISTS-OK on success; any failure prints PLAYLISTS-FAIL <cond> (line) and exits non-zero.
 //
-// Isolation: like the other core probes (probe_marks/probe_sync), AppPaths::dataDir() is the probe exe's own
-// build-tree folder (portable app), so the everythingbox.ini it reads/writes sits next to the probe and never
-// touches a deployed install. We wipe the "playlists" and "profiles" groups at start and SEED our own profile
-// id via ProfileStore::setCurrent, so ProfileStore::currentId() can't leak a developer's real profile.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// PlaylistStore opens starts empty and is removed at exit. The v1 blob seeded below is therefore the only
+// thing in it -- which is what makes "the first migrate rewrites, the second is a no-op" a statement about the
+// stamp rather than about whatever the last run happened to leave.
 //
 // The `com.mymediavault.*` ids below are NOT leftovers from the rebrand and must not be swept: they are the
 // FIXTURE — a byte-faithful copy of the v1 playlist blob an install written before the rename left on disk.
@@ -75,12 +75,9 @@ int main(int argc, char** argv)
         "{\"catalogKey\":\"someaddon|weird|quux\",\"id\":\"") + weirdId + QStringLiteral("\","
         "\"items\":[],\"name\":\"Mystery\"}]");
     {
-        QSettings reset(iniPath, QSettings::IniFormat);
-        reset.remove(QStringLiteral("playlists"));
-        reset.remove(QStringLiteral("profiles"));
-        reset.setValue(itemsKey(profile), v1Blob);   // the un-migrated v1 blob
-        reset.remove(schemaKey(profile));             // ensure no stale stamp
-        reset.sync();
+        QSettings seed(iniPath, QSettings::IniFormat);
+        seed.setValue(itemsKey(profile), v1Blob);   // the un-migrated v1 blob, and nothing else
+        seed.sync();
     }
     ProfileStore::setCurrent(profile);
 

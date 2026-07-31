@@ -51,8 +51,6 @@ int main(int argc, char** argv)
                 facts:[{label:"Developer",value:"TestSoft"},{label:"Genre",value:"Action"}],
                 meta:{developer:"TestSoft"} }); } )JS");
 
-    QDir(dataDir + QStringLiteral("/metadata")).removeRecursively(); // fresh cache
-
     AddonManager mgr;
     CHECK(!mgr.metaProvidersFor(QStringLiteral("game")).isEmpty(), "canned game provider discovered");
 
@@ -96,9 +94,6 @@ int main(int argc, char** argv)
     while (t.elapsed() < 8000 && !freshDone) QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
     CHECK(freshDone, "priority hover scrapes an uncached game");
     CHECK(!logoOf(fresh).isEmpty(), "priority hover cached the result");
-
-    QDir(addonDir).removeRecursively();                 // clean the build tree
-    QDir(dataDir + QStringLiteral("/metadata")).removeRecursively();
 
     if (failures) { std::fprintf(stderr, "GAMEAGG-FAIL %d check(s) failed\n", failures); return 1; }
     std::printf("GAMEAGG-OK\n");
