@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.164 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.165 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -751,7 +751,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp's virtualPadEnabled() -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/SteamLibrary.cpp src/addons/AddonModels.cpp
         src/media/StreamResolver.cpp src/media/StreamResolver.h
-        src/core/StreamHeaders.cpp   # StreamResolver applies a source's proxyHeaders to its playlist fetch)
+        src/core/StreamHeaders.cpp)  # StreamResolver applies a source's proxyHeaders to its playlist fetch
     target_include_directories(probe_perf PRIVATE src src/core src/addons src/browse src/media)
     target_link_libraries(probe_perf PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 
@@ -821,7 +821,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for StreamResolver's m3u classification (HLS vs IPTV vs multi-disc).
     add_executable(probe_m3u tools/probe_m3u.cpp
         src/media/StreamResolver.cpp src/media/StreamResolver.h
-        src/core/StreamHeaders.cpp   # StreamResolver applies a source's proxyHeaders to its playlist fetch)
+        src/core/StreamHeaders.cpp)  # StreamResolver applies a source's proxyHeaders to its playlist fetch
     target_include_directories(probe_m3u PRIVATE src src/media)
     target_link_libraries(probe_m3u PRIVATE Qt6::Core Qt6::Network)
 
