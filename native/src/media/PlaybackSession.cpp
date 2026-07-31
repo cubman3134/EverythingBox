@@ -45,9 +45,12 @@ QString PlaybackSession::titleAt(int index) const
 }
 
 void PlaybackSession::setQueue(const QStringList& files, int startIndex, const QStringList& titles,
-                               const QString& resumeKey)
+                               const QString& resumeKey, const TrackHeaders& trackHeaders)
 {
     tracks_ = files;
+    // Assigned WITH the tracks, never appended to: a queue replaces the previous one wholesale, and headers
+    // left over from the last queue would be indexed by position into a completely different track list.
+    trackHeaders_ = trackHeaders;
     QStringList displayTitles;
     for (int i = 0; i < tracks_.size(); ++i)
         displayTitles << (i < titles.size() && !titles[i].isEmpty()
@@ -68,7 +71,10 @@ void PlaybackSession::playIndex(int index)
     trackIndex_ = index;
     beginResume(tracks_[index]);  // track the new file's position (and resume it if seen before)
     emit trackChanged(index, tracks_.size(), titleAt(index));
-    emit playRequested(tracks_[index]);
+    // value(), not at(): trackHeaders_ is allowed to be shorter than tracks_ (a local queue passes none at
+    // all), and an out-of-range read yields an empty set — which is the correct answer, and the one that
+    // makes the player clear the previous track's headers rather than keep them.
+    emit playRequested(tracks_[index], trackHeaders_.value(index));
 }
 
 void PlaybackSession::next()
@@ -158,6 +164,7 @@ void PlaybackSession::clearQueue()
     lastAccruedPos_ = 0.0; // consumption-stats: per-track reset (next media starts a fresh accrual span)
     statsAccum_ = 0.0;
     tracks_.clear();
+    trackHeaders_.clear();  // the queue's headers die with the queue — nothing outlives its own track list
     trackIndex_ = -1;
     emit queueCleared();
 }

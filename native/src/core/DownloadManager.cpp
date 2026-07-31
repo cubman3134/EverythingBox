@@ -1,6 +1,7 @@
 #include "DownloadManager.h"
 #include "AppBrand.h"
 #include "AppPaths.h"
+#include "NetHeaderApply.h"
 
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
@@ -53,11 +54,19 @@ void DownloadManager::enqueue(const DownloadJob& in)
     for (DownloadJob& j : jobs_)
         if (j.dest == in.dest)
         {
+            // …with THIS resolve's url and headers, not the ones the old job is holding. Both go stale: a
+            // debrid link expires, and headers are dropped entirely by a restart (see DownloadJob). Asking
+            // the item again is exactly how a user recovers a job that outlived its own credentials, so the
+            // fresh answer has to win — otherwise the retry re-sends the dead one and fails identically.
+            j.url = in.url;
+            j.requestHeaders = in.requestHeaders;
+            j.headerGated = !in.requestHeaders.isEmpty();
             if (j.state == DownloadJob::Failed || j.state == DownloadJob::Paused) { j.state = DownloadJob::Queued; j.error.clear(); }
             save(); emit changed(); pump();
             return;
         }
     DownloadJob j = in;
+    j.headerGated = !j.requestHeaders.isEmpty(); // the value-free half, and the only half that survives a restart
     if (j.id.isEmpty()) j.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     j.state = DownloadJob::Queued;
     jobs_.push_front(j);
@@ -75,6 +84,19 @@ void DownloadManager::pump()
 void DownloadManager::start(int idx)
 {
     DownloadJob& j = jobs_[idx];
+    // A gated job that came back from queue.json has its flag but not its headers (they are deliberately not
+    // persisted — see DownloadJob::headerGated). Retrying it would send the request bare and take the 403
+    // this whole change exists to stop, and the user would read that as the download being broken twice. Say
+    // what actually happened instead; re-downloading the item resolves it afresh and refills the headers.
+    if (j.headerGated && j.requestHeaders.isEmpty())
+    {
+        j.state = DownloadJob::Failed;
+        j.error = tr("this source needs HTTP headers that aren't kept after a restart — start the download "
+                     "again from the item");
+        save(); emit changed();
+        pump(); // this job is out of the running; don't strand the rest of the queue behind it
+        return;
+    }
     const QString part = j.dest + QStringLiteral(".part");
     QDir().mkpath(QFileInfo(j.dest).absolutePath());
 
@@ -98,9 +120,15 @@ void DownloadManager::start(int idx)
 
     QNetworkRequest rq{ QUrl(j.url) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // OUR Range, set before the source's headers and safe from them: parseProxyHeaders refuses a Range from a
+    // stream precisely because this request (and the player's seeks) own it.
     if (have > 0) rq.setRawHeader("Range", QByteArray("bytes=") + QByteArray::number(have) + "-");
-    reply_ = nam_->get(rq);
+    // The source's own proxyHeaders, plus the same-origin redirect gate that has to accompany them (#59). A
+    // download is the plain-HTTP fetch of the very URL the player would have played: without this a
+    // header-gated source plays and does not download, and the 403 reads as a broken download rather than a
+    // missing header. Redirect policy is chosen in there too — this used to be NoLessSafe unconditionally,
+    // which on a gated job would have re-sent this source's Referer to whatever host it 302'd to.
+    reply_ = NetHeaderApply::get(nam_, rq, j.requestHeaders, j.url);
     connect(reply_, &QNetworkReply::readyRead, this, &DownloadManager::onReadyRead);
     connect(reply_, &QNetworkReply::finished, this, &DownloadManager::onFinished);
     save(); emit changed();
@@ -250,6 +278,9 @@ void DownloadManager::save() const
             { QStringLiteral("id"), j.id }, { QStringLiteral("title"), j.title }, { QStringLiteral("url"), j.url },
             { QStringLiteral("dest"), j.dest }, { QStringLiteral("kind"), j.kind }, { QStringLiteral("sysId"), j.sysId },
             { QStringLiteral("thumb"), j.thumb }, { QStringLiteral("key"), j.key },
+            // The FLAG, never the headers. Deliberately not a loop over requestHeaders: this file is not a
+            // credential store, and the values are per-request secrets. See DownloadJob::headerGated.
+            { QStringLiteral("gated"), j.headerGated },
             { QStringLiteral("received"), j.received }, { QStringLiteral("total"), j.total },
             { QStringLiteral("state"), int(j.state == DownloadJob::Active ? DownloadJob::Paused : j.state) } });
     }
@@ -274,6 +305,7 @@ void DownloadManager::load()
         j.sysId = o.value(QStringLiteral("sysId")).toString();
         j.thumb = o.value(QStringLiteral("thumb")).toString();
         j.key = o.value(QStringLiteral("key")).toString();
+        j.headerGated = o.value(QStringLiteral("gated")).toBool(); // requestHeaders stays empty — that is the point
         j.received = o.value(QStringLiteral("received")).toVariant().toLongLong();
         j.total = o.value(QStringLiteral("total")).toVariant().toLongLong();
         j.state = static_cast<DownloadJob::State>(o.value(QStringLiteral("state")).toInt());

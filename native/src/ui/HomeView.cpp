@@ -3113,12 +3113,12 @@ void HomeView::dlResolveLeaf(const DlNode& node)
     }
     if (node.addon && node.addon->transport == LoadedAddon::RemoteHttp) // file provider OR Stremio: its /stream
     {
-        // The DOWNLOAD crawl, not playback: it writes the file to disk with the normal HTTP client. A
-        // header-gated source would need those headers on the download request too — that is a separate
-        // path from this issue's playback fix, and it is called out in the download queue's own notes.
+        // The DOWNLOAD crawl, not playback: it writes the file to disk with the normal HTTP client — which is
+        // exactly why the source's headers have to ride along (#59). They are declared for THIS url and go
+        // no further than it; DownloadManager re-scopes them through forPlayUrl before the request.
         mgr_->resolveStream(node.addon, it, [this, it](const QString& url, const QString& mime,
-                                                      const StreamHeaders::Headers&) {
-            if (!url.isEmpty()) dlEmit(it, url, mime);
+                                                      const StreamHeaders::Headers& headers) {
+            if (!url.isEmpty()) dlEmit(it, url, mime, headers);
             dlNext();
         });
         return;
@@ -3134,9 +3134,14 @@ void HomeView::dlResolveLeaf(const DlNode& node)
     dlNext(); // unknown / non-downloadable leaf
 }
 
-void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime)
+void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mime,
+                      const StreamHeaders::Headers& headers)
 {
     MediaItem m = it; m.url = url; m.mime = mime;
+    // Bound to the url they were declared for, exactly as the play path binds them (#59). The default is
+    // empty, so the one caller with no headers to offer — resolveDocumentByQuery, whose callback carries
+    // none — keeps the previous behaviour rather than inheriting anything.
+    m.requestHeaders = headers;
     // Downloading for keeps: save the catalog metadata + artwork locally (MetaCache) so this item's
     // poster and info page keep working offline. Only items with a stable id are cached — a transient
     // stream url would never match the item again. The rich detail card comes from the open info page
@@ -4596,10 +4601,10 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
             const QString stremioType = (it.type == QStringLiteral("movie")) ? QStringLiteral("movie")
                                                                               : QStringLiteral("series");
             mgr_->resolveStreamByImdb(stremioType, imdb, [this, it, detail](const QString& url, const QString& mime,
-                                                                           const StreamHeaders::Headers&) {
+                                                                           const StreamHeaders::Headers& headers) {
                 if (!url.isEmpty())
                 {
-                    dlEmit(it, url, mime);
+                    dlEmit(it, url, mime, headers);
                     // The crawl fetched this item's own /meta to bridge it — save the card for offline too.
                     if (!it.id.isEmpty())
                     {

@@ -4,6 +4,8 @@
 // straight to a .part file (no whole-file buffering) and resumes with an HTTP Range request when the server
 // supports it, else restarts. One download runs at a time; the rest queue.
 #pragma once
+#include "StreamHeaders.h"
+
 #include <QObject>
 #include <QString>
 #include <QVector>
@@ -22,6 +24,20 @@ struct DownloadJob
     QString sysId;   // game system id, else empty
     QString thumb;
     QString key;     // stable identity for de-dup / recording
+    // The source's behaviorHints.proxyHeaders.request, declared for `url` (#59). A download is a plain HTTP
+    // fetch of the very URL the player would have played, so a header-gated source that PLAYS fine used to
+    // fail here with a 403 the user reads as "the download is broken".
+    //
+    // Per JOB, not a manager member: a member holding "the last download's headers" outlives its download,
+    // and the next job — a different host — would inherit them. Same reason the resolve callback carries
+    // them rather than StreamResolver holding them.
+    StreamHeaders::Headers requestHeaders;
+    // …and NOT persisted, which is why this exists. queue.json is an ordinary file in the app folder, not a
+    // credential store, and a proxyHeader is routinely a signed-URL token or a session cookie; writing one
+    // there turns a transient per-request secret into a secret at rest that outlives the download. So a
+    // restart drops the values and keeps this value-free bit, and a restored job that needs headers it no
+    // longer has says so instead of retrying into an unexplained 403.
+    bool headerGated = false;
     qint64 received = 0;
     qint64 total = 0;
     enum State { Queued, Active, Paused, Failed, Done };

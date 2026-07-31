@@ -59,6 +59,61 @@ int main(int argc, char** argv)
     s5.beginResume("stable-id");
     CHECK(qFuzzyCompare(s5.takeResumeSeek(), 567.0), "setQueue resumeKey keys resume by the stable id");
 
+    // ---- the per-track header channel (#59) -------------------------------------------------------------
+    // Before it, this class carried urls only, so every queue-driven load — a gated audio stream, an IPTV
+    // channel list, and every advance within either — reached the player with no headers and 403'd. What is
+    // asserted here is not "the headers arrive" but "TRACK N's headers arrive, and nobody else's": a queue is
+    // exactly where a per-source secret is most likely to outlive its source.
+    {
+        PlaybackSession q(ini);
+        QStringList paths;
+        QVector<StreamHeaders::Headers> seen;
+        QObject::connect(&q, &PlaybackSession::playRequested,
+                         [&](const QString& p, const StreamHeaders::Headers& trackHeaders) {
+                             paths << p; seen << trackHeaders;
+                         });
+
+        StreamHeaders::Headers first, second;
+        first.insert("Referer", "https://one.test/");
+        second.insert("X-Token", "TWO");
+        // Deliberately SHORTER than the track list: a playlist whose third entry sits on another host gets no
+        // headers at all, and the caller expresses that by not supplying one.
+        q.setQueue({ "http://one.test/a", "http://two.test/b", "http://three.test/c" }, 0, {}, QString(),
+                   { first, second });
+        CHECK(paths == QStringList{ "http://one.test/a" }, "the queue starts where it was told to");
+        CHECK(seen.size() == 1 && seen.at(0) == first, "track 1 is played with track 1's headers");
+
+        q.next();
+        CHECK(seen.size() == 2 && seen.at(1) == second, "an advance carries the NEXT track's headers");
+        // The assertion this section exists for. An advance that emitted nothing, or emitted the previous
+        // track's, is the leak: track 2 is a different host.
+        CHECK(seen.size() == 2 && !seen.at(1).contains("Referer"),
+              "…and not the previous track's, which belong to a different host");
+
+        q.next();
+        CHECK(seen.size() == 3 && seen.at(2).isEmpty(),
+              "a track the caller supplied no headers for is played with an EMPTY set");
+        // Empty is not "absent": it is what makes the player CLEAR what the last track set (MpvHeaderApply
+        // writes all three properties unconditionally), so the signal has to fire for it at all.
+        CHECK(paths.size() == 3 && paths.at(2) == QStringLiteral("http://three.test/c"),
+              "…and is still played, rather than being skipped for having none");
+
+        // A new queue REPLACES the header list. Appending — or keeping the old one — would index the
+        // previous queue's secrets by position into a completely unrelated track list.
+        q.setQueue({ "http://four.test/d" }, 0);
+        CHECK(seen.size() == 4 && seen.at(3).isEmpty(),
+              "a queue that supplies no headers plays with none, whatever the last queue had");
+
+        // …and clearQueue drops them, so a stale set cannot survive to be indexed by a later playIndex.
+        StreamHeaders::Headers only;
+        only.insert("X-Token", "FIVE");
+        q.setQueue({ "http://five.test/e" }, 0, {}, QString(), { only });
+        CHECK(seen.size() == 5 && seen.at(4) == only, "…and one that does, plays with its own");
+        q.clearQueue();
+        q.setQueue({ "http://five.test/e" }, 0);
+        CHECK(seen.size() == 6 && seen.at(5).isEmpty(), "the same url replayed after a clear carries nothing");
+    }
+
     if (fails == 0) printf("PLAYBACK-OK\n");
     return fails == 0 ? 0 : 1;
 }

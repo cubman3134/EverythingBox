@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.178 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.179 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -687,13 +687,17 @@ if(EVERYTHINGBOX_BUILD_APP)
     target_link_libraries(probe_segments PRIVATE Qt6::Core Qt6::Gui)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
-    # catalog classification. Pure — no network, no addon installed.
+    # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
+    # place on purpose. No addon is installed and no request is ever sent: the QtNetwork half (#59) builds
+    # requests and a download queue without running an event loop. DownloadManager comes along because it is
+    # the one header consumer that PERSISTS, and "the values are not written to disk" is the rule with teeth.
     add_executable(probe_stremio tools/probe_stremio.cpp
         src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
         src/core/BingeStore.cpp src/core/BingeStore.h
+        src/core/DownloadManager.cpp src/core/DownloadManager.h
         src/core/StreamHeaders.cpp src/core/StreamHeaders.h)
     target_include_directories(probe_stremio PRIVATE src src/addons src/core)
-    target_link_libraries(probe_stremio PRIVATE Qt6::Core)
+    target_link_libraries(probe_stremio PRIVATE Qt6::Core Qt6::Network)
 
     # Headless test for the save-sync decision table (pure) AND for the transport's conflict ordering and
     # baseline rules, which are driven through SaveSync's virtual Drive seam against an in-memory cloud and
