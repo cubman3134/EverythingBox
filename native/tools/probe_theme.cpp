@@ -4,6 +4,11 @@
 // pin the PURE decisions (no ini, no filesystem) verbatim, so the UI layers can never drift from them —
 // including legacyEffectiveGlobal (4b), the "an upgrade's appearance never changes on update" guarantee.
 //
+// Section 6b covers the OTHER pure theme decision this binary owns: ThemeFormFactors::fit — a theme
+// manifest's `formFactors` declaration judged against the device deciding right now (issue #32). It lives
+// here rather than in a probe of its own because it is the same shape of thing (a pure table about which
+// theme a profile gets) and because ThemeFormFactors.cpp, like ThemeChoice.cpp, is QtCore-only.
+//
 // Section 7 covers the INI-BACKED half — forProfile/setForProfile/runMigrationForIds. That half had no
 // coverage at all, which is exactly why a migration that could destroy the legacy value survived review and
 // six mutations: every pure-table assertion passed while the ini path threw the value away. It runs against a
@@ -12,11 +17,15 @@
 //
 // Prints THEME-OK on success; any failure prints THEME-FAIL <cond> and exits non-zero.
 #include "ThemeChoice.h"
+#include "ThemeFormFactors.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QHash>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QSettings>
 #include <QString>
 #include <QStringList>
@@ -161,6 +170,97 @@ int main()
         CHECK(second.isEmpty());
         // ...and a third run over the SAME state is still empty.
         CHECK(ThemeChoice::planMigration(QStringLiteral("XMB"), twoProfiles, existing).isEmpty());
+    }
+
+    // ---- 6b. ThemeFormFactors::fit — the manifest declaration vs. THIS device (issue #32) ------------
+    // The whole of the form-factor feature's logic. It is ADVISORY: no caller may gate on it, so every
+    // assertion here is about what the picker LABELS, never about what it will render.
+    {
+        using ThemeFormFactors::Fit;
+        auto arr = [](std::initializer_list<const char*> labels) {
+            QJsonArray a;
+            for (const char* l : labels) a.append(QString::fromUtf8(l));
+            return QJsonValue(a);
+        };
+        const QJsonValue kShippedDecl = arr({ "desktop", "tv", "mobile", "handheld" });
+
+        // (a) ABSENT is Undeclared — the decision every community theme in the registry depends on. Neither
+        //     "supports everything" (Supported, which would invent a claim) nor "supports nothing"
+        //     (Unsupported, which would flag every existing theme).
+        CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Undefined), QStringLiteral("desktop"))
+              == Fit::Undeclared);
+        CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Undefined), QStringLiteral("tv"))
+              == Fit::Undeclared);
+
+        // (b) A value that is not an ARRAY is also Undeclared — strict on purpose (see the header). The bare
+        //     string is the typo an author will actually make, and it must read as "you declared nothing",
+        //     not as a declaration we guessed at.
+        CHECK(ThemeFormFactors::fit(QJsonValue(QStringLiteral("desktop")), QStringLiteral("desktop"))
+              == Fit::Undeclared);
+        CHECK(ThemeFormFactors::fit(QJsonValue(QJsonValue::Null), QStringLiteral("desktop")) == Fit::Undeclared);
+        CHECK(ThemeFormFactors::fit(QJsonValue(4), QStringLiteral("desktop")) == Fit::Undeclared);
+        CHECK(ThemeFormFactors::fit(QJsonValue(QJsonObject()), QStringLiteral("desktop")) == Fit::Undeclared);
+
+        // (c) An EMPTY array is a real declaration ("fits nothing"), NOT a missing one. This is the one shape
+        //     where declaring the key is worse than omitting it, and it must not collapse into (a).
+        CHECK(ThemeFormFactors::fit(arr({}), QStringLiteral("desktop")) == Fit::Unsupported);
+
+        // (d) The shipped declaration matches all three modes FormFactor actually resolves. "mobile" and
+        //     "tv" sit at indices 1 and 2, so an implementation that only ever tests the first entry — the
+        //     natural off-by-one here — fails these and passes a single-element test.
+        CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("desktop")) == Fit::Supported);
+        CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("tv")) == Fit::Supported);
+        CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("mobile")) == Fit::Supported);
+
+        // (e) A declaration that omits this device is Unsupported. Night ships exactly this shape.
+        CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("desktop")) == Fit::Supported);
+        CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("tv")) == Fit::Unsupported);
+        CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("mobile")) == Fit::Unsupported);
+        CHECK(ThemeFormFactors::fit(arr({ "tv", "mobile" }), QStringLiteral("desktop")) == Fit::Unsupported);
+
+        // (f) THE HANDHELD ANSWER (the issue's one genuine design question), pinned rather than implied.
+        //     FormFactor resolves no handheld mode, so "handheld" is a label the app cannot check — a theme
+        //     declaring ONLY it has named no device that exists, and reads Unsupported everywhere. That is
+        //     the honest verdict: the author did not claim this device.
+        CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("desktop")) == Fit::Unsupported);
+        CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("tv")) == Fit::Unsupported);
+        CHECK(ThemeFormFactors::fit(arr({ "handheld" }), QStringLiteral("mobile")) == Fit::Unsupported);
+        //     ...and the OTHER half of that answer: the match is a plain string compare with NO table of
+        //     "modes we know", so the day a real FormFactor::Mode::Handheld lands and modeName() returns
+        //     "handheld", every theme already declaring it starts matching with no change to this unit.
+        //     An implementation that filtered labels against a hardcoded {desktop,tv,mobile} fails here.
+        CHECK(ThemeFormFactors::fit(kShippedDecl, QStringLiteral("handheld")) == Fit::Supported);
+
+        // (g) Entries are compared case- and whitespace-insensitively (authors hand-write this JSON)...
+        CHECK(ThemeFormFactors::fit(arr({ "  DeSkToP " }), QStringLiteral("desktop")) == Fit::Supported);
+        //     ...and so is the mode the caller passes in. FormFactor::modeName() is already lower-case, so
+        //     this one is defence, not a live path — see the kill-matrix note.
+        CHECK(ThemeFormFactors::fit(arr({ "desktop" }), QStringLiteral("  DESKTOP ")) == Fit::Supported);
+
+        // (h) A non-string entry is ignored rather than aborting the scan: the real "desktop" after it still
+        //     matches. QJsonValue::toString() yields an empty string for a number, which is why (i) matters.
+        {
+            QJsonArray mixed;
+            mixed.append(3);
+            mixed.append(QJsonValue(QJsonValue::Null));
+            mixed.append(QStringLiteral("desktop"));
+            CHECK(ThemeFormFactors::fit(QJsonValue(mixed), QStringLiteral("desktop")) == Fit::Supported);
+            CHECK(ThemeFormFactors::fit(QJsonValue(mixed), QStringLiteral("tv")) == Fit::Unsupported);
+        }
+
+        // (i) THE TRIPWIRE: a caller that never resolved a mode passes an empty string. Blank entries are
+        //     skipped, so that reads Unsupported (loud — every theme is flagged and someone notices) rather
+        //     than Supported (silent — the feature quietly does nothing). Deliberate absence-of-behaviour.
+        CHECK(ThemeFormFactors::fit(arr({ "" }), QString()) == Fit::Unsupported);
+        CHECK(ThemeFormFactors::fit(kShippedDecl, QString()) == Fit::Unsupported);
+
+        // (j) shortNote: a FITTING theme is decorated with nothing at all (a badge on every row is a badge on
+        //     none), and the two non-fitting verdicts must never collapse into one sentence — "the author
+        //     said no" and "nobody said" are different facts, which is the entire reason Fit has three states.
+        CHECK(ThemeFormFactors::shortNote(Fit::Supported).isEmpty());
+        CHECK(!ThemeFormFactors::shortNote(Fit::Unsupported).isEmpty());
+        CHECK(!ThemeFormFactors::shortNote(Fit::Undeclared).isEmpty());
+        CHECK(ThemeFormFactors::shortNote(Fit::Unsupported) != ThemeFormFactors::shortNote(Fit::Undeclared));
     }
 
     // ---- 7. THE INI-BACKED HALF: forProfile / setForProfile / runMigrationForIds -------------------

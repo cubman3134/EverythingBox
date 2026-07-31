@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.180 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.181 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -212,6 +212,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfileStore.cpp src/core/ProfileStore.h
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
+        src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # theme `formFactors` declaration -> verdict for this device (#32)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
@@ -450,8 +451,11 @@ if(EVERYTHINGBOX_BUILD_APP)
     # four-step ordering, the XMB->Triple rename, and the migration table incl. idempotence. ThemeChoice.cpp
     # is QtCore-only (its own file-local store(), AppPaths/AppBrand are header-only), and the only other TU it
     # needs is ProfileStore for the profile id list — so this links leaner than any other probe here.
+    # It ALSO carries ThemeFormFactors (issue #32) — the `formFactors` manifest declaration judged against the
+    # current device — which is the same shape of pure theme decision and is likewise QtCore-only.
     add_executable(probe_theme tools/probe_theme.cpp
         src/core/ThemeChoice.cpp src/core/ThemeChoice.h
+        src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h)
     target_include_directories(probe_theme PRIVATE src src/core)
     # The ini-redirect seam exists ONLY here. The app target must never define this: without it the setter is
