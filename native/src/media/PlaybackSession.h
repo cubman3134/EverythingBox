@@ -1,7 +1,9 @@
 #pragma once
+#include "../core/StreamHeaders.h"
 #include <QObject>
 #include <QSettings>
 #include <QStringList>
+#include <QVector>
 
 // The audio-queue + resume state machine: owns the current track list/position, drives next/prev/
 // track-end advance, and persists "where you left off" for any timed media (video/audio/audiobook),
@@ -15,11 +17,24 @@ public:
     // scratch path so tests never touch the real user store.
     explicit PlaybackSession(const QString& settingsFile = QString(), QObject* parent = nullptr);
 
+    // A track's HTTP request headers, indexed exactly like `files`. Empty (the default) for every local
+    // queue; see setQueue.
+    using TrackHeaders = QVector<StreamHeaders::Headers>;
+
     // resumeKey empty (default) = the starting track resumes keyed by its own file path (current behavior).
     // Non-empty = the first-played track is resume-keyed by `resumeKey` instead (a stable catalog/audiobook
     // id), folded in atomically so callers no longer re-key with a separate beginResume() after setQueue.
+    //
+    // `trackHeaders` is the PER-TRACK header channel (#59). Before it, this class carried urls only, so every
+    // queue-driven load — a gated audio stream, an IPTV channel list, and every advance within one — reached
+    // the player bare and 403'd. Per TRACK and not per queue because an IPTV playlist's entries are separate
+    // URLs on whatever hosts the list names, and the playlist's own headers belong to the playlist's origin
+    // alone: the caller scopes each entry through StreamHeaders::forPlayUrl and hands the answers here.
+    //
+    // Shorter than `files` (or empty) is normal and means "no headers for the tracks past the end" rather
+    // than being an error — playHeaders() reads it with value(), so a local queue passes nothing at all.
     void setQueue(const QStringList& files, int startIndex, const QStringList& titles = {},
-                  const QString& resumeKey = QString());
+                  const QString& resumeKey = QString(), const TrackHeaders& trackHeaders = {});
     void playIndex(int index);
     void next();
     void prev();
@@ -49,7 +64,12 @@ public:
     double position() const { return audioPos_; }
 
 signals:
-    void playRequested(const QString& path);                          // host hands it to mpv
+    // The host hands both to mpv. The headers ride the SIGNAL rather than being read back off this object
+    // afterwards, for the reason #43 gave for the resolve callback: a getter returning "the current track's
+    // headers" can be called at a moment when "current" has moved on, and the value that outlives its track
+    // is the leak. Emitted on every track — empty for the ones that need none, which is what clears the
+    // previous track's headers at the player (MpvHeaderApply writes all three properties unconditionally).
+    void playRequested(const QString& path, const StreamHeaders::Headers& trackHeaders);
     void trackChanged(int index, int count, const QString& displayTitle);
     void queueChanged(const QStringList& titles, int current);        // host rebuilds playlist_
     void queueCleared();
@@ -61,6 +81,7 @@ private:
     QString titleAt(int index) const;
 
     QStringList tracks_;           // current audio queue (absolute paths)
+    TrackHeaders trackHeaders_;    // per-track request headers, parallel to tracks_ (usually empty)
     int trackIndex_ = -1;          // index into tracks_, or -1 when not playing a queue
     QString resumePath_;           // the timed-media file (video/audio/audiobook) whose position we track, or empty
     double resumeSeek_ = 0.0;      // pending resume target applied once the file's duration is known

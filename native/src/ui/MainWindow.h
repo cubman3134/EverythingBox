@@ -307,8 +307,11 @@ private:
                     const QString& title = QString(), const StreamHeaders::Headers& headers = {});
     // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
+    // `headers` defaults empty for the same reason playStream's does: a caller with nothing to pass CLEARS
+    // the previous stream's headers rather than inheriting them (#59).
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
-                         const QString& thumbnailUrl = QString());
+                         const QString& thumbnailUrl = QString(),
+                         const StreamHeaders::Headers& headers = {});
     bool openDocumentPath(const QString& path); // .epub / .pdf / .cbz by extension; true if it opened
     void toggleFullScreen();
     void leaveFullScreen();   // restore windowed: status bar + cursor

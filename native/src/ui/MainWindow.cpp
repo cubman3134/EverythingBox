@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "../core/AppBrand.h"
+#include "../core/NetHeaderApply.h"
 #include "Notifier.h"
 #include "BlackFrameWatchdog.h"
 #include "FeedbackPolicy.h"   // kFeedbackShort/Long — feedback duration policy (J08/J10/J11)
@@ -959,7 +960,8 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
             [this](const QString& src, const QString& title) { openGamePath(src, title); });
     connect(streams_, &StreamResolver::playQueue, this,
             [this](const QStringList& urls, const QStringList& titles,
-                   const QString& src, const QString& title) {
+                   const QString& src, const QString& title,
+                   const QVector<StreamHeaders::Headers>& entryHeaders) {
         // An IPTV / media playlist: build a channel queue (the list panel + next/prev), play the first entry.
         currentNextSourceCapable_ = false;
         themedAudioSession_ = false; // an IPTV/channel queue is VIDEO — keep the classic player page
@@ -967,7 +969,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // file's segment state here or an IPTV channel inherits the last episode's learned intro.
         resetSegmentState();
         retro_->stop(); book_->persist(); pdf_->persist(); comic_->persist();
-        session_->setQueue(urls, 0, titles);
+        // …with each entry's own headers, already scoped to its host by StreamResolver (#59). A gated IPTV
+        // provider's channels sit on its own origin and inherit the playlist's headers; an entry pointing
+        // somewhere else arrives with an empty set and is played bare, on purpose.
+        session_->setQueue(urls, 0, titles, QString(), entryHeaders);
         session_->setMediaVideo(true); // consumption-stats: kind AFTER setQueue (outgoing track flushes under its own kind)
         RecentStore::add({ src, title.isEmpty() ? QFileInfo(src).completeBaseName() : title,
                            QStringLiteral("video"), QString(), src });
@@ -977,7 +982,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // to resume via signals; we own the actual player + playlist widget.
     session_ = new PlaybackSession(QString(), this);
     connect(session_, &PlaybackSession::playRequested, this,
-            [this](const QString& p) {
+            [this](const QString& p, const StreamHeaders::Headers& trackHeaders) {
         // Per-track choke point for EVERY queue-driven load — initial track and advances alike, keyed exactly
         // as PlaybackSession::beginResume(tracks_[index]) keys the resume. Covers local audio folders/multi-select
         // and IPTV queues (the direct-play paths set their own key and never reach here). openAudioStream re-keys
@@ -991,12 +996,12 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // BEFORE player_->play(p): the gather hangs off the durationChanged this play triggers. The channel
         // guard is deliberately NOT run here — an advance inside a queue is not a new user-initiated play.
         resetSegmentState();
-        // KNOWN GAP (#59): every queue-driven load comes through here — the IPTV/channel queue from
-        // StreamResolver::playQueue, audio queues, and every advance — and PlaybackSession carries urls only,
-        // so a header-gated entry plays bare. Not a leak: this play() clears whatever the last one set,
-        // because MpvHeaderApply writes all three properties unconditionally. Closing it means a per-track
-        // header channel on PlaybackSession, which is also what openAudioStream needs.
-        player_->play(p);
+        // WITH this track's own headers (#59). Every queue-driven load comes through here — the IPTV/channel
+        // queue from StreamResolver::playQueue, audio/audiobook streams, and every advance within either —
+        // and until PlaybackSession grew a per-track header channel they all played bare, so a gated entry
+        // 403'd. Empty for every local queue and for any entry not entitled to the queue's headers, which is
+        // what clears the previous track's: MpvHeaderApply writes all three properties unconditionally.
+        player_->play(p, trackHeaders);
     });
     connect(session_, &PlaybackSession::queueChanged, this,
             [this](const QStringList& titles, int current) {
@@ -3584,11 +3589,9 @@ void MainWindow::openStreamPrompt()
 void MainWindow::openStreamUrl(const QString& url, const QString& resumeKey, const QString& title,
                                const StreamHeaders::Headers& headers)
 {
-    // KNOWN GAP (#59): the split pane takes a url and a title and has no header channel, so a gated source
-    // opened into a split view plays bare. Not a leak — the split target is a separate player whose own
-    // MpvHeaderApply pass clears everything on load — but a gated stream will 403 there. Every
-    // splitTarget_->openVideo call site in this file has the same gap; this is the one they all resemble.
-    if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
+    // The split pane has its own MpvWidget, and now its own header channel (#59) — a gated source opened
+    // into a split view used to play bare there and 403.
+    if (splitTarget_) { splitTarget_->openVideo(url, title, headers); finishSplitOpen(); return; }
     // Playlists need fetching + dispatch (HLS stream vs. channel list vs. disc set); everything else is a
     // single link libmpv can play straight away. streams_->resolve() classifies it and emits back on a signal:
     // an HLS master → playDirect (→ playStream), a channel/media list → playQueue (→ setQueue).
@@ -3658,16 +3661,15 @@ void MainWindow::playStream(const QString& url, const QString& resumeKey, const 
     RecentStore::add({ url, t, QStringLiteral("video"), QString(), resumeKey });
 }
 
-// KNOWN GAP (#59): this entry point has no headers parameter, so a header-gated audio/audiobook stream plays
-// bare and a gated source 403s. Not a leak — MpvHeaderApply writes all three properties on every play, so the
-// previous stream's headers are cleared here rather than inherited; it is a missing capability, not a stale
-// one. Threading them through means giving PlaybackSession a per-track header channel (see the playRequested
-// choke point in the constructor), which is the same change the IPTV queue needs.
+// `headers` is this source's proxyHeaders (#59): audio and audiobooks are gated by the same hosts video is,
+// and this entry point used to have no way to carry them, so a gated audiobook played bare and 403'd. They
+// reach mpv the same way every other queue-driven track's do — through PlaybackSession's per-track channel
+// and the playRequested choke point — rather than by this function touching the player itself.
 void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
-                                 const QString& thumbnailUrl)
+                                 const QString& thumbnailUrl, const StreamHeaders::Headers& headers)
 {
     PerfTrace::begin(QStringLiteral("open.audio"));
-    if (splitTarget_) { splitTarget_->openVideo(url, title); finishSplitOpen(); return; }
+    if (splitTarget_) { splitTarget_->openVideo(url, title, headers); finishSplitOpen(); return; }
     notePlaybackStart();    // channel guard: keep the channel iff this is its own audio-stream pick
     subCtx_ = {};           // audio has no subtitles to fetch
     stopScrobble();         // leaving whatever video was playing
@@ -3681,7 +3683,10 @@ void MainWindow::openAudioStream(const QString& url, const QString& resumeKey, c
     session_->setMediaVideo(false); // consumption-stats: streamed audio/audiobook accrues "listen" seconds
     // The now-playing list (vs. the bare video surface) marks this as audio. resumeKey re-keys the track to the
     // stable id atomically (a long audiobook must resume where you left off even as its debrid URL changes).
-    session_->setQueue({ url }, 0, { t }, rkey);
+    // A one-track queue, so a one-entry header list. `url` IS the url these were declared for on every route
+    // that supplies them, so no forPlayUrl re-scoping is needed here (the two callers that re-point a url —
+    // prefer-local and the remote-document cache — re-derive before they get this far).
+    session_->setQueue({ url }, 0, { t }, rkey, { headers });
     syncKey_ = rkey;             // AFTER setQueue: the playRequested choke point just set syncKey_ to the volatile
                                  // url; override the initial track with the stable id (audio uses the same
                                  // MpvWidget — sub offset harmless). fileLoaded fires async, so this wins the apply.
@@ -5826,11 +5831,22 @@ void MainWindow::openRecent(const QString& path, const QString& kind,
         statusBar()->showMessage(tr("That file can no longer be found: %1").arg(path), kFeedbackLong);
         return;
     }
-    // KNOWN GAP (#59): a Recent entry is a url and a kind. proxyHeaders are deliberately never serialised —
-    // they are per-source and frequently token-bearing, and a persisted one would be a stale secret on disk —
-    // so replaying a gated stream from Recent replays it bare and it 403s. Not a leak, and not an oversight
-    // in the store: closing it means re-resolving the source through its addon rather than remembering its
-    // headers, which is a different feature.
+    // OPEN BY DECISION (#59), not by omission. Both entry points below now take headers; a Recent entry has
+    // none to give, because a Recent entry is a url and a kind and proxyHeaders are deliberately never
+    // serialised. So replaying a gated stream from Recent replays it bare and it 403s.
+    //
+    // The trade-off, stated so nobody has to re-derive it: persisting them would make replay work, at the
+    // price of writing values that are routinely signed-URL tokens, session cookies and Authorization
+    // headers into recents.json — a file with no encryption, no expiry and no lifecycle, which is read at
+    // startup and synced to the cloud store. A token there outlives the stream it was minted for and is a
+    // secret at rest in a store that is not treated as one. The alternative that costs nothing at rest is to
+    // re-resolve the source through its addon on replay (which is how the URL gets refreshed anyway when a
+    // debrid link expires) — a different feature, and the one to build if this is worth closing.
+    //
+    // Whichever way it goes, it is a call for the repository owner, not something to slip in under a fix.
+    // The download queue faces exactly the same question and answers it the same way — see
+    // DownloadJob::headerGated, which persists a value-free bit so a restored gated job can at least SAY
+    // that this is what happened instead of failing with an unexplained 403.
     if (isUrl && kind == QStringLiteral("audio")) openAudioStream(path, resumeKey, title);
     else if (isUrl)                              openStreamUrl(path, resumeKey, title);
     else if (kind == QStringLiteral("video"))    openVideoPath(path);
@@ -8464,7 +8480,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     // re-checks the contents and still routes a genuine disc list to the emulator.
     if (StreamResolver::isM3uRef(lower))
     {
-        if (splitTarget_) { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
+        if (splitTarget_) { splitTarget_->openVideo(url, item.title, item.requestHeaders); finishSplitOpen(); return; }
         // The item's own proxyHeaders ride along: this is a plain HTTP fetch of the STREAM URL, so a gated
         // HLS/IPTV source is refused here — and refused before playback, so it would read as a broken
         // playlist rather than a missing header.
@@ -8525,7 +8541,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         const bool isGame = (type == QStringLiteral("game")
                              || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr);
         if (!isGame) // video / audio / audiobook all play through the pane's own libmpv
-        { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
+        { splitTarget_->openVideo(url, item.title, item.requestHeaders); finishSplitOpen(); return; }
     }
 
     // Recent entry for a document: carry the catalog title/cover (the local file is often a hashed cache
@@ -8574,7 +8590,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     {
         // An audiobook (or any audio-mime stream, e.g. from Allarr): play in the now-playing audio view with
         // resume keyed by the stable item id (a re-resolved debrid URL changes, so it can't be the key).
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl);
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("audio"))
     {
@@ -8582,7 +8598,7 @@ void MainWindow::openLibraryItem(const MediaItem& item)
         // routing (themedAudioSession_ + the page's cover/title data) as well as the J18 stable-id resume key.
         // The old inline setQueue bypassed that routing, leaving a STALE themedAudioSession_ to decide the
         // surface — a classic page in themed mode (or a themed page with the previous item's art).
-        openAudioStream(url, item.id, item.title, item.thumbnailUrl);
+        openAudioStream(url, item.id, item.title, item.thumbnailUrl, item.requestHeaders);
     }
     else if (type == QStringLiteral("game") || SystemCatalog::forExtension(QFileInfo(lower).suffix()) != nullptr)
     {
@@ -8764,8 +8780,15 @@ void MainWindow::fetchRemoteDocumentThenOpen(const MediaItem& item, const QStrin
 
     QNetworkRequest rq{QUrl(item.url)};
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
-    rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    QNetworkReply* reply = docNam_->get(rq);
+    // The third of the three fetches that pull a stream URL to disk (#59): a remote CBZ/EPUB/PDF or a ROM.
+    // Same shape as the download queue's — a gated source would 403 here and read as "there may be no copy",
+    // which is the message this branch prints — and the same same-origin redirect gate comes with it.
+    QNetworkReply* reply = NetHeaderApply::get(docNam_, rq, item.requestHeaders, item.url,
+                                               [this](bool allowed, const QUrl& to) {
+        if (!allowed)
+            mwLog(QStringLiteral("download: cross-origin redirect -> %1, refusing to carry this source's "
+                                 "headers there").arg(logSafeUrl(to.toString())));
+    });
 
     // Write each chunk to disk as it arrives — memory stays ~one buffer, not the whole file.
     connect(reply, &QNetworkReply::readyRead, this, [reply, part] { part->write(reply->readAll()); });
@@ -8937,9 +8960,22 @@ void MainWindow::enqueueDownload(const MediaItem& item)
     j.sysId = (kind == QStringLiteral("game")) ? downloadSystemId(item.systemHint, ext) : QString();
     j.thumb = item.thumbnailUrl;
     j.key = item.id;
+    // The source's headers, re-derived for the url this job will actually fetch rather than copied across
+    // (#59). j.url is item.url today, so this reads as a no-op — which is the reason to write it this way and
+    // not `= item.requestHeaders`: the invariant is that a MediaItem's headers are asked for again whenever
+    // they are bound to a new url, not that this particular copy happened to keep the same one. Same
+    // reasoning as the prefer-local and remote-document re-entries.
+    j.requestHeaders = StreamHeaders::forPlayUrl(item.requestHeaders, item.url, j.url);
     dm_->enqueue(j);
     notify(tr("“%1” added to Downloads. See Settings ▸ Downloads for progress.").arg(item.title), 4000);
-    mwLog(QStringLiteral("download(library): queued \"%1\" -> %2").arg(item.title, QFileInfo(j.dest).fileName()));
+    // Names and a count, via the one sanctioned renderer. Built into a local first so the log CALL never
+    // mentions header data at all — the log-discipline gate reads statements, and "the only mention is inside
+    // logSummary()" is easier to keep true than to explain.
+    const QString headerNote = j.requestHeaders.isEmpty()
+                                   ? QString()
+                                   : QStringLiteral(" + ") + StreamHeaders::logSummary(j.requestHeaders);
+    mwLog(QStringLiteral("download(library): queued \"%1\" -> %2%3")
+              .arg(item.title, QFileInfo(j.dest).fileName(), headerNote));
 }
 
 

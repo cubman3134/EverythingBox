@@ -23,6 +23,17 @@ public:
     static QVector<M3uEntry> parseM3u(const QString& text, const QString& src);
     static bool looksLikeDiscPlaylist(const QVector<M3uEntry>& entries);
 
+    // Which of a playlist's own headers each of its entries is entitled to, parallel to `entries` (#59).
+    // A playlist names whatever hosts it likes; the headers it was fetched with belong to `src`'s origin
+    // alone, so an entry served from that origin inherits them and an entry pointing elsewhere gets an
+    // EMPTY set — which is not the same as being skipped: it is what makes the player clear the previous
+    // channel's headers when this one needs none.
+    //
+    // Pure, and public, because it is the rule worth pinning and classify() (which emits signals from a
+    // network callback) is not a seam a probe can reach.
+    static QVector<StreamHeaders::Headers> entryHeaders(const QVector<M3uEntry>& entries, const QString& src,
+                                                        const StreamHeaders::Headers& headers);
+
     // local file or http(s) URL. `headers` is the source's behaviorHints.proxyHeaders.request: this is a
     // NON-MPV fetch of the very stream URL, so without them a header-gated playlist/HLS manifest 403s here
     // and the user sees "couldn't load" on a stream the player itself could have played.
@@ -32,8 +43,14 @@ signals:
     // HLS / unparseable / fetch failed. Carries the headers back out so the player gets the same ones this
     // fetch used — the manifest and its segments come from the same host and are gated the same way.
     void playDirect(const QString& url, const QString& title, const StreamHeaders::Headers& headers);
+    // IPTV/media list. `entryHeaders` is parallel to `urls`: each entry's own answer from forPlayUrl, because
+    // a playlist names whatever hosts it likes and the list's headers belong to the LIST's origin. An entry
+    // served from that origin inherits them (which is the common shape — a gated provider's channels sit
+    // beside its playlist); an entry pointing at another host gets none, and gets them removed by being
+    // handed an empty set rather than by anyone remembering to clear (#59).
     void playQueue(const QStringList& urls, const QStringList& titles,
-                   const QString& recentSrc, const QString& title); // IPTV/media list
+                   const QString& recentSrc, const QString& title,
+                   const QVector<StreamHeaders::Headers>& entryHeaders);
     void openDisc(const QString& src, const QString& title);     // PlayStation multi-disc set
     void status(const QString& message);                          // transient progress ("Loading playlist…")
 

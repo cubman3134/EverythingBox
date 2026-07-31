@@ -62,6 +62,48 @@ namespace StreamHeaders
     // asks this, and a re-pointed URL loses the headers automatically.
     Headers forPlayUrl(const Headers& declared, const QString& declaredUrl, const QString& playUrl);
 
+    // THE ONE ROUTE THIS GUARD DOES NOT COVER, and why it is a limitation rather than a bug (#59).
+    //
+    // forPlayUrl is asked before every request the APP makes, so a URL that changed host loses the headers.
+    // It is asked once more, on the redirect itself, for every request the app makes through
+    // NetHeaderApply — Qt re-sends raw headers across a 302, and that hop is interceptable in-process, so it
+    // is intercepted and a cross-origin one is refused.
+    //
+    // The player's own transfers are NOT interceptable. Once a URL is handed to libmpv, ffmpeg's HTTP layer
+    // follows redirects itself, with the headers we set, and neither the hop nor its result is visible to us.
+    // Measured against the libmpv this app links (mpv v0.41.0-769-g2d5dfb343, 2026-07), with two loopback
+    // servers where the second was deliberately wide open so that anything arriving there was a leak rather
+    // than a rejection:
+    //
+    //   * a cross-origin 302 IS followed, and the second host received BOTH the Referer and the custom
+    //     token declared for the first. The leak is real, not theoretical;
+    //   * no option constrains it. `max-redirects`, `http-max-redirects` and `follow-redirects` do not exist
+    //     as mpv options (option-info reports them unavailable). Passing ffmpeg's own `max_redirects=0` or
+    //     `follow_redirects=0` down through `stream-lavf-o` / `demuxer-lavf-o` is ACCEPTED — mpv does not
+    //     validate that key/value list — and changes nothing: the second host was still contacted, still
+    //     with the headers. That is the trap worth writing down, because it looks like a fix and reports
+    //     success;
+    //   * nothing observes it either. After the redirect was followed, `path`, `stream-path`, `filename`,
+    //     `stream-open-filename` and `media-title` all still reported the ORIGINAL url, so we cannot even
+    //     detect after the fact that a hop happened, let alone which host it went to.
+    //
+    // Dropping the headers for the mpv leg does not help: host A gated the stream, so a bare request 403s
+    // and costs the user playback to protect them from a hop that may not happen.
+    //
+    // Two things WOULD close it, both design changes rather than fixes, both deliberately not taken here:
+    //   1. resolve the redirect ourselves first and hand mpv the final url. We have the network stack and
+    //      this guard to judge the result. It costs an extra round trip before every gated play, and it is
+    //      unsafe against the one-time / single-use signed urls that some of these gated sources issue —
+    //      the pre-flight would spend the url and the player would get a dead one;
+    //   2. mpv's stream_cb API (mpv/stream_cb.h, which ships with the libmpv we link): register a custom
+    //      protocol and do the I/O ourselves, which gives total control over every request the player makes.
+    //      It also means reimplementing a seekable HTTP stream — ranges, reconnects, timeouts — that ffmpeg
+    //      already does well, for one property.
+    //
+    // Until one of those is chosen, the exposure is: a stream whose declaring host redirects to another host
+    // hands that host this source's request headers, on the player leg only. Everything the app fetches
+    // itself is covered.
+
     // Receives one player property assignment: a property name and the values it should take (an EMPTY list
     // means "clear this property" — i.e. put it back to the PLAYER'S OWN DEFAULT for that property, which is
     // not always the empty string; mpv's user-agent defaults to "libmpv". See MpvHeaderApply::setProperty).

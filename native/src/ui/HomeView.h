@@ -484,7 +484,10 @@ private:
     void startDownload();              // begin a crawl from the current detail item
     void dlNext();                     // process the next queued node
     void dlResolveLeaf(const DlNode& node); // resolve one leaf's source, then continue
-    void dlEmit(const MediaItem& it, const QString& url, const QString& mime); // queue a resolved file
+    // Queue a resolved file. `headers` is the source's proxyHeaders for `url` — a download is an ordinary
+    // HTTP fetch of the stream URL, so a gated source needs them here too (#59).
+    void dlEmit(const MediaItem& it, const QString& url, const QString& mime,
+                const StreamHeaders::Headers& headers = {});
     // TMDB->IMDB bridge: when a non-Stremio catalog item (e.g. AIO Catalog) supplies an IMDB stream id via
     // getMeta, Play resolves it through the installed Stremio stream addons. Set in showMeta for the open item.
     QString playImdbId_;              // "tt123" (movie) or "ttShow:s:e" (episode), else empty

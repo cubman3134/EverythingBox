@@ -3,6 +3,7 @@
 // the app's normal full-screen views. A thin top bar shows the title, a play/pause + volume control, and a
 // close button; clicking anywhere in the pane focuses it (the focused pane receives keyboard/controller).
 #pragma once
+#include "../core/StreamHeaders.h"
 #include <QWidget>
 
 class QStackedWidget;
@@ -21,7 +22,10 @@ class MediaPane : public QWidget
 public:
     explicit MediaPane(QWidget* parent = nullptr);
 
-    void openVideo(const QString& url, const QString& title); // also used for audio (mpv plays audio-only)
+    // Also used for audio (mpv plays audio-only). `headers` is the source's proxyHeaders (#59): this pane
+    // owns its OWN MpvWidget, so a gated stream opened here needs them as much as the full-screen player
+    // does. Defaulting to empty is what makes a caller with none CLEAR whatever the pane played last.
+    void openVideo(const QString& url, const QString& title, const StreamHeaders::Headers& headers = {});
     // title/systemId carry the catalog item's display name and the console it was opened from through to
     // RetroView, which needs both to file this game's save files (see RetroView::openGame).
     void openGame(const QString& corePath, const QString& romPath, const QString& coreName,

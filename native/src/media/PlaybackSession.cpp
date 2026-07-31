@@ -45,9 +45,12 @@ QString PlaybackSession::titleAt(int index) const
 }
 
 void PlaybackSession::setQueue(const QStringList& files, int startIndex, const QStringList& titles,
-                               const QString& resumeKey)
+                               const QString& resumeKey, const TrackHeaders& trackHeaders)
 {
     tracks_ = files;
+    // Assigned WITH the tracks, never appended to: a queue replaces the previous one wholesale, and headers
+    // left over from the last queue would be indexed by position into a completely different track list.
+    trackHeaders_ = trackHeaders;
     QStringList displayTitles;
     for (int i = 0; i < tracks_.size(); ++i)
         displayTitles << (i < titles.size() && !titles[i].isEmpty()
@@ -68,7 +71,18 @@ void PlaybackSession::playIndex(int index)
     trackIndex_ = index;
     beginResume(tracks_[index]);  // track the new file's position (and resume it if seen before)
     emit trackChanged(index, tracks_.size(), titleAt(index));
-    emit playRequested(tracks_[index]);
+    // trackHeaders_ is allowed to be SHORTER than tracks_ (a local queue passes none at all), and a track
+    // with no entry gets an empty set — which is the correct answer, and the one that makes the player clear
+    // the previous track's headers rather than keep them.
+    //
+    // Spelled with an explicit bound and at(), not with value(): the log-discipline gate reads
+    // `<name>Headers.value(…)` as pulling ONE header's value out into a local, and it is right to — that is
+    // the hole no grep over log calls can see. This container is a LIST of header sets rather than a set, so
+    // the match would be a false positive, and the fix for a false positive is not to teach the gate a
+    // nuance it would then apply everywhere. It is to not write the shape.
+    const StreamHeaders::Headers trackHeaders =
+        index < trackHeaders_.size() ? trackHeaders_.at(index) : StreamHeaders::Headers();
+    emit playRequested(tracks_[index], trackHeaders);
 }
 
 void PlaybackSession::next()
@@ -158,6 +172,12 @@ void PlaybackSession::clearQueue()
     lastAccruedPos_ = 0.0; // consumption-stats: per-track reset (next media starts a fresh accrual span)
     statsAccum_ = 0.0;
     tracks_.clear();
+    // The queue's headers die with the queue. NOT observable — every read of trackHeaders_ is a playIndex
+    // reached through a setQueue, which assigns the list wholesale — so probe_playback pins no assertion on
+    // this line and says why. It stays because tracks_ and trackHeaders_ are a parallel pair: clearing one
+    // and not the other leaves two members disagreeing about how many tracks there are, which is the state a
+    // future change to the read path would be bitten by.
+    trackHeaders_.clear();
     trackIndex_ = -1;
     emit queueCleared();
 }

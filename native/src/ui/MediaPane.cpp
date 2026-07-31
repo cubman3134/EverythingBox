@@ -123,12 +123,12 @@ void MediaPane::showView(QWidget* w, const QString& title, bool hasAudio)
     stack_->setCurrentWidget(w);
 }
 
-void MediaPane::openVideo(const QString& url, const QString& title)
+void MediaPane::openVideo(const QString& url, const QString& title, const StreamHeaders::Headers& headers)
 {
     kind_ = Video;
     showView(player_, title.isEmpty() ? QFileInfo(url).fileName() : title, /*hasAudio*/ true);
     player_->setVolume(volPct_);
-    player_->play(url);
+    player_->play(url, headers);
     emit focusRequested();
 }
 
