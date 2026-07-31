@@ -658,6 +658,19 @@ void AddonManager::reload()
         loadFolder(d.absoluteFilePath());
     }
     loadRemoteSources(); // URL-only HTTP addons (built from their cached manifests)
+
+    // The brand migration cannot rename per-addon config, because the id that keys it is whatever manifest.id
+    // says and only the load above knows that. So it leaves those keys alone and we reconcile here, where the
+    // real ids finally exist — including the remote ones, which is the case that has no folder to inspect and
+    // therefore no answer until its cached manifest has been read. Idempotent and near-free on the ordinary
+    // run; it earns its keep once, on the first launch after an install whose keys an earlier build stranded.
+    QStringList ids;
+    ids.reserve(int(loaded_.size()));
+    for (const auto& a : loaded_) ids << a->manifest.id;
+    const int restored = BrandMigration::reconcileAddonConfig(AppPaths::dataDir(), ids);
+    if (restored)
+        streamLog(QStringLiteral("addon config: restored %1 stranded setting(s) to the add-on ids in use")
+                      .arg(restored));   // COUNT only — these values are user credentials
 }
 
 QStringList AddonManager::remoteSourceUrls() const

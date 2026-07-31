@@ -13,6 +13,7 @@
 // the directory being moved. It is a separate, device-tested step; until it lands, the pin IS the tolerance.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <functional>
 
 namespace BrandMigration
@@ -42,4 +43,13 @@ namespace BrandMigration
     // live in AppPaths::dataDir() — they describe this device, not the directory passed in.
     bool migrateLocalIni(const QString& dataDir);
     bool migrateAddonIds(const QString& dataDir);
+
+    // ---- per-add-on state, reunited with the id the add-on actually reports ----------------------------
+    // Deliberately NOT a Step and NOT flagged. Its subject is the set of ids that actually LOADED, which the
+    // steps above cannot know: a remote add-on has no folder to inspect and no manifest until one has been
+    // fetched and cached, possibly not until a later launch. A one-shot flag would retire the repair before
+    // the add-on it exists for was ever seen. Idempotent instead, and cheap enough to run on every reload —
+    // AddonManager::reload() calls it once its sources are built. `installedIds` is manifest ids, verbatim.
+    // Returns how many values were carried across; 0 on the ordinary no-op run.
+    int reconcileAddonConfig(const QString& dataDir, const QStringList& installedIds);
 }

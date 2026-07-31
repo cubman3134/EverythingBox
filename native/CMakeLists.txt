@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.163 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.164 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -527,8 +527,16 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
+        src/addons/AddonContext.cpp  src/addons/AddonContext.h        # the REAL per-addon config lookup (see below)
         third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
-    target_include_directories(probe_brand PRIVATE src src/core src/theme2 third_party)
+    # AddonContext is linked so the addon-config sections can assert through AddonContext::readConfig itself
+    # rather than a re-spelling of its key format. That distinction is the whole point of those sections: the
+    # bug is a RENAME, so a check that builds its own key string would be asserting against a copy of the
+    # thing under test and would keep passing if the two ever drifted. Its configStore() is pinned to
+    # AppPaths::dataDir(), which under EB_ISOLATED_DATA_DIR is this process's own scratch directory — so the
+    # real lookup runs against a fixture and never opens an installed ini. ${EB_SECRETS_GEN_DIR} is for the
+    # build-tree BuiltinSecrets.h that AddonContext.cpp includes (empty when no secrets file is present).
+    target_include_directories(probe_brand PRIVATE src src/core src/addons src/theme2 third_party ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(probe_brand PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_brand PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
 

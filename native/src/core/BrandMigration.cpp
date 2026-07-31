@@ -144,6 +144,39 @@ bool copyVerified(const QString& legacy, const QString& fresh)
     return true;
 }
 
+// The same id spelled under the other namespace, or empty when the id belongs to neither (a third party's —
+// nothing here has any business touching those).
+QString counterpartId(const QString& id)
+{
+    const QString oldNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
+    const QString newNs = QString::fromLatin1(AppBrand::kAddonPrefix);
+    if (id.startsWith(newNs)) return oldNs + id.mid(newNs.size());
+    if (id.startsWith(oldNs)) return newNs + id.mid(oldNs.size());
+    return QString();
+}
+
+// Move one stranded key onto the id actually in use. Returns true if a value was carried across.
+//
+// The two rules are the whole point:
+//   * NEVER CLOBBER. A value already stored under the id in use wins, always. Someone whose keys vanished may
+//     well have shrugged and typed them in again; putting the stale copy back on top would break them a
+//     second time, and this run would be the thing that did it.
+//   * The stale key is dropped either way, which is what makes this IDEMPOTENT — the source group empties as
+//     it is consumed, so every later run finds nothing and does nothing. Dropping it is not a data risk: it
+//     is dead data under a name nothing reads, and the previous brand's ini is still on disk beside the exe
+//     (migrateLocalIni copies, never moves) holding the original.
+// `touched` records that the ini was modified AT ALL, which is not the same question as the return value:
+// the don't-clobber path writes nothing but still drops the stale key, and that removal has to be synced.
+bool adoptKey(QSettings& s, const QString& from, const QString& to, bool& touched)
+{
+    if (!s.contains(from)) return false;
+    const bool carried = !s.contains(to);
+    if (carried) s.setValue(to, s.value(from));
+    s.remove(from);
+    touched = true;
+    return carried;
+}
+
 } // namespace
 
 bool BrandMigration::done(Step s)
@@ -240,4 +273,57 @@ bool BrandMigration::migrateAddonIds(const QString& dataDir)
 
     if (allOk) setDone(Step::AddonIds, true);
     return allOk;
+}
+
+// Reunite per-add-on state with the id the add-on actually reports.
+//
+// NOT a numbered Step, and deliberately NOT flagged. The steps above are one-shot because their subject is
+// this device's own files; this one's subject is a set of ids that is not fully knowable at migration time —
+// a remote add-on contributes its id only once its cached manifest is present, which may be a later launch
+// entirely. A flag would retire the repair before the add-on it exists for had ever been seen. It is instead
+// idempotent and cheap enough to run on every load (see adoptKey).
+//
+// Two populations need it, and they are one repair taken from opposite directions:
+//   * an add-on that KEPT the previous namespace, whose config an earlier build's blind rewrite pushed into
+//     the current one. This is the already-broken user: their API keys are still in the ini, intact, under a
+//     name nothing reads. Nothing else recovers them — a forward-only fix leaves them blank forever.
+//   * an add-on that MOVED to the current namespace (migrateAddonIds rewrites local manifest ids), whose
+//     config the rewrite no longer touches and so is now left behind under the previous one.
+//
+// Which direction applies is never assumed. `installedIds` is what ACTUALLY loaded, and the counterpart is
+// derived from each id rather than guessed at — the whole bug was a migration inventing an identifier it
+// could not observe, and repeating that here would just move the breakage around.
+//
+// Returns the number of values carried across (0 on the overwhelmingly common no-op run).
+int BrandMigration::reconcileAddonConfig(const QString& dataDir, const QStringList& installedIds)
+{
+    QSettings s(currentIni(dataDir), QSettings::IniFormat);
+    if (s.status() != QSettings::NoError) return 0;
+
+    int restored = 0;
+    bool touched = false;
+    for (const QString& id : installedIds)
+    {
+        const QString other = counterpartId(id);
+        if (other.isEmpty() || other == id) continue;   // third-party id, or nothing to reconcile
+
+        // addoncfg/<id>/<key> — the per-add-on config group. Enumerated under the SOURCE id: only keys that
+        // are actually stranded are considered, so an add-on with nothing to repair costs one group lookup.
+        s.beginGroup(QStringLiteral("addoncfg/") + other);
+        const QStringList leaves = s.allKeys();
+        s.endGroup();
+        for (const QString& leaf : leaves)
+            if (adoptKey(s, QStringLiteral("addoncfg/") + other + QLatin1Char('/') + leaf,
+                            QStringLiteral("addoncfg/") + id    + QLatin1Char('/') + leaf, touched))
+                ++restored;
+
+        // addon.enabled.<id> — same foreign key, same silent miss. Milder (its default is "enabled", so the
+        // symptom is an add-on the user switched OFF quietly coming back rather than a credential vanishing),
+        // but it is the same bug and the repair is the same two lines.
+        if (adoptKey(s, QStringLiteral("addon.enabled.") + other, QStringLiteral("addon.enabled.") + id, touched))
+            ++restored;
+    }
+
+    if (touched) s.sync();
+    return restored;
 }
