@@ -12,9 +12,10 @@
 //
 // Prints FORMFACTOR-OK on success; any failure prints FORMFACTOR-FAIL <cond> and exits non-zero.
 //
-// Isolation: like the other core probes (see probe_meta), AppPaths::dataDir() is the probe exe's own folder
-// in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and never
-// touches a deployed install. Every assert sets "display/mode" explicitly, so a leftover ini can't skew it.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// Settings opens starts empty and is removed at exit. Every mode assert sets "display/mode" explicitly anyway;
+// what isolation buys here is the virtual-pad OPACITY default, which is only a default while nothing has
+// written the key.
 #include "FormFactor.h"
 #include "Settings.h"
 #include "LifecyclePolicy.h"
@@ -136,10 +137,6 @@ int main(int argc, char** argv)
     CHECK(Settings::virtualPadOpacity() == 45);            // default
     Settings::setVirtualPadOpacity(200);
     CHECK(Settings::virtualPadOpacity() == 100);           // clamped to 0..100
-    Settings::setVirtualPadOpacity(45);
-    Settings::setVirtualPad(QStringLiteral("auto"));       // restore defaults so a leftover ini can't skew later
-    Settings::setDisplayMode(QStringLiteral("auto"));
-    ff.refresh();
 
     // 7. Android OS-lifecycle pause/resume decision core (D2 Task 3). MainWindow::onApplicationStateChanged is
     // not headless-linkable (full widget/GL app), so the remember-and-restore policy lives in the pure

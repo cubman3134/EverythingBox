@@ -12,10 +12,9 @@
 //
 // Prints SYNC-OK on success; any failure prints SYNC-FAIL <cond> and exits non-zero.
 //
-// Isolation: like the other core probes (see probe_formfactor), AppPaths::dataDir() is the probe exe's own
-// folder in the build tree (portable app), so the everythingbox.ini it reads/writes is next to the probe and
-// never touches a deployed install. We wipe the "sync" group at start so a leftover ini can't skew the
-// defaults asserts.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// SyncOffsets opens starts empty and is removed at exit — which is what makes the "a fresh store resolves to
+// no offset" asserts below mean anything.
 #include "SyncOffsets.h"
 #include "AppPaths.h"
 #include "AppBrand.h"
@@ -37,14 +36,6 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
 
     const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
-
-    // Reset: wipe any leftover sync/* keys so the defaults asserts start clean. Shares QSettings' per-file
-    // cache with SyncOffsets' own store(), so this remove()+sync() is visible to every later read.
-    {
-        QSettings reset(iniPath, QSettings::IniFormat);
-        reset.remove(QStringLiteral("sync"));
-        reset.sync();
-    }
 
     using SyncOffsets::Which;
 
