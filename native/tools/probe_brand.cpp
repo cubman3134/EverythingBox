@@ -838,18 +838,21 @@ int main(int argc, char** argv)
     // so an ini that cannot be written (read-only, full disk, locked by another process) produced that line
     // for a repair that landed nowhere — and produced it again on the next launch, and the one after.
     //
-    // Two directories rather than one: QSettings shares a QConfFile per PATH process-wide, so reusing the
-    // control's path for the read-only case would test against a cache that still holds the control's
-    // outcome. Separate paths keep the read-only run reading exactly what is on disk.
+    // ONE DIRECTORY PER READ-ONLY CALL, and this is load-bearing rather than tidiness. QSettings shares a
+    // QConfFile per PATH, and a sync that fails leaves the pending writes sitting in it. The next QSettings
+    // opened on that same path re-attempts them during its own construction, fails again, and comes up with
+    // status() != NoError — so the SECOND reconcile on a shared path returns 0 from its opening guard, having
+    // never looked at anything. Written that way, "the second one also reports nothing" passed on a build
+    // with the sync check removed: it was measuring the shared cache, not the fix. Each read-only call now
+    // gets a path nothing else has touched.
     {
-        const QString okDir = AppPaths::dataDir() + QStringLiteral("/probe_sync_ok");
-        const QString roDir = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro");
-        QDir(okDir).removeRecursively();
-        QDir(roDir).removeRecursively();
-        QDir().mkpath(okDir);
-        QDir().mkpath(roDir);
-        const QString okIni = newIniIn(okDir);
-        const QString roIni = newIniIn(roDir);
+        const QString okDir  = AppPaths::dataDir() + QStringLiteral("/probe_sync_ok");
+        const QString roRefs = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro_refs");
+        const QString roCfg  = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro_cfg");
+        for (const QString& d : { okDir, roRefs, roCfg }) { QDir(d).removeRecursively(); QDir().mkpath(d); }
+        const QString okIni    = newIniIn(okDir);
+        const QString roRefIni = newIniIn(roRefs);
+        const QString roCfgIni = newIniIn(roCfg);
 
         const QString workerId    = legacyId(QStringLiteral("aiocatalog-worker"));  // PINNED to the previous id
         const QString workerWrong = currentId(QStringLiteral("aiocatalog-worker")); // where the rewrite put it
@@ -865,32 +868,37 @@ int main(int argc, char** argv)
         CHECK(BrandMigration::reconcileAddonConfig(okDir, installed) == 1,
               "...and so is a stranded config value");
 
-        // The same fixture, then the write permission taken away.
-        seedFavorites(roIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
-        writeKey(roIni, strandedCfg, QStringLiteral("KEY"));
-        QByteArray before;
-        { QFile f(roIni); if (f.open(QIODevice::ReadOnly)) before = f.readAll(); }
-        CHECK(!before.isEmpty(), "the read-only fixture was written before its permissions changed");
-        CHECK(QFile::setPermissions(roIni, QFile::ReadOwner | QFile::ReadUser),
-              "the fixture could be made read-only");
+        // The same fixture in each read-only directory, then the write permission taken away.
+        seedFavorites(roRefIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
+        writeKey(roCfgIni, strandedCfg, QStringLiteral("KEY"));
+        QByteArray refsBefore, cfgBefore;
+        { QFile f(roRefIni); if (f.open(QIODevice::ReadOnly)) refsBefore = f.readAll(); }
+        { QFile f(roCfgIni); if (f.open(QIODevice::ReadOnly)) cfgBefore = f.readAll(); }
+        CHECK(!refsBefore.isEmpty() && !cfgBefore.isEmpty(),
+              "both read-only fixtures were written before their permissions changed");
+        CHECK(QFile::setPermissions(roRefIni, QFile::ReadOwner | QFile::ReadUser)
+                  && QFile::setPermissions(roCfgIni, QFile::ReadOwner | QFile::ReadUser),
+              "both fixtures could be made read-only");
 
-        CHECK(BrandMigration::reconcileAddonRefs(roDir, installed) == 0,
+        CHECK(BrandMigration::reconcileAddonRefs(roRefs, installed) == 0,
               "a re-point that could not be flushed reports NOTHING repaired");
-        CHECK(BrandMigration::reconcileAddonConfig(roDir, installed) == 0,
+        CHECK(BrandMigration::reconcileAddonConfig(roCfg, installed) == 0,
               "...and neither does a config adoption that could not be flushed");
         // Read the FILE, not the settings: QSettings still holds the unflushed change in memory, so a
         // readback through it would show the repair that never reached the disk.
-        QByteArray after;
-        { QFile f(roIni); if (f.open(QIODevice::ReadOnly)) after = f.readAll(); }
-        CHECK(after == before,
-              "...and the reported nothing is the truth: the file on disk is byte-for-byte unchanged");
+        QByteArray refsAfter, cfgAfter;
+        { QFile f(roRefIni); if (f.open(QIODevice::ReadOnly)) refsAfter = f.readAll(); }
+        { QFile f(roCfgIni); if (f.open(QIODevice::ReadOnly)) cfgAfter = f.readAll(); }
+        CHECK(refsAfter == refsBefore && cfgAfter == cfgBefore,
+              "...and the reported nothing is the truth: both files are byte-for-byte unchanged");
 
-        QFile::setPermissions(roIni, QFile::ReadOwner | QFile::ReadUser
+        for (const QString& f : { roRefIni, roCfgIni })
+            QFile::setPermissions(f, QFile::ReadOwner | QFile::ReadUser
                                          | QFile::WriteOwner | QFile::WriteUser);
-        QDir(okDir).removeRecursively();
-        QDir(roDir).removeRecursively();
-        CHECK(!QFileInfo::exists(okDir) && !QFileInfo::exists(roDir),
-              "both fixture directories are removed (this probe leaves no residue)");
+        bool residue = false;
+        for (const QString& d : { okDir, roRefs, roCfg })
+        { QDir(d).removeRecursively(); if (QFileInfo::exists(d)) residue = true; }
+        CHECK(!residue, "every fixture directory is removed (this probe leaves no residue)");
     }
 
     clearAllFlags();
