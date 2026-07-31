@@ -145,6 +145,44 @@ namespace browse
                                 const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
                                 const QList<SteamGame>& steamOwned = {});
 
+    // ---- The PC Games folder's launcher filter (issue #44) ---------------------------------------------
+    // pcGamesCatalog has always taken a `launcherFilter` and it has always worked; every call site passed an
+    // empty string and no surface offered it, so "show me what I own on Steam" — which the design used to
+    // justify deleting the four per-launcher folders — had no replacement at all. These three build the
+    // control that reaches it. Pure: they decide what the folder OFFERS, never what it shows.
+
+    // The launcher's own name, for a row a person reads. Returns an empty string for an id with no name
+    // here, which callers use as "not a launcher we can offer".
+    QString pcLauncherLabel(const QString& launcher);
+
+    // Which launchers this library actually has games in, in the folder's fixed display order
+    // (steam, epic, gog, battlenet). Offering a launcher with nothing behind it is a menu row that can only
+    // ever empty the folder, and offering ALL FOUR always would do exactly that on the common machine with
+    // one store installed. Owned-but-not-installed Steam entries count: they are Steam library entries, and
+    // "what I own on Steam" is the phrase this feature exists to answer.
+    QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                                   const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                                   const QList<SteamGame>& steamOwned = {});
+
+    // The filter menu: .first is the launcherFilter value to pass to pcGamesCatalog (EMPTY = every
+    // launcher), .second is the row a person reads, with the current choice ticked.
+    //
+    // ONE list of pairs rather than two parallel lists on purpose: the row the user pressed and the value it
+    // means have to stay index-aligned, and two lists that must agree by convention is the shape this
+    // codebase has already been bitten by (see pcgame::itemId's header).
+    //
+    // "All launchers" is ALWAYS first, so a filter that has emptied the folder can still be cleared — the
+    // rows below it may all have vanished with the library they described.
+    QVector<QPair<QString, QString>> pcLauncherFilterChoices(const QStringList& available,
+                                                             const QString& current);
+
+    // The control row itself, pinned at the TOP of the PC Games folder. A row in the folder rather than a
+    // widget above it because this app has four layouts (classic grid, themed grid, XMB, carousel) and only
+    // the classic one has chrome a QComboBox could live in — a filter bar there is a control most users
+    // cannot see, and one only a mouse can reach, which is the defect issue #40 is already open about.
+    // A folder row is D-pad reachable in every layout by construction.
+    MediaItem pcLauncherFilterRow(const QString& current);
+
     // Episodes airing soon, from a connected Trakt account. Sorted by air time, soonest first.
     // PAST entries are excluded: recently-aired episodes are issue #25's job ("You missed"), and two
     // surfaces both claiming the same episode is worse than either alone. The boundary is CLOSED on the

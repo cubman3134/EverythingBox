@@ -522,6 +522,73 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
     return cat;
 }
 
+// ---- The PC Games folder's launcher filter (issue #44) --------------------------------------------------
+
+QString pcLauncherLabel(const QString& launcher)
+{
+    if (launcher == QStringLiteral("steam"))     return QObject::tr("Steam");
+    if (launcher == QStringLiteral("epic"))      return QObject::tr("Epic Games");
+    if (launcher == QStringLiteral("gog"))       return QObject::tr("GOG");
+    if (launcher == QStringLiteral("battlenet")) return QObject::tr("Battle.net");
+    return QString();   // not a launcher this folder can filter on
+}
+
+QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                               const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                               const QList<SteamGame>& steamOwned)
+{
+    // The SAME fixed order the display-title precedence uses (pcTitleRank), for the same reason: a menu
+    // whose rows reshuffle when a launcher scan comes back in a different order is a menu whose muscle
+    // memory is a lie.
+    QStringList out;
+    if (!steam.isEmpty() || !steamOwned.isEmpty()) out << QStringLiteral("steam");
+    if (!epic.isEmpty())                           out << QStringLiteral("epic");
+    if (!gog.isEmpty())                            out << QStringLiteral("gog");
+    if (!bnet.isEmpty())                           out << QStringLiteral("battlenet");
+    return out;
+}
+
+QVector<QPair<QString, QString>> pcLauncherFilterChoices(const QStringList& available,
+                                                          const QString& current)
+{
+    QVector<QPair<QString, QString>> out;
+    const QString tick = QStringLiteral("✓  ");
+    const QString pad  = QStringLiteral("     ");   // aligns the unticked rows under the ticked one
+    out.push_back({ QString(), (current.isEmpty() ? tick : pad) + QObject::tr("All launchers") });
+    for (const QString& l : available)
+    {
+        const QString label = pcLauncherLabel(l);
+        if (label.isEmpty()) continue;   // an id with no name is one this folder cannot filter on
+        out.push_back({ l, (current == l ? tick : pad) + label });
+    }
+    // A filter the user set for a launcher that has since gone (the store uninstalled, the last game
+    // removed) is still OFFERED, ticked, so the menu shows the state the folder is actually in. Without
+    // this the folder is empty, the menu says "All launchers" is selected, and the two disagree.
+    if (!current.isEmpty() && !available.contains(current))
+    {
+        const QString label = pcLauncherLabel(current);
+        if (!label.isEmpty()) out.push_back({ current, tick + label });
+    }
+    return out;
+}
+
+MediaItem pcLauncherFilterRow(const QString& current)
+{
+    MediaItem it;
+    it.id    = QStringLiteral("_pcfilter");
+    it.type  = QStringLiteral("_pcfilter");   // HomeView routes on this; '_' also keeps it out of the
+                                              // library-management verbs, which have no marks key for it
+    it.mime  = QStringLiteral("pcfilter:") + current;
+    it.title = current.isEmpty()
+        ? QObject::tr("🎮  Launcher: All")
+        : QObject::tr("🎮  Launcher: %1").arg(pcLauncherLabel(current));
+    // The row SAYS it is filtered, on the row itself. A folder that is quietly showing a third of the
+    // library because of a control the user set two sessions ago and forgot reads as games having gone
+    // missing, which is the failure this whole area is about.
+    if (!current.isEmpty()) it.subtitle = QObject::tr("Showing one launcher — open to change");
+    return it;
+}
+
 // The Trakt "airing soon" list (#23). Pure like every builder above: entries in, MediaCatalog out — no
 // TraktClient, no network, no ini. The SURFACE decides whether to show this at all (TraktClient::
 // calendarAvailable()); this only decides what the list looks like once it is shown.

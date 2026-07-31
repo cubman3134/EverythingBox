@@ -589,6 +589,91 @@ int main(int argc, char** argv)
               "pcgames: two all-noise titles do NOT collapse into one bucket");
     }
 
+    // ---- pcgames-filter: the launcher filter's CONTROL (issue #44) ---------------------------------------
+    // pcGamesCatalog's launcherFilter shipped working and probe-tested with every call site passing "" and no
+    // surface offering it, so "show me what I own on Steam" — the thing the design used the filter to justify
+    // deleting the four per-launcher folders for — had no replacement. These are the pure halves of the
+    // control that now reaches it: which launchers may be offered, what the menu says, and the folder row.
+    {
+        QList<SteamGame> st; { SteamGame g; g.appid = "1"; g.name = "Hades"; st << g; }
+        QList<GogGame>   gg; { GogGame g;   g.id = "2";    g.name = "Tunic"; gg << g; }
+
+        // Only launchers this machine HAS. Offering all four always would put rows in the menu whose only
+        // possible effect is to empty the folder — the common case is one store installed.
+        CHECK(browse::pcLaunchersPresent(st, {}, gg, {}) == QStringList({ "steam", "gog" }),
+              "pcfilter: only launchers the library actually has, in the folder's fixed order");
+        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}).isEmpty(),
+              "pcfilter: an empty library offers no launcher rows");
+        // Owned-but-not-installed Steam entries COUNT — they are Steam library entries, and "what I own on
+        // Steam" is the exact phrase this feature answers. Without this the filter is missing on a machine
+        // whose Steam games are all uninstalled, which is the library most in need of it.
+        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}, st) == QStringList({ "steam" }),
+              "pcfilter: an owned-but-not-installed Steam library still offers the Steam row");
+        // The order is FIXED, not the order the scans came back in.
+        QList<EpicGame> ep; { EpicGame g; g.appName = "e"; g.name = "Fortnite"; ep << g; }
+        QList<BattleNetGame> bn; { BattleNetGame g; g.code = "wow"; g.name = "WoW"; bn << g; }
+        CHECK(browse::pcLaunchersPresent(st, ep, gg, bn) == QStringList({ "steam", "epic", "gog", "battlenet" }),
+              "pcfilter: the launcher order does not depend on which scan returned first");
+
+        // The menu. "All launchers" is always row 0 with an EMPTY value, so a filter that emptied the folder
+        // can still be cleared; the value and the label ride one pair, so the row pressed and the filter it
+        // means cannot drift apart.
+        {
+            const QVector<QPair<QString, QString>> all = browse::pcLauncherFilterChoices({ "steam", "gog" }, QString());
+            CHECK(all.size() == 3 && all[0].first.isEmpty(),
+                  "pcfilter: the menu is All + one row per available launcher, All first with an empty value");
+            CHECK(all[1].first == "steam" && all[2].first == "gog",
+                  "pcfilter: each row's VALUE is the launcher id pcGamesCatalog takes");
+            CHECK(all[1].second.contains("Steam") && all[2].second.contains("GOG"),
+                  "pcfilter: ...and each row's LABEL is the launcher's own name");
+            // Exactly ONE tick, and it is on the current choice. A menu that ticked everything, or nothing,
+            // would pass a size check and tell the user nothing about the state they are in.
+            int ticks = 0; for (const auto& c : all) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1 && all[0].second.contains(QChar(0x2713)),
+                  "pcfilter: no filter set -> the tick is on All launchers, and only there");
+        }
+        {
+            const QVector<QPair<QString, QString>> onGog = browse::pcLauncherFilterChoices({ "steam", "gog" }, "gog");
+            int ticks = 0; for (const auto& c : onGog) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1 && onGog[2].second.contains(QChar(0x2713)),
+                  "pcfilter: the tick follows the current filter, and does not stay on All");
+            CHECK(onGog.size() == 3 && onGog[0].first.isEmpty(),
+                  "pcfilter: All launchers is still offered while a filter is active (the way back)");
+        }
+        {
+            // The stale filter: set to a launcher whose games have since gone. The row must still be there,
+            // ticked, or the folder is empty while the menu claims "All launchers" — two surfaces disagreeing
+            // about one state, with no way to see which is true.
+            const QVector<QPair<QString, QString>> stale = browse::pcLauncherFilterChoices({ "steam" }, "gog");
+            bool hasGog = false; for (const auto& c : stale) if (c.first == "gog") hasGog = true;
+            CHECK(hasGog, "pcfilter: a filter on a launcher that has gone is still shown, not silently dropped");
+            int ticks = 0; for (const auto& c : stale) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1, "pcfilter: ...and it is the one ticked row");
+        }
+        // An unknown launcher id has no name, so it is not offered — a nameless row can only confuse.
+        CHECK(browse::pcLauncherLabel("itch").isEmpty(), "pcfilter: an unknown launcher id has no label");
+        {
+            const QVector<QPair<QString, QString>> odd = browse::pcLauncherFilterChoices({ "itch" }, QString());
+            CHECK(odd.size() == 1, "pcfilter: a launcher with no name is not offered as a row");
+        }
+
+        // The folder row. Its type is what HomeView routes on, and it must NOT look like a media item — a
+        // '_' type keeps it out of the library-management verbs, which have no marks key for it.
+        {
+            const MediaItem all = browse::pcLauncherFilterRow(QString());
+            CHECK(all.type == "_pcfilter" && all.id == "_pcfilter" && all.mime == "pcfilter:",
+                  "pcfilter: the control row carries the routing type/id/mime HomeView dispatches on");
+            CHECK(all.url.isEmpty(), "pcfilter: the control row has no url (a url would make it open as a file)");
+            CHECK(all.subtitle.isEmpty(), "pcfilter: with no filter set the row says nothing extra");
+            const MediaItem one = browse::pcLauncherFilterRow("steam");
+            CHECK(one.title.contains("Steam") && one.title != all.title,
+                  "pcfilter: the row NAMES the active launcher, so a filtered folder is never unexplained");
+            CHECK(!one.subtitle.isEmpty(),
+                  "pcfilter: ...and says the folder is narrowed — games 'missing' with no cause is the failure");
+            CHECK(one.mime == "pcfilter:steam", "pcfilter: the row carries the active filter in its mime");
+        }
+    }
+
     // ---- pcgames-override: the user's "these are / aren't the same game" verdict reaches the FOLDER -------
     // pcgame::setOverride and pcgame::sameGame shipped probe-tested with zero callers (issue #44); the
     // grouping key was pcgame::itemId alone, so the escape hatch the design named as the thing that makes a

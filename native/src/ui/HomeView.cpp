@@ -1847,7 +1847,23 @@ void HomeView::populatePcGames(bool runRemap)
         pcgame::applyRemap(pcgame::remapTable(lib));
     }
 
-    showSyntheticCatalog(pcLibraryCatalog(query, QString(), &scan));
+    // The launcher filter (issue #44). `launcherFilter` has always been a parameter of pcGamesCatalog and
+    // has always worked; nothing offered it, so the "filter inside the folder" that justified deleting the
+    // four per-launcher folders never appeared. It is FOLDER STATE, not a setting: it belongs to this level
+    // the way a search query does, it is set and cleared from the row that displays it, and a persisted
+    // copy would silently hide most of the library on the next launch with no visible cause.
+    //
+    // Which launchers to OFFER is decided from the same scan the folder is built from, so the menu can
+    // never list a launcher this machine has nothing in.
+    pcLaunchersAvailable_ = browse::pcLaunchersPresent(scan.steam, scan.epic, scan.gog, scan.bnet,
+                                                       scan.steamOwned);
+    MediaCatalog cat = pcLibraryCatalog(query, pcLauncherFilter_, &scan);
+    // Pinned at the TOP, and shown unconditionally — including when the filter has emptied the folder,
+    // which is exactly when it must still be reachable to clear. It is inserted HERE and not inside
+    // pcLibraryCatalog because that builder is also the re-derivation path (pcSourcesForId), which looks a
+    // game up by id and has no business seeing a control row.
+    cat.items.insert(0, browse::pcLauncherFilterRow(pcLauncherFilter_));
+    showSyntheticCatalog(cat);
 
     // BACKGROUND: with a key+SteamID configured and the cache stale, fetch the owned library off the GUI
     // thread (async, 8s reply timeout). On completion — ONLY if this console is STILL the top level — re-present
@@ -1876,6 +1892,34 @@ void HomeView::populatePcGames(bool runRemap)
             grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
         }
     });
+}
+
+// The launcher filter's menu (issue #44). A NavMenu from the nav kit — an in-window child overlay that a
+// D-pad reaches, never a QDialog or a QComboBox: three of this app's four layouts render no widget chrome at
+// all, so a dropdown above the grid would be a control most users never see and only a mouse could reach.
+//
+// The FOLDER ROW is what opens this, so the control lives inside the thing it controls and says, on the row
+// itself, which launcher is currently showing.
+void HomeView::showPcLauncherFilterMenu()
+{
+    const QVector<QPair<QString, QString>> choices =
+        browse::pcLauncherFilterChoices(pcLaunchersAvailable_, pcLauncherFilter_);
+    QStringList rows;
+    rows.reserve(choices.size());
+    for (const QPair<QString, QString>& c : choices) rows << c.second;
+
+    new NavMenu(tr("Show games from:"), rows, [this, choices](int row) {
+        if (row < 0 || row >= choices.size()) return;             // Back: leave the folder as it was
+        const QString picked = choices.at(row).first;
+        if (picked == pcLauncherFilter_) return;                  // the ticked row: nothing to rebuild
+        pcLauncherFilter_ = picked;
+        // Keep the cursor on the control row: it is row 0 of the rebuilt folder and it is the thing that
+        // just changed, so the user can see the new state and press again without hunting for it.
+        browseSelectKey_ = QStringLiteral("_pcfilter");
+        populatePcGames(/*runRemap=*/false);   // a filter cannot alter the library the remap is derived from
+        emit browseItemsChanged(false);        // re-sync a themed browse view (else its selection desyncs)
+        browseSelectKey_.clear();              // cleared AFTER the re-sync reads it (the favourite idiom)
+    }, window());
 }
 
 // ---- The source picker --------------------------------------------------------------------------------
@@ -2946,6 +2990,14 @@ void HomeView::activateItem(int row)
     }
     if (it.type == QStringLiteral("_newplaylist"))
         { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
+
+    // The PC Games folder's launcher filter row. Deferred a turn for the same reason every other overlay
+    // here is: in the themed modes this runs inside the QML view's own `activated` handler.
+    if (it.type == QStringLiteral("_pcfilter"))
+    {
+        QMetaObject::invokeMethod(this, [this] { showPcLauncherFilterMenu(); }, Qt::QueuedConnection);
+        return;
+    }
 
     // A generic leaf/container: resolve + open through the shared per-entry path (also reused by Play-random
     // over a playlist, so a random pick resolves identically to activating that item's row).

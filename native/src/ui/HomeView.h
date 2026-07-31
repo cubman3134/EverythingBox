@@ -322,6 +322,9 @@ private:
     void playPcGame(const MediaItem& it);
     // Launch ONE chosen source, routed by kind through the launcher path that already exists for it.
     void launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s);
+    // The launcher filter's menu (issue #44), opened from the folder's own control row. A NavMenu, because
+    // three of the four layouts render no widget chrome for a dropdown to live in.
+    void showPcLauncherFilterMenu();
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
@@ -500,6 +503,13 @@ private:
     } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     int ownedFetchGen_ = 0;           // in-flight dedup for the async owned-games re-present (only the latest wins)
+    // The PC Games folder's launcher filter, and the launchers it can offer. FOLDER STATE, deliberately not
+    // persisted: it belongs to this level the way the in-folder search query does, and a filter restored on
+    // the next launch would hide most of the library with nothing on screen explaining why. `available` is
+    // recomputed from the same scan the folder is built from, so the menu can never offer a launcher this
+    // machine has no games in.
+    QString     pcLauncherFilter_;
+    QStringList pcLaunchersAvailable_;
     // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
     int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
     int themedMetaIndex_ = -1;        // the currently-selected browse index (updated on every hover)
