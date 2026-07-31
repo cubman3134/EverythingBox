@@ -679,7 +679,12 @@ int main(int argc, char** argv)
         // (which, on a first launch offline, is every remote add-on there is).
         const QString absentId    = currentId(QStringLiteral("notloaded"));
 
-        const QStringList installed{ workerId, igdbNow, bothNow, bothWas, thirdParty };
+        // thirdParty is deliberately NOT in this list. Were it loaded, the "the stored id already resolves"
+        // guard would return first and the third-party favourite below would prove nothing about the guard
+        // that actually protects it — the one that refuses to act on an id belonging to NEITHER namespace.
+        // A third-party add-on that is merely not loaded on this launch is the case where that guard is the
+        // only thing standing between the user's favourite and an id invented for it.
+        const QStringList installed{ workerId, igdbNow, bothNow, bothWas };
 
         seedFavorites(ini, QStringLiteral("alpha"),
                       { { QStringLiteral("fa-broken"), workerWrong },
@@ -710,8 +715,8 @@ int main(int argc, char** argv)
         CHECK(favById(QStringLiteral("fa-broken"), f), "the repaired favourite is readable through the store");
         CHECK(favoriteSourceAddon(f, installed) == workerId,
               "a favourite of an add-on pinned to the previous id resolves its source addon again");
-        CHECK(favById(QStringLiteral("fa-third"), f) && favoriteSourceAddon(f, installed) == thirdParty,
-              "a third-party favourite's source is under neither namespace and is left alone");
+        CHECK(favById(QStringLiteral("fa-third"), f) && f.addonId == thirdParty,
+              "a favourite whose source is under NEITHER namespace keeps its id verbatim");
 
         // (b) THE OTHER DIRECTION, and in a DIFFERENT PROFILE — one call had to reach both. An id that
         //     genuinely moved leaves its favourites naming the previous spelling (permanently now that the
@@ -724,8 +729,10 @@ int main(int argc, char** argv)
         //     a state that is still repairable on a later launch for one that never is.
         CHECK(favById(QStringLiteral("fb-absent"), f) && f.addonId == absentId,
               "an id loaded under NEITHER spelling is left exactly as stored, not guessed at");
-        CHECK(favById(QStringLiteral("fb-absent"), f) && favoriteSourceAddon(f, installed).isEmpty(),
-              "...and it reports as unavailable rather than resolving to some other add-on");
+        // (There is deliberately NO companion "...and it resolves to nothing" line here. It would restate
+        //  the fixture — absentId is not in `installed`, so the resolution is empty by construction — and no
+        //  mutation of the implementation can make it fail. An assertion that cannot fail is worse than none:
+        //  it reads like coverage.)
 
         // (d) BOTH SPELLINGS LIVE — nothing is stranded, so nothing may move. Driving from the STORED id is
         //     what makes this fall out for free: whichever spelling the blob names is itself loaded.
@@ -745,9 +752,14 @@ int main(int argc, char** argv)
         ProfileStore::setCurrent(QStringLiteral("alpha"));
         CHECK(favById(QStringLiteral("fa-broken"), f) && favoriteSourceAddon(f, installed) == workerId,
               "a second pass leaves the repaired favourite resolving");
+        // ...and the two live spellings do not ping-pong. Checked after an ODD number of passes, on purpose:
+        // with the already-resolves guard gone the pair swaps on EVERY run, so after an even number of them
+        // it is back where it started and a check made at that moment passes on the broken build. This is the
+        // same trap in miniature as "the favourite is still stored" — a state that happens to look right.
+        BrandMigration::reconcileAddonRefs(ddir, installed);   // a third
         ProfileStore::setCurrent(QStringLiteral("charlie"));
         CHECK(favById(QStringLiteral("fc-was"), f) && favoriteSourceAddon(f, installed) == bothWas,
-              "a second pass does not swap the two live spellings' favourites");
+              "an odd number of passes still does not swap the two live spellings' favourites");
     }
 
     // ---- 13. PLAYLISTS: the same id, one level deeper (per ENTRY, since a playlist is mixed-source) --------
