@@ -143,8 +143,10 @@ remember: the define is applied by name over every probe target at the bottom of
 `native/CMakeLists.txt`. Two consequences worth knowing:
 
 * a probe's `dataDir()` is empty when it starts and gone when it ends, so a
-  probe no longer has to defensively wipe the groups it uses — and a probe that
-  wants a fixture on disk must write it under `dataDir()`, not next to the exe;
+  probe does not defensively wipe the groups it uses and does not clean up after
+  itself for the next run — see *Do not write a defensive reset* below — and a
+  probe that wants a fixture on disk must write it under `dataDir()`, not next
+  to the exe;
 * nothing in `build/Release` can change a probe's result, and no probe can
   change what is in `build/Release`. `probe_isolation` asserts both (the runner
   seeds junk into that folder before running it), and the suite's
@@ -162,6 +164,38 @@ remember: the define is applied by name over every probe target at the bottom of
 
 `EB_PROBE_DATA_DIR_KEEP=1` keeps the scratch directory around when you need to
 see what a failing probe wrote; `EB_PROBE_DATA_DIR=<dir>` pins it.
+
+### Do not write a defensive reset (#48)
+
+A dozen probes used to open the shared ini at startup only to `remove()` the
+group they were about to use, or to delete their own scratch files on the way
+out so the *next* run would start clean. Issue #48 swept all of it. Do not add
+another: there is no previous run in that directory and no sibling probe in it,
+so the reset defends against nothing and reads to the next author as the house
+pattern.
+
+The line to hold is **what the reset is defending against**:
+
+* against a *previous run*, a *sibling probe*, or anything a developer dropped
+  in `build/Release` → delete it. Isolation covers that case completely.
+* against an *earlier section of the same probe*, in the same process → keep it,
+  and say so in the comment. Isolation is per process and says nothing about
+  what case 3 left for case 4. `probe_savesync`'s `clearTombs()`,
+  `probe_cloudmerge`'s `wipeStores()`, `probe_brand`'s per-section
+  `clearAllFlags()` and `probe_navqml` §20's mode restore are all this, and all
+  stayed.
+* a fixture the probe then asserts on → keep it. Seeding is not resetting.
+  `probe_playlists` still writes the v1 blob it migrates.
+
+Deleting a reset is not a tidy-up, so do not treat it as one. A probe that
+passed only because it controlled the state has assertions that were partly
+inert, and the removal is what exposes them. Mutate the code the probe is about
+and check the probe actually goes red; if it does not, the assertion is the bug.
+That is how #48 found that nothing in the suite pinned `Settings::externalPlayer()`'s
+unconfigured default — `probe_extplayer` set the key before every check it made,
+so flipping the default from `builtin` to `vlc` left the suite green. Fixing
+that needed a store nobody had written to, which is exactly what isolation now
+provides. Strengthen the assertion; never restore the reset to hide the gap.
 
 This does **not** replace the per-unit `setIniPathForTesting` seams
 (`ThemeChoice`, `SettingsTxn`, `ProfilePasscode`, `PcGameId`, each behind its own
