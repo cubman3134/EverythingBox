@@ -52,4 +52,20 @@ namespace BrandMigration
     // AddonManager::reload() calls it once its sources are built. `installedIds` is manifest ids, verbatim.
     // Returns how many values were carried across; 0 on the ordinary no-op run.
     int reconcileAddonConfig(const QString& dataDir, const QStringList& installedIds);
+
+    // ---- add-on ids stored INSIDE per-profile content, re-pointed at the ids that loaded ---------------
+    // The same repair as reconcileAddonConfig, on the other surface it has. Favourites and playlists persist
+    // the id of the add-on an item came from inside their JSON blob (FavoritesStore's "addonId",
+    // PlaylistStore's per-entry "addonId"), and that id is a foreign key into whatever manifest.id says —
+    // not a brand string of ours. The symptom is one step louder than a blank Configure field: opening the
+    // favourite resolves no source add-on at all and says so.
+    //
+    // Covers EVERY profile, not just the active one — the stores are namespaced per profile, so a repair
+    // scoped to whoever happens to be signed in would leave every other profile broken with no second
+    // chance. Enumerated from the ini's own groups rather than from ProfileStore, so data belonging to a
+    // profile that has since been deleted is still reached (and this stays a QtCore-only TU).
+    //
+    // Same contract as reconcileAddonConfig: not a Step, not flagged, idempotent, safe on every reload.
+    // Returns how many stored references were re-pointed; 0 on the ordinary no-op run.
+    int reconcileAddonRefs(const QString& dataDir, const QStringList& installedIds);
 }

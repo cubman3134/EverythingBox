@@ -88,6 +88,13 @@ public:
     LoadedAddon* sourceById(const QString& manifestId) const          // resolve a source by its manifest id
     { for (LoadedAddon* s : sources_) if (s->manifest.id == manifestId) return s; return nullptr; }
     const std::vector<std::unique_ptr<LoadedAddon>>& all() const { return loaded_; }
+    // The manifest ids that ACTUALLY loaded on this launch — the input BrandMigration's two reconcile passes
+    // are driven from, and the only place that answer exists (a remote add-on contributes its id only once its
+    // cached manifest has been read). Exposed rather than open-coded because reload() is no longer the sole
+    // caller: a cloud merge can land a blob still naming the previous brand's spelling, so MainWindow re-runs
+    // the ref reconcile after every merge (#58 review).
+    QStringList installedIds() const
+    { QStringList ids; ids.reserve(int(loaded_.size())); for (const auto& a : loaded_) ids << a->manifest.id; return ids; }
     QVector<AddonCatalog> catalogs(LoadedAddon* src) const;
 
     // ---- synchronous (runs on the calling thread; used by the console probe / tests) ----

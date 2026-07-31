@@ -62,6 +62,7 @@
 #include "../core/ThemeChoice.h"
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
+#include "../core/BrandMigration.h"   // mergeProgress re-runs the stored-add-on-id repair after every merge (#58)
 #include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
 #include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
 #include "ProfileDialog.h"
@@ -11296,6 +11297,20 @@ QByteArray MainWindow::serializeProgress() const
 void MainWindow::mergeProgress(const QByteArray& json)
 {
     CloudMerge::mergeAll(QJsonDocument::fromJson(json).object());
+
+    // ...and re-run the stored-add-on-id repair over what the merge just landed (#58 review).
+    //
+    // The tie-break no longer decides an equal-timestamp meeting on an add-on id's SPELLING (CloudMerge's
+    // tieKey), so a repaired blob is no longer reverted by the merge that follows it. This covers the other
+    // half: a peer's blob that is genuinely NEWER wins outright, spelling and all, and can therefore arrive
+    // still naming the namespace this device renamed away from. AddonManager::reload() ran at startup and
+    // will not run again, so without this the favourite would read "source addon isn't available" for the
+    // rest of the session and only come right on the next launch. Idempotent and near-free (it writes only
+    // when something actually moved), which is what makes running it on every merge affordable.
+    if (!addons_) return;
+    const int repointed = BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), addons_->installedIds());
+    if (repointed)
+        mwLog(QStringLiteral("addon refs: re-pointed %1 stored reference(s) after a cloud merge").arg(repointed));
 }
 
 void MainWindow::pushProgressNow()

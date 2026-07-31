@@ -14,6 +14,9 @@
 #include "BrandMigration.h"
 #include "Settings.h"
 #include "AddonContext.h"   // sections 7/8 assert through the REAL per-addon config lookup, not a copy of it
+#include "FavoritesStore.h" // sections 12/13: the stores that persist an add-on id INSIDE a value (#58)
+#include "PlaylistStore.h"
+#include "ProfileStore.h"   // ...and they are per-profile, which is half of what those sections assert
 
 #include "AppBrand.h"
 #include "AppPaths.h"
@@ -22,11 +25,14 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QPair>
 #include <QSettings>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QVector>
 #include <cstdio>
 
 static int failures = 0;
@@ -81,6 +87,56 @@ static bool addonEnabledIn(const QString& ini, const QString& id)
     return s.value(QStringLiteral("addon.enabled.") + id, true).toBool();
 }
 
+// ---- the REAL favourite/playlist lookup, and the one line of it that has to be re-spelled here -----------
+//
+// Neither of the two call sites can be linked into a headless probe: HomeView is Qt Widgets and most of the
+// app, and AddonManager drags in QuickJS, the addon runtime and the network stack. So the resolution's final
+// comparison is written out below. That is deliberately ALL that is written out — the half that actually
+// broke, the id itself, comes out of FavoritesStore::list() / PlaylistStore::get() and is carried through
+// exactly the transformations the real path applies to it.
+//
+// This is the distinction sections 12/13 live or die on. The bug is a RENAME: the favourite is still stored
+// afterwards, its blob still parses, its title and thumbnail are all still there. Every "the favourite
+// survived" check passes just as happily on the broken build. The only question that separates the two builds
+// is whether the id it carries names an add-on that is actually loaded — which is precisely what the user hits
+// when the toast says the source addon isn't available.
+//
+// Returns the id of the resolved source add-on, or empty for "isn't available".
+static QString favoriteSourceAddon(const FavoriteItem& f, const QStringList& installedIds)
+{
+    const QString mime = QStringLiteral("fav:") + f.addonId; // HomeView.cpp: the tile carries it in `mime`
+    const QString addonId = mime.mid(4);                     // HomeView::openFavorite strips the marker back off
+    for (const QString& id : installedIds)                   // ...and matches it against manifest.id
+        if (id == addonId) return id;
+    return QString();                                        // -> "That favourite's source addon isn't available."
+}
+
+// The playlist half of the same path: playlistItemsCatalog stamps each row's sourceAddonId from the entry's
+// stored addonId, and activateItem resolves it through AddonManager::sourceById (manifest.id ==).
+static QString entrySourceAddon(const PlaylistEntry& e, const QStringList& installedIds)
+{
+    const QString sourceAddonId = e.addonId;
+    for (const QString& id : installedIds)
+        if (id == sourceAddonId) return id;
+    return QString();
+}
+
+// Look one favourite up by itemId through the REAL store reader (never by re-parsing the blob here).
+static bool favById(const QString& itemId, FavoriteItem& out)
+{
+    for (const FavoriteItem& f : FavoritesStore::list())
+        if (f.itemId == itemId) { out = f; return true; }
+    return false;
+}
+static bool entryById(const QString& playlistId, const QString& itemId, PlaylistEntry& out)
+{
+    Playlist p;
+    if (!PlaylistStore::get(playlistId, p)) return false;
+    for (const PlaylistEntry& e : p.items)
+        if (e.itemId == itemId) { out = e; return true; }
+    return false;
+}
+
 static void writeManifest(const QString& dir, const QString& id)
 {
     QDir().mkpath(dir);
@@ -108,6 +164,63 @@ static void seedLegacyInstall(const QString& dir)
                QStringLiteral("true"));
     s.setValue(QStringLiteral("favorites/one"),
                QStringLiteral("{\"addonId\":\"%1\"}").arg(legacyId(QStringLiteral("aiocatalog"))));
+    s.sync();
+}
+
+// ---- fixtures for sections 12/13 --------------------------------------------------------------------------
+//
+// Written straight into the ini rather than through FavoritesStore::add() / PlaylistStore::addItem(), because
+// what has to be described is a blob that ALREADY carries the WRONG add-on id — a state the stores' own
+// writers cannot produce (they stamp whatever the loaded add-on reports). The blobs are byte-shaped exactly
+// as those writers shape them, and everything is READ back through the real store readers.
+static void seedFavorites(const QString& ini, const QString& profile,
+                          const QVector<QPair<QString, QString>>& itemIdToAddonId)
+{
+    QJsonArray arr;
+    for (const auto& pair : itemIdToAddonId)
+    {
+        QJsonObject o;
+        o.insert(QStringLiteral("addonId"), pair.second);
+        o.insert(QStringLiteral("itemId"), pair.first);
+        o.insert(QStringLiteral("title"), QStringLiteral("Fixture ") + pair.first);
+        o.insert(QStringLiteral("type"), QStringLiteral("movie"));
+        o.insert(QStringLiteral("expandable"), false);
+        o.insert(QStringLiteral("ts"), 1000.0);
+        arr.append(o);
+    }
+    QSettings s(ini, QSettings::IniFormat);
+    s.setValue(QStringLiteral("favorites/") + profile + QStringLiteral("/items"),
+               QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+    s.sync();
+}
+
+// One playlist per profile, in v2 shape with the schema already stamped, so PlaylistStore's v1->v2 migration
+// is a proven no-op here and cannot be what rewrote the blob.
+static void seedPlaylist(const QString& ini, const QString& profile, const QString& playlistId,
+                         qint64 updatedAt, const QVector<QPair<QString, QString>>& itemIdToAddonId)
+{
+    QJsonArray items;
+    for (const auto& pair : itemIdToAddonId)
+    {
+        QJsonObject e;
+        e.insert(QStringLiteral("addonId"), pair.second);
+        e.insert(QStringLiteral("itemId"), pair.first);
+        e.insert(QStringLiteral("title"), QStringLiteral("Fixture ") + pair.first);
+        e.insert(QStringLiteral("type"), QStringLiteral("movie"));
+        e.insert(QStringLiteral("expandable"), false);
+        items.append(e);
+    }
+    QJsonObject pl;
+    pl.insert(QStringLiteral("id"), playlistId);
+    pl.insert(QStringLiteral("categoryKey"), QStringLiteral("video"));
+    pl.insert(QStringLiteral("name"), QStringLiteral("Fixture playlist"));
+    pl.insert(QStringLiteral("updatedAt"), static_cast<double>(updatedAt));
+    pl.insert(QStringLiteral("items"), items);
+    QJsonArray arr; arr.append(pl);
+    QSettings s(ini, QSettings::IniFormat);
+    s.setValue(QStringLiteral("playlists/") + profile + QStringLiteral("/items"),
+               QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+    s.setValue(QStringLiteral("playlists/") + profile + QStringLiteral("/schema"), 2);
     s.sync();
 }
 
@@ -142,10 +255,17 @@ int main(int argc, char** argv)
     CHECK(readKey(newIni, QStringLiteral("addons/") + currentId(QStringLiteral("igdb"))
                           + QStringLiteral("/enabled")) == QStringLiteral("true"),
           "an addon-namespaced KEY was rewritten to the current prefix");
-    CHECK(!readKey(newIni, QStringLiteral("favorites/one")).contains(QLatin1String(AppBrand::Legacy::kAddonPrefix))
-              && readKey(newIni, QStringLiteral("favorites/one"))
-                     .contains(QLatin1String(AppBrand::kAddonPrefix)),
-          "an addon id inside a VALUE was rewritten to the current prefix");
+    // ...and an addon id inside a VALUE is NOT. This assertion used to say the opposite (#58 inverted it).
+    // The prefix only ever appears inside an ini value as part of an add-on's SELF-REPORTED manifest id — a
+    // foreign key this migration cannot observe — so rewriting it is the same guess isAddonIdKeyed refuses to
+    // make for keys, and it is worse: it destroys the original, while the config case leaves it recoverable
+    // under the other spelling. The stored id is reconciled against the ids that actually loaded instead
+    // (BrandMigration::reconcileAddonRefs, sections 12/13).
+    CHECK(readKey(newIni, QStringLiteral("favorites/one"))
+                  .contains(QLatin1String(AppBrand::Legacy::kAddonPrefix))
+              && !readKey(newIni, QStringLiteral("favorites/one"))
+                      .contains(QLatin1String(AppBrand::kAddonPrefix)),
+          "an addon id inside a VALUE is left alone (it is a foreign key, not a brand string)");
     CHECK(readKey(legacyIni, QStringLiteral("roms/folder")) == QStringLiteral("D:/roms"),
           "the retained legacy ini is intact, not emptied");
 
@@ -516,6 +636,259 @@ int main(int argc, char** argv)
               "a second run leaves the recovered value alone");
     }
 
+    // ---- 12. FAVOURITES: the add-on id stored INSIDE the blob, re-pointed at the id that loaded (#58) ------
+    //
+    // Sections 7-11 are about a key. This is the same root cause on the other surface it has: a favourite
+    // persists the id of the add-on it was starred from INSIDE its JSON, and the ini rewrite used to rewrite
+    // string values as well as key names. For the add-on pinned to the previous spelling that is a rename of
+    // a foreign key nothing else follows, so HomeView::openFavorite resolves no source at all and the user is
+    // told the source addon isn't available.
+    //
+    // Asserted through favoriteSourceAddon (see its comment) rather than by inspecting the blob. That is not
+    // fussiness: the bug is a RENAME, the favourite is still there afterwards, and "the favourite is still
+    // stored" is TRUE ON THE BROKEN BUILD. Only "the id it carries names an add-on that actually loaded"
+    // separates them.
+    //
+    // EVERY PROFILE. These stores are namespaced per profile and only one is ever current, so the fixture
+    // spreads the cases across four of them and the reconcile is called ONCE.
+    {
+        const QString ddir = AppPaths::dataDir();
+        const QString ini  = newIniIn(ddir);
+
+        const QString workerId    = legacyId(QStringLiteral("aiocatalog-worker"));  // PINNED to the previous id
+        const QString workerWrong = currentId(QStringLiteral("aiocatalog-worker")); // where the rewrite put it
+        const QString igdbNow     = currentId(QStringLiteral("igdb"));              // an id that genuinely MOVED
+        const QString igdbWas     = legacyId(QStringLiteral("igdb"));
+        const QString bothNow     = currentId(QStringLiteral("dualspell"));         // BOTH spellings loaded
+        const QString bothWas     = legacyId(QStringLiteral("dualspell"));
+        const QString thirdParty  = QStringLiteral("org.someone.catalog");
+        // Loaded under NEITHER spelling: uninstalled, or remote with no cached manifest yet (which, on a
+        // first launch offline, is every remote add-on there is). NOT "switched off", which this line used
+        // to claim: AddonManager::loadFolder/loadRemoteSources apply no isEnabled test — enabled-gating is
+        // serve-time — so a disabled INSTALLED add-on's id is in installedIds and its favourites resolve.
+        const QString absentId    = currentId(QStringLiteral("notloaded"));
+
+        // thirdParty is deliberately NOT in this list. Were it loaded, the "the stored id already resolves"
+        // guard would return first and the third-party favourite below would prove nothing about the guard
+        // that actually protects it — the one that refuses to act on an id belonging to NEITHER namespace.
+        // A third-party add-on that is merely not loaded on this launch is the case where that guard is the
+        // only thing standing between the user's favourite and an id invented for it.
+        const QStringList installed{ workerId, igdbNow, bothNow, bothWas };
+
+        seedFavorites(ini, QStringLiteral("alpha"),
+                      { { QStringLiteral("fa-broken"), workerWrong },
+                        { QStringLiteral("fa-third"),  thirdParty } });
+        seedFavorites(ini, QStringLiteral("bravo"),
+                      { { QStringLiteral("fb-moved"),  igdbWas },
+                        { QStringLiteral("fb-absent"), absentId } });
+        seedFavorites(ini, QStringLiteral("charlie"),
+                      { { QStringLiteral("fc-was"), bothWas },
+                        { QStringLiteral("fc-now"), bothNow } });
+        seedFavorites(ini, QStringLiteral("delta"),
+                      { { QStringLiteral("fd-ok"), workerId } });   // already correct
+
+        // Captured to prove the never-clobber rule at the BYTE level: a profile with nothing wrong must not be
+        // reserialized at all. Rewriting it would be invisible in any per-field check, and would churn a blob
+        // the multi-device merge watches.
+        const QString deltaBefore = readKey(ini, QStringLiteral("favorites/delta/items"));
+
+        const int repointed = BrandMigration::reconcileAddonRefs(ddir, installed);
+        CHECK(repointed == 2,
+              "exactly the two stranded favourite references are reported as re-pointed");
+
+        FavoriteItem f;
+
+        // (a) the add-on PINNED to the previous spelling — the already-broken user, and the whole issue.
+        ProfileStore::setCurrent(QStringLiteral("alpha"));
+        // The premise, stated so the assertion below cannot pass vacuously if the blob ever stopped parsing.
+        CHECK(favById(QStringLiteral("fa-broken"), f), "the repaired favourite is readable through the store");
+        CHECK(favoriteSourceAddon(f, installed) == workerId,
+              "a favourite of an add-on pinned to the previous id resolves its source addon again");
+        CHECK(favById(QStringLiteral("fa-third"), f) && f.addonId == thirdParty,
+              "a favourite whose source is under NEITHER namespace keeps its id verbatim");
+
+        // (b) THE OTHER DIRECTION, and in a DIFFERENT PROFILE — one call had to reach both. An id that
+        //     genuinely moved leaves its favourites naming the previous spelling (permanently now that the
+        //     value rewrite is gone), so without this half the fix for (a) would strand every local add-on's
+        //     favourites instead of the pinned one's.
+        ProfileStore::setCurrent(QStringLiteral("bravo"));
+        CHECK(favById(QStringLiteral("fb-moved"), f) && favoriteSourceAddon(f, installed) == igdbNow,
+              "a favourite naming an id that DID move is carried forward, in a second profile");
+        // (c) neither spelling loaded -> LEAVE IT. Moving it to a name that also does not resolve would trade
+        //     a state that is still repairable on a later launch for one that never is.
+        CHECK(favById(QStringLiteral("fb-absent"), f) && f.addonId == absentId,
+              "an id loaded under NEITHER spelling is left exactly as stored, not guessed at");
+        // (There is deliberately NO companion "...and it resolves to nothing" line here. It would restate
+        //  the fixture — absentId is not in `installed`, so the resolution is empty by construction — and no
+        //  mutation of the implementation can make it fail. An assertion that cannot fail is worse than none:
+        //  it reads like coverage.)
+
+        // (d) BOTH SPELLINGS LIVE — nothing is stranded, so nothing may move. Driving from the STORED id is
+        //     what makes this fall out for free: whichever spelling the blob names is itself loaded.
+        ProfileStore::setCurrent(QStringLiteral("charlie"));
+        CHECK(favById(QStringLiteral("fc-was"), f) && favoriteSourceAddon(f, installed) == bothWas,
+              "with both spellings loaded, a favourite of the previous one still resolves to THAT one");
+        CHECK(favById(QStringLiteral("fc-now"), f) && favoriteSourceAddon(f, installed) == bothNow,
+              "...and a favourite of the current one still resolves to THAT one");
+
+        // (e) never clobber what is already right.
+        CHECK(readKey(ini, QStringLiteral("favorites/delta/items")) == deltaBefore,
+              "a profile whose favourites are already correct is not so much as reserialized");
+
+        // (f) idempotent, across every profile at once, and no value ping-pongs between spellings.
+        CHECK(BrandMigration::reconcileAddonRefs(ddir, installed) == 0,
+              "a second pass re-points nothing");
+        ProfileStore::setCurrent(QStringLiteral("alpha"));
+        CHECK(favById(QStringLiteral("fa-broken"), f) && favoriteSourceAddon(f, installed) == workerId,
+              "a second pass leaves the repaired favourite resolving");
+        // ...and the two live spellings do not ping-pong. Checked after an ODD number of passes, on purpose:
+        // with the already-resolves guard gone the pair swaps on EVERY run, so after an even number of them
+        // it is back where it started and a check made at that moment passes on the broken build. This is the
+        // same trap in miniature as "the favourite is still stored" — a state that happens to look right.
+        BrandMigration::reconcileAddonRefs(ddir, installed);   // a third
+        ProfileStore::setCurrent(QStringLiteral("charlie"));
+        CHECK(favById(QStringLiteral("fc-was"), f) && favoriteSourceAddon(f, installed) == bothWas,
+              "an odd number of passes still does not swap the two live spellings' favourites");
+    }
+
+    // ---- 13. PLAYLISTS: the same id, one level deeper (per ENTRY, since a playlist is mixed-source) --------
+    {
+        const QString ddir = AppPaths::dataDir();
+        const QString ini  = newIniIn(ddir);
+
+        const QString workerId    = legacyId(QStringLiteral("aiocatalog-worker"));
+        const QString workerWrong = currentId(QStringLiteral("aiocatalog-worker"));
+        const QString igdbNow     = currentId(QStringLiteral("igdb"));
+        const QString igdbWas     = legacyId(QStringLiteral("igdb"));
+        const QString absentId    = currentId(QStringLiteral("notloaded"));
+        const QStringList installed{ workerId, igdbNow };
+
+        const qint64 seededAt = 111;   // an updatedAt from long ago; the repair must not re-date it
+        seedPlaylist(ini, QStringLiteral("echo"), QStringLiteral("pl-echo"), seededAt,
+                     { { QStringLiteral("pe-broken"), workerWrong },
+                       { QStringLiteral("pe-absent"), absentId } });
+        seedPlaylist(ini, QStringLiteral("foxtrot"), QStringLiteral("pl-fox"), seededAt,
+                     { { QStringLiteral("pf-moved"), igdbWas } });
+        seedPlaylist(ini, QStringLiteral("golf"), QStringLiteral("pl-golf"), seededAt,
+                     { { QStringLiteral("pg-ok"), workerId } });   // already correct
+
+        const QString golfBefore = readKey(ini, QStringLiteral("playlists/golf/items"));
+
+        const int repointed = BrandMigration::reconcileAddonRefs(ddir, installed);
+        CHECK(repointed == 2, "exactly the two stranded playlist entries are reported as re-pointed");
+
+        PlaylistEntry e;
+        ProfileStore::setCurrent(QStringLiteral("echo"));
+        CHECK(entryById(QStringLiteral("pl-echo"), QStringLiteral("pe-broken"), e),
+              "the repaired playlist entry is readable through the store");
+        CHECK(entrySourceAddon(e, installed) == workerId,
+              "a playlist entry from an add-on pinned to the previous id resolves its source again");
+        CHECK(entryById(QStringLiteral("pl-echo"), QStringLiteral("pe-absent"), e) && e.addonId == absentId,
+              "a playlist entry whose add-on loaded under neither spelling is left exactly as stored");
+        // updatedAt is the merge clock (mdsync T2, whole-object newest-wins). Re-dating a playlist because a
+        // local repair touched it would let that repair beat a genuinely newer edit made on another device.
+        //
+        // A NOTE ON WHAT THIS ONE IS. a7040de's message claimed "every remaining assertion in both sections
+        // is now killed by at least one mutation of the implementation". That is not true of this line and
+        // cannot be: no statement in repointPlaylists or reconcileAddonRefs writes updatedAt, so there is
+        // nothing here to mutate — it asserts the ABSENCE of a behaviour. It is kept deliberately, and it is
+        // not the inert kind: it goes red the moment an edit ADDS a re-date (verified by inserting exactly
+        // that line, which turns this and four of probe_cloudmerge's section-19 checks red together). The
+        // distinction worth holding on to is between an assertion no CHANGE can kill — a restatement of the
+        // fixture, which is what got deleted in a7040de — and one that only an INSERTION can kill, which is
+        // what a tripwire is for.
+        {
+            Playlist p;
+            CHECK(PlaylistStore::get(QStringLiteral("pl-echo"), p) && p.updatedAt == seededAt,
+                  "the repair does NOT bump updatedAt (it would beat a newer edit from another device)");
+        }
+
+        ProfileStore::setCurrent(QStringLiteral("foxtrot"));
+        CHECK(entryById(QStringLiteral("pl-fox"), QStringLiteral("pf-moved"), e)
+                  && entrySourceAddon(e, installed) == igdbNow,
+              "a playlist entry naming an id that DID move is carried forward, in a second profile");
+
+        CHECK(readKey(ini, QStringLiteral("playlists/golf/items")) == golfBefore,
+              "a profile whose playlists are already correct is not so much as reserialized");
+
+        CHECK(BrandMigration::reconcileAddonRefs(ddir, installed) == 0,
+              "a second pass over the playlists re-points nothing");
+        ProfileStore::setCurrent(QStringLiteral("echo"));
+        CHECK(entryById(QStringLiteral("pl-echo"), QStringLiteral("pe-broken"), e)
+                  && entrySourceAddon(e, installed) == workerId,
+              "a second pass leaves the repaired playlist entry resolving");
+    }
+
+    // ---- 14. A repair that could not be WRITTEN is never REPORTED (#58 review) ----------------------------
+    // Both reconcile passes return a count their caller turns into something the user reads — "restored N
+    // stranded setting(s)", "re-pointed N stored reference(s)". sync() was called and its status thrown away,
+    // so an ini that cannot be written (read-only, full disk, locked by another process) produced that line
+    // for a repair that landed nowhere — and produced it again on the next launch, and the one after.
+    //
+    // ONE DIRECTORY PER READ-ONLY CALL, and this is load-bearing rather than tidiness. QSettings shares a
+    // QConfFile per PATH, and a sync that fails leaves the pending writes sitting in it. The next QSettings
+    // opened on that same path re-attempts them during its own construction, fails again, and comes up with
+    // status() != NoError — so the SECOND reconcile on a shared path returns 0 from its opening guard, having
+    // never looked at anything. Written that way, "the second one also reports nothing" passed on a build
+    // with the sync check removed: it was measuring the shared cache, not the fix. Each read-only call now
+    // gets a path nothing else has touched.
+    {
+        const QString okDir  = AppPaths::dataDir() + QStringLiteral("/probe_sync_ok");
+        const QString roRefs = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro_refs");
+        const QString roCfg  = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro_cfg");
+        for (const QString& d : { okDir, roRefs, roCfg }) { QDir(d).removeRecursively(); QDir().mkpath(d); }
+        const QString okIni    = newIniIn(okDir);
+        const QString roRefIni = newIniIn(roRefs);
+        const QString roCfgIni = newIniIn(roCfg);
+
+        const QString workerId    = legacyId(QStringLiteral("aiocatalog-worker"));  // PINNED to the previous id
+        const QString workerWrong = currentId(QStringLiteral("aiocatalog-worker")); // where the rewrite put it
+        const QStringList installed{ workerId };
+        const QString strandedCfg = QStringLiteral("addoncfg/") + workerWrong + QStringLiteral("/apiKey");
+
+        // The writable control. Without it the read-only asserts below would pass just as happily on a build
+        // where the repair never fired at all — 0 for the wrong reason reads exactly like 0 for the right one.
+        seedFavorites(okIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
+        writeKey(okIni, strandedCfg, QStringLiteral("KEY"));
+        CHECK(BrandMigration::reconcileAddonRefs(okDir, installed) == 1,
+              "the writable control: a stranded reference is repaired AND reported");
+        CHECK(BrandMigration::reconcileAddonConfig(okDir, installed) == 1,
+              "...and so is a stranded config value");
+
+        // The same fixture in each read-only directory, then the write permission taken away.
+        seedFavorites(roRefIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
+        writeKey(roCfgIni, strandedCfg, QStringLiteral("KEY"));
+        QByteArray refsBefore, cfgBefore;
+        { QFile f(roRefIni); if (f.open(QIODevice::ReadOnly)) refsBefore = f.readAll(); }
+        { QFile f(roCfgIni); if (f.open(QIODevice::ReadOnly)) cfgBefore = f.readAll(); }
+        CHECK(!refsBefore.isEmpty() && !cfgBefore.isEmpty(),
+              "both read-only fixtures were written before their permissions changed");
+        CHECK(QFile::setPermissions(roRefIni, QFile::ReadOwner | QFile::ReadUser)
+                  && QFile::setPermissions(roCfgIni, QFile::ReadOwner | QFile::ReadUser),
+              "both fixtures could be made read-only");
+
+        CHECK(BrandMigration::reconcileAddonRefs(roRefs, installed) == 0,
+              "a re-point that could not be flushed reports NOTHING repaired");
+        CHECK(BrandMigration::reconcileAddonConfig(roCfg, installed) == 0,
+              "...and neither does a config adoption that could not be flushed");
+        // Read the FILE, not the settings: QSettings still holds the unflushed change in memory, so a
+        // readback through it would show the repair that never reached the disk.
+        QByteArray refsAfter, cfgAfter;
+        { QFile f(roRefIni); if (f.open(QIODevice::ReadOnly)) refsAfter = f.readAll(); }
+        { QFile f(roCfgIni); if (f.open(QIODevice::ReadOnly)) cfgAfter = f.readAll(); }
+        CHECK(refsAfter == refsBefore && cfgAfter == cfgBefore,
+              "...and the reported nothing is the truth: both files are byte-for-byte unchanged");
+
+        for (const QString& f : { roRefIni, roCfgIni })
+            QFile::setPermissions(f, QFile::ReadOwner | QFile::ReadUser
+                                         | QFile::WriteOwner | QFile::WriteUser);
+        bool residue = false;
+        for (const QString& d : { okDir, roRefs, roCfg })
+        { QDir(d).removeRecursively(); if (QFileInfo::exists(d)) residue = true; }
+        CHECK(!residue, "every fixture directory is removed (this probe leaves no residue)");
+    }
+
+    clearAllFlags();
     if (failures) { std::fprintf(stderr, "BRAND: %d failure(s)\n", failures); return 1; }
     std::printf("BRAND-OK\n");
     return 0;
