@@ -1202,6 +1202,10 @@ int main(int argc, char** argv)
         // DownloadManager constructed here would load() them and spend its single slot on them.
         QFile::remove(downloads + QStringLiteral("/queue.json"));
 
+        // The two `is listening` lines below are HARNESS PRECONDITIONS, not assertions about the code under
+        // test — no mutation of the app can kill them, and they are here so that a box which cannot bind
+        // loopback reports that instead of letting every assertion in this section pass vacuously.
+        //
         // Origin B: the host a cross-origin hop would land on. It answers, so that "B was not contacted" is
         // a fact about the gate and not about B being unreachable.
         Loopback b;
@@ -1253,7 +1257,10 @@ int main(int argc, char** argv)
         CHECK(cj && cj->error.contains(QStringLiteral("different site"))
                  && cj->error.contains(QStringLiteral("headers")),
               "…it names the hop and the headers, so this is diagnosable from a bug report");
-        CHECK(cj && !cj->error.isEmpty(), "…and there IS a reason, rather than a blank line in the UI");
+        // (A `!cj->error.isEmpty()` line was here and was deleted before it ever shipped: any string that
+        // satisfies the check above is non-empty, so it could not fail while that one passed. No mutation
+        // could kill one without the other — an assertion that only ever agrees with its neighbour is a
+        // count in the kill matrix and nothing else.)
 
         // --- the control that makes all of the above mean something. Same manager, same headers, same
         // server: a SAME-origin redirect must be followed and the file must land. Without this, a
