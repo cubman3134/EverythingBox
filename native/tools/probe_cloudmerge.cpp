@@ -28,6 +28,7 @@
 #include "Tombstones.h"
 #include "CloudMerge.h"
 #include "CloudSync.h"      // mdsync T4: the device-local carve-out + bundle-settings hands-off
+#include "BrandMigration.h" // #58 review: the stored-add-on-id repair, played against the merge (section 19)
 #include "SettingsTxn.h"    // #26: applySettingsJson must close an open settings transaction
 #include "ProfileStore.h"
 #include "AppPaths.h"
@@ -893,6 +894,250 @@ int main(int argc, char** argv)
         QDir(app + QStringLiteral("/states")).removeRecursively();
         QDir(app + QStringLiteral("/themes/probeT3")).removeRecursively();
         CHECK(CloudSync::stateFingerprint() == fp0);   // cleanup restored the baseline (no stray left behind)
+    }
+
+    // ---- 19. #58 review: a REPAIRED add-on id must survive the merge that follows it — two devices, two rounds
+    //
+    // BrandMigration::reconcileAddonRefs re-points a stored favourite/playlist reference at the add-on id that
+    // actually loaded. It deliberately does NOT re-date the blob (a repair is not an edit; stamping it now
+    // would let it beat a genuinely newer change made elsewhere) and it fires no store change-hook, so it arms
+    // no push. Both are right — and together they landed the repaired blob in the merge at an EQUAL timestamp
+    // against the cloud's unrepaired copy, differing in nothing but the id's SPELLING. Deciding that on raw
+    // canonical bytes decided it on the spelling, and the previous namespace sorts greater, so it won every
+    // tie: repair at launch, pull 1.5s later, reverted; "that favourite's source addon isn't available" for
+    // the rest of the session; and any later push uploaded the REVERTED blob, so the cloud never converged
+    // either. Whole-object newest-wins made it worse for playlists — the entire repaired playlist went back.
+    //
+    // Two changes answer it, and this section demonstrates BOTH as convergence rather than as a local symptom:
+    //   * CloudMerge's tieKey — an add-on id's spelling is not a content difference, so blobs that differ only
+    //     in it now TIE and neither replaces the other;
+    //   * MainWindow::mergeProgress re-runs the repair after every merge — because a peer's blob that really
+    //     IS newer still wins outright, spelling and all, and reload() has already been and gone.
+    {
+        const QString aioNow = QLatin1String(AppBrand::kAddonPrefix) + QStringLiteral("aio");
+        const QString aioWas = QLatin1String(AppBrand::Legacy::kAddonPrefix) + QStringLiteral("aio");
+        const QString p19    = QStringLiteral("dev19");
+        const QString favK   = QStringLiteral("favorites/") + p19 + QStringLiteral("/items");
+        const QString plK    = QStringLiteral("playlists/") + p19 + QStringLiteral("/items");
+
+        // One favourite and one playlist ENTRY, both naming `addon`, both stamped `ts`. The playlist carries
+        // the id one level deeper, which is where whole-object newest-wins does the most damage.
+        auto injRefs = [&](const QString& addon, qint64 ts, const QString& title) {
+            QJsonObject f;
+            f[QStringLiteral("itemId")] = QStringLiteral("I");
+            f[QStringLiteral("title")]  = title;
+            f[QStringLiteral("addonId")] = addon;
+            f[QStringLiteral("ts")] = double(ts);
+            QJsonArray fa; fa.append(f);
+            setRaw(favK, compact(fa));
+
+            QJsonObject e;
+            e[QStringLiteral("itemId")]  = QStringLiteral("I");
+            e[QStringLiteral("addonId")] = addon;
+            QJsonArray items; items.append(e);
+            QJsonObject pl;
+            pl[QStringLiteral("id")] = QStringLiteral("P");
+            pl[QStringLiteral("name")] = title;
+            pl[QStringLiteral("categoryKey")] = QStringLiteral("video");
+            pl[QStringLiteral("updatedAt")] = double(ts);
+            pl[QStringLiteral("items")] = items;
+            QJsonArray pa; pa.append(pl);
+            setRaw(plK, compact(pa));
+        };
+        auto favAddon = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(favK).toString().toUtf8()).array())
+                if (v.toObject().value(QStringLiteral("itemId")).toString() == QStringLiteral("I"))
+                    return v.toObject().value(QStringLiteral("addonId")).toString();
+            return QString();
+        };
+        auto favTitle19 = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(favK).toString().toUtf8()).array())
+                if (v.toObject().value(QStringLiteral("itemId")).toString() == QStringLiteral("I"))
+                    return v.toObject().value(QStringLiteral("title")).toString();
+            return QString();
+        };
+        auto plAddon = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(plK).toString().toUtf8()).array())
+                for (const QJsonValue& e : v.toObject().value(QStringLiteral("items")).toArray())
+                    return e.toObject().value(QStringLiteral("addonId")).toString();
+            return QString();
+        };
+        auto plUpdated = [&]() -> qint64 {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(plK).toString().toUtf8()).array())
+                return qint64(v.toObject().value(QStringLiteral("updatedAt")).toDouble());
+            return -1;
+        };
+        // The whole per-device state, as BYTES — so "nothing moved" is checked at the level the merge writes
+        // at, not through a field-by-field reading that a reserialization could slip past.
+        auto snapshot = [&]() {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            return QPair<QString, QString>{ raw.value(favK).toString(), raw.value(plK).toString() };
+        };
+        auto restore = [&](const QPair<QString, QString>& s) { setRaw(favK, s.first); setRaw(plK, s.second); };
+        auto reconcile = [&](const QStringList& installed) {
+            return BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), installed);
+        };
+        const QString title = QStringLiteral("Thing");
+
+        // Devices A and B: the same pre-rebrand install on two machines, each of which renamed its local copy
+        // of the add-on (migrateAddonIds), so the id that resolves on BOTH is the current spelling.
+        const QStringList instA{ aioNow };
+        const QStringList instB{ aioNow };
+
+        // -- Round 1, device A: repair at launch, then the 1.5s startup pull lands the cloud's stale copy ----
+        wipeStores(); injRefs(aioWas, T, title);
+        const QJsonObject cloud0 = serializeNow();          // the cloud document, still unrepaired
+        wipeStores(); injRefs(aioWas, T, title);            // device A, as it starts
+        CHECK(reconcile(instA) == 2);                       // the favourite AND the playlist entry move
+        CHECK(favAddon() == aioNow);
+        CHECK(plAddon() == aioNow);
+        CHECK(favTs(p19, QStringLiteral("I")) == T);        // ...at an UNCHANGED stamp. This is the premise the
+        CHECK(plUpdated() == T);                            //    whole finding rests on; stated, not assumed.
+        mergeDoc(cloud0);                                   // pullAndMergeProgress, ~1.5s after launch
+        CHECK(favAddon() == aioNow);   // was: reverted to the previous spelling by the raw-byte tie-break
+        CHECK(plAddon() == aioNow);    // was: the ENTIRE repaired playlist replaced, whole-object newest-wins
+        const QPair<QString, QString> stateA1 = snapshot();
+        const QJsonObject docA1 = serializeNow();
+
+        // -- Round 1, device B: pulls A's repaired doc, then repairs its own copy after the merge -----------
+        wipeStores(); injRefs(aioWas, T, title);
+        mergeDoc(docA1);
+        // The tie is a no-op in BOTH directions, so B is not dragged onto A's bytes either...
+        CHECK(favAddon() == aioWas);
+        CHECK(plAddon() == aioWas);
+        // ...and the post-merge repair is what makes B correct on THIS launch rather than the next one.
+        CHECK(reconcile(instB) == 2);
+        CHECK(favAddon() == aioNow);
+        CHECK(plAddon() == aioNow);
+        const QPair<QString, QString> stateB1 = snapshot();
+        const QJsonObject docB1 = serializeNow();
+
+        CHECK(stateA1 == stateB1);   // both ends agree — byte for byte, not merely semantically
+
+        // -- Round 2: a SECOND exchange moves nothing on either end (no oscillation, nothing left stranded) --
+        wipeStores(); restore(stateA1); mergeDoc(docB1);
+        CHECK(reconcile(instA) == 0);
+        CHECK(snapshot() == stateA1);
+        wipeStores(); restore(stateB1); mergeDoc(docA1);
+        CHECK(reconcile(instB) == 0);
+        CHECK(snapshot() == stateB1);
+
+        // -- The ASYMMETRIC pair, which is why arming a push would not have been enough --------------------
+        // Device C's copy of the add-on kept the previous namespace and always will (for a remote add-on the
+        // id is identity, not branding — renaming it orphans every saved URL), while A's local copy was
+        // renamed. The two ends are BOTH correct and they disagree, permanently. Arming a push after the
+        // repair only re-runs the same equal-ts comparison at the other end; the answer has to be that the
+        // comparison stops caring. Two full rounds each way, and neither is dragged onto the other's spelling.
+        const QStringList instC{ aioWas };
+        wipeStores(); injRefs(aioWas, T, title);
+        CHECK(reconcile(instC) == 0);                       // C is already correct: not so much as reserialized
+        const QPair<QString, QString> stateC = snapshot();
+        const QJsonObject docC = serializeNow();
+        wipeStores(); injRefs(aioWas, T, title);
+        CHECK(reconcile(instA) == 2);
+        const QPair<QString, QString> stateA = snapshot();
+        const QJsonObject docA = serializeNow();
+        for (int round = 0; round < 2; ++round)
+        {
+            wipeStores(); restore(stateA); mergeDoc(docC);
+            CHECK(reconcile(instA) == 0);
+            CHECK(snapshot() == stateA);                    // A keeps the id that resolves on A
+            wipeStores(); restore(stateC); mergeDoc(docA);
+            CHECK(reconcile(instC) == 0);
+            CHECK(snapshot() == stateC);                    // ...and C keeps the id that resolves on C
+        }
+
+        // -- The normalization must not BLUNT the tie-break on real content -------------------------------
+        // Spelling and content deliberately point opposite ways: the previous-namespace copy carries the
+        // LESSER title. Content has to decide, in both orders. (On the raw-byte comparator the spelling
+        // decided instead, and "alpha" won.)
+        wipeStores(); injRefs(aioWas, T, QStringLiteral("alpha"));
+        const QJsonObject cA = serializeNow();
+        wipeStores(); injRefs(aioNow, T, QStringLiteral("beta"));
+        const QJsonObject cB = serializeNow();
+        wipeStores(); injRefs(aioNow, T, QStringLiteral("beta"));  mergeDoc(cA);
+        const QString w1 = favTitle19();
+        wipeStores(); injRefs(aioWas, T, QStringLiteral("alpha")); mergeDoc(cB);
+        const QString w2 = favTitle19();
+        CHECK(w1 == w2);                          // still convergent
+        CHECK(w1 == QStringLiteral("beta"));      // ...and decided by the title, not by the spelling
+
+        // -- ...and it must not be TOO BROAD either -------------------------------------------------------
+        // A playlist's legacyKey opens with an add-on id as well, and reconcileAddonRefs deliberately never
+        // repairs it (nothing resolves segment 0). Folding it into the tie key would make two blobs tie that
+        // no repair can ever bring together — and a tie means "keep local", so the two merge orders would
+        // then land on DIFFERENT states. Order-independence is what catches an over-broad normalization.
+        auto injPlLegacy = [&](const QString& lk) {
+            QJsonObject pl;
+            pl[QStringLiteral("id")] = QStringLiteral("P");
+            pl[QStringLiteral("name")] = title;
+            pl[QStringLiteral("categoryKey")] = QStringLiteral("video");
+            pl[QStringLiteral("legacyKey")] = lk;
+            pl[QStringLiteral("updatedAt")] = double(T);
+            pl[QStringLiteral("items")] = QJsonArray();
+            QJsonArray pa; pa.append(pl);
+            setRaw(plK, compact(pa));
+        };
+        auto plLegacyKey = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(plK).toString().toUtf8()).array())
+                return v.toObject().value(QStringLiteral("legacyKey")).toString();
+            return QString();
+        };
+        const QString lkWas = aioWas + QStringLiteral("|movie|top");
+        const QString lkNow = aioNow + QStringLiteral("|movie|top");
+        wipeStores(); injPlLegacy(lkWas); const QJsonObject lkDocWas = serializeNow();
+        wipeStores(); injPlLegacy(lkNow); const QJsonObject lkDocNow = serializeNow();
+        wipeStores(); injPlLegacy(lkNow); mergeDoc(lkDocWas); const QString lk1 = plLegacyKey();
+        wipeStores(); injPlLegacy(lkWas); mergeDoc(lkDocNow); const QString lk2 = plLegacyKey();
+        CHECK(lk1 == lk2);          // both orders still reach the SAME state
+        CHECK(lk1 == lkWas);        // ...decided on the bytes, because this is not a field the repair moves
+
+        // -- The walk reaches an addonId at any DEPTH ------------------------------------------------------
+        // Not hypothetical: the document on the other end was written by whatever build THAT device runs,
+        // which may be a newer one with a richer per-item shape. An addonId nested inside it still names the
+        // same add-on under two names, and the tie must not be decided on it either.
+        auto injNested = [&](const QString& addon) {
+            QJsonObject inner; inner[QStringLiteral("addonId")] = addon;
+            QJsonObject f;
+            f[QStringLiteral("itemId")] = QStringLiteral("I");
+            f[QStringLiteral("ts")] = double(T);
+            f[QStringLiteral("origin")] = inner;
+            QJsonArray fa; fa.append(f);
+            setRaw(favK, compact(fa));
+        };
+        auto favNestedAddon = [&]() -> QString {
+            QSettings raw(iniPath, QSettings::IniFormat);
+            for (const QJsonValue& v : QJsonDocument::fromJson(raw.value(favK).toString().toUtf8()).array())
+                return v.toObject().value(QStringLiteral("origin")).toObject()
+                        .value(QStringLiteral("addonId")).toString();
+            return QString();
+        };
+        wipeStores(); injNested(aioWas); const QJsonObject nestedDoc = serializeNow();
+        wipeStores(); injNested(aioNow); mergeDoc(nestedDoc);
+        CHECK(favNestedAddon() == aioNow);   // the tie is a no-op; this device keeps its own spelling
+
+        // -- A genuinely NEWER peer still wins outright, spelling and all ----------------------------------
+        // Nothing should stop it — that blob really is newer. But it can land this device back on the
+        // namespace it renamed away from, and reload() has already run for the session, which is exactly what
+        // the post-merge repair is for. Note the repair STILL does not re-date: the peer's stamp survives it.
+        wipeStores(); injRefs(aioWas, T + 100, title);
+        const QJsonObject newerDoc = serializeNow();
+        wipeStores(); injRefs(aioNow, T, title);
+        mergeDoc(newerDoc);
+        CHECK(favAddon() == aioWas);
+        CHECK(plAddon() == aioWas);
+        CHECK(reconcile(instA) == 2);
+        CHECK(favAddon() == aioNow);
+        CHECK(plAddon() == aioNow);
+        CHECK(favTs(p19, QStringLiteral("I")) == T + 100);
+        CHECK(plUpdated() == T + 100);
+
+        wipeStores();
     }
 
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }

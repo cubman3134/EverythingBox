@@ -34,15 +34,72 @@ namespace {
 // compares these bytes lexically.
 QByteArray canon(const QJsonObject& o) { return QJsonDocument(o).toJson(QJsonDocument::Compact); }
 
+// ---- the tie-break key: canon(), modulo an add-on id's SPELLING (#58 review) --------------------------------
+//
+// An add-on that the brand migration renamed is the SAME add-on under two names, and the stored references to
+// it (favourites' per-item addonId, playlists' per-entry addonId) can carry either. The device-local repair
+// that reunites them with the id actually loaded — BrandMigration::reconcileAddonRefs — deliberately does NOT
+// re-date the blob: a repair is not an edit, and stamping it now would let it beat a genuinely newer change
+// made on another device. It also fires no store change-hook, so it arms no push.
+//
+// Both of those are right, and together they land the repaired blob HERE, at an EQUAL timestamp against the
+// unrepaired copy still in the cloud document, differing in nothing but that spelling. Deciding such a tie on
+// raw bytes decides it on the spelling — and the previous namespace sorts GREATER than the current one, so it
+// won every tie: the first merge after every launch reverted the repair, the favourite went back to reporting
+// that its source add-on isn't available, and any later push uploaded the reverted blob, so the cloud copy
+// never converged either. Whole-object newest-wins made it worse for playlists — the entire repaired playlist
+// went back.
+//
+// Normalizing the spelling for the COMPARISON says what is actually true: this is not a content difference.
+// Two blobs that differ only in it now compare EQUAL, remoteReplaces answers "no", and each device keeps the
+// spelling that resolves ON IT. Order-independence is preserved in the sense that matters — A-merges-B and
+// B-merges-A leave the two ends semantically identical, and a second round changes nothing.
+//
+// Only the value of a member literally named "addonId" is normalized, reached recursively (a playlist's
+// entries are two levels down), and only ever for the comparison — nothing written back is touched, so a
+// malformed or third-party id is still stored byte-verbatim. That set is exactly what reconcileAddonRefs can
+// move. A playlist's "legacyKey" also opens with an add-on id and is deliberately NOT repaired, so folding it
+// in here would make blobs tie that no repair can ever reconcile.
+void normalizeAddonIds(QJsonObject& o);
+
+void normalizeAddonIds(QJsonArray& a)
+{
+    for (int i = 0; i < a.size(); ++i)
+    {
+        if (a.at(i).isObject())     { QJsonObject c = a.at(i).toObject(); normalizeAddonIds(c); a.replace(i, c); }
+        else if (a.at(i).isArray()) { QJsonArray  c = a.at(i).toArray();  normalizeAddonIds(c); a.replace(i, c); }
+    }
+}
+
+void normalizeAddonIds(QJsonObject& o)
+{
+    static const QString oldNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
+    static const QString newNs = QString::fromLatin1(AppBrand::kAddonPrefix);
+    const QStringList keys = o.keys();
+    for (const QString& k : keys)
+    {
+        const QJsonValue v = o.value(k);
+        if (k == QLatin1String("addonId") && v.isString())
+        {
+            const QString id = v.toString();
+            if (id.startsWith(oldNs)) o.insert(k, newNs + id.mid(oldNs.size()));
+        }
+        else if (v.isObject()) { QJsonObject c = v.toObject(); normalizeAddonIds(c); o.insert(k, c); }
+        else if (v.isArray())  { QJsonArray  c = v.toArray();  normalizeAddonIds(c); o.insert(k, c); }
+    }
+}
+
+QByteArray tieKey(const QJsonObject& o) { QJsonObject c = o; normalizeAddonIds(c); return canon(c); }
+
 // Should the remote value replace the local one? Newest timestamp wins; on EQUAL timestamps a deterministic
-// ORDER-INDEPENDENT decision — the lexically-greater canonical value bytes — so A-merges-B and B-merges-A pick
-// the SAME winner (identical values compare equal -> no replace -> a no-op anyway). This uniform rule
-// supersedes the divergent legacy ties (four stores kept-local, recents kept-remote via `>=`); that legacy
-// recents byte behaviour is DELIBERATELY superseded here.
-bool remoteReplaces(qint64 remoteTs, qint64 localTs, const QByteArray& remoteCanon, const QByteArray& localCanon)
+// ORDER-INDEPENDENT decision — the lexically-greater tie key — so A-merges-B and B-merges-A pick the SAME
+// winner (values identical up to an add-on id's spelling compare equal -> no replace -> a semantic no-op).
+// This uniform rule supersedes the divergent legacy ties (four stores kept-local, recents kept-remote via
+// `>=`); that legacy recents byte behaviour is DELIBERATELY superseded here.
+bool remoteReplaces(qint64 remoteTs, qint64 localTs, const QJsonObject& remote, const QJsonObject& local)
 {
     if (remoteTs != localTs) return remoteTs > localTs;
-    return remoteCanon > localCanon; // equal ts -> order-independent value tie-break
+    return tieKey(remote) > tieKey(local); // equal ts -> order-independent value tie-break
 }
 
 QJsonArray stringsToArray(const QStringList& list)
@@ -160,7 +217,7 @@ void mergeResume(const QJsonObject& resume)
             if (store().contains(prefix + QStringLiteral("dur")))   localObj.insert(QStringLiteral("dur"),   store().value(prefix + QStringLiteral("dur")).toDouble());
             if (store().contains(prefix + QStringLiteral("ts")))    localObj.insert(QStringLiteral("ts"),    store().value(prefix + QStringLiteral("ts")).toDouble());
             if (store().contains(prefix + QStringLiteral("title"))) localObj.insert(QStringLiteral("title"), store().value(prefix + QStringLiteral("title")).toString());
-            if (!remoteReplaces(remoteTs, localTs, canon(re), canon(localObj))) continue;
+            if (!remoteReplaces(remoteTs, localTs, re, localObj)) continue;
         }
         if (re.contains(QStringLiteral("pos")))   store().setValue(prefix + QStringLiteral("pos"),   re.value(QStringLiteral("pos")).toDouble());
         if (re.contains(QStringLiteral("dur")))   store().setValue(prefix + QStringLiteral("dur"),   re.value(QStringLiteral("dur")).toDouble());
@@ -192,7 +249,7 @@ void mergeRecent(const QJsonObject& recent)
                 if (cur == byId.constEnd()
                     || remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
                                       static_cast<qint64>(cur.value().value(QStringLiteral("ts")).toDouble()),
-                                      canon(o), canon(cur.value())))
+                                      o, cur.value()))
                     byId.insert(id, o);
             }
         };
@@ -200,6 +257,9 @@ void mergeRecent(const QJsonObject& recent)
         ingest(QJsonDocument::fromJson(it.value().toString().toUtf8()).array());              // then remote
         QList<QJsonObject> merged = byId.values();
         // Newest-first; ties broken by canonical bytes so the cap-40 cut is deterministic (order-independent).
+        // Deliberately canon() and not tieKey(): a recents entry has no addonId field at all (RecentStore
+        // writes path/title/kind/thumb/key/system/ts), so normalizing here would be motion with no reachable
+        // effect and no mutation could ever kill it.
         std::sort(merged.begin(), merged.end(), [](const QJsonObject& a, const QJsonObject& b) {
             const double at = a.value(QStringLiteral("ts")).toDouble(), bt = b.value(QStringLiteral("ts")).toDouble();
             if (at != bt) return at > bt;
@@ -268,7 +328,7 @@ void mergeMarks(const QJsonObject& marks)
             {
                 const QJsonObject lblob = QJsonDocument::fromJson(localRaw).object();
                 const qint64 lTs = static_cast<qint64>(lblob.value(QStringLiteral("updatedAt")).toDouble());
-                if (!remoteReplaces(rTs, lTs, canon(rblob), canon(lblob))) continue; // equal ts -> value tie-break
+                if (!remoteReplaces(rTs, lTs, rblob, lblob)) continue; // equal ts -> value tie-break
             }
             s.setValue(ikey, QString::fromUtf8(canon(rblob)));
         }
@@ -337,7 +397,7 @@ void mergeFavorites(const QJsonObject& favorites)
                 if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
                 else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("ts")).toDouble()),
                                         static_cast<qint64>(byId[id].value(QStringLiteral("ts")).toDouble()),
-                                        canon(o), canon(byId[id]))) // equal ts -> order-independent value tie-break
+                                        o, byId[id])) // equal ts -> order-independent value tie-break
                     byId.insert(id, o);
             }
         };
@@ -397,7 +457,7 @@ void mergePlaylists(const QJsonObject& playlists)
                 if (!byId.contains(id)) { byId.insert(id, o); order.push_back(id); }
                 else if (remoteReplaces(static_cast<qint64>(o.value(QStringLiteral("updatedAt")).toDouble()),
                                         static_cast<qint64>(byId[id].value(QStringLiteral("updatedAt")).toDouble()),
-                                        canon(o), canon(byId[id]))) // equal updatedAt -> order-independent tie-break
+                                        o, byId[id])) // equal updatedAt -> order-independent tie-break
                     byId.insert(id, o);
             }
         };

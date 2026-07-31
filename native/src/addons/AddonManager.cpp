@@ -673,9 +673,7 @@ void AddonManager::reload()
     // real ids finally exist — including the remote ones, which is the case that has no folder to inspect and
     // therefore no answer until its cached manifest has been read. Idempotent and near-free on the ordinary
     // run; it earns its keep once, on the first launch after an install whose keys an earlier build stranded.
-    QStringList ids;
-    ids.reserve(int(loaded_.size()));
-    for (const auto& a : loaded_) ids << a->manifest.id;
+    const QStringList ids = installedIds();
     const int restored = BrandMigration::reconcileAddonConfig(AppPaths::dataDir(), ids);
     if (restored)
         streamLog(QStringLiteral("addon config: restored %1 stranded setting(s) to the add-on ids in use")
