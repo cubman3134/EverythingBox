@@ -62,6 +62,26 @@ bool hasUserContent(const QString& ini)
     return false;
 }
 
+// Keys whose SUBJECT is an add-on's SELF-REPORTED id rather than a brand string, and which the rewrite below
+// must therefore leave alone.
+//
+// The distinction is not cosmetic. Everywhere else the previous namespace appears it is OUR string, written
+// by this product, and rewriting it is a fact. Here it is a foreign key into whatever `manifest.id` says —
+// and this migration cannot observe that. A remote add-on's manifest lives behind a URL (no fetch happens at
+// migration time, and on a first launch offline none ever would), and the one bundled here deliberately KEEPS
+// the previous namespace forever: for a remote add-on the id and the URL are identity, not branding, so
+// renaming it would orphan every add-on URL a user has already saved.
+//
+// So a rewrite of these keys is a GUESS at an identifier the migration cannot see, and when it guesses wrong
+// the user's stored API keys move to a name nothing reads — silently, with the Configure fields simply blank
+// afterwards. Left untouched here and reconciled against the ids that ACTUALLY loaded, which is the only
+// place the answer exists: see BrandMigration::reconcileAddonConfig.
+bool isAddonIdKeyed(const QString& key)
+{
+    return key.startsWith(QStringLiteral("addoncfg/"))        // per-addon config — where Configure puts API keys
+        || key.startsWith(QStringLiteral("addon.enabled."));  // per-addon on/off — same foreign key, same miss
+}
+
 // Rewrite the previous brand's addon namespace to the current one, in both KEYS (addons/<id>/... ) and inside
 // string VALUES (a favourite's stored addonId, a playlist entry's source). Returns false only if the file
 // could not be opened for writing.
@@ -74,6 +94,10 @@ bool rewriteAddonPrefix(const QString& ini)
     const QStringList keys = s.allKeys();
     for (const QString& k : keys)
     {
+        // Not ours to rename. The VALUE is skipped as well as the key: an addoncfg value is whatever the user
+        // typed into Configure (an API key, a base URL), and a blind substring substitution inside a
+        // credential is at best meaningless and at worst corrupts it.
+        if (isAddonIdKeyed(k)) continue;
         QVariant v = s.value(k);
         bool valueChanged = false;
         if (v.typeId() == QMetaType::QString)
@@ -111,7 +135,10 @@ bool copyVerified(const QString& legacy, const QString& fresh)
     for (const QString& k : keys)
     {
         QString nk = k;
-        if (nk.contains(oldNs)) nk.replace(oldNs, newNs);
+        // Mirror rewriteAddonPrefix exactly: an addon-id-keyed key was deliberately NOT renamed, so it must
+        // verify under its ORIGINAL name. Expecting the rewritten one here would fail every install that has
+        // ever configured an add-on — the copy would be deleted and the migration would retry forever.
+        if (!isAddonIdKeyed(k) && nk.contains(oldNs)) nk.replace(oldNs, newNs);
         if (!dst.contains(nk)) return false;
     }
     return true;
