@@ -5649,6 +5649,15 @@ void MainWindow::openAppearance()
             QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
                                                 previewItems, previewSystem, previewBox);
             p->setMinimumSize(480, 270);
+            // The preview must never take the D-pad cursor. ThemeEngine::buildView hands back a
+            // Qt::StrongFocus QQuickWidget (it has to be focusable when it IS the page), and this panel
+            // lives inside panelRing_ — so without this the ring collects a 480x300 view that has no
+            // action and paints no focus outline, and arrowing into it reads as the selector vanishing.
+            // The themed twin has always done this (ThemePickerHost::rebuildPreview); the classic panel
+            // is the copy that never got it. NOT WA_TransparentForMouseEvents, unlike there: this panel
+            // has no click-through target behind the preview, and leaving mouse handling alone keeps the
+            // change to the one thing that was wrong.
+            p->setFocusPolicy(Qt::NoFocus);
             if (QQuickItem* r = ThemeEngine::rootItem(p)) // feed categories too, so an XMB theme shows its cross
                 { r->setProperty("categories", previewItems); r->setProperty("catIndex", 0); }
             pv->addWidget(p);
