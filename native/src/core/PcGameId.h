@@ -28,6 +28,28 @@ namespace pcgame
     // year strip is nonetheless required.
     QString normalizeTitle(const QString& raw);
 
+    // normalizeTitle's body with the trailing-year strip made optional. Exposed only because separationTag
+    // below is defined as "everything normalizeTitle does EXCEPT the year", and re-implementing that here
+    // would be a second copy of the eight-step rule — the exact drift this unit's whole design fights.
+    // stripYear = true is normalizeTitle; callers who want that should call normalizeTitle.
+    QString normalizeCore(const QString& raw, bool stripYear);
+
+    // THE KEY A COPY KEEPS ONCE ITS GROUP IS SEPARATED — normalizeTitle with the year left in.
+    //
+    // Choosing it this way, rather than "the raw title", is the whole difference between a usable escape
+    // hatch and a worse mess. The trailing-year strip is the ONE step that fuses genuinely different games
+    // ("Prey (2006)" onto "Prey (2017)"), so restoring it is precisely the distinction the user is pointing
+    // at. Every other step removes edition noise — and keying a separated group on the raw title would then
+    // split "Prey" from "Prey: Game of the Year Edition" too, turning a two-way over-merge into a
+    // three-entry library, which is a fresh instance of the harm being cured.
+    //
+    // The honest consequence: two copies that differ ONLY in something normalizeTitle removes for good
+    // reason (punctuation, a trademark symbol) share a tag, so separating cannot tell them apart. They are
+    // still both launchable — the picker disambiguates same-launcher rows by their per-launcher title and,
+    // failing that, by launch id — and the surface that offers "separate" checks how many distinct tags a
+    // group actually has, so it never offers an action that would do nothing.
+    QString separationTag(const QString& title);
+
     // The grouping key used by the catalog builder: the igdb id when there is one, else the
     // normalised title. Two entries group together iff their mergeKey matches.
     //
@@ -88,6 +110,55 @@ namespace pcgame
     // wrong merge is otherwise uncurable.
     bool overrideSaysSame(const QString& normA, const QString& normB);
     void setOverride(const QString& normA, const QString& normB, bool same);
+    // Forget a verdict entirely — NOT the same as storing "not the same". Storing a negative is the user
+    // SEPARATING a wrongly merged key and has to keep beating the heuristic forever; clearing is the user
+    // undoing their own correction and handing the decision back to the heuristic. Two different states, so
+    // two different calls (a UI that only had setOverride could never restore the default).
+    void clearOverride(const QString& normA, const QString& normB);
+
+    // One stored verdict, with both sides already normalised (that is the form they are keyed in).
+    struct MergeVerdict { QString a; QString b; bool same = false; };
+    // Every verdict the user has recorded. Needed because a "same" verdict is a graph edge — the id builder
+    // has to find everything a title was fused WITH, and a pair lookup can only answer about a pair it was
+    // already told about.
+    QVector<MergeVerdict> overrides();
+
+    // Has the user SEPARATED this normalised key, i.e. said the copies that fuse under it are not one game?
+    // Stored as the self-pair (norm, norm), which is exactly what setOverride writes when the two titles
+    // normalise to the same thing — the case the merge is wrong in ("Prey (2006)" and "Prey (2017)" both
+    // normalise to "prey", so there is no second key to name).
+    bool overrideSaysSeparate(const QString& norm);
+
+    // THE ID THE FOLDER AND THE REMAP ACTUALLY KEY ON — itemId with the user's overrides applied.
+    //
+    // itemId above stays the pure, override-free base and is still the only place the title arithmetic
+    // lives; this is the one place the escape hatch is spent. It exists as a SEPARATE function rather than
+    // as a change to itemId so the base rule ("an id is a total function of the title") is still stated and
+    // still tested, and so the override is visible at the two call sites that spend it.
+    //
+    // BOTH the catalog builder and pcgame::remapTable call THIS, for the same reason they both call itemId:
+    // the catalog groups on it and the remap moves records onto it, and the failure mode of the two
+    // disagreeing is silent — every record lands on an id no lookup performs. One function, two callers.
+    //
+    // Three outcomes:
+    //   * no verdict touches this title      -> exactly itemId(title)
+    //   * the key was SEPARATED              -> itemId(title) + "#" + separationTag(title), so copies that
+    //                                           differ by the year the merge key threw away get one entry
+    //                                           each while two editions of one copy still fuse. Both callers
+    //                                           are handed the same raw launcher name, so they cannot derive
+    //                                           different ids from it.
+    //   * the key was FUSED with other keys  -> the smallest normalised key in the fused set, so the answer
+    //                                           does not depend on which side the user was looking at, nor on
+    //                                           the order the verdicts were recorded.
+    //
+    // SEPARATE BEATS FUSE when a key somehow carries both: a key cannot simultaneously be too coarse and too
+    // fine, and picking one deterministically is better than a rule that depends on lookup order.
+    //
+    // HONEST LIMIT, and it is inherent rather than an oversight: records are stored under a hash of the id,
+    // so changing the id STRANDS what was already banked. Separating a wrongly merged entry does not
+    // re-divide the play time that was already summed onto it — nothing records which copy earned which
+    // hour — and the surface that offers this has to say so plainly rather than implying an undo.
+    QString effectiveItemId(const QString& title);
 
 #ifdef EB_PCGAMEID_TEST_SEAM
     // Test-only ini redirect, declared and compiled ONLY for probe_pcgames (same rule as

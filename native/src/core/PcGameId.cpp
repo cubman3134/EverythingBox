@@ -5,6 +5,7 @@
 
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QSet>
 #include <QSettings>
 #include <QStringList>
 
@@ -89,14 +90,32 @@ const QRegularExpression& wsRe()
     return re;
 }
 
+// The ini GROUP every verdict lives in, and the separator inside the key. The separator is '|' because
+// normalizeTitle strips all punctuation, so a normalised title can never contain one — the split back into
+// two titles is therefore exact rather than a best guess. '/' would have been read by QSettings as a group
+// separator, which is the other reason it is not used.
+const QLatin1String kAliasGroup("pcgames/alias");
+
 // The pair key, canonical by construction: the two normalised titles SORTED. Symmetry is then a
 // property of the key rather than of a second lookup somebody can forget to write.
 QString pairKey(const QString& normA, const QString& normB)
 {
     QStringList pair{ normA, normB };
     pair.sort();
-    return QStringLiteral("pcgames/alias/") + pair.at(0) + QStringLiteral("|") + pair.at(1);
+    return kAliasGroup + QStringLiteral("/") + pair.at(0) + QStringLiteral("|") + pair.at(1);
 }
+
+// Every verdict, cached. effectiveItemId is called once per library entry per refresh — a few hundred times
+// for a real library — and each call needs the whole verdict set (a "same" verdict is a graph edge, so a
+// point lookup cannot answer it). Re-enumerating the ini group that often is the kind of per-item cost this
+// folder has already been bitten by, so the list is read once and held.
+//
+// EVERY writer invalidates it, including the test seam: a probe that re-points the ini and then read a list
+// gathered from the previous file would be testing nothing, and would do it silently.
+QVector<pcgame::MergeVerdict> g_verdicts;
+bool                          g_verdictsLoaded = false;
+
+void invalidateVerdicts() { g_verdictsLoaded = false; g_verdicts.clear(); }
 
 // -1 = the user has said nothing about this pair, 0 = "not the same", 1 = "the same".
 int overrideValue(const QString& normA, const QString& normB)
@@ -117,6 +136,7 @@ void pcgame::setIniPathForTesting(const QString& path)
     delete g_testStore;
     g_testStore   = nullptr;
     g_testIniPath = path;
+    invalidateVerdicts();   // the cached verdicts came from the OLD file
 }
 #endif
 
@@ -132,7 +152,12 @@ void pcgame::setIniPathForTesting(const QString& path)
 // callers, and the reason this note exists: a TITLE-ONLY library — no metadata provider, or entries
 // the provider did not resolve — will show a remake and its original as ONE entry. That is not
 // recoverable inside this function; the cures are an igdb id or the user override store.
-QString pcgame::normalizeTitle(const QString& raw)
+QString pcgame::normalizeTitle(const QString& raw) { return normalizeCore(raw, /*stripYear=*/true); }
+
+// The whole of normalizeTitle, with the ONE step that the separation tag needs turned off. See
+// pcgame::separationTag: keeping the year is exactly the difference a user is pointing at when they separate
+// a wrongly fused key, and every OTHER step here removes edition noise, which must keep fusing.
+QString pcgame::normalizeCore(const QString& raw, bool stripYear)
 {
     QString s = raw;
 
@@ -144,7 +169,7 @@ QString pcgame::normalizeTitle(const QString& raw)
 
     // 2. A trailing parenthesised year. See the note above this function: this is what merges a remake
     //    with its original, and the igdb id is what tells them apart again.
-    s.remove(trailingYearRe());
+    if (stripYear) s.remove(trailingYearRe());
 
     // 3. Edition noise — explicit phrases, at the END only, peeled one at a time. See editionSuffixRe().
     bool strippedEdition = false;
@@ -253,6 +278,112 @@ void pcgame::setOverride(const QString& normA, const QString& normB, bool same)
     // has to keep beating the heuristic on every later scan.
     store().setValue(pairKey(a, b), same);
     store().sync();
+    invalidateVerdicts();
+}
+
+void pcgame::clearOverride(const QString& normA, const QString& normB)
+{
+    const QString a = normalizeTitle(normA);
+    const QString b = normalizeTitle(normB);
+    if (a.isEmpty() || b.isEmpty()) return;
+    store().remove(pairKey(a, b));
+    store().sync();
+    invalidateVerdicts();
+}
+
+QVector<pcgame::MergeVerdict> pcgame::overrides()
+{
+    if (g_verdictsLoaded) return g_verdicts;
+
+    QVector<MergeVerdict> out;
+    QSettings& s = store();
+    s.beginGroup(kAliasGroup);
+    const QStringList keys = s.childKeys();
+    for (const QString& k : keys)
+    {
+        // "<normA>|<normB>". indexOf, not section(): a normalised title cannot contain '|' (normalizeTitle
+        // strips punctuation), so the FIRST separator is the only one and the split is exact. A key that
+        // does not have this shape is not one of ours — skip it rather than inventing an empty side.
+        const int cut = k.indexOf(QLatin1Char('|'));
+        if (cut <= 0 || cut + 1 >= k.size()) continue;
+        MergeVerdict v;
+        v.a    = k.left(cut);
+        v.b    = k.mid(cut + 1);
+        v.same = s.value(k).toBool();
+        out.push_back(v);
+    }
+    s.endGroup();
+
+    g_verdicts       = out;
+    g_verdictsLoaded = true;
+    return g_verdicts;
+}
+
+QString pcgame::separationTag(const QString& title) { return normalizeCore(title, /*stripYear=*/false); }
+
+bool pcgame::overrideSaysSeparate(const QString& norm)
+{
+    // The SELF-pair. When the merge is the thing that is wrong, both titles normalise to the same key by
+    // construction — that is WHY they fused — so there is no second key to name the verdict against, and
+    // (norm, norm) is the only honest place to record "the copies under this key are not one game".
+    const QString n = normalizeTitle(norm);
+    if (n.isEmpty()) return false;
+    return overrideValue(n, n) == 0;
+}
+
+// The smallest normalised key in the set of keys the user has fused together, found by walking the "same"
+// verdicts as edges. Smallest-in-the-component rather than "whichever side the user pressed on" so the answer
+// is the same from either entry and does not depend on the order the verdicts were recorded — an id that
+// moved when a third alias was added would strand the records of the first two.
+static QString canonicalNorm(const QString& norm)
+{
+    const QVector<pcgame::MergeVerdict> all = pcgame::overrides();
+    QString best = norm;
+    QSet<QString> seen{ norm };
+    QStringList queue{ norm };
+    // Bounded by the number of stored verdicts: each iteration either enqueues a key never seen before or
+    // ends. A user has a handful of these, not a graph.
+    while (!queue.isEmpty())
+    {
+        const QString cur = queue.takeFirst();
+        if (cur < best) best = cur;
+        for (const pcgame::MergeVerdict& v : all)
+        {
+            if (!v.same) continue;
+            QString other;
+            if      (v.a == cur) other = v.b;
+            else if (v.b == cur) other = v.a;
+            else continue;
+            if (other.isEmpty() || seen.contains(other)) continue;
+            seen.insert(other);
+            queue << other;
+        }
+    }
+    return best;
+}
+
+QString pcgame::effectiveItemId(const QString& title)
+{
+    const QString base = itemId(title);
+    if (base.isEmpty()) return base;   // nothing to group on -> no id, override or not (rule 1)
+
+    const QString norm = normalizeTitle(title);
+    // A title that normalises to NOTHING is already keyed by mergeKey's private raw-title fallback, and the
+    // verdict store is keyed on normalised titles — there is no key here for a verdict to be about. Returning
+    // the base is not a shortcut; it is the only defined answer.
+    if (norm.isEmpty()) return base;
+
+    // SEPARATE first (see the header): a key cannot be both too coarse and too fine, and this branch is the
+    // one that recovers a game the merge removed from the library, which is the worse direction.
+    if (overrideSaysSeparate(norm))
+        return base + QStringLiteral("#") + separationTag(title);
+
+    const QString canon = canonicalNorm(norm);
+    // normalizeTitle can never emit ':' , so a normalised key is never already namespaced and the prefix is
+    // unconditional here (unlike itemId, which has to cope with mergeKey's "pcgame:rawtitle/" fallback —
+    // unreachable in this branch, which already returned for an empty norm).
+    if (canon != norm) return QStringLiteral("pcgame:") + canon;
+    return base;
 }
 
 QString pcgame::legacyLaunchId(const PcGameSource& s)

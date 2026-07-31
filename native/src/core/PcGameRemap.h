@@ -47,7 +47,8 @@ namespace pcgame
     // old id -> merged id, for every entry that HAS a merged id. `oldIdToTitle` is the current library
     // flattened to (id, title) pairs.
     //
-    // THE DESTINATION IS pcgame::itemId(title) AND NOTHING ELSE. It is not computed here, and there is
+    // THE DESTINATION IS pcgame::effectiveItemId(title) AND NOTHING ELSE — itemId with the user's merge
+    // overrides applied, which is precisely what pcGamesCatalog groups on. It is not computed here, and there is
     // deliberately no metadata argument: this function used to take a title->igdb map and prefer the id
     // it supplied, while pcGamesCatalog keyed on the title alone. The moment a caller populated that map
     // — which the parameter openly invited — every record would have been moved to an id no catalog

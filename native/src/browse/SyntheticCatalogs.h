@@ -71,12 +71,18 @@ namespace browse
     // The single PC Games folder: ONE MediaItem per game, with every way to launch it carried as a source on
     // that item (MediaItem::pcSources). It replaces the four per-launcher folders this file used to build
     // (steamGamesCatalog / epicGamesCatalog / gogGamesCatalog / battleNetGamesCatalog, all deleted with the
-    // folders themselves), where the same game appeared up to five times with unrelated ids. Pure, like every
-    // builder here: plain lists in, a
-    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::itemId (pure)
-    // and never consults the user-override ini, which is a store.
+    // folders themselves), where the same game appeared up to five times with unrelated ids. Plain lists in, a
+    // MediaCatalog out, and no UI.
     //
-    // Per item: id = pcgame::itemId(title) — the SAME function pcgame::remapTable moves records onto, and
+    // ONE store read, and it is deliberate: grouping goes through pcgame::effectiveItemId, which consults the
+    // user's merge-override ini. That is the escape hatch the design named as the thing that makes a fuzzy
+    // title heuristic shippable, and it has to be spent at the point identity is minted or the catalog and the
+    // record remap end up keying on different ids. With no verdict recorded the read changes nothing —
+    // effectiveItemId is then exactly itemId — so a probe with a clean data dir sees the pure builder it saw
+    // before. (Every probe_* target compiles with EB_ISOLATED_DATA_DIR and therefore starts with an empty ini,
+    // so a probe that wants the override branch writes a verdict itself; see probe_browse §pcgames-override.)
+    //
+    // Per item: id = pcgame::effectiveItemId(title) — the SAME function pcgame::remapTable moves records onto, and
     // the only place that id is built. The two used to compute it separately and could disagree, which
     // silently strands the user's favourites, marks and play time under a key nothing reads; probe_browse
     // now pins them equal. mime = "pcgame", the ONE routing kind replacing steamgame /

@@ -589,6 +589,144 @@ int main(int argc, char** argv)
               "pcgames: two all-noise titles do NOT collapse into one bucket");
     }
 
+    // ---- pcgames-override: the user's "these are / aren't the same game" verdict reaches the FOLDER -------
+    // pcgame::setOverride and pcgame::sameGame shipped probe-tested with zero callers (issue #44); the
+    // grouping key was pcgame::itemId alone, so the escape hatch the design named as the thing that makes a
+    // fuzzy heuristic shippable could not change anything the user sees. The folder now groups on
+    // pcgame::effectiveItemId, and this is where that is pinned END TO END — a verdict written through the
+    // store the UI writes through, then a catalog built from a real library.
+    //
+    // No test seam is involved: every probe_* target compiles with EB_ISOLATED_DATA_DIR, so this process's
+    // ini starts empty and is its own. Each block clears its verdict afterwards, because the store PERSISTS
+    // and a later section reading an earlier one's leftovers is a documented past failure in this area.
+    //
+    // THE TRAP, named because it is the easy mistake here: "the game appears once" passes just as well on a
+    // build that fuses the WHOLE library into a single tile, and "it appears twice" passes on one that
+    // splits everything. Every block below therefore also asserts on the games that must NOT move —
+    // "Hades" vs "Hades II" above all, since fusing those deletes a game from the library.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "3970";    g.name = "Prey";       st << g; }  // 2006
+        { SteamGame g; g.appid = "480490";  g.name = "Prey (2017)"; st << g; } // the remake: same merge key
+        { SteamGame g; g.appid = "1145360"; g.name = "Hades";      st << g; }
+        { SteamGame g; g.appid = "2074920"; g.name = "Hades II";   st << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        auto idsOf = [](const MediaCatalog& c) {
+            QSet<QString> s; for (const MediaItem& i : c.items) s.insert(i.id); return s;
+        };
+        auto titled = [](const MediaCatalog& c, const char* t) {
+            int n = 0; for (const MediaItem& i : c.items) if (i.title == QString::fromLatin1(t)) ++n; return n;
+        };
+
+        // The PREMISE. Without this the whole section could be passing because the two Prey copies never
+        // merged in the first place, and the separate verdict below would be proving nothing.
+        const MediaCatalog before = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(before.items.size() == 3, "pcgames-override: the premise — the two Prey copies fuse into one tile");
+        CHECK(titled(before, "Prey") == 1 && titled(before, "Hades") == 1 && titled(before, "Hades II") == 1,
+              "pcgames-override: ...and Hades / Hades II are already two separate tiles");
+        QString preyId, hadesId, hades2Id;
+        for (const MediaItem& i : before.items)
+        {
+            if (i.title == "Prey")     { preyId = i.id;  CHECK(i.pcSources.size() == 2,
+                  "pcgames-override: the fused Prey tile carries BOTH copies as sources"); }
+            if (i.title == "Hades")    hadesId  = i.id;
+            if (i.title == "Hades II") hades2Id = i.id;
+        }
+
+        // ---- SEPARATE ------------------------------------------------------------------------------
+        pcgame::setOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"), false);
+        const MediaCatalog sep = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(sep.items.size() == 4, "pcgames-override: separating the key yields one tile per copy");
+        CHECK(titled(sep, "Prey") == 1 && titled(sep, "Prey (2017)") == 1,
+              "pcgames-override: each separated copy is named by its OWN title, not the merged one");
+        // Identity, not just count: two tiles with DIFFERENT non-empty ids, each carrying exactly its own
+        // copy. A build that emitted the same id twice, or an empty one, would pass a size check alone.
+        {
+            QString a, b;
+            for (const MediaItem& i : sep.items)
+            {
+                if (i.title == "Prey")        { a = i.id; CHECK(i.pcSources.size() == 1 && i.pcSources[0].launchId == "3970",
+                      "pcgames-override: the separated 2006 tile carries only the 2006 copy"); }
+                if (i.title == "Prey (2017)") { b = i.id; CHECK(i.pcSources.size() == 1 && i.pcSources[0].launchId == "480490",
+                      "pcgames-override: the separated remake tile carries only the remake copy"); }
+            }
+            CHECK(!a.isEmpty() && !b.isEmpty() && a != b,
+                  "pcgames-override: the two separated tiles have distinct, real ids");
+            CHECK(a.startsWith("pcgame:") && b.startsWith("pcgame:"),
+                  "pcgames-override: a separated id is still a pcgame: id (favourites/marks key on the prefix)");
+        }
+        // THE NEGATIVE HALF. Everything the user did not point at is untouched, by id — this is what fails
+        // on a build that separates the whole library instead of one key.
+        CHECK(idsOf(sep).contains(hadesId) && idsOf(sep).contains(hades2Id),
+              "pcgames-override: separating one key leaves every other tile's id EXACTLY as it was");
+        CHECK(titled(sep, "Hades") == 1 && titled(sep, "Hades II") == 1 && hadesId != hades2Id,
+              "pcgames-override: Hades and Hades II are still two games after a separate verdict");
+
+        // The remap sends each copy's records to the tile that copy is actually on. Cheap to get wrong and
+        // invisible when it is: the records land on an id no tile carries and the user's hours vanish.
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : st) lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+            for (const MediaItem& i : sep.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    CHECK(t.value(pcgame::legacyLaunchId(s)) == i.id,
+                          "pcgames-override: every separated copy's remap destination is the tile it is on");
+            CHECK(t.value("steam:3970") != t.value("steam:480490"),
+                  "pcgames-override: ...and the two copies do NOT share one destination");
+        }
+
+        pcgame::clearOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"));
+        const MediaCatalog undone = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(undone.items.size() == 3 && idsOf(undone).contains(preyId),
+              "pcgames-override: clearing the verdict restores the ORIGINAL tile, id and all");
+
+        // ---- FUSE ----------------------------------------------------------------------------------
+        // Two spellings the title heuristic cannot join. The premise is checked first, again so the block
+        // cannot pass by them never having been apart.
+        QList<SteamGame> ff = st;
+        { SteamGame g; g.appid = "1462040"; g.name = "Final Fantasy VII Remake"; ff << g; }
+        QList<EpicGame> ep;
+        { EpicGame g; g.appName = "ff7r"; g.name = "FF7 Remake"; ep << g; }
+        const MediaCatalog apart = browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art);
+        CHECK(apart.items.size() == 5, "pcgames-override: the premise — two spellings are two tiles");
+
+        pcgame::setOverride(QStringLiteral("Final Fantasy VII Remake"), QStringLiteral("FF7 Remake"), true);
+        const MediaCatalog fused = browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art);
+        CHECK(fused.items.size() == 4, "pcgames-override: fusing two keys yields ONE tile for the game");
+        {
+            bool found = false;
+            for (const MediaItem& i : fused.items)
+                if (i.pcSources.size() == 2)
+                {
+                    QSet<QString> launchers;
+                    for (const pcgame::PcGameSource& s : i.pcSources) launchers.insert(s.launcher);
+                    if (launchers.contains("steam") && launchers.contains("epic")) found = true;
+                }
+            CHECK(found, "pcgames-override: the fused tile carries BOTH spellings' copies as sources");
+        }
+        // The negative half again, and it is the one that matters most: fusing must not be contagious.
+        CHECK(idsOf(fused).contains(hadesId) && idsOf(fused).contains(hades2Id),
+              "pcgames-override: fusing two keys leaves every other tile's id EXACTLY as it was");
+        CHECK(titled(fused, "Hades") == 1 && titled(fused, "Hades II") == 1,
+              "pcgames-override: Hades and Hades II are still two games after a fuse verdict");
+        CHECK(titled(fused, "Prey") == 1,
+              "pcgames-override: an unrelated fused key does not re-separate the Prey tile");
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : ff) lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            for (const EpicGame& g : ep)  lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+            CHECK(t.value("steam:1462040") == t.value("epic:ff7r") && !t.value("epic:ff7r").isEmpty(),
+                  "pcgames-override: both fused copies' records move to the SAME tile");
+            CHECK(t.value("steam:1145360") != t.value("epic:ff7r"),
+                  "pcgames-override: ...and an untouched game keeps its own destination");
+        }
+        pcgame::clearOverride(QStringLiteral("Final Fantasy VII Remake"), QStringLiteral("FF7 Remake"));
+        CHECK(browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art).items.size() == 5,
+              "pcgames-override: clearing the fuse verdict returns the two tiles");
+    }
+
     // ---- SearchAggregator dedup/skip rule: the merge path's pure helper (see SearchAggregator::onCatalogReady).
     {
         QSet<QString> seen;

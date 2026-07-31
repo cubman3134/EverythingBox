@@ -277,15 +277,20 @@ MediaCatalog pcGamesCatalog(const QList<SteamGame>& steam, const QList<EpicGame>
     {
         const QString title = rawTitle.trimmed();
 
-        // The merged identity — from pcgame::itemId and NOWHERE else. This id is what the user's
+        // The merged identity — from pcgame::effectiveItemId and NOWHERE else. This id is what the user's
         // favourite, marks, play time and resume position are stored under, and PcGameRemap moves those
         // records onto the id that same function returns; building it here by hand is how the two came
         // apart before, so the arithmetic lives in one place and both sides call it. probe_browse pins
         // the equality.
         //
+        // effectiveItemId rather than itemId is what SPENDS the user's merge overrides: with no verdict
+        // recorded the two are the same string, and with one it is this call that separates a wrongly
+        // merged key into an entry per copy, or fuses two entries the heuristic left apart. Grouping is
+        // still "equal id" and nothing else — the escape hatch changes the id, not the grouping rule.
+        //
         // An empty id means "nothing to group on" (a nameless copy), and such a copy is DROPPED rather
         // than bucketed: every nameless entry would otherwise share one id and fuse into a single tile.
-        const QString id = pcgame::itemId(title);
+        const QString id = pcgame::effectiveItemId(title);
         if (id.isEmpty()) return;
 
         int idx = byId.value(id, -1);
