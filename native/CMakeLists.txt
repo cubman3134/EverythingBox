@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.183 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.184 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -689,9 +689,12 @@ if(EVERYTHINGBOX_BUILD_APP)
 
     # Headless test for the Stremio protocol translator: manifest/extras/idPrefixes/stream parsing and the
     # catalog classification — plus everything the app does with a stream's proxyHeaders, which is all in one
-    # place on purpose. No addon is installed and no request is ever sent: the QtNetwork half (#59) builds
-    # requests and a download queue without running an event loop. DownloadManager comes along because it is
-    # the one header consumer that PERSISTS, and "the values are not written to disk" is the rule with teeth.
+    # place on purpose. No addon is installed: the QtNetwork half (#59) mostly builds requests and a download
+    # queue without running an event loop. Its last section is the exception — two loopback servers on
+    # EPHEMERAL ports put a real 302 in front of a real DownloadManager, because the redirect decision and
+    # the failure reason it produces cannot be reached from an un-sent request. DownloadManager comes along
+    # because it is the one header consumer that PERSISTS, and "the values are not written to disk" is the
+    # rule with teeth.
     add_executable(probe_stremio tools/probe_stremio.cpp
         src/addons/StremioTranslate.cpp src/addons/StremioTranslate.h
         src/core/BingeStore.cpp src/core/BingeStore.h

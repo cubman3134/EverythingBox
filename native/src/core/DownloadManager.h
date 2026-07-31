@@ -84,4 +84,8 @@ private:
     QFile* file_ = nullptr;             // the open .part being written
     QString activeId_;
     bool restartOnHeaders_ = false;     // set when a resume was requested; cleared once we've checked the status
+    // Set by the NetHeaderApply redirect hook when the origin gate refused a hop, so onFinished() can tell
+    // that abort apart from the user's Cancel — both arrive as OperationCanceledError, and Qt's string for
+    // it ("Operation canceled") is the one this job must NOT report. Cleared at the top of every start().
+    bool redirectRefused_ = false;
 };

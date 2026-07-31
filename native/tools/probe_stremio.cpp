@@ -2,10 +2,14 @@
 // behaviorHints.proxyHeaders a stream arrives with — parsing, the origin guard, the player assignment set,
 // and (since #59) the requests the app makes itself.
 //
-// No addon is installed and NOTHING IS SENT: sections 16-17 build QNetworkRequests and a download queue but
-// never run an event loop, so QNetworkAccessManager::get() queues a request that is inspected and dropped.
-// Anything needing a real server — a 302 across origins, a gate that answers 403 — is proved out of tree
-// against loopback servers, because a probe that binds ports is a probe that fails on a busy CI box.
+// No addon is installed. Sections 16-17 send nothing at all: they build QNetworkRequests and a download
+// queue but never run an event loop, so QNetworkAccessManager::get() queues a request that is inspected and
+// dropped. Section 18 is the exception, and deliberately: the redirect DECISION cannot be reached without a
+// server that answers 302, and the bug it now guards was in the consequence of that decision, not in the
+// request. It talks only to two loopback servers it starts itself, on EPHEMERAL ports — the objection to a
+// port-binding probe is that a fixed port fails on a busy CI box, and listen(…, 0) has no fixed port to be
+// unlucky with. Anything needing a host we do not control (a gate that answers 403) is still proved out of
+// tree.
 //
 // Prints STREMIO-OK on success; any failure prints STREMIO-FAIL <what> and exits non-zero.
 #include "StremioTranslate.h"
@@ -17,11 +21,18 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QHostAddress>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QThread>
 #include <cstdio>
+#include <functional>
+#include <memory>
 
 static int failures = 0;
 #define CHECK(cond, what)                                                        \
@@ -33,6 +44,77 @@ static const Catalog* byId(const Manifest& m, const QString& id)
 {
     for (const Catalog& c : m.catalogs) if (c.id == id) return &c;
     return nullptr;
+}
+
+// ---- the loopback half of section 18 ----------------------------------------------------------
+// A minimal HTTP responder, one request per connection, used to put a REAL 302 in front of a real
+// DownloadManager. Binds an EPHEMERAL port — listen(…, 0) — which is what makes this admissible under the
+// rule at the top of this file: a port the OS chooses cannot collide with something already running on a
+// busy CI box, so there is no fixed port to be unlucky with.
+//
+// It records the request's field NAMES, lower-cased, and never a value. That is not squeamishness: the
+// assertions below are about which fields left the process, the values are fabricated three lines away, and
+// a probe that keeps one in a variable is a probe someone later prints.
+struct Loopback
+{
+    QTcpServer srv;
+    int hits = 0;                 // connections accepted; 0 is the whole assertion for the cross-origin host
+    QByteArray fieldNames;        // "\nhost\nuser-agent\nreferer\n…" of the last request
+    std::function<QByteArray(const QByteArray& path)> answer;
+
+    bool start()
+    {
+        if (!srv.listen(QHostAddress::LocalHost, 0)) return false;
+        QObject::connect(&srv, &QTcpServer::newConnection, &srv, [this] {
+            QTcpSocket* c = srv.nextPendingConnection();
+            if (!c) return;
+            ++hits;
+            auto buf = std::make_shared<QByteArray>();
+            QObject::connect(c, &QTcpSocket::readyRead, c, [this, c, buf] {
+                buf->append(c->readAll());
+                const int end = buf->indexOf("\r\n\r\n");
+                if (end < 0) return;                       // request head not complete yet
+                const QList<QByteArray> lines = buf->left(end).split('\n');
+                fieldNames = "\n";
+                for (int i = 1; i < lines.size(); ++i)     // [0] is the request line
+                {
+                    const int colon = lines.at(i).indexOf(':');
+                    if (colon > 0) fieldNames += lines.at(i).left(colon).trimmed().toLower() + "\n";
+                }
+                const QList<QByteArray> req = lines.value(0).trimmed().split(' ');
+                c->write(answer(req.value(1)));
+                c->flush();
+                c->disconnectFromHost();
+            });
+            QObject::connect(c, &QTcpSocket::disconnected, c, &QObject::deleteLater);
+        });
+        return true;
+    }
+
+    QString url(const QString& path) const
+    { return QStringLiteral("http://127.0.0.1:%1%2").arg(srv.serverPort()).arg(path); }
+};
+
+static const DownloadJob* jobFor(const DownloadManager& dm, const QString& destSuffix)
+{
+    for (const DownloadJob& j : dm.jobs()) if (j.dest.endsWith(destSuffix)) return &j;
+    return nullptr;
+}
+
+// Run the event loop until the named job leaves Queued/Active. Everything here is loopback with no DNS, so
+// the deadline is enormously generous; it exists so a broken build reports a FAILED assertion instead of
+// hanging the suite, which is the failure mode a probe must never have.
+static bool settle(const DownloadManager& dm, const QString& destSuffix, int ms = 15000)
+{
+    QElapsedTimer t; t.start();
+    while (t.elapsed() < ms)
+    {
+        const DownloadJob* j = jobFor(dm, destSuffix);
+        if (j && j->state != DownloadJob::Queued && j->state != DownloadJob::Active) return true;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        QThread::msleep(1);
+    }
+    return false;
 }
 
 int main(int argc, char** argv)
@@ -1101,6 +1183,101 @@ int main(int argc, char** argv)
             CHECK(plainIdx >= 0 && jobs.at(plainIdx).state == DownloadJob::Active,
                   "…and starts, so the refusal above is about the missing headers and nothing else");
         }
+    }
+
+    // ---------------------------------- 18. the gate on the wire, and what a refusal TELLS the user (#59)
+    // Everything above builds requests and inspects them. The redirect DECISION cannot be reached that way —
+    // it needs a server that actually answers 302 — and the consequence of the decision was where the bug
+    // was: NetHeaderApply aborts a cross-origin hop, DownloadManager sees OperationCanceledError, and
+    // finishActive recorded Qt's string for it, "Operation canceled". A message that says the USER stopped
+    // this download, on a source that plays perfectly, with nothing in any log. Undiagnosable from the
+    // field, and not theoretical: these hosts 302 cross-origin, which is exactly why playback works — mpv
+    // follows the hop.
+    //
+    // So this section runs the real DownloadManager against two loopback origins on ephemeral ports, over a
+    // real event loop, and asserts on the reason the user is given.
+    {
+        const QString downloads = AppPaths::dataDir() + QStringLiteral("/downloads");
+        // Section 17's queue.json is still on disk and its jobs point at a port where nothing listens. A
+        // DownloadManager constructed here would load() them and spend its single slot on them.
+        QFile::remove(downloads + QStringLiteral("/queue.json"));
+
+        // Origin B: the host a cross-origin hop would land on. It answers, so that "B was not contacted" is
+        // a fact about the gate and not about B being unreachable.
+        Loopback b;
+        b.answer = [](const QByteArray&) {
+            return QByteArray("HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\nB-SHOULD-NOT");
+        };
+        CHECK(b.start(), "origin B is listening");
+
+        // Origin A: the origin the headers are declared for. Same host as B, DIFFERENT port — which is a
+        // different origin, because StreamHeaders::origin() makes the port explicit precisely so that this
+        // comparison cannot be fooled by a shared hostname.
+        const QByteArray aBody = "A-CONTENT-OK";
+        Loopback a;
+        CHECK(a.start(), "origin A is listening");
+        a.answer = [&a, &b, &aBody](const QByteArray& path) -> QByteArray {
+            if (path.startsWith("/cross"))
+                return QByteArray("HTTP/1.1 302 Found\r\nLocation: ") + b.url(QStringLiteral("/moved.bin")).toUtf8()
+                     + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            if (path.startsWith("/same"))
+                return QByteArray("HTTP/1.1 302 Found\r\nLocation: ") + a.url(QStringLiteral("/final.bin")).toUtf8()
+                     + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            return QByteArray("HTTP/1.1 200 OK\r\nContent-Length: ") + QByteArray::number(aBody.size())
+                 + "\r\nConnection: close\r\n\r\n" + aBody;
+        };
+
+        StreamHeaders::Headers wireHeaders;
+        wireHeaders.insert(QStringLiteral("Referer"), a.url(QStringLiteral("/watch")));
+        wireHeaders.insert(QStringLiteral("X-Token"), QStringLiteral("PROBE-WIRE-TOKEN"));
+
+        DownloadManager dm;
+
+        // --- the refusal.
+        DownloadJob cross;
+        cross.title = QStringLiteral("Cross");
+        cross.url   = a.url(QStringLiteral("/cross.bin"));
+        cross.dest  = downloads + QStringLiteral("/cross.bin");
+        cross.kind  = QStringLiteral("video");
+        cross.requestHeaders = wireHeaders;
+        dm.enqueue(cross);
+        CHECK(settle(dm, QStringLiteral("cross.bin")), "the refused download reaches a terminal state");
+        const DownloadJob* cj = jobFor(dm, QStringLiteral("cross.bin"));
+        CHECK(cj && cj->state == DownloadJob::Failed, "…as a failure");
+        CHECK(b.hits == 0,
+              "origin B is never contacted, so there is nothing of A's for it to have been handed");
+        // THE assertion this section exists for. Qt's errorString for the abort is "Operation canceled"; the
+        // job must not report that, because nobody cancelled anything.
+        CHECK(cj && !cj->error.contains(QStringLiteral("cancel"), Qt::CaseInsensitive),
+              "…and the reason is not the generic cancellation string, which blames the user");
+        CHECK(cj && cj->error.contains(QStringLiteral("different site"))
+                 && cj->error.contains(QStringLiteral("headers")),
+              "…it names the hop and the headers, so this is diagnosable from a bug report");
+        CHECK(cj && !cj->error.isEmpty(), "…and there IS a reason, rather than a blank line in the UI");
+
+        // --- the control that makes all of the above mean something. Same manager, same headers, same
+        // server: a SAME-origin redirect must be followed and the file must land. Without this, a
+        // NetHeaderApply that refused every redirect — or a DownloadManager that failed every job — would
+        // satisfy every assertion above, and a totally broken download path would read as coverage.
+        DownloadJob same;
+        same.title = QStringLiteral("Same");
+        same.url   = a.url(QStringLiteral("/same.bin"));
+        same.dest  = downloads + QStringLiteral("/same.bin");
+        same.kind  = QStringLiteral("video");
+        same.requestHeaders = wireHeaders;
+        dm.enqueue(same);
+        CHECK(settle(dm, QStringLiteral("same.bin")), "the same-origin download reaches a terminal state");
+        const DownloadJob* sj = jobFor(dm, QStringLiteral("same.bin"));
+        CHECK(sj && sj->state == DownloadJob::Done,
+              "a SAME-origin redirect is followed — the refusal above is about the origin CHANGE, not about "
+              "redirects and not about carrying headers at all");
+        QFile got(downloads + QStringLiteral("/same.bin"));
+        CHECK(got.open(QIODevice::ReadOnly) && got.readAll() == aBody,
+              "…and the bytes on disk are the ones the redirect TARGET served");
+        // …and the headers really did leave the process, which is what makes b.hits == 0 a statement about
+        // the gate rather than about a request that carried nothing in the first place. Names only.
+        CHECK(a.fieldNames.contains("\nx-token\n") && a.fieldNames.contains("\nreferer\n"),
+              "origin A received the declared fields on the wire, across the hop it was allowed");
     }
 
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }
