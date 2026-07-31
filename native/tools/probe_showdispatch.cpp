@@ -59,17 +59,19 @@ static LocalLibrary::VideoEntry ep(const QString& show, int s, int e, const QStr
 
 // "Zero network" holds because AddonManager's constructor skips every startup network kick (default-source
 // seeding, remote-manifest refresh, addon self-update) whenever EB_ADDONS_ROOT is set, and runCase() sets
-// that override before constructing the manager. Without that gate a real remote source left in the shared
-// portable ini by an earlier probe (Cinemeta, manifest already cached) could answer the show job before the
-// fixture does — the positive case would get an IMDB id instead of the canned tmdb:tv:1396 and the
-// movie-only negative control would match anyway, i.e. the probe would pass or fail on what the settings
-// file happened to accumulate rather than on the seam it tests.
+// that override before constructing the manager. The gate is still needed for the network kicks; what it no
+// longer has to stand in for is a remote source configured in the ini, because the ini is this process's own
+// scratch file and starts empty (issue #42). Both halves used to matter: a cached Cinemeta manifest answering
+// the show job before the fixture did would give the positive case an IMDB id instead of the canned
+// tmdb:tv:1396 and let the movie-only negative control match anyway.
+//
+// resolveOnline is likewise no longer pinned here. It defaults to true and nothing has written the key, so
+// the enqueue path below now runs on the real default rather than on one this probe set for itself.
 static bool runCase(bool serieslike, QStringList& outIds)
 {
     QTemporaryDir root; QTemporaryDir data;
     makeSeriesFixture(root.path(), "fixture.series", serieslike);
     qputenv("EB_ADDONS_ROOT", root.path().toUtf8());
-    Settings::setResolveOnline(true);                   // enqueue is gated on this; default is true, pin it anyway
     AddonManager mgr;                                   // real manager, loads the JsLocal fixture, no network
     LocalResolveCache cache(data.path() + "/localresolve.json"); cache.load();
     CatalogResolver resolver(&mgr, &cache);
