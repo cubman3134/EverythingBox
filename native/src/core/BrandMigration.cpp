@@ -10,8 +10,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSet>
 #include <QSettings>
 #include <QStringList>
 #include <QVariant>
@@ -90,9 +92,34 @@ bool isAddonIdKeyed(const QString& key)
         || key.startsWith(QStringLiteral("addon.enabled."));  // per-addon on/off — same foreign key, same miss
 }
 
-// Rewrite the previous brand's addon namespace to the current one, in both KEYS (addons/<id>/... ) and inside
-// string VALUES (a favourite's stored addonId, a playlist entry's source). Returns false only if the file
-// could not be opened for writing.
+// Rewrite the previous brand's addon namespace to the current one, in KEYS (addons/<id>/...) and ONLY in
+// keys. Returns false only if the file could not be opened for writing.
+//
+// IT USED TO REWRITE STRING VALUES TOO, and that was the same mistake isAddonIdKeyed exists to prevent, made
+// one layer down (#58). The argument is worth spelling out because "rewrite our own brand string wherever it
+// appears" reads as obviously right:
+//
+//   * The addon prefix does not appear inside an ini VALUE as a brand string of ours. By construction it only
+//     ever appears there as part of an ADD-ON ID — a foreign key into whatever that add-on's manifest.id
+//     says. Every occurrence swept for was one: FavoritesStore's per-item "addonId" and PlaylistStore's
+//     per-entry "addonId", both buried in a JSON blob. Nothing else in the ini carries the prefix in a value
+//     at all; the two that come closest, addon.remote.urls and the cached remote manifests, are stored as
+//     QByteArray and were skipped by the type test above rather than by anything deliberate — which is to say
+//     the old code's safety there was luck, not design.
+//   * So every value rewrite this function ever performed was a GUESS at an identifier it cannot observe,
+//     exactly as a rewrite of addoncfg/<id> would be. When it guesses wrong — the add-on kept the previous
+//     spelling, which the one bundled here does on purpose and forever — the favourite's stored addonId now
+//     names an add-on that does not exist, and opening it reports "That favourite's source addon isn't
+//     available."
+//   * And unlike the config case, the damage is not fully repairable. reconcileAddonRefs only moves an id
+//     when it can SEE the destination loaded; an add-on that is merely disabled, or remote with no cached
+//     manifest yet, resolves to nothing on that launch and is correctly left alone. A rewrite that has
+//     already destroyed the original leaves that user with a wrong id and no way back. Not rewriting leaves
+//     the original in place until the answer actually exists.
+//
+// What this costs: an add-on whose id LEGITIMATELY moved (migrateAddonIds renames local manifest ids) now has
+// favourites still naming the previous spelling. That is the price, it is paid deliberately, and it is what
+// reconcileAddonRefs' second direction repairs — from the ids that loaded, rather than from a guess.
 bool rewriteAddonPrefix(const QString& ini)
 {
     QSettings s(ini, QSettings::IniFormat);
@@ -102,27 +129,11 @@ bool rewriteAddonPrefix(const QString& ini)
     const QStringList keys = s.allKeys();
     for (const QString& k : keys)
     {
-        // Not ours to rename. The VALUE is skipped as well as the key: an addoncfg value is whatever the user
-        // typed into Configure (an API key, a base URL), and a blind substring substitution inside a
-        // credential is at best meaningless and at worst corrupts it.
-        if (isAddonIdKeyed(k)) continue;
-        QVariant v = s.value(k);
-        bool valueChanged = false;
-        if (v.typeId() == QMetaType::QString)
-        {
-            QString sv = v.toString();
-            if (sv.contains(oldNs)) { sv.replace(oldNs, newNs); v = sv; valueChanged = true; }
-        }
-        if (k.contains(oldNs))
-        {
-            QString nk = k; nk.replace(oldNs, newNs);
-            s.setValue(nk, v);
-            s.remove(k);
-        }
-        else if (valueChanged)
-        {
-            s.setValue(k, v);
-        }
+        if (isAddonIdKeyed(k)) continue;   // not ours to rename — see above
+        if (!k.contains(oldNs)) continue;
+        QString nk = k; nk.replace(oldNs, newNs);
+        s.setValue(nk, s.value(k));
+        s.remove(k);
     }
     s.sync();
     return s.status() == QSettings::NoError;
@@ -201,6 +212,129 @@ bool adoptKey(QSettings& s, const QString& from, const QString& to, bool& touche
     // a user could see, and counting it would put the "restored N stranded setting(s)" line on screen for a
     // repair that did not happen.
     return carried && !stale.toString().isEmpty();
+}
+
+// ---- add-on ids stored inside a VALUE (favourites / playlists) ------------------------------------------
+
+// Re-point ONE stored add-on id at the id that actually loaded. Returns true when `id` was changed.
+//
+// The whole repair is three answers, and the ORDER of them is the design:
+bool repointStoredId(QString& id, const QSet<QString>& installedIds)
+{
+    if (id.isEmpty()) return false;
+
+    // 1. THE STORED ID ALREADY RESOLVES — leave it exactly as it is. Three separate requirements collapse
+    //    into this one line:
+    //      * never clobber a blob that is already correct (the overwhelmingly common case: every user who
+    //        was never broken takes this branch and nothing is written);
+    //      * IDEMPOTENT — the value this function writes satisfies this test, so a second run, and every run
+    //        after it, does nothing;
+    //      * BOTH SPELLINGS LIVE. reconcileAddonConfig needs an explicit installedIds.contains(other) guard
+    //        because it is driven from the id side and would otherwise visit a pair twice and eat a
+    //        credential. This function is driven from the STORED id, so when both A and B are loaded,
+    //        whichever one the blob names resolves here and is left alone. Nothing is moved, and no value
+    //        ping-pongs between the two spellings launch after launch.
+    if (installedIds.contains(id)) return false;
+
+    const QString other = counterpartId(id);
+    if (other.isEmpty() || other == id) return false;   // a third party's id — never ours to touch
+
+    // 2. IT DOES NOT RESOLVE BUT ITS COUNTERPART DOES — adopt the counterpart. Symmetric, so it repairs BOTH
+    //    directions without needing to know which one happened:
+    //      * an add-on PINNED to the previous spelling whose blob an earlier build's value rewrite pushed
+    //        forward. This is the already-broken user; nothing else gets them back.
+    //      * an add-on whose id LEGITIMATELY moved (migrateAddonIds), whose blob still names the previous
+    //        spelling — either because it predates the migration, or because the rewrite no longer touches
+    //        values at all. Without this half, fixing the first direction would strand every local add-on's
+    //        favourites instead.
+    if (!installedIds.contains(other)) return false;
+
+    // 3. NEITHER RESOLVES — the line above already returned, and that no-op is deliberate rather than
+    //    incidental. An add-on that is simply not loaded ON THIS LAUNCH (switched off, uninstalled, or
+    //    remote with no cached manifest yet, which on a first launch offline is every remote add-on) is
+    //    indistinguishable here from a dead id. Moving the blob to a spelling that does not resolve either
+    //    would trade a state that is still recoverable for one that is not. Waiting costs a launch; guessing
+    //    costs the favourite. This is also why the value rewrite had to come OUT of rewriteAddonPrefix —
+    //    a one-shot guess has no later launch to be right on.
+    id = other;
+    return true;
+}
+
+// favorites/<profile>/items — a JSON array of favourite objects, each carrying the id of the add-on it was
+// starred from. Returns how many were re-pointed; writes back only if that is non-zero, so an untouched
+// profile's blob is not so much as reserialized (which would churn its bytes and arm the Drive push).
+int repointFavorites(QSettings& s, const QString& key, const QSet<QString>& installedIds)
+{
+    const QString blob = s.value(key).toString();
+    if (blob.isEmpty()) return 0;
+    QJsonArray arr = QJsonDocument::fromJson(blob.toUtf8()).array();
+    int n = 0;
+    for (int i = 0; i < arr.size(); ++i)
+    {
+        if (!arr.at(i).isObject()) continue;
+        QJsonObject o = arr.at(i).toObject();
+        QString id = o.value(QStringLiteral("addonId")).toString();
+        if (!repointStoredId(id, installedIds)) continue;
+        o.insert(QStringLiteral("addonId"), id);
+        arr.replace(i, o);
+        ++n;
+    }
+    if (n) s.setValue(key, QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact)));
+    return n;
+}
+
+// playlists/<profile>/items — one level deeper: a JSON array of playlists, each with an "items" array whose
+// entries carry the per-entry addonId (playlists are category-scoped and may be mixed-source, so the id is on
+// the ENTRY and not on the playlist).
+//
+// The playlist's own "legacyKey" is deliberately NOT touched, though its first '|' segment is also an add-on
+// id. It is retained provenance from the v1 per-catalogue schema, and its only reader takes segment 2 (the
+// catalog TYPE, for the category oracle) — HomeView::addonForKey, which is the one thing that would read
+// segment 0, has no callers. Repairing a field nothing resolves would be motion without an observable effect,
+// and it is untestable through any real lookup path, which is how inert assertions get written.
+int repointPlaylists(QSettings& s, const QString& key, const QSet<QString>& installedIds)
+{
+    const QString blob = s.value(key).toString();
+    if (blob.isEmpty()) return 0;
+    QJsonArray pls = QJsonDocument::fromJson(blob.toUtf8()).array();
+    int n = 0;
+    for (int p = 0; p < pls.size(); ++p)
+    {
+        if (!pls.at(p).isObject()) continue;
+        QJsonObject pl = pls.at(p).toObject();
+        QJsonArray items = pl.value(QStringLiteral("items")).toArray();
+        int changed = 0;
+        for (int i = 0; i < items.size(); ++i)
+        {
+            if (!items.at(i).isObject()) continue;
+            QJsonObject e = items.at(i).toObject();
+            QString id = e.value(QStringLiteral("addonId")).toString();
+            if (!repointStoredId(id, installedIds)) continue;
+            e.insert(QStringLiteral("addonId"), id);
+            items.replace(i, e);
+            ++changed;
+        }
+        if (!changed) continue;
+        // updatedAt is NOT bumped. It is the merge clock for whole-object newest-wins (mdsync T2), and this
+        // is a local repair of a value the user never edited — dating it now would let a repaired playlist
+        // beat a genuinely newer edit made on another device.
+        pl.insert(QStringLiteral("items"), items);
+        pls.replace(p, pl);
+        n += changed;
+    }
+    if (n) s.setValue(key, QString::fromUtf8(QJsonDocument(pls).toJson(QJsonDocument::Compact)));
+    return n;
+}
+
+// The profiles that actually have data under `root`, read off the ini's own group structure. Deliberately not
+// ProfileStore::list(): a profile deleted from the list can still have a favourites blob behind it, the ini
+// is the authority on what is there to repair, and this keeps the TU free of ProfileStore.
+QStringList profilesUnder(QSettings& s, const QString& root)
+{
+    s.beginGroup(root);
+    const QStringList groups = s.childGroups();
+    s.endGroup();
+    return groups;
 }
 
 } // namespace
@@ -371,4 +505,39 @@ int BrandMigration::reconcileAddonConfig(const QString& dataDir, const QStringLi
 
     if (touched) s.sync();
     return restored;
+}
+
+// The same repair, on the surface where the add-on id sits INSIDE the value rather than in the key (#58).
+//
+// Why this is a separate function rather than more of reconcileAddonConfig: that one is driven from the
+// INSTALLED ids, because its subject is a key it can construct from an id. This one is driven from the STORED
+// ids, because its subject is a foreign key buried in a JSON blob that has to be walked to be found. The
+// direction matters — see the both-live note in repointStoredId — and so does the count they return, which
+// AddonManager reports in two different sentences.
+//
+// EVERY PROFILE. FavoritesStore and PlaylistStore namespace their blobs by profile id, and only one profile is
+// ever "current". A repair that used ProfileStore::currentId() would fix whoever launched the app and leave
+// every other member of the household broken, with no later run to catch them (this is idempotent, so once
+// their own launch found their blob already correct... it never would — but the point stands: nothing would
+// ever visit the other profiles). Reading the groups straight off the ini also reaches a profile that has
+// since been deleted from profiles/list but whose data is still sitting there.
+int BrandMigration::reconcileAddonRefs(const QString& dataDir, const QStringList& installedIds)
+{
+    QSettings s(currentIni(dataDir), QSettings::IniFormat);
+    if (s.status() != QSettings::NoError) return 0;
+
+    // A set, not the list: this is consulted once per stored reference, and a household with a few hundred
+    // favourites across a few profiles would otherwise be a linear scan per item.
+    const QSet<QString> ids(installedIds.begin(), installedIds.end());
+
+    int repointed = 0;
+    for (const QString& profile : profilesUnder(s, QStringLiteral("favorites")))
+        repointed += repointFavorites(
+            s, QStringLiteral("favorites/") + profile + QStringLiteral("/items"), ids);
+    for (const QString& profile : profilesUnder(s, QStringLiteral("playlists")))
+        repointed += repointPlaylists(
+            s, QStringLiteral("playlists/") + profile + QStringLiteral("/items"), ids);
+
+    if (repointed) s.sync();
+    return repointed;
 }

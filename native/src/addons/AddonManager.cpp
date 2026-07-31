@@ -680,6 +680,16 @@ void AddonManager::reload()
     if (restored)
         streamLog(QStringLiteral("addon config: restored %1 stranded setting(s) to the add-on ids in use")
                       .arg(restored));   // COUNT only — these values are user credentials
+
+    // ...and the same repair on the other surface (#58): favourites and playlists store the id of the add-on
+    // an item came from INSIDE their JSON blob, so an add-on whose spelling the migration guessed at leaves
+    // the user with a favourite that opens to "That favourite's source addon isn't available". Runs here for
+    // the same reason: `ids` is the only place the answer exists. Covers every profile, not just the current
+    // one — the stores are per-profile and reload() is not.
+    const int repointed = BrandMigration::reconcileAddonRefs(AppPaths::dataDir(), ids);
+    if (repointed)
+        streamLog(QStringLiteral("addon refs: re-pointed %1 stored favourite/playlist reference(s) "
+                                 "to the add-on ids in use").arg(repointed));
 }
 
 QStringList AddonManager::remoteSourceUrls() const

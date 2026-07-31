@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.178 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.179 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -530,6 +530,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
         src/addons/AddonContext.cpp  src/addons/AddonContext.h        # the REAL per-addon config lookup (see below)
+        # The two stores that persist an add-on id INSIDE a value (#58), linked for the same reason
+        # AddonContext is: sections 12/13 read the favourite/playlist back through FavoritesStore::list() and
+        # PlaylistStore::get() rather than re-parsing the blob themselves, so the assertion runs against the
+        # real deserializer and cannot drift from it. Both are QtCore-only (QSettings + JSON on the shared
+        # ini). Their own dependencies come with them: every store is namespaced by ProfileStore;
+        # FavoritesStore's one-time list() backfill consults RecentStore/DownloadsStore; both stores tombstone
+        # on remove; PlaylistStore's v1->v2 migration classifies through MediaCategories.
+        src/core/FavoritesStore.cpp  src/core/FavoritesStore.h
+        src/core/PlaylistStore.cpp   src/core/PlaylistStore.h
+        src/core/RecentStore.cpp     src/core/RecentStore.h
+        src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
+        src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/ProfileStore.cpp    src/core/ProfileStore.h
+        src/core/MediaCategories.h
+        src/core/ShuffleBag.h
         third_party/miniz.c)                                          # (CloudSync's bundle zip; unused by these asserts)
     # AddonContext is linked so the addon-config sections can assert through AddonContext::readConfig itself
     # rather than a re-spelling of its key format. That distinction is the whole point of those sections: the
