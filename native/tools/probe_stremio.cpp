@@ -1060,8 +1060,14 @@ int main(int argc, char** argv)
         CHECK(!onDisk.contains("gated.test"), "…not the Referer's either");
         CHECK(!onDisk.contains("X-Token") && !onDisk.contains("Referer"),
               "…and not even the NAMES, which would say which gate a source uses");
-        CHECK(onDisk.contains("gated") && onDisk.contains("127.0.0.1"),
-              "the value-free flag and the url are — that is the whole record");
+        // The positive half. Written as the JSON the flag actually serialises to, NOT as the bare substring
+        // "gated": the fixture's url and dest are both …/gated.bin, so `onDisk.contains("gated")` is
+        // satisfied by the FILENAME whether or not save() writes the flag at all — delete
+        // {"gated", j.headerGated} from save() and the old spelling still passed. The property was pinned
+        // only by the restore-side check further down, and this line named something it did not test.
+        CHECK(onDisk.contains("\"gated\":true"),
+              "the value-free flag IS written, as a flag and not merely as part of the file name");
+        CHECK(onDisk.contains("127.0.0.1"), "…and the url is — the two of them are the whole record");
 
         {
             DownloadManager restored;    // a restart: load() from the queue.json above
