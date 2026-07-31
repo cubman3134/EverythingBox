@@ -67,8 +67,9 @@ probe executables so they find Qt's plugins without you exporting
 
 The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
-`.srm` path gate, the probe data-dir isolation wiring gate, and the old-brand
-gate below. Those fail on code you wrote even if every probe binary passes. One
+`.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
+registry drift gate below, and the old-brand gate. Those fail on code you wrote
+even if every probe binary passes. One
 more gate is a property of the run rather than of the source: `exe-folder
 contamination` compares the build folder's app-data footprint before and after
 the suite, and fails if anything changed it while the suite ran — normally a
@@ -173,6 +174,30 @@ still needs the seam; `probe_theme` drives six separate scratch inis through one
 process for precisely that reason. What isolation *does* remove is the seams'
 other motive — "don't write the real ini" — so a new probe should not grow a new
 seam for that alone.
+
+### A theme that ships here also ships in the registry — change both
+
+`native/themes2/Channels`, `Night` and `Triple` exist twice: bundled here, and
+published in the community registry
+([everythingbox-themes](https://github.com/cubman3134/everythingbox-themes))
+that the Appearance panel points users at. So does `themes2/THEME_FORMAT.md`.
+Both copies had drifted badly before anything noticed (issue #57) — the
+registry's Triple had lost every view but `home`, which is exactly the blank
+cross-add-on search of issue #29, and downloading a theme from the registry got
+you a strictly worse one than the app already had under the same name.
+
+`=== bundled-theme / registry drift ===` fails the moment a bundled theme's
+*meaning* changes (the hash is of the parsed, re-serialised JSON, so a reformat
+is free). When it goes red, republish the changed folder to the registry, then
+run `native/tools/theme-registry-sync.py --update` and commit the refreshed
+`native/themes2/REGISTRY-SYNC.json` with the theme change. That file documents
+the procedure, and is also where a theme gets recorded as deliberately *not*
+published.
+
+The gate cannot see the registry — it is a different repo, and this suite is
+offline by design — so it checks the record, not the remote. It makes drift
+loud, not impossible; making it impossible means a publish job with a
+cross-repo write credential.
 
 ### The old brand stays gone
 
