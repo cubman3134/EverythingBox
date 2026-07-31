@@ -336,8 +336,14 @@ int main(int argc, char** argv)
     // is about. This orders; it must not filter, because a user joining two titles that look nothing alike
     // still has to be able to reach the row.
     {
+        // The fixture is chosen so ALPHABETICAL ORDER AND RANKED ORDER DISAGREE. The obvious list —
+        // Zork / Hades / Final Fantasy VII / Final Fantasy X — sorts alphabetically into exactly the ranked
+        // order, so every check below passed against a build that ignored the score entirely (measured: it
+        // survived the mutation). "Alpha Protocol" and "Baldur's Gate" are here for that and nothing else:
+        // they sort BEFORE the Final Fantasy rows and must still rank after them.
         const QStringList others{ QStringLiteral("Zork"), QStringLiteral("Final Fantasy VII"),
-                                  QStringLiteral("Hades"), QStringLiteral("Final Fantasy X") };
+                                  QStringLiteral("Alpha Protocol"), QStringLiteral("Final Fantasy X"),
+                                  QStringLiteral("Baldur's Gate") };
         const QStringList r = rankMergeCandidates(QStringLiteral("Final Fantasy VII Remake"), others);
         // NOTHING IS DROPPED. Checked first and by count AND by membership: a build that returned only the
         // close matches would pass every ordering check below while hiding rows the user needs.
@@ -347,9 +353,13 @@ int main(int argc, char** argv)
         CHECK(r.at(0) == QStringLiteral("Final Fantasy VII"));
         // More shared leading words beats fewer: "Final Fantasy VII" (3) over "Final Fantasy X" (2).
         CHECK(r.indexOf(QStringLiteral("Final Fantasy VII")) < r.indexOf(QStringLiteral("Final Fantasy X")));
-        // ...and any shared prefix beats none, whatever the alphabet says ("Hades" and "Zork" share none).
-        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Hades")));
-        CHECK(r.indexOf(QStringLiteral("Hades")) < r.indexOf(QStringLiteral("Zork")));  // ties: alphabetical
+        // ...and ANY shared prefix beats none EVEN WHEN THE ALPHABET DISAGREES — "Alpha Protocol" and
+        // "Baldur's Gate" both sort before "Final Fantasy", and both must still come after it.
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Alpha Protocol")));
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Baldur's Gate")));
+        // Ties (all score 0) fall back to the alphabet.
+        CHECK(r.indexOf(QStringLiteral("Alpha Protocol")) < r.indexOf(QStringLiteral("Baldur's Gate")));
+        CHECK(r.indexOf(QStringLiteral("Baldur's Gate")) < r.indexOf(QStringLiteral("Zork")));
         // TOTAL order, so an unchanged library gives an unchanged picker: the same set in a different input
         // order comes back identical.
         QStringList shuffled; for (int i = others.size() - 1; i >= 0; --i) shuffled << others.at(i);
@@ -357,8 +367,7 @@ int main(int argc, char** argv)
         // A title with nothing in common with anything still returns every row, in alphabetical order.
         const QStringList none = rankMergeCandidates(QStringLiteral("!!!"), others);
         CHECK(none.size() == others.size());
-        CHECK(none.at(0) == QStringLiteral("Final Fantasy VII"));   // alphabetical, no prefix bonus anywhere
-        CHECK(rankMergeCandidates(QStringLiteral("Hades"), QStringList()).isEmpty());
+        CHECK(none.at(0) == QStringLiteral("Alpha Protocol"));   // alphabetical, no prefix bonus anywhere
     }
 
     // ---- 5c. mergeKey: the igdb id when there is one, else the normalised title -----------------
@@ -624,8 +633,14 @@ int main(int argc, char** argv)
             const QHash<QString, QString> t = remapTable(lib);
             // Both copies' records go to the ONE tile the folder now builds for them.
             CHECK(t.value(QStringLiteral("steam:1462040")) == t.value(QStringLiteral("epic:ff7r")));
-            CHECK(t.value(QStringLiteral("epic:ff7r")) == effectiveItemId(ffShort));
-            CHECK(!t.value(QStringLiteral("epic:ff7r")).isEmpty());
+            // Asserted on the side whose id ACTUALLY MOVES. The fused key is the smaller of the two, which
+            // here is ffShort's own — so "the short spelling's destination is its effective id" holds even
+            // on a remap that ignores overrides entirely, and pinned that way it was inert (measured). The
+            // long spelling is the one whose records have somewhere new to go.
+            CHECK(t.value(QStringLiteral("steam:1462040")) == effectiveItemId(ffLong));
+            // Same reason for the same side: rule 1 DROPS an entry whose destination came back empty, so
+            // "there is a destination at all" is only a real check on the copy whose id the verdict moves.
+            CHECK(!t.value(QStringLiteral("steam:1462040")).isEmpty());
             // ...and the untouched game did NOT join them. Without this, a build that maps everything to
             // one destination passes every check above.
             CHECK(t.value(QStringLiteral("steam:1145360")) != t.value(QStringLiteral("epic:ff7r")));

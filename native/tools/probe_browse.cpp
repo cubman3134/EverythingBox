@@ -622,20 +622,24 @@ int main(int argc, char** argv)
             const QVector<QPair<QString, QString>> all = browse::pcLauncherFilterChoices({ "steam", "gog" }, QString());
             CHECK(all.size() == 3 && all[0].first.isEmpty(),
                   "pcfilter: the menu is All + one row per available launcher, All first with an empty value");
-            CHECK(all[1].first == "steam" && all[2].first == "gog",
+            // Guarded on the size, not just asserted after it: CHECK records a failure and CONTINUES, so a
+            // build that returns a shorter list would index past the end and take the probe down with an
+            // access violation instead of printing which assertion failed. (Measured — the "drop the All
+            // row" mutation did exactly that.)
+            CHECK(all.size() == 3 && all[1].first == "steam" && all[2].first == "gog",
                   "pcfilter: each row's VALUE is the launcher id pcGamesCatalog takes");
-            CHECK(all[1].second.contains("Steam") && all[2].second.contains("GOG"),
+            CHECK(all.size() == 3 && all[1].second.contains("Steam") && all[2].second.contains("GOG"),
                   "pcfilter: ...and each row's LABEL is the launcher's own name");
             // Exactly ONE tick, and it is on the current choice. A menu that ticked everything, or nothing,
             // would pass a size check and tell the user nothing about the state they are in.
             int ticks = 0; for (const auto& c : all) if (c.second.contains(QChar(0x2713))) ++ticks;
-            CHECK(ticks == 1 && all[0].second.contains(QChar(0x2713)),
+            CHECK(ticks == 1 && all.size() == 3 && all[0].second.contains(QChar(0x2713)),
                   "pcfilter: no filter set -> the tick is on All launchers, and only there");
         }
         {
             const QVector<QPair<QString, QString>> onGog = browse::pcLauncherFilterChoices({ "steam", "gog" }, "gog");
             int ticks = 0; for (const auto& c : onGog) if (c.second.contains(QChar(0x2713))) ++ticks;
-            CHECK(ticks == 1 && onGog[2].second.contains(QChar(0x2713)),
+            CHECK(ticks == 1 && onGog.size() == 3 && onGog[2].second.contains(QChar(0x2713)),
                   "pcfilter: the tick follows the current filter, and does not stay on All");
             CHECK(onGog.size() == 3 && onGog[0].first.isEmpty(),
                   "pcfilter: All launchers is still offered while a filter is active (the way back)");
@@ -727,17 +731,22 @@ int main(int argc, char** argv)
         // Identity, not just count: two tiles with DIFFERENT non-empty ids, each carrying exactly its own
         // copy. A build that emitted the same id twice, or an empty one, would pass a size check alone.
         {
-            QString a, b;
-            for (const MediaItem& i : sep.items)
-            {
-                if (i.title == "Prey")        { a = i.id; CHECK(i.pcSources.size() == 1 && i.pcSources[0].launchId == "3970",
-                      "pcgames-override: the separated 2006 tile carries only the 2006 copy"); }
-                if (i.title == "Prey (2017)") { b = i.id; CHECK(i.pcSources.size() == 1 && i.pcSources[0].launchId == "480490",
-                      "pcgames-override: the separated remake tile carries only the remake copy"); }
-            }
-            CHECK(!a.isEmpty() && !b.isEmpty() && a != b,
+            // Looked up UNCONDITIONALLY rather than asserted inside a loop over whatever tiles exist: a
+            // build that never separated at all has no "Prey (2017)" row, the loop body never runs, and an
+            // in-loop CHECK silently passes. (Measured — that is exactly what the "ignore the separate
+            // verdict" mutation did to this block before it was written this way.)
+            auto byTitle = [&sep](const char* t) {
+                for (const MediaItem& i : sep.items) if (i.title == QString::fromLatin1(t)) return i;
+                return MediaItem();
+            };
+            const MediaItem a2006 = byTitle("Prey"), a2017 = byTitle("Prey (2017)");
+            CHECK(a2006.pcSources.size() == 1 && a2006.pcSources[0].launchId == "3970",
+                  "pcgames-override: the separated 2006 tile exists and carries only the 2006 copy");
+            CHECK(a2017.pcSources.size() == 1 && a2017.pcSources[0].launchId == "480490",
+                  "pcgames-override: the separated remake tile exists and carries only the remake copy");
+            CHECK(!a2006.id.isEmpty() && !a2017.id.isEmpty() && a2006.id != a2017.id,
                   "pcgames-override: the two separated tiles have distinct, real ids");
-            CHECK(a.startsWith("pcgame:") && b.startsWith("pcgame:"),
+            CHECK(a2006.id.startsWith("pcgame:") && a2017.id.startsWith("pcgame:"),
                   "pcgames-override: a separated id is still a pcgame: id (favourites/marks key on the prefix)");
         }
         // THE NEGATIVE HALF. Everything the user did not point at is untouched, by id — this is what fails
