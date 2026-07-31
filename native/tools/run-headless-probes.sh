@@ -411,7 +411,9 @@ ph_blob="$(cd "$HERE/.." && awk '
       sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
       if (buf == "") { start = FNR; buf = s; prevf = FILENAME } else if (s != "") { buf = buf " " s }
       if (s ~ /[;{}]$/ || s == "") { if (buf != "") print FILENAME ":" start ": " buf; buf = ""; start = 0 } }
-    END { if (buf != "") print prevf ":" start ": " buf }' $ph_files)"
+    END { if (buf != "") print prevf ":" start ": " buf }' $ph_files </dev/null)"
+# (</dev/null is not decoration: with an empty corpus awk gets no file operands and falls back to STDIN,
+# which under CI is the suite's own stdin — the gate would hang rather than report the empty corpus above.)
 
 # A log call, in any of the tree's spellings, whose statement still mentions header data after every
 # logSummary(...) sub-expression has been removed from it. The `:a;ta` loop peels nested parens.
