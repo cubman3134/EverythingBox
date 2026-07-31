@@ -164,7 +164,12 @@ void PlaybackSession::clearQueue()
     lastAccruedPos_ = 0.0; // consumption-stats: per-track reset (next media starts a fresh accrual span)
     statsAccum_ = 0.0;
     tracks_.clear();
-    trackHeaders_.clear();  // the queue's headers die with the queue — nothing outlives its own track list
+    // The queue's headers die with the queue. NOT observable — every read of trackHeaders_ is a playIndex
+    // reached through a setQueue, which assigns the list wholesale — so probe_playback pins no assertion on
+    // this line and says why. It stays because tracks_ and trackHeaders_ are a parallel pair: clearing one
+    // and not the other leaves two members disagreeing about how many tracks there are, which is the state a
+    // future change to the read path would be bitten by.
+    trackHeaders_.clear();
     trackIndex_ = -1;
     emit queueCleared();
 }

@@ -104,14 +104,19 @@ int main(int argc, char** argv)
         CHECK(seen.size() == 4 && seen.at(3).isEmpty(),
               "a queue that supplies no headers plays with none, whatever the last queue had");
 
-        // …and clearQueue drops them, so a stale set cannot survive to be indexed by a later playIndex.
         StreamHeaders::Headers only;
         only.insert("X-Token", "FIVE");
         q.setQueue({ "http://five.test/e" }, 0, {}, QString(), { only });
         CHECK(seen.size() == 5 && seen.at(4) == only, "…and one that does, plays with its own");
-        q.clearQueue();
-        q.setQueue({ "http://five.test/e" }, 0);
-        CHECK(seen.size() == 6 && seen.at(5).isEmpty(), "the same url replayed after a clear carries nothing");
+
+        // There is deliberately NO assertion that clearQueue() drops the header list. One was written here
+        // ("the same url replayed after a clear carries nothing") and mutation testing showed it inert:
+        // deleting the clear from clearQueue left it passing, because trackHeaders_ is only ever READ from
+        // playIndex, every route to playIndex goes through setQueue, and setQueue ASSIGNS the list. There is
+        // no observable difference, so there is nothing to pin — and an assertion that survives the deletion
+        // of the line it names reads as coverage while being none. (Same finding, and the same treatment, as
+        // #43's forPlayUrl early return.) The clear itself stays: tracks_ and trackHeaders_ are a parallel
+        // pair and clearing one without the other is the state a future reader would be bitten by.
     }
 
     if (fails == 0) printf("PLAYBACK-OK\n");
