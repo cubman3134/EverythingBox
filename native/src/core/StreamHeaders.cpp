@@ -121,7 +121,11 @@ StreamHeaders::Headers StreamHeaders::parseProxyHeaders(const QJsonObject& behav
 StreamHeaders::Headers StreamHeaders::forPlayUrl(const Headers& declared, const QString& declaredUrl,
                                                  const QString& playUrl)
 {
-    if (declared.isEmpty()) return {};
+    // No `if (declared.isEmpty()) return {}` short-circuit. It was here and it was unkillable: with an empty
+    // input every path below already returns empty, so deleting it, inverting it or replacing it changed
+    // nothing observable, and the assertion aimed at it ("no headers in, none out") passed no matter what it
+    // was mutated into. An unkillable guard plus its inert assertion reads as coverage while being neither.
+    // (Same shape as the isString() guard in parseProxyHeaders, and found the same way.)
     const QString a = origin(declaredUrl);
     if (a.isEmpty()) return {};
     if (a != origin(playUrl)) return {};

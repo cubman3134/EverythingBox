@@ -414,7 +414,7 @@ int main(int argc, char** argv)
             const QByteArray b = QByteArrayLiteral("{\"streams\":[{\"name\":\"x\",\"title\":\"") + title
                 + "\",\"infoHash\":\"0123456789abcdef0123456789abcdef01234567\"}]}";
             const QVector<StreamCandidate> got = parseStreams(b);
-            return got.size() == 1 ? got[0].seeders : -2;
+            return got.size() == 1 ? got.at(0).seeders : -2;
         };
         const QByteArray person = QByteArrayLiteral("\xF0\x9F\x91\xA4");   // the seeder emoji
         const QByteArray disk   = QByteArrayLiteral("\xF0\x9F\x92\xBE");   // the size emoji
@@ -747,7 +747,11 @@ int main(int argc, char** argv)
         CHECK(StreamHeaders::forPlayUrl(h, QStringLiteral("http:///movie.mp4"),
                                         QStringLiteral("http:///movie.mp4")).isEmpty(),
               "an http url with no host is not an origin either");
-        CHECK(StreamHeaders::forPlayUrl({}, declared, declared).isEmpty(), "no headers in, none out");
+        // There is deliberately NO "no headers in, none out" assertion here. It existed, and it was inert:
+        // with `declared` empty, deleting the early return, inverting it or replacing it with anything at all
+        // still yields an empty map, because every other branch returns either {} or the empty input. It
+        // pinned nothing and read as coverage. The guard it was aimed at has been removed too — same
+        // reasoning as the isString() guard in parseProxyHeaders.
     }
 
     // ---------------------------------- 14f. applyTo: the player assignment set, and its CLEARS (#43)
@@ -760,6 +764,12 @@ int main(int argc, char** argv)
             StreamHeaders::applyTo(h, [&out](const QString& p, const QStringList& v) { out.push_back({ p, v }); });
             return out;
         };
+        // Every index below goes through this. CHECK is non-fatal by design — it counts a failure and carries
+        // on — so a size assertion does NOT protect the indexing that follows it: the exact regression these
+        // assertions exist to catch (applyTo stopping emitting one of the three) would run off the end of the
+        // vector and crash the probe instead of printing STREMIO-FAIL. Out of range yields a default Assign,
+        // which matches no expectation, so the failure stays a failure and stays readable.
+        auto at = [](const QVector<Assign>& v, int i) { return (i >= 0 && i < v.size()) ? v.at(i) : Assign{}; };
 
         StreamHeaders::Headers h;
         h.insert(QStringLiteral("User-Agent"), QStringLiteral("EB-Probe/1.0"));
@@ -767,19 +777,19 @@ int main(int argc, char** argv)
         h.insert(QStringLiteral("X-Token"), QStringLiteral("abc,def"));
         const QVector<Assign> got = record(h);
         CHECK(got.size() == 3, "exactly three properties are written");
-        CHECK(got[0].property == QStringLiteral("user-agent")
-                  && got[0].values == QStringList{ QStringLiteral("EB-Probe/1.0") },
+        CHECK(at(got, 0).property == QStringLiteral("user-agent")
+                  && at(got, 0).values == QStringList{ QStringLiteral("EB-Probe/1.0") },
               "User-Agent goes to mpv's dedicated user-agent property");
-        CHECK(got[1].property == QStringLiteral("referrer")
-                  && got[1].values == QStringList{ QStringLiteral("https://embed.a.test/watch") },
+        CHECK(at(got, 1).property == QStringLiteral("referrer")
+                  && at(got, 1).values == QStringList{ QStringLiteral("https://embed.a.test/watch") },
               "Referer goes to mpv's dedicated referrer property");
-        CHECK(got[2].property == QStringLiteral("http-header-fields"),
+        CHECK(at(got, 2).property == QStringLiteral("http-header-fields"),
               "everything else goes to the header field list");
-        CHECK(got[2].values == QStringList{ QStringLiteral("X-Token: abc,def") },
+        CHECK(at(got, 2).values == QStringList{ QStringLiteral("X-Token: abc,def") },
               "…as one 'Name: value' entry, comma in the value and all");
         // Lifting the two out of the field list is what stops mpv sending each of them twice.
-        CHECK(!got[2].values.join(QLatin1Char('|')).contains(QStringLiteral("User-Agent"))
-                  && !got[2].values.join(QLatin1Char('|')).contains(QStringLiteral("Referer")),
+        CHECK(!at(got, 2).values.join(QLatin1Char('|')).contains(QStringLiteral("User-Agent"))
+                  && !at(got, 2).values.join(QLatin1Char('|')).contains(QStringLiteral("Referer")),
               "the two dedicated ones are NOT also in the field list");
 
         // THE clear-between-streams assertion. A stream that needs no headers must still produce all three
@@ -787,23 +797,31 @@ int main(int argc, char** argv)
         // previous source's Referer stays live for the next stream, on a different host.
         const QVector<Assign> cleared = record({});
         CHECK(cleared.size() == 3, "a headerless stream still writes all three properties");
-        CHECK(cleared[0].property == QStringLiteral("user-agent") && cleared[0].values.isEmpty(),
+        CHECK(at(cleared, 0).property == QStringLiteral("user-agent") && at(cleared, 0).values.isEmpty(),
               "…user-agent cleared");
-        CHECK(cleared[1].property == QStringLiteral("referrer") && cleared[1].values.isEmpty(),
+        CHECK(at(cleared, 1).property == QStringLiteral("referrer") && at(cleared, 1).values.isEmpty(),
               "…referrer cleared");
-        CHECK(cleared[2].property == QStringLiteral("http-header-fields") && cleared[2].values.isEmpty(),
+        CHECK(at(cleared, 2).property == QStringLiteral("http-header-fields") && at(cleared, 2).values.isEmpty(),
               "…and the field list cleared");
         // The order is fixed, so a caller can never write a stale value after a fresh one.
-        CHECK(cleared[0].property == got[0].property && cleared[1].property == got[1].property
-                  && cleared[2].property == got[2].property,
+        CHECK(at(cleared, 0).property == at(got, 0).property && at(cleared, 1).property == at(got, 1).property
+                  && at(cleared, 2).property == at(got, 2).property,
               "the same properties in the same order, headers or not");
 
         // A stream carrying ONLY a User-Agent still clears the referrer the previous one set.
         StreamHeaders::Headers uaOnly;
         uaOnly.insert(QStringLiteral("User-Agent"), QStringLiteral("EB-Probe/2.0"));
         const QVector<Assign> partial = record(uaOnly);
-        CHECK(partial[1].values.isEmpty() && partial[2].values.isEmpty(),
-              "a partial header set clears the properties it does not use");
+        CHECK(partial.size() == 3, "a partial header set still writes all three properties");
+        // The property NAMES are checked alongside the emptiness, and that is not decoration: an out-of-range
+        // at() yields a default Assign whose values are also empty, so "cleared" and "never emitted" would be
+        // indistinguishable if only emptiness were asserted — the assertion would pass on exactly the
+        // regression it exists to catch.
+        CHECK(at(partial, 1).property == QStringLiteral("referrer") && at(partial, 1).values.isEmpty(),
+              "a partial header set clears the referrer it does not use");
+        CHECK(at(partial, 2).property == QStringLiteral("http-header-fields")
+                  && at(partial, 2).values.isEmpty(),
+              "…and the field list it does not use");
     }
 
     // ---------------------------------- 14g. logSummary is names-only, and the external-player call (#43)
