@@ -3,6 +3,8 @@
 #include <QJsonValue>
 #include <QUrl>
 
+#include <cstring>
+
 namespace
 {
 
@@ -17,6 +19,40 @@ bool blocked(const QString& lowerName)
         QStringLiteral("transfer-encoding"), QStringLiteral("upgrade"), QStringLiteral("range"),
     };
     return kBlocked.contains(lowerName);
+}
+
+// RFC 7230 `token` — the complete set of characters a header field-name may contain: ALPHA / DIGIT /
+// "!#$%&'*+-.^_`|~". A name is either entirely made of these or refused; nothing is stripped.
+//
+// This is the NAME half of the injection guard, and it is the sharper half. A value carrying CRLF is
+// refused below, but a NAME carrying it used to sail through: QString::trimmed() removes only LEADING and
+// TRAILING whitespace, so `X-A\r\nRange: bytes=0-1` kept its embedded CRLF, was not in blocked() (the
+// blocklist sees the whole mangled string, not the `Range` hiding inside it), and reached applyTo, which
+// emits `name + ": " + value` verbatim into mpv's field list. libmpv/ffmpeg does no sanitising of its own —
+// verified on the wire — so the bytes go onto the socket as written: that smuggles both the blocked fields
+// the list exists to stop AND, with a doubled CRLF, a whole second attacker-chosen request pipelined onto
+// the connection. Rejecting outright (rather than deleting the offending characters) is deliberate: a
+// stripping rule has to be right about every character it rewrites, while this one only has to be right
+// about which characters are legal.
+//
+// Deliberately NOT relying on QHttpHeaders refusing it on the StreamResolver leg: the mpv leg has no such
+// backstop, and a guard that only one of two consumers enforces is not a guard.
+bool isToken(const QString& name)
+{
+    if (name.isEmpty()) return false;
+    static const char kPunct[] = "!#$%&'*+-.^_`|~";
+    for (const QChar ch : name)
+    {
+        const char16_t c = ch.unicode();
+        // ASCII ranges spelled out rather than QChar::isLetterOrNumber(), which also accepts non-ASCII
+        // letters and digits — those are not `token` characters and have no business in a field-name.
+        if ((c >= u'0' && c <= u'9') || (c >= u'A' && c <= u'Z') || (c >= u'a' && c <= u'z')) continue;
+        // c != 0 guards strchr's documented match on the terminating NUL — a name containing U+0000 would
+        // otherwise be accepted, and a NUL is exactly the sort of byte a smuggling attempt is made of.
+        if (c != 0 && c < 0x80 && std::strchr(kPunct, char(c)) != nullptr) continue;
+        return false;
+    }
+    return true;
 }
 
 // scheme://host:port, lowercased, with the default port made explicit so "http://h" and "http://h:80"
@@ -38,7 +74,10 @@ QString origin(const QString& url)
 QString StreamHeaders::canonicalName(const QString& raw)
 {
     const QString t = raw.trimmed().toLower();
-    if (t.isEmpty()) return QString();
+    // Charset FIRST, before any folding or title-casing: everything below rewrites the string, and a rule
+    // that validates a rewritten name is a rule about the rewriter, not about what the addon sent. An
+    // illegal name is not repaired into a legal one — it is refused, and the caller drops the field.
+    if (!isToken(t)) return QString();
     // The HTTP header is spelled `Referer`; mpv's option (and therefore some addons) spells it `referrer`.
     // Fold to one so a stream declaring both cannot end up with two disagreeing values.
     if (t == QLatin1String("referrer")) return QStringLiteral("Referer");

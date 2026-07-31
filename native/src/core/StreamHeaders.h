@@ -27,9 +27,13 @@ namespace StreamHeaders
     // Names are stored canonicalised ("User-Agent", "Referer"), so lookups need no case dance.
     using Headers = QMap<QString, QString>;
 
-    // "user-agent"/"USER_AGENT-ish" -> "User-Agent". Lowercase, then capitalise each dash-separated part.
+    // "user-agent"/"USER-AGENT" -> "User-Agent". Lowercase, then capitalise each dash-separated part.
     // `Referrer` (the two-r spelling addons pick up from mpv's own option name) canonicalises to the HTTP
     // spelling `Referer`, so the two can never both be present and disagree.
+    //
+    // "" for any name that is not an RFC 7230 `token` (ALPHA / DIGIT / "!#$%&'*+-.^_`|~") — a space, a
+    // colon, a CR or LF, a control byte, anything non-ASCII. Refused, never repaired: see the comment on
+    // isToken in the .cpp for why a name carrying CRLF is a request-smuggling primitive and not a typo.
     QString canonicalName(const QString& raw);
 
     // The `request` half of behaviorHints.proxyHeaders. `response` is deliberately dropped: it describes
@@ -37,7 +41,11 @@ namespace StreamHeaders
     // it would only create a second thing to accidentally send.
     //
     // Rejected on the way in, because a stream is untrusted input:
-    //   * empty names, and empty values — which is also what a number/array/object value becomes;
+    //   * any name that is not an RFC 7230 `token` (see canonicalName) — a space, a colon, a CR/LF. This
+    //     is the name half of the injection guard: without it a name like "X-A\r\nRange: bytes=0-1" both
+    //     defeats the blocklist below (it is not spelled `range`) and writes two fields where one was
+    //     declared. Empty names fall out of the same rule;
+    //   * empty values — which is also what a number/array/object value becomes;
     //   * CR/LF anywhere in a value — otherwise a single addon field becomes header injection;
     //   * hop-by-hop and request-shaping fields (Host, Content-Length, Connection, Transfer-Encoding,
     //     Upgrade, Range). Range is the sharp one: the player issues its OWN Range for every seek, and a

@@ -633,6 +633,22 @@ int main(int argc, char** argv)
               "the two-r spelling folds onto the HTTP one");
         CHECK(StreamHeaders::canonicalName(QStringLiteral("X-FORWARDED-for")) == QStringLiteral("X-Forwarded-For"),
               "each dash-separated part is capitalised");
+
+        // The RFC 7230 `token` charset, asserted on canonicalName directly because that is where the rule
+        // lives and every consumer of a header name goes through it. The parse-level fixture in 14d pins
+        // the consequence; these pin the rule, one refused character class at a time.
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-Ok_1.2*")) == QStringLiteral("X-Ok_1.2*"),
+              "the punctuation RFC 7230 actually permits is not refused");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-A\r\nRange")).isEmpty(),
+              "a name carrying CRLF is refused outright — the request-smuggling primitive");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X A")).isEmpty(), "…as is one containing a space");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X:A")).isEmpty(), "…or its own colon");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("X-Café")).isEmpty(),
+              "…or a non-ASCII letter, which QChar::isLetterOrNumber would have waved through");
+        CHECK(StreamHeaders::canonicalName(QString(QChar(u'\0'))).isEmpty(),
+              "…or a lone NUL, which strchr's terminator match would otherwise accept");
+        CHECK(StreamHeaders::canonicalName(QStringLiteral("  Referer  ")) == QStringLiteral("Referer"),
+              "surrounding whitespace is still tolerated — the charset rule applies to the trimmed name");
     }
 
     // ---------------------------------- 14d. proxyHeaders: what is REFUSED on the way in (#43)
@@ -650,7 +666,11 @@ int main(int argc, char** argv)
             "X-Inject":  "v\r\nX-Evil: 1",
             "X-Empty":   "",
             "":          "nameless",
-            "X-Number":  7
+            "X-Number":  7,
+            "X-Smuggle\r\nRange": "bytes=0-1",
+            "X Spaced":  "v",
+            "X-Colon: Y": "v",
+            "X-é":  "v"
           } } }
         }]})";
         const StreamHeaders::Headers h = parseStreams(body).value(0).requestHeaders;
@@ -666,6 +686,24 @@ int main(int argc, char** argv)
               "hop-by-hop / body-shaping fields are refused");
         CHECK(!h.contains(QStringLiteral("X-Inject")),
               "a value containing CRLF is refused — one field must not become two");
+        // The NAME half of the same guard, and the sharper one. trimmed() strips only leading/trailing
+        // whitespace, so an EMBEDDED CRLF used to survive canonicalisation, miss the blocklist (the key is
+        // not spelled `range`) and reach mpv's field list verbatim — which puts the bytes on the socket.
+        // Asserted three ways because each defeats the filter differently.
+        // Matched case-INSENSITIVELY and by substring, deliberately. Asserting `!h.contains("X-Spaced")`
+        // would be inert: canonicalName only capitalises after a dash, so a surviving mangled key is
+        // spelled "X spaced" / "X-Smuggle\r\nrange" and an exact-spelling assertion would pass while the
+        // field sat in the map. (Both of these WERE inert until mutation C1-a showed them staying green.)
+        CHECK(h.keys().filter(QStringLiteral("smuggle"), Qt::CaseInsensitive).isEmpty()
+                  && h.keys().filter(QStringLiteral("range"), Qt::CaseInsensitive).isEmpty(),
+              "a blocked field smuggled as a CRLF continuation of a permitted name does not survive — "
+              "under any spelling");
+        CHECK(h.keys().filter(QStringLiteral("spaced"), Qt::CaseInsensitive).isEmpty(),
+              "a name containing a space is refused, not repaired into a legal one");
+        CHECK(h.keys().filter(QStringLiteral("colon"), Qt::CaseInsensitive).isEmpty(),
+              "a name carrying its own colon is refused — it would write two fields");
+        CHECK(h.keys().filter(QStringLiteral("x-"), Qt::CaseInsensitive).isEmpty(),
+              "…so no X- name from this fixture reaches the map at all");
         CHECK(!h.contains(QStringLiteral("X-Empty")), "an empty value is refused");
         // A number/array/object value stringifies to "" and is refused by that same rule — asserted because
         // it is the OBSERVABLE behaviour an addon can trip, not because a separate guard implements it.
