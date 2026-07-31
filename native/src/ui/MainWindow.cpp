@@ -8421,7 +8421,10 @@ void MainWindow::openLibraryItem(const MediaItem& item)
     if (StreamResolver::isM3uRef(lower))
     {
         if (splitTarget_) { splitTarget_->openVideo(url, item.title); finishSplitOpen(); return; }
-        streams_->resolve(url, item.title);
+        // The item's own proxyHeaders ride along: this is a plain HTTP fetch of the STREAM URL, so a gated
+        // HLS/IPTV source is refused here — and refused before playback, so it would read as a broken
+        // playlist rather than a missing header.
+        streams_->resolve(url, item.title, item.requestHeaders);
         return;
     }
 
