@@ -1,12 +1,20 @@
-// Headless coverage for the Stremio protocol translator. Pure — no network, no addon installed.
+// Headless coverage for the Stremio protocol translator, and for the download queue that a Stremio stream
+// feeds. No addon is installed and NOTHING IS SENT: the download section builds a real queue but runs no
+// event loop, so QNetworkAccessManager::get() queues a request that is never dispatched.
 // Prints STREMIO-OK on success; any failure prints STREMIO-FAIL <what> and exits non-zero.
 #include "StremioTranslate.h"
+#include "AppPaths.h"
 #include "BingeStore.h"
+#include "DownloadManager.h"
 #include "StreamHeaders.h"
 
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <cstdio>
 
@@ -930,6 +938,80 @@ int main(int argc, char** argv)
         CHECK(!ov.put(QStringLiteral("ttA"), QStringLiteral("bad")), "the overwrite fails to write");
         CHECK(ov.lookup(QStringLiteral("ttA")) == QStringLiteral("good"),
               "and the previous choice is restored, not erased");
+    }
+
+    // ---------------------------------- 16. the download queue: a start that FAILS must not strand the rest
+    // One download runs at a time and pump() is the only thing that picks the next, so every path that takes
+    // a job out of the running has to call it. The ones that end a live job do (finishActive, cancel, retry);
+    // the ones that refuse a job BEFORE there is a request are the ones to watch, because there is no reply
+    // and therefore no finished() coming later to pump on their behalf.
+    //
+    // A restored queue is the case with teeth: the constructor pumps exactly once, so one job whose folder
+    // cannot be written would otherwise hold every job behind it — with no error against them and nothing
+    // running — until the user happened to touch the panel and pump it by hand.
+    //
+    // Driven through queue.json rather than enqueue(), because enqueue() pumps per job: a queue that is
+    // Queued all the way down with only ONE pump against it is what a restart produces and nothing else does.
+    //
+    // No event loop runs here, so the job that does start sends nothing: get() queues the request and returns.
+    {
+        const QString downloads = AppPaths::dataDir() + QStringLiteral("/downloads");
+        CHECK(QDir().mkpath(downloads), "the probe's own downloads folder");
+
+        // An ordinary FILE standing where the failing jobs' folder would have to be. mkpath() cannot make a
+        // directory under it and QFile cannot create the .part inside it — on every platform, and without
+        // needing a permission the CI box may not be able to set.
+        const QString blocked = downloads + QStringLiteral("/blocked");
+        {
+            QFile b(blocked);
+            CHECK(b.open(QIODevice::WriteOnly), "a file standing where a folder is needed");
+            b.write("x");
+        }
+        // Port 1 on loopback: nothing listens, and with no event loop nothing is even attempted.
+        const QString url = QStringLiteral("http://127.0.0.1:1/x.bin");
+        const QString bad1 = blocked + QStringLiteral("/first.bin");
+        const QString bad2 = blocked + QStringLiteral("/second.bin");
+        const QString good = downloads + QStringLiteral("/third.bin");
+
+        QJsonArray restored;
+        for (const QString& dest : { bad1, bad2, good })
+            restored.append(QJsonObject{
+                { QStringLiteral("id"), QFileInfo(dest).fileName() },
+                { QStringLiteral("title"), QFileInfo(dest).fileName() },
+                { QStringLiteral("url"), url },
+                { QStringLiteral("dest"), dest },
+                { QStringLiteral("kind"), QStringLiteral("video") },
+                { QStringLiteral("state"), int(DownloadJob::Queued) } });
+        {
+            QFile q(downloads + QStringLiteral("/queue.json"));
+            CHECK(q.open(QIODevice::WriteOnly), "write the queue a restart would find");
+            q.write(QJsonDocument(restored).toJson(QJsonDocument::Compact));
+        }
+
+        DownloadManager dm;    // load() + one pump(): the restart
+        const QVector<DownloadJob>& jobs = dm.jobs();
+        CHECK(jobs.size() == 3, "all three queued jobs came back");
+        if (jobs.size() == 3)
+        {
+            CHECK(jobs.at(0).dest == bad1, "the unwritable one is first, so it is the one that pump picks");
+            CHECK(jobs.at(0).state == DownloadJob::Failed, "…and it fails rather than pretending to run");
+            CHECK(!jobs.at(0).error.isEmpty(), "…saying so, since nothing else will");
+            // THE assertion, twice over. Queued here would mean the queue stopped dead behind a job that is
+            // not even running. Two failures in a row also pin that the retry is not a loop: each one is
+            // Failed before the next pump, so pump keeps finding a DIFFERENT job and eventually none.
+            CHECK(jobs.at(1).state == DownloadJob::Failed,
+                  "the second unwritable job is reached too — a refused start does not strand the queue");
+            // The control that makes those mean something: a job that CAN be written still starts. Without
+            // it, a start() that refused everything would satisfy both assertions above while having broken
+            // every download in the app.
+            CHECK(jobs.at(2).state == DownloadJob::Active,
+                  "…and the startable job behind them runs, so the failures are about the folder alone");
+            // Close the job we just started. Not tidiness for its own sake: the manager holds its .part open
+            // until the request ends, and on Windows an open handle keeps the probe's scratch directory from
+            // being removed when the process exits — one leaked directory per hand-run of this probe.
+            const QString startedId = jobs.at(2).id;   // a COPY: cancel() removes the job this points into
+            dm.cancel(startedId);
+        }
     }
 
     if (failures) { std::fprintf(stderr, "STREMIO-FAIL %d check(s) failed\n", failures); return 1; }

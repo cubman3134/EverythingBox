@@ -88,7 +88,14 @@ void DownloadManager::start(int idx)
     }
     else
     {
-        if (!file_->open(QIODevice::WriteOnly)) { delete file_; file_ = nullptr; j.state = DownloadJob::Failed; j.error = tr("Can't write to the downloads folder."); save(); emit changed(); return; }
+        if (!file_->open(QIODevice::WriteOnly))
+        {
+            delete file_; file_ = nullptr;
+            j.state = DownloadJob::Failed; j.error = tr("Can't write to the downloads folder.");
+            save(); emit changed();
+            pump(); // this job is out of the running; don't strand the rest of the queue behind it
+            return;
+        }
         j.received = 0;
         restartOnHeaders_ = false;
     }
