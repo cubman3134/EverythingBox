@@ -753,6 +753,42 @@ else
 fi
 echo
 
+# Bundled-theme / community-registry drift gate (issue #57). Channels, Night and Triple exist TWICE: bundled
+# under native/themes2, and published in the community registry (github.com/cubman3134/everythingbox-themes)
+# that the Appearance panel sends users to. Nothing noticed when a bundled theme gained a view and its
+# registry twin did not, so both copies had quietly rotted: the registry's Channels had lost the
+# nowplayingAudio view, the `channels` browse layout and the detail actionrow, and its Triple had lost
+# everything but `home` — the exact blank-browse shape issue #29 was about. Under the same name, the
+# downloadable theme was strictly worse than the shipped one.
+#
+# This gate cannot LOOK at the registry: it is a different repo, and this suite is offline on purpose (no
+# network, no keys — that is what makes it a gate rather than a flaky test). So the comparison is against a
+# checked-in record of what was last synced there, native/themes2/REGISTRY-SYNC.json. Edit a bundled theme
+# and its canonical hash moves; this goes red and names the theme, the file that has to be republished, and
+# the command that refreshes the record. Be clear about what that buys: the record states an INTENT, and
+# --update can be run by someone who never pushed. It converts a SILENT drift into a deliberate one — the
+# person editing the theme is told, at the moment of the edit, that a second copy exists. The guarantee
+# needs a publish job (a workflow that pushes the changed themes to the registry itself), which needs a
+# cross-repo write credential; REGISTRY-SYNC.json spells that out.
+#
+# The hash is canonical, not byte-for-byte, so a reindent is not drift — see theme-registry-sync.py. The
+# script also fails on a theme.json that stops parsing, a view declared with an empty `elements` (which the
+# engine treats as not declared at all, so it silently falls back), and a bundled theme that is tracked in
+# neither publishedThemes nor notPublished — the last one because otherwise the cheapest way to silence a
+# red gate is to delete the offending entry.
+echo "=== bundled-theme / registry drift ==="
+THEMESYNC_PY="$HERE/theme-registry-sync.py"
+if [ ! -f "$THEMESYNC_PY" ]; then
+  echo "FAIL: bundled-theme / registry drift (theme-registry-sync.py not found at $THEMESYNC_PY)"; fail=1
+elif "$PY" "$THEMESYNC_PY" --check; then
+  echo "PASS: bundled-theme / registry drift"
+else
+  echo "FAIL: bundled-theme / registry drift — a bundled theme has moved away from the copy the community"
+  echo "  registry serves under the same name. Republish it and rerun with --update (details above)."
+  fail=1
+fi
+echo
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration

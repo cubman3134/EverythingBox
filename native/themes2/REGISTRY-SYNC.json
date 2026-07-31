@@ -1,0 +1,53 @@
+{
+  "_readme": [
+    "What the community theme registry is expected to be serving for each theme this app ALSO bundles.",
+    "",
+    "Three of the themes in this folder exist twice: here, and in the registry at the url below, so the",
+    "Appearance panel can send users somewhere to browse and download them. Nothing used to notice when a",
+    "bundled theme gained a view and its registry twin did not, and both had quietly rotted (issue #57):",
+    "the registry's Channels had no nowplayingAudio view, a grid instead of the channels browse layout and",
+    "no detail actionrow, and its Triple had nothing but `home` — downloading either gave you a strictly",
+    "worse theme than the one already in the app, under the same name.",
+    "",
+    "canonicalSha256 is the hash of the theme's MEANING, not its bytes: parse the theme.json, re-serialise",
+    "it with sorted keys and no whitespace, hash that. So a reformat is not drift and the two repos are free",
+    "to spell the same theme differently. native/tools/theme-registry-sync.py computes it; the headless probe",
+    "suite runs that script with --check on every push.",
+    "",
+    "TO CHANGE A PUBLISHED THEME:",
+    "  1. edit it here, as usual;",
+    "  2. the gate goes red, naming the theme;",
+    "  3. copy the changed themes2/<Name>/ (and THEME_FORMAT.md, if it moved) into a clone of the registry,",
+    "     commit and push there;",
+    "  4. run  native/tools/theme-registry-sync.py --update  and commit the result with the theme change.",
+    "",
+    "This records an INTENT, not the registry's actual state — step 4 can be run without step 3. It makes a",
+    "silent drift into a deliberate one, which is worth having, but it is not a guarantee. The guarantee is a",
+    "publish job: a workflow in this repo that, on a push to main touching native/themes2/**, checks the",
+    "registry out with a deploy credential, copies the shared themes over, and pushes. That removes the hand",
+    "step entirely and makes the registry copies generated content. Its cost is a cross-repo write credential",
+    "held as a secret in this repo, which is why it is not wired up here."
+  ],
+  "registry": "https://github.com/cubman3134/everythingbox-themes",
+  "publishedThemes": {
+    "Channels": {
+      "registryPath": "themes2/Channels",
+      "canonicalSha256": "29d4b7ed55d5d24c6537846e41427fefec2aaff4441f10bd73902e91ec96fe6b"
+    },
+    "Night": {
+      "registryPath": "themes2/Night",
+      "canonicalSha256": "e6dc22478935d391340b27b0cf10a993313bb27460b9317576a627057ce1dd1d"
+    },
+    "Triple": {
+      "registryPath": "themes2/Triple",
+      "canonicalSha256": "2b16269bf259b0ba75d17b28241a6e271a4bed6cc0bb14e9e1a8d16ec5e9567f"
+    }
+  },
+  "notPublished": {},
+  "publishedDocs": {
+    "THEME_FORMAT.md": {
+      "registryPath": "THEME_FORMAT.md",
+      "sha256": "75c01fc8890c1243368ef514e31d52bce640415d7357612f37b4c233ea75a9db"
+    }
+  }
+}
