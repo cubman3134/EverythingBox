@@ -288,6 +288,38 @@ echo
 #
 # The DECISION in that last test is pure and asserted properly, by probe_crashreport. This gate covers only what
 # a probe cannot see.
+# Proxy-header log discipline (#43). A stream's behaviorHints.proxyHeaders routinely carry a signed-URL
+# token, a session cookie or an Authorization value, and stream_debug.log is a file users paste into bug
+# reports. probe_stremio pins that StreamHeaders::logSummary emits NAMES and never values; this gate pins the
+# other half — that logSummary is the ONLY way header data reaches a log. Without it the rule holds exactly
+# until someone writes the obvious .arg(headers.value("Referer")) into a trace line, which no probe can see.
+echo "=== proxy-header log discipline ==="
+ph_fail=0
+ph_note() { echo "  $1"; ph_fail=1; }
+# Every log/trace call in the tree that mentions a header container or a header name, MINUS the ones that
+# route through logSummary. Comments are stripped first: these files discuss headers at length by design.
+ph_hits="$(for f in $(git -C "$HERE/.." ls-files 'src/**/*.cpp' 'src/**/*.h' 2>/dev/null); do
+    sed -E 's://.*$::' "$HERE/../$f" | grep -nE '(streamLog|videoLog|srLog|mwLog|qDebug|qWarning|qInfo)\s*\(' \
+      | grep -E 'requestHeaders|proxyHeaders|StreamHeaders::Headers|headers\.value|headers\[' \
+      | grep -v 'logSummary' | sed "s|^|$f:|"
+  done)"
+if [ -n "$ph_hits" ]; then
+  ph_note "a log call touches header data without going through StreamHeaders::logSummary:"
+  printf '%s\n' "$ph_hits" | sed 's|^|    |'
+fi
+# logSummary itself must keep emitting keys, not values. Cheap, but it is the assertion the gate rests on,
+# and a probe cannot notice the day the file stops existing.
+if ! grep -q 'h.keys()' "$HERE/../src/core/StreamHeaders.cpp" 2>/dev/null; then
+  ph_note "StreamHeaders::logSummary no longer renders h.keys() — check it is still names-only."
+fi
+if grep -qE 'logSummary' "$HERE/../src/core/StreamHeaders.cpp" 2>/dev/null; then :; else
+  ph_note "StreamHeaders::logSummary not found — this gate is now asserting nothing."
+fi
+if [ "$ph_fail" -eq 0 ]; then echo "PASS: proxy-header log discipline"; else
+  echo "FAIL: proxy-header log discipline"; fail=1
+fi
+echo
+
 echo "=== crashreport handler discipline ==="
 CRCPP="$HERE/../src/core/CrashReport.cpp"
 cr_fail=0
