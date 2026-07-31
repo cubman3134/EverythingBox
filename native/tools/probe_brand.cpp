@@ -675,8 +675,10 @@ int main(int argc, char** argv)
         const QString bothNow     = currentId(QStringLiteral("dualspell"));         // BOTH spellings loaded
         const QString bothWas     = legacyId(QStringLiteral("dualspell"));
         const QString thirdParty  = QStringLiteral("org.someone.catalog");
-        // Loaded under NEITHER spelling: uninstalled, switched off, or remote with no cached manifest yet
-        // (which, on a first launch offline, is every remote add-on there is).
+        // Loaded under NEITHER spelling: uninstalled, or remote with no cached manifest yet (which, on a
+        // first launch offline, is every remote add-on there is). NOT "switched off", which this line used
+        // to claim: AddonManager::loadFolder/loadRemoteSources apply no isEnabled test — enabled-gating is
+        // serve-time — so a disabled INSTALLED add-on's id is in installedIds and its favourites resolve.
         const QString absentId    = currentId(QStringLiteral("notloaded"));
 
         // thirdParty is deliberately NOT in this list. Were it loaded, the "the stored id already resolves"
@@ -798,6 +800,16 @@ int main(int argc, char** argv)
               "a playlist entry whose add-on loaded under neither spelling is left exactly as stored");
         // updatedAt is the merge clock (mdsync T2, whole-object newest-wins). Re-dating a playlist because a
         // local repair touched it would let that repair beat a genuinely newer edit made on another device.
+        //
+        // A NOTE ON WHAT THIS ONE IS. a7040de's message claimed "every remaining assertion in both sections
+        // is now killed by at least one mutation of the implementation". That is not true of this line and
+        // cannot be: no statement in repointPlaylists or reconcileAddonRefs writes updatedAt, so there is
+        // nothing here to mutate — it asserts the ABSENCE of a behaviour. It is kept deliberately, and it is
+        // not the inert kind: it goes red the moment an edit ADDS a re-date (verified by inserting exactly
+        // that line, which turns this and four of probe_cloudmerge's section-19 checks red together). The
+        // distinction worth holding on to is between an assertion no CHANGE can kill — a restatement of the
+        // fixture, which is what got deleted in a7040de — and one that only an INSERTION can kill, which is
+        // what a tripwire is for.
         {
             Playlist p;
             CHECK(PlaylistStore::get(QStringLiteral("pl-echo"), p) && p.updatedAt == seededAt,
@@ -818,6 +830,67 @@ int main(int argc, char** argv)
         CHECK(entryById(QStringLiteral("pl-echo"), QStringLiteral("pe-broken"), e)
                   && entrySourceAddon(e, installed) == workerId,
               "a second pass leaves the repaired playlist entry resolving");
+    }
+
+    // ---- 14. A repair that could not be WRITTEN is never REPORTED (#58 review) ----------------------------
+    // Both reconcile passes return a count their caller turns into something the user reads — "restored N
+    // stranded setting(s)", "re-pointed N stored reference(s)". sync() was called and its status thrown away,
+    // so an ini that cannot be written (read-only, full disk, locked by another process) produced that line
+    // for a repair that landed nowhere — and produced it again on the next launch, and the one after.
+    //
+    // Two directories rather than one: QSettings shares a QConfFile per PATH process-wide, so reusing the
+    // control's path for the read-only case would test against a cache that still holds the control's
+    // outcome. Separate paths keep the read-only run reading exactly what is on disk.
+    {
+        const QString okDir = AppPaths::dataDir() + QStringLiteral("/probe_sync_ok");
+        const QString roDir = AppPaths::dataDir() + QStringLiteral("/probe_sync_ro");
+        QDir(okDir).removeRecursively();
+        QDir(roDir).removeRecursively();
+        QDir().mkpath(okDir);
+        QDir().mkpath(roDir);
+        const QString okIni = newIniIn(okDir);
+        const QString roIni = newIniIn(roDir);
+
+        const QString workerId    = legacyId(QStringLiteral("aiocatalog-worker"));  // PINNED to the previous id
+        const QString workerWrong = currentId(QStringLiteral("aiocatalog-worker")); // where the rewrite put it
+        const QStringList installed{ workerId };
+        const QString strandedCfg = QStringLiteral("addoncfg/") + workerWrong + QStringLiteral("/apiKey");
+
+        // The writable control. Without it the read-only asserts below would pass just as happily on a build
+        // where the repair never fired at all — 0 for the wrong reason reads exactly like 0 for the right one.
+        seedFavorites(okIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
+        writeKey(okIni, strandedCfg, QStringLiteral("KEY"));
+        CHECK(BrandMigration::reconcileAddonRefs(okDir, installed) == 1,
+              "the writable control: a stranded reference is repaired AND reported");
+        CHECK(BrandMigration::reconcileAddonConfig(okDir, installed) == 1,
+              "...and so is a stranded config value");
+
+        // The same fixture, then the write permission taken away.
+        seedFavorites(roIni, QStringLiteral("hotel"), { { QStringLiteral("fh"), workerWrong } });
+        writeKey(roIni, strandedCfg, QStringLiteral("KEY"));
+        QByteArray before;
+        { QFile f(roIni); if (f.open(QIODevice::ReadOnly)) before = f.readAll(); }
+        CHECK(!before.isEmpty(), "the read-only fixture was written before its permissions changed");
+        CHECK(QFile::setPermissions(roIni, QFile::ReadOwner | QFile::ReadUser),
+              "the fixture could be made read-only");
+
+        CHECK(BrandMigration::reconcileAddonRefs(roDir, installed) == 0,
+              "a re-point that could not be flushed reports NOTHING repaired");
+        CHECK(BrandMigration::reconcileAddonConfig(roDir, installed) == 0,
+              "...and neither does a config adoption that could not be flushed");
+        // Read the FILE, not the settings: QSettings still holds the unflushed change in memory, so a
+        // readback through it would show the repair that never reached the disk.
+        QByteArray after;
+        { QFile f(roIni); if (f.open(QIODevice::ReadOnly)) after = f.readAll(); }
+        CHECK(after == before,
+              "...and the reported nothing is the truth: the file on disk is byte-for-byte unchanged");
+
+        QFile::setPermissions(roIni, QFile::ReadOwner | QFile::ReadUser
+                                         | QFile::WriteOwner | QFile::WriteUser);
+        QDir(okDir).removeRecursively();
+        QDir(roDir).removeRecursively();
+        CHECK(!QFileInfo::exists(okDir) && !QFileInfo::exists(roDir),
+              "both fixture directories are removed (this probe leaves no residue)");
     }
 
     clearAllFlags();

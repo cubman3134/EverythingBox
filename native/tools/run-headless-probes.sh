@@ -352,6 +352,40 @@ else
 fi
 echo
 
+# Post-merge add-on-ref repair gate (#58 review). CloudMerge's tie-break no longer lets an equal-timestamp
+# meeting be decided on an add-on id's SPELLING, so a repaired favourite/playlist is no longer reverted by the
+# merge that follows it — probe_cloudmerge section 19 proves that end to end. But a peer's blob that genuinely
+# IS newer still wins outright, spelling and all, and it can land this device back on the namespace it renamed
+# away from. AddonManager::reload() has already run for the session by then, so the repair has to run again
+# AFTER the merge or the favourite reads "source addon isn't available" until the next launch.
+#
+# That second half is a WIRING fact inside MainWindow, which no headless probe links (it is the whole Qt
+# Widgets app). The probe demonstrates the behaviour by calling merge-then-reconcile itself; this gate pins
+# that mergeProgress is where the product actually does it. Deleting the call is otherwise a silent revert:
+# every probe stays green, and the symptom only appears on a synced install with a renamed add-on.
+echo "=== post-merge addon-ref repair ==="
+MWCPP="$HERE/../src/ui/MainWindow.cpp"
+if [ ! -f "$MWCPP" ]; then
+  echo "FAIL: post-merge addon-ref repair (MainWindow.cpp not found at $MWCPP)"; fail=1
+else
+  # The body of mergeProgress, comments stripped, from its signature to the closing brace at column 0.
+  mp_body="$(sed -E 's://.*$::' "$MWCPP" | awk '
+    /^void MainWindow::mergeProgress\(/ { inbody = 1 }
+    inbody                              { print }
+    inbody && /^}/                      { exit }
+  ')"
+  if [ -z "$(printf '%s' "$mp_body" | tr -d '[:space:]')" ]; then
+    echo "FAIL: post-merge addon-ref repair (MainWindow::mergeProgress not found — the gate stopped matching)"
+    fail=1
+  elif ! printf '%s' "$mp_body" | grep -q 'reconcileAddonRefs'; then
+    echo "FAIL: post-merge addon-ref repair (mergeProgress no longer re-runs BrandMigration::reconcileAddonRefs)"
+    fail=1
+  else
+    echo "PASS: post-merge addon-ref repair"
+  fi
+fi
+echo
+
 # Proxy-header log discipline (#43). A stream's behaviorHints.proxyHeaders routinely carry a signed-URL
 # token, a session cookie or an Authorization value, and stream_debug.log is a file users paste into bug
 # reports. probe_stremio pins that StreamHeaders::logSummary emits NAMES and never values; this gate pins the

@@ -997,6 +997,11 @@ int main(int argc, char** argv)
         CHECK(plAddon() == aioNow);
         CHECK(favTs(p19, QStringLiteral("I")) == T);        // ...at an UNCHANGED stamp. This is the premise the
         CHECK(plUpdated() == T);                            //    whole finding rests on; stated, not assumed.
+        // A's document AS REPAIRED, captured before the pull lands — what a push carries if some unrelated
+        // change armed the debounce in that window. B's round below merges THIS rather than A's post-merge
+        // state, deliberately: a document built after the merge is a product of the same comparator under
+        // test, so an assertion made against it could not fail however that comparator was broken.
+        const QJsonObject docARepaired = serializeNow();
         mergeDoc(cloud0);                                   // pullAndMergeProgress, ~1.5s after launch
         CHECK(favAddon() == aioNow);   // was: reverted to the previous spelling by the raw-byte tie-break
         CHECK(plAddon() == aioNow);    // was: the ENTIRE repaired playlist replaced, whole-object newest-wins
@@ -1005,7 +1010,7 @@ int main(int argc, char** argv)
 
         // -- Round 1, device B: pulls A's repaired doc, then repairs its own copy after the merge -----------
         wipeStores(); injRefs(aioWas, T, title);
-        mergeDoc(docA1);
+        mergeDoc(docARepaired);
         // The tie is a no-op in BOTH directions, so B is not dragged onto A's bytes either...
         CHECK(favAddon() == aioWas);
         CHECK(plAddon() == aioWas);

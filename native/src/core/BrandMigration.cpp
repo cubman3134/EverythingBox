@@ -112,10 +112,15 @@ bool isAddonIdKeyed(const QString& key)
 //     names an add-on that does not exist, and opening it reports "That favourite's source addon isn't
 //     available."
 //   * And unlike the config case, the damage is not fully repairable. reconcileAddonRefs only moves an id
-//     when it can SEE the destination loaded; an add-on that is merely disabled, or remote with no cached
+//     when it can SEE the destination loaded; an add-on that is uninstalled, or remote with no cached
 //     manifest yet, resolves to nothing on that launch and is correctly left alone. A rewrite that has
 //     already destroyed the original leaves that user with a wrong id and no way back. Not rewriting leaves
 //     the original in place until the answer actually exists.
+//     NOT "disabled", which an earlier draft of this comment listed: AddonManager::loadFolder and
+//     loadRemoteSources apply no isEnabled test — the enabled flag is consulted at SERVE time (catalog /
+//     search / meta fan-out), not at load — so a switched-off installed add-on is in loaded_ and its id is
+//     in installedIds like any other. Its favourites are therefore repaired on the very launch it is off,
+//     which is better than this paragraph used to claim, not worse.
 //
 // What this costs: an add-on whose id LEGITIMATELY moved (migrateAddonIds renames local manifest ids) now has
 // favourites still naming the previous spelling. That is the price, it is paid deliberately, and it is what
@@ -250,12 +255,14 @@ bool repointStoredId(QString& id, const QSet<QString>& installedIds)
     if (!installedIds.contains(other)) return false;
 
     // 3. NEITHER RESOLVES — the line above already returned, and that no-op is deliberate rather than
-    //    incidental. An add-on that is simply not loaded ON THIS LAUNCH (switched off, uninstalled, or
-    //    remote with no cached manifest yet, which on a first launch offline is every remote add-on) is
-    //    indistinguishable here from a dead id. Moving the blob to a spelling that does not resolve either
-    //    would trade a state that is still recoverable for one that is not. Waiting costs a launch; guessing
-    //    costs the favourite. This is also why the value rewrite had to come OUT of rewriteAddonPrefix —
-    //    a one-shot guess has no later launch to be right on.
+    //    incidental. An add-on that is simply not loaded ON THIS LAUNCH (uninstalled, or remote with no
+    //    cached manifest yet, which on a first launch offline is every remote add-on) is indistinguishable
+    //    here from a dead id. "Switched off" is NOT one of them, and used to be listed here in error: the
+    //    load paths apply no isEnabled test (it is a serve-time gate), so a disabled add-on's id is in
+    //    installedIds and its references resolve normally. Moving the blob to a spelling that does not
+    //    resolve either would trade a state that is still recoverable for one that is not. Waiting costs a
+    //    launch; guessing costs the favourite. This is also why the value rewrite had to come OUT of
+    //    rewriteAddonPrefix — a one-shot guess has no later launch to be right on.
     id = other;
     return true;
 }
@@ -324,6 +331,26 @@ int repointPlaylists(QSettings& s, const QString& key, const QSet<QString>& inst
     }
     if (n) s.setValue(key, QString::fromUtf8(QJsonDocument(pls).toJson(QJsonDocument::Compact)));
     return n;
+}
+
+// Flush, and report the repair count ONLY if the flush actually landed.
+//
+// Both reconcile passes return a count that their caller turns into a line on screen / in the log — "restored
+// N stranded setting(s)", "re-pointed N stored reference(s)". A QSettings::sync() that fails (a read-only ini,
+// a full disk, a file another process has locked) leaves those writes nowhere, and the un-checked version
+// reported the repair anyway: the user is told their favourites were fixed, nothing on disk changed, and the
+// next launch says it again. Returning 0 says what is true — nothing persisted, so there is nothing to
+// announce — and costs nothing else, because neither pass is flagged: the next launch simply retries.
+//
+// The qWarning is the only trace left, and deliberately carries a COUNT and a label, never a value: this is
+// the path that moves API keys.
+int syncedOrZero(QSettings& s, int count, const QString& what)
+{
+    s.sync();
+    if (s.status() == QSettings::NoError) return count;
+    qWarning("brand migration: %s repair of %d item(s) could not be written to the settings file",
+             qPrintable(what), count);
+    return 0;
 }
 
 // The profiles that actually have data under `root`, read off the ini's own group structure. Deliberately not
@@ -503,8 +530,8 @@ int BrandMigration::reconcileAddonConfig(const QString& dataDir, const QStringLi
             ++restored;
     }
 
-    if (touched) s.sync();
-    return restored;
+    if (!touched) return restored;   // (restored is 0 here by construction: nothing was written)
+    return syncedOrZero(s, restored, QStringLiteral("addon config"));
 }
 
 // The same repair, on the surface where the add-on id sits INSIDE the value rather than in the key (#58).
@@ -538,6 +565,6 @@ int BrandMigration::reconcileAddonRefs(const QString& dataDir, const QStringList
         repointed += repointPlaylists(
             s, QStringLiteral("playlists/") + profile + QStringLiteral("/items"), ids);
 
-    if (repointed) s.sync();
-    return repointed;
+    if (!repointed) return 0;
+    return syncedOrZero(s, repointed, QStringLiteral("addon refs"));
 }
