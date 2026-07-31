@@ -76,11 +76,13 @@ bool hasUserContent(const QString& ini)
 // the user's stored API keys move to a name nothing reads — silently, with the Configure fields simply blank
 // afterwards. Left untouched here and reconciled against the ids that ACTUALLY loaded, which is the only
 // place the answer exists: see BrandMigration::reconcileAddonConfig.
-// NOT listed, and deliberately: addon.update.etag.<id>. It is keyed the same way and it does get renamed by
-// the rewrite below, so a pinned-id add-on loses it — but the entire consequence is that the next update check
-// misses its 304 and re-downloads one package, after which the etag is rewritten under the right id and the
-// problem has repaired itself. Excluding it would mean reconciling it too (or leaving a dead key behind for
-// every add-on whose id legitimately moved), which is more moving parts than a redundant download is worth.
+// NOT listed, and deliberately: addon.update.etag.<id>. It is keyed the same way and the rewrite below does
+// rename it — but for that one key the rename is CORRECT, not merely survivable. checkAddonUpdates writes an
+// etag only for a JsLocal add-on that carries an updateUrl (AddonManager::checkAddonUpdates), which is to say
+// one that lives in a folder on this device — and migrateAddonIds moves every such add-on's manifest id to
+// the current prefix. The id this key is keyed by therefore really did move, and the rewrite FOLLOWS it
+// rather than guessing at it. The add-on that keeps the previous namespace, which is the one this whole
+// exclusion list exists for, is remote: not JsLocal, no updateUrl, so it has no etag to get wrong.
 // Said out loud because an unexplained omission from a list like this is indistinguishable from an oversight.
 bool isAddonIdKeyed(const QString& key)
 {
