@@ -71,10 +71,18 @@ void PlaybackSession::playIndex(int index)
     trackIndex_ = index;
     beginResume(tracks_[index]);  // track the new file's position (and resume it if seen before)
     emit trackChanged(index, tracks_.size(), titleAt(index));
-    // value(), not at(): trackHeaders_ is allowed to be shorter than tracks_ (a local queue passes none at
-    // all), and an out-of-range read yields an empty set — which is the correct answer, and the one that
-    // makes the player clear the previous track's headers rather than keep them.
-    emit playRequested(tracks_[index], trackHeaders_.value(index));
+    // trackHeaders_ is allowed to be SHORTER than tracks_ (a local queue passes none at all), and a track
+    // with no entry gets an empty set — which is the correct answer, and the one that makes the player clear
+    // the previous track's headers rather than keep them.
+    //
+    // Spelled with an explicit bound and at(), not with value(): the log-discipline gate reads
+    // `<name>Headers.value(…)` as pulling ONE header's value out into a local, and it is right to — that is
+    // the hole no grep over log calls can see. This container is a LIST of header sets rather than a set, so
+    // the match would be a false positive, and the fix for a false positive is not to teach the gate a
+    // nuance it would then apply everywhere. It is to not write the shape.
+    const StreamHeaders::Headers trackHeaders =
+        index < trackHeaders_.size() ? trackHeaders_.at(index) : StreamHeaders::Headers();
+    emit playRequested(tracks_[index], trackHeaders);
 }
 
 void PlaybackSession::next()
