@@ -13,10 +13,9 @@
 //
 // Prints STATS-OK on success; any failure prints STATS-FAIL <cond> (line) and exits non-zero.
 //
-// Isolation: like the other core probes, AppPaths::dataDir() is the probe exe's own build-tree folder, so the
-// everythingbox.ini it reads/writes sits next to the probe and never touches a deployed install. We wipe the
-// "stats" and "profiles" groups at start and SEED profile ids via ProfileStore::setCurrent, so currentId()
-// can't leak a developer's real profile into the asserts.
+// Isolation: AppPaths::dataDir() is this process's own scratch directory (issue #42), so the everythingbox.ini
+// the accumulators open starts empty and is removed at exit. The probe still SEEDS profile ids via
+// ProfileStore::setCurrent -- that is the fixture the per-profile asserts are written against.
 #include "ConsumptionStats.h"
 #include "PlayStats.h"
 #include "ProfileStore.h"
@@ -67,15 +66,6 @@ int main(int argc, char** argv)
     QCoreApplication app(argc, argv);
 
     const QString iniPath = AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile);
-    {
-        QSettings reset(iniPath, QSettings::IniFormat);
-        reset.remove(QStringLiteral("stats"));
-        reset.remove(QStringLiteral("playstats"));
-        reset.remove(QStringLiteral("profiles"));
-        reset.sync();
-    }
-    ConsumptionStats::invalidate();
-
     // This device's accumulator namespace (mdsync T3): every writer targets stats/<profile>/<dev>/... and
     // playstats/<profile>/<dev>/...; the public readers SUM across device namespaces. Fixtures that poke the
     // raw ini must address the device path.
