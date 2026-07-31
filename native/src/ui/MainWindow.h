@@ -230,7 +230,10 @@ private:
     static int hintFromRoute(PlayRoute r) {               // PlayRoute -> hint for playThemedLeaf/MediaItem
         return r == PlayRoute::ForceExternal ? 2 : r == PlayRoute::ForceBuiltin ? 1 : 0; }
     PlayRoute playRouteOverride_ = PlayRoute::Default;
-    bool routePlay(const QString& urlOrPath, PlayRoute explicitRoute = PlayRoute::Default);
+    // True when playback left the app for an external player. `dryRun` runs the identical decision (one-shot
+    // override included) but launches nothing and only REPORTS that it would have — used for a stream whose
+    // proxyHeaders cannot follow it out, so the caller can keep it in-app and explain.
+    bool routePlay(const QString& urlOrPath, PlayRoute explicitRoute = PlayRoute::Default, bool dryRun = false);
 
     // Path-based open helpers: open the file AND record it in the Recent list (the dialog-based
     // openFile/openAudio/openGame/openDocument and the Recent tab both route through these).
@@ -293,10 +296,15 @@ private:
     void ensureEmuPage();    // lazily build the "playing in <emulator>" wait page
     void openEmulatorManager(); // Settings > Emulators: folder + per-emulator install status
     void openStreamPrompt();                    // inline form to paste a stream/URL link
+    // route an http(s) link (or .m3u/.m3u8) to libmpv. `headers` is the source's proxyHeaders and reaches
+    // BOTH the playlist probe (a plain HTTP fetch of the same URL) and the player.
     void openStreamUrl(const QString& url, const QString& resumeKey = QString(),
-                       const QString& title = QString()); // route an http(s) link (or .m3u/.m3u8) to libmpv
+                       const QString& title = QString(), const StreamHeaders::Headers& headers = {});
+    // play a single resolved link via libmpv. Defaulting `headers` to empty is what makes every other caller
+    // (a pasted link, a Recent entry, a queue entry) CLEAR the previous stream's headers rather than inherit
+    // them — see MpvWidget::play.
     void playStream(const QString& url, const QString& resumeKey = QString(),
-                    const QString& title = QString());    // play a single resolved link via libmpv
+                    const QString& title = QString(), const StreamHeaders::Headers& headers = {});
     // Stream an http(s) audiobook/audio link in the now-playing audio view (playlist + transport). Resume +
     // Recent key on resumeKey (the stable item id) since a debrid URL is re-resolved fresh each open.
     void openAudioStream(const QString& url, const QString& resumeKey, const QString& title,
@@ -677,7 +685,8 @@ private:
     // not, unlatches + hides the "Up next…" notice — a dropped callback is the hand-off dying, and nothing else
     // in this file would ever clear either one before the next open.
     bool nextEpHandoffStillOurs(int gen);
-    void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime);
+    void playResolvedEpisode(const QString& imdbStreamId, const QString& url, const QString& mime,
+                             const StreamHeaders::Headers& headers = {});
 
     // Intro/credits skipping. A SEPARATE context from subCtx_ on purpose: subCtx_ is the subtitle system's
     // and is deliberately cleared on the openVideoPath route, whereas segments can still be derived there
@@ -738,6 +747,9 @@ private:
     // playing stream so the picker can hand it to the chosen device.
     class CastManager* castMgr_ = nullptr;
     QString castUrl_, castTitle_, castMime_;
+    // The stream in castUrl_ needs HTTP headers a cast device cannot be given (it fetches the URL itself).
+    // Set alongside castUrl_ on every path that assigns it, so it can never describe a previous stream.
+    bool castHeaderGated_ = false;
     void showCastMenu(QWidget* anchor);           // device picker popup for the cast button
 
     // Trakt.tv scrobbling: mark movies/episodes watched as you play them. scrobbleImdb_ is the id currently

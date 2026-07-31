@@ -100,49 +100,56 @@ bool StreamResolver::looksLikeDiscPlaylist(const QVector<M3uEntry>& entries)
 StreamResolver::StreamResolver(QObject* parent) : QObject(parent) {}
 
 // Read an .m3u/.m3u8 (local file or remote URL), then hand its text to classify() for dispatch.
-void StreamResolver::resolve(const QString& src, const QString& title)
+void StreamResolver::resolve(const QString& src, const QString& title, const StreamHeaders::Headers& headers)
 {
     if (!src.contains(QStringLiteral("://")))
     {
         QFile f(src);
         QString text;
         if (f.open(QIODevice::ReadOnly | QIODevice::Text)) text = QString::fromUtf8(f.readAll());
-        classify(src, text, title.isEmpty() ? QFileInfo(src).completeBaseName() : title);
+        classify(src, text, title.isEmpty() ? QFileInfo(src).completeBaseName() : title, {});
         return;
     }
     if (!nam_) nam_ = new QNetworkAccessManager(this);
     emit status(tr("Loading playlist…"));
-    srLog(QStringLiteral("m3u: GET %1").arg(logSafeUrl(src)));
+    srLog(QStringLiteral("m3u: GET %1%2").arg(logSafeUrl(src),
+          headers.isEmpty() ? QString() : QStringLiteral(" + ") + StreamHeaders::logSummary(headers)));
     QNetworkRequest rq{ QUrl(src) };
     rq.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+    // The source's own proxyHeaders, applied AFTER our default UA so a stream that specifies a User-Agent
+    // replaces it rather than being appended to. Without this the manifest fetch is refused by exactly the
+    // hosts this feature exists for, and the failure looks like a broken playlist rather than a missing header.
+    for (auto it = headers.begin(); it != headers.end(); ++it)
+        rq.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
     rq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(rq);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, src, title] {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, src, title, headers] {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError)
         {
             // Couldn't fetch the manifest text (auth, headers, live-only) - let libmpv try the URL itself.
             srLog(QStringLiteral("m3u: fetch failed (%1) -> player").arg(reply->errorString()));
-            emit playDirect(src, title);
+            emit playDirect(src, title, headers);
             return;
         }
-        classify(src, QString::fromUtf8(reply->readAll()), title);
+        classify(src, QString::fromUtf8(reply->readAll()), title, headers);
     });
 }
 
-void StreamResolver::classify(const QString& src, const QString& text, const QString& title)
+void StreamResolver::classify(const QString& src, const QString& text, const QString& title,
+                              const StreamHeaders::Headers& headers)
 {
     if (isHlsManifest(text))                       // a single adaptive stream: libmpv handles the segments
     {
         srLog(QStringLiteral("m3u: HLS manifest -> player"));
-        emit playDirect(src, title);
+        emit playDirect(src, title, headers);
         return;
     }
     const QVector<M3uEntry> entries = parseM3u(text, src);
     if (entries.isEmpty())                         // not a recognisable list - best effort: play the URL
     {
         srLog(QStringLiteral("m3u: no entries -> player"));
-        emit playDirect(src, title);
+        emit playDirect(src, title, headers);
         return;
     }
     if (looksLikeDiscPlaylist(entries))            // PlayStation multi-disc: the emulator swaps discs itself

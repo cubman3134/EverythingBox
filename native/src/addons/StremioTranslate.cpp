@@ -274,6 +274,7 @@ QVector<StremioTranslate::StreamCandidate> StremioTranslate::parseStreams(const 
         c.bingeGroup  = bh.value(QStringLiteral("bingeGroup")).toString();
         c.notWebReady = bh.value(QStringLiteral("notWebReady")).toBool();
         c.videoSize   = qint64(bh.value(QStringLiteral("videoSize")).toDouble());
+        c.requestHeaders = StreamHeaders::parseProxyHeaders(bh);
         c.seeders     = scrapeSeeders(c.title);
 
         if (!c.isDirect() && !validInfoHash(c.infoHash)) continue;  // nothing playable here

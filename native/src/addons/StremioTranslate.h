@@ -12,6 +12,7 @@
 #include <QString>
 #include <QStringList>
 #include <QVector>
+#include "../core/StreamHeaders.h"
 
 namespace StremioTranslate
 {
@@ -109,6 +110,11 @@ namespace StremioTranslate
         bool    notWebReady = false;
         qint64  videoSize = 0;
         int     seeders = -1;   // scraped out of `title` when present; -1 = unknown
+        // behaviorHints.proxyHeaders.request — the HTTP headers this source's host requires (typically a
+        // Referer and/or a specific User-Agent; direct-HTTP and embed hosts gate their CDNs on them). They
+        // belong to `url` and to nothing else: pass them to StreamHeaders::forPlayUrl with the URL actually
+        // being fetched before using them, so a debrid-resolved substitute cannot inherit them.
+        StreamHeaders::Headers requestHeaders;
 
         bool isDirect() const { return url.startsWith(QStringLiteral("http")); }
     };

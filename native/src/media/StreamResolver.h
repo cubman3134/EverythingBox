@@ -1,4 +1,5 @@
 #pragma once
+#include "../core/StreamHeaders.h"
 #include <QObject>
 #include <QVector>
 
@@ -22,16 +23,22 @@ public:
     static QVector<M3uEntry> parseM3u(const QString& text, const QString& src);
     static bool looksLikeDiscPlaylist(const QVector<M3uEntry>& entries);
 
-    void resolve(const QString& src, const QString& title); // local file or http(s) URL
+    // local file or http(s) URL. `headers` is the source's behaviorHints.proxyHeaders.request: this is a
+    // NON-MPV fetch of the very stream URL, so without them a header-gated playlist/HLS manifest 403s here
+    // and the user sees "couldn't load" on a stream the player itself could have played.
+    void resolve(const QString& src, const QString& title, const StreamHeaders::Headers& headers = {});
 
 signals:
-    void playDirect(const QString& url, const QString& title);   // HLS / unparseable / fetch failed
+    // HLS / unparseable / fetch failed. Carries the headers back out so the player gets the same ones this
+    // fetch used — the manifest and its segments come from the same host and are gated the same way.
+    void playDirect(const QString& url, const QString& title, const StreamHeaders::Headers& headers);
     void playQueue(const QStringList& urls, const QStringList& titles,
                    const QString& recentSrc, const QString& title); // IPTV/media list
     void openDisc(const QString& src, const QString& title);     // PlayStation multi-disc set
     void status(const QString& message);                          // transient progress ("Loading playlist…")
 
 private:
-    void classify(const QString& src, const QString& text, const QString& title); // was handleM3u
+    void classify(const QString& src, const QString& text, const QString& title,
+                  const StreamHeaders::Headers& headers); // was handleM3u
     QNetworkAccessManager* nam_ = nullptr; // lazily created for remote playlists
 };

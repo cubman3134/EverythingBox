@@ -5,6 +5,7 @@
 #include <QString>
 #include <QVector>
 #include "../core/MediaSegments.h"   // MediaSegments::Chapter — declared in core so it needs no libmpv
+#include "../core/StreamHeaders.h"   // per-stream proxyHeaders (QtCore-only, so it costs the probes nothing)
 #include <mpv/client.h>
 #ifdef Q_OS_IOS
 // iOS: OpenGL ES context creation fails in the simulator (and EAGL is deprecated on device), so render
@@ -30,7 +31,10 @@ public:
     explicit MpvWidget(QWidget* parent = nullptr);
     ~MpvWidget() override;
 
-    void play(const QString& url);   // local path or http(s)/stream URL
+    // local path or http(s)/stream URL. `headers` is this stream's behaviorHints.proxyHeaders.request; it is
+    // applied per-load and, being applied unconditionally, CLEARS the previous stream's headers when empty —
+    // callers never have to remember to reset anything (and a caller that passes nothing gets a clean load).
+    void play(const QString& url, const StreamHeaders::Headers& headers = {});
     void stop();
     void setPaused(bool paused);
     bool isPaused() const;   // current mpv "pause" flag (OS-lifecycle pause query)
