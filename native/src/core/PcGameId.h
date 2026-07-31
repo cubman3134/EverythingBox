@@ -6,6 +6,7 @@
 // Pure and QtCore-only (the override store is a small ini map), so probe_pcgames links lean.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace pcgame
@@ -171,6 +172,18 @@ namespace pcgame
     // and reads as "the revert didn't work". The probe must own a fresh file.
     void setIniPathForTesting(const QString& path);
 #endif
+
+    // Order candidates for the "this is the same game as…" picker: the plausible ones first.
+    //
+    // It exists because the picker's honest list is EVERY other entry in the library, and the two spellings
+    // a user is trying to join are similar by definition — an alphabetical wall of four hundred games buries
+    // the one row the whole action is about. Ranked on how many LEADING normalised words the two titles
+    // share, so "Final Fantasy VII Remake" surfaces beside "Final Fantasy VII", then alphabetically, which
+    // makes the order total and therefore stable between two identical libraries.
+    //
+    // It is an ORDERING and never a filter: a user who knows the two titles look nothing alike must still be
+    // able to reach the row, so nothing is dropped. Returns the same titles, reordered.
+    QStringList rankMergeCandidates(const QString& title, const QStringList& others);
 
     // One way to launch a game.
     struct PcGameSource

@@ -330,6 +330,37 @@ int main(int argc, char** argv)
         CHECK(separationTag(QStringLiteral("  PREY (2017) ")) == separationTag(QStringLiteral("Prey (2017)")));
     }
 
+    // ---- 5g. rankMergeCandidates: the picker's order, and what it must NEVER do ------------------
+    // The "this is the same game as…" picker's honest list is every OTHER entry in the library, and the two
+    // spellings being joined are similar by definition — alphabetical order buries the one row the action
+    // is about. This orders; it must not filter, because a user joining two titles that look nothing alike
+    // still has to be able to reach the row.
+    {
+        const QStringList others{ QStringLiteral("Zork"), QStringLiteral("Final Fantasy VII"),
+                                  QStringLiteral("Hades"), QStringLiteral("Final Fantasy X") };
+        const QStringList r = rankMergeCandidates(QStringLiteral("Final Fantasy VII Remake"), others);
+        // NOTHING IS DROPPED. Checked first and by count AND by membership: a build that returned only the
+        // close matches would pass every ordering check below while hiding rows the user needs.
+        CHECK(r.size() == others.size());
+        for (const QString& o : others) CHECK(r.contains(o));
+        // The closest spelling leads.
+        CHECK(r.at(0) == QStringLiteral("Final Fantasy VII"));
+        // More shared leading words beats fewer: "Final Fantasy VII" (3) over "Final Fantasy X" (2).
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy VII")) < r.indexOf(QStringLiteral("Final Fantasy X")));
+        // ...and any shared prefix beats none, whatever the alphabet says ("Hades" and "Zork" share none).
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Hades")));
+        CHECK(r.indexOf(QStringLiteral("Hades")) < r.indexOf(QStringLiteral("Zork")));  // ties: alphabetical
+        // TOTAL order, so an unchanged library gives an unchanged picker: the same set in a different input
+        // order comes back identical.
+        QStringList shuffled; for (int i = others.size() - 1; i >= 0; --i) shuffled << others.at(i);
+        CHECK(rankMergeCandidates(QStringLiteral("Final Fantasy VII Remake"), shuffled) == r);
+        // A title with nothing in common with anything still returns every row, in alphabetical order.
+        const QStringList none = rankMergeCandidates(QStringLiteral("!!!"), others);
+        CHECK(none.size() == others.size());
+        CHECK(none.at(0) == QStringLiteral("Final Fantasy VII"));   // alphabetical, no prefix bonus anywhere
+        CHECK(rankMergeCandidates(QStringLiteral("Hades"), QStringList()).isEmpty());
+    }
+
     // ---- 5c. mergeKey: the igdb id when there is one, else the normalised title -----------------
     {
         CHECK(mergeKey(QStringLiteral("Hades"), QStringLiteral("igdb:7")) == QStringLiteral("igdb:7"));

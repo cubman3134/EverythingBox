@@ -47,6 +47,9 @@ Item {
         if (verb === "play")     return { label: (readable ? "📖  Read" : "▶  Play"), color: "#3FA95E", textColor: "#FFFFFF" }
         if (verb === "source")   return { label: "🔀  Choose source…",                 color: "#EDE4FF", textColor: "#3A2A7A" }
         if (verb === "download") return { label: "⬇  Download",                       color: "#5A8CFF", textColor: "#FFFFFF" }
+        // The PC-game merge override (issue #44) — offered only on a merged PC game, whose identity is a
+        // title heuristic the user may need to overrule ("these are two games" / "these are one").
+        if (verb === "pcfix")    return { label: "⚙  Fix this entry…",                color: "#E7EBF2", textColor: "#33405A" }
         if (verb === "favorite") return { label: (favorited ? "★  Favorited" : "☆  Favorite"),
                                           color: (favorited ? "#E0A92E" : "#FFF1CC"), textColor: (favorited ? "#3A2A00" : "#7A4E00") }
         if (verb === "playlist") return { label: "➕  Playlist",                        color: "#E7EBF2", textColor: "#33405A" }

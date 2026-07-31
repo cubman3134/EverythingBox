@@ -326,6 +326,21 @@ private:
     // three of the four layouts render no widget chrome for a dropdown to live in.
     void showPcLauncherFilterMenu();
 
+public:
+    // THE MERGE OVERRIDE, offered from the entry it is about (issue #44) — split a tile that is two games,
+    // fuse two tiles that are one, or undo a previous verdict. Synchronous (NavMenu::pick / NavConfirm::ask,
+    // the addGameToPlaylistInteractive idiom) so the caller learns whether anything changed; returns true
+    // only when a verdict was written. Nothing is repopulated here — see refreshAfterPcMergeFix.
+    bool fixPcGameEntry(const MediaItem& it);
+    bool fixPcGameEntryAt(int browseIndex);      // the themed detail row, resolved to its item
+    // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
+    // LEFT rather than refreshed in place.
+    void refreshAfterPcMergeFix();
+    // Is this browse row a merged PC game? The themed detail action row asks, to decide whether to offer the
+    // fix verb at all.
+    bool isMergedPcGameAt(int browseIndex) const;
+private:
+
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
     // identifies a catalogue ("addonId|catalogId|catalogType"); currentCategoryKey() maps the current
@@ -475,6 +490,8 @@ private:
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
     QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
+    // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
+    QPushButton* pcFixBtn_ = nullptr;
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.

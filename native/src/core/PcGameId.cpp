@@ -8,6 +8,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QStringList>
+#include <algorithm>
 
 namespace {
 
@@ -384,6 +385,32 @@ QString pcgame::effectiveItemId(const QString& title)
     // unreachable in this branch, which already returned for an empty norm).
     if (canon != norm) return QStringLiteral("pcgame:") + canon;
     return base;
+}
+
+QStringList pcgame::rankMergeCandidates(const QString& title, const QStringList& others)
+{
+    const QStringList mine = normalizeTitle(title).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+    auto sharedPrefix = [&mine](const QString& other) {
+        const QStringList t = normalizeTitle(other).split(QLatin1Char(' '), Qt::SkipEmptyParts);
+        int n = 0;
+        while (n < mine.size() && n < t.size() && mine.at(n) == t.at(n)) ++n;
+        return n;
+    };
+    QVector<QPair<int, QString>> scored;
+    scored.reserve(others.size());
+    for (const QString& o : others) scored.push_back({ sharedPrefix(o), o });
+    // Alphabetical inside a score band, so the order is TOTAL — two entries with the same score would
+    // otherwise sit in whatever order the folder happened to build them in, and the picker would reshuffle
+    // between two runs over an unchanged library.
+    std::stable_sort(scored.begin(), scored.end(),
+                     [](const QPair<int, QString>& a, const QPair<int, QString>& b) {
+                         if (a.first != b.first) return a.first > b.first;   // more shared words first
+                         return QString::compare(a.second, b.second, Qt::CaseInsensitive) < 0;
+                     });
+    QStringList out;
+    out.reserve(scored.size());
+    for (const QPair<int, QString>& p : scored) out << p.second;
+    return out;
 }
 
 QString pcgame::legacyLaunchId(const PcGameSource& s)

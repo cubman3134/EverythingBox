@@ -4707,6 +4707,15 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     }
     else if (verb == QStringLiteral("status")) themedDetailPickStatus();
     else if (verb == QStringLiteral("tags"))   themedDetailEditTags();
+    // The PC-game merge override (issue #44). Unlike every verb above it can DELETE the entry this page is
+    // showing — splitting replaces one tile with one per copy — so a change leaves the page rather than
+    // re-pushing detailData onto an entry that no longer exists.
+    else if (verb == QStringLiteral("pcfix"))
+    {
+        if (!home_->fixPcGameEntryAt(idx)) return;   // Back / Cancel: the page stays exactly as it was
+        if (NavGraph* g = ThemeEngine::navGraph(stack_->currentWidget())) g->back(); // pop the detail level
+        home_->refreshAfterPcMergeFix();
+    }
 }
 
 // The completion-status picker: a controller-navigable NavMenu over the five states, the current one marked
