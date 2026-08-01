@@ -155,6 +155,13 @@ run "meta cache"          META-OK          "$META"
 # offline round-tripping with cached-file-first resolution. Same probe binary as the meta cache.
 run "media-art schema"    ART-OK           "$META"
 
+# Per-item metadata overrides (issue #24): the correction a user makes when the scraper got an item wrong.
+# The record's one canonical spelling (trimmed, omit-empty — so two devices' identical corrections are
+# identical BYTES), the override-beats-scraped composite, that all three MetaCache read primitives run it,
+# that a re-scrape cannot discard it, and that reset restores the scraped values. Same probe binary again.
+# The cross-device half is probe_cloudmerge section 20.
+run "metadata overrides"  OVERRIDE-OK      "$META"
+
 # Addon engine + manager: builtinCredential scoping, catalog cache hit/miss, the prefetcher's in-flight cap,
 # reload-mid-sweep recovery, the TTL/watchdog paths, and the reserved-namespace install guard. Self-contained
 # — it writes its own JsLocal fixtures into a temp EB_ADDONS_ROOT and touches no network. The `--prefetch`

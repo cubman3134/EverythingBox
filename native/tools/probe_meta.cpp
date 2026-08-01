@@ -2,11 +2,18 @@
 // poster/info keep working with no network. Asserts the contract the app relies on — and the one that
 // makes the cache future-proof: merge() must PRESERVE keys it doesn't know about, so new metadata kinds
 // can be added later without a migration. Prints META-OK on success; META-FAIL <what> and exits non-zero.
+//
+// Also covers the per-item OVERRIDE layer (src/core/MetaOverrides, issue #24): the record's single canonical
+// spelling, the override-beats-scraped composite, the fact that all three MetaCache read primitives run it,
+// that a re-scrape cannot discard it, and that reset restores the scraped values. The cross-device merge half
+// of that store lives in probe_cloudmerge §20 — it needs CloudMerge, which this probe does not link.
 #include "AddonModels.h"
 #include "AppPaths.h"
 #include "MetaCache.h"
+#include "MetaOverrides.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -236,6 +243,201 @@ int main(int argc, char** argv)
         MetaCache::setPinnedKeysProvider({});
         for (const QString& k : { kOld, kFav, kNew, kSeen }) MetaCache::remove(k);
         std::printf("EVICT-OK\n");
+    }
+
+    // ================================================================ per-item metadata overrides (issue #24)
+    // The user's correction to a wrong scrape. Two things are being pinned here and they are different: the
+    // pure composite (override beats scraped, field by field, and an unset field changes nothing), and the
+    // fact that MetaCache's three READ primitives all run it — which is what makes one edit visible on the
+    // grid tile, the detail card, the XMB panel and the offline fallback without touching any of them.
+    {
+        const QString ok1 = QStringLiteral("igdb:24000");
+        MetaCache::remove(ok1);
+        MetaOverrides::reset(ok1);   // start from a known-clear state (see below: reset is not a deletion)
+
+        // -- the record's ONE canonical spelling ------------------------------------------------------
+        // Two devices that made the same correction must produce byte-identical records, or CloudMerge's
+        // equal-timestamp tie-break would read incidental whitespace as a content difference and flip one
+        // device onto the other's copy for no reason (the #58 lesson, answered at write time instead).
+        {
+            MetaOverrides::Override padded;
+            padded.title = QStringLiteral("  Bonk's Adventure  ");
+            padded.subtitle = QStringLiteral("\t1990\n");
+            MetaOverrides::Override tight;
+            tight.title = QStringLiteral("Bonk's Adventure");
+            tight.subtitle = QStringLiteral("1990");
+            CHECK(QJsonDocument(MetaOverrides::toJson(padded)).toJson(QJsonDocument::Compact)
+                      == QJsonDocument(MetaOverrides::toJson(tight)).toJson(QJsonDocument::Compact),
+                  "override: incidental whitespace is trimmed at write, so the record has one spelling");
+            // An unset field is ABSENT, never "" — one spelling for "not overridden", so the two can never
+            // be compared as different bytes.
+            CHECK(!MetaOverrides::toJson(tight).contains(QStringLiteral("overview")),
+                  "override: an unset field is absent from the record, not an empty string");
+            CHECK(MetaOverrides::toJson(tight).contains(QStringLiteral("title")),
+                  "override: a set field is present");
+            // The reset husk is a real record (it carries its stamp) that composites as nothing.
+            const QJsonObject husk = MetaOverrides::toJson(MetaOverrides::Override{});
+            CHECK(husk.contains(QStringLiteral("updatedAt")) && husk.size() == 1,
+                  "override: a reset record is a timestamp-only husk");
+            CHECK(MetaOverrides::fromJson(husk).isEmpty(), "override: a husk reads back as no override");
+            // Same key space, same hash scheme as the other per-item stores — not a fifth scheme.
+            CHECK(MetaOverrides::hashKey(ok1)
+                      == QString::fromLatin1(QCryptographicHash::hash(ok1.toUtf8(),
+                                                                      QCryptographicHash::Md5).toHex()),
+                  "override: the item hash is MD5-hex over UTF-8, as ItemMarks uses");
+        }
+
+        // -- the pure composite ------------------------------------------------------------------------
+        {
+            MediaDetail scraped;
+            scraped.title    = QStringLiteral("Bonk 3");        // wrong game
+            scraped.subtitle = QStringLiteral("1993");
+            scraped.overview = QStringLiteral("The wrong synopsis.");
+            scraped.imageUrl = QStringLiteral("https://x.invalid/wrong.jpg");
+            scraped.art.addImage(QStringLiteral("poster"), QStringLiteral("https://x.invalid/wrong.jpg"));
+            scraped.valid = true;
+
+            MetaOverrides::Override ov;
+            ov.title = QStringLiteral("Bonk's Adventure");
+            ov.image = QStringLiteral("https://x.invalid/right.jpg");
+
+            MediaDetail d = scraped;
+            MetaOverrides::applyTo(ov, d);
+            CHECK(d.title == QStringLiteral("Bonk's Adventure"), "composite: an overridden field wins");
+            CHECK(d.subtitle == QStringLiteral("1993"), "composite: an UNSET field leaves the scrape alone");
+            CHECK(d.overview == QStringLiteral("The wrong synopsis."),
+                  "composite: an unset overview leaves the scraped one alone");
+            CHECK(d.imageUrl == QStringLiteral("https://x.invalid/right.jpg"), "composite: the poster is replaced");
+            CHECK(d.art.image(QStringLiteral("poster")) == QStringLiteral("https://x.invalid/right.jpg"),
+                  "composite: the corrected image LEADS the poster role, so selected.poster binds to it");
+            CHECK(d.art.image(QStringLiteral("thumb")) == QStringLiteral("https://x.invalid/right.jpg"),
+                  "composite: …and the thumb role, so the grid tile changes too");
+            CHECK(d.art.images.value(QStringLiteral("poster")).size() == 2,
+                  "composite: the scraped candidate stays behind it (nothing is thrown away)");
+
+            // An empty override changes nothing at all — the identity case a reset relies on.
+            MediaDetail untouched = scraped;
+            MetaOverrides::applyTo(MetaOverrides::Override{}, untouched);
+            CHECK(untouched.title == scraped.title && untouched.imageUrl == scraped.imageUrl
+                      && untouched.art.images.value(QStringLiteral("poster")).size() == 1,
+                  "composite: an empty override is a no-op");
+
+            // A MediaItem composites the same way (the grid row reads these three fields directly).
+            MediaItem row;
+            row.title = QStringLiteral("Bonk 3");
+            row.subtitle = QStringLiteral("1993");
+            row.thumbnailUrl = QStringLiteral("https://x.invalid/wrong.jpg");
+            MetaOverrides::applyTo(ov, row);
+            CHECK(row.title == QStringLiteral("Bonk's Adventure"), "composite: MediaItem title");
+            CHECK(row.subtitle == QStringLiteral("1993"), "composite: MediaItem unset field untouched");
+            CHECK(row.thumbnailUrl == QStringLiteral("https://x.invalid/right.jpg"), "composite: MediaItem thumb");
+
+            // A card with NOTHING scraped but a correction on it is showable — otherwise the one screen
+            // where the user could fix a blank item would keep reporting itself as empty.
+            MediaDetail blank;
+            MetaOverrides::applyTo(ov, blank);
+            CHECK(blank.valid, "composite: a corrected-but-unscraped item becomes a valid card");
+        }
+
+        // -- through MetaCache's read primitives, and ACROSS a re-scrape --------------------------------
+        {
+            MediaItem wrong;
+            wrong.id = ok1;
+            wrong.title = QStringLiteral("Bonk 3");
+            wrong.subtitle = QStringLiteral("1993");
+            wrong.thumbnailUrl = QStringLiteral("https://x.invalid/wrong.jpg");
+            wrong.type = QStringLiteral("game");
+            MetaCache::saveItem(wrong);
+            MediaDetail wd;
+            wd.valid = true;
+            wd.title = QStringLiteral("Bonk 3");
+            wd.subtitle = QStringLiteral("1993");
+            wd.overview = QStringLiteral("The wrong synopsis.");
+            wd.imageUrl = QStringLiteral("https://x.invalid/wrong.jpg");
+            wd.art.addImage(QStringLiteral("poster"), QStringLiteral("https://x.invalid/wrong.jpg"));
+            MetaCache::saveDetail(ok1, wd);
+            // A finished poster download: the WRONG art, cached locally. displayImage would normally serve
+            // this in preference to any url, which is exactly why the correction has to outrank it.
+            MetaCache::storeImage(ok1, QStringLiteral("thumb"), QStringLiteral("https://x.invalid/wrong.png"),
+                                  QStringLiteral("image/png"), QByteArray(64, 'x'));
+            CHECK(!MetaCache::imagePath(ok1, QStringLiteral("thumb")).isEmpty(),
+                  "fixture: the wrong poster really is cached on disk");
+            CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
+                      == MetaCache::imagePath(ok1, QStringLiteral("thumb")),
+                  "fixture: without an override the cached file is what gets served");
+
+            MetaOverrides::Override fix;
+            fix.title = QStringLiteral("Bonk's Adventure");
+            fix.overview = QStringLiteral("The right synopsis.");
+            fix.image = QStringLiteral("https://x.invalid/right.jpg");
+            MetaOverrides::set(ok1, fix);
+
+            MediaDetail got = MetaCache::cachedDetail(ok1);
+            CHECK(got.title == QStringLiteral("Bonk's Adventure"), "cachedDetail composites the correction");
+            CHECK(got.overview == QStringLiteral("The right synopsis."), "cachedDetail composites the overview");
+            CHECK(got.subtitle == QStringLiteral("1993"), "cachedDetail leaves an uncorrected field scraped");
+            CHECK(got.imageUrl == QStringLiteral("https://x.invalid/right.jpg"),
+                  "cachedDetail: the correction outranks the locally cached poster");
+            CHECK(MetaCache::loadArt(ok1).image(QStringLiteral("poster"))
+                      == QStringLiteral("https://x.invalid/right.jpg"),
+                  "loadArt composites the correction ahead of the cached file");
+            CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
+                      == QStringLiteral("https://x.invalid/right.jpg"),
+                  "displayImage: the correction outranks the cached WRONG file (grid tiles change too)");
+
+            // THE POINT OF THE FEATURE: the scraper runs again and writes the wrong data back. The
+            // correction must still win — an override a refresh silently discards is worse than none,
+            // because the user is never told it happened.
+            MetaCache::saveItem(wrong);
+            MetaCache::saveDetail(ok1, wd);
+            MediaDetail after = MetaCache::cachedDetail(ok1);
+            CHECK(after.title == QStringLiteral("Bonk's Adventure"), "a re-scrape does NOT discard the correction");
+            CHECK(after.imageUrl == QStringLiteral("https://x.invalid/right.jpg"),
+                  "a re-scrape does NOT discard the corrected artwork");
+            CHECK(MetaCache::load(ok1).value(QStringLiteral("detail")).toObject()
+                      .value(QStringLiteral("title")).toString() == QStringLiteral("Bonk 3"),
+                  "the scraped value is still stored underneath, unedited — which is what reset restores");
+
+            // …and clearing ONE field falls back to the scrape for that field only.
+            MetaOverrides::Override partial = MetaOverrides::get(ok1);
+            partial.overview.clear();
+            MetaOverrides::set(ok1, partial);
+            MediaDetail mixed = MetaCache::cachedDetail(ok1);
+            CHECK(mixed.overview == QStringLiteral("The wrong synopsis."),
+                  "clearing one field restores the scrape for that field only");
+            CHECK(mixed.title == QStringLiteral("Bonk's Adventure"), "…and leaves the others corrected");
+
+            // -- reset to scraped ----------------------------------------------------------------------
+            MetaOverrides::reset(ok1);
+            MediaDetail back = MetaCache::cachedDetail(ok1);
+            CHECK(back.title == QStringLiteral("Bonk 3"), "reset restores the scraped title");
+            CHECK(back.overview == QStringLiteral("The wrong synopsis."), "reset restores the scraped overview");
+            CHECK(back.imageUrl == MetaCache::imagePath(ok1, QStringLiteral("thumb")),
+                  "reset restores the cached scraped artwork");
+            CHECK(!MetaOverrides::has(ok1), "reset leaves nothing overridden");
+            MetaCache::remove(ok1);
+        }
+
+        // -- clearAll: the settings-side escape hatch ----------------------------------------------------
+        {
+            const QString a = QStringLiteral("clear:a"), b = QStringLiteral("clear:b");
+            MetaOverrides::Override ov; ov.title = QStringLiteral("x");
+            MetaOverrides::set(a, ov);
+            MetaOverrides::set(b, ov);
+            CHECK(MetaOverrides::count() == 2, "count reports the items carrying a correction");
+            MetaOverrides::clearAll();
+            CHECK(MetaOverrides::count() == 0, "clearAll resets every corrected item");
+            CHECK(!MetaOverrides::has(a) && !MetaOverrides::has(b), "clearAll: nothing is left overridden");
+        }
+
+        // An empty key is a safe no-op on every entry point (same contract as the other per-item stores).
+        MetaOverrides::Override any; any.title = QStringLiteral("nope");
+        MetaOverrides::set(QString(), any);
+        MetaOverrides::reset(QString());
+        CHECK(!MetaOverrides::has(QString()), "an item with no identity can carry no override");
+        CHECK(MetaOverrides::count() == 0, "…and storing under an empty key writes nothing");
+
+        std::printf("OVERRIDE-OK\n");
     }
 
     // ---------------------------------------------------------------- items without a stable identity
