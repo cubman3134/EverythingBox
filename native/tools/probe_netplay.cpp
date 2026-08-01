@@ -27,8 +27,11 @@ int main(int argc, char** argv)
     QObject::connect(&host, &NetplaySession::ended, [](const QString& r) { printf("[host] ENDED: %s\n", qUtf8Printable(r)); });
     QObject::connect(&join, &NetplaySession::ended, [](const QString& r) { printf("[join] ENDED: %s\n", qUtf8Printable(r)); });
 
-    host.hostViaRelay(QStringLiteral("127.0.0.1"), relayPort, QStringLiteral("TESTROOM"));
-    QTimer::singleShot(500, [&] { join.joinViaRelay(QStringLiteral("127.0.0.1"), relayPort, QStringLiteral("TESTROOM")); });
+    // Room code carries the pid: a fixed one lets two concurrent runs sharing a relay pair with EACH OTHER
+    // (identical gameId/core/state, so the handshake succeeds) and mis-report the result.
+    const QString room = QStringLiteral("TESTROOM%1").arg(QCoreApplication::applicationPid());
+    host.hostViaRelay(QStringLiteral("127.0.0.1"), relayPort, room);
+    QTimer::singleShot(500, [&] { join.joinViaRelay(QStringLiteral("127.0.0.1"), relayPort, room); });
 
     QTimer::singleShot(3000, [&] {
         host.sendLocalInput(0, 0x1234);  // host -> joiner input packet, over the relay pipe

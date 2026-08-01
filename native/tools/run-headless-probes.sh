@@ -7,6 +7,8 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:silent  — the direct endpoint accepts and then never handshakes (a stale port forward); the
+#     / both:dropped         joiner must still reach the host over the relay instead of hanging or ending.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
@@ -20,7 +22,7 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-55677}"
+RELAY_PORT="${RELAY_PORT:-0}"   # 0 = OS-assigned; see the relay startup below for why not a fixed port
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -155,12 +157,20 @@ run() { # <name> <sentinel> <exe> [args...]
   echo
 }
 
-# Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
+# Bring up the relay both netplay tests rendezvous through. Port 0 by default: two suites running at once (two
+# worktrees, a developer alongside CI) must not fight over one port — the loser's relay never binds, and its
+# netplay probes then rendezvous through the WINNER's relay and pair with the wrong process. The log is
+# per-run for the same reason. RELAY_PORT= still pins a port for hand-debugging.
+RELAY_LOG="$(mktemp)"
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; rm -f "$RELAY_LOG"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
+for _ in $(seq 1 40); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"
+# The relay reports the port it actually bound; everything downstream uses that, never the requested one.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" | head -1)"
+[ -n "$RELAY_PORT" ] || { echo "FATAL: netplay relay did not start"; cat "$RELAY_LOG"; exit 2; }
+echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
@@ -223,6 +233,11 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The two ways a direct endpoint can accept a connection and still be a dead end — a stale port forward that
+# outlived its app, and an EB host that already paired with somebody else. Both used to strand the joiner,
+# because the fallback was keyed on the TCP connect rather than on the handshake completing.
+run "netplay both:silent"  NETPLAY-BOTH-OK "$BOTH" silent  "$RELAY_PORT"
+run "netplay both:dropped" NETPLAY-BOTH-OK "$BOTH" dropped "$RELAY_PORT"
 
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.
