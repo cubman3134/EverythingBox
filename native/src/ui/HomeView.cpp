@@ -5197,8 +5197,18 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     // themed browse model (browseItems reads items_), AND search: both live in-catalog search and the cross-
     // addon "search everything" ride populate() (SearchAggregator::resultsAppended -> populate). Synthetic
     // folder/open rows were pushed above (not via cat.items) and are never marks-bearing, so they're untouched.
-    for (const MediaItem& it : cat.items)
-        if (!isHiddenItem(it)) items_.push_back(it);
+    for (const MediaItem& src : cat.items)
+    {
+        if (isHiddenItem(src)) continue;
+        // Composite the user's correction to a wrong scrape (issue #24) ONCE, on the way in, so every surface
+        // items_ feeds — the poster grid, the carousel, the XMB, the themed browse model, search results, and
+        // the detail card that opens from any of them — shows the fix without each of them knowing about it.
+        // Only display fields move: keyFor() reads id/url, so the item's identity (and its own override) is
+        // untouched, and the correction cannot follow the wrong item on a later pass.
+        MediaItem it = src;
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), it);
+        items_.push_back(it);
+    }
 
     for (int i = from; i < items_.size(); ++i)
     {
