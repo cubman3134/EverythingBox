@@ -110,7 +110,12 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         // first also makes a second Enter (or a Back arriving after a pick) a no-op, so the caller's continuation
         // cannot run twice off one presentation.
         onPicked_ = nullptr; onBack_ = nullptr;
-        fn(folder);
+        // DEFER PAST THE EMISSION (#165). The disarm above stays synchronous — a second Enter must be a no-op
+        // immediately — but the dispatch does not: `fn` re-presents or tears down THIS surface (openAppearance,
+        // openHome -> showThemedHome's removeWidget + deleteLater), and it runs from ThemePicker.qml's row
+        // delegate, whose emission is on the stack. `folder` is a stable name, not a row index, so it survives
+        // the turn (the deferral rule's caller obligation).
+        deferPastQmlEmission([fn, folder] { fn(folder); });
     });
     // No levels are pushed by this host, so every Back bottoms out here: the caller owns what leaving means
     // (Appearance returns to the panel; the forced first-run step wires a quit-confirm or accepts the default).
@@ -118,8 +123,16 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         const std::function<void()> fn = onBack_;
         if (!fn) return;
         onPicked_ = nullptr; onBack_ = nullptr;   // same disarm-before-dispatch rule as the pick path above
-        fn();
+        // Same deferral as the pick path, and this one is the sharper case: the startup Back runs
+        // quitConfirmFromStartup(), i.e. NavConfirm::ask — a nested event loop directly on the QML emission.
+        deferPastQmlEmission([fn] { fn(); });
     });
+}
+
+// See the declaration in ThemePickerHost.h, and MainWindow::deferPastQmlEmission for the full rule (#28).
+void ThemePickerHost::deferPastQmlEmission(std::function<void()> work)
+{
+    QMetaObject::invokeMethod(this, std::move(work), Qt::QueuedConnection);
 }
 
 QWidget* ThemePickerHost::quickWidget() const { return view_; }
@@ -225,6 +238,22 @@ QVariantList ThemePickerHost::previewItems()
     return items;
 }
 
+// RUNS ON THE QML DELEGATE'S EMISSION STACK, DELIBERATELY UNDEFERRED (#165). The selectionChanged relay in the
+// constructor lands here, and its production emitters are all QML: ThemePicker.qml's row delegate (onClicked ->
+// g.select) and the root Keys handler (g.move). So a full theme instantiation — buildView's whole QQuickWidget,
+// arbitrary community QML, the theme's QSoundEffects, any MpvPreview — plus the outgoing preview's deleteLater
+// all run with a live ListView delegate's own emission below them. That is the #165 shape, and it is SAFE here
+// for two reasons, both of which a future edit must preserve:
+//
+//   * NO NESTED LOOP on any path out of this function. setSource is synchronous but loop-free, and nothing
+//     theme2 reaches from here spins a QEventLoop / processEvents / QFileDialog / NavConfirm / Osk. A nested
+//     loop is what turns a live emission into the #28 crash: it flushes the process's pending DeferredDeletes
+//     into the middle of QQuickRepeater::clear(). If you ever need one here, defer the work instead.
+//   * The scene retired below is a SIBLING, not the emitter. preview_ is a separate QQuickWidget overlaid on
+//     view_; deleteLater on a scene that is NOT the one dispatching is the survivable half of #28.
+//
+// Deferring this defensively would cost a whole event-loop turn of stale preview on every cursor step, so the
+// deferral stops at the two caller dispatches in the constructor. Keep it that way by keeping the loop out.
 void ThemePickerHost::rebuildPreview()
 {
     const int idx = (graph_ && graph_->zone() == QStringLiteral("themeRows")) ? graph_->index() : 0;

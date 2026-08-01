@@ -7,6 +7,8 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:silent  — the direct endpoint accepts and then never handshakes (a stale port forward); the
+#     / both:dropped         joiner must still reach the host over the relay instead of hanging or ending.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
@@ -20,7 +22,7 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-55677}"
+RELAY_PORT="${RELAY_PORT:-0}"   # 0 = OS-assigned; see the relay startup below for why not a fixed port
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -155,12 +157,20 @@ run() { # <name> <sentinel> <exe> [args...]
   echo
 }
 
-# Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
+# Bring up the relay both netplay tests rendezvous through. Port 0 by default: two suites running at once (two
+# worktrees, a developer alongside CI) must not fight over one port — the loser's relay never binds, and its
+# netplay probes then rendezvous through the WINNER's relay and pair with the wrong process. The log is
+# per-run for the same reason. RELAY_PORT= still pins a port for hand-debugging.
+RELAY_LOG="$(mktemp)"
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; rm -f "$RELAY_LOG"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
+for _ in $(seq 1 40); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"
+# The relay reports the port it actually bound; everything downstream uses that, never the requested one.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" | head -1)"
+[ -n "$RELAY_PORT" ] || { echo "FATAL: netplay relay did not start"; cat "$RELAY_LOG"; exit 2; }
+echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
@@ -223,6 +233,11 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The two ways a direct endpoint can accept a connection and still be a dead end — a stale port forward that
+# outlived its app, and an EB host that already paired with somebody else. Both used to strand the joiner,
+# because the fallback was keyed on the TCP connect rather than on the handshake completing.
+run "netplay both:silent"  NETPLAY-BOTH-OK "$BOTH" silent  "$RELAY_PORT"
+run "netplay both:dropped" NETPLAY-BOTH-OK "$BOTH" dropped "$RELAY_PORT"
 
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.
@@ -590,8 +605,167 @@ else
     [ -n "$td_undeferred" ] && td_note "createPlaylistInteractive is called without a queued invoke: $(printf '%s' "$td_undeferred" | tr '\n' ' ')"
   fi
 
+  # 8. THE THEME2 HOSTS (issue #165). MainWindow's handlers above are one half of the surface; the other half is
+  #    the host classes that own their own QQuickWidget and dispatch a CALLER's std::function from a NavGraph
+  #    signal. ThemedPanelHost::onGraphActivated and ThemePickerHost's two lambdas are DIRECT connections from
+  #    NavGraph::activated / rootBack, and every production emitter of those is QML — SettingsPanel.qml's row
+  #    delegate + header MouseAreas and root Keys handler, ThemePicker.qml's row delegate and root Keys handler.
+  #    A caller handler dispatched from there runs on a live delegate's emission, and the shipped ones reach
+  #    nested loops (the Emulators/Add-ons QFileDialogs, confirmRemoveAddon's NavConfirm, the startup Back's
+  #    quit-confirm) — plus the panel host runs two loops of its OWN in the TextField editor. probe_navqml §18(k)
+  #    pins the dispatch deferral as BEHAVIOUR for the panel host (it links headlessly); what is held here is the
+  #    part no probe can drive: the TextField editor's own nested loops, and the picker host, which needs a real
+  #    themes directory to present at all.
+  TPHCPP="$HERE/../src/theme2/ThemedPanelHost.cpp"
+  TPKCPP="$HERE/../src/theme2/ThemePickerHost.cpp"
+  # Wider than td_loops: these two files also spin loops the nav kit does not own (the mobile inline edit's raw
+  # QEventLoop, and the QFileDialog a caller opens).
+  td_hostloops="$td_loops|QEventLoop|QFileDialog::"
+  if [ ! -f "$TPHCPP" ] || [ ! -f "$TPKCPP" ]; then
+    td_note "ThemedPanelHost.cpp or ThemePickerHost.cpp not found under $HERE/../src/theme2 — moved? This gate is now asserting nothing about the theme2 hosts."
+  else
+    tph_src="$(sed -E 's://.*$::' "$TPHCPP")"
+    tpk_src="$(sed -E 's://.*$::' "$TPKCPP")"
+
+    # 8a. Each host's own deferral helper must actually defer (the MainWindow check above, per host). Written out
+    #     twice rather than looped: a `for` over "name:$src" pairs word-splits the embedded file on its newlines.
+    td_hd="$(td_body 'void ThemedPanelHost::deferPastQmlEmission(' "$tph_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemedPanelHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemedPanelHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+    td_hd="$(td_body 'void ThemePickerHost::deferPastQmlEmission(' "$tpk_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemePickerHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemePickerHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+
+    # 8b. ThemedPanelHost::onGraphActivated — the panel host's dispatch boundary. FOUR row kinds dispatch from it
+    #     (Action/Progress, Toggle, Choice, TextField) and every one must hand off through the helper; and no
+    #     blocking loop may sit on its own body, because its own body IS the QML emission's stack.
+    td_oga="$(td_body 'void ThemedPanelHost::onGraphActivated(' "$tph_src")"
+    if [ -z "$td_oga" ]; then
+      td_note "ThemedPanelHost::onGraphActivated not found — signature changed? This gate is now asserting nothing about the panel host's dispatch."
+    else
+      td_hit="$(printf '%s' "$td_oga" | grep -nE "$td_hostloops" || true)"
+      [ -n "$td_hit" ] && td_note "ThemedPanelHost::onGraphActivated spins a nested event loop on the QML delegate's own stack: $(printf '%s' "$td_hit" | tr '\n' ' ')"
+      td_n="$(printf '%s\n' "$td_oga" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 4 ] \
+        || td_note "ThemedPanelHost::onGraphActivated has $td_n deferPastQmlEmission call(s); Action/Progress, Toggle, Choice and TextField each need one."
+    fi
+    # ...and the deferred TextField half must still be where the LOOPS live. Without this, inlining
+    # runTextFieldEdit back into the switch leaves the count above satisfied by a deferral to nothing — the
+    # "this gate is now asserting nothing" failure mode, same as runThemedBrowseFilterNow above.
+    td_tfe="$(td_body 'void ThemedPanelHost::runTextFieldEdit(' "$tph_src")"
+    if [ -z "$td_tfe" ]; then
+      td_note "ThemedPanelHost::runTextFieldEdit not found — renamed or inlined? The TextField deferral is then deferring to nothing and this gate is asserting nothing about where the OSK runs."
+    else
+      td_tfe_loops="$(printf '%s\n' "$td_tfe" | grep -cE "$td_hostloops" || true)"
+      [ "$td_tfe_loops" != "0" ] \
+        || td_note "ThemedPanelHost::runTextFieldEdit contains no blocking editor: the OSK / inline-edit loop has moved somewhere this gate cannot see."
+    fi
+
+    # 8c. ThemedPanelHost::onLevelPopped — the ROOT onBack. It leaves the host (a QQuickWidget retirement) or
+    #     opens a quit-confirm, from a nav.back() emission, so it defers; the in-host sub-panel pop above it must
+    #     NOT (probe_navqml §18(k)(v) holds that converse). A bare `gone.onBack()` is the pre-#165 shape.
+    td_olp="$(td_body 'void ThemedPanelHost::onLevelPopped(' "$tph_src")"
+    if [ -z "$td_olp" ]; then
+      td_note "ThemedPanelHost::onLevelPopped not found — signature changed? This gate is now asserting nothing about the root onBack."
+    else
+      printf '%s' "$td_olp" | grep -q 'deferPastQmlEmission' \
+        || td_note "ThemedPanelHost::onLevelPopped does not defer: the root onBack tears down this host's QQuickWidget from inside its own scene's emission again."
+      td_bare="$(printf '%s' "$td_olp" | grep -nE '(^|[^.[:alnum:]_])gone\.onBack\(\)' || true)"
+      [ -n "$td_bare" ] && td_note "ThemedPanelHost::onLevelPopped calls gone.onBack() directly: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+
+    # 8d. ThemePickerHost — both caller dispatches (the row pick, and rootBack, whose startup form is the
+    #     NavConfirm quit prompt) live in the constructor's connect lambdas. They must go through the helper, and
+    #     the bare `fn(folder);` / `fn();` shape they replaced must not come back.
+    td_tpk="$(td_body 'ThemePickerHost::ThemePickerHost(' "$tpk_src")"
+    if [ -z "$td_tpk" ]; then
+      td_note "ThemePickerHost's constructor not found — signature changed? This gate is now asserting nothing about the picker's dispatch."
+    else
+      td_n="$(printf '%s\n' "$td_tpk" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 2 ] \
+        || td_note "ThemePickerHost's constructor has $td_n deferPastQmlEmission call(s); the pick dispatch and the rootBack dispatch each need one."
+      td_bare="$(printf '%s' "$td_tpk" | grep -nE '^[[:space:]]*fn\((folder)?\);' || true)"
+      [ -n "$td_bare" ] && td_note "ThemePickerHost dispatches a caller callback directly on the QML emission's stack: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+  fi
+
   if [ "$td_fail" -eq 0 ]; then echo "PASS: themed handler deferral"; else
     echo "FAIL: themed handler deferral (a themed handler runs a nested event loop on a live QML delegate's stack)"; fail=1
+  fi
+fi
+echo
+
+# Panel-dialog lifetime gate (issue #122). Same standing as the gate above, and for the same reason: MainWindow
+# links into no probe, so this rule cannot be asserted as behaviour anywhere. It is held as source shape.
+#
+# THE DEFECT, from the preserved dump. showPanel replaces the panel's content with
+# `panelScroll_->setWidget(content)`, which deletes the PREVIOUS content widget synchronously. A dialog put
+# there by showDialogPanel is a CHILD of that content, so the call destroys it — while panelDialog_ still names
+# it. The next statement, `stack_->setCurrentWidget(panelPage_)`, emits QStackedWidget::currentChanged, whose
+# slot is updateNavForPage(), which runs `panelDialog_ && panelDialog_->inherits("ControllerRemapDialog")`: a
+# virtual dispatch through a dead object. In the dump that is Qt6Core!QObject::inherits+0x7 reading [rax+8]
+# with rax = 1 (the freed block's first qword, where the vptr used to be), one frame under
+# MainWindow::updateNavForPage. The classic-mode path that reaches it is ordinary: the startup profile picker
+# is a showDialogPanel, openHome() leaves the panel page without clearing anything, and the first Settings
+# panel after that is the showPanel that frees the picker out from under the pointer.
+#
+# THE RULE, in two independent halves:
+#   a. panelDialog_ is a QPointer, so it nulls itself when the dialog dies, by any route.
+#   b. showPanel clears it BEFORE the setWidget that does the destroying, so the window never opens.
+# Either alone closes #122. Both are held, because (a) covers destruction routes (b) cannot see, and (b) keeps
+# the order right for a reader who has not noticed (a).
+#
+# What this gate CANNOT see: whether some future code path stores a third alias to the hosted dialog and
+# outlives it that way. That stays a review obligation, written on panelDialog_'s declaration.
+echo "=== panel dialog lifetime ==="
+PDL_CPP="$HERE/../src/ui/MainWindow.cpp"
+PDL_H="$HERE/../src/ui/MainWindow.h"
+pdl_fail=0
+pdl_note() { echo "  $1"; pdl_fail=1; }
+if [ ! -f "$PDL_CPP" ] || [ ! -f "$PDL_H" ]; then
+  echo "FAIL: panel dialog lifetime (MainWindow.cpp or MainWindow.h not found under $HERE/../src/ui)"; fail=1
+else
+  # Comments stripped first and CRs dropped: the declaration and showPanel both carry comment blocks that quote
+  # the very tokens matched below (this repo is CRLF, so a `$`-anchored pattern on a raw line matches nothing).
+  pdl_hsrc="$(sed -E 's://.*$::' "$PDL_H" | tr -d '\r')"
+  pdl_csrc="$(sed -E 's://.*$::' "$PDL_CPP" | tr -d '\r')"
+
+  # a. The declaration. A raw QWidget* here is freed-but-non-null for as long as it takes the currentChanged
+  #    slot to type-test it.
+  printf '%s\n' "$pdl_hsrc" \
+    | grep -qE '^[[:space:]]*QPointer<[[:space:]]*QWidget[[:space:]]*>[[:space:]]+panelDialog_' \
+    || pdl_note "panelDialog_ is not declared 'QPointer<QWidget> panelDialog_' in MainWindow.h: a raw pointer to a panel-hosted dialog outlives the dialog, and updateNavForPage() dereferences it (#122)."
+
+  # b. The ordering inside showPanel. Body = the definition line through the column-0 brace that closes it.
+  pdl_body="$(printf '%s\n' "$pdl_csrc" | awk '
+    !on && index($0, "void MainWindow::showPanel(") { on = 1 }
+    on           { print }
+    on && /^\}/  { exit }')"
+  if [ -z "$pdl_body" ]; then
+    pdl_note "MainWindow::showPanel not found — signature changed? This gate is now asserting nothing about the clear/destroy order."
+  else
+    # Line numbers WITHIN the extracted body, so an edit elsewhere in the file cannot move them.
+    pdl_clear="$(printf '%s\n' "$pdl_body" | grep -n 'panelDialog_[[:space:]]*=[[:space:]]*nullptr' | head -1 | cut -d: -f1)"
+    pdl_set="$(printf '%s\n' "$pdl_body" | grep -n 'panelScroll_->setWidget(' | head -1 | cut -d: -f1)"
+    if [ -z "$pdl_clear" ]; then
+      pdl_note "showPanel no longer clears panelDialog_: a plain panel would inherit the previous panel's dialog for its nav ring, and the pointer would outlive the object it names."
+    elif [ -z "$pdl_set" ]; then
+      pdl_note "showPanel no longer calls panelScroll_->setWidget( — the content-replacement point this gate orders against has moved, and the ordering half is asserting nothing."
+    elif [ "$pdl_clear" -gt "$pdl_set" ]; then
+      pdl_note "showPanel clears panelDialog_ (body line $pdl_clear) AFTER panelScroll_->setWidget (body line $pdl_set): setWidget destroys the hosted dialog, so the pointer dangles across the setCurrentWidget that follows — and that emits currentChanged into updateNavForPage(). That is #122."
+    fi
+  fi
+
+  if [ "$pdl_fail" -eq 0 ]; then echo "PASS: panel dialog lifetime"; else
+    echo "FAIL: panel dialog lifetime (a panel-hosted dialog can be type-tested after it is destroyed)"; fail=1
   fi
 fi
 echo
