@@ -410,11 +410,20 @@ int main(int argc, char** argv)
         const qint64 kCapCeilMs = NetplaySession::kDirectGreetingTimeoutMs / 2;
         const bool silentOk = !directMode || (silentDropped && silentDropMs >= kSilentFloorMs && silentDropMs <= kSilentCeilMs);
         const bool floodOk = !directMode || (floodDropped && floodDropMs <= kCapCeilMs);
+        // Three of these fields are direct-mode only, and they are printed "n/a" everywhere else. Printing the
+        // 1 that `!directMode ||` produces would report a pass for a measurement no other mode takes — which is
+        // the exact shape of the defect these assertions were added to fix.
+        char silentF[48], floodF[48];
+        if (directMode)
+        {
+            snprintf(silentF, sizeof silentF, "%d(at %lldms)", int(silentOk), static_cast<long long>(silentDropMs));
+            snprintf(floodF, sizeof floodF, "%d(at %lldms)", int(floodOk), static_cast<long long>(floodDropMs));
+        }
+        else { snprintf(silentF, sizeof silentF, "n/a"); snprintf(floodF, sizeof floodF, "n/a"); }
         printf("mode=%s hostStarted=%d joinStarted=%d stateSynced=%d input=%d(0x%04x) strangerRejected=%d "
-               "silentDropped=%d(at %lldms) floodDropped=%d(at %lldms) survivedGreetingDeadline=%d\n",
+               "silentDropped=%s floodDropped=%s survivedGreetingDeadline=%s\n",
                qUtf8Printable(mode), hostStarted, joinStarted, int(stateGot == stateSent), int(gotInput), rb,
-               int(wrongRoomDropped), int(silentOk), static_cast<long long>(silentDropMs),
-               int(floodOk), static_cast<long long>(floodDropMs), int(gotLate));
+               int(wrongRoomDropped), silentF, floodF, directMode ? (gotLate ? "1" : "0") : "n/a");
         if (directMode && !silentOk)
             printf("  a peer that never announced itself was expected to be hung up on between %lldms and "
                    "%lldms after it connected (the greeting deadline is %dms)\n",
