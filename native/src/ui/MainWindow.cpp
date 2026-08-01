@@ -5623,13 +5623,15 @@ void MainWindow::openAppearance()
         row->addWidget(previewBox, 1);
         v->addLayout(row, 1);
 
-        // How to get more themes and share your own (the community theme registry on GitHub).
+        // Getting more themes: the gallery is the way in, the GitHub link is how you contribute one (and
+        // the fallback for a registry the gallery can't install from). Before this, the hand-copy was the
+        // ONLY documented route, which is not performable on a TV box with no browser and no file manager.
         auto* share = new QLabel(tr(
             "<b>Get more themes &amp; share yours.</b> "
-            "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>. "
-            "Browse and download community themes, or upload your own, at "
+            "Browse the community registry below, or at "
             "<a href=\"https://github.com/cubman3134/everythingbox-themes\">github.com/cubman3134/everythingbox-themes</a>. "
-            "To <b>add</b> a theme, drop its folder into the directory above and pick it here. "
+            "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>, so you can also "
+            "add one by dropping its folder in there. "
             "To <b>share</b> yours, add the folder under <code>themes2/</code> in that repo with an "
             "<code>index.json</code> entry and open a pull request (see <code>THEME_FORMAT.md</code> for the format).")
             .arg(ThemeEngine::themesRoot()));
@@ -5638,6 +5640,23 @@ void MainWindow::openAppearance()
         share->setOpenExternalLinks(true); // the GitHub link opens in the browser
         share->setStyleSheet(QStringLiteral("margin-top:12px;"));
         v->addWidget(share);
+
+        // The in-app gallery. Hosted INLINE via showDialogPanel (it sets Qt::Widget), never as a top-level
+        // window — this panel lives inside panelRing_ and a real dialog would be unreachable with a D-pad.
+        // Same hosting LibraryView::browseAddons uses for the add-on browser.
+        auto* browse = new QPushButton(tr("Browse community themes…"));
+        browse->setMinimumHeight(40);
+        connect(browse, &QPushButton::clicked, this, [this] {
+            auto* dlg = new RegistryBrowser(RegistryBrowser::Themes, nullptr, this);
+            showDialogPanel(tr("Browse Themes"), dlg, [this](int) {
+                // Re-render Appearance EITHER WAY, install or not. availableThemes() reads the directory
+                // live, so a newly installed theme is in the list as soon as the panel is rebuilt. And it
+                // must be unconditional: the browser's own Close button only HIDES the inline dialog, so a
+                // "did you install?" guard here would strand a user who just looked on an empty panel.
+                openAppearance();
+            }, [this] { openAppearance(); });
+        });
+        v->addWidget(browse);
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
