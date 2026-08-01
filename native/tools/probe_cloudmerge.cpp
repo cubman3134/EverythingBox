@@ -924,6 +924,11 @@ int main(int argc, char** argv)
         CHECK(owed(clean) == false);
         CHECK(gaveUp(clean) == false);
         CHECK(due(clean, /*signedIn*/true,  /*manual*/false, t0) == Due::Nothing);   // nothing owed -> no traffic
+        // Signed out AND clean. Kept knowing it is INERT under single-mutation testing — two independent
+        // guards each answer Nothing here, so breaking either one leaves it green, and it is the one
+        // assertion in §19-22 that no mutation kills. It stays as the composite tripwire for the day both
+        // guards move at once; the two dimensions it composes are each pinned on their own (line 926 for
+        // "nothing owed", lines 932-933 for "signed out").
         CHECK(due(clean, /*signedIn*/false, /*manual*/false, t0) == Due::Nothing);
 
         State one; one.attempts = 1; one.lastAttemptMs = t0; one.failure = Failure::Offline;
@@ -1037,13 +1042,18 @@ int main(int argc, char** argv)
 
         // Credential-shaped rows, seeded with sentinels so the assertions below can prove no VALUE was copied
         // anywhere near the pending record. These are fake strings, not credentials.
-        const QString sentinelA = QStringLiteral("SENTINEL-ACCESS-0000");
-        const QString sentinelB = QStringLiteral("SENTINEL-RATOKEN-0000");
+        //
+        // The tripwire looks for the shared MARKER, not for the seeded values, and that distinction is the
+        // whole assertion: (a) below ROTATES both tokens, so by the time the record is written the live value
+        // is not the one seeded here — a check against the seeded strings would sail past a leak of the
+        // current token and prove nothing. Verified by mutation: appending the live trakt/access to the
+        // persisted failure word is caught only by the marker form.
+        const QString marker = QStringLiteral("SENTINEL");
         {
             QSettings raw(iniPath, QSettings::IniFormat);
-            raw.setValue(QStringLiteral("trakt/access"), sentinelA);
-            raw.setValue(QStringLiteral("trakt/refresh"), sentinelA);
-            raw.setValue(QStringLiteral("ra/token"), sentinelB);
+            raw.setValue(QStringLiteral("trakt/access"), marker + QStringLiteral("-ACCESS-0000"));
+            raw.setValue(QStringLiteral("trakt/refresh"), marker + QStringLiteral("-REFRESH-0000"));
+            raw.setValue(QStringLiteral("ra/token"), marker + QStringLiteral("-RATOKEN-0000"));
             raw.sync();
         }
 
@@ -1056,8 +1066,8 @@ int main(int argc, char** argv)
         SettingsTxn::begin();
         {
             QSettings raw(iniPath, QSettings::IniFormat);
-            raw.setValue(QStringLiteral("trakt/access"), QStringLiteral("SENTINEL-ACCESS-ROTATED"));
-            raw.setValue(QStringLiteral("ra/token"), QStringLiteral("SENTINEL-RATOKEN-ROTATED"));
+            raw.setValue(QStringLiteral("trakt/access"), marker + QStringLiteral("-ACCESS-ROTATED"));
+            raw.setValue(QStringLiteral("ra/token"), marker + QStringLiteral("-RATOKEN-ROTATED"));
             raw.sync();
         }
         CHECK(SettingsTxn::dirtyCount() == 0);      // a token rotation is invisible to the Save prompt...
@@ -1108,13 +1118,12 @@ int main(int argc, char** argv)
             CHECK(pushKeys == (QStringList{QStringLiteral("attempts"), QStringLiteral("failure"),
                                            QStringLiteral("lastAttemptMs")}));
             CHECK(raw.value(QStringLiteral("device/push/failure")).toString() == QStringLiteral("auth"));
-            // NO settings value rides along. Nothing in the record equals — or contains — either sentinel.
+            // NO settings value rides along: nothing in the record carries the credential marker, in any of
+            // its seeded or rotated forms. Note this is asserted against the RAW ini rather than the State
+            // struct — the struct has nowhere to put a string, which is the design, and the tripwire is here
+            // to catch the day someone gives it one.
             for (const QString& k : { keyAttempts(), keyLastAttempt(), keyFailure() })
-            {
-                const QString v = raw.value(k).toString();
-                CHECK(!v.contains(sentinelA));
-                CHECK(!v.contains(sentinelB));
-            }
+                CHECK(!raw.value(k).toString().contains(marker));
             // §1's invariant survives the new record: `push` is a GROUP under device, not a child KEY, so the
             // only direct child key of `device` is still `id`.
             raw.beginGroup(QStringLiteral("device"));
