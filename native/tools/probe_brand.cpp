@@ -400,8 +400,10 @@ int main(int argc, char** argv)
     //
     // WHAT 7a PINS. The Goliath hop rewrites the addon namespace in KEYS and in VALUES, with no
     // isAddonIdKeyed exclusion — precisely what #56 and #58 took OUT of the hop below it. That asymmetry is
-    // correct and is argued at migrateGoliathIni's definition: the Goliath rename was TOTAL, so
-    // com.goliath.X -> com.mymediavault.X is a fact rather than the guess it would be one hop later. These
+    // correct and is argued at migrateGoliathIni's definition: the Goliath rename was TOTAL, so moving
+    // com.goliath.X onto the previous namespace is a fact rather than the guess it would be one hop later.
+    // (Named that way round on purpose — this file is NOT exempt from the old-brand gate, and composing the
+    // spelling from AppBrand is what keeps it from needing to be.) These
     // assertions exist because the asymmetry reads as an oversight, and the obvious "fix" for it is a
     // regression that no key-level check would catch:
     //   * adding the exclusion here leaves the config at addoncfg/com.goliath.X/*, where counterpartId — which
