@@ -33,18 +33,36 @@ public:
     bool installedSomething() const { return installed_; }
 
     // An install is SYNCHRONOUS: it downloads one file per nested event loop (downloadTo), each behind a
-    // 20 s wall, and the surfaces that host this dialog inline keep their own Back live while it runs.
-    // Their Back replaces the panel content, which DELETES this dialog — under its own stack frame, with
-    // the download code still to return into it. deleteLater() at the host cannot fix that: a deferred
-    // delete posted from inside a nested loop is delivered by that same loop. So a host must ask before
-    // navigating away, and hand the exit to closeWhenIdle() instead.
+    // 20 s wall, and the surfaces that host this dialog inline keep their own navigation live while it
+    // runs. A host that navigates away replaces the panel content, which DELETES this dialog — under its
+    // own stack frame, with the download code still to return into it.
+    //
+    // What carries an exit INTO that nested loop is the QUEUED finished() connection the hosts use. A
+    // queued call (QMetaCallEvent) has no loop-level guard: whichever event loop spins next delivers it,
+    // the nested one inside downloadTo included. So an exit taken mid-install runs the host's
+    // navigate-away handler while we are still down inside the download. Reproduced as an access
+    // violation at downloadTo's reply->abort().
+    //
+    // Deferred DELETION is the opposite and is not the hazard: Qt stamps each DeferredDelete with the loop
+    // level it was posted at and re-posts it until the level drops below that, so deleteLater() genuinely
+    // outlives a nested loop (LibraryView::popPage relies on this).
+    //
+    // Hence: a host must ask this before navigating away of its own accord, and every exit the dialog
+    // itself can take — Escape, the Close button, a host's explicit reject(), a close event — is funnelled
+    // through done(), which defers rather than emitting finished() mid-install.
     bool isInstalling() const { return installing_; }
 
     // Leave when it is safe to: now if nothing is in flight, otherwise once the install finishes, via the
     // usual accept() -> finished -> host handler (queued, so it lands with no dialog frame on the stack).
     void closeWhenIdle();
 
+    // Every close funnels here (accept/reject/Escape/closeEvent all call it), which is why the guard lives
+    // on it rather than on any one button: mid-install it is refused and owed, not obeyed.
+    void done(int r) override;
+
 private:
+    void deferExit();                      // remember an exit asked for mid-install, and say so on screen
+    QString installStatus(const QString& text) const; // `text`, plus the owed-exit note when one is owed
     void finishInstall();                  // end of an install: clear the flag, honour a deferred exit
 
     // Bracket around an install so EVERY exit from it — including the early error returns — clears the
@@ -77,7 +95,10 @@ private:
     // Add-ons. An add-on entry LISTS its files (or names a remote URL to subscribe to), so it stays on the
     // raw QJsonObject; nothing in ThemeRegistry describes that shape.
     void renderEntry(const QJsonObject& entry, const QString& indexUrl);
-    void installEntry(const QJsonObject& entry, const QString& indexUrl);
+    // false ONLY when the press was refused because another install is already running — nothing was
+    // touched, so the card must go back exactly as it was. A FAILED install returns true: it was attempted,
+    // and the card is right to offer Retry.
+    bool installEntry(const QJsonObject& entry, const QString& indexUrl);
     bool isInstalled(const QJsonObject& entry) const;
 
     bool downloadTo(const QString& url, const QString& destPath, QString* error);
@@ -93,7 +114,7 @@ private:
     // surface ends up listing a theme the themed Appearance surface refuses to show.
     void renderThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl);
     bool isThemeInstalled(const ThemeRegistry::Entry& entry) const;
-    void installThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl);
+    bool installThemeEntry(const ThemeRegistry::Entry& entry, const QString& indexUrl); // false = refused
     QByteArray treeFor(const QString& indexUrl, QString* error);
     QHash<QString, QByteArray> treeCache_;
 

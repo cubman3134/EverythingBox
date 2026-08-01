@@ -9082,10 +9082,12 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     build(v);
     v->addStretch(1);
     // NOTE: this deletes the previous content widget SYNCHRONOUSLY, so a hosted dialog that is sitting in a
-    // nested event loop must not let a Back reach here — it would be freed under its own stack frame.
-    // deleteLater() here does NOT make that safe: a deferred delete posted from inside a nested loop is
-    // delivered by that same loop (measured — see RegistryBrowser's closeWhenIdle), so the guard belongs at
-    // the dialog, which is the only thing that knows it is busy.
+    // nested event loop must not let a navigation reach here — it would be freed under its own stack frame.
+    // What gets one in there is the QUEUED finished() connection in showDialogPanel: a queued call carries
+    // no loop-level guard, so the FIRST loop to spin delivers it — a nested one inside the dialog included.
+    // Switching this to deleteLater() would not fix that either: the delete would be safely deferred, but
+    // the rest of the navigation still runs mid-install. The guard belongs at the dialog, which is the only
+    // thing that knows it is busy — see RegistryBrowser::done.
     panelScroll_->setWidget(content);
     stack_->setCurrentWidget(panelPage_);
     panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
@@ -9115,6 +9117,9 @@ void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
     dlg->setWindowFlags(Qt::Widget); // render inline instead of as a separate top-level window
     // Queued: the handler navigates away (deleting this dialog), so it must run AFTER QDialog::done()
     // returns rather than mid-emission, or we'd free the dialog out from under its own call stack.
+    // Queued is NOT the same as "after the dialog is idle", though: the call is delivered by whichever
+    // event loop spins next, so a dialog that runs its own nested loop has to withhold finished() while it
+    // does (RegistryBrowser::done) rather than assume this connection protects it.
     connect(dlg, &QDialog::finished, this, onFinished, Qt::QueuedConnection);
     showPanel(title, [dlg](QVBoxLayout* v) { v->addWidget(dlg); }, onBack);
     panelDialog_ = dlg; // its own widgets handle the keyboard; suppress the panel's row arrow-nav

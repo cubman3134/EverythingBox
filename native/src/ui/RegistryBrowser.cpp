@@ -147,10 +147,9 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     bottom->addWidget(repoLink_);
     bottom->addStretch(1);
     auto* box = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    // Not accept() directly: Close is live while an install's nested loops are running, and the host's
-    // finished handler navigates away — which deletes this dialog. Queued or not, that lands in whichever
-    // loop is spinning, including a nested one. closeWhenIdle waits for the stack to unwind.
-    connect(box, &QDialogButtonBox::rejected, this, &RegistryBrowser::closeWhenIdle);
+    // Plain accept(): the mid-install guard is on done(), which every close goes through — this button,
+    // Escape, a host's reject(). Guarding the button here instead would leave all the others open.
+    connect(box, &QDialogButtonBox::rejected, this, &QDialog::accept);
     bottom->addWidget(box);
     v->addLayout(bottom);
 
@@ -372,7 +371,11 @@ void RegistryBrowser::renderEntry(const QJsonObject& entry, const QString& index
             addons_->addRemoteSource(entry.value(QStringLiteral("url")).toString());
             return;
         }
-        installEntry(entry, indexUrl);
+        // addCard's click handler already greyed this card to "Installing…". If the press was REFUSED
+        // (another install is running) nothing was attempted, so put the card back rather than falling
+        // through to the relabel below — which would read isInstalled, find it false, and offer "Retry"
+        // for a failure that never happened.
+        if (!installEntry(entry, indexUrl)) { btn->setText(tr("Install")); btn->setEnabled(true); return; }
         const bool ok = isInstalled(entry);
         btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
         btn->setEnabled(!ok);
@@ -386,7 +389,9 @@ void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const 
     addCard(entry.name, entry.author, entry.description, entry.formFactors, indexUrl,
             isThemeInstalled(entry),
             [this, entry, indexUrl](QPushButton* btn) {
-        installThemeEntry(entry, indexUrl);
+        // Refused (another install is already running): nothing was attempted, so restore the card
+        // addCard already greyed to "Installing…" instead of relabelling it "Retry" — see renderEntry.
+        if (!installThemeEntry(entry, indexUrl)) { btn->setText(tr("Install")); btn->setEnabled(true); return; }
         const bool ok = isThemeInstalled(entry);
         btn->setText(ok ? tr("Installed ✓") : tr("Retry"));
         btn->setEnabled(!ok);
@@ -441,10 +446,42 @@ bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QS
     return true;
 }
 
+// EVERY way out of this dialog ends here — accept(), reject(), the Escape key (QDialog::keyPressEvent
+// matches QKeySequence::Cancel), a close event, and a host calling reject() explicitly (LibraryView::
+// navBack does). That is why the guard is here and not on the Close button: the button is one door of
+// five, and the crash came in through Escape.
+//
+// Refusing here stops finished() being emitted at all, so the host's queued handler — which navigates
+// away and, on the panel host, deletes us synchronously — cannot be delivered by the nested event loop
+// we are currently sitting inside.
+void RegistryBrowser::done(int r)
+{
+    if (installing_) { deferExit(); return; }
+    QDialog::done(r);
+}
+
 void RegistryBrowser::closeWhenIdle()
 {
-    if (installing_) { closeWhenIdle_ = true; return; }   // finishInstall() will do it
+    if (installing_) { deferExit(); return; }   // finishInstall() will do it
     accept();
+}
+
+// A deferred exit with nothing on screen to show for it reads as a dead button: an install can be several
+// files behind a 20 s wall each, so the press could go unacknowledged for a minute, and an unresponsive
+// Back on a TV reads as a freeze. Say the press landed and what it is waiting for.
+void RegistryBrowser::deferExit()
+{
+    if (closeWhenIdle_) return;        // already owed — don't stack the note on a second press
+    closeWhenIdle_ = true;
+    status_->setText(installStatus(status_->text()));
+}
+
+// The install loop repaints the status line for every file, so the note above has to ride along with it or
+// it would flash once and be overwritten by the next "Downloading…".
+QString RegistryBrowser::installStatus(const QString& text) const
+{
+    if (!closeWhenIdle_) return text;
+    return text + QLatin1Char('\n') + tr("Leaving when this install finishes…");
 }
 
 // Bracket for the two install paths: while one runs, this dialog's own frames are on the stack under a
@@ -460,27 +497,30 @@ void RegistryBrowser::finishInstall()
     accept();
 }
 
-void RegistryBrowser::installEntry(const QJsonObject& entry, const QString& indexUrl)
+bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& indexUrl)
 {
-    if (installing_) return;   // a second card's Install, clicked from inside the first one's nested loop
+    // A second card's Install, clicked from inside the first one's nested loop. Say so: silently returning
+    // left the caller to re-read isInstalled, find it false and relabel an untouched card "Retry" — a
+    // failure that never happened.
+    if (installing_) { status_->setText(tr("One install at a time — this one has to finish first.")); return false; }
     const InstallScope scope(this);
 
     // A theme is a folder, not a file list, and the flattening loop below would drop its sounds/ and fonts/
     // subdirectories onto one level. Themes have their own path from fetchOne onwards and cannot reach this
     // function; the guard is here so that a future caller which forgets that is refused rather than served.
     if (kind_ == Themes)
-    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return; }
+    { status_->setText(tr("A theme can't be installed this way. Reopen this window and try again.")); return true; }
 
     const QString base = baseUrl(indexUrl);
     QStringList files;
     QString destDir;
 
     const QString id = entry.value(QStringLiteral("id")).toString();
-    if (id.isEmpty()) { status_->setText(tr("Entry has no id.")); return; }
+    if (id.isEmpty()) { status_->setText(tr("Entry has no id.")); return true; }
     destDir = localDirFor(id);
     for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
 
-    if (files.isEmpty()) { status_->setText(tr("Nothing to download for this entry.")); return; }
+    if (files.isEmpty()) { status_->setText(tr("Nothing to download for this entry.")); return true; }
 
     for (const QString& rel : files)
     {
@@ -491,13 +531,14 @@ void RegistryBrowser::installEntry(const QJsonObject& entry, const QString& inde
         if (!downloadTo(url, dest, &err))
         {
             status_->setText(tr("Download failed: %1\n%2").arg(QFileInfo(rel).fileName(), err));
-            return;
+            return true;
         }
     }
 
     installed_ = true;
     status_->setText(tr("Installed “%1”.").arg(entry.value(QStringLiteral("name")).toString()));
     if (kind_ == Addons && addons_) addons_->reload();
+    return true;
 }
 
 // The registry repo's file tree, fetched once per registry per dialog. An entry names a directory, so this
@@ -541,21 +582,24 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
 // Install one themes2 entry: list the folder from the repo tree, download every file, then hand the whole
 // set to ThemeRegistry::installFiles, which writes it atomically. Nothing touches themes2/<Name> until
 // every byte is in hand — a half-installed theme would still be offered by the picker.
-void RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QString& indexUrl)
+bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QString& indexUrl)
 {
-    if (installing_) return;   // a second card's Install, clicked from inside the first one's nested loop
+    // A second card's Install, clicked from inside the first one's nested loop. Say so: silently returning
+    // left the caller to re-read isThemeInstalled, find it false and relabel an untouched card "Retry" — a
+    // failure that never happened.
+    if (installing_) { status_->setText(tr("One install at a time — this one has to finish first.")); return false; }
     const InstallScope scope(this);
 
     const QString folder = e.folder();
-    if (folder.isEmpty()) { status_->setText(tr("This entry doesn't name a usable theme folder.")); return; }
+    if (folder.isEmpty()) { status_->setText(tr("This entry doesn't name a usable theme folder.")); return true; }
 
-    status_->setText(tr("Reading the registry's file list…"));
+    status_->setText(installStatus(tr("Reading the registry's file list…")));
     QString err;
     const QByteArray tree = treeFor(indexUrl, &err);
-    if (tree.isEmpty()) { status_->setText(err); return; }
+    if (tree.isEmpty()) { status_->setText(err); return true; }
 
     const ThemeRegistry::Listing listing = ThemeRegistry::filesUnder(tree, e.dir);
-    if (!listing.ok()) { status_->setText(listing.error); return; }
+    if (!listing.ok()) { status_->setText(listing.error); return true; }
 
     const QString base = baseUrl(indexUrl);
     QVector<QPair<QString, QByteArray>> blobs;
@@ -567,8 +611,8 @@ void RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
         // hang. The label does repaint: downloadTo enters a nested event loop on the very next line.
         // The multi-arg form substitutes in ONE pass, so a file whose name contains "%2" is not treated as a
         // placeholder for the count that follows it.
-        status_->setText(tr("Downloading %1 (%2 of %3)…")
-                             .arg(rel, QString::number(i + 1), QString::number(listing.files.size())));
+        status_->setText(installStatus(tr("Downloading %1 (%2 of %3)…")
+                             .arg(rel, QString::number(i + 1), QString::number(listing.files.size()))));
 
         // `rel` travels to installFiles as the string filesUnder validated. assetUrl percent-encodes for the
         // URL side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named
@@ -577,23 +621,24 @@ void RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
         const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
         QString derr;
         if (!downloadTo(url, tmp, &derr))
-        { status_->setText(tr("Download failed: %1\n%2").arg(rel, derr)); QFile::remove(tmp); return; }
+        { status_->setText(tr("Download failed: %1\n%2").arg(rel, derr)); QFile::remove(tmp); return true; }
         QFile f(tmp);
         if (!f.open(QIODevice::ReadOnly))
-        { status_->setText(tr("Download failed: %1").arg(rel)); QFile::remove(tmp); return; }
+        { status_->setText(tr("Download failed: %1").arg(rel)); QFile::remove(tmp); return true; }
         blobs << qMakePair(rel, f.readAll());
         f.close();
         QFile::remove(tmp);
     }
 
-    status_->setText(tr("Writing the theme folder…"));
+    status_->setText(installStatus(tr("Writing the theme folder…")));
     if (!ThemeRegistry::installFiles(themesRoot(), folder, blobs, &err))
-    { status_->setText(err); return; }
+    { status_->setText(err); return true; }
 
     installed_ = true;
     // The folder stands in for a nameless entry: an index that omits "name" would otherwise say Installed “”.
     status_->setText(tr("Installed “%1”. Pick it from the theme list.")
                          .arg(e.name.isEmpty() ? folder : e.name));
+    return true;
 }
 
 void RegistryBrowser::updateRepoLink()
