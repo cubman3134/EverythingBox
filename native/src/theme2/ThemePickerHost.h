@@ -12,8 +12,9 @@
 //
 // THE PREVIEW IS REGISTERED IN NO NAV ZONE and is created Qt::NoFocus. A focusable live view inside a nav
 // surface takes the cursor and strands the user in a preview they cannot leave — the single constraint this
-// class exists to hold. (See rebuildPreview() in the .cpp: the setFocusPolicy(Qt::NoFocus) call, and the
-// ctor's ONE registerZone.)
+// class exists to hold. The NoFocus is no longer set here: it moved into ThemeEngine::buildPreview(), which
+// holds the whole preview contract at construction so a new preview site cannot silently join the nav ring.
+// (See rebuildPreview() in the .cpp for the buildPreview() call, and the ctor's ONE registerZone.)
 #pragma once
 #include <QStringList>
 #include <QVariantList>
@@ -121,6 +122,12 @@ protected:
 private:
     void rebuildPreview();          // tear down + rebuild the live preview for the selected row
     void layoutPreview();           // position the preview widget over the QML's preview slot
+    // Run `work` on the next event-loop turn, once the QML signal emission that reached us has unwound
+    // (issue #28 / #165). Same mechanism, same rule, same reason as ThemedPanelHost::deferPastQmlEmission —
+    // ThemePicker.qml's row-delegate MouseArea and root Keys handler drive nav.activate()/nav.back(), so this
+    // host's two caller dispatches also run on a live delegate's emission, and both of them reach a nested
+    // event loop (the startup Back is a NavConfirm quit prompt) or retire this very surface.
+    void deferPastQmlEmission(std::function<void()> work);
 
     QQuickWidget* view_ = nullptr;  // the picker chrome
     QQuickWidget* preview_ = nullptr; // the live theme preview (NoFocus, no nav zone)

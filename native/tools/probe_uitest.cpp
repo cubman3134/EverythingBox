@@ -261,9 +261,19 @@ int main(int argc, char** argv)
     }
 
     // ---- 4. a command QUEUED behind the fatal one is abandoned, not run off the dead socket -------
-    // The guard is on the `while (alive && alive->canReadLine())` condition as much as on the write:
     // uitest.py can put two lines in one packet, and after the client dies the loop must not come back
-    // round to read the second one out of a freed QIODevice.
+    // round to read the second one out of a freed QIODevice. This section pins that abandonment.
+    //
+    // WHICH HALF of the guard delivers it, measured rather than assumed: the early `return` after the
+    // failed re-check — NOT the `alive &&` in the `while` condition. Dropping `alive &&` from that
+    // condition (and reading through the raw `sock` again) leaves this entire probe GREEN, because the
+    // return preempts the condition: the only paths back to it are the first iteration, an empty-line
+    // `continue`, and a completed write, and on none of them can the socket have been freed. The clause
+    // is therefore unreachable AS A GUARD and no mutation here can kill it.
+    //
+    // Labelled rather than reported as coverage, on the house rule for an assertion no mutation kills.
+    // It stays because it is defence in depth for the day the `return` becomes a `continue` or moves
+    // below the write — and the ABANDONMENT it backs up is genuinely pinned, by the two checks below.
     {
         g_log.clear();
         g_keyCalls = 0;

@@ -6543,20 +6543,17 @@ void MainWindow::openAppearance()
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
-            QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
-                                                previewItems, previewSystem, previewBox);
+            // buildPreview, not buildView: the preview must never take the D-pad cursor, and that is now a
+            // property of construction (ThemeEngine.h) rather than a line each preview site has to remember.
+            // This panel lives inside panelRing_, so a Qt::StrongFocus 480x300 view would join the ring with
+            // no action and no focus outline, and arrowing into it reads as the selector vanishing (#40).
+            // buildPreview also seeds `categories`, so an XMB theme shows its cross.
+            QWidget* p = ThemeEngine::buildPreview(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                                   previewItems, previewSystem, previewBox);
+            if (!p) return;
             p->setMinimumSize(480, 270);
-            // The preview must never take the D-pad cursor. ThemeEngine::buildView hands back a
-            // Qt::StrongFocus QQuickWidget (it has to be focusable when it IS the page), and this panel
-            // lives inside panelRing_ — so without this the ring collects a 480x300 view that has no
-            // action and paints no focus outline, and arrowing into it reads as the selector vanishing.
-            // The themed twin has always done this (ThemePickerHost::rebuildPreview); the classic panel
-            // is the copy that never got it. NOT WA_TransparentForMouseEvents, unlike there: this panel
-            // has no click-through target behind the preview, and leaving mouse handling alone keeps the
-            // change to the one thing that was wrong.
-            p->setFocusPolicy(Qt::NoFocus);
-            if (QQuickItem* r = ThemeEngine::rootItem(p)) // feed categories too, so an XMB theme shows its cross
-                { r->setProperty("categories", previewItems); r->setProperty("catIndex", 0); }
+            // NOT WA_TransparentForMouseEvents, unlike ThemePickerHost: this panel has no click-through
+            // target behind the preview, so leaving mouse handling alone is correct here.
             pv->addWidget(p);
         };
         // The commit path. The list highlights the RESOLVED folder (currentThemeFolder()) while nothing may
@@ -9989,6 +9986,14 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->setSpacing(14);
     build(v);
     v->addStretch(1);
+    // Cleared BEFORE the setWidget below, not after it (issue #122). setWidget destroys the OLD content, and a
+    // dialog put there by showDialogPanel is one of its children — so from that call until this assignment a raw
+    // panelDialog_ would name freed memory. That window is not empty: setCurrentWidget below emits
+    // currentChanged, whose slot is updateNavForPage(), which runs panelDialog_->inherits() — a virtual dispatch
+    // through the dead dialog, which is the access violation in #122's dump. Clearing first closes that window;
+    // panelDialog_ being a QPointer closes every OTHER route to the same dangle. Either alone suffices; both are
+    // kept because they guard different things — this line the order, the type the ownership.
+    panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     // NOTE: this deletes the previous content widget SYNCHRONOUSLY, so a hosted dialog that is sitting in a
     // nested event loop must not let a navigation reach here — it would be freed under its own stack frame.
     // What gets one in there is the QUEUED finished() connection in showDialogPanel: a queued call carries
@@ -9998,7 +10003,6 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     // thing that knows it is busy — see RegistryBrowser::done.
     panelScroll_->setWidget(content);
     stack_->setCurrentWidget(panelPage_);
-    panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     updateNavForPage();     // panel -> panel doesn't fire currentChanged; re-register the ring explicitly
     // Drop focus onto the first interactive row so arrow keys / a remote work without a click first.
     // Deferred a tick so the new content widget is laid out and its children are focusable.

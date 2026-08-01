@@ -15,6 +15,7 @@
 
 class QTcpServer;
 class QTcpSocket;
+class QTimer;
 
 class NetplaySession : public QObject
 {
@@ -29,17 +30,35 @@ public:
     // pairs them and then just pipes bytes, so the lockstep protocol runs over it unchanged.
     void hostViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
     void joinViaRelay(const QString& relayHost, quint16 relayPort, const QString& code);
-    // "Both" online mode: host listens for a DIRECT (UPnP-forwarded) connection AND on the relay at once — first
-    // peer to arrive wins, the other path is dropped. The joiner tries the host's direct endpoint first (if any),
-    // then falls back to the relay. Lowest latency when UPnP works; always connects thanks to the relay.
+    // "Both" online mode: host listens for a DIRECT (UPnP-forwarded) connection AND on the relay at once — the
+    // first peer to PROVE it holds the room code wins, and only then is the other path dropped. The joiner tries
+    // the host's direct endpoint first (if any), then falls back to the relay. Lowest latency when UPnP works;
+    // always connects thanks to the relay. A peer that just opens the direct port and says nothing (a scanner,
+    // a stale client) is hung up on, not adopted.
+    // localPort 0 lets the OS pick a free port — ask directPort() for the one actually bound.
     void hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code);
     void joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
                     const QString& directIp, quint16 directPort);
     void stop();
 
+    // The port the direct server is actually listening on, or 0 if the direct path never came up (port taken —
+    // the session then runs relay-only). Callers that advertise a direct endpoint must use THIS, not the port
+    // they asked for: hostOnline() deliberately survives a failed listen(), so the two can differ.
+    quint16 directPort() const;
+
     bool active() const { return active_; }
     bool isHost() const { return host_; }
     bool ready() const { return ready_; }          // handshake done -> the frame loop may run
+    // How long an unproven peer on the direct port has to announce itself before the host hangs up on it. Public
+    // so a test can assert that an ACCEPTED direct session is still alive on the far side of this deadline, and
+    // that an unproven one is NOT.
+    static constexpr int kDirectGreetingTimeoutMs = 5000;
+    // How long joinOnline's direct attempt may go without progress before the relay takes over. It is a budget
+    // per PHASE, not for the attempt as a whole: it is restarted when the connect completes and again on every
+    // byte the host sends. One budget covering the connect AND the handshake expires mid-greeting on a slow
+    // link, after the host has already committed to us irreversibly. Public so a test can build a peer that
+    // costs most of each phase in turn.
+    static constexpr int kDirectTrialMs = 4000;
 
     // Game identity for the handshake mismatch check, set before host()/join().
     QString gameId;   // "<rom-basename>|<size>"
@@ -56,13 +75,21 @@ public:
 signals:
     void status(const QString& message);
     void started();                                // handshake complete: begin lockstep at frame 0
+    // The relay confirmed our room is registered, so a joiner using this code can now be paired to us. Until this
+    // fires a JOIN with the same code races the registration and gets NOHOST — anything that has to wait for the
+    // room to exist must wait for THIS, not for a timer.
+    void roomOpen();
     void ended(const QString& reason);
 
 private:
     void attachSocket(QTcpSocket* s);
     void wireSocketErrors(QTcpSocket* s);          // disconnected/errorOccurred handlers (shared by all modes)
     void onReadyRead();
-    void onRelayHandshake();                       // consume the relay's PAIRED/NOHOST/BUSY line, then start the session
+    void onRelayHandshake();                       // consume the relay's HOSTED/PAIRED/NOHOST/BUSY lines, then start
+    // Consume whole relay lines from `buf`: 1 = PAIRED (session bytes that trailed it land in `leftover`),
+    // -1 = refused (`err` holds the message), 0 = need more data. HOSTED is absorbed here (emits roomOpen()).
+    int takeRelayLines(QByteArray& buf, QByteArray& leftover, QString& err);
+    void vetDirectPeer(QTcpSocket* s, const QString& code);   // prove an inbound direct peer before committing
     void connectToRelay(const QString& relayHost, quint16 relayPort, const QByteArray& verbLine);
     void sendFrame(quint8 type, const QByteArray& payload);
     void onConnected();                            // client side: connected, waiting for HELLO+STATE
@@ -71,6 +98,9 @@ private:
     QTcpServer* server_ = nullptr;
     QTcpSocket* sock_ = nullptr;
     QTcpSocket* relaySock_ = nullptr;              // host's relay socket while it races the direct server (first wins)
+    // Non-null exactly while joinOnline's direct attempt is still on trial — connected or not, but not yet in
+    // sync. While it exists, no failure of that socket is fatal to the session: it hands us to the relay instead.
+    QTimer* directWatchdog_ = nullptr;
     QByteArray rx_;
     QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
     bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;

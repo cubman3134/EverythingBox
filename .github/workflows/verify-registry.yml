@@ -1,4 +1,4 @@
-# Does the community registry actually serve what this repo's record says it does?
+# Does the community registry actually serve what this repo bundles?
 #
 # The publish job verifies its own push, which covers the case where a publish RAN. This covers the cases
 # it structurally cannot: a registry edited directly, a revert there, a publish that failed and was never
@@ -8,7 +8,8 @@
 # Deliberately NOT triggered on push. That would race the publish job and report a drift the publisher is
 # thirty seconds from fixing — a gate that cries wolf gets muted, and a muted gate reports nothing.
 #
-# No credential: the registry is public and this only reads.
+# No credential: the registry is public and this only reads. Which themes it reads is not written here;
+# native/themes2/REGISTRY-SYNC.json is the one list of what is published.
 name: verify registry
 
 on:
@@ -25,5 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: The registry must match the record
-        run: python3 native/tools/theme-registry-sync.py --verify-remote
+      # Exits 0 for a match, 1 for real drift, 2 for "could not find out" — an unreachable registry is not
+      # a verdict about the record. Both non-zero values fail the step, and deliberately so for a job whose
+      # whole purpose is to notice silence; the distinction is in the log, where the person reading it
+      # needs it, rather than in a green run nobody opens.
+      - name: The registry must serve what this repo bundles
+        run: python3 native/tools/theme-registry-sync.py --verify-registry

@@ -7,6 +7,10 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:slowconnect — a host whose connect and whose answer each eat most of the joiner's give-up
+#                            budget, but neither eats all of it: the joiner must still land on the direct path.
+#   * netplay both:silent  — the direct endpoint accepts and then never handshakes (a stale port forward); the
+#     / both:dropped         joiner must still reach the host over the relay instead of hanging or ending.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
@@ -20,7 +24,10 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-55677}"
+# 0 = let the OS pick a free port for this run's relay, and read back what it picked. A hard-coded default meant
+# two suites on one machine fought over one port: the loser's relay died silently, its probes talked to the
+# winner's, and the netplay results stopped being about this run (issue #164). Override to pin it if you need to.
+RELAY_PORT="${RELAY_PORT:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -156,11 +163,19 @@ run() { # <name> <sentinel> <exe> [args...]
 }
 
 # Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
+RELAY_LOG="$(mktemp -t eb-relay.XXXXXX)"
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null; rm -f "${RELAY_LOG:-}"' EXIT
+for _ in $(seq 1 100); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+# The port the relay actually bound. Waiting for "listening" and then carrying on regardless is how a relay that
+# never came up got papered over: the netplay probes would connect to SOMEONE's relay and the result meant
+# nothing. No port here is a hard failure.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" 2>/dev/null | head -1)"
+if [ -z "$RELAY_PORT" ]; then
+  echo "FATAL: the netplay relay did not come up — $(head -3 "$RELAY_LOG" 2>/dev/null)"; exit 2
+fi
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"; echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
@@ -223,6 +238,16 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The joiner's give-up deadline measures the HANDSHAKE, not the connect plus the handshake — and a session the
+# user left inside that window stays left. Deliberately slow (~5s): the only way to tell the two readings of
+# that deadline apart is to make the connect itself cost most of the budget, which on loopback means putting a
+# stalling CONNECT proxy in front of it.
+run "netplay both:slowconnect" NETPLAY-BOTH-OK "$BOTH" slowconnect
+# The two ways a direct endpoint can accept a connection and still be a dead end — a stale port forward that
+# outlived its app, and an EB host that already paired with somebody else. Both used to strand the joiner,
+# because the fallback was keyed on the TCP connect rather than on the handshake completing.
+run "netplay both:silent"  NETPLAY-BOTH-OK "$BOTH" silent  "$RELAY_PORT"
+run "netplay both:dropped" NETPLAY-BOTH-OK "$BOTH" dropped "$RELAY_PORT"
 
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.
@@ -590,8 +615,167 @@ else
     [ -n "$td_undeferred" ] && td_note "createPlaylistInteractive is called without a queued invoke: $(printf '%s' "$td_undeferred" | tr '\n' ' ')"
   fi
 
+  # 8. THE THEME2 HOSTS (issue #165). MainWindow's handlers above are one half of the surface; the other half is
+  #    the host classes that own their own QQuickWidget and dispatch a CALLER's std::function from a NavGraph
+  #    signal. ThemedPanelHost::onGraphActivated and ThemePickerHost's two lambdas are DIRECT connections from
+  #    NavGraph::activated / rootBack, and every production emitter of those is QML — SettingsPanel.qml's row
+  #    delegate + header MouseAreas and root Keys handler, ThemePicker.qml's row delegate and root Keys handler.
+  #    A caller handler dispatched from there runs on a live delegate's emission, and the shipped ones reach
+  #    nested loops (the Emulators/Add-ons QFileDialogs, confirmRemoveAddon's NavConfirm, the startup Back's
+  #    quit-confirm) — plus the panel host runs two loops of its OWN in the TextField editor. probe_navqml §18(k)
+  #    pins the dispatch deferral as BEHAVIOUR for the panel host (it links headlessly); what is held here is the
+  #    part no probe can drive: the TextField editor's own nested loops, and the picker host, which needs a real
+  #    themes directory to present at all.
+  TPHCPP="$HERE/../src/theme2/ThemedPanelHost.cpp"
+  TPKCPP="$HERE/../src/theme2/ThemePickerHost.cpp"
+  # Wider than td_loops: these two files also spin loops the nav kit does not own (the mobile inline edit's raw
+  # QEventLoop, and the QFileDialog a caller opens).
+  td_hostloops="$td_loops|QEventLoop|QFileDialog::"
+  if [ ! -f "$TPHCPP" ] || [ ! -f "$TPKCPP" ]; then
+    td_note "ThemedPanelHost.cpp or ThemePickerHost.cpp not found under $HERE/../src/theme2 — moved? This gate is now asserting nothing about the theme2 hosts."
+  else
+    tph_src="$(sed -E 's://.*$::' "$TPHCPP")"
+    tpk_src="$(sed -E 's://.*$::' "$TPKCPP")"
+
+    # 8a. Each host's own deferral helper must actually defer (the MainWindow check above, per host). Written out
+    #     twice rather than looped: a `for` over "name:$src" pairs word-splits the embedded file on its newlines.
+    td_hd="$(td_body 'void ThemedPanelHost::deferPastQmlEmission(' "$tph_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemedPanelHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemedPanelHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+    td_hd="$(td_body 'void ThemePickerHost::deferPastQmlEmission(' "$tpk_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemePickerHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemePickerHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+
+    # 8b. ThemedPanelHost::onGraphActivated — the panel host's dispatch boundary. FOUR row kinds dispatch from it
+    #     (Action/Progress, Toggle, Choice, TextField) and every one must hand off through the helper; and no
+    #     blocking loop may sit on its own body, because its own body IS the QML emission's stack.
+    td_oga="$(td_body 'void ThemedPanelHost::onGraphActivated(' "$tph_src")"
+    if [ -z "$td_oga" ]; then
+      td_note "ThemedPanelHost::onGraphActivated not found — signature changed? This gate is now asserting nothing about the panel host's dispatch."
+    else
+      td_hit="$(printf '%s' "$td_oga" | grep -nE "$td_hostloops" || true)"
+      [ -n "$td_hit" ] && td_note "ThemedPanelHost::onGraphActivated spins a nested event loop on the QML delegate's own stack: $(printf '%s' "$td_hit" | tr '\n' ' ')"
+      td_n="$(printf '%s\n' "$td_oga" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 4 ] \
+        || td_note "ThemedPanelHost::onGraphActivated has $td_n deferPastQmlEmission call(s); Action/Progress, Toggle, Choice and TextField each need one."
+    fi
+    # ...and the deferred TextField half must still be where the LOOPS live. Without this, inlining
+    # runTextFieldEdit back into the switch leaves the count above satisfied by a deferral to nothing — the
+    # "this gate is now asserting nothing" failure mode, same as runThemedBrowseFilterNow above.
+    td_tfe="$(td_body 'void ThemedPanelHost::runTextFieldEdit(' "$tph_src")"
+    if [ -z "$td_tfe" ]; then
+      td_note "ThemedPanelHost::runTextFieldEdit not found — renamed or inlined? The TextField deferral is then deferring to nothing and this gate is asserting nothing about where the OSK runs."
+    else
+      td_tfe_loops="$(printf '%s\n' "$td_tfe" | grep -cE "$td_hostloops" || true)"
+      [ "$td_tfe_loops" != "0" ] \
+        || td_note "ThemedPanelHost::runTextFieldEdit contains no blocking editor: the OSK / inline-edit loop has moved somewhere this gate cannot see."
+    fi
+
+    # 8c. ThemedPanelHost::onLevelPopped — the ROOT onBack. It leaves the host (a QQuickWidget retirement) or
+    #     opens a quit-confirm, from a nav.back() emission, so it defers; the in-host sub-panel pop above it must
+    #     NOT (probe_navqml §18(k)(v) holds that converse). A bare `gone.onBack()` is the pre-#165 shape.
+    td_olp="$(td_body 'void ThemedPanelHost::onLevelPopped(' "$tph_src")"
+    if [ -z "$td_olp" ]; then
+      td_note "ThemedPanelHost::onLevelPopped not found — signature changed? This gate is now asserting nothing about the root onBack."
+    else
+      printf '%s' "$td_olp" | grep -q 'deferPastQmlEmission' \
+        || td_note "ThemedPanelHost::onLevelPopped does not defer: the root onBack tears down this host's QQuickWidget from inside its own scene's emission again."
+      td_bare="$(printf '%s' "$td_olp" | grep -nE '(^|[^.[:alnum:]_])gone\.onBack\(\)' || true)"
+      [ -n "$td_bare" ] && td_note "ThemedPanelHost::onLevelPopped calls gone.onBack() directly: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+
+    # 8d. ThemePickerHost — both caller dispatches (the row pick, and rootBack, whose startup form is the
+    #     NavConfirm quit prompt) live in the constructor's connect lambdas. They must go through the helper, and
+    #     the bare `fn(folder);` / `fn();` shape they replaced must not come back.
+    td_tpk="$(td_body 'ThemePickerHost::ThemePickerHost(' "$tpk_src")"
+    if [ -z "$td_tpk" ]; then
+      td_note "ThemePickerHost's constructor not found — signature changed? This gate is now asserting nothing about the picker's dispatch."
+    else
+      td_n="$(printf '%s\n' "$td_tpk" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 2 ] \
+        || td_note "ThemePickerHost's constructor has $td_n deferPastQmlEmission call(s); the pick dispatch and the rootBack dispatch each need one."
+      td_bare="$(printf '%s' "$td_tpk" | grep -nE '^[[:space:]]*fn\((folder)?\);' || true)"
+      [ -n "$td_bare" ] && td_note "ThemePickerHost dispatches a caller callback directly on the QML emission's stack: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+  fi
+
   if [ "$td_fail" -eq 0 ]; then echo "PASS: themed handler deferral"; else
     echo "FAIL: themed handler deferral (a themed handler runs a nested event loop on a live QML delegate's stack)"; fail=1
+  fi
+fi
+echo
+
+# Panel-dialog lifetime gate (issue #122). Same standing as the gate above, and for the same reason: MainWindow
+# links into no probe, so this rule cannot be asserted as behaviour anywhere. It is held as source shape.
+#
+# THE DEFECT, from the preserved dump. showPanel replaces the panel's content with
+# `panelScroll_->setWidget(content)`, which deletes the PREVIOUS content widget synchronously. A dialog put
+# there by showDialogPanel is a CHILD of that content, so the call destroys it — while panelDialog_ still names
+# it. The next statement, `stack_->setCurrentWidget(panelPage_)`, emits QStackedWidget::currentChanged, whose
+# slot is updateNavForPage(), which runs `panelDialog_ && panelDialog_->inherits("ControllerRemapDialog")`: a
+# virtual dispatch through a dead object. In the dump that is Qt6Core!QObject::inherits+0x7 reading [rax+8]
+# with rax = 1 (the freed block's first qword, where the vptr used to be), one frame under
+# MainWindow::updateNavForPage. The classic-mode path that reaches it is ordinary: the startup profile picker
+# is a showDialogPanel, openHome() leaves the panel page without clearing anything, and the first Settings
+# panel after that is the showPanel that frees the picker out from under the pointer.
+#
+# THE RULE, in two independent halves:
+#   a. panelDialog_ is a QPointer, so it nulls itself when the dialog dies, by any route.
+#   b. showPanel clears it BEFORE the setWidget that does the destroying, so the window never opens.
+# Either alone closes #122. Both are held, because (a) covers destruction routes (b) cannot see, and (b) keeps
+# the order right for a reader who has not noticed (a).
+#
+# What this gate CANNOT see: whether some future code path stores a third alias to the hosted dialog and
+# outlives it that way. That stays a review obligation, written on panelDialog_'s declaration.
+echo "=== panel dialog lifetime ==="
+PDL_CPP="$HERE/../src/ui/MainWindow.cpp"
+PDL_H="$HERE/../src/ui/MainWindow.h"
+pdl_fail=0
+pdl_note() { echo "  $1"; pdl_fail=1; }
+if [ ! -f "$PDL_CPP" ] || [ ! -f "$PDL_H" ]; then
+  echo "FAIL: panel dialog lifetime (MainWindow.cpp or MainWindow.h not found under $HERE/../src/ui)"; fail=1
+else
+  # Comments stripped first and CRs dropped: the declaration and showPanel both carry comment blocks that quote
+  # the very tokens matched below (this repo is CRLF, so a `$`-anchored pattern on a raw line matches nothing).
+  pdl_hsrc="$(sed -E 's://.*$::' "$PDL_H" | tr -d '\r')"
+  pdl_csrc="$(sed -E 's://.*$::' "$PDL_CPP" | tr -d '\r')"
+
+  # a. The declaration. A raw QWidget* here is freed-but-non-null for as long as it takes the currentChanged
+  #    slot to type-test it.
+  printf '%s\n' "$pdl_hsrc" \
+    | grep -qE '^[[:space:]]*QPointer<[[:space:]]*QWidget[[:space:]]*>[[:space:]]+panelDialog_' \
+    || pdl_note "panelDialog_ is not declared 'QPointer<QWidget> panelDialog_' in MainWindow.h: a raw pointer to a panel-hosted dialog outlives the dialog, and updateNavForPage() dereferences it (#122)."
+
+  # b. The ordering inside showPanel. Body = the definition line through the column-0 brace that closes it.
+  pdl_body="$(printf '%s\n' "$pdl_csrc" | awk '
+    !on && index($0, "void MainWindow::showPanel(") { on = 1 }
+    on           { print }
+    on && /^\}/  { exit }')"
+  if [ -z "$pdl_body" ]; then
+    pdl_note "MainWindow::showPanel not found — signature changed? This gate is now asserting nothing about the clear/destroy order."
+  else
+    # Line numbers WITHIN the extracted body, so an edit elsewhere in the file cannot move them.
+    pdl_clear="$(printf '%s\n' "$pdl_body" | grep -n 'panelDialog_[[:space:]]*=[[:space:]]*nullptr' | head -1 | cut -d: -f1)"
+    pdl_set="$(printf '%s\n' "$pdl_body" | grep -n 'panelScroll_->setWidget(' | head -1 | cut -d: -f1)"
+    if [ -z "$pdl_clear" ]; then
+      pdl_note "showPanel no longer clears panelDialog_: a plain panel would inherit the previous panel's dialog for its nav ring, and the pointer would outlive the object it names."
+    elif [ -z "$pdl_set" ]; then
+      pdl_note "showPanel no longer calls panelScroll_->setWidget( — the content-replacement point this gate orders against has moved, and the ordering half is asserting nothing."
+    elif [ "$pdl_clear" -gt "$pdl_set" ]; then
+      pdl_note "showPanel clears panelDialog_ (body line $pdl_clear) AFTER panelScroll_->setWidget (body line $pdl_set): setWidget destroys the hosted dialog, so the pointer dangles across the setCurrentWidget that follows — and that emits currentChanged into updateNavForPage(). That is #122."
+    fi
+  fi
+
+  if [ "$pdl_fail" -eq 0 ]; then echo "PASS: panel dialog lifetime"; else
+    echo "FAIL: panel dialog lifetime (a panel-hosted dialog can be type-tested after it is destroyed)"; fail=1
   fi
 fi
 echo
@@ -1145,12 +1329,26 @@ echo
 # network, no keys — that is what makes it a gate rather than a flaky test). So the comparison is against a
 # checked-in record of what the registry is expected to be serving, native/themes2/REGISTRY-SYNC.json. Edit
 # a bundled theme and its canonical hash moves; this goes red and names the theme and the command that
-# refreshes the record. Be clear about what that buys: this compares the themes against the RECORD, not
-# against the remote, so what it catches is the record falling behind the repo — the person editing the
-# theme is told, at the moment of the edit, that a second copy exists and has to move with it. The copy
-# itself is no longer a hand step: on merge to main the publish-themes workflow pushes the changed themes to
-# the registry with a deploy key and then re-reads what the registry serves (--verify-remote), and the
-# verify-registry workflow re-checks the same thing weekly. REGISTRY-SYNC.json spells that out.
+# refreshes the record.
+#
+# Be clear about what that buys, because for a year it bought less than it looked like (issue #151).
+# --update recomputes the record from the BUNDLED theme and has never touched the registry, so it could be
+# run by someone who never pushed — and was: #57 and #32 ran it alone, so the record asserted the registry
+# was current while it still served the pre-#29 Triple, `home` and nothing else, under a green gate. The
+# gate was not broken. What it compared against was a claim nobody had to substantiate.
+#
+# So the record now has to NAME what it was published against, and this prints that on every run, whichever
+# it is: a registry commit sha (falsifiable anywhere with a network call — theme-registry-sync.py
+# --verify-registry) or a written reason it has none. A bare --update is refused. Nothing here can PROVE the
+# registry is current — this suite is offline and stays that way — but it no longer silently implies it.
+#
+# The COPY itself is no longer a hand step, which is what closes the loop the two paragraphs above describe:
+# on a push to main touching native/themes2/**, the publish-themes workflow checks the registry out with a
+# deploy key, runs --publish into it, pushes, and then rewrites this record with --update --registry-commit
+# <the sha it just pushed> and pushes that back here. So the claim the gate prints is normally MACHINE
+# written, and --assume-published is what a human writes when they are recording an intent instead. The
+# verify-registry workflow re-reads the registry weekly, catching what the publisher cannot see: a direct
+# edit there, a revert, or a publish that never ran. REGISTRY-SYNC.json spells that out.
 #
 # The hash is canonical, not byte-for-byte, so a reindent is not drift — see theme-registry-sync.py. The
 # script also fails on a theme.json that stops parsing, a view declared with an empty `elements` (which the
@@ -1165,8 +1363,45 @@ elif "$PY" "$THEMESYNC_PY" --check; then
   echo "PASS: bundled-theme / registry drift"
 else
   echo "FAIL: bundled-theme / registry drift — a bundled theme has moved away from the record of what the"
-  echo "  community registry serves under the same name. Run --update, commit the refreshed record with the"
-  echo "  theme change, and rerun; the publish workflow does the copy on merge (details above)."
+  echo "  community registry serves under the same name, or the record no longer says what it was published"
+  echo "  against. Rerun with --update --assume-published \"<why>\" (or --registry-commit <sha> if you pushed"
+  echo "  by hand), commit the refreshed record with the theme change; the publish workflow does the copy on"
+  echo "  merge and rewrites the claim with the real sha (details above)."
+  fail=1
+fi
+echo
+
+# Registry index / manifest agreement rule (issue #151). The registry serves SEVEN themes; only three are
+# bundled here, so the drift gate above cannot see Default, Grid, Lumen or Midnight at all — nothing checked
+# that they parse, declare a usable view, or agree with the gallery card that advertises them. That gap is
+# why index.json credited Triple to `cubman3134` while its own theme.json said `EverythingBox` for as long
+# as both files existed: the card and the installed theme disagreed and no reader ever held them together.
+#
+# The RULE lives here, in theme-registry-validate.py, because this repo defines what index.json's fields
+# mean (formFactors semantics in ThemeFormFactors.h, the field list in themes2/THEME_FORMAT.md). The
+# registry's CI downloads and runs it, the same way its theme-assets.yml downloads the app's Theme.js
+# instead of keeping a second copy of that rule.
+#
+# This suite has no registry checkout and no network, so it cannot run the rule against the real data. What
+# it runs is --selftest: build a synthetic registry, confirm the correct one passes, then break one thing at
+# a time and require the matching complaint — plus three negative controls, since a rule that fires on
+# everything is as useless as one that fires on nothing. A validator nobody has shown can fail is the same
+# defect as a sync record nobody has to substantiate, one level up.
+#
+# It also covers the validator's could-not-run branches, and those assert the EXIT STATUS, not just the
+# complaint. They are the family that matters most to the registry's CI: a permissive edit to a per-theme
+# check lets one bad submission through, but a permissive edit to "there is no index.json here" makes the
+# whole file pass on anything it is pointed at — and running --selftest on the downloaded copy is the only
+# thing standing between that file and a green verdict on somebody's PR.
+echo "=== registry index / manifest rule ==="
+REGVALIDATE_PY="$HERE/theme-registry-validate.py"
+if [ ! -f "$REGVALIDATE_PY" ]; then
+  echo "FAIL: registry index / manifest rule (theme-registry-validate.py not found at $REGVALIDATE_PY)"; fail=1
+elif "$PY" "$REGVALIDATE_PY" --selftest; then
+  echo "PASS: registry index / manifest rule"
+else
+  echo "FAIL: registry index / manifest rule — a check in theme-registry-validate.py cannot be shown to fire"
+  echo "  on the defect it names, so the registry's CI would be running a rule that reports nothing."
   fail=1
 fi
 echo

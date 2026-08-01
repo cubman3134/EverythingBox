@@ -1,4 +1,4 @@
-# Publish the bundled themes the community registry also serves.
+# Publish the bundled themes the community registry also serves, and record what was published.
 #
 # Three themes exist twice: here under native/themes2, and in
 # github.com/cubman3134/everythingbox-themes, so the app's Appearance panel can offer them for download.
@@ -7,12 +7,19 @@
 # another missing a whole surface (#131). This job removes the hand step: the registry copies are now
 # generated content.
 #
-# Which themes those were is deliberately not written here; native/themes2/REGISTRY-SYNC.json is the one
+# It also closes the OTHER half of that failure, the one issue #151 is about. The record in this repo
+# (native/themes2/REGISTRY-SYNC.json) has to name the registry commit it was published against, and a
+# human typing that sha is the same unreliable step in a different costume. So this job writes it: it
+# pushes to the registry, reads back the commit it just created, reruns --update --registry-commit with
+# it, and pushes THAT back here. The claim substantiates itself.
+#
+# Which themes those are is deliberately not written here; native/themes2/REGISTRY-SYNC.json is the one
 # list of what is published, and its `_readme` tells the story in full.
 #
-# The copy rules are NOT in this file. native/tools/theme-registry-sync.py already knows which themes are
-# published and where they land, and a second copy of that list here would be exactly the kind of drift
-# this whole area exists to prevent. This workflow contributes a credential, a checkout and an invocation.
+# The copy rules are NOT in this file either. native/tools/theme-registry-sync.py already knows which
+# themes are published and where they land, and a second copy of that list here would be exactly the kind
+# of drift this whole area exists to prevent. This workflow contributes a credential, two checkouts, an
+# ordering and two pushes.
 name: publish themes
 
 on:
@@ -24,23 +31,35 @@ on:
 
 # Two pushes to main in quick succession would otherwise race each other into the registry, and the loser
 # gets a rejected push rather than a merge. Serialise instead, and never cancel a run mid-publish: a
-# cancelled job can have pushed without verifying.
+# cancelled job can have pushed to the registry without recording or verifying it.
 concurrency:
   group: publish-themes
   cancel-in-progress: false
 
+# `write` is for the loop-back commit to THIS repo (the refreshed record) and nothing else. The registry
+# is a different repo and GITHUB_TOKEN has no reach into it at all; that side uses the deploy key below.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # ref: main rather than the pushed sha, because this job COMMITS: it needs a real branch to push
+      # back to, not a detached head. fetch-depth: 0 because the push at the end may have to rebase onto
+      # a main that moved while the registry push was in flight, and a depth-1 clone cannot.
+      #
+      # persist-credentials is left at its default (true), which is what leaves GITHUB_TOKEN in the local
+      # git config for that final push. Note also that the repo's pre-commit hook (the version bump) lives
+      # in .git/hooks and is NOT checked out, so the commit this job makes contains exactly what it staged.
       - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
 
       # BEFORE touching the registry. If the record and the bundled themes disagree, someone merged
-      # without running --update, and publishing would push content the record does not describe — the
-      # same drift pointing the other way. Refuse while the registry is still untouched.
+      # without refreshing it, and publishing would push content the record does not describe — the same
+      # drift pointing the other way. Refuse while the registry is still untouched.
       - name: The record must describe the bundled themes
         run: python3 native/tools/theme-registry-sync.py --check
 
@@ -61,43 +80,99 @@ jobs:
       - name: Check out the registry
         uses: actions/checkout@v4
         with:
-          # Must name the same repo as `registry` in native/themes2/REGISTRY-SYNC.json — that record is what
-          # --publish and --verify-remote both derive their urls from, so if the two disagree this job
-          # publishes into one repo and verifies another.
+          # Must name the same repo as `registry` in native/themes2/REGISTRY-SYNC.json, and the same one
+          # REGISTRY_RAW/REGISTRY_API name in theme-registry-sync.py — otherwise this job publishes into
+          # one repo and verifies another.
           repository: cubman3134/everythingbox-themes
           ssh-key: ${{ secrets.THEMES_REGISTRY_DEPLOY_KEY }}
           path: registry
-          # Named rather than left to the registry's default branch, because --verify-remote reads back from
-          # raw.githubusercontent's /main/ path (see raw_base in theme-registry-sync.py). Both halves now say
-          # `main` literally; letting them drift apart would push successfully and then fail verify with
-          # "could not read", which points nowhere near the branch.
+          # Named rather than left to the registry's default branch, because --verify-registry reads back
+          # from raw.githubusercontent's /main/ path (see REGISTRY_RAW in theme-registry-sync.py). Both
+          # halves now say `main` literally; letting them drift apart would push successfully and then fail
+          # verify with "could not read", which points nowhere near the branch.
           ref: main
-          # A shallow checkout is fine: this job only ever adds one commit on top of main.
+          # A shallow checkout is fine: this job only ever adds one commit on top of the registry's main.
           fetch-depth: 1
 
       - name: Copy the published themes over
         run: python3 native/tools/theme-registry-sync.py --publish registry
 
-      - name: Commit and push
+      # THE NO-OP CASE MATTERS. A push to main that touches native/themes2/** but changes nothing the
+      # registry serves — a comment in the record, a theme listed under notPublished — leaves the checkout
+      # clean. There is then no new registry commit, so there is nothing to record, and an empty commit on
+      # either repo would be a receipt for a publish that did not happen. `sha` stays empty and the step
+      # below is skipped.
+      - name: Commit and push to the registry
+        id: registry_push
         working-directory: registry
         run: |
           if [ -z "$(git status --porcelain)" ]; then
             echo "registry already in sync — nothing to publish"
+            echo "sha=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git status --short
           git config user.name "everythingbox-publish"
           git config user.email "publish@everythingbox.invalid"
           git add -A
-          git commit -m "Publish themes from EverythingBox@${GITHUB_SHA:0:7}
-
-          Generated by the publish-themes workflow in cubman3134/EverythingBox.
-          The bundled copies under native/themes2 are the source; edit them there."
+          # Separate -m flags rather than one embedded newline: inside a YAML block scalar every
+          # continuation line would carry this step's indentation into the commit message body.
+          git commit -m "Publish themes from EverythingBox@${GITHUB_SHA:0:7}" \
+                     -m "Generated by the publish-themes workflow in cubman3134/EverythingBox. The bundled copies under native/themes2 are the source; edit them there."
           git push
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # THE LOOP BACK, and the reason the record's claim is no longer a promise. --update --registry-commit
+      # is run with the sha the step above actually created, so publishedAgainst names a commit that
+      # demonstrably exists rather than one somebody meant to make.
+      #
+      # WHY THIS DOES NOT RECUR. The commit written here touches native/themes2/REGISTRY-SYNC.json, which
+      # matches this workflow's own `paths` filter — so the only thing stopping an endless chain is that
+      # GitHub does not start one. Verified against the documented behaviour rather than assumed: "events
+      # triggered by the GITHUB_TOKEN will not create a new workflow run", with only workflow_dispatch and
+      # repository_dispatch excepted (docs.github.com, Triggering a workflow / "Triggering a workflow from
+      # a workflow"). This push uses GITHUB_TOKEN, so no `push` run is created.
+      #
+      # And if that ever changed, the chain would still terminate at length one rather than run away: a
+      # re-triggered run would --publish the same content into an already-matching registry, find the
+      # checkout clean, emit an empty `sha`, and skip this step. The recurrence has no fuel.
+      - name: Record the registry commit, and push that back here
+        if: steps.registry_push.outputs.sha != ''
+        env:
+          SHA: ${{ steps.registry_push.outputs.sha }}
+        run: |
+          python3 native/tools/theme-registry-sync.py --update --registry-commit "$SHA"
+          # Nothing to commit is not an error: a re-run over an unchanged tree can land on the same sha.
+          # An empty commit here would be pure noise in the history of a file people read for its claims.
+          if [ -z "$(git status --porcelain native/themes2/REGISTRY-SYNC.json)" ]; then
+            echo "the record already named $SHA — nothing to commit"
+            exit 0
+          fi
+          git config user.name "everythingbox-publish"
+          git config user.email "publish@everythingbox.invalid"
+          git add native/themes2/REGISTRY-SYNC.json
+          git commit -m "chore: record the theme registry publish as ${SHA:0:7}" \
+                     -m "Written by the publish-themes workflow after pushing the bundled themes to cubman3134/everythingbox-themes. Falsifiable with: native/tools/theme-registry-sync.py --verify-registry"
+          # main can have moved while the registry push was in flight. Rebase and retry rather than
+          # failing the job: the registry has ALREADY been published at this point, so giving up here
+          # would leave the record claiming an older sha than the content the registry now serves —
+          # exactly the unsubstantiated claim this job exists to end.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push rejected (attempt $attempt); rebasing onto main and retrying"
+            git pull --rebase origin main || break
+          done
+          echo "::error::published to the registry as $SHA but could not push the refreshed record."
+          echo "::error::Run  native/tools/theme-registry-sync.py --update --registry-commit $SHA  and commit it."
+          exit 1
 
       # The job proves its own work. A push can succeed and still leave the registry wrong — an incomplete
       # copy, a path the record names that nothing checked. This fetches what the registry actually serves
-      # and compares it to the record. It retries internally because raw.githubusercontent is eventually
-      # consistent and would otherwise report the pre-push bytes.
-      - name: Verify the registry now matches the record
-        run: python3 native/tools/theme-registry-sync.py --verify-remote
+      # and compares it to the BUNDLED themes. It retries internally because raw.githubusercontent is
+      # eventually consistent and would otherwise report the pre-push bytes for a job that did everything
+      # right. Exit 2 (could not reach the registry) fails the step too: after a push of our own, "I could
+      # not find out" is not a result this job may end on.
+      - name: Verify the registry now matches
+        run: python3 native/tools/theme-registry-sync.py --verify-registry
