@@ -991,6 +991,10 @@ public:
     // Fire minimalMutate() from the C++ itemRemoved hook instead of a QML
     // handler, so the walked buffer is freed without `item` ever being wrapped.
     bool minMutateFromCpp = false;
+    // Restrict the free to walks entered through itemChange->regenerate(), i.e.
+    // the ~QQuickItem teardown chain both dumps show, rather than the live
+    // modelUpdated(reset)->regenerate() path.
+    bool minMutateTeardownOnly = false;
     bool m_minFired = false, m_minBusy = false;
     Q_INVOKABLE void minimalMutate()
     {
@@ -1066,7 +1070,8 @@ public:
                     // which is why the QML-handler repro lands in Qt6Qml and the
                     // app, whose Repeaters have no onItemRemoved handler at all,
                     // gets all the way to clear+0x127.
-                    if (g_probe->minMutateFromCpp)
+                    if (g_probe->minMutateFromCpp
+                            && (!g_probe->minMutateTeardownOnly || g_probe->regenDepth > 0))
                         g_probe->minimalMutate();
                     g_probe->killItem(item, i, this);
                 },
@@ -1281,12 +1286,13 @@ int main(int argc, char **argv)
     QCommandLineOption oSdLive("sd-live", "sd-*: also fire on live-path clears (drops the regenerate bracket gate)");
     QCommandLineOption oKillTd("kill-teardown-only", "kill-item: only fire inside itemChange->regenerate()->clear()");
     QCommandLineOption oProbeRep("probe-repeater", "--minimal: use ProbeRepeater (C++ itemRemoved hook) instead of a plain Repeater");
-    QCommandLineOption oMinCpp("min-mutate", "--probe-repeater: free the walked buffer from the C++ hook (no QML wrap of `item`)");
+    QCommandLineOption oMinCpp("min-mutate", "--probe-repeater: free the walked buffer from the C++ hook (no QML wrap of the item)");
+    QCommandLineOption oMinTd("min-teardown-only", "--min-mutate: only free on walks entered via itemChange->regenerate()");
     QCommandLineOption oWer("wer", "let the AV reach WER (writes a minidump; evicts the ring). Off by default.");
     QCommandLineOption oVerbose("verbose", "per-event trace");
     QCommandLineOption oOffscreen("offscreen", "use the offscreen platform plugin");
     p.addOptions({oAsyncLoader, oAsyncImages, oImages, oNetQml, oChurn, oChurnOuter, oLive, oMinimal, oSdLive,
-                  oKillTd, oProbeRep, oMinCpp, oWer, oVerbose, oOffscreen});
+                  oKillTd, oProbeRep, oMinCpp, oMinTd, oWer, oVerbose, oOffscreen});
     p.process(app);
 
     Probe probe;
@@ -1320,6 +1326,7 @@ int main(int argc, char **argv)
     probe.killPoison   = p.value(oKillPois).toInt();
     probe.killTeardownOnly = p.isSet(oKillTd);
     probe.minMutateFromCpp = p.isSet(oMinCpp);
+    probe.minMutateTeardownOnly = p.isSet(oMinTd);
     probe.poisonQptr   = p.value(oQpPois).toInt();
 #ifdef _WIN32
     g_letWerDump       = p.isSet(oWer);
