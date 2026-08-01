@@ -2,6 +2,7 @@
 #include "../core/AppPaths.h"
 #include "../core/ThemeAssetPath.h"
 #include "../core/ThemeChoice.h"
+#include "../core/ThemeRegistry.h"   // owns the one definition of "<dataDir>/themes2"
 #include "FormFactor.h"
 #include "../core/SafeAreaInsets.h"
 #include "../ui/nav/NavGraph.h"
@@ -248,7 +249,10 @@ namespace ThemeEngine
 
 QString themesRoot()
 {
-    return AppPaths::dataDir() + QStringLiteral("/themes2");
+    // The path itself lives in ThemeRegistry (QtCore-only, covered by probe_themereg). This stays as the
+    // name the rest of the app calls — ThemeEngine.cpp is only compiled when EB_HAVE_QML is set, so a
+    // no-QML build has to be able to reach the path without reaching this function.
+    return ThemeRegistry::themesRoot(AppPaths::dataDir());
 }
 
 QStringList availableThemes()

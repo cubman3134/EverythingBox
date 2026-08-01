@@ -1,6 +1,7 @@
 #include "AssetBootstrap.h"
 
-#include "ThemeChoice.h"   // header-only constants: the ONE place the folder names XMB/Triple are spelled
+#include "ThemeChoice.h"    // header-only constants: the ONE place the folder names XMB/Triple are spelled
+#include "ThemeRegistry.h"  // themesRoot(dataDir): the ONE place "<dataDir>/themes2" is spelled
 
 #include <QDir>
 #include <QDirIterator>
@@ -64,7 +65,7 @@ namespace AssetBootstrap
         // Stock themes are REFRESHED on every fresh/bumped run: source themes overwrite same-named files so a new
         // app version ships updated stock themes. User-added theme dirs (not present in the source) are never
         // iterated, so they survive untouched.
-        copyTreeOverwrite(sourceRoot + QStringLiteral("/themes2"), dataDir + QStringLiteral("/themes2"));
+        copyTreeOverwrite(sourceRoot + QStringLiteral("/themes2"), ThemeRegistry::themesRoot(dataDir));
 
         // Addons are COPY-IF-ABSENT at the addon-dir granularity: a first-party addon the user has configured
         // (or removed) must never be clobbered by an upgrade. Only addon dirs missing from disk get extracted.
@@ -109,7 +110,7 @@ namespace AssetBootstrap
 
     bool retireRenamedTheme(const QString& dataDir)
     {
-        const QString root  = dataDir + QStringLiteral("/themes2");
+        const QString root  = ThemeRegistry::themesRoot(dataDir);
         const QString kept  = root + QLatin1Char('/') + QLatin1String(ThemeChoice::kFallbackTheme);
         const QString stale = root + QLatin1Char('/') + QLatin1String(ThemeChoice::kRenamedFrom);
 

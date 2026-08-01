@@ -293,7 +293,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK" "probe_themereg THEMEREG-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken
@@ -1506,6 +1506,116 @@ else
     echo "PASS: general settings builder parity ($gs_nids themed control rows, $gs_nctrl classic controls)"
   else
     echo "FAIL: general settings builder parity — the two builders of openGeneralSettings() have drifted."; fail=1
+  fi
+fi
+echo
+
+# Appearance theme-gallery reachability gate. openAppearance() has TWO builders — a themed one (PanelRows)
+# and a classic one (QWidgets) — and CONTRIBUTING.md names that split as the thing most often half-done. The
+# gallery is a fresh instance of it: the registry browser supported a Themes kind for a long time while being
+# constructed with Addons at its ONE call site, so there was no theme gallery at all and nothing said so.
+#
+# This asserts the property rather than the prose: both builders still reach the registry. The themed side
+# needs a row that OFFERS the gallery, a dispatch arm that HANDLES that row, and presentThemeRegistry both
+# DEFINED and CALLED (a definition nothing calls is exactly the dead-code state this replaces); the classic
+# side needs a RegistryBrowser::Themes construction.
+#
+# Comments are stripped FIRST, and that is load-bearing rather than tidiness: this whole section is
+# introduced by prose naming every symbol it greps for, so a gate reading the raw file would go on passing
+# after someone deleted the code and left a comment describing it. That is precisely how an assertion ends
+# up gating nothing — the same trap the probe data-dir isolation gate documents.
+#
+# What the strip does NOT cover, said plainly so a PASS is not read for more than it earns: the preprocessor
+# and control flow. Wrap either builder in `#if 0`, put the row behind a runtime `if`, build the browser in a
+# lambda nothing connects — every token below is still there and this gate is still green. That is not a
+# hypothetical shape: MainWindow.cpp already carries `void MainWindow::openAppearance() {}` in a `#else`
+# branch. A grep cannot see any of it; only a UI-driving test could, and this suite is deliberately offline
+# and windowless. Naming the hole beats a heuristic that would pretend to cover it.
+echo "=== appearance theme-gallery reachability ==="
+GAL_MW="$HERE/../src/ui/MainWindow.cpp"
+if [ ! -f "$GAL_MW" ]; then
+  echo "FAIL: appearance theme-gallery reachability (MainWindow.cpp not found at $GAL_MW)"
+  fail=1
+else
+  gal_bad=0
+  # Block comments come off first, then line comments. Neither order is a C lexer: taken this way round a
+  # `//` comment holding an unbalanced `/*` opens a spurious block, and taken the other way a `/* … */`
+  # holding a `//` loses its terminator. MainWindow.cpp has neither today — 77 `/* … */`, every one opened
+  # and closed on its own line — and both failure modes OVER-strip, which can only produce a false FAIL.
+  # That is the safe direction for a gate; under-stripping is the direction that lets a comment pass as code.
+  gal_src="$(sed -E ':j; s@/\*([^*]|\*+[^*/])*\*+/@@g; /\/\*/ { $!{ N; bj } }' "$GAL_MW" | sed -E 's://.*$::')"
+
+  # `grep -q` is deliberately NOT used on this stream, and that is not a style choice. This script runs under
+  # `set -o pipefail` (top of file). grep -q exits the instant it matches, which SIGPIPEs the producer feeding
+  # it; pipefail then reports the whole pipeline as rc=141 — a FAILURE — even though the pattern was found. On
+  # the small files the other gates read the producer finishes inside the pipe buffer and it never shows, so
+  # the idiom looks safe; MainWindow.cpp is ~760 KB, so it fires every single time. Written with grep -q this
+  # gate failed all four assertions against a tree that satisfies all four, which is the mirror image of the
+  # bug it exists to catch and would have been "fixed" by deleting the gate. `grep -c >/dev/null` drains the
+  # stream, so the producer always completes; the exit status is still "did it match".
+  #
+  # -w (whole word) is the other thing the mutation pass paid for. A plain substring grep for
+  # `RegistryBrowser::Themes` is satisfied by `RegistryBrowser::ThemesX`, so renaming the enumerator out from
+  # under the classic builder left this gate green. Every pattern below is anchored on word boundaries now.
+  #
+  # GNU -w constrains BOTH ends regardless of what the pattern's own last character is: the man page's rule is
+  # that the match must start at the line start or after a non-word character, and end at the line end or
+  # before one. So on the two patterns closing with `)` it is doing work at the back too — the character after
+  # that `)` must be a non-word character. Verified rather than assumed (GNU grep 3.0): with the pattern
+  # `action(QStringLiteral("appr\.browse")`, a line ending `…"appr.browse")x;` does NOT match while one ending
+  # `…"appr.browse");` does. That makes this gate STRICTER than a plain substring grep at both ends, not just
+  # at the front, which is fine — every real call site is followed by `;` or `,` — but it is worth knowing:
+  # a future pattern ending in a word character glued to a longer identifier would be rejected here.
+  gal_has() { printf '%s\n' "$gal_src" | grep -cw "$1" >/dev/null; }
+
+  # Floor: did this gate scan the right file at all? A gate that walks the wrong tree prints PASS, which is
+  # worse than no gate — it reports a rule as enforced. openAppearance is the function both builders live in.
+  if ! gal_has 'void MainWindow::openAppearance'; then
+    echo "  MainWindow.cpp has no openAppearance definition — this gate scanned the wrong file or the"
+    echo "  builders moved. Treat a PASS as meaningless until the path is fixed."
+    gal_bad=1
+  fi
+
+  # Themed builder: the row that OFFERS the gallery, and the dispatch arm that HANDLES it. These are asserted
+  # as two separate spellings rather than as the shared substring `"appr.browse"`, and that is the whole point:
+  # the id appears twice — once building the PanelRow, once in onAct — so a single-occurrence check is
+  # satisfied by either one alone. Deleting only the row leaves the dispatch arm holding both the id string
+  # AND the presentThemeRegistry() call, so the row check and the call check below BOTH survive and the themed
+  # surface loses its button with the suite fully green. Mutation-tested in each direction. Two spellings
+  # rather than a >=2 occurrence count, which an unrelated third mention of the id would break.
+  gal_has 'action(QStringLiteral("appr\.browse")' \
+    || { echo "  the themed Appearance builder no longer offers an appr.browse row — the gallery has no"; \
+         echo "  entry point on the themed surface"; gal_bad=1; }
+  gal_has 'id == QStringLiteral("appr\.browse")' \
+    || { echo "  nothing in the themed builder's onAct dispatches appr.browse — the row is offered but"; \
+         echo "  pressing it does nothing"; gal_bad=1; }
+  gal_has 'void MainWindow::presentThemeRegistry' \
+    || { echo "  presentThemeRegistry is no longer defined — the themed gallery panel is gone"; gal_bad=1; }
+  # Called, not merely defined. The definition line is excluded so it cannot satisfy its own call check. The
+  # narrow grep runs FIRST so the second one is fed a couple of lines rather than the whole file — the same
+  # SIGPIPE reasoning as above, and the reason this pipeline is safe to write as a pipeline.
+  gal_calls="$(printf '%s\n' "$gal_src" | grep -n 'presentThemeRegistry()' \
+                 | grep -v 'void MainWindow::presentThemeRegistry' || true)"
+  [ -n "$gal_calls" ] \
+    || { echo "  presentThemeRegistry is defined but never called — a themed panel nothing opens is the"; \
+         echo "  exact dead-code state this gate exists to prevent"; gal_bad=1; }
+
+  # Classic builder: the only way its gallery opens is a Themes-kind RegistryBrowser. Scope caveat, because
+  # the PASS line must not claim more than this proves — the check is FILE-scoped, not scoped to the classic
+  # builder's body. The two builders are branches of one function with no reliable textual boundary between
+  # them, so what this actually asserts is "MainWindow.cpp constructs a Themes-kind browser somewhere". True
+  # of the classic button today (one occurrence, MainWindow.cpp:5869), but a later refactor that built one
+  # from the THEMED path would satisfy it after the classic one was gone. Hence the wording below.
+  gal_has 'RegistryBrowser::Themes' \
+    || { echo "  nothing in MainWindow.cpp constructs RegistryBrowser::Themes — the classic Appearance"; \
+         echo "  builder's route into the gallery is gone"; gal_bad=1; }
+
+  if [ "$gal_bad" -eq 0 ]; then
+    echo "PASS: appearance theme-gallery reachability (every call site both builders need is present)"
+  else
+    echo "FAIL: appearance theme-gallery reachability — a user-facing surface exists on only one of"
+    echo "  openAppearance()'s two builders. See the two-settings-builders rule in CONTRIBUTING.md."
+    fail=1
   fi
 fi
 echo

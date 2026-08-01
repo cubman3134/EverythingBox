@@ -68,12 +68,13 @@ probe executables so they find Qt's plugins without you exporting
 The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 `.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
-registry drift gate below, and the old-brand gate. Those fail on code you wrote
-even if every probe binary passes. One
-more gate is a property of the run rather than of the source: `exe-folder
-contamination` compares the build folder's app-data footprint before and after
-the suite, and fails if anything changed it while the suite ran — normally a
-probe, occasionally an app or a build running out of that same folder.
+registry drift gate below, the Appearance theme-gallery reachability gate, and
+the old-brand gate. Those fail on code you wrote even if every probe binary
+passes. One more gate is a property of the run rather than of the source:
+`exe-folder contamination` compares the build folder's app-data footprint
+before and after the suite, and fails if anything changed it while the suite
+ran — normally a probe, occasionally an app or a build running out of that
+same folder.
 
 ## Rules that the review will hold you to
 
@@ -122,6 +123,20 @@ indistinguishable from an oversight, and a stale one fails the gate. Separator
 and Info rows are out of scope: they are headings and status read-outs, not
 capabilities. The gate covers `openGeneralSettings()` only; the other doubled
 panels are still on you.
+
+The theme gallery is the worked example, and the reason there is now a gate:
+`RegistryBrowser` carried a `Themes` kind for a long time while its only
+construction passed `Addons`, so there was no in-app theme gallery on either
+surface and nothing said so. `=== appearance theme-gallery reachability ===`
+asserts that every call site the two builders need is still in the source — the
+themed one's row, the dispatch arm that handles it, and `presentThemeRegistry`
+defined *and* called; the classic one's `RegistryBrowser::Themes` construction.
+
+It reads comment-stripped text, so it cannot see `#if 0` or a runtime `if` — and
+it only reads `native/src/ui/MainWindow.cpp`. Move either builder into another
+file and the gate goes green while asserting nothing, which is why its first
+check is that `MainWindow::openAppearance` is still defined in the file it just
+read. The script's own comment says the same; keep the two in step.
 
 ### A new pure component gets a probe, registered in three places
 

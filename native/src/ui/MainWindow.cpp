@@ -4284,8 +4284,38 @@ QString registryNormalizeUrl(QString u)
     while (u.endsWith(QLatin1Char('/'))) u.chop(1);
     return u;
 }
-// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
-bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+// Bound a reply's body AS IT ARRIVES — classic RegistryBrowser::boundIncoming parity, and the same reasoning
+// applies verbatim: QNetworkAccessManager buffers a whole response by default, so a byte cap tested after
+// readAll() is a cap on nothing. A registry serving ONE 500 MB file has 500 MB resident before anything gets
+// to refuse it, which on the 32-bit armv7 box is the OOM ThemeRegistry's caps were written to prevent.
+// setReadBufferSize is what actually bounds the resident bytes (nothing here reads before finished(), so the
+// reply's buffer IS the body); downloadProgress ends the transfer instead of leaving it stalled against a
+// full buffer until the 20 s wall, and is what lets a caller tell a refusal from a network error. bytesTotal
+// is checked too, so a response DECLARING itself over budget is dropped before its body arrives.
+//
+// `context` owns the connection: a blocking caller passes its stack QEventLoop so the lambda cannot outlive
+// the flag it writes into; an async caller passes the reply.
+void registryBoundIncoming(QNetworkReply* reply, qint64 maxBytes, QObject* context, bool* overBudget)
+{
+    reply->setReadBufferSize(maxBytes + 1);   // +1 so the first byte PAST the budget is still seen and refused
+    QObject::connect(reply, &QNetworkReply::downloadProgress, context,
+                     [reply, maxBytes, overBudget](qint64 received, qint64 total) {
+        if (received <= maxBytes && total <= maxBytes) return;   // total is -1 when unknown, which passes
+        if (overBudget) *overBudget = true;
+        reply->abort();
+    });
+}
+// Blocking fetch into MEMORY (20 s cap, and `maxBytes` of body) — classic RegistryBrowser::fetchToBuffer
+// parity. The theme path wants the bytes, not a file: the fixed /tmp/eb-theme-*.tmp paths it used to
+// round-trip through were opened O_TRUNC in a world-writable directory on desktop Linux (a pre-planted
+// symlink is followed) and were the SAME two paths the classic browser uses, behind two busy flags that know
+// nothing of each other.
+//
+// `maxBytes` is required rather than defaulted, so a new call site has to answer the question rather than
+// inherit an unbounded read. *overBudget, when given, says the false return was that REFUSAL and not a
+// network error — only one of the two is worth retrying, and they want different words on screen.
+bool registryFetchToBuffer(QNetworkAccessManager* nam, const QString& url, qint64 maxBytes, QByteArray* out,
+                           QString* error, bool* overBudget = nullptr)
 {
     QNetworkRequest req((QUrl(url)));
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -4295,16 +4325,41 @@ bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QS
     QTimer to; to.setSingleShot(true);
     QObject::connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
     QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    bool over = false;
+    registryBoundIncoming(reply, maxBytes, &loop, &over);
     to.start(20000);
     loop.exec();
+    // Before the error branch: the abort this refusal performs surfaces as OperationCanceledError with the
+    // errorString "Operation canceled", which reads as a transient hiccup worth retrying — and this is not
+    // one. The same registry will send the same oversized body every time.
+    if (over)
+    {
+        if (overBudget) *overBudget = true;
+        if (error) *error = QCoreApplication::translate("MainWindow",
+                                "the server sent more than the %1 MB this app will accept for one download, "
+                                "so the transfer was stopped")
+                                .arg(double(maxBytes) / (1024.0 * 1024.0));
+        reply->abort(); reply->deleteLater();
+        return false;
+    }
     if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
     {
         if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
         reply->abort(); reply->deleteLater();
         return false;
     }
-    const QByteArray data = reply->readAll();
+    if (out) *out = reply->readAll();
     reply->deleteLater();
+    return true;
+}
+// Blocking file download (20 s cap) — classic RegistryBrowser::downloadTo parity for packaged entries.
+bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QString& destPath, QString* error)
+{
+    QByteArray data;
+    // One file's worth is the bound: the add-on path has no per-entry budget of its own, and this reads the
+    // whole body into memory before writing a byte of it. Classic parity — RegistryBrowser::downloadTo passes
+    // the same constant for the same reason.
+    if (!registryFetchToBuffer(nam, url, ThemeRegistry::kMaxFileBytes, &data, error)) return false;
     QFileInfo fi(destPath);
     QDir().mkpath(fi.absolutePath());
     QFile f(destPath);
@@ -4312,6 +4367,16 @@ bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QS
     f.write(data);
     return true;
 }
+// Bracket around a blocking install so EVERY exit from it — including its seven early error returns — clears
+// the flag. A flag left set by one missed return path would disable the surface for the rest of the session.
+struct BusyFlag
+{
+    explicit BusyFlag(bool& f) : f_(f) { f_ = true; }
+    ~BusyFlag() { f_ = false; }
+    BusyFlag(const BusyFlag&) = delete;
+    BusyFlag& operator=(const BusyFlag&) = delete;
+    bool& f_;
+};
 } // namespace
 
 // The add-on registry "store" as a nested panel: fetch the configured registry index(es) (the built-in
@@ -4394,6 +4459,10 @@ void MainWindow::presentAddonRegistry()
         req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
         req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply* reply = docNam_->get(req);
+        // An index.json is read into memory whole by the readAll() below, exactly like a blob, and a registry
+        // is as free to serve half a gigabyte of it. One refused this way contributes no entries, which the
+        // "may be unreachable" line already covers.
+        registryBoundIncoming(reply, ThemeRegistry::kMaxListingBytes, reply, nullptr);
         connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
             reply->deleteLater();
             if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
@@ -4458,6 +4527,228 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
     { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installed ✓");
       r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
     updatePanelInfo(QStringLiteral("reg.status"), tr("Installed \"%1\".").arg(name));
+}
+
+// The theme gallery as a nested themed panel — the twin of the classic RegistryBrowser(Themes). Same shape
+// as presentAddonRegistry: a status Info row, one Action row per entry, a 15 s guard so "Loading…" cannot
+// stick, and a themedPanelIsTop gate so a fetch that lands after the user navigated away is dropped.
+//
+// A theme entry names a FOLDER ({dir: "themes2/<Name>"}), so installing means listing that folder from the
+// registry repo's own tree and writing it whole — see ThemeRegistry, which both surfaces share so they
+// cannot disagree about what a registry says or what may become a filename.
+void MainWindow::presentThemeRegistry()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+
+    // Present a loading placeholder immediately; the entries replace it once every index has been fetched.
+    QVector<PanelRow> loading;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+      r.value = tr("Loading…"); loading << r; }
+    // Defensive root onBack: Browse Themes is nested UNDER Appearance, so a pop re-renders that parent and this
+    // never runs — it only fires if this panel somehow became the root, and then it leaves for where it opened from.
+    themedPanelHost_->present(tr("Browse Themes"), loading,
+                              [](const QString&, const QString&) {}, [this] { openAppearance(); });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+
+    // The built-in themes index + any user-saved extras (the same ini key the classic browser writes, so a
+    // registry added there shows up here). Management of that list stays on the classic surface.
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
+    QStringList regs;
+    regs << QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+
+    struct ThemeFetch { int pending = 0; QVector<QPair<ThemeRegistry::Entry, QString>> entries; };
+    auto st = std::make_shared<ThemeFetch>();
+    st->pending = regs.size();
+
+    auto finish = [this, st] {
+        if (!themedPanelIsTop(tr("Browse Themes"))) return;   // navigated away while fetching — drop
+        QVector<PanelRow> rows;
+        if (st->entries.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+            r.value = tr("No themes found — the registry may be unreachable."); rows << r;
+        }
+        else
+        {
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+              r.value = tr("%n theme(s) available.", "", int(st->entries.size())); rows << r; }
+            for (int i = 0; i < st->entries.size(); ++i)
+            {
+                const ThemeRegistry::Entry& e = st->entries[i].first;
+                // Installed = the folder is on disk, the same predicate availableThemes() uses. The bundled
+                // themes are therefore never offered, which is what keeps the registry's older copies of
+                // them (issue #131) from replacing the ones already in the app.
+                const bool installed =
+                    QFile::exists(ThemeEngine::themesRoot() + QStringLiteral("/") + e.folder()
+                                  + QStringLiteral("/theme.json"));
+                PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("treg:") + QString::number(i);
+                r.label = e.name.isEmpty() ? e.folder() : e.name;
+                QString sub = e.author.isEmpty() ? QString() : tr("by %1").arg(e.author);
+                if (!e.formFactors.isEmpty())
+                    sub += (sub.isEmpty() ? QString() : QStringLiteral(" · ")) + e.formFactors.join(QStringLiteral(", "));
+                r.value = installed ? tr("Installed ✓") : sub;
+                r.enabled = !installed;
+                rows << r;
+            }
+        }
+        themedPanelHost_->replaceTop(tr("Browse Themes"), rows,
+            [this, st](const QString& id, const QString&) {
+                if (!id.startsWith(QStringLiteral("treg:"))) return;   // no other Action row exists — not a refusal
+                const int i = id.mid(5).toInt();
+                if (i < 0 || i >= st->entries.size())
+                { updatePanelInfo(QStringLiteral("treg.status"),
+                                  tr("That entry is no longer in this list — reopen this page.")); return; }
+                installThemeRegistryEntry(st->entries[i].first, st->entries[i].second, id);
+            },
+            [this] { openAppearance(); });
+    };
+
+    // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
+    QTimer::singleShot(15000, this, [st, finish] { if (st->pending > 0) { st->pending = 0; finish(); } });
+
+    for (const QString& indexUrl : regs)
+    {
+        QNetworkRequest req((QUrl(indexUrl)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        // Same bound as the add-on twin, and for the same reason: parseIndex is handed the WHOLE body, so an
+        // unbounded index.json is an unbounded allocation before a single entry has been read.
+        registryBoundIncoming(reply, ThemeRegistry::kMaxListingBytes, reply, nullptr);
+        connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
+            reply->deleteLater();
+            if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
+            if (reply->error() == QNetworkReply::NoError)
+                for (const ThemeRegistry::Entry& e : ThemeRegistry::parseIndex(reply->readAll()))
+                    st->entries << qMakePair(e, indexUrl);
+            if (--st->pending <= 0) finish();
+        });
+    }
+}
+
+// Install one theme entry from the themed gallery: list its folder from the registry repo's tree, download
+// every file, then write the set atomically. Blocking, like the add-on twin (installRegistryEntry); the row
+// shows "Installing…" and the status line names each file as it goes.
+//
+// The tree is fetched per INSTALL here rather than cached per registry as the classic browser does. That is
+// still one API call per install — the figure the 60-an-hour budget rests on — and the alternative is a
+// cache member on MainWindow outliving the panel that filled it, which is more state than one call is worth.
+//
+// `entry` and `indexUrl` are taken BY VALUE. Both arguments the caller passes are elements of the fetch state
+// that a PANEL CALLBACK owns, and this body sits under up to 64 nested event loops during which the user can
+// pop that panel and free it. ThemedPanelHost::onGraphActivated does dispatch through a by-value copy of the
+// handler, which is what keeps that state alive today — but copying at this boundary (before any loop spins)
+// means the body does not depend on a discipline enforced in another file. `indexUrl` was a reference into
+// the same QVector for as long as the sentence above claimed otherwise; a comment that overstates the code is
+// worse than no comment, because the next reader trusts it.
+void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, QString indexUrl,
+                                           const QString& rowId)
+{
+    // One install at a time. Every file below is a nested event loop, so this panel stays live while it runs and
+    // a SECOND theme's row is still activatable from inside this one — stacking another install (its own up-to-64
+    // downloads, all held in memory as QByteArray blobs) under these frames, on a product that ships to a 32-bit
+    // armv7 box. Refuse BEFORE the row is greyed, and say so: the classic surface learned that a silent refusal
+    // leaves the caller relabelling an untouched row "Retry" for a failure that never happened.
+    if (themeInstallBusy_)
+    { updatePanelInfo(QStringLiteral("treg.status"),
+                      tr("One install at a time — this one has to finish first.")); return; }
+    const BusyFlag busy(themeInstallBusy_);
+
+    // The folder stands in for a nameless entry: an index that omits "name" would otherwise install "".
+    const QString label = entry.name.isEmpty() ? entry.folder() : entry.name;
+    auto setRow = [this, rowId, label](const QString& value, bool enabled) {
+        PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = label;
+        r.value = value; r.enabled = enabled; themedPanelHost_->updateRow(rowId, r);
+    };
+    setRow(tr("Installing…"), false);
+
+    const QString folder = entry.folder();
+    if (folder.isEmpty())
+    { updatePanelInfo(QStringLiteral("treg.status"), tr("This entry doesn't name a usable theme folder."));
+      setRow(tr("Retry"), true); return; }
+
+    const QString api = ThemeRegistry::treeApiUrl(indexUrl);
+    if (api.isEmpty())
+    { // A user-added registry may be anywhere. It still LISTS — the row says what the theme is — but we cannot
+      // enumerate a folder without the API, so name the manual route instead of a Retry that cannot succeed.
+      updatePanelInfo(QStringLiteral("treg.status"),
+                      tr("This registry isn't hosted on GitHub, so themes can't be installed from here. "
+                         "Download the folder from the registry and drop it into %1.")
+                          .arg(QDir::toNativeSeparators(ThemeEngine::themesRoot())));
+      setRow(tr("Manual"), false); return; }
+
+    updatePanelInfo(QStringLiteral("treg.status"), tr("Reading the registry's file list…"));
+    QByteArray tree;
+    QString err;
+    // The listing gets a budget too: a hostile registry can serve a 500 MB tree JSON as cheaply as a 500 MB
+    // font, and this response is read into memory whole.
+    if (!registryFetchToBuffer(docNam_, api, ThemeRegistry::kMaxListingBytes, &tree, &err))
+    { // GitHub's 60-an-hour unauthenticated rate limit lands here too.
+      updatePanelInfo(QStringLiteral("treg.status"), tr("Couldn't read the registry's file list: %1").arg(err));
+      setRow(tr("Retry"), true); return; }
+
+    const ThemeRegistry::Listing listing = ThemeRegistry::filesUnder(tree, entry.dir);
+    if (!listing.ok())
+    { updatePanelInfo(QStringLiteral("treg.status"), listing.error); setRow(tr("Retry"), true); return; }
+
+    const QString base = registryBaseUrl(indexUrl);
+    QVector<QPair<QString, QByteArray>> blobs;
+    // The bytes actually held so far. filesUnder has already checked the size the TREE CLAIMED, but the blobs
+    // below are separate requests against branch HEAD: a registry that commits small files, gets listed, then
+    // force-pushes large ones serves whatever it likes into an unbounded readAll(). The caps are
+    // ThemeRegistry's so the classic surface enforces the same two numbers — 64 × 8 MB is half a gigabyte of
+    // QByteArray held at once, on a product that ships to a 32-bit armv7 box.
+    qint64 got = 0;
+    for (int i = 0; i < listing.files.size(); ++i)
+    {
+        const QString& rel = listing.files.at(i);
+        // Named per file, classic parity: up to kMaxFiles sequential fetches, each behind its own 20 s wall, on
+        // the UI thread — one unchanging "Installing…" across all of them is indistinguishable from a hang. The
+        // status row does repaint: registryDownloadTo enters a nested event loop on the very next line, and
+        // updateRow patches in place (dataChanged), so the ListView redraws inside it. The multi-arg form
+        // substitutes in ONE pass, so a file whose name contains "%2" is not a placeholder for the count.
+        updatePanelInfo(QStringLiteral("treg.status"), tr("Downloading %1 (%2 of %3)…")
+                            .arg(rel, QString::number(i + 1), QString::number(listing.files.size())));
+
+        // `rel` travels to installFiles as the string filesUnder validated. assetUrl percent-encodes for the URL
+        // side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named "%2e%2e" would
+        // become ".." on the way to disk.
+        const QString url = ThemeRegistry::assetUrl(base, entry.dir, rel);
+        QByteArray blob;
+        // The budget the transfer itself is held to, carrying the running total: the per-file cap and what is
+        // left of this entry's total, whichever is smaller. Passed IN rather than applied afterwards, because
+        // a check that runs once readAll() has returned is a check on bytes that are already resident.
+        bool over = false;
+        if (!registryFetchToBuffer(docNam_, url, ThemeRegistry::remainingDownloadBudget(got), &blob, &err, &over))
+        { // A refusal is not a failure and does not read as one: nothing about this registry's response will
+          // be different next time, so "Download failed" — which invites a retry — would be the wrong
+          // sentence. The ROW stays "Retry" on both paths deliberately: the classic twin's install returns a
+          // single bool and cannot say more than that, and a label this surface offers and that one does not
+          // is the two-surfaces-disagree trap. The status line is where they both say which it was.
+          updatePanelInfo(QStringLiteral("treg.status"), over ? tr("Refused %1: %2").arg(rel, err)
+                                                              : tr("Download failed: %1 — %2").arg(rel, err));
+          setRow(tr("Retry"), true); return; }
+        // Belt to the arrival-time brace: the abort above is asynchronous, so a reply that finishes in the
+        // same turn it crosses its budget can still hand back a body over it. This refuses that body rather
+        // than installing it, and is the only bound left if a future caller forgets the budget argument.
+        if (!ThemeRegistry::acceptDownloadedBytes(blob.size(), got, rel, &err))
+        { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
+        got += blob.size();
+        blobs << qMakePair(rel, blob);
+    }
+
+    // No "Writing the theme folder…" line here: installFiles is synchronous and no event loop spins between
+    // setting such a label and replacing it, so it would never reach the screen. A status that cannot paint is
+    // a comment written to the wrong place.
+    if (!ThemeRegistry::installFiles(ThemeEngine::themesRoot(), folder, blobs, &err))
+    { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
+
+    setRow(tr("Installed ✓"), false);
+    updatePanelInfo(QStringLiteral("treg.status"),
+                    tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
 }
 #endif // EB_HAVE_QML
 
@@ -6059,7 +6350,9 @@ void MainWindow::openAppearance()
              tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
         info(QStringLiteral("appr.root"), tr("Themes folder"), ThemeEngine::themesRoot());
         info(QStringLiteral("appr.community"),
-             tr("Browse and share community themes at github.com/cubman3134/everythingbox-themes."), QString());
+             tr("Browse the registry below, or share your own at github.com/cubman3134/everythingbox-themes."),
+             QString());
+        action(QStringLiteral("appr.browse"), tr("Browse community themes…"));
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         auto onAct =
@@ -6106,6 +6399,12 @@ void MainWindow::openAppearance()
                     }
                     stack_->setCurrentWidget(themePickerHost_);
                     updateNavForPage();
+                }
+                else if (id == QStringLiteral("appr.browse")) {
+                    // The IN-APP gallery, the themed twin of the classic panel's RegistryBrowser(Themes). Nested
+                    // on this host (present -> one more graph level), so Back lands back on Appearance and the
+                    // theme installed here is in Theme…'s picker the moment that panel is rebuilt.
+                    presentThemeRegistry();
                 }
                 else if (id == QStringLiteral("appr.gallery")) {
                     // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
@@ -6198,13 +6497,15 @@ void MainWindow::openAppearance()
         row->addWidget(previewBox, 1);
         v->addLayout(row, 1);
 
-        // How to get more themes and share your own (the community theme registry on GitHub).
+        // Getting more themes: the gallery is the way in, the GitHub link is how you contribute one (and
+        // the fallback for a registry the gallery can't install from). Before this, the hand-copy was the
+        // ONLY documented route, which is not performable on a TV box with no browser and no file manager.
         auto* share = new QLabel(tr(
             "<b>Get more themes &amp; share yours.</b> "
-            "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>. "
-            "Browse and download community themes, or upload your own, at "
+            "Browse the community registry below, or at "
             "<a href=\"https://github.com/cubman3134/everythingbox-themes\">github.com/cubman3134/everythingbox-themes</a>. "
-            "To <b>add</b> a theme, drop its folder into the directory above and pick it here. "
+            "Themes live in <code>%1</code> — each is a folder with a <code>theme.json</code>, so you can also "
+            "add one by dropping its folder in there. "
             "To <b>share</b> yours, add the folder under <code>themes2/</code> in that repo with an "
             "<code>index.json</code> entry and open a pull request (see <code>THEME_FORMAT.md</code> for the format).")
             .arg(ThemeEngine::themesRoot()));
@@ -6213,6 +6514,32 @@ void MainWindow::openAppearance()
         share->setOpenExternalLinks(true); // the GitHub link opens in the browser
         share->setStyleSheet(QStringLiteral("margin-top:12px;"));
         v->addWidget(share);
+
+        // The in-app gallery. Hosted INLINE via showDialogPanel (it sets Qt::Widget), never as a top-level
+        // window — this panel lives inside panelRing_ and a real dialog would be unreachable with a D-pad.
+        // Same *inline* treatment (Qt::Widget) LibraryView::browseAddons uses for the add-on browser — that
+        // one is hosted differently though (LibraryView::showDialogPage/pushPage gives it a whole page).
+        auto* browse = new QPushButton(tr("Browse community themes…"));
+        browse->setMinimumHeight(40);
+        connect(browse, &QPushButton::clicked, this, [this] {
+            auto* dlg = new RegistryBrowser(RegistryBrowser::Themes, nullptr, this);
+            showDialogPanel(tr("Browse Themes"), dlg, [this](int) {
+                // Re-render Appearance EITHER WAY, install or not. availableThemes() reads the directory
+                // live, so a newly installed theme is in the list as soon as the panel is rebuilt. And it
+                // must be unconditional: the browser's own Close button only HIDES the inline dialog, so a
+                // "did you install?" guard here would strand a user who just looked on an empty panel.
+                openAppearance();
+            }, [this, dlg] {
+                // Back is live while an install is running, and an install is synchronous: it sits in a
+                // nested event loop per file. Navigating now would delete the browser out from under those
+                // frames (showPanel replaces the panel content), and the download code would return into
+                // freed memory — reproduced as an access violation before this guard. Hand the exit to the
+                // dialog instead; it leaves the moment the install finishes, through the handler above.
+                if (dlg->isInstalling()) { dlg->closeWhenIdle(); return; }
+                openAppearance();
+            });
+        });
+        v->addWidget(browse);
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
@@ -9662,7 +9989,14 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->setSpacing(14);
     build(v);
     v->addStretch(1);
-    panelScroll_->setWidget(content); // deletes the previous content widget
+    // NOTE: this deletes the previous content widget SYNCHRONOUSLY, so a hosted dialog that is sitting in a
+    // nested event loop must not let a navigation reach here — it would be freed under its own stack frame.
+    // What gets one in there is the QUEUED finished() connection in showDialogPanel: a queued call carries
+    // no loop-level guard, so the FIRST loop to spin delivers it — a nested one inside the dialog included.
+    // Switching this to deleteLater() would not fix that either: the delete would be safely deferred, but
+    // the rest of the navigation still runs mid-install. The guard belongs at the dialog, which is the only
+    // thing that knows it is busy — see RegistryBrowser::done.
+    panelScroll_->setWidget(content);
     stack_->setCurrentWidget(panelPage_);
     panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     updateNavForPage();     // panel -> panel doesn't fire currentChanged; re-register the ring explicitly
@@ -9691,6 +10025,9 @@ void MainWindow::showDialogPanel(const QString& title, QDialog* dlg,
     dlg->setWindowFlags(Qt::Widget); // render inline instead of as a separate top-level window
     // Queued: the handler navigates away (deleting this dialog), so it must run AFTER QDialog::done()
     // returns rather than mid-emission, or we'd free the dialog out from under its own call stack.
+    // Queued is NOT the same as "after the dialog is idle", though: the call is delivered by whichever
+    // event loop spins next, so a dialog that runs its own nested loop has to withhold finished() while it
+    // does (RegistryBrowser::done) rather than assume this connection protects it.
     connect(dlg, &QDialog::finished, this, onFinished, Qt::QueuedConnection);
     showPanel(title, [dlg](QVBoxLayout* v) { v->addWidget(dlg); }, onBack);
     panelDialog_ = dlg; // its own widgets handle the keyboard; suppress the panel's row arrow-nav
