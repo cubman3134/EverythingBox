@@ -32,7 +32,7 @@
   "publishedThemes": {
     "Channels": {
       "registryPath": "themes2/Channels",
-      "canonicalSha256": "29d4b7ed55d5d24c6537846e41427fefec2aaff4441f10bd73902e91ec96fe6b"
+      "canonicalSha256": "5336f42d28c12011e8818051b0ff339e916880aad8cd8cc59156dea3c61ac38e"
     },
     "Night": {
       "registryPath": "themes2/Night",
@@ -40,14 +40,14 @@
     },
     "Triple": {
       "registryPath": "themes2/Triple",
-      "canonicalSha256": "2b16269bf259b0ba75d17b28241a6e271a4bed6cc0bb14e9e1a8d16ec5e9567f"
+      "canonicalSha256": "a390de9af1a6930596c2efa960904e01f46b8eda2b492fed94b77da0391222f0"
     }
   },
   "notPublished": {},
   "publishedDocs": {
     "THEME_FORMAT.md": {
       "registryPath": "THEME_FORMAT.md",
-      "sha256": "75c01fc8890c1243368ef514e31d52bce640415d7357612f37b4c233ea75a9db"
+      "sha256": "dfaeb0c50efc52e1fd1eb09af4646c31e180dd538e3e51d97220a3d2c0b8907c"
     }
   }
 }

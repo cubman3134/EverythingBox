@@ -59,6 +59,7 @@
 #include "../core/PcGameRemap.h"   // setRemapCacheInvalidator — the caches the remap rewrites underneath
 #include "../core/Theme.h"
 #include "../core/ThemeChoice.h"
+#include "../core/ThemeFormFactors.h"  // theme `formFactors` declaration -> a note on the theme rows (#32)
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
 #include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
@@ -2143,6 +2144,9 @@ void MainWindow::updateUiTestServer()
                 o.insert(QStringLiteral("pickerIndex"), kg->index());
             }
             o.insert(QStringLiteral("pickerFocus"), themePickerHost_->focusedRowLabel());
+            // The form-factor note on that row (issue #32) — empty when the theme fits this device. A separate
+            // field rather than part of pickerFocus, so existing assertions on the display name still match.
+            o.insert(QStringLiteral("pickerFitNote"), themePickerHost_->focusedRowFitNote());
         }
 #endif
         if (cur == playerPage_)
@@ -5491,7 +5495,17 @@ void MainWindow::openAppearance()
 
         toggle(QStringLiteral("appr.themed"), tr("Use the themed home screen (beta)"), themedHomeEnabled());
         sep(tr("Theme"));
-        action(QStringLiteral("appr.theme"), tr("Theme…   %1").arg(ThemeEngine::themeDisplayName(curFolder)));
+        // The CURRENT theme's own form-factor verdict, shown on the row that opens the picker (issue #32).
+        // This is where a user who has already landed on a wrong-looking home actually looks, and without it
+        // the note would only appear once they were inside the picker — after the confusion, not before it.
+        {
+            const QString curNote =
+                ThemeFormFactors::shortNote(ThemeEngine::themeFormFactorFit(curFolder));
+            const QString curLabel = curNote.isEmpty()
+                                   ? ThemeEngine::themeDisplayName(curFolder)
+                                   : tr("%1  (%2)").arg(ThemeEngine::themeDisplayName(curFolder), curNote);
+            action(QStringLiteral("appr.theme"), tr("Theme…   %1").arg(curLabel));
+        }
         sep(tr("Display mode"));
         choice(QStringLiteral("appr.dispmode"), tr("Display mode"), dispOpts, dispCur);
         info(QStringLiteral("appr.dispmodehint"),
@@ -5603,8 +5617,20 @@ void MainWindow::openAppearance()
         const QString current = currentThemeFolder();
         for (const QString& folder : themes)
         {
-            auto* it = new QListWidgetItem(ThemeEngine::themeDisplayName(folder), list);
+            // The CLASSIC twin of the themed picker's per-row form-factor note (issue #32). A user who never
+            // turns the themed home on picks their theme here and nowhere else, so a marker that existed only
+            // in ThemePicker.qml would be invisible to exactly the people most likely to be on an odd device.
+            // Same wording (ThemeFormFactors::shortNote), same never-hide rule: every installed theme is
+            // listed and every row is selectable — the note is the whole of the behaviour.
+            const QString note = ThemeFormFactors::shortNote(ThemeEngine::themeFormFactorFit(folder));
+            const QString label = note.isEmpty()
+                                ? ThemeEngine::themeDisplayName(folder)
+                                : tr("%1  —  %2").arg(ThemeEngine::themeDisplayName(folder), note);
+            auto* it = new QListWidgetItem(label, list);
+            // The note rides in the visible text but NEVER in the stored value: the folder is what gets
+            // committed, and it is carried in UserRole exactly as before.
             it->setData(Qt::UserRole, folder);
+            if (!note.isEmpty()) it->setToolTip(note);
             if (folder == current) list->setCurrentItem(it);
         }
         if (!list->currentItem() && list->count() > 0) list->setCurrentRow(0);

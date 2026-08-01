@@ -15,10 +15,13 @@
 
 // ---- PickerBridge ------------------------------------------------------------------------------------------
 
-void PickerBridge::set(const QString& t, const QStringList& n, bool must)
+void PickerBridge::set(const QString& t, const QStringList& n, const QStringList& kinds,
+                       const QStringList& notes, bool must)
 {
     title_ = t;
     names_ = n;
+    fitKinds_ = kinds;
+    fitNotes_ = notes;
     mustChoose_ = must;
     emit changed();
 }
@@ -27,6 +30,19 @@ void PickerBridge::setStyleMap(const QVariantMap& s)
 {
     style_ = s;
     emit changed();
+}
+
+// The QML-facing spelling of a verdict. Kinds, not colours: the QML resolves these against the theme's own
+// settingsPanel palette, so a light theme's warning is its own warning colour and not a hardcoded red.
+static QString fitKindName(ThemeFormFactors::Fit f)
+{
+    switch (f)
+    {
+        case ThemeFormFactors::Fit::Supported:   return QStringLiteral("supported");
+        case ThemeFormFactors::Fit::Unsupported: return QStringLiteral("unsupported");
+        case ThemeFormFactors::Fit::Undeclared:  return QStringLiteral("undeclared");
+    }
+    return QStringLiteral("undeclared");
 }
 
 // ---- ThemePickerHost ---------------------------------------------------------------------------------------
@@ -118,6 +134,16 @@ QString ThemePickerHost::focusedRowLabel() const
     return folder.isEmpty() ? QString() : ThemeEngine::themeDisplayName(folder);
 }
 
+QString ThemePickerHost::focusedRowFitNote() const
+{
+    if (!graph_ || graph_->zone() != QStringLiteral("themeRows")) return QString();
+    const QString folder = folders_.value(graph_->index());
+    // Re-derived from the folder rather than read out of the bridge, for the same reason focusedRowLabel is:
+    // folders_ is the authoritative list, and a cached copy is a copy that can drift from what is on screen.
+    return folder.isEmpty() ? QString()
+                            : ThemeFormFactors::shortNote(ThemeEngine::themeFormFactorFit(folder));
+}
+
 void ThemePickerHost::setStyle(const QVariantMap& style)
 {
     bridge_->setStyleMap(style);
@@ -154,11 +180,21 @@ bool ThemePickerHost::present(const QString& title, const QString& currentFolder
     // folders_ is the AUTHORITATIVE list; the bridge's display names are built from it in the same pass, so the
     // two stay index-aligned. A display name ("Name — Author") must never be mapped back to a folder.
     folders_ = ThemeEngine::availableThemes();
-    QStringList names;
+    QStringList names, fitKinds, fitNotes;
     names.reserve(folders_.size());
     for (const QString& folder : folders_)
+    {
         names << ThemeEngine::themeDisplayName(folder);
-    bridge_->set(title, names, mustChoose);
+        // EVERY installed theme is listed, whatever its verdict says. Marking a row is the whole of what the
+        // form-factor declaration does here — it never removes one, never reorders the list, and never
+        // disqualifies a row from being committed. Hiding a mismatched theme would be worse on both ends: a
+        // user who deliberately installed it cannot find it, and on the forced first-run step a device whose
+        // installed themes all declare something else would be left with an empty list it cannot leave.
+        const ThemeFormFactors::Fit f = ThemeEngine::themeFormFactorFit(folder);
+        fitKinds << fitKindName(f);
+        fitNotes << ThemeFormFactors::shortNote(f);
+    }
+    bridge_->set(title, names, fitKinds, fitNotes, mustChoose);
 
     graph_->setZoneCount(QStringLiteral("themeRows"), folders_.size());
     int idx = folders_.indexOf(currentFolder);

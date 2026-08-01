@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.182 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.183 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -592,6 +592,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     if(EB_HAVE_QML)
         qt_add_resources(EB_THEME2_RCC_PROBE resources/theme2.qrc)
         add_executable(probe_theme2 tools/probe_theme2.cpp src/theme2/ThemeEngine.cpp
+            src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h  # ThemeEngine::themeFormFactorFit (#32)
             src/theme2/MpvPreview.cpp src/theme2/MpvPreview.h
             src/theme2/FormFactor.cpp src/theme2/FormFactor.h  # D1 Task 2: ThemeEngine now registers `form`
             src/core/Settings.cpp src/core/Settings.h
@@ -820,7 +821,8 @@ if(EVERYTHINGBOX_BUILD_APP)
             # §21 (issue #38) drives the REAL ThemeEngine::buildView on a scratch theme.json, so the sidebar
             # assertions ride the whole shipped path — theme parse, graph-shape choice, ThemeBridge write-back
             # and the qrc QML — instead of a probe-local replica of any of it.
-            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h)
+            src/theme2/ThemeEngine.cpp src/theme2/ThemeEngine.h
+            src/core/ThemeFormFactors.cpp src/core/ThemeFormFactors.h)  # ThemeEngine::themeFormFactorFit (#32)
         # Qt6::Test supplies QTest::touchEvent / createTouchDevice for §20 (synthetic touch with real hit-testing).
         # Qt6::Multimedia is ThemeEngine's QSoundEffect (a theme's optional UI sounds; §21's fixture declares none).
         target_link_libraries(probe_navqml PRIVATE Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Test

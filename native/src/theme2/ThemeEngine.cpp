@@ -277,6 +277,20 @@ QString themeDisplayName(const QString& folder)
     return folder;
 }
 
+ThemeFormFactors::Fit themeFormFactorFit(const QString& folder)
+{
+    QFile f(themesRoot() + QStringLiteral("/") + folder + QStringLiteral("/theme.json"));
+    // Unreadable or unparsable reads the same as "the key is absent": Undeclared. A theme whose manifest is
+    // broken has bigger problems than this label, and inventing Unsupported for it would put a "not for this
+    // device" note on a theme that never said anything about devices at all.
+    if (!f.open(QIODevice::ReadOnly)) return ThemeFormFactors::Fit::Undeclared;
+    const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
+    // modeName() re-resolved from THIS device, never a stored value: `display/mode` is device-local and "auto"
+    // re-resolves per device, so one synced profile legitimately fits on the phone and not on the TV.
+    return ThemeFormFactors::fit(o.value(QLatin1String(ThemeFormFactors::kKey)),
+                                 FormFactor::instance().modeName());
+}
+
 QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
                    QWidget* parent, std::function<void(int)> onActivated,
                    std::function<void()> onBack, std::function<void()> onCycle,
