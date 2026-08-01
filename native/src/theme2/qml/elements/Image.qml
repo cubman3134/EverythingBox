@@ -11,7 +11,10 @@ Item {
     property var ctx: ({})
     property var host
 
-    readonly property string src: host ? host.resolve(T.imageSource(el, ctx)) : ""
+    // T.imageUrl, not host.<one rule>(T.imageSource(…)): the winning branch decides which rule applies. A
+    // literal `path` / `fallback` is a THEME path (confined to the theme folder); a `binding` or a `role` is
+    // whatever the provider supplied (a remote poster, or an absolute path into the offline image cache).
+    readonly property string src: T.imageUrl(el, ctx, host)
     // Double-buffered display: `shown` is the last source that ACTUALLY loaded; `probe` test-loads every
     // new src off-screen and only promotes it on Ready. Without this, a source swap (e.g. the detail page's
     // async meta replacing the catalog thumb with hi-res art) blanked the element while loading — and if the

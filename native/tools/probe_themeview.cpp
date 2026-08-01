@@ -321,6 +321,172 @@ int main(int argc, char** argv)
                         "    return declared === isOwn }) })"),
           "declaresView/viewFor: declared <=> the theme's OWN object renders; undeclared <=> the fallback does");
 
+    // ---- 9. themeAsset / contentUrl — a manifest's path vs a provider's url ----------------------------
+    // ThemeView.qml used to resolve every image through ONE permissive function: a string containing "://"
+    // came back as-is, an absolute path became file:///…, and anything else was joined to the theme folder.
+    // Every element called it — for the paths a theme.json NAMES and for the urls a provider SUPPLIES alike.
+    // Once themes install themselves from a public, third-party-writable registry, that means a manifest can
+    // ask for whatever a provider can: a sibling theme's folder, a file outside themes2, or a remote host
+    // re-fetched on every render.
+    //
+    // The two cannot be one rule, and the reason is on the CONTENT side, not the manifest side. Content
+    // legitimately carries both of the shapes a manifest must be denied: providers serve artwork over https,
+    // and MetaCache::scrapedImage / LocalLibrary hand back ABSOLUTE LOCAL PATHS (the offline image cache, an
+    // NFO's <thumb>) as the url for a tile. A containment check inside the shared function blanks every
+    // cached poster; a scheme ban blanks every catalog. So the rule keys off PROVENANCE, and this section
+    // pins both halves plus the branch-picking that decides which one a given element string earns.
+    //
+    // themeAsset is the JS twin of ThemeAssetPath::resolve (probe_theme §8) and runs the same table below,
+    // with ONE deliberate difference asserted at the end.
+    const QString base = QStringLiteral("file:///C:/app/themes2/Night");
+    const QByteArray b = ("'" + base.toUtf8() + "'");
+    auto ta = [&](const char* p) {
+        return evalStr(eng, ("themeAsset(" + b + ", " + QByteArray(p) + ")").constData());
+    };
+    auto cu = [&](const char* p) {
+        return evalStr(eng, ("contentUrl(" + b + ", " + QByteArray(p) + ")").constData());
+    };
+
+    // The ordinary cases still work, or the check is useless.
+    CHECK(ta("'bg.jpg'") == base + QStringLiteral("/bg.jpg"), "themeAsset: a plain relative path resolves");
+    CHECK(ta("'art/icons/movie.png'") == base + QStringLiteral("/art/icons/movie.png"),
+          "themeAsset: a nested relative path resolves");
+    CHECK(ta("'art/../bg.jpg'") == base + QStringLiteral("/bg.jpg"),
+          "themeAsset: a `..` that stays INSIDE is normalisation, not an escape");
+    CHECK(ta("'./bg.jpg'") == base + QStringLiteral("/bg.jpg"), "themeAsset: a leading ./ is folded away");
+    CHECK(ta("'art//bg.jpg'") == base + QStringLiteral("/art/bg.jpg"), "themeAsset: an empty segment is folded away");
+
+    // THE CONTRACT: an escape is refused, and the element gets nothing to draw.
+    CHECK(ta("'../Channels/bg.jpg'").isEmpty(), "themeAsset: a sibling theme's folder is outside");
+    CHECK(ta("'../../../secret.png'").isEmpty(), "themeAsset: climbing out of themes2 is outside");
+    CHECK(ta("'..'").isEmpty(), "themeAsset: the parent folder is outside");
+    CHECK(ta("'.'").isEmpty(), "themeAsset: the folder ITSELF is not an asset in it");
+    // A SIBLING WHOSE NAME EXTENDS THIS ONE — "…/NightMare" beside "…/Night" passes any startsWith(base)
+    // test while being a different theme's folder. cleanRelPath walks SEGMENTS, so it cannot be produced at
+    // all; this is the case that separates containment from prefix comparison, and it is why the JS folds
+    // the path itself instead of string-joining and comparing afterwards.
+    CHECK(ta("'../NightMare/bg.jpg'").isEmpty(), "themeAsset: a sibling whose NAME EXTENDS this one is still outside");
+    // Deeper in and back out again, so the refusal is not just a leading-".." test.
+    CHECK(ta("'art/../../NightMare/bg.jpg'").isEmpty(), "themeAsset: an escape that dips inside first is still an escape");
+
+    // Refused on EVERY platform, not only where the OS would act on them — a manifest is a cross-platform
+    // document, so a path that escapes on Windows must not resolve to a merely odd filename on Linux.
+    CHECK(ta("'..\\\\..\\\\secret.png'").isEmpty(), "themeAsset: a backslash escape is refused everywhere");
+    CHECK(ta("'art\\\\bg.jpg'").isEmpty(), "themeAsset: a backslash separator is refused everywhere");
+    CHECK(ta("'C:secret.png'").isEmpty(), "themeAsset: a drive-relative path is refused everywhere");
+
+    // THE POLICY CALL: no remote assets in a manifest. THEME_FORMAT.md has only ever documented these as
+    // paths relative to the theme folder, so nothing legitimate is refused — while a registry-installed
+    // theme.json naming http://… would beacon the viewer on every render and let its author change what is
+    // painted after the theme was reviewed.
+    CHECK(ta("'https://attacker.example/x.png'").isEmpty(), "themeAsset: a remote https url is refused");
+    CHECK(ta("'http://attacker.example/beacon.png'").isEmpty(), "themeAsset: a remote http url is refused");
+    CHECK(ta("'file:///C:/Users/x/secret.png'").isEmpty(), "themeAsset: a file:// url is refused too — it is still not a relative path");
+
+    // Absolute: THIS is the one deliberate divergence from ThemeAssetPath::resolve, which judges an absolute
+    // path by containment (one pointing inside the folder is the same file spelled the long way). The QML
+    // side holds the theme folder as a file:// URL rather than a path, so path-space containment would need a
+    // second property kept in sync — and an absolute path in a manifest is unportable by construction, so no
+    // theme that ships to another machine can be using one. Refused outright, and pinned as a decision.
+    CHECK(ta("'/etc/passwd'").isEmpty(), "themeAsset: an absolute posix path is refused");
+    CHECK(ta("'C:/Users/x/secret.png'").isEmpty(), "themeAsset: an absolute windows path is refused");
+    CHECK(ta("'/C:/app/themes2/Night/bg.jpg'").isEmpty(),
+          "themeAsset: absolute is refused even when it points INSIDE — the divergence from the C++ twin");
+
+    // Nothing asked for, nothing resolved. No base is the same answer: without a folder there is no `inside`.
+    CHECK(ta("''").isEmpty() && ta("null").isEmpty() && ta("undefined").isEmpty(),
+          "themeAsset: no path -> \"\", and it does not throw");
+    CHECK(evalStr(eng, "themeAsset('', 'bg.jpg')").isEmpty(), "themeAsset: no theme folder -> \"\"");
+
+    // contentUrl: the permissive half, unchanged from the resolver this pair replaces. Each of these is a
+    // shape the app really produces, and each would be REFUSED by themeAsset — which is the whole reason the
+    // two exist separately.
+    CHECK(cu("'https://images.example/poster.jpg'") == QStringLiteral("https://images.example/poster.jpg"),
+          "contentUrl: a provider's https poster survives with its scheme (themeAsset refuses this)");
+    CHECK(cu("'C:/Users/x/AppData/EverythingBox/meta/poster.jpg'")
+          == QStringLiteral("file:///C:/Users/x/AppData/EverythingBox/meta/poster.jpg"),
+          "contentUrl: MetaCache's absolute cache path becomes a file url (themeAsset refuses this)");
+    CHECK(cu("'D:/Media/Film/folder.jpg'") == QStringLiteral("file:///D:/Media/Film/folder.jpg"),
+          "contentUrl: LocalLibrary's absolute NFO thumb becomes a file url (themeAsset refuses this)");
+    // Carried over, not endorsed: a POSIX-shaped absolute path comes out with four slashes, because the rule
+    // is a literal "file:///" + p and only ever meets drive-lettered paths in practice (MetaCache and
+    // LocalLibrary both build theirs from a Windows data dir). Pinned as the INHERITED behaviour so this pair
+    // stays a move of the old resolver — fixing it here would be a second change riding along with a
+    // containment fix, and it belongs with whatever makes the local library run on Linux.
+    CHECK(cu("'/home/x/Movies/Film/folder.jpg'") == QStringLiteral("file:////home/x/Movies/Film/folder.jpg"),
+          "contentUrl: a posix absolute path keeps the old rule's doubled slash (inherited, pinned as-is)");
+    CHECK(cu("''").isEmpty() && cu("null").isEmpty(), "contentUrl: nothing supplied -> \"\"");
+    // The vestigial branch: no provider produces a relative url, but the behaviour is carried over verbatim
+    // so this pair is a MOVE of the old rule rather than a second change riding along with the fix.
+    CHECK(cu("'rel.jpg'") == base + QStringLiteral("/rel.jpg"), "contentUrl: a relative url still joins the theme base");
+
+    // ---- 9b. imageUrl — the branch decides the rule ----------------------------------------------------
+    // T.imageSource collapses four branches into one string: a literal `path` and a literal `fallback` are
+    // written by the THEME, while `binding`, `role` and a `fallback` that names a role are whatever the
+    // provider supplied. An element holding only the result cannot tell them apart, so it cannot pick a rule
+    // — which is why imageUrl walks the branches itself. This is the assertion that a manifest cannot launder
+    // an escape through an element that also accepts provider art.
+    // The `host` an element is handed, spelled in JS: ThemeView.qml's two functions are exactly these two
+    // bindings of `base` (see its asset-resolution block), so binding them here runs the shipped rule with
+    // the shipped wiring and no scene.
+    const QByteArray H = "({ themeAsset: function (p) { return themeAsset('" + base.toUtf8() + "', p) },"
+                         "   contentUrl: function (p) { return contentUrl('" + base.toUtf8() + "', p) } })";
+    auto iu = [&](const char* el, const char* ctx) {
+        return evalStr(eng, ("imageUrl(" + QByteArray(el) + ", " + QByteArray(ctx) + ", " + H + ")").constData());
+    };
+
+    CHECK(iu("{ path: 'art/box.png' }", "({})") == base + QStringLiteral("/art/box.png"),
+          "imageUrl: a literal `path` is a THEME path and resolves inside the folder");
+    CHECK(iu("{ path: '../../../secret.png' }", "({})").isEmpty(),
+          "imageUrl: a literal `path` that escapes is refused — the manifest branch takes the strict rule");
+    CHECK(iu("{ path: 'https://attacker.example/x.png' }", "({})").isEmpty(),
+          "imageUrl: a literal `path` may not be remote, even though a role at the same element may be");
+    CHECK(iu("{ role: 'poster' }", "({ selected: { images: { poster: ['https://img.example/p.jpg'] } } })")
+          == QStringLiteral("https://img.example/p.jpg"),
+          "imageUrl: a `role` is CONTENT and keeps its scheme");
+    CHECK(iu("{ binding: 'selected.poster' }", "({ selected: { poster: 'C:/cache/p.jpg' } })")
+          == QStringLiteral("file:///C:/cache/p.jpg"),
+          "imageUrl: a `binding` is CONTENT and may be an absolute local path");
+    // The fallback arm carries BOTH rules, chosen by whether the name happens to be a role the item has.
+    CHECK(iu("{ fallback: 'thumb' }", "({ selected: { images: { thumb: ['https://img.example/t.jpg'] } } })")
+          == QStringLiteral("https://img.example/t.jpg"),
+          "imageUrl: a `fallback` that NAMES A ROLE the item has is content");
+    CHECK(iu("{ fallback: 'art/default.png' }", "({})") == base + QStringLiteral("/art/default.png"),
+          "imageUrl: a `fallback` with no such role is a literal THEME path");
+    CHECK(iu("{ fallback: '../Channels/bg.jpg' }", "({})").isEmpty(),
+          "imageUrl: …and it is judged as one — an escaping literal fallback is refused");
+    // A refused manifest path STOPS. Falling through to the role would paint art the theme did not ask for,
+    // which is exactly the sanitising behaviour the rule exists to refuse.
+    CHECK(iu("{ path: '../../../secret.png', role: 'poster' }",
+             "({ selected: { images: { poster: ['https://img.example/p.jpg'] } } })").isEmpty(),
+          "imageUrl: a refused `path` does not fall through to the role — reject, do not substitute");
+    // Precedence is imageSource's precedence. Assert the correspondence rather than re-listing it, so the two
+    // cannot drift apart: whichever branch imageSource picks is the branch imageUrl resolves.
+    CHECK(evalBool(eng,
+              ("[{ path: 'a.png' }, { binding: 'selected.poster' }, { role: 'poster' }, { fallback: 'thumb' },"
+               " { fallback: 'lit.png' }, {}].every(function (el) {"
+               "  var ctx = { selected: { poster: 'p.jpg', images: { poster: ['p.jpg'], thumb: ['t.jpg'] } } };"
+               "  var picked = imageSource(el, ctx);"
+               "  var got = imageUrl(el, ctx, " + H + ");"
+               "  return picked === '' ? got === '' : got.indexOf(picked.split('/').pop()) >= 0 }) ").constData()),
+          "imageUrl: resolves the SAME branch imageSource picks, for every branch");
+    CHECK(evalStr(eng, "imageUrl({ path: 'a.png' }, ({}), null)").isEmpty(),
+          "imageUrl: no host -> \"\" (delegates run before the host lands)");
+
+    // ---- 9c. galleryUrls — the reel mixes both provenances ---------------------------------------------
+    CHECK(evalStr(eng, ("galleryUrls({ role: 'screenshot' },"
+                        " ({ selected: { images: { screenshot: ['https://img.example/1.jpg','https://img.example/2.jpg'] } } }),"
+                        " " + H + ").join('|')").constData())
+          == QStringLiteral("https://img.example/1.jpg|https://img.example/2.jpg"),
+          "galleryUrls: the item's art for the role is content, in order, best first");
+    CHECK(evalStr(eng, ("galleryUrls({ fallback: 'art/reel.png' }, ({}), " + H + ").join('|')").constData())
+          == base + QStringLiteral("/art/reel.png"),
+          "galleryUrls: a literal `fallback` is a THEME path");
+    CHECK(evalInt(eng, ("galleryUrls({ fallback: '../../../secret.png' }, ({}), " + H + ").length").constData()) == 0,
+          "galleryUrls: an escaping literal fallback yields an EMPTY reel, not a blank frame in it");
+    CHECK(evalInt(eng, ("galleryUrls({ role: 'screenshot' }, ({}), " + H + ").length").constData()) == 0,
+          "galleryUrls: nothing to show -> [] (and it does not throw)");
+
     if (failures == 0) std::printf("THEMEVIEW-OK\n");
     else std::fprintf(stderr, "THEMEVIEW: %d failed\n", failures);
     return failures == 0 ? 0 : 1;

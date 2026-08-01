@@ -248,6 +248,11 @@ function inkFor(bg) { return bgLuma(bg) > 140 ? "#111820" : "#FFFFFF" }
 //   literal path / binding  ->  el.role (selected.images[role])  ->  el.fallback (another role, then a
 //   literal/default path). Returns "" when nothing resolves (the element then shows its placeholder or,
 //   if textFallback is set, the bound text).
+//
+// This answers WHICH STRING WINS and nothing else. It cannot be handed to a resolver, because the four
+// branches do not come from the same place: `path` and a literal `fallback` are written by the THEME, while
+// `binding`, `role` and a `fallback` that names a role are whatever the provider supplied. imageUrl() below
+// walks the same branches and applies the right rule to each; keep the two orders identical.
 function imageSource(el, ctx) {
     var s = sourceOf(el, ctx)
     if (s) return s
@@ -255,7 +260,113 @@ function imageSource(el, ctx) {
     if (el && el.fallback) {
         var fb = artUrl(ctx, el.fallback) // treat the fallback as a role first...
         if (fb) return fb
-        return el.fallback                // ...else a literal / default path (host.resolve handles it)
+        return el.fallback                // ...else a literal / default path (themeAsset judges it)
     }
     return ""
+}
+
+// --- Where a theme's asset path is allowed to point ----------------------------------------------------
+// Two rules, because the renderer resolves strings from two DIFFERENT places and only one of them is
+// untrusted. A theme.json arrives from a public, third-party-writable registry; a poster url arrives from
+// whichever addon the user chose to install. Collapsing them into one permissive resolver (which is what
+// the single `resolve()` these replace did) meant a manifest could name anything a provider could.
+//
+// themeAsset() is the JS twin of ThemeAssetPath::resolve in src/core/ThemeAssetPath.h — same policy, same
+// case table (probe_theme §8 pins the C++ half, probe_themeview §9 pins this one). It is deliberately a
+// STRICT SUBSET on one axis: the C++ half judges an ABSOLUTE path by containment (one pointing inside the
+// folder is the same file spelled the long way), this one refuses absolutes outright. The QML side holds the
+// theme folder as a file:// URL rather than a path, so it cannot do path-space containment without a second
+// property to keep in sync — and an absolute path in a manifest is unportable by construction, so no theme
+// that ships to another machine can be using one. Keep that difference here, and keep it pinned.
+
+// Fold "." and ".." segments of a RELATIVE path. Returns "" if it climbs above the root, or lands on the
+// root itself. Anchored per segment, so a sibling whose name merely EXTENDS this folder ("…/NightMare"
+// beside "…/Night") can never come out of it: this walks segments, it does not compare string prefixes.
+function cleanRelPath(p) {
+    var parts = String(p).split("/")
+    var out = []
+    for (var i = 0; i < parts.length; i++) {
+        var seg = parts[i]
+        if (seg === "" || seg === ".") continue     // "a//b" and "a/./b" are just "a/b"
+        if (seg === "..") { if (out.length === 0) return ""; out.pop(); continue }
+        out.push(seg)
+    }
+    return out.length ? out.join("/") : ""
+}
+
+// A path the THEME's manifest named (background.image, fontFile, a category icon, a literal `path` /
+// `fallback`). Confined to the theme's own folder. REJECT, DO NOT SANITIZE — a refused path yields "" and
+// the element draws its placeholder, because trimming a bad path back inside the folder would invent a file
+// the theme never asked for and paint art nobody chose.
+function themeAsset(base, p) {
+    if (!base || !p) return ""
+    p = String(p)
+    // No remote assets in a manifest. THEME_FORMAT.md has only ever documented these as paths relative to
+    // the theme folder, so nothing legitimate is refused here — while a registry-installed theme.json
+    // naming http://… would beacon the viewer's IP on every render, let its author change what is painted
+    // after the theme was reviewed, and break offline use. A provider's url is a different question and
+    // keeps its scheme; see contentUrl.
+    if (p.indexOf("://") >= 0) return ""
+    // Refused on EVERY platform, not just the one where the OS would act on them: a backslash is a separator
+    // on Windows and a colon makes a path drive-relative there. A manifest travels between machines, so a
+    // path that escapes on Windows must not resolve to a merely odd filename elsewhere.
+    if (p.indexOf("\\") >= 0 || p.indexOf(":") >= 0) return ""
+    if (p.charAt(0) === "/") return ""              // absolute — see the note above on the C++ twin
+    var rel = cleanRelPath(p)
+    if (rel === "") return ""                       // climbed out of the folder, or named the folder itself
+    return base + "/" + rel
+}
+
+// A url the CONTENT supplied (a provider's poster, a scraped image, a local-library thumb). Deliberately
+// permissive, and deliberately unchanged from the resolver this pair replaces: providers serve artwork over
+// https, and MetaCache/LocalLibrary hand back ABSOLUTE LOCAL PATHS (the offline image cache, an NFO's
+// <thumb>) as the url for a tile. Containment-checking this would blank every cached poster; refusing a
+// scheme would blank every catalog. The relative branch is vestigial — no provider produces one — but is
+// kept so this is a move rather than a second change riding along.
+function contentUrl(base, p) {
+    if (!p) return ""
+    p = String(p)
+    if (p.indexOf("://") >= 0) return p
+    if (p.length > 1 && (p.charAt(0) === "/" || p.charAt(1) === ":")) return "file:///" + p
+    return base ? base + "/" + p : p
+}
+
+// Resolve an Image/Video element's source, applying the right rule to whichever branch wins. Same branch
+// ORDER as imageSource above — this is that function with a resolver attached to each arm, so the two can
+// never disagree about precedence. `host` supplies themeAsset/contentUrl (ThemeView.qml).
+//
+// A refused manifest path stops here rather than falling through to the next branch: falling through would
+// paint the role's art in place of the path the theme asked for, which is the sanitising behaviour the whole
+// rule exists to refuse.
+function imageUrl(el, ctx, host) {
+    if (!host) return ""
+    if (el && el.path) return host.themeAsset(el.path)
+    if (el && el.binding) { var v = dig(ctx, el.binding); if (v) return host.contentUrl(String(v)) }
+    if (el && el.role) { var s = artUrl(ctx, el.role); if (s) return host.contentUrl(s) }
+    if (el && el.fallback) {
+        var fb = artUrl(ctx, el.fallback)           // treat the fallback as a role first...
+        if (fb) return host.contentUrl(fb)
+        return host.themeAsset(el.fallback)         // ...else it is a literal path the THEME wrote
+    }
+    return ""
+}
+
+// The Gallery element's already-resolved image list: the selected item's art for `role` (content), else the
+// single `fallback` (another role, else a literal path the theme wrote). Resolved HERE rather than in the
+// element for the same reason as imageUrl — the element cannot see which branch produced each string. A
+// refused entry is dropped, so the reel cycles what it may show instead of stalling on a blank frame.
+function galleryUrls(el, ctx, host) {
+    if (!host) return []
+    var list = artList(ctx, val(el, "role", "screenshot"))
+    if (list.length > 0) {
+        var out = []
+        for (var i = 0; i < list.length; i++) { var u = host.contentUrl(list[i]); if (u) out.push(u) }
+        return out
+    }
+    if (el && el.fallback) {
+        var fb = artUrl(ctx, el.fallback)
+        var one = fb ? host.contentUrl(fb) : host.themeAsset(el.fallback)
+        if (one) return [one]
+    }
+    return []
 }

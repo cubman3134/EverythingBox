@@ -194,7 +194,8 @@ Item {
             }
             Image {
                 anchors.fill: parent; visible: cat.icon !== ""
-                source: (cat.icon !== "" && xmb.host) ? xmb.host.resolve(cat.icon) : ""
+                // Theme-authored art (see Sidebar.qml's twin) — a manifest path, not a provider url.
+                source: (cat.icon !== "" && xmb.host) ? xmb.host.themeAsset(cat.icon) : ""
                 fillMode: Image.PreserveAspectFit; smooth: true
             }
             Text { // the selected bucket's name, just under its tile
@@ -324,7 +325,7 @@ Item {
                 // Only rasterize icons for rows near the cross: a full console list is ~56 SVGs, and decoding
                 // them all at once on the software renderer is the hitch you feel landing on a big category.
                 source: (row.art !== "" && xmb.host && Math.abs(row.index - xmb.itemScroll) < 9)
-                        ? xmb.host.resolve(row.art) : ""
+                        ? xmb.host.contentUrl(row.art) : ""
                 fillMode: Image.PreserveAspectCrop; smooth: true
             }
             // Title (and, for the selected row, a subtitle line beneath it) to the right of the icon.
@@ -417,7 +418,7 @@ Item {
             Image {
                 id: titleLogo
                 width: parent.width; height: meta.height * 0.10
-                property string logoSrc: (meta.m && meta.m.logo && xmb.host) ? xmb.host.resolve(meta.m.logo) : ""
+                property string logoSrc: (meta.m && meta.m.logo && xmb.host) ? xmb.host.contentUrl(meta.m.logo) : ""
                 source: logoSrc; visible: logoSrc !== "" && status === Image.Ready
                 fillMode: Image.PreserveAspectFit; horizontalAlignment: Image.AlignLeft; smooth: true
             }

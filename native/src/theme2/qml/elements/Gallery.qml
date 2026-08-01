@@ -12,19 +12,17 @@ Item {
     property var host
 
     readonly property string role: T.val(el, "role", "screenshot")
-    readonly property var urls: {
-        var list = T.artList(ctx, role)
-        if (list.length > 0) return list
-        // No gallery art: fall back to a single image (fallback role, then literal/default path).
-        var fb = el.fallback ? (T.artUrl(ctx, el.fallback) || el.fallback) : ""
-        return fb ? [fb] : []
-    }
+    // ALREADY RESOLVED, and resolved in Theme.js rather than here: the reel mixes the provider's art for
+    // `role` (a content url) with a literal `fallback` the theme wrote (a path confined to its folder), and
+    // only the function that picked the branch knows which rule each entry earns. A refused entry is dropped,
+    // so indices below always name something showable.
+    readonly property var urls: T.galleryUrls(el, ctx, host)
     property int idx: 0
     readonly property int interval: Math.max(800, Number(T.val(el, "interval", 4000)))
 
     onUrlsChanged: { idx = 0; a.source = first(); b.source = ""; a.opacity = 1; b.opacity = 0 } // new item -> restart
-    function first() { return urls.length ? (host ? host.resolve(urls[0]) : urls[0]) : "" }
-    function at(i) { return (urls.length && host) ? host.resolve(urls[i % urls.length]) : "" }
+    function first() { return urls.length ? urls[0] : "" }
+    function at(i) { return urls.length ? urls[i % urls.length] : "" }
 
     Rectangle { // backdrop / placeholder
         anchors.fill: parent

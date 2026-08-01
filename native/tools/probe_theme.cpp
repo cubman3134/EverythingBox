@@ -9,6 +9,10 @@
 // here rather than in a probe of its own because it is the same shape of thing (a pure table about which
 // theme a profile gets) and because ThemeFormFactors.cpp, like ThemeChoice.cpp, is QtCore-only.
 //
+// Section 8 covers the third: ThemeAssetPath::resolve, which decides whether a theme manifest's asset path is
+// allowed to leave the theme's own folder. Same reason for living here — a pure table about what a manifest
+// may say, with no I/O in it.
+//
 // Section 7 covers the INI-BACKED half — forProfile/setForProfile/runMigrationForIds. That half had no
 // coverage at all, which is exactly why a migration that could destroy the legacy value survived review and
 // six mutations: every pure-table assertion passed while the ini path threw the value away. It runs against a
@@ -16,6 +20,7 @@
 // and deletes every file it made before exiting.
 //
 // Prints THEME-OK on success; any failure prints THEME-FAIL <cond> and exits non-zero.
+#include "ThemeAssetPath.h"
 #include "ThemeChoice.h"
 #include "ThemeFormFactors.h"
 
@@ -466,6 +471,90 @@ int main()
             QFile::remove(p);
             CHECK(QFile::exists(p) == false);
         }
+    }
+
+    // ---- 8. ThemeAssetPath::resolve — a theme may only name files inside its OWN folder --------------
+    // The third pure theme decision this binary owns (same reasoning as 6b: a pure table about what a theme
+    // manifest is allowed to say, QtCore-only, no window). A manifest names its artwork, fonts and sounds as
+    // paths relative to the theme folder; resolve() is what turns one into a path the engine opens. Until
+    // this section existed it would hand back anything the manifest asked for, `../../../` included.
+    //
+    // That was low-stakes while a theme arrived by hand-copying a folder — you already trusted whoever gave
+    // it to you. It stops being low-stakes when themes install themselves from a public registry: the
+    // installer validates every path it WRITES, and nothing validated the paths the installed manifest then
+    // asks the engine to READ. Hence reject rather than sanitize, matching the installer's own rel-path
+    // policy: a manifest that reaches outside its folder is refused, not quietly trimmed back inside it.
+    //
+    // WHO ASKS. When this section was written the only caller was Theme.cpp's resolveAsset, on the CLASSIC
+    // theme path — which has no live caller at all (ThemeStore::all() returns the built-ins). The LIVE
+    // theme2 path now comes through here too: ThemeEngine's `sounds` and MainWindow's `music`, both of which
+    // used to be QDir::absoluteFilePath and would hand back "../../<anything>". The third theme2 site is the
+    // QML renderer, which cannot call into C++ per binding; its rule is themeAsset() in theme2/qml/Theme.js,
+    // pinned by probe_themeview against this same table. The two are deliberately not identical on ONE axis
+    // — absolute paths, see the case below — and that probe asserts the difference so it stays a decision.
+    {
+        const QString dir = QStringLiteral("/themes2/Night");
+
+        // The ordinary cases still work, or the check is useless.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("bg.png"))
+              == QStringLiteral("/themes2/Night/bg.png"));
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("art/icons/movie.png"))
+              == QStringLiteral("/themes2/Night/art/icons/movie.png"));
+        // A `..` that stays inside is normalisation, not an escape — cleanPath settles it and it is allowed.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("art/../bg.png"))
+              == QStringLiteral("/themes2/Night/bg.png"));
+        // An absolute path that happens to point INSIDE the folder is the same file by another spelling.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("/themes2/Night/bg.png"))
+              == QStringLiteral("/themes2/Night/bg.png"));
+
+        // THE CONTRACT: escapes are refused, and the caller gets nothing to open.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../Channels/bg.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../../../../Users/x/secret.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("..")).isEmpty());
+        // Absolute, anywhere outside — the escape that needs no `..` at all.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("/etc/passwd")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("C:/Users/x/secret.png")).isEmpty());
+
+        // A SIBLING WHOSE NAME EXTENDS THIS ONE. "/themes2/NightMare" passes a startsWith(dir) test and is a
+        // different theme's folder, so this is the case that separates a containment check from a prefix
+        // comparison. Written first as the escape a naive fix lets through.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../NightMare/bg.png")).isEmpty());
+
+        // Platform-independent by construction: a backslash or a drive letter in a RELATIVE path is refused
+        // everywhere, not just where the OS would have read it as a separator. A manifest is a cross-platform
+        // document — a path that escapes on Windows must not resolve to a merely odd filename on Linux.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("..\\..\\secret.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("art\\bg.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("C:secret.png")).isEmpty());
+
+        // Nothing asked for, nothing resolved — and an empty theme dir can never be the containing folder.
+        CHECK(ThemeAssetPath::resolve(dir, QString()).isEmpty());
+        CHECK(ThemeAssetPath::resolve(QString(), QStringLiteral("bg.png")).isEmpty());
+
+        // The shapes the two LIVE theme2 callers actually produce, spelled out at the rule rather than left
+        // implied by the generic cases above — these are what a real theme.json writes, and both callers
+        // reached QDir::absoluteFilePath with them until this change.
+        //
+        // ThemeEngine loadEffect(), theme.json "sounds": { "navigate": "sounds/move.wav", … }
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("sounds/move.wav"))
+              == QStringLiteral("/themes2/Night/sounds/move.wav"));
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../Channels/sounds/move.wav")).isEmpty());
+        // A refused sound is SILENCE for that action, not a substituted one: loadEffect returns null, which
+        // is the same state as a theme that declared no sound at all.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../../../Windows/Media/Alarm01.wav")).isEmpty());
+        // MainWindow applyThemeMusic(), theme.json "music": "music/menu.mp3"
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("music/menu.mp3"))
+              == QStringLiteral("/themes2/Night/music/menu.mp3"));
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../../../Users/x/Music/private.mp3")).isEmpty());
+        // An ABSENT "music" key reaches resolve() as an empty string. applyThemeMusic no longer branches on
+        // that itself — it passes the value straight through — so the empty-path case above is what
+        // "this theme ships no music" now looks like to BackgroundMusic::setThemeDefault.
+
+        // A REMOTE url is not a path and never resolves here. Worth an explicit case because the QML twin
+        // refuses it as its own first rule (it is the one place a manifest could previously have named a
+        // remote host), and because the colon rule is what happens to catch it on this side.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("https://attacker.example/x.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("http://attacker.example/beacon.wav")).isEmpty());
     }
 
     if (failures == 0) { std::puts("THEME-OK"); return 0; }

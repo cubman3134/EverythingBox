@@ -94,7 +94,7 @@ Item {
             anchors.fill: parent
             asynchronous: true
             fillMode: Image.PreserveAspectCrop
-            source: host ? host.resolve(T.imageSource({ role: "poster", fallback: "thumb" }, page.ctx)) : ""
+            source: host ? T.imageUrl({ role: "poster", fallback: "thumb" }, page.ctx, host) : ""
             layer.enabled: true
         }
     }

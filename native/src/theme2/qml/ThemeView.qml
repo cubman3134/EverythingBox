@@ -629,13 +629,23 @@ Item {
         return g ? g : undefined
     }
 
-    // Resolve an asset path: a URL as-is, an absolute path to a file URL, else relative to the theme dir.
-    function resolve(p) {
-        if (!p) return ""
-        if (p.indexOf("://") >= 0) return p
-        if (p.length > 1 && (p.charAt(0) === "/" || p.charAt(1) === ":")) return "file:///" + p
-        return base + "/" + p
-    }
+    // --- Asset resolution: two entry points, and deliberately no default ------------------------------
+    // These replace a single permissive resolve(), which every element called for BOTH the paths a theme
+    // manifest names and the urls a content provider supplies — two different trust domains through one
+    // door. A theme.json now installs itself from a public, third-party-writable registry, so a manifest
+    // could ask for anything a provider could: a sibling theme's folder, a file outside themes2 entirely, or
+    // a remote host fetched fresh on every render.
+    //
+    // resolve() is GONE rather than kept as an alias, so a new element cannot reach the permissive rule by
+    // habit — every call site has to say which domain its string came from. The rules themselves live in
+    // Theme.js (themeAsset/contentUrl) so probe_themeview can pin them with no window and no host; these are
+    // the two-line bindings of `base`. See the block comment there for the policy and for how themeAsset
+    // relates to its C++ twin, ThemeAssetPath::resolve.
+
+    // A path the theme's own manifest named. Confined to the theme's folder; "" if it reaches outside.
+    function themeAsset(p) { return T.themeAsset(base, p) }
+    // A url the content supplied (provider artwork, the offline image cache, a local-library thumb).
+    function contentUrl(p) { return T.contentUrl(base, p) }
 
     // --- background -----------------------------------------------------------------------------------
     // OUTSIDE the fading `content` below and always fully opaque, so switching views never drops to the
@@ -651,8 +661,9 @@ Item {
         }
     }
     Image {
+        objectName: "ffBackgroundImage"   // probe_navqml §18(g)(c) reads `source` off this
         anchors.fill: parent
-        source: root.resolve(T.val(root.view ? root.view.background : null, "image", ""))
+        source: root.themeAsset(T.val(root.view ? root.view.background : null, "image", ""))
         visible: source != "" && status === Image.Ready
         fillMode: Image.PreserveAspectCrop
     }
