@@ -237,7 +237,7 @@ process for precisely that reason. What isolation *does* remove is the seams'
 other motive — "don't write the real ini" — so a new probe should not grow a new
 seam for that alone.
 
-### A theme that ships here also ships in the registry — change both
+### A theme that ships here also ships in the registry — keep the record in step
 
 `native/themes2/Channels`, `Night` and `Triple` exist twice: bundled here, and
 published in the community registry
@@ -250,16 +250,24 @@ you a strictly worse one than the app already had under the same name.
 
 `=== bundled-theme / registry drift ===` fails the moment a bundled theme's
 *meaning* changes (the hash is of the parsed, re-serialised JSON, so a reformat
-is free). When it goes red, republish the changed folder to the registry, then
-run `native/tools/theme-registry-sync.py --update` and commit the refreshed
-`native/themes2/REGISTRY-SYNC.json` with the theme change. That file documents
-the procedure, and is also where a theme gets recorded as deliberately *not*
-published.
+is free). When it goes red, run `native/tools/theme-registry-sync.py --update`
+and commit the refreshed `native/themes2/REGISTRY-SYNC.json` with the theme
+change. That file documents the procedure, and is also where a theme gets
+recorded as deliberately *not* published.
 
-The gate cannot see the registry — it is a different repo, and this suite is
-offline by design — so it checks the record, not the remote. It makes drift
-loud, not impossible; making it impossible means a publish job with a
-cross-repo write credential.
+You no longer copy anything into the registry yourself. On merge to `main`, the
+`publish themes` workflow checks the registry out with a deploy key, copies over
+exactly the targets that record lists, pushes, and then re-fetches what the
+registry serves to confirm it matches. `verify registry` re-checks the same
+thing every Monday, which catches what the publisher cannot see: a direct edit
+there, a revert, or a publish that failed and was never retried.
+
+The offline suite still checks the record rather than the remote, because it has
+no network by design — so the record is what goes red in your PR, and the
+workflows are what make it true afterwards. Adding a *new* theme to the registry
+is still a two-repo change: the publish job refuses to create a folder the
+registry does not already carry, because `index.json` needs a `description` that
+exists nowhere in `theme.json`.
 
 ### The old brand stays gone
 
