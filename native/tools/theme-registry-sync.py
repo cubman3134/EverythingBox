@@ -30,6 +30,7 @@ Usage:
 """
 import hashlib
 import json
+import ntpath          # for the absolute-path refusal in publish_into; see the comment there
 import os
 import shutil
 import sys
@@ -167,8 +168,11 @@ def _selftest_publish():
     """
     import tempfile
     problems = []
+    # The doubled slash is deliberate: it resolves to the same folder (an empty component is a no-op in
+    # os.path.join), the copy below must still land there, and the "copied" list asserted further down is
+    # spelled SINGLE-slash — which is what pins the normalisation of the echoed path.
     rec = {
-        "publishedThemes": {"Shared": {"registryPath": "themes2/Shared", "canonicalSha256": ""}},
+        "publishedThemes": {"Shared": {"registryPath": "themes2//Shared", "canonicalSha256": ""}},
         "publishedDocs": {"DOC.md": {"registryPath": "DOC.md", "sha256": ""}},
     }
     with tempfile.TemporaryDirectory() as tmp:
@@ -266,8 +270,20 @@ def _selftest_publish():
         registry = os.path.join(outer, "registry")
         src_themes = os.path.join(tmp, "bundled")
         _make_bundled(src_themes)
-        for dest_rel in (".", "themes2/../..", os.path.join(outer, "neighbour").replace(os.sep, "/"),
-                         "/etc/everythingbox"):
+        # Each case names the RULE that must refuse it, not merely "something was refused". That
+        # distinction is the whole point here: every absolute spelling below is also caught downstream by
+        # must-already-exist (a same-drive "C:/..." is joined onto the checkout by os.path.join, which
+        # treats a bare "C:" component as same-drive-relative) or by commonpath (another drive). So an
+        # assertion that only counts refusals stays GREEN with the absolute-path branch deleted — measured,
+        # not assumed — and the rule would be free to rot behind a rule that happens to shadow it.
+        for dest_rel, want in ((".", "escapes the registry checkout"),
+                               ("themes2/../..", "escapes the registry checkout"),
+                               # Windows spells this "C:/.../outer/neighbour" and POSIX "/tmp/.../neighbour",
+                               # so this one case exercises whichever half of the rule the host uses.
+                               (os.path.join(outer, "neighbour").replace(os.sep, "/"),
+                                "is an absolute path"),
+                               ("/etc/everythingbox", "is an absolute path"),      # driveless-rooted
+                               ("C:/Windows/System32", "is an absolute path")):    # drive-qualified
             # Rebuilt per case, not once: a case that fails destroys these, and the next case's report must
             # be about the next case rather than about the wreckage the previous one left.
             _make_registry(registry)
@@ -276,9 +292,9 @@ def _selftest_publish():
             _write(os.path.join(registry, ".git-marker"), "REPO")
             copied, bad = _publish_caught(_theme_rec("Shared", dest_rel), src_themes, registry,
                                           problems, "registryPath %r" % dest_rel)
-            if not bad or copied:
-                problems.append("--publish accepted registryPath %r, which does not name a path inside the "
-                                "registry checkout." % dest_rel)
+            if copied or not any(want in b for b in bad):
+                problems.append("--publish must refuse registryPath %r as %r, and did not: %r"
+                                % (dest_rel, want, bad or copied))
             for gone, what in ((os.path.join(registry, ".git-marker"), "the registry checkout itself"),
                                (os.path.join(registry, "themes2", "RegistryOnly", "theme.json"),
                                 "the registry's other themes"),
@@ -343,11 +359,6 @@ def publish_into(rec, themes_dir, registry_dir):
     if not os.path.isdir(registry_dir):
         return [], ["registry checkout not found at %s" % registry_dir]
 
-    # ntpath, not os.path: it recognises BOTH spellings of "absolute" ("/x" and "C:/x"), so the refusal
-    # below does not depend on which OS runs the job. Under posixpath, "C:/Windows" is a relative path and
-    # would sail through onto a Windows operator's disk.
-    import ntpath
-
     root = os.path.normcase(os.path.realpath(registry_dir))
     problems = []
     plan = []
@@ -365,7 +376,16 @@ def publish_into(rec, themes_dir, registry_dir):
         # rmtree takes the checkout — .git included — or its parent. realpath, so a symlink inside the
         # checkout cannot be used to step out either; normcase, because the comparison must not hinge on
         # the casing of a Windows path.
-        if ntpath.isabs(dest_rel) or ntpath.splitdrive(dest_rel)[0]:
+        # BOTH spellings of "absolute", on every interpreter this may run on, tested by hand rather than
+        # delegated to isabs. The DRIVE half must come from ntpath and not os.path: run this job on POSIX
+        # and os.path.splitdrive("C:/Windows") reports no drive, so a Windows-absolute registryPath would
+        # read as relative and be joined onto the checkout. The ROOTED half is spelled out because
+        # ntpath.isabs no longer covers it: through Python 3.12 it answered True for a driveless "/x" or
+        # "\x", but 3.13 redefined absolute as "has a drive AND is rooted" (or is a UNC path), so on 3.13+
+        # ntpath.isabs("/etc/everythingbox") is False. Between them these two tests catch everything isabs
+        # ever caught (drive-rooted "C:/x", UNC "//srv/share/x" — both rooted anyway) plus drive-RELATIVE
+        # "C:x", and they answer identically on 3.12 and 3.14; isabs is therefore not called at all.
+        if dest_rel.startswith(("/", "\\")) or ntpath.splitdrive(dest_rel)[0]:
             problems.append(
                 "%s: registryPath %r is an absolute path. The record names paths RELATIVE to the registry\n"
                 "    checkout, because the checkout lives at a different place on every machine that runs\n"
@@ -402,7 +422,9 @@ def publish_into(rec, themes_dir, registry_dir):
                             % (name, dest_rel))
             continue
 
-        plan.append((kind, src, dest, dest_rel))
+        # Echoed in its normalised spelling: "themes2//Shared" and "themes2/Shared/" both resolve to the
+        # same place and are copied correctly, but printed back verbatim a `published` line looks wrong.
+        plan.append((kind, src, dest, "/".join(p for p in dest_rel.split("/") if p)))
 
     if problems:
         # `copied` deliberately does not exist yet: on this path there is nothing to report because nothing
