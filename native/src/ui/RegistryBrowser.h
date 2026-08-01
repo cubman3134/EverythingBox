@@ -32,7 +32,32 @@ public:
 
     bool installedSomething() const { return installed_; }
 
+    // An install is SYNCHRONOUS: it downloads one file per nested event loop (downloadTo), each behind a
+    // 20 s wall, and the surfaces that host this dialog inline keep their own Back live while it runs.
+    // Their Back replaces the panel content, which DELETES this dialog — under its own stack frame, with
+    // the download code still to return into it. deleteLater() at the host cannot fix that: a deferred
+    // delete posted from inside a nested loop is delivered by that same loop. So a host must ask before
+    // navigating away, and hand the exit to closeWhenIdle() instead.
+    bool isInstalling() const { return installing_; }
+
+    // Leave when it is safe to: now if nothing is in flight, otherwise once the install finishes, via the
+    // usual accept() -> finished -> host handler (queued, so it lands with no dialog frame on the stack).
+    void closeWhenIdle();
+
 private:
+    void finishInstall();                  // end of an install: clear the flag, honour a deferred exit
+
+    // Bracket around an install so EVERY exit from it — including the early error returns — clears the
+    // flag and settles a deferred close.
+    struct InstallScope
+    {
+        explicit InstallScope(RegistryBrowser* b) : b_(b) { b_->installing_ = true; }
+        ~InstallScope() { b_->finishInstall(); }
+        InstallScope(const InstallScope&) = delete;
+        InstallScope& operator=(const InstallScope&) = delete;
+        RegistryBrowser* b_;
+    };
+
     QString defaultUrl() const;            // the built-in cubman3134 registry
     QStringList extraRegistries() const;   // user-added registries
     void saveExtras(const QStringList& list);
@@ -84,4 +109,6 @@ private:
     int pending_ = 0;
     int total_ = 0;
     bool installed_ = false;
+    bool installing_ = false;      // an install's nested event loops are on the stack
+    bool closeWhenIdle_ = false;   // an exit was asked for while they were, and is owed once they unwind
 };

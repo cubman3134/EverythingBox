@@ -127,6 +127,13 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     listLayout_ = new QVBoxLayout(host);
     listLayout_->setAlignment(Qt::AlignTop);
     scroll->setWidget(host);
+    // Hosted inline (MainWindow::showDialogPanel), this dialog is laid out at its sizeHint — and the card
+    // area's sizeHint comes from a host widget that is still EMPTY at that moment, because the registry
+    // fetch is asynchronous. Without a floor the list renders about one card tall under 500 px of dead
+    // panel, and the outer layout never re-runs when the cards land. resize() above cannot supply it: a
+    // layout consults sizeHint/minimumSizeHint and never a prior resize. Height only, so a narrow window
+    // is not forced to scroll sideways; a short one still degrades gracefully because the panel scrolls.
+    scroll->setMinimumHeight(360);
     v->addWidget(scroll, 1);
 
     status_ = new QLabel(this);
@@ -140,7 +147,10 @@ RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* paren
     bottom->addWidget(repoLink_);
     bottom->addStretch(1);
     auto* box = new QDialogButtonBox(QDialogButtonBox::Close, this);
-    connect(box, &QDialogButtonBox::rejected, this, &QDialog::accept);
+    // Not accept() directly: Close is live while an install's nested loops are running, and the host's
+    // finished handler navigates away — which deletes this dialog. Queued or not, that lands in whichever
+    // loop is spinning, including a nested one. closeWhenIdle waits for the stack to unwind.
+    connect(box, &QDialogButtonBox::rejected, this, &RegistryBrowser::closeWhenIdle);
     bottom->addWidget(box);
     v->addLayout(bottom);
 
@@ -431,8 +441,30 @@ bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QS
     return true;
 }
 
+void RegistryBrowser::closeWhenIdle()
+{
+    if (installing_) { closeWhenIdle_ = true; return; }   // finishInstall() will do it
+    accept();
+}
+
+// Bracket for the two install paths: while one runs, this dialog's own frames are on the stack under a
+// nested event loop, so anything that would delete it has to wait. Called on EVERY exit from an install,
+// including the early error returns, or a failed install would leave the dialog permanently "busy".
+void RegistryBrowser::finishInstall()
+{
+    installing_ = false;
+    if (!closeWhenIdle_) return;
+    closeWhenIdle_ = false;
+    // Safe now: the nested loops have unwound, and finished() reaches the host queued, so nothing of ours
+    // is on the stack when it deletes us.
+    accept();
+}
+
 void RegistryBrowser::installEntry(const QJsonObject& entry, const QString& indexUrl)
 {
+    if (installing_) return;   // a second card's Install, clicked from inside the first one's nested loop
+    const InstallScope scope(this);
+
     // A theme is a folder, not a file list, and the flattening loop below would drop its sounds/ and fonts/
     // subdirectories onto one level. Themes have their own path from fetchOne onwards and cannot reach this
     // function; the guard is here so that a future caller which forgets that is refused rather than served.
@@ -511,6 +543,9 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
 // every byte is in hand — a half-installed theme would still be offered by the picker.
 void RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QString& indexUrl)
 {
+    if (installing_) return;   // a second card's Install, clicked from inside the first one's nested loop
+    const InstallScope scope(this);
+
     const QString folder = e.folder();
     if (folder.isEmpty()) { status_->setText(tr("This entry doesn't name a usable theme folder.")); return; }
 

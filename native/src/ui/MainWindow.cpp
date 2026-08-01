@@ -5643,7 +5643,8 @@ void MainWindow::openAppearance()
 
         // The in-app gallery. Hosted INLINE via showDialogPanel (it sets Qt::Widget), never as a top-level
         // window — this panel lives inside panelRing_ and a real dialog would be unreachable with a D-pad.
-        // Same hosting LibraryView::browseAddons uses for the add-on browser.
+        // Same *inline* treatment (Qt::Widget) LibraryView::browseAddons uses for the add-on browser — that
+        // one is hosted differently though (LibraryView::showDialogPage/pushPage gives it a whole page).
         auto* browse = new QPushButton(tr("Browse community themes…"));
         browse->setMinimumHeight(40);
         connect(browse, &QPushButton::clicked, this, [this] {
@@ -5654,7 +5655,15 @@ void MainWindow::openAppearance()
                 // must be unconditional: the browser's own Close button only HIDES the inline dialog, so a
                 // "did you install?" guard here would strand a user who just looked on an empty panel.
                 openAppearance();
-            }, [this] { openAppearance(); });
+            }, [this, dlg] {
+                // Back is live while an install is running, and an install is synchronous: it sits in a
+                // nested event loop per file. Navigating now would delete the browser out from under those
+                // frames (showPanel replaces the panel content), and the download code would return into
+                // freed memory — reproduced as an access violation before this guard. Hand the exit to the
+                // dialog instead; it leaves the moment the install finishes, through the handler above.
+                if (dlg->isInstalling()) { dlg->closeWhenIdle(); return; }
+                openAppearance();
+            });
         });
         v->addWidget(browse);
 
@@ -9072,7 +9081,12 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->setSpacing(14);
     build(v);
     v->addStretch(1);
-    panelScroll_->setWidget(content); // deletes the previous content widget
+    // NOTE: this deletes the previous content widget SYNCHRONOUSLY, so a hosted dialog that is sitting in a
+    // nested event loop must not let a Back reach here — it would be freed under its own stack frame.
+    // deleteLater() here does NOT make that safe: a deferred delete posted from inside a nested loop is
+    // delivered by that same loop (measured — see RegistryBrowser's closeWhenIdle), so the guard belongs at
+    // the dialog, which is the only thing that knows it is busy.
+    panelScroll_->setWidget(content);
     stack_->setCurrentWidget(panelPage_);
     panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     updateNavForPage();     // panel -> panel doesn't fire currentChanged; re-register the ring explicitly
