@@ -808,6 +808,95 @@ static void runThemeViewAsserts()
             CHECK(rootBackFired, "grid-home Escape with an empty level stack emits rootBack (the pause-menu leg)");
         }
     }
+
+    // ---- (c) a theme's background image may not leave the theme's own folder ---------------------------
+    // The END-TO-END half of the asset-containment rule. probe_themeview pins the decision (Theme.js
+    // themeAsset/contentUrl, every escape shape, no scene); this pins that the SHIPPED ThemeView.qml
+    // actually asks it — that the background binding routes through themeAsset rather than the permissive
+    // resolver it replaced, and that `base` is wired into it. A rule nothing calls is the exact failure this
+    // whole change exists to fix: ThemeAssetPath::resolve was correct and sat on dead code.
+    {
+        const QString base = QStringLiteral("file:///C:/app/themes2/Night");
+        auto themeWithBg = [](const QString& image) -> QVariantMap {
+            QVariantMap home{ { QStringLiteral("background"),
+                                QVariantMap{ { QStringLiteral("color"), QStringLiteral("#101010") },
+                                             { QStringLiteral("image"), image } } },
+                              { QStringLiteral("elements"), QVariantList{} } };
+            return QVariantMap{ { QStringLiteral("name"), QStringLiteral("Probe") },
+                                { QStringLiteral("views"), QVariantMap{ { QStringLiteral("home"), home } } } };
+        };
+        auto bgSourceFor = [&](const QString& image) -> QString {
+            NavGraph g;
+            buildThemedNavGraph(g, 0);
+            buildAudioPageNavGraph(g);
+            QQuickWidget qw;
+            qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+            qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+            qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+            qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+            QQuickItem* root = qw.rootObject();
+            CHECK(root != nullptr, "ThemeView.qml instantiates from the qrc (background case)");
+            if (!root) return QStringLiteral("<no root>");
+            root->setProperty("base", base);                // ThemeEngine::buildView sets exactly this
+            root->setProperty("categories", QVariantList{});
+            root->setProperty("items", QVariantList{});
+            root->setProperty("currentView", QStringLiteral("home"));
+            root->setProperty("theme", themeWithBg(image)); // set last
+            qw.resize(1280, 720);
+            qw.show();
+            pump(); pump();
+            QQuickItem* bg = root->findChild<QQuickItem*>(QStringLiteral("ffBackgroundImage"));
+            CHECK(bg != nullptr, "the background Image is findable by objectName");
+            return bg ? bg->property("source").toUrl().toString() : QStringLiteral("<not found>");
+        };
+
+        // Positive control FIRST — without it a passing containment assertion proves only that the binding is
+        // broken, which is how a security check goes quietly inert.
+        CHECK(bgSourceFor(QStringLiteral("bg.jpg")) == base + QStringLiteral("/bg.jpg"),
+              "background: a path inside the theme folder still resolves and renders");
+        // The escapes, through the real binding.
+        CHECK(bgSourceFor(QStringLiteral("../Channels/bg.jpg")).isEmpty(),
+              "background: a sibling theme's folder is refused (no source at all)");
+        CHECK(bgSourceFor(QStringLiteral("../../../secret.png")).isEmpty(),
+              "background: climbing out of themes2 is refused");
+        CHECK(bgSourceFor(QStringLiteral("C:/Users/x/secret.png")).isEmpty(),
+              "background: an absolute path is refused");
+        // The policy call, end to end: a manifest cannot make the app fetch from a remote host on render.
+        CHECK(bgSourceFor(QStringLiteral("https://attacker.example/x.png")).isEmpty(),
+              "background: a remote url in a MANIFEST is refused — the app never fetches it");
+
+        // The wiring itself, called the way an element calls it. `resolve` is GONE rather than aliased, so a
+        // new element cannot reach the old permissive rule by habit; assert its absence, or the pair below is
+        // only proof that two more functions exist beside it.
+        NavGraph g;
+        buildThemedNavGraph(g, 0);
+        buildAudioPageNavGraph(g);
+        QQuickWidget qw;
+        qw.setResizeMode(QQuickWidget::SizeRootObjectToView);
+        qw.rootContext()->setContextProperty(QStringLiteral("nav"), &g);
+        qw.rootContext()->setContextProperty(QStringLiteral("form"), &FormFactor::instance());
+        qw.setSource(QUrl(QStringLiteral("qrc:/theme2/ThemeView.qml")));
+        if (QQuickItem* root = qw.rootObject())
+        {
+            root->setProperty("base", base);
+            QVariant out;
+            CHECK(QMetaObject::invokeMethod(root, "themeAsset", Q_RETURN_ARG(QVariant, out),
+                                            Q_ARG(QVariant, QStringLiteral("art/box.png")))
+                  && out.toString() == base + QStringLiteral("/art/box.png"),
+                  "host.themeAsset is callable on the root and binds `base`");
+            CHECK(QMetaObject::invokeMethod(root, "themeAsset", Q_RETURN_ARG(QVariant, out),
+                                            Q_ARG(QVariant, QStringLiteral("../NightMare/box.png")))
+                  && out.toString().isEmpty(),
+                  "host.themeAsset refuses a sibling whose name extends this one");
+            CHECK(QMetaObject::invokeMethod(root, "contentUrl", Q_RETURN_ARG(QVariant, out),
+                                            Q_ARG(QVariant, QStringLiteral("https://img.example/p.jpg")))
+                  && out.toString() == QStringLiteral("https://img.example/p.jpg"),
+                  "host.contentUrl still passes a provider's url through — the catalog keeps its artwork");
+            CHECK(!QMetaObject::invokeMethod(root, "resolve", Q_RETURN_ARG(QVariant, out),
+                                             Q_ARG(QVariant, QStringLiteral("../../../secret.png"))),
+                  "the permissive resolve() is GONE, not aliased — an element must choose a rule");
+        }
+    }
 }
 
 // §19 — `form` context property + TV scale/insets on the ThemeView surface (D1 Task 2). Loads the REAL

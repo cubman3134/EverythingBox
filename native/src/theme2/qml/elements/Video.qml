@@ -40,7 +40,7 @@ Item {
     // through to the next role we do have, instead of leaving the frame black.
     readonly property var stillCandidates: {
         var out = []
-        var s = host ? host.resolve(T.imageSource(el, ctx)) : ""
+        var s = T.imageUrl(el, ctx, host)   // per-branch rule; see Image.qml
         if (s) out.push(s)
         // Box/poster art is preferred as the still; screenshots are the LAST resort (video is the priority).
         var order = hasVideo ? ["hero", "poster", "box", "fanart", "background", "thumb", "image", "screenshot"]
@@ -48,7 +48,7 @@ Item {
         for (var i = 0; i < order.length; i++) {
             var u = T.artUrl(ctx, order[i])
             if (u) {
-                var r = host ? host.resolve(u) : u
+                var r = host ? host.contentUrl(u) : u
                 if (out.indexOf(r) < 0) out.push(r)
             }
         }

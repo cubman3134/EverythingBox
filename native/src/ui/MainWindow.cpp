@@ -59,6 +59,7 @@
 #include "../core/ConsumptionStats.h"
 #include "../core/PcGameRemap.h"   // setRemapCacheInvalidator — the caches the remap rewrites underneath
 #include "../core/Theme.h"
+#include "../core/ThemeAssetPath.h"    // theme.json "music" may not name a file outside the theme folder
 #include "../core/ThemeChoice.h"
 #include "../core/ThemeFormFactors.h"  // theme `formFactors` declaration -> a note on the theme rows (#32)
 #include "../core/CloudSync.h"
@@ -9547,6 +9548,11 @@ void MainWindow::updateBackgroundMusic()
 
 // A theme can ship default menu music via theme.json "music" (a path relative to the theme dir). It plays
 // only when the user's own music folder is empty, so every theme has sound out of the box.
+//
+// Relative to the theme dir, and ONLY inside it: ThemeAssetPath::resolve rather than
+// QDir::absoluteFilePath, for the same reason as ThemeEngine's "sounds" — a theme.json installed from the
+// public registry may not name a file that is none of its business. A refused path leaves no theme default,
+// which is exactly the state of a theme that ships no music.
 void MainWindow::applyThemeMusic(const QString& themeDir)
 {
     if (!bgm_) return;
@@ -9557,8 +9563,7 @@ void MainWindow::applyThemeMusic(const QString& themeDir)
         const QJsonObject o = QJsonDocument::fromJson(f.readAll()).object();
         music = o.value(QStringLiteral("music")).toString();
     }
-    bgm_->setThemeDefault(music.isEmpty() ? QString()
-                                          : QDir(themeDir).absoluteFilePath(music));
+    bgm_->setThemeDefault(ThemeAssetPath::resolve(themeDir, music));
 }
 
 // Push the current track name into the themed home so the Triple theme's "now playing" readout shows it.

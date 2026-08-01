@@ -484,6 +484,14 @@ int main()
     // installer validates every path it WRITES, and nothing validated the paths the installed manifest then
     // asks the engine to READ. Hence reject rather than sanitize, matching the installer's own rel-path
     // policy: a manifest that reaches outside its folder is refused, not quietly trimmed back inside it.
+    //
+    // WHO ASKS. When this section was written the only caller was Theme.cpp's resolveAsset, on the CLASSIC
+    // theme path — which has no live caller at all (ThemeStore::all() returns the built-ins). The LIVE
+    // theme2 path now comes through here too: ThemeEngine's `sounds` and MainWindow's `music`, both of which
+    // used to be QDir::absoluteFilePath and would hand back "../../<anything>". The third theme2 site is the
+    // QML renderer, which cannot call into C++ per binding; its rule is themeAsset() in theme2/qml/Theme.js,
+    // pinned by probe_themeview against this same table. The two are deliberately not identical on ONE axis
+    // — absolute paths, see the case below — and that probe asserts the difference so it stays a decision.
     {
         const QString dir = QStringLiteral("/themes2/Night");
 
@@ -522,6 +530,31 @@ int main()
         // Nothing asked for, nothing resolved — and an empty theme dir can never be the containing folder.
         CHECK(ThemeAssetPath::resolve(dir, QString()).isEmpty());
         CHECK(ThemeAssetPath::resolve(QString(), QStringLiteral("bg.png")).isEmpty());
+
+        // The shapes the two LIVE theme2 callers actually produce, spelled out at the rule rather than left
+        // implied by the generic cases above — these are what a real theme.json writes, and both callers
+        // reached QDir::absoluteFilePath with them until this change.
+        //
+        // ThemeEngine loadEffect(), theme.json "sounds": { "navigate": "sounds/move.wav", … }
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("sounds/move.wav"))
+              == QStringLiteral("/themes2/Night/sounds/move.wav"));
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../Channels/sounds/move.wav")).isEmpty());
+        // A refused sound is SILENCE for that action, not a substituted one: loadEffect returns null, which
+        // is the same state as a theme that declared no sound at all.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../../../Windows/Media/Alarm01.wav")).isEmpty());
+        // MainWindow applyThemeMusic(), theme.json "music": "music/menu.mp3"
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("music/menu.mp3"))
+              == QStringLiteral("/themes2/Night/music/menu.mp3"));
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("../../../Users/x/Music/private.mp3")).isEmpty());
+        // An ABSENT "music" key reaches resolve() as an empty string. applyThemeMusic no longer branches on
+        // that itself — it passes the value straight through — so the empty-path case above is what
+        // "this theme ships no music" now looks like to BackgroundMusic::setThemeDefault.
+
+        // A REMOTE url is not a path and never resolves here. Worth an explicit case because the QML twin
+        // refuses it as its own first rule (it is the one place a manifest could previously have named a
+        // remote host), and because the colon rule is what happens to catch it on this side.
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("https://attacker.example/x.png")).isEmpty());
+        CHECK(ThemeAssetPath::resolve(dir, QStringLiteral("http://attacker.example/beacon.wav")).isEmpty());
     }
 
     if (failures == 0) { std::puts("THEME-OK"); return 0; }

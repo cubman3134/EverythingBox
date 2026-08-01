@@ -114,7 +114,7 @@ Item {
                                 Image {
                                     anchors.top: parent.top; anchors.left: parent.left; anchors.right: parent.right
                                     height: parent.height - parent.stripH
-                                    source: (parent.art !== "" && ch.host) ? ch.host.resolve(parent.art) : ""
+                                    source: (parent.art !== "" && ch.host) ? ch.host.contentUrl(parent.art) : ""
                                     fillMode: Image.PreserveAspectCrop; visible: status === Image.Ready
                                 }
                                 Rectangle { // the title strip under the poster
