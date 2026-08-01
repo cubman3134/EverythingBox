@@ -10732,6 +10732,29 @@ void MainWindow::openGeneralSettings()
         });
         v->addSpacing(10);
 
+        // --- Library: the classic twin of the themed builder's "lib.showhidden" row (issue #133). Same store,
+        // same key, same live refresh. Global rather than per-profile ON PURPOSE: it reveals what ANY profile
+        // has hidden, so it is the one place a mistakenly-hidden item can be found again — which is exactly why
+        // it may not exist in only one of the two builders. ---
+        auto* libHeading = new QLabel(tr("Library"));
+        libHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
+        v->addWidget(libHeading);
+        auto* showHidden = new QCheckBox(tr("Show hidden items"));
+        showHidden->setStyleSheet(QStringLiteral("font-size:15px;"));
+        showHidden->setChecked(store().value(QStringLiteral("library/showHidden"), false).toBool());
+        connect(showHidden, &QCheckBox::toggled, this, [this](bool c) {
+            store().setValue(QStringLiteral("library/showHidden"), c);
+            store().sync();                        // flush so HomeView's own QSettings sees it on the refresh below
+            if (home_) home_->reloadForFilterChange(); // hidden rows appear/disappear on the live surface at once
+        });
+        v->addWidget(showHidden);
+        auto* showHiddenNote = new QLabel(tr("Items you hid from their detail view reappear in the library, "
+                                             "for every profile, so you can un-hide them."));
+        showHiddenNote->setWordWrap(true);
+        showHiddenNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(showHiddenNote);
+        v->addSpacing(10);
+
         // --- Updates: check GitHub Releases and install a newer build in place. ---
         auto* uHeading = new QLabel(tr("Updates"));
         uHeading->setStyleSheet(QStringLiteral("font-size:17px;font-weight:bold;"));
@@ -10852,6 +10875,44 @@ void MainWindow::openGeneralSettings()
         connect(llRescan, &QPushButton::clicked, this, [this] {
             rescanLocalLibrary();
             statusBar()->showMessage(tr("Rescanning your local library…"), 4000);
+        });
+
+        // The classic twins of library.resolveonline + library.rematch (issue #133). Same Settings key, same
+        // setter, same resolver calls as the themed rows — one write path, no drift. Without these two the
+        // classic surface can point at a library folder and rescan it, but can neither turn online matching on
+        // nor ask for it again: posters and synopses would be a thing that either happened or didn't.
+        auto* llResolve = new QCheckBox(tr("Match local files to online catalogs"));
+        llResolve->setStyleSheet(QStringLiteral("font-size:15px;"));
+        llResolve->setChecked(Settings::resolveOnline());
+        connect(llResolve, &QCheckBox::toggled, this, [this](bool c) {
+            Settings::setResolveOnline(c);
+            if (c && resolver_) resolver_->enqueue(LocalLibrary::index().all());
+        });
+        v->addWidget(llResolve);
+        auto* llResolveNote = new QLabel(tr("Looks your files up online to fill in posters, synopses and "
+                                            "episode titles. Turn it off to show only what the filenames say."));
+        llResolveNote->setWordWrap(true);
+        llResolveNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(llResolveNote);
+
+        auto* llRematch = new QPushButton(tr("Re-match Local Library online"));
+        llRematch->setMinimumHeight(34);
+        auto* llRematchRow = new QHBoxLayout(); llRematchRow->addWidget(llRematch); llRematchRow->addStretch(1);
+        v->addLayout(llRematchRow);
+        auto* llRematchNote = new QLabel(tr("Throws away every match already made and looks the whole library "
+                                            "up again — use it when files came back matched to the wrong title."));
+        llRematchNote->setWordWrap(true);
+        llRematchNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(llRematchNote);
+        connect(llRematch, &QPushButton::clicked, this, [this] {
+            // Same guard as the themed row, for the same reason: with resolveOnline off, clearing the cache
+            // then enqueue() (which no-ops) wipes every resolved id on the next rebuild and never re-resolves.
+            if (!Settings::resolveOnline()) {
+                statusBar()->showMessage(tr("Turn on \"Match local files to online catalogs\" first."), 4000);
+                return;
+            }
+            if (resolver_) resolver_->clearCacheAndRequeue(LocalLibrary::index().all());
+            statusBar()->showMessage(tr("Re-matching your Local Library online…"), 4000);
         });
 
         // The themed twin of library.clearmetaedits (issue #24). Same store, same clearAll, same confirm — the

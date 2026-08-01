@@ -110,6 +110,19 @@ way a new option ships invisible. The same doubling applies to the other panels
 `MainWindow` builds; if you are editing a settings surface, check whether it has
 a themed twin before you assume it doesn't.
 
+This rule is now **enforced**, by the `general settings builder parity` gate in
+`native/tools/run-headless-probes.sh`. It reads the themed builder's row ids —
+the ids *are* the setting list — and requires every control row (toggle, action,
+text field, choice) to name the classic construction that twins it, in both
+directions. Add a themed row and the gate tells you what the classic builder
+still owes; add a classic control and it tells you the same in reverse. If a row
+genuinely belongs to one surface only, say so in `GS_THEMED_ONLY` /
+`GS_CLASSIC_ONLY` **with its reason** — an unexplained exemption is
+indistinguishable from an oversight, and a stale one fails the gate. Separator
+and Info rows are out of scope: they are headings and status read-outs, not
+capabilities. The gate covers `openGeneralSettings()` only; the other doubled
+panels are still on you.
+
 ### A new pure component gets a probe, registered in three places
 
 Extract logic into something testable without a window, then add a probe under
