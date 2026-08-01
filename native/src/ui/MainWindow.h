@@ -654,6 +654,49 @@ private:
     void pullAndMergeProgress();          // download remote progress + merge into local, then refresh the home view
     QByteArray serializeProgress() const; // current resume positions + per-profile recent lists -> JSON
     void mergeProgress(const QByteArray& json); // merge remote JSON into local by recency (never deletes local)
+
+    // ---- push settings on Save, with a durable retry when offline (#34) ---------------------------------
+    // The POLICY (when to attempt, when to wait, when to stop, what to do about a peer's push) lives in
+    // core/PendingPush and is exercised headlessly by probe_cloudmerge §19-23. What lives here is only the
+    // plumbing: two timers, one in-flight guard, and the funnel that feeds every push's outcome back into the
+    // durable record. Nothing on this path may block the UI or gate a local save on the network.
+    QTimer* settingsPushTimer_ = nullptr;  // Save -> one push per settings VISIT (short debounce off the nav path)
+    QTimer* pendingRetryTimer_ = nullptr;  // the backoff timer; re-armed from the record after every attempt
+    QTimer* cloudPushWatchdog_ = nullptr;  // releases cloudPushBusy_ if the Drive chain never calls back at all
+    bool cloudPushBusy_ = false;           // one attempt in flight at a time (an attempt is 1-3 Drive round trips)
+    // Bumped when an attempt takes the guard, and again when the watchdog gives up on one. A callback carries
+    // the epoch it started under, so a reply that lands after its attempt was abandoned is DROPPED instead of
+    // double-counting the failure (or clearing a record the next attempt now owns).
+    quint32 cloudPushEpoch_ = 0;
+    // Carried across a deferral: PendingPush::due() may answer Deferred (a settings visit is open), and the
+    // re-armed attempt must remember whether a user action stood behind it.
+    bool settingsPushManual_ = false;
+    // WHAT SET THIS ATTEMPT OFF. Two facts come out of it, and they do not line up the same way, which is why
+    // one bool could not carry it: `manual` (may this override a backoff window and un-park a give-up?) is
+    // true for AfterSave and UserAction, while the settings-visit gate (PendingPush decision 5) applies to
+    // both TIMERS and not to UserAction — a push the user is asking for at this instant is reachable only from
+    // inside the settings area, so a transaction is open by construction and gating it would make the panel's
+    // "Retry sync" a button that visibly does nothing.
+    enum class PushTrigger { Backoff, AfterSave, UserAction };
+    void pushSettingsAfterSave();          // called from leaveSettingsArea's Save branch, and ONLY from there
+    void armSettingsPushTimer();           // (re)arm the short debounce — the Save path AND the deferral path
+    void runPendingPush(PushTrigger t);    // one attempt: due() -> checkStatus -> resolve() -> push/pull+push
+    void finishPendingPush(bool ok, quint32 epoch); // an ATTEMPT ended: release the guard (if still ours), record
+    void recordPushOutcome(bool ok);       // THE funnel — every push in the app reports its result here
+    void armPendingRetry();                // (re)arm pendingRetryTimer_ from the durable record
+    // The Cloud Sync panel's honesty line: empty when nothing is owed, else why and what the user can do.
+    // Reports STATE, never a credential or a settings value.
+    QString cloudPendingLine() const;
+    void refreshCloudPendingRow();         // patch that line into whichever Cloud Sync surface is built
+    // The classic panel's pending line. A QPointer because the panel is rebuilt (and the label destroyed)
+    // whenever showPanel runs, while a push completing minutes later still wants to patch it if it is alive.
+    QPointer<QLabel> cloudPendingLabel_;
+    // ...and its "Retry sync" row, held for the same reason: a park arising while the panel is OPEN has to
+    // move the ACTION the line tells the user to choose, not just the line.
+    QPointer<QPushButton> cloudRetryRow_;
+    // Whether the themed Cloud panel was built WITH the retry row. Themed rows are omitted, not hidden, so
+    // making one appear needs a rebuild — and a rebuild is only correct when the row set actually changed.
+    bool cloudRetryRowShown_ = false;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
 
     class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place

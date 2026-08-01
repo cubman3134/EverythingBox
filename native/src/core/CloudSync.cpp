@@ -29,6 +29,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSysInfo>
+#include <chrono>
 #include <cstring>
 #include "miniz.h"
 
@@ -73,6 +74,14 @@ static QString randomToken(int n)
 CloudSync::CloudSync(QObject* parent) : QObject(parent)
 {
     nam_ = new QNetworkAccessManager(this);
+    // EVERY request this class makes gets a transfer timeout (#34 review, minor 6). Qt 6 ships this DISABLED by
+    // default, so without it a reply that stops mid-transfer — a captive portal that accepts the connection and
+    // then says nothing, a handheld whose Wi-Fi drops between the request and the response — never finishes and
+    // never errors. Every caller here is a callback chain, so a reply that never completes is a callback that
+    // never runs: the push funnel's in-flight guard is held forever and every later attempt, automatic AND the
+    // user's own Retry, silently returns until the app restarts. It is an INACTIVITY timeout, not a deadline,
+    // so a slow upload of a multi-megabyte bundle is unaffected as long as bytes keep moving.
+    nam_->setTransferTimeout(std::chrono::milliseconds(60000));
 }
 
 QString CloudSync::driveQueryQuote(const QString& value)
@@ -94,6 +103,7 @@ void CloudSync::signOut()
     store().sync();
     accessToken_.clear();
     accessExpiryMs_ = 0;
+    lastAuth_ = PendingPush::Auth::Ok;   // no account is not a failed one — the owed push is cleared with it (#34)
     emit signedOut();
 }
 
@@ -234,6 +244,7 @@ void CloudSync::exchangeCode(const QString& code, const QString& verifier, const
         { emit signInFailed(tr("Sign-in failed (no token returned).")); return; }
         accessToken_ = at;
         accessExpiryMs_ = QDateTime::currentMSecsSinceEpoch() + (o.value(QStringLiteral("expires_in")).toInt(3600) - 60) * 1000LL;
+        lastAuth_ = PendingPush::Auth::Ok;   // a fresh grant un-parks a retry that gave up on the old one (#34)
         store().setValue(QStringLiteral("cloud/refreshToken"), rt);
         store().sync();
         fetchAccountEmail();
@@ -259,9 +270,12 @@ void CloudSync::fetchAccountEmail()
 
 void CloudSync::withAccessToken(std::function<void(bool)> cb)
 {
-    if (!accessToken_.isEmpty() && QDateTime::currentMSecsSinceEpoch() < accessExpiryMs_) { cb(true); return; }
+    if (!accessToken_.isEmpty() && QDateTime::currentMSecsSinceEpoch() < accessExpiryMs_)
+    { lastAuth_ = PendingPush::Auth::Ok; cb(true); return; }
     const QString rt = store().value(QStringLiteral("cloud/refreshToken")).toString();
-    if (rt.isEmpty()) { cb(false); return; }
+    // No stored grant: nothing to refresh and no trip to make. Expired, not Offline — the fix is a sign-in.
+    if (rt.isEmpty())
+    { lastAuth_ = PendingPush::classifyRefresh(false, /*httpStatus*/0, QString(), false); cb(false); return; }
 
     QNetworkRequest req((QUrl(QString::fromLatin1(kTokenUrl))));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/x-www-form-urlencoded"));
@@ -273,8 +287,18 @@ void CloudSync::withAccessToken(std::function<void(bool)> cb)
     QNetworkReply* reply = nam_->post(req, body.toString(QUrl::FullyEncoded).toUtf8());
     connect(reply, &QNetworkReply::finished, this, [this, reply, cb] {
         reply->deleteLater();
+        // #34: separate "the grant is dead" from "this failure is transient". BOTH facts the classifier needs
+        // are on the reply and both are read here: the HTTP status (0 when the request never got a response at
+        // all) and the OAuth `error` code. What is deliberately NOT the test any more is "the body parsed as
+        // JSON" — Google answers rate limits and internal errors with JSON too, and reading those as a revoked
+        // grant parks the device behind a "sign in again" it cannot act on (review round 1). The body is
+        // classified and dropped: never logged, never stored, and no part of it reaches the pending record.
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
         const QString at = o.value(QStringLiteral("access_token")).toString();
+        lastAuth_ = PendingPush::classifyRefresh(/*haveRefreshToken*/true, status,
+                                                 o.value(QStringLiteral("error")).toString(),
+                                                 /*haveAccessToken*/!at.isEmpty());
         if (at.isEmpty()) { cb(false); return; }
         accessToken_ = at;
         accessExpiryMs_ = QDateTime::currentMSecsSinceEpoch() + (o.value(QStringLiteral("expires_in")).toInt(3600) - 60) * 1000LL;
@@ -731,6 +755,26 @@ static QByteArray stateHash()
 // the headless probe can assert per-item churn no longer flips it (i.e. the heavy bundle stays quiet).
 QByteArray CloudSync::stateFingerprint() { return stateHash(); }
 
+// checkStatus's localChanged, minus the network. ONE expression, shared by the status query and the push
+// funnel, so "is anything actually owed?" cannot be answered two different ways in the same app.
+bool CloudSync::localChangedSinceSync()
+{
+    return stateHash() != store().value(QStringLiteral("cloud/syncedHash")).toByteArray();
+}
+
+// The fixed point of the pull->push round, in one place. After this runs, localChangedSinceSync() is false, so
+// the next checkStatus reports localChanged == false and PendingPush::resolve answers NothingToSend — which is
+// what makes the round terminate rather than re-enter itself. Asserted in probe_cloudmerge §23.
+void CloudSync::adoptSyncedBaseline(const QString& modifiedIso, const QString& remoteHash)
+{
+    store().setValue(QStringLiteral("cloud/appliedModified"), modifiedIso);
+    // Baseline = the remote we just took, so a re-check sees neither side changed (no false conflict). A
+    // legacy bundle carries no stamp, and then the state we have just applied is itself the baseline.
+    store().setValue(QStringLiteral("cloud/syncedHash"),
+                     remoteHash.isEmpty() ? stateHash() : remoteHash.toUtf8());
+    store().sync();
+}
+
 void CloudSync::checkStatus(std::function<void(const Status&)> cb)
 {
     ensureFolder([this, cb](const QString& folderId) {
@@ -738,7 +782,7 @@ void CloudSync::checkStatus(std::function<void(const Status&)> cb)
         if (folderId.isEmpty()) { cb(st); return; } // unreachable
         st.reached = true;
         const QByteArray synced = store().value(QStringLiteral("cloud/syncedHash")).toByteArray();
-        st.localChanged = (stateHash() != synced);
+        st.localChanged = localChangedSinceSync();   // the shared expression, so the push funnel cannot drift
         findBrandedFile(folderId, QString::fromLatin1(kBundleName), QString::fromLatin1(AppBrand::Legacy::kSyncZip),
                  [this, cb, st, synced](bool listOk, const QString& id, const QString& modIso, const QString& remoteHash) mutable {
             st.listReached = listOk;   // false => the file-query failed; "no bundle" is UNPROVEN, don't seed fresh
@@ -763,13 +807,9 @@ void CloudSync::applyRemote(const QString& fileId, const QString& modifiedIso, c
                             std::function<void(bool)> cb)
 {
     if (fileId.isEmpty()) { cb(false); return; }
-    downloadFile(fileId, [this, modifiedIso, remoteHash, cb](bool ok, const QByteArray& data) {
+    downloadFile(fileId, [modifiedIso, remoteHash, cb](bool ok, const QByteArray& data) {
         if (!ok || !applyBundle(data)) { cb(false); return; }
-        store().setValue(QStringLiteral("cloud/appliedModified"), modifiedIso);
-        // Baseline = the remote we just took, so a re-check sees neither side changed (no false conflict).
-        store().setValue(QStringLiteral("cloud/syncedHash"),
-                         remoteHash.isEmpty() ? stateHash() : remoteHash.toUtf8());
-        store().sync();
+        adoptSyncedBaseline(modifiedIso, remoteHash);
         cb(true);
     });
 }

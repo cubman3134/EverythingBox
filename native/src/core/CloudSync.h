@@ -5,6 +5,7 @@
 // Slice 1 (here): sign in/out, token refresh, and the Drive primitives (find-or-create folder, upload,
 // download, metadata). Slice 2 layers the state bundle + automatic sync on top of these.
 #pragma once
+#include "PendingPush.h"   // #34: the Auth classification the token refresh reports
 #include <QObject>
 #include <QString>
 #include <QByteArray>
@@ -22,6 +23,13 @@ public:
     static bool isConfigured();          // an OAuth client id/secret is available (embedded or in settings)
     bool isSignedIn() const;             // we hold a refresh token
     QString accountEmail() const;        // the signed-in Google account (cached), or empty
+
+    // Why the LAST token refresh could not produce an access token — the one fact that separates "the account
+    // needs a human" from "the network needs patience" (#34). isSignedIn() cannot answer it: a revoked grant
+    // leaves cloud/refreshToken in place, so this device still reads as signed in while every Drive call fails.
+    // Ok until a refresh has actually failed; reset to Ok by any successful refresh and by a fresh sign-in.
+    // Reports a CLASSIFICATION, never any part of a token — the refresh body is neither logged nor stored.
+    PendingPush::Auth lastAuth() const { return lastAuth_; }
 
     // ---- the device-local carve-out (mdsync T4) ----
     // The ONE exclusion table for sync (applied in BOTH directions). A device-local key never travels in the
@@ -42,6 +50,16 @@ public:
     // The sync fingerprint (checkStatus's localChanged gate). Excludes both the device-local carve-out and the
     // per-item stores, so per-item churn does NOT re-upload the heavy bundle (mdsync T5). Exposed for the probe.
     static QByteArray stateFingerprint();
+    // checkStatus's st.localChanged, answered WITHOUT a network trip: does the local state still match the
+    // baseline the last successful sync recorded? The push funnel consults it so a failed push that had
+    // nothing to send does not inflate the pending record (#34 review, minor 4), and the probe uses it to
+    // assert the fixed point below.
+    static bool localChangedSinceSync();
+    // Adopt a remote as the synced baseline: cloud/appliedModified + cloud/syncedHash. FACTORED OUT of
+    // applyRemote so the property the whole no-oscillation argument rests on — after a pull, localChanged is
+    // FALSE, so the next resolve() answers NothingToSend — is assertable without a socket. `remoteHash` empty
+    // means a legacy bundle with no hash stamp, in which case the state we just applied IS the baseline.
+    static void adoptSyncedBaseline(const QString& modifiedIso, const QString& remoteHash);
 
     // Whether interactive Drive sign-in works on this platform: true on desktop, false under Q_OS_ANDROID (the
     // OAuth-on-Android follow-up is pending). The onboarding Restore action stays VISIBLE everywhere and consults
@@ -126,5 +144,6 @@ private:
     QTcpServer* loopback_ = nullptr;
     QString accessToken_;
     qint64 accessExpiryMs_ = 0;          // epoch ms when accessToken_ expires
+    PendingPush::Auth lastAuth_ = PendingPush::Auth::Ok;
     QString pendingVerifier_, pendingState_, redirectUri_;
 };
