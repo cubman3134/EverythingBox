@@ -104,6 +104,27 @@ namespace ThemeEngine
                        std::function<void(QString)> onAudioTransport = {},
                        std::function<void(int)> onAudioQueue = {});
 
+    // A themed view built for PREVIEW use — the ONE way to embed a theme render inside another surface
+    // (classic Appearance, ThemePickerHost). It is a real buildView: a preview must BE the shipped renderer,
+    // because a community theme is arbitrary QML and nothing short of running it shows what it looks like.
+    // What it adds is the preview CONTRACT, applied here rather than at each call site:
+    //
+    //   * Qt::NoFocus. buildView hands back a Qt::StrongFocus QQuickWidget (it has to be focusable when it IS
+    //     the page). A focusable 480x300 view dropped inside a widget nav ring becomes a ring stop with no
+    //     action that paints no focus outline — arrowing into it reads as the selector vanishing. That was a
+    //     REAL defect in classic Appearance (issue #40), fixed there by a line at the call site while the
+    //     themed twin held the same line separately. A rule spelled once per call site is a rule the next
+    //     preview forgets, so it lives here: refusing focus is now a property of CONSTRUCTION.
+    //   * no callbacks. A preview drives nothing — it takes no focus, no keys and no selection, so there is
+    //     nothing for an activate/back/cycle handler to fire from.
+    //   * `categories`/`catIndex` seeded from `items`, so an XMB or sidebar theme shows its cross/rail
+    //     instead of an empty column. Both preview sites did this identically.
+    //
+    // Callers keep whatever is genuinely site-specific (minimum size, WA_TransparentForMouseEvents, geometry).
+    // Pinned by probe_navqml §23 against a REAL NavRing, with a bare buildView as the positive control.
+    QWidget* buildPreview(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
+                          QWidget* parent = nullptr);
+
     // The QML root item of a widget returned by buildView(), for setting properties live (items/view/...).
     QQuickItem* rootItem(QWidget* view);
 

@@ -246,17 +246,16 @@ void ThemePickerHost::rebuildPreview()
     // is the whole point: the preview must BE the real renderer, because a community theme is arbitrary QML and
     // nothing short of running it can show what it looks like. Do not "optimise" this into a screenshot, a
     // static mock or a cut-down loader — every such fake previews only the themes we happened to anticipate.
-    QWidget* w = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
-                                        items, system, this);
+    // buildPreview, not buildView: THE constraint — the preview must never take the cursor — is now held by
+    // construction (ThemeEngine.h), together with the categories seeding both preview sites used to repeat.
+    QWidget* w = ThemeEngine::buildPreview(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                           items, system, this);
     preview_ = qobject_cast<QQuickWidget*>(w);
     if (!preview_) { if (w) w->deleteLater(); return; }
 
-    // THE constraint: the preview must never take the cursor. NoFocus on the widget, and it is registered
-    // in no nav zone, so arrows/Enter always reach the list.
-    preview_->setFocusPolicy(Qt::NoFocus);
+    // Site-specific: this surface has a click-through target behind the preview (the picker chrome), so the
+    // preview must not eat the mouse either. The classic Appearance panel deliberately does NOT do this.
     preview_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    if (QQuickItem* r = ThemeEngine::rootItem(preview_))   // feed categories too, so XMB shows its cross
-        { r->setProperty("categories", items); r->setProperty("catIndex", 0); }
     previewFolder_ = folder;
     preview_->show();
     layoutPreview();
