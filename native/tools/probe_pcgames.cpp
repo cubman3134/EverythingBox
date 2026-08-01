@@ -763,6 +763,169 @@ int main(int argc, char** argv)
             CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
     }
 
+    // ---- 7f. A TRANSITIVE FUSE CHAIN — more than one edge, and the confirm has to NAME the survivor --
+    //
+    // §7d fuses exactly ONE pair, so canonicalNorm's walk is exercised with a single edge and a component
+    // of two: every answer it could give is "one of the two titles in front of me". A three-key chain is
+    // the first input that can tell the component minimum apart from the pairwise minimum — and that gap
+    // is a WRONG DATA-LOSS DISCLOSURE on the dialog whose entire purpose is that disclosure.
+    {
+        // Chosen so the alphabetical order is not the order they are fused in: "aeon" < "beacon" < "cinder".
+        const QString a = QStringLiteral("Aeon Drift");
+        const QString b = QStringLiteral("Beacon Drift");
+        const QString c = QStringLiteral("Cinder Drift");
+        const QString na = normalizeTitle(a), nb = normalizeTitle(b), nc = normalizeTitle(c);
+        CHECK(na < nb); CHECK(nb < nc);                      // the premise the whole fixture rests on
+        CHECK(itemId(a) != itemId(b)); CHECK(itemId(b) != itemId(c));
+
+        // Fuse B—C FIRST, so the smallest key in the eventual component is not in this pair at all.
+        setOverride(b, c, true);
+        CHECK(effectiveItemId(b) == effectiveItemId(c));
+        CHECK(effectiveItemId(b) == itemId(b));              // B is the smaller of B and C
+        // A is untouched so far.
+        CHECK(effectiveItemId(a) == itemId(a));
+        CHECK(effectiveItemId(a) != effectiveItemId(b));
+
+        // BEFORE fusing A and B: what must the confirm say? The pairwise rule says A (A < B). The component
+        // rule says A too — A really is the smallest here, so this direction agrees and is NOT the case that
+        // discriminates. It is asserted anyway so the fixture pins both answers rather than only the
+        // interesting one.
+        CHECK(fusedCanonicalKey(na, nb) == na);
+        CHECK(fuseSurvivorTitle(a, b, QStringList{ a, b, c }) == a);
+
+        // ...now the case that DOES discriminate: fuse C with A, from C's side. Pairwise, A < C, so the
+        // pairwise rule names A — and A is right only by luck here. Swap which side is smallest instead:
+        // ask about fusing C and B. Pairwise the answer is B; the component's minimum is A, which is in
+        // NEITHER of the two titles the dialog is about.
+        CHECK(fusedCanonicalKey(nc, nb) == nb);              // before A joins, B really is the minimum
+        setOverride(a, b, true);                             // the chain closes: A—B—C
+
+        // THE COMPONENT, walked from every member. Order-independent: same set whichever end you start at.
+        for (const QString& start : QStringList{ na, nb, nc })
+        {
+            const QStringList comp = fusedKeys(start);
+            CHECK(comp.size() == 3);
+            CHECK(comp.contains(na)); CHECK(comp.contains(nb)); CHECK(comp.contains(nc));
+        }
+        // ...and it drags nothing else in.
+        CHECK(!fusedKeys(na).contains(QStringLiteral("hades")));
+        CHECK(fusedKeys(QStringLiteral("hades")).size() == 1);
+
+        // ALL THREE key on the one id, and it is the component minimum — not "whichever side was asked
+        // first" and not "the order the verdicts were recorded".
+        CHECK(effectiveItemId(a) == effectiveItemId(b));
+        CHECK(effectiveItemId(b) == effectiveItemId(c));
+        CHECK(effectiveItemId(c) == itemId(a));
+
+        // THE CONFIRM TEXT. Fusing C and B — the pairwise rule names B, the truth is A. This single CHECK is
+        // the one the pairwise implementation fails, and it is the whole reason this fixture exists.
+        CHECK(fusedCanonicalKey(nc, nb) == na);
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ a, b, c }) == a);
+        // Symmetric in the pair, like every other question this store answers.
+        CHECK(fuseSurvivorTitle(b, c, QStringList{ a, b, c }) == a);
+        // The survivor is named even when the library list is handed in some other order.
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ c, b, a }) == a);
+        // A survivor that is one of the two IS returned as that side's own spelling, not looked up.
+        CHECK(fuseSurvivorTitle(a, c, QStringList{ a, b, c }) == a);
+        // ...and when the anchoring copy has left the library there is nothing to name, which the caller
+        // has to say differently rather than quoting a title that is not there.
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ b, c }).isEmpty());
+
+        // The remap agrees with the folder for all three.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("steam:9001"), a)
+                << qMakePair(QStringLiteral("gog:9002"),   b)
+                << qMakePair(QStringLiteral("epic:9003"),  c)
+                << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"));
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("gog:9002"))  == t.value(QStringLiteral("epic:9003")));
+            CHECK(t.value(QStringLiteral("epic:9003")) == t.value(QStringLiteral("steam:9001")));
+            CHECK(t.value(QStringLiteral("epic:9003")) == effectiveItemId(c));
+            CHECK(!t.value(QStringLiteral("epic:9003")).isEmpty());
+            CHECK(t.value(QStringLiteral("steam:1145360")) != t.value(QStringLiteral("epic:9003")));
+        }
+
+        // UNDO from the MIDDLE of the chain clears the whole component, not only the edges naming B. This is
+        // the rule the fix surface relies on: undoing from one member and leaving the rest joined would show
+        // the user an entry still grouped differently than before, under a toast saying it was not.
+        {
+            QSet<QString> group;
+            for (const QString& k : fusedKeys(nb)) group.insert(k);
+            for (const MergeVerdict& v : overrides())
+                if (group.contains(v.a) || group.contains(v.b)) clearOverrideKeys(v.a, v.b);
+        }
+        CHECK(effectiveItemId(a) == itemId(a));
+        CHECK(effectiveItemId(b) == itemId(b));
+        CHECK(effectiveItemId(c) == itemId(c));
+        CHECK(effectiveItemId(a) != effectiveItemId(b));
+        CHECK(effectiveItemId(b) != effectiveItemId(c));
+        CHECK(fusedKeys(na).size() == 1);
+        // The clear was SCOPED to the component — §5b's unrelated verdict is still there.
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
+    // ---- 7g. FUSE x SEPARATE — the interaction, which half-applies and announces success -------------
+    //
+    // SEPARATE beats FUSE inside effectiveItemId, deliberately: a key cannot be both too coarse and too
+    // fine. The consequence nothing tested is what happens when a fuse is recorded ACROSS that rule — the
+    // separated side does not move, the other side is dragged to a canonical id no separated copy carries,
+    // and the library is left with three entries, one keyed on a game that is not there.
+    {
+        const QString preyBare = QStringLiteral("Prey");
+        const QString prey2017 = QStringLiteral("Prey (2017)");
+        const QString preyEpic = QStringLiteral("Prey 2017");     // a third spelling, its own key
+        const QString nPrey    = normalizeTitle(preyBare);
+        CHECK(normalizeTitle(prey2017) == nPrey);                 // the year strip is why they fused
+        CHECK(normalizeTitle(preyEpic) != nPrey);                 // ...and why this one did not
+
+        // SPLIT the Prey group.
+        setOverride(preyBare, preyBare, false);
+        CHECK(overrideSaysSeparate(preyBare) == true);
+        CHECK(overrideSaysSeparate(prey2017) == true);            // same key, so the split covers both
+        const QString sepBare = effectiveItemId(preyBare);
+        const QString sep2017 = effectiveItemId(prey2017);
+        CHECK(sepBare != sep2017);
+        CHECK(sepBare.contains(QLatin1Char('#')));
+
+        // The state the fix surface must REFUSE to fuse from. It is detectable without writing anything,
+        // which is what lets the refusal happen before the destructive confirm rather than after it.
+        CHECK(overrideSaysSeparate(preyEpic) == false);           // the Epic copy itself is not split
+        CHECK(overrideSaysSeparate(preyBare) == true);            // ...but its intended partner is
+
+        // AND THIS IS WHY IT MUST BE REFUSED. Record the fuse anyway and read what the folder becomes:
+        // three entries, and the Epic copy alone on a base id no separated copy carries.
+        setOverride(preyEpic, prey2017, true);
+        CHECK(effectiveItemId(preyBare) == sepBare);              // the separated side did NOT move
+        CHECK(effectiveItemId(prey2017) == sep2017);              // ...nor did the copy actually named
+        CHECK(effectiveItemId(preyEpic) != effectiveItemId(prey2017));   // the fuse did not happen
+        CHECK(effectiveItemId(preyEpic) == itemId(preyBare));     // dragged to a GHOST: nothing else is here
+        CHECK(effectiveItemId(preyEpic) != itemId(preyEpic));     // ...and off its own id, so it is worse
+                                                                 // than doing nothing
+        // Three distinct entries where the user was told there would be one fewer.
+        CHECK(effectiveItemId(preyBare) != effectiveItemId(preyEpic));
+        CHECK(effectiveItemId(prey2017) != effectiveItemId(preyEpic));
+
+        // Undoing the split makes the fuse take effect all at once, which is the other half of why the
+        // refusal has to be a refusal and not a silent auto-unsplit: the user gets a different library from
+        // the one the confirm described, later, with no action in between.
+        clearOverrideKeys(nPrey, nPrey);
+        CHECK(overrideSaysSeparate(preyBare) == false);
+        CHECK(effectiveItemId(preyEpic) == effectiveItemId(preyBare));
+        CHECK(effectiveItemId(preyEpic) == effectiveItemId(prey2017));
+
+        // Back to §7d's state.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == normalizeTitle(preyEpic) || v.b == normalizeTitle(preyEpic) ||
+                v.a == nPrey || v.b == nPrey)
+                clearOverrideKeys(v.a, v.b);
+        CHECK(effectiveItemId(preyBare) == itemId(preyBare));
+        CHECK(effectiveItemId(preyEpic) == itemId(preyEpic));
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
     // ---- 8. applyRemap: the records follow the id, in every store and every profile -------------
     // Each store below is keyed the way its OWNER keys it (three different hashes), and the ids used
     // are the shapes the launcher scans actually emit.

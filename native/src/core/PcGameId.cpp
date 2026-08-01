@@ -435,6 +435,26 @@ QString pcgame::fusedCanonicalKey(const QString& normA, const QString& normB)
     return best;
 }
 
+QString pcgame::fuseSurvivorTitle(const QString& titleA, const QString& titleB,
+                                  const QStringList& libraryTitles)
+{
+    const QString na = normalizeTitle(titleA);
+    const QString nb = normalizeTitle(titleB);
+    const QString survivor = fusedCanonicalKey(na, nb);
+    if (survivor.isEmpty()) return QString();
+    // The two the user is looking at, first and by identity — so the dialog quotes the spelling the user
+    // just read off the screen rather than some other store's name for the same game.
+    if (survivor == na) return titleA;
+    if (survivor == nb) return titleB;
+    // A THIRD key: one of these two was already fused with something smaller, and THAT entry is the one
+    // whose banked history the merged entry keeps. Naming it is the difference between a disclosure and a
+    // false one. The caller has to say something different in this case, which is why the empty/third
+    // outcomes are distinguishable rather than folded into "one of the two".
+    for (const QString& t : libraryTitles)
+        if (normalizeTitle(t) == survivor) return t;
+    return QString();   // the survivor is a copy no longer in the library — nothing here to name it by
+}
+
 QString pcgame::effectiveItemId(const QString& title)
 {
     const QString base = itemId(title);

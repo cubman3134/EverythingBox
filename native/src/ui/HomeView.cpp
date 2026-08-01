@@ -2150,16 +2150,80 @@ bool HomeView::fixPcGameEntry(const MediaItem& it)
     if (pick < 0 || pick >= others.size()) return false;
     const QString other = others.at(pick);
 
-    // WHICH history survives is decidable up front, so it is stated rather than left to be discovered: the
-    // fused entry keys on the smaller of the two normalised titles (pcgame::effectiveItemId), and only that
-    // side's already-banked records are on it.
-    const QString keeps = (pcgame::itemId(it.title) <= pcgame::itemId(other)) ? it.title : other;
-    const QString loses = (keeps == it.title) ? other : it.title;
-    if (NavConfirm::ask(tr("Merge “%1” and “%2”?").arg(it.title, other),
-                        tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
-                           "Play time, marks and stars recorded so far were kept per entry: the merged entry "
-                           "keeps “%1”'s, and “%2”'s stay behind under its old entry. New activity is counted "
-                           "together.").arg(keeps, loses),
+    // ---- The two ways a fuse would be ACCEPTED and then not happen. Both are refused BEFORE the confirm,
+    //      because a destructive-sounding dialog followed by a success toast and an unchanged folder is
+    //      worse than being told no: the user retries it, and every retry fails the same silent way.
+
+    // A title that normalises to NOTHING — "GOTY", "!!!" — is real here: mergeKey has a whole
+    // "pcgame:rawtitle/" fallback for it. setOverride returns early on such a side, so the confirm and the
+    // toast would both fire over a verdict that was never written. The SPLIT direction is already guarded
+    // (a title with no normalised form yields no separation tags, so the row is not offered); this is the
+    // same guard on the direction that lacked it.
+    const QString myNorm    = pcgame::normalizeTitle(it.title);
+    const QString otherNorm = pcgame::normalizeTitle(other);
+    if (myNorm.isEmpty() || otherNorm.isEmpty())
+    {
+        showToast(tr("“%1” can't be merged — one of these names is all punctuation or edition wording, so "
+                     "there's no name left to match on.")
+                      .arg(myNorm.isEmpty() ? it.title : other),
+                  kFeedbackLong);
+        return false;
+    }
+
+    // A side the user has already SPLIT. effectiveItemId applies SEPARATE before FUSE — a key cannot be both
+    // too coarse and too fine — so the separated side would not move at all while the other side was dragged
+    // onto a canonical id no separated copy carries: three entries, one of them keyed on a game that is not
+    // there, after a confirm describing the migration and a toast saying they are now one entry. Refused
+    // rather than silently un-splitting the other entry, which is a destructive change to a tile the user is
+    // not looking at.
+    const bool meSeparated    = pcgame::overrideSaysSeparate(it.title);
+    const bool otherSeparated = pcgame::overrideSaysSeparate(other);
+    if (meSeparated || otherSeparated)
+    {
+        showToast(tr("“%1” is currently split into separate entries, so it can't be merged with anything "
+                     "yet. Undo that split first, then merge.")
+                      .arg(meSeparated ? it.title : other),
+                  kFeedbackLong);
+        return false;
+    }
+
+    // WHICH history survives is decidable up front, so it is stated rather than left to be discovered.
+    //
+    // The surviving key is the minimum of the whole FUSED COMPONENT, not the smaller of these two titles.
+    // Those differ exactly when one side was already fused with something smaller — and then the pairwise
+    // answer names an entry whose records strand under its old id immediately after the dialog promised they
+    // were kept. A wrong data-loss disclosure on the confirm whose entire purpose is that disclosure, so the
+    // rule lives in pcgame::fuseSurvivorTitle where it is derived once and probe-tested.
+    QStringList libraryTitles = others;
+    libraryTitles << it.title;
+    const QString keeps = pcgame::fuseSurvivorTitle(it.title, other, libraryTitles);
+    QString body;
+    if (keeps == it.title || keeps == other)
+    {
+        const QString loses = (keeps == it.title) ? other : it.title;
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "Play time, marks and stars recorded so far were kept per entry: the merged entry "
+                  "keeps “%1”'s, and “%2”'s stay behind under its old entry. New activity is counted "
+                  "together.").arg(keeps, loses);
+    }
+    else if (!keeps.isEmpty())
+    {
+        // The third-entry case: one of these two is already part of a group that “%3” anchors.
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "NEITHER of these keeps its recorded history: one of them was already merged into "
+                  "“%3”, and that entry is the one the play time, marks and stars stay on. Both “%1”'s "
+                  "and “%2”'s stay behind under their old entries. New activity is counted together.")
+                   .arg(it.title, other, keeps);
+    }
+    else
+    {
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "NEITHER of these keeps its recorded history: they join a group anchored by a copy that "
+                  "is no longer in your library, so “%1”'s and “%2”'s play time, marks and stars stay "
+                  "behind under their old entries. New activity is counted together.")
+                   .arg(it.title, other);
+    }
+    if (NavConfirm::ask(tr("Merge “%1” and “%2”?").arg(it.title, other), body,
                         { tr("Merge them"), tr("Cancel") }, /*focusIndex=*/1, /*cancelIndex=*/1,
                         window()) != 0)
         return false;

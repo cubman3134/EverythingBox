@@ -161,6 +161,26 @@ namespace pcgame
     // were kept. Both arguments are normalizeTitle output.
     QString fusedCanonicalKey(const QString& normA, const QString& normB);
 
+    // THE TITLE A MERGE CONFIRM MUST NAME as the entry whose already-banked play time, marks and stars the
+    // merged entry keeps — i.e. the title carrying fusedCanonicalKey(A, B).
+    //
+    // It lives here rather than in the dialog for the same reason itemId does: the confirm's ENTIRE PURPOSE
+    // is that disclosure, so the string it quotes has to be derived by the same rule the id is, and a rule
+    // stated twice is a rule that drifts. The dialog is also the one place this can never be tested — it
+    // needs a window and a nested event loop — so the arithmetic is pure, here, and pinned by probe_pcgames.
+    //
+    // Three outcomes the caller MUST distinguish:
+    //   * titleA or titleB     -> that side's history survives; the other side's stays behind.
+    //   * some other title     -> NEITHER of these two keeps its history. One of them was already fused
+    //                             with this third entry, which is smaller, so it is the one that survives
+    //                             and BOTH of the named pair strand. Saying "keeps A's" here is a wrong
+    //                             data-loss disclosure on the dialog whose whole job is that disclosure.
+    //   * empty                -> the surviving key belongs to no supplied title (a copy that has left the
+    //                             library). The caller has nothing honest to name and must say so.
+    // libraryTitles is searched only for the third case; passing the folder's titles is enough.
+    QString fuseSurvivorTitle(const QString& titleA, const QString& titleB,
+                              const QStringList& libraryTitles);
+
     // THE ID THE FOLDER AND THE REMAP ACTUALLY KEY ON — itemId with the user's overrides applied.
     //
     // itemId above stays the pure, override-free base and is still the only place the title arithmetic
