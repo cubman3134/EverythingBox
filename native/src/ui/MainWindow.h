@@ -16,6 +16,7 @@
 #include "../core/MediaSegments.h"
 #include "../core/SegmentStore.h"
 #include "../core/ShuffleBag.h"
+#include "../core/ThemeRegistry.h"   // installThemeRegistryEntry names ThemeRegistry::Entry (QtCore-only)
 
 class MpvWidget;
 class QQuickItem;           // the themed (QML) scene root — only ever held as a pointer here
@@ -477,6 +478,17 @@ private:
     void setAddonsStatus(const QString& msg);                    // patch the root "Add-ons" status Info row in place
     void updatePanelInfo(const QString& id, const QString& value); // patch an Info row's value in place (status lines)
     QString registryInstallRowId_;                               // the registry entry row currently installing (async remote)
+
+    // ---- Themed theme gallery: the twin of the classic Appearance panel's RegistryBrowser(Themes), so the
+    // gallery is reachable from BOTH settings builders (CONTRIBUTING.md's rule — a user-facing setting on only
+    // one is unreachable on the other surface). Shaped exactly like presentAddonRegistry above; everything that
+    // is easy to get subtly wrong (index key, path safety, the atomic folder write) lives in ThemeRegistry, which
+    // both surfaces share so they cannot disagree. ----
+    void presentThemeRegistry();   // the themed twin of RegistryBrowser(Themes) — the theme gallery
+    void installThemeRegistryEntry(ThemeRegistry::Entry entry, const QString& indexUrl, const QString& rowId);
+    // A blocking theme install is on the stack. Its nested event loops leave the panel live, so another entry's
+    // row is still activatable from inside one — see installThemeRegistryEntry, which refuses and says why.
+    bool themeInstallBusy_ = false;
 
     // ---- Themed input mapping (B2 Task 5): ControllerRemapDialog as a themed SHELL. player/scope/turbo Choices +
     // per-button Action rows; activating a binding row enters CAPTURE (keyboard grab + pad poll), the row shows

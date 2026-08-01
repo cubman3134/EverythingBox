@@ -4067,6 +4067,16 @@ bool registryDownloadTo(QNetworkAccessManager* nam, const QString& url, const QS
     f.write(data);
     return true;
 }
+// Bracket around a blocking install so EVERY exit from it — including its seven early error returns — clears
+// the flag. A flag left set by one missed return path would disable the surface for the rest of the session.
+struct BusyFlag
+{
+    explicit BusyFlag(bool& f) : f_(f) { f_ = true; }
+    ~BusyFlag() { f_ = false; }
+    BusyFlag(const BusyFlag&) = delete;
+    BusyFlag& operator=(const BusyFlag&) = delete;
+    bool& f_;
+};
 } // namespace
 
 // The add-on registry "store" as a nested panel: fetch the configured registry index(es) (the built-in
@@ -4213,6 +4223,206 @@ void MainWindow::installRegistryEntry(const QJsonObject& entry, const QString& i
     { PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = name; r.value = tr("Installed ✓");
       r.enabled = false; themedPanelHost_->updateRow(rowId, r); }
     updatePanelInfo(QStringLiteral("reg.status"), tr("Installed \"%1\".").arg(name));
+}
+
+// The theme gallery as a nested themed panel — the twin of the classic RegistryBrowser(Themes). Same shape
+// as presentAddonRegistry: a status Info row, one Action row per entry, a 15 s guard so "Loading…" cannot
+// stick, and a themedPanelIsTop gate so a fetch that lands after the user navigated away is dropped.
+//
+// A theme entry names a FOLDER ({dir: "themes2/<Name>"}), so installing means listing that folder from the
+// registry repo's own tree and writing it whole — see ThemeRegistry, which both surfaces share so they
+// cannot disagree about what a registry says or what may become a filename.
+void MainWindow::presentThemeRegistry()
+{
+    if (!docNam_) docNam_ = new QNetworkAccessManager(this);
+
+    // Present a loading placeholder immediately; the entries replace it once every index has been fetched.
+    QVector<PanelRow> loading;
+    { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+      r.value = tr("Loading…"); loading << r; }
+    // Defensive root onBack: Browse Themes is nested UNDER Appearance, so a pop re-renders that parent and this
+    // never runs — it only fires if this panel somehow became the root, and then it leaves for where it opened from.
+    themedPanelHost_->present(tr("Browse Themes"), loading,
+                              [](const QString&, const QString&) {}, [this] { openAppearance(); });
+    stack_->setCurrentWidget(themedPanelHost_);
+    updateNavForPage();
+
+    // The built-in themes index + any user-saved extras (the same ini key the classic browser writes, so a
+    // registry added there shows up here). Management of that list stays on the classic surface.
+    QSettings iniStore(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile), QSettings::IniFormat);
+    QStringList regs;
+    regs << QStringLiteral("https://raw.githubusercontent.com/cubman3134/everythingbox-themes/main/index.json");
+    for (const QString& u : iniStore.value(QStringLiteral("registry/themesExtras")).toStringList())
+        if (!u.trimmed().isEmpty() && !regs.contains(u.trimmed())) regs << u.trimmed();
+
+    struct ThemeFetch { int pending = 0; QVector<QPair<ThemeRegistry::Entry, QString>> entries; };
+    auto st = std::make_shared<ThemeFetch>();
+    st->pending = regs.size();
+
+    auto finish = [this, st] {
+        if (!themedPanelIsTop(tr("Browse Themes"))) return;   // navigated away while fetching — drop
+        QVector<PanelRow> rows;
+        if (st->entries.isEmpty())
+        {
+            PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+            r.value = tr("No themes found — the registry may be unreachable."); rows << r;
+        }
+        else
+        {
+            { PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("treg.status"); r.label = tr("Registry");
+              r.value = tr("%n theme(s) available.", "", int(st->entries.size())); rows << r; }
+            for (int i = 0; i < st->entries.size(); ++i)
+            {
+                const ThemeRegistry::Entry& e = st->entries[i].first;
+                // Installed = the folder is on disk, the same predicate availableThemes() uses. The bundled
+                // themes are therefore never offered, which is what keeps the registry's older copies of
+                // them (issue #131) from replacing the ones already in the app.
+                const bool installed =
+                    QFile::exists(ThemeEngine::themesRoot() + QStringLiteral("/") + e.folder()
+                                  + QStringLiteral("/theme.json"));
+                PanelRow r; r.kind = PanelRow::Action; r.id = QStringLiteral("treg:") + QString::number(i);
+                r.label = e.name.isEmpty() ? e.folder() : e.name;
+                QString sub = e.author.isEmpty() ? QString() : tr("by %1").arg(e.author);
+                if (!e.formFactors.isEmpty())
+                    sub += (sub.isEmpty() ? QString() : QStringLiteral(" · ")) + e.formFactors.join(QStringLiteral(", "));
+                r.value = installed ? tr("Installed ✓") : sub;
+                r.enabled = !installed;
+                rows << r;
+            }
+        }
+        themedPanelHost_->replaceTop(tr("Browse Themes"), rows,
+            [this, st](const QString& id, const QString&) {
+                if (!id.startsWith(QStringLiteral("treg:"))) return;   // no other Action row exists — not a refusal
+                const int i = id.mid(5).toInt();
+                if (i < 0 || i >= st->entries.size())
+                { updatePanelInfo(QStringLiteral("treg.status"),
+                                  tr("That entry is no longer in this list — reopen this page.")); return; }
+                installThemeRegistryEntry(st->entries[i].first, st->entries[i].second, id);
+            },
+            [this] { openAppearance(); });
+    };
+
+    // Guard against a hung registry: render whatever arrived after 15 s so "Loading…" never sticks.
+    QTimer::singleShot(15000, this, [st, finish] { if (st->pending > 0) { st->pending = 0; finish(); } });
+
+    for (const QString& indexUrl : regs)
+    {
+        QNetworkRequest req((QUrl(indexUrl)));
+        req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply* reply = docNam_->get(req);
+        connect(reply, &QNetworkReply::finished, this, [reply, indexUrl, st, finish] {
+            reply->deleteLater();
+            if (st->pending <= 0) return;   // already finished (timeout) — ignore a late arrival
+            if (reply->error() == QNetworkReply::NoError)
+                for (const ThemeRegistry::Entry& e : ThemeRegistry::parseIndex(reply->readAll()))
+                    st->entries << qMakePair(e, indexUrl);
+            if (--st->pending <= 0) finish();
+        });
+    }
+}
+
+// Install one theme entry from the themed gallery: list its folder from the registry repo's tree, download
+// every file, then write the set atomically. Blocking, like the add-on twin (installRegistryEntry); the row
+// shows "Installing…" and the status line names each file as it goes.
+//
+// The tree is fetched per INSTALL here rather than cached per registry as the classic browser does. That is
+// still one API call per install — the figure the 60-an-hour budget rests on — and the alternative is a
+// cache member on MainWindow outliving the panel that filled it, which is more state than one call is worth.
+//
+// `entry` is taken BY VALUE. The argument the caller passes is an element of the fetch state that a PANEL
+// CALLBACK owns, and this body sits under up to 64 nested event loops during which the user can pop that
+// panel and free it. ThemedPanelHost::onGraphActivated does dispatch through a by-value copy of the handler,
+// which is what keeps that state alive today — but copying at this boundary (before any loop spins) means the
+// body does not depend on a discipline enforced in another file.
+void MainWindow::installThemeRegistryEntry(ThemeRegistry::Entry entry, const QString& indexUrl,
+                                           const QString& rowId)
+{
+    // One install at a time. Every file below is a nested event loop, so this panel stays live while it runs and
+    // a SECOND theme's row is still activatable from inside this one — stacking another install (its own up-to-64
+    // downloads, all held in memory as QByteArray blobs) under these frames, on a product that ships to a 32-bit
+    // armv7 box. Refuse BEFORE the row is greyed, and say so: the classic surface learned that a silent refusal
+    // leaves the caller relabelling an untouched row "Retry" for a failure that never happened.
+    if (themeInstallBusy_)
+    { updatePanelInfo(QStringLiteral("treg.status"),
+                      tr("One install at a time — this one has to finish first.")); return; }
+    const BusyFlag busy(themeInstallBusy_);
+
+    // The folder stands in for a nameless entry: an index that omits "name" would otherwise install "".
+    const QString label = entry.name.isEmpty() ? entry.folder() : entry.name;
+    auto setRow = [this, rowId, label](const QString& value, bool enabled) {
+        PanelRow r; r.kind = PanelRow::Action; r.id = rowId; r.label = label;
+        r.value = value; r.enabled = enabled; themedPanelHost_->updateRow(rowId, r);
+    };
+    setRow(tr("Installing…"), false);
+
+    const QString folder = entry.folder();
+    if (folder.isEmpty())
+    { updatePanelInfo(QStringLiteral("treg.status"), tr("This entry doesn't name a usable theme folder."));
+      setRow(tr("Retry"), true); return; }
+
+    const QString api = ThemeRegistry::treeApiUrl(indexUrl);
+    if (api.isEmpty())
+    { // A user-added registry may be anywhere. It still LISTS — the row says what the theme is — but we cannot
+      // enumerate a folder without the API, so name the manual route instead of a Retry that cannot succeed.
+      updatePanelInfo(QStringLiteral("treg.status"),
+                      tr("This registry isn't hosted on GitHub, so themes can't be installed from here. "
+                         "Download the folder from the registry and drop it into %1.")
+                          .arg(QDir::toNativeSeparators(ThemeEngine::themesRoot())));
+      setRow(tr("Manual"), false); return; }
+
+    updatePanelInfo(QStringLiteral("treg.status"), tr("Reading the registry's file list…"));
+    const QString treeTmp = QDir::tempPath() + QStringLiteral("/eb-theme-tree.tmp");
+    QString err;
+    if (!registryDownloadTo(docNam_, api, treeTmp, &err))
+    { // GitHub's 60-an-hour unauthenticated rate limit lands here too.
+      updatePanelInfo(QStringLiteral("treg.status"), tr("Couldn't read the registry's file list: %1").arg(err));
+      QFile::remove(treeTmp); setRow(tr("Retry"), true); return; }
+    QByteArray tree;
+    { QFile f(treeTmp); if (f.open(QIODevice::ReadOnly)) tree = f.readAll(); }
+    QFile::remove(treeTmp);
+
+    const ThemeRegistry::Listing listing = ThemeRegistry::filesUnder(tree, entry.dir);
+    if (!listing.ok())
+    { updatePanelInfo(QStringLiteral("treg.status"), listing.error); setRow(tr("Retry"), true); return; }
+
+    const QString base = registryBaseUrl(indexUrl);
+    QVector<QPair<QString, QByteArray>> blobs;
+    for (int i = 0; i < listing.files.size(); ++i)
+    {
+        const QString& rel = listing.files.at(i);
+        // Named per file, classic parity: up to kMaxFiles sequential fetches, each behind its own 20 s wall, on
+        // the UI thread — one unchanging "Installing…" across all of them is indistinguishable from a hang. The
+        // status row does repaint: registryDownloadTo enters a nested event loop on the very next line, and
+        // updateRow patches in place (dataChanged), so the ListView redraws inside it. The multi-arg form
+        // substitutes in ONE pass, so a file whose name contains "%2" is not a placeholder for the count.
+        updatePanelInfo(QStringLiteral("treg.status"), tr("Downloading %1 (%2 of %3)…")
+                            .arg(rel, QString::number(i + 1), QString::number(listing.files.size())));
+
+        // `rel` travels to installFiles as the string filesUnder validated. assetUrl percent-encodes for the URL
+        // side only; nothing here re-parses, re-joins or decodes it, or a file legitimately named "%2e%2e" would
+        // become ".." on the way to disk.
+        const QString url = ThemeRegistry::assetUrl(base, entry.dir, rel);
+        const QString tmp = QDir::tempPath() + QStringLiteral("/eb-theme-dl.tmp");
+        if (!registryDownloadTo(docNam_, url, tmp, &err))
+        { updatePanelInfo(QStringLiteral("treg.status"), tr("Download failed: %1 — %2").arg(rel, err));
+          QFile::remove(tmp); setRow(tr("Retry"), true); return; }
+        QFile f(tmp);
+        if (!f.open(QIODevice::ReadOnly))
+        { updatePanelInfo(QStringLiteral("treg.status"), tr("Download failed: %1").arg(rel));
+          QFile::remove(tmp); setRow(tr("Retry"), true); return; }
+        blobs << qMakePair(rel, f.readAll());
+        f.close();
+        QFile::remove(tmp);
+    }
+
+    updatePanelInfo(QStringLiteral("treg.status"), tr("Writing the theme folder…"));
+    if (!ThemeRegistry::installFiles(ThemeEngine::themesRoot(), folder, blobs, &err))
+    { updatePanelInfo(QStringLiteral("treg.status"), err); setRow(tr("Retry"), true); return; }
+
+    setRow(tr("Installed ✓"), false);
+    updatePanelInfo(QStringLiteral("treg.status"),
+                    tr("Installed \"%1\". Pick it from Theme… on Appearance.").arg(label));
 }
 #endif // EB_HAVE_QML
 
@@ -5501,7 +5711,9 @@ void MainWindow::openAppearance()
              tr("Edit a theme's theme.json to customise it (colours, layout, artwork)."), QString());
         info(QStringLiteral("appr.root"), tr("Themes folder"), ThemeEngine::themesRoot());
         info(QStringLiteral("appr.community"),
-             tr("Browse and share community themes at github.com/cubman3134/everythingbox-themes."), QString());
+             tr("Browse the registry below, or share your own at github.com/cubman3134/everythingbox-themes."),
+             QString());
+        action(QStringLiteral("appr.browse"), tr("Browse community themes…"));
         action(QStringLiteral("appr.gallery"), tr("Open the theme gallery (GitHub)…"));
 
         auto onAct =
@@ -5548,6 +5760,12 @@ void MainWindow::openAppearance()
                     }
                     stack_->setCurrentWidget(themePickerHost_);
                     updateNavForPage();
+                }
+                else if (id == QStringLiteral("appr.browse")) {
+                    // The IN-APP gallery, the themed twin of the classic panel's RegistryBrowser(Themes). Nested
+                    // on this host (present -> one more graph level), so Back lands back on Appearance and the
+                    // theme installed here is in Theme…'s picker the moment that panel is rebuilt.
+                    presentThemeRegistry();
                 }
                 else if (id == QStringLiteral("appr.gallery")) {
                     // Outward navigation to the browser — parity with the classic panel's openExternalLinks GitHub link.
