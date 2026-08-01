@@ -254,6 +254,122 @@ int main(int argc, char** argv)
                        QStringLiteral("Hades II"), QString()) == false);
     }
 
+    // ---- 5e. the verdict STORE: listing, the self-pair, and clearing vs storing "no" ------------
+    // §5/§5b prove sameGame consults a verdict. They cannot see the two things the UI needs of the
+    // store itself: that a verdict can be ENUMERATED (a "same" verdict is a graph edge, so the id
+    // builder has to find what a title was fused WITH, which no pair lookup can answer) and that
+    // FORGETTING a verdict is a distinct state from storing a negative one. Without the second, a user
+    // who separates the wrong pair has no way back — "undo" would store "not the same" forever.
+    {
+        // Start from a known state: §5b left a stored verdict on (hades, hades ii).
+        clearOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"));
+        CHECK(overrideSaysSeparate(QStringLiteral("prey")) == false);
+
+        // THE SELF-PAIR. Two copies of a wrongly merged key normalise to the SAME string — that is why
+        // they fused — so "these are not the same game" has no second key to name and is recorded
+        // against (norm, norm). setOverride normalises both sides, so the caller passes raw titles.
+        setOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"), false);
+        CHECK(overrideSaysSeparate(QStringLiteral("prey")) == true);
+        CHECK(overrideSaysSeparate(QStringLiteral("Prey (2017)")) == true);   // normalises its argument
+        // ...and it does NOT leak to any other key. A separate verdict that quietly applied to the whole
+        // library would split every game, which passes any "this entry appears once" check while
+        // destroying the folder.
+        CHECK(overrideSaysSeparate(QStringLiteral("hades")) == false);
+        CHECK(overrideSaysSeparate(QStringLiteral("portal 2")) == false);
+        CHECK(overrideSaysSeparate(QString()) == false);
+
+        // The listing carries it, with both sides normalised and the verdict itself readable.
+        {
+            int preyRows = 0;
+            for (const MergeVerdict& v : overrides())
+                if (v.a == QStringLiteral("prey") && v.b == QStringLiteral("prey"))
+                { ++preyRows; CHECK(v.same == false); }
+            CHECK(preyRows == 1);
+            // The listing is not empty for the WRONG reason: §5b's (hades, hades ii) row is in it too,
+            // so "found it" above is a real find and not a builder that returns every possible pair.
+            bool sawHades = false;
+            for (const MergeVerdict& v : overrides())
+                if (v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades")) sawHades = true;
+            CHECK(sawHades);
+            for (const MergeVerdict& v : overrides()) { CHECK(!v.a.isEmpty()); CHECK(!v.b.isEmpty()); }
+        }
+
+        // CLEARING is not storing "no". After a clear the pair is absent from the listing entirely and
+        // the heuristic decides again; after storing "no" it is present and keeps winning.
+        clearOverride(QStringLiteral("prey"), QStringLiteral("prey"));
+        CHECK(overrideSaysSeparate(QStringLiteral("prey")) == false);
+        for (const MergeVerdict& v : overrides())
+            CHECK(!(v.a == QStringLiteral("prey") && v.b == QStringLiteral("prey")));
+        // The clear is SCOPED — it did not empty the store.
+        {
+            bool sawHades = false;
+            for (const MergeVerdict& v : overrides())
+                if (v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades")) sawHades = true;
+            CHECK(sawHades);
+        }
+    }
+
+    // ---- 5f. separationTag: the year comes back, the edition noise does NOT ---------------------
+    // The key a copy keeps once its group is separated. Getting this wrong in the obvious way — keying
+    // on the raw title — turns a two-way over-merge into a three-entry library, because the edition
+    // variant separates too. That is the same class of harm (a game the user cannot find where they
+    // expect it) arriving through the cure, so it is pinned here rather than left to the id checks.
+    {
+        // The year the merge key threw away is exactly what comes back.
+        CHECK(separationTag(QStringLiteral("Prey (2017)")) != separationTag(QStringLiteral("Prey")));
+        CHECK(separationTag(QStringLiteral("Prey")) == normalizeTitle(QStringLiteral("Prey")));
+        CHECK(separationTag(QStringLiteral("Prey (2017)")).contains(QStringLiteral("2017")));
+        // Edition noise still collapses — otherwise separating "Prey" would also split its GOTY edition.
+        CHECK(separationTag(QStringLiteral("Prey: Game of the Year Edition"))
+              == separationTag(QStringLiteral("Prey")));
+        CHECK(separationTag(QStringLiteral("Prey (2017) Definitive Edition"))
+              == separationTag(QStringLiteral("Prey (2017)")));
+        // Sequels are still different games here too (the numeral rule survives the year being kept).
+        CHECK(separationTag(QStringLiteral("Hades")) != separationTag(QStringLiteral("Hades II")));
+        // Case and padding are not identity, same as every other key in this unit.
+        CHECK(separationTag(QStringLiteral("  PREY (2017) ")) == separationTag(QStringLiteral("Prey (2017)")));
+    }
+
+    // ---- 5g. rankMergeCandidates: the picker's order, and what it must NEVER do ------------------
+    // The "this is the same game as…" picker's honest list is every OTHER entry in the library, and the two
+    // spellings being joined are similar by definition — alphabetical order buries the one row the action
+    // is about. This orders; it must not filter, because a user joining two titles that look nothing alike
+    // still has to be able to reach the row.
+    {
+        // The fixture is chosen so ALPHABETICAL ORDER AND RANKED ORDER DISAGREE. The obvious list —
+        // Zork / Hades / Final Fantasy VII / Final Fantasy X — sorts alphabetically into exactly the ranked
+        // order, so every check below passed against a build that ignored the score entirely (measured: it
+        // survived the mutation). "Alpha Protocol" and "Baldur's Gate" are here for that and nothing else:
+        // they sort BEFORE the Final Fantasy rows and must still rank after them.
+        const QStringList others{ QStringLiteral("Zork"), QStringLiteral("Final Fantasy VII"),
+                                  QStringLiteral("Alpha Protocol"), QStringLiteral("Final Fantasy X"),
+                                  QStringLiteral("Baldur's Gate") };
+        const QStringList r = rankMergeCandidates(QStringLiteral("Final Fantasy VII Remake"), others);
+        // NOTHING IS DROPPED. Checked first and by count AND by membership: a build that returned only the
+        // close matches would pass every ordering check below while hiding rows the user needs.
+        CHECK(r.size() == others.size());
+        for (const QString& o : others) CHECK(r.contains(o));
+        // The closest spelling leads.
+        CHECK(r.at(0) == QStringLiteral("Final Fantasy VII"));
+        // More shared leading words beats fewer: "Final Fantasy VII" (3) over "Final Fantasy X" (2).
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy VII")) < r.indexOf(QStringLiteral("Final Fantasy X")));
+        // ...and ANY shared prefix beats none EVEN WHEN THE ALPHABET DISAGREES — "Alpha Protocol" and
+        // "Baldur's Gate" both sort before "Final Fantasy", and both must still come after it.
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Alpha Protocol")));
+        CHECK(r.indexOf(QStringLiteral("Final Fantasy X")) < r.indexOf(QStringLiteral("Baldur's Gate")));
+        // Ties (all score 0) fall back to the alphabet.
+        CHECK(r.indexOf(QStringLiteral("Alpha Protocol")) < r.indexOf(QStringLiteral("Baldur's Gate")));
+        CHECK(r.indexOf(QStringLiteral("Baldur's Gate")) < r.indexOf(QStringLiteral("Zork")));
+        // TOTAL order, so an unchanged library gives an unchanged picker: the same set in a different input
+        // order comes back identical.
+        QStringList shuffled; for (int i = others.size() - 1; i >= 0; --i) shuffled << others.at(i);
+        CHECK(rankMergeCandidates(QStringLiteral("Final Fantasy VII Remake"), shuffled) == r);
+        // A title with nothing in common with anything still returns every row, in alphabetical order.
+        const QStringList none = rankMergeCandidates(QStringLiteral("!!!"), others);
+        CHECK(none.size() == others.size());
+        CHECK(none.at(0) == QStringLiteral("Alpha Protocol"));   // alphabetical, no prefix bonus anywhere
+    }
+
     // ---- 5c. mergeKey: the igdb id when there is one, else the normalised title -----------------
     {
         CHECK(mergeKey(QStringLiteral("Hades"), QStringLiteral("igdb:7")) == QStringLiteral("igdb:7"));
@@ -418,6 +534,460 @@ int main(int argc, char** argv)
         // (The old "an igdb id wins outright" check lived here. It was the bug: it asserted the remap
         // building an id — "pcgame:igdb:7" — that pcGamesCatalog never builds, so passing it meant the
         // records were unreachable. See §7c for what replaced it, and the header for why.)
+    }
+
+    // ---- 7d. effectiveItemId: the escape hatch, spent in the ONE place identity is minted ---------
+    // itemId is the pure base and stays title-only (§7c). This is the function the CATALOG groups on and
+    // the REMAP moves records onto, and the reason it is one function is unchanged from §7c: two
+    // implementations of "what id does this title get" disagree silently, and every record then lands on
+    // a key no lookup performs.
+    //
+    // THE TRAP THIS SECTION IS WRITTEN AGAINST: "the game appears once" passes just as happily under a
+    // build that fuses the WHOLE library into one entry. Every check below therefore names the identity
+    // it expects and pins the games that must NOT move — the sequels most of all, because merging
+    // "Hades" with "Hades II" deletes a game from the library, which is worse than showing one twice.
+    {
+        // 1. With no verdict about them, effectiveItemId IS itemId — for a normal title, for one that
+        //    normalises to nothing (mergeKey's private fallback), and for the two no-id cases.
+        CHECK(effectiveItemId(QStringLiteral("Hades")) == itemId(QStringLiteral("Hades")));
+        CHECK(effectiveItemId(QStringLiteral("Portal 2")) == itemId(QStringLiteral("Portal 2")));
+        CHECK(effectiveItemId(QStringLiteral("GOTY")) == itemId(QStringLiteral("GOTY")));
+        CHECK(effectiveItemId(QString()).isEmpty());
+        CHECK(effectiveItemId(QStringLiteral("   ")).isEmpty());
+
+        // 2. SEPARATE — the case the design named. The premise first: these two really do fuse today.
+        CHECK(itemId(QStringLiteral("Prey")) == itemId(QStringLiteral("Prey (2017)")));
+        setOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"), false);
+        CHECK(effectiveItemId(QStringLiteral("Prey")) != effectiveItemId(QStringLiteral("Prey (2017)")));
+        // Both halves are REAL ids, not one game plus an empty string (rule 1: an empty id is dropped
+        // from the folder and absent from the remap, so "they differ" alone would pass on a build that
+        // deletes one of them).
+        CHECK(!effectiveItemId(QStringLiteral("Prey")).isEmpty());
+        CHECK(!effectiveItemId(QStringLiteral("Prey (2017)")).isEmpty());
+        CHECK(effectiveItemId(QStringLiteral("Prey")).startsWith(QStringLiteral("pcgame:")));
+        CHECK(effectiveItemId(QStringLiteral("Prey (2017)")).startsWith(QStringLiteral("pcgame:")));
+        // STABLE per title — the id is re-derived from scratch on every scan, so a copy whose id moved
+        // between two refreshes would strand its own records.
+        CHECK(effectiveItemId(QStringLiteral("Prey (2017)"))
+              == effectiveItemId(QStringLiteral("  Prey (2017)  ")));
+        CHECK(effectiveItemId(QStringLiteral("Prey")) == effectiveItemId(QStringLiteral("prey")));
+        // Two EDITIONS of the separated copy still fuse. Keying a separated group on the raw title would
+        // split these too, which is the over-merge cured by turning it into an over-split.
+        CHECK(effectiveItemId(QStringLiteral("Prey: Game of the Year Edition"))
+              == effectiveItemId(QStringLiteral("Prey")));
+        // SCOPED to the key the user pointed at. Everything else is byte-identical to its base id — this
+        // is the check that fails on a build which separates (or fuses) the whole library.
+        CHECK(effectiveItemId(QStringLiteral("Hades")) == itemId(QStringLiteral("Hades")));
+        CHECK(effectiveItemId(QStringLiteral("Hades II")) == itemId(QStringLiteral("Hades II")));
+        CHECK(effectiveItemId(QStringLiteral("Portal")) == itemId(QStringLiteral("Portal")));
+        CHECK(effectiveItemId(QStringLiteral("Portal 2")) == itemId(QStringLiteral("Portal 2")));
+        // ...and the sequel pairs are still two games, reached through the overridden builder.
+        CHECK(effectiveItemId(QStringLiteral("Hades")) != effectiveItemId(QStringLiteral("Hades II")));
+        CHECK(effectiveItemId(QStringLiteral("Portal")) != effectiveItemId(QStringLiteral("Portal 2")));
+        // Neither separated half collides with an unrelated game.
+        CHECK(effectiveItemId(QStringLiteral("Prey")) != effectiveItemId(QStringLiteral("Hades")));
+        CHECK(effectiveItemId(QStringLiteral("Prey (2017)")) != effectiveItemId(QStringLiteral("Hades")));
+
+        // 3. THE REMAP FOLLOWS. This is the half that makes the override safe rather than merely
+        //    visible: the folder now builds two tiles, and the table has to send each copy's records to
+        //    the tile that copy is actually on. A remap left on the pure base id would put both on a
+        //    tile the catalog no longer builds — the silent stranding this whole unit exists to prevent.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("steam:3970"),  QStringLiteral("Prey"))
+                << qMakePair(QStringLiteral("steam:480490"), QStringLiteral("Prey (2017)"))
+                << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"));
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("steam:3970"))   == effectiveItemId(QStringLiteral("Prey")));
+            CHECK(t.value(QStringLiteral("steam:480490")) == effectiveItemId(QStringLiteral("Prey (2017)")));
+            CHECK(t.value(QStringLiteral("steam:3970")) != t.value(QStringLiteral("steam:480490")));
+            // The untouched game's destination did not move at all.
+            CHECK(t.value(QStringLiteral("steam:1145360")) == itemId(QStringLiteral("Hades")));
+        }
+        clearOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"));
+        // Cleared -> the heuristic decides again and the two fuse, exactly as before the verdict.
+        CHECK(effectiveItemId(QStringLiteral("Prey")) == effectiveItemId(QStringLiteral("Prey (2017)")));
+        CHECK(effectiveItemId(QStringLiteral("Prey")) == itemId(QStringLiteral("Prey")));
+
+        // 4. FUSE — the other direction. Two spellings the title heuristic leaves apart, joined by hand.
+        const QString ffLong  = QStringLiteral("Final Fantasy VII Remake");
+        const QString ffShort = QStringLiteral("FF7 Remake");
+        CHECK(itemId(ffLong) != itemId(ffShort));                      // the premise
+        setOverride(ffLong, ffShort, true);
+        CHECK(effectiveItemId(ffLong) == effectiveItemId(ffShort));
+        CHECK(!effectiveItemId(ffLong).isEmpty());
+        // The canonical id is the SAME from either side and does not depend on which one was asked
+        // first — an id that depended on the lookup order would move under the records it holds.
+        CHECK(effectiveItemId(ffShort) == effectiveItemId(ffLong));
+        // It is one of the two real keys, not some third invented string that no tile would carry.
+        CHECK(effectiveItemId(ffLong) == itemId(ffShort) || effectiveItemId(ffLong) == itemId(ffLong));
+        // Fusing two keys must not drag anything else in.
+        CHECK(effectiveItemId(QStringLiteral("Hades")) != effectiveItemId(ffLong));
+        CHECK(effectiveItemId(QStringLiteral("Hades")) == itemId(QStringLiteral("Hades")));
+        CHECK(effectiveItemId(QStringLiteral("Hades")) != effectiveItemId(QStringLiteral("Hades II")));
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("steam:1462040"), ffLong)
+                << qMakePair(QStringLiteral("epic:ff7r"),     ffShort)
+                << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"));
+            const QHash<QString, QString> t = remapTable(lib);
+            // Both copies' records go to the ONE tile the folder now builds for them.
+            CHECK(t.value(QStringLiteral("steam:1462040")) == t.value(QStringLiteral("epic:ff7r")));
+            // Asserted on the side whose id ACTUALLY MOVES. The fused key is the smaller of the two, which
+            // here is ffShort's own — so "the short spelling's destination is its effective id" holds even
+            // on a remap that ignores overrides entirely, and pinned that way it was inert (measured). The
+            // long spelling is the one whose records have somewhere new to go.
+            CHECK(t.value(QStringLiteral("steam:1462040")) == effectiveItemId(ffLong));
+            // Same reason for the same side: rule 1 DROPS an entry whose destination came back empty, so
+            // "there is a destination at all" is only a real check on the copy whose id the verdict moves.
+            CHECK(!t.value(QStringLiteral("steam:1462040")).isEmpty());
+            // ...and the untouched game did NOT join them. Without this, a build that maps everything to
+            // one destination passes every check above.
+            CHECK(t.value(QStringLiteral("steam:1145360")) != t.value(QStringLiteral("epic:ff7r")));
+            CHECK(t.value(QStringLiteral("steam:1145360")) == itemId(QStringLiteral("Hades")));
+        }
+        clearOverride(ffLong, ffShort);
+        CHECK(effectiveItemId(ffLong) != effectiveItemId(ffShort));   // back to two games
+
+        // 5. Leave the store exactly as §7d found it (only §5b's (hades, hades ii) verdict), so the
+        //    record-store sections below are not reading state this one invented. A probe whose later
+        //    sections depend on an earlier one's leftovers is the failure mode the header's note about
+        //    the persisting override store already records once.
+        CHECK(effectiveItemId(QStringLiteral("Prey")) == itemId(QStringLiteral("Prey")));
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
+    // ---- 7e. A TITLE THAT IS NOT A NORMALISATION FIXED POINT ------------------------------------
+    //
+    // Every fixture above this one — Prey, Hades, FF7 Remake, Portal 2 — is a fixed point of
+    // normalizeTitle, so none of them can see a second normalisation happen. That is not a gap in the
+    // assertions; it is a gap in the INPUTS, and it is what let two unrecoverable defects ship with a
+    // 44/44 mutation kill rate.
+    //
+    // The shape: the edition-phrase strip (step 3) runs BEFORE punctuation becomes space (step 4),
+    // because the phrases carry punctuation themselves ("director's cut"). So an edition phrase wrapped
+    // in brackets survives the strip, and only the NEXT pass sees it:
+    //
+    //     "Batman Arkham City (GOTY)"  ->  "batman arkham city goty"  ->  "batman arkham city"
+    //
+    // Bracketed edition suffixes are routine in downloaded release names, which is a population this
+    // folder explicitly ingests. Anything that normalises a key it was handed ALREADY NORMALISED builds a
+    // key nothing ever wrote, and every read and remove against it silently misses.
+    {
+        const QString gotyRaw = QStringLiteral("Batman Arkham City (GOTY)");
+        const QString gogRaw  = QStringLiteral("Batman: Arkham City");
+
+        // THE PREMISE, pinned so this fixture cannot quietly stop testing what it is named for. If a
+        // later change makes normalizeTitle idempotent, this CHECK fails loudly and whoever made that
+        // change gets told that the fixture guarding the double-normalisation bug no longer reproduces
+        // its precondition — which is the moment to decide about migrating existing ids, not later.
+        const QString n1 = normalizeTitle(gotyRaw);
+        const QString n2 = normalizeTitle(n1);
+        CHECK(n1 == QStringLiteral("batman arkham city goty"));
+        CHECK(n2 == QStringLiteral("batman arkham city"));
+        CHECK(n1 != n2);                                   // the whole point: not a fixed point
+        CHECK(normalizeTitle(gogRaw) == n2);               // ...and the second pass lands on the OTHER copy
+        CHECK(itemId(gotyRaw) != itemId(gogRaw));          // so the heuristic leaves them apart
+
+        // 1. FUSE, then UNDO THE WAY THE UI UNDOES IT — from the STORED keys overrides() hands back.
+        setOverride(gogRaw, gotyRaw, true);
+        CHECK(effectiveItemId(gogRaw) == effectiveItemId(gotyRaw));
+        CHECK(!effectiveItemId(gotyRaw).isEmpty());
+        // The verdict is stored under the SINGLY-normalised keys, which is the form the fuse path matches.
+        {
+            bool sawPair = false;
+            for (const MergeVerdict& v : overrides())
+                if ((v.a == n1 && v.b == n2) || (v.a == n2 && v.b == n1)) { sawPair = true; CHECK(v.same); }
+            CHECK(sawPair);
+        }
+        // ...and EVERY public reader of the store agrees with the folder about this pair. Both of these
+        // take RAW titles and normalise once; a reader that normalised twice would miss the verdict and
+        // fall through to the heuristic, which says these two are different games. Pinned here because
+        // this is the only fixture whose titles can tell one normalisation from two — measured: without
+        // these, "overrideValue normalises twice" and "sameGame re-normalises its already-normalised
+        // keys" both survived the whole suite.
+        CHECK(overrideSaysSame(gogRaw, gotyRaw) == true);
+        CHECK(overrideSaysSame(gotyRaw, gogRaw) == true);          // symmetric, on the awkward pair too
+        CHECK(sameGame(gogRaw, QString(), gotyRaw, QString()) == true);
+        CHECK(sameGame(gotyRaw, QString(), gogRaw, QString()) == true);
+        // ...and the verdict beats two DIFFERENT igdb ids, which is the precedence rule §5b pins only on
+        // titles that are normalisation fixed points.
+        CHECK(sameGame(gogRaw, QStringLiteral("igdb:1"), gotyRaw, QStringLiteral("igdb:2")) == true);
+
+        // The remap agrees with the folder — both copies' records go to the one tile.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("gog:1234"), gogRaw)
+                << qMakePair(QStringLiteral("dl:batman"), gotyRaw);
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("gog:1234")) == t.value(QStringLiteral("dl:batman")));
+            CHECK(t.value(QStringLiteral("dl:batman")) == effectiveItemId(gotyRaw));
+        }
+
+        // UNDO. clearOverrideKeys takes the stored keys verbatim; the raw-title entry point would
+        // re-normalise "batman arkham city goty" into "batman arkham city", remove a pair nobody wrote
+        // (QSettings::remove no-ops), and report success while the fuse survived every later scan with
+        // the loser side's favourites, marks and play time stranded under an id nothing looks up again.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == n1 || v.b == n1) clearOverrideKeys(v.a, v.b);
+        // THE GROUPING ACTUALLY RETURNED — asserted on the ids, not on the absence of a toast.
+        CHECK(effectiveItemId(gogRaw) != effectiveItemId(gotyRaw));
+        CHECK(effectiveItemId(gotyRaw) == itemId(gotyRaw));
+        CHECK(effectiveItemId(gogRaw) == itemId(gogRaw));
+        // ...and the verdict is gone from the store, so the next scan re-decides rather than re-reading it.
+        for (const MergeVerdict& v : overrides()) CHECK(v.a != n1 && v.b != n1);
+        // A second undo on an already-undone pair is a no-op, not a resurrection.
+        clearOverrideKeys(n1, n2);
+        CHECK(effectiveItemId(gogRaw) != effectiveItemId(gotyRaw));
+
+        // 2. SPLIT — the self-pair, on the same non-idempotent key. The verdict is written at
+        //    normalizeTitle(title); overrideSaysSeparate has to ask about THAT key and not about its
+        //    re-normalisation, or the destructive confirm and the success toast both fire and the folder
+        //    comes back byte-identical.
+        const QString before = effectiveItemId(gotyRaw);
+        setOverride(gotyRaw, gotyRaw, false);
+        CHECK(overrideSaysSeparate(gotyRaw) == true);
+        // THE FOLDER ACTUALLY CHANGED.
+        CHECK(effectiveItemId(gotyRaw) != before);
+        CHECK(effectiveItemId(gotyRaw) == itemId(gotyRaw) + QStringLiteral("#") + separationTag(gotyRaw));
+        // ...and it did not leak onto the key the SECOND normalisation would have landed on — that key
+        // belongs to a different game, and splitting one entry must never re-key another.
+        CHECK(overrideSaysSeparate(gogRaw) == false);
+        CHECK(effectiveItemId(gogRaw) == itemId(gogRaw));
+
+        // The remap follows the split, or the split's new tile holds no records.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("dl:batman"), gotyRaw)
+                << qMakePair(QStringLiteral("gog:1234"), gogRaw);
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("dl:batman")) == effectiveItemId(gotyRaw));
+            CHECK(t.value(QStringLiteral("dl:batman")) != t.value(QStringLiteral("gog:1234")));
+        }
+
+        // Undo the split too, from the stored keys, and confirm the entry came back.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == n1 || v.b == n1) clearOverrideKeys(v.a, v.b);
+        CHECK(overrideSaysSeparate(gotyRaw) == false);
+        CHECK(effectiveItemId(gotyRaw) == before);
+
+        // Leave §7d's state: only (hades, hades ii).
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
+    // ---- 7f. A TRANSITIVE FUSE CHAIN — more than one edge, and the confirm has to NAME the survivor --
+    //
+    // §7d fuses exactly ONE pair, so canonicalNorm's walk is exercised with a single edge and a component
+    // of two: every answer it could give is "one of the two titles in front of me". A three-key chain is
+    // the first input that can tell the component minimum apart from the pairwise minimum — and that gap
+    // is a WRONG DATA-LOSS DISCLOSURE on the dialog whose entire purpose is that disclosure.
+    {
+        // Chosen so the alphabetical order is not the order they are fused in: "aeon" < "beacon" < "cinder".
+        const QString a = QStringLiteral("Aeon Drift");
+        const QString b = QStringLiteral("Beacon Drift");
+        const QString c = QStringLiteral("Cinder Drift");
+        const QString na = normalizeTitle(a), nb = normalizeTitle(b), nc = normalizeTitle(c);
+        CHECK(na < nb); CHECK(nb < nc);                      // the premise the whole fixture rests on
+        CHECK(itemId(a) != itemId(b)); CHECK(itemId(b) != itemId(c));
+
+        // Fuse B—C FIRST, so the smallest key in the eventual component is not in this pair at all.
+        setOverride(b, c, true);
+        CHECK(effectiveItemId(b) == effectiveItemId(c));
+        CHECK(effectiveItemId(b) == itemId(b));              // B is the smaller of B and C
+        // A is untouched so far.
+        CHECK(effectiveItemId(a) == itemId(a));
+        CHECK(effectiveItemId(a) != effectiveItemId(b));
+
+        // BEFORE fusing A and B: what must the confirm say? The pairwise rule says A (A < B). The component
+        // rule says A too — A really is the smallest here, so this direction agrees and is NOT the case that
+        // discriminates. It is asserted anyway so the fixture pins both answers rather than only the
+        // interesting one.
+        CHECK(fusedCanonicalKey(na, nb) == na);
+        CHECK(fuseSurvivorTitle(a, b, QStringList{ a, b, c }) == a);
+
+        // ...now the case that DOES discriminate: fuse C with A, from C's side. Pairwise, A < C, so the
+        // pairwise rule names A — and A is right only by luck here. Swap which side is smallest instead:
+        // ask about fusing C and B. Pairwise the answer is B; the component's minimum is A, which is in
+        // NEITHER of the two titles the dialog is about.
+        CHECK(fusedCanonicalKey(nc, nb) == nb);              // before A joins, B really is the minimum
+        setOverride(a, b, true);                             // the chain closes: A—B—C
+
+        // THE COMPONENT, walked from every member. Order-independent: same set whichever end you start at.
+        for (const QString& start : QStringList{ na, nb, nc })
+        {
+            const QStringList comp = fusedKeys(start);
+            CHECK(comp.size() == 3);
+            CHECK(comp.contains(na)); CHECK(comp.contains(nb)); CHECK(comp.contains(nc));
+        }
+        // ...and it drags nothing else in.
+        CHECK(!fusedKeys(na).contains(QStringLiteral("hades")));
+        CHECK(fusedKeys(QStringLiteral("hades")).size() == 1);
+
+        // ALL THREE key on the one id, and it is the component minimum — not "whichever side was asked
+        // first" and not "the order the verdicts were recorded".
+        CHECK(effectiveItemId(a) == effectiveItemId(b));
+        CHECK(effectiveItemId(b) == effectiveItemId(c));
+        CHECK(effectiveItemId(c) == itemId(a));
+
+        // THE CONFIRM TEXT. Fusing C and B — the pairwise rule names B, the truth is A. This single CHECK is
+        // the one the pairwise implementation fails, and it is the whole reason this fixture exists.
+        CHECK(fusedCanonicalKey(nc, nb) == na);
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ a, b, c }) == a);
+        // Symmetric in the pair, like every other question this store answers.
+        CHECK(fuseSurvivorTitle(b, c, QStringList{ a, b, c }) == a);
+        // The survivor is named even when the library list is handed in some other order.
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ c, b, a }) == a);
+        // A survivor that is one of the two IS returned as that side's own spelling, not looked up.
+        CHECK(fuseSurvivorTitle(a, c, QStringList{ a, b, c }) == a);
+        // ...and it is named from EITHER position. Asserted with the survivor as the SECOND argument,
+        // which is the only arrangement that can see "always name the first title" — measured: without
+        // this the mutation survived the whole suite while the dialog named the wrong entry every time
+        // the user happened to open the fix menu from the larger-titled side.
+        CHECK(fuseSurvivorTitle(c, a, QStringList{ a, b, c }) == a);
+        CHECK(fuseSurvivorTitle(b, a, QStringList{ a, b, c }) == a);
+        // ...and when the anchoring copy has left the library there is nothing to name, which the caller
+        // has to say differently rather than quoting a title that is not there.
+        CHECK(fuseSurvivorTitle(c, b, QStringList{ b, c }).isEmpty());
+        // Two titles that both normalise to NOTHING have no survivor key at all, so there is nothing to
+        // name — NOT "name the first one anyway". The fix surface refuses this fuse before it gets here,
+        // but the function is total and its answer for the case has to be the honest one.
+        CHECK(fuseSurvivorTitle(QStringLiteral("!!!"), QStringLiteral("GOTY"),
+                                QStringList{ a, b, c }).isEmpty());
+
+        // THE UNION IS TWO-SIDED. A lone key fused with a member of an existing group: the survivor is
+        // the GROUP's minimum, and it is reachable only through the SECOND argument's component. Ordered
+        // deliberately so the lone key is the alphabetically smaller of the two named — otherwise walking
+        // only the first side happens to give the right answer and the check is inert. Measured: without
+        // this pair of checks, "only union one side's component" survived the whole suite.
+        const QString lone  = QStringLiteral("Bastion Drift");
+        const QString nLone = normalizeTitle(lone);
+        CHECK(na < nLone); CHECK(nLone < nc);          // aeon < bastion < cinder — the premise
+        CHECK(fusedKeys(nLone).size() == 1);           // it really is on its own
+        CHECK(fusedCanonicalKey(nLone, nc) == na);     // lone key FIRST: only nc's side holds the answer
+        CHECK(fusedCanonicalKey(nc, nLone) == na);     // ...and the same the other way round
+        CHECK(fuseSurvivorTitle(lone, c, QStringList{ a, b, c, lone }) == a);
+
+        // The remap agrees with the folder for all three.
+        {
+            QVector<QPair<QString, QString>> lib;
+            lib << qMakePair(QStringLiteral("steam:9001"), a)
+                << qMakePair(QStringLiteral("gog:9002"),   b)
+                << qMakePair(QStringLiteral("epic:9003"),  c)
+                << qMakePair(QStringLiteral("steam:1145360"), QStringLiteral("Hades"));
+            const QHash<QString, QString> t = remapTable(lib);
+            CHECK(t.value(QStringLiteral("gog:9002"))  == t.value(QStringLiteral("epic:9003")));
+            CHECK(t.value(QStringLiteral("epic:9003")) == t.value(QStringLiteral("steam:9001")));
+            CHECK(t.value(QStringLiteral("epic:9003")) == effectiveItemId(c));
+            CHECK(!t.value(QStringLiteral("epic:9003")).isEmpty());
+            CHECK(t.value(QStringLiteral("steam:1145360")) != t.value(QStringLiteral("epic:9003")));
+        }
+
+        // UNDO from the MIDDLE of the chain clears the whole component, not only the edges naming B. This is
+        // the rule the fix surface relies on: undoing from one member and leaving the rest joined would show
+        // the user an entry still grouped differently than before, under a toast saying it was not.
+        {
+            QSet<QString> group;
+            for (const QString& k : fusedKeys(nb)) group.insert(k);
+            for (const MergeVerdict& v : overrides())
+                if (group.contains(v.a) || group.contains(v.b)) clearOverrideKeys(v.a, v.b);
+        }
+        CHECK(effectiveItemId(a) == itemId(a));
+        CHECK(effectiveItemId(b) == itemId(b));
+        CHECK(effectiveItemId(c) == itemId(c));
+        CHECK(effectiveItemId(a) != effectiveItemId(b));
+        CHECK(effectiveItemId(b) != effectiveItemId(c));
+        CHECK(fusedKeys(na).size() == 1);
+        // The clear was SCOPED to the component — §5b's unrelated verdict is still there.
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
+    }
+
+    // ---- 7g. FUSE x SEPARATE — the interaction, which half-applies and announces success -------------
+    //
+    // SEPARATE beats FUSE inside effectiveItemId, deliberately: a key cannot be both too coarse and too
+    // fine. The consequence nothing tested is what happens when a fuse is recorded ACROSS that rule — the
+    // separated side does not move, the other side is dragged to a canonical id no separated copy carries,
+    // and the library is left with three entries, one keyed on a game that is not there.
+    {
+        const QString preyBare = QStringLiteral("Prey");
+        const QString prey2017 = QStringLiteral("Prey (2017)");
+        const QString preyEpic = QStringLiteral("Prey 2017");     // a third spelling, its own key
+        const QString nPrey    = normalizeTitle(preyBare);
+        CHECK(normalizeTitle(prey2017) == nPrey);                 // the year strip is why they fused
+        CHECK(normalizeTitle(preyEpic) != nPrey);                 // ...and why this one did not
+
+        // SPLIT the Prey group.
+        setOverride(preyBare, preyBare, false);
+        CHECK(overrideSaysSeparate(preyBare) == true);
+        CHECK(overrideSaysSeparate(prey2017) == true);            // same key, so the split covers both
+        const QString sepBare = effectiveItemId(preyBare);
+        const QString sep2017 = effectiveItemId(prey2017);
+        CHECK(sepBare != sep2017);
+        CHECK(sepBare.contains(QLatin1Char('#')));
+
+        // The state the fix surface must REFUSE to fuse from. It is detectable without writing anything,
+        // which is what lets the refusal happen before the destructive confirm rather than after it.
+        CHECK(overrideSaysSeparate(preyEpic) == false);           // the Epic copy itself is not split
+        CHECK(overrideSaysSeparate(preyBare) == true);            // ...but its intended partner is
+
+        // AND THIS IS WHY IT MUST BE REFUSED. Record the fuse anyway and read what the folder becomes:
+        // three entries, and the Epic copy alone on a base id no separated copy carries.
+        setOverride(preyEpic, prey2017, true);
+        CHECK(effectiveItemId(preyBare) == sepBare);              // the separated side did NOT move
+        CHECK(effectiveItemId(prey2017) == sep2017);              // ...nor did the copy actually named
+        CHECK(effectiveItemId(preyEpic) != effectiveItemId(prey2017));   // the fuse did not happen
+        CHECK(effectiveItemId(preyEpic) == itemId(preyBare));     // dragged to a GHOST: nothing else is here
+        CHECK(effectiveItemId(preyEpic) != itemId(preyEpic));     // ...and off its own id, so it is worse
+                                                                 // than doing nothing
+        // Three distinct entries where the user was told there would be one fewer.
+        CHECK(effectiveItemId(preyBare) != effectiveItemId(preyEpic));
+        CHECK(effectiveItemId(prey2017) != effectiveItemId(preyEpic));
+
+        // SEPARATE BEATS FUSE, asserted in the ONE direction that can observe the precedence.
+        //
+        // The fuse recorded just above joins "prey" to a LARGER key ("prey 2017"), so the component
+        // minimum is still "prey" — and a build where the fuse branch ran first would land on the same id
+        // and look correct. The rule only becomes visible when the fused partner is SMALLER, because then
+        // the two branches give different answers. Measured: without this block, swapping the precedence
+        // survived the whole suite, and the documented rule that a separated entry cannot be dragged back
+        // into a group was pinned by nothing.
+        {
+            const QString smaller = QStringLiteral("Aeon Prey");
+            CHECK(normalizeTitle(smaller) < nPrey);          // the premise
+            setOverride(smaller, preyBare, true);            // fuse the SEPARATED key to a smaller one
+            // The fuse branch really WOULD move this key — that is what makes the next check discriminating
+            // rather than a coincidence about which branch happened to run.
+            CHECK(fusedKeys(nPrey).contains(normalizeTitle(smaller)));
+            CHECK(fusedCanonicalKey(nPrey, normalizeTitle(smaller)) == normalizeTitle(smaller));
+            // ...and the separated entry still keys on its own separated id, NOT on the smaller canonical.
+            CHECK(effectiveItemId(preyBare) == sepBare);
+            CHECK(effectiveItemId(preyBare).contains(QLatin1Char('#')));
+            CHECK(effectiveItemId(preyBare) != itemId(smaller));
+            CHECK(effectiveItemId(prey2017) == sep2017);
+            // The smaller partner is unaffected by the separation — it was never the separated key.
+            CHECK(effectiveItemId(smaller) == itemId(smaller));
+            clearOverrideKeys(normalizeTitle(smaller), nPrey);
+        }
+
+        // Undoing the split makes the fuse take effect all at once, which is the other half of why the
+        // refusal has to be a refusal and not a silent auto-unsplit: the user gets a different library from
+        // the one the confirm described, later, with no action in between.
+        clearOverrideKeys(nPrey, nPrey);
+        CHECK(overrideSaysSeparate(preyBare) == false);
+        CHECK(effectiveItemId(preyEpic) == effectiveItemId(preyBare));
+        CHECK(effectiveItemId(preyEpic) == effectiveItemId(prey2017));
+
+        // Back to §7d's state.
+        for (const MergeVerdict& v : overrides())
+            if (v.a == normalizeTitle(preyEpic) || v.b == normalizeTitle(preyEpic) ||
+                v.a == nPrey || v.b == nPrey)
+                clearOverrideKeys(v.a, v.b);
+        CHECK(effectiveItemId(preyBare) == itemId(preyBare));
+        CHECK(effectiveItemId(preyEpic) == itemId(preyEpic));
+        for (const MergeVerdict& v : overrides())
+            CHECK(v.a == QStringLiteral("hades") || v.b == QStringLiteral("hades"));
     }
 
     // ---- 8. applyRemap: the records follow the id, in every store and every profile -------------

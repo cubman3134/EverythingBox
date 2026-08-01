@@ -620,8 +620,11 @@ QHash<QString, QString> pcgame::remapTable(const QVector<QPair<QString, QString>
     {
         const QString oldId = e.first;
         // The destination is whatever the CATALOG will key this title under — same function, same
-        // arguments, no second implementation to drift. See PcGameRemap.h.
-        const QString merged = pcgame::itemId(e.second);
+        // arguments, no second implementation to drift. See PcGameRemap.h. effectiveItemId, not itemId:
+        // the catalog groups on the id AFTER the user's merge overrides are applied, so a remap that
+        // stopped at the pure base would send every record of an overridden game to an id no tile carries
+        // — the exact silent stranding this shared-function rule exists to prevent.
+        const QString merged = pcgame::effectiveItemId(e.second);
 
         // RULE 1. No id, or nothing to group on (itemId returns empty) -> the entry is ABSENT from the
         // table. It is NOT mapped to an empty string: applyRemap would then hash "" and rewrite a real

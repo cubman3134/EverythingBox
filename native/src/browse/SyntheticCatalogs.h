@@ -71,12 +71,18 @@ namespace browse
     // The single PC Games folder: ONE MediaItem per game, with every way to launch it carried as a source on
     // that item (MediaItem::pcSources). It replaces the four per-launcher folders this file used to build
     // (steamGamesCatalog / epicGamesCatalog / gogGamesCatalog / battleNetGamesCatalog, all deleted with the
-    // folders themselves), where the same game appeared up to five times with unrelated ids. Pure, like every
-    // builder here: plain lists in, a
-    // MediaCatalog out, no UI and no store singleton — in particular it groups with pcgame::itemId (pure)
-    // and never consults the user-override ini, which is a store.
+    // folders themselves), where the same game appeared up to five times with unrelated ids. Plain lists in, a
+    // MediaCatalog out, and no UI.
     //
-    // Per item: id = pcgame::itemId(title) — the SAME function pcgame::remapTable moves records onto, and
+    // ONE store read, and it is deliberate: grouping goes through pcgame::effectiveItemId, which consults the
+    // user's merge-override ini. That is the escape hatch the design named as the thing that makes a fuzzy
+    // title heuristic shippable, and it has to be spent at the point identity is minted or the catalog and the
+    // record remap end up keying on different ids. With no verdict recorded the read changes nothing —
+    // effectiveItemId is then exactly itemId — so a probe with a clean data dir sees the pure builder it saw
+    // before. (Every probe_* target compiles with EB_ISOLATED_DATA_DIR and therefore starts with an empty ini,
+    // so a probe that wants the override branch writes a verdict itself; see probe_browse §pcgames-override.)
+    //
+    // Per item: id = pcgame::effectiveItemId(title) — the SAME function pcgame::remapTable moves records onto, and
     // the only place that id is built. The two used to compute it separately and could disagree, which
     // silently strands the user's favourites, marks and play time under a key nothing reads; probe_browse
     // now pins them equal. mime = "pcgame", the ONE routing kind replacing steamgame /
@@ -138,6 +144,44 @@ namespace browse
                                 const QString& query, const QString& launcherFilter,
                                 const std::function<QString(const QVector<pcgame::PcGameSource>&)>& poster = {},
                                 const QList<SteamGame>& steamOwned = {});
+
+    // ---- The PC Games folder's launcher filter (issue #44) ---------------------------------------------
+    // pcGamesCatalog has always taken a `launcherFilter` and it has always worked; every call site passed an
+    // empty string and no surface offered it, so "show me what I own on Steam" — which the design used to
+    // justify deleting the four per-launcher folders — had no replacement at all. These three build the
+    // control that reaches it. Pure: they decide what the folder OFFERS, never what it shows.
+
+    // The launcher's own name, for a row a person reads. Returns an empty string for an id with no name
+    // here, which callers use as "not a launcher we can offer".
+    QString pcLauncherLabel(const QString& launcher);
+
+    // Which launchers this library actually has games in, in the folder's fixed display order
+    // (steam, epic, gog, battlenet). Offering a launcher with nothing behind it is a menu row that can only
+    // ever empty the folder, and offering ALL FOUR always would do exactly that on the common machine with
+    // one store installed. Owned-but-not-installed Steam entries count: they are Steam library entries, and
+    // "what I own on Steam" is the phrase this feature exists to answer.
+    QStringList pcLaunchersPresent(const QList<SteamGame>& steam, const QList<EpicGame>& epic,
+                                   const QList<GogGame>& gog, const QList<BattleNetGame>& bnet,
+                                   const QList<SteamGame>& steamOwned = {});
+
+    // The filter menu: .first is the launcherFilter value to pass to pcGamesCatalog (EMPTY = every
+    // launcher), .second is the row a person reads, with the current choice ticked.
+    //
+    // ONE list of pairs rather than two parallel lists on purpose: the row the user pressed and the value it
+    // means have to stay index-aligned, and two lists that must agree by convention is the shape this
+    // codebase has already been bitten by (see pcgame::itemId's header).
+    //
+    // "All launchers" is ALWAYS first, so a filter that has emptied the folder can still be cleared — the
+    // rows below it may all have vanished with the library they described.
+    QVector<QPair<QString, QString>> pcLauncherFilterChoices(const QStringList& available,
+                                                             const QString& current);
+
+    // The control row itself, pinned at the TOP of the PC Games folder. A row in the folder rather than a
+    // widget above it because this app has four layouts (classic grid, themed grid, XMB, carousel) and only
+    // the classic one has chrome a QComboBox could live in — a filter bar there is a control most users
+    // cannot see, and one only a mouse can reach, which is the defect issue #40 is already open about.
+    // A folder row is D-pad reachable in every layout by construction.
+    MediaItem pcLauncherFilterRow(const QString& current);
 
     // Episodes airing soon, from a connected Trakt account. Sorted by air time, soonest first.
     // PAST entries are excluded: recently-aired episodes are issue #25's job ("You missed"), and two
