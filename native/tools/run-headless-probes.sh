@@ -7,6 +7,8 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:slowconnect — a host whose connect and whose answer each eat most of the joiner's give-up
+#                            budget, but neither eats all of it: the joiner must still land on the direct path.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
 #
 # Usage:  BUILD_DIR=build ./native/tools/run-headless-probes.sh
@@ -234,6 +236,11 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The joiner's give-up deadline measures the HANDSHAKE, not the connect plus the handshake — and a session the
+# user left inside that window stays left. Deliberately slow (~5s): the only way to tell the two readings of
+# that deadline apart is to make the connect itself cost most of the budget, which on loopback means putting a
+# stalling CONNECT proxy in front of it.
+run "netplay both:slowconnect" NETPLAY-BOTH-OK "$BOTH" slowconnect
 
 # Controller-navigation invariants (offscreen QPA): a selection always exists, arrows clamp + recover from
 # deleted rows, overlays stack/unwind and restore focus, Back always routes, the on-screen keyboard works.

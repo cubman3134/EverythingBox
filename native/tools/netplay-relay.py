@@ -54,7 +54,11 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
     peer = writer.get_extra_info("peername")
     try:
         line = await asyncio.wait_for(reader.readline(), HANDSHAKE_TIMEOUT)
-    except (asyncio.TimeoutError, ConnectionError):
+    except (asyncio.TimeoutError, ConnectionError, ValueError):
+        # ValueError is readline()'s report that the line ran past StreamReader's 64 KiB limit (it re-raises
+        # LimitOverrunError that way). The handshake line is at most a verb plus a 64-char code, so anything
+        # that long is a scanner or a stray HTTP request — but uncaught it killed the handler task mid-flight
+        # and the socket leaked until the process died. Same answer as a timeout: hang up.
         writer.close()
         return
 

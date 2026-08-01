@@ -47,8 +47,13 @@ public:
     // hard-coded port is one more thing two instances on a machine can collide on.
     quint16 directPort() const;
     // How long an unproven peer on the direct port has to announce itself before the host hangs up on it. Public
-    // so a test can assert that an ACCEPTED direct session is still alive on the far side of this deadline.
+    // so a test can assert that an ACCEPTED direct session is still alive on the far side of this deadline, and
+    // that an unproven one is NOT.
     static constexpr int kDirectGreetingTimeoutMs = 5000;
+    // The joiner's give-up budget, spent TWICE over: once on the TCP connect, then again on the host's answer.
+    // One budget covering both would expire mid-handshake on a slow link, after the host had already committed
+    // to us irreversibly (see joinOnline). Public so a test can build a peer that costs most of each phase.
+    static constexpr int kDirectGiveUpMs = 4000;
 
     // Game identity for the handshake mismatch check, set before host()/join().
     QString gameId;   // "<rom-basename>|<size>"
@@ -91,5 +96,9 @@ private:
     QByteArray rx_;
     QByteArray relayBuf_;                          // accumulates the relay's handshake line before the session starts
     bool active_ = false, host_ = false, ready_ = false, awaitingPair_ = false;
+    // Bumped by stop(). joinOnline's direct give-up deadlines are QTimer::singleShot on THIS object, so they
+    // survive the sockets they were armed for; each one captures the generation it belongs to and does nothing
+    // if it no longer matches. Covers both "the user left" and "a second joinOnline started".
+    quint64 attempt_ = 0;
     QHash<quint32, quint16> remoteInputs_;
 };
