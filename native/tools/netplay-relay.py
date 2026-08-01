@@ -10,11 +10,18 @@ Settings > the netplay relay address.
 Protocol (line-based handshake, then a raw byte pipe):
   client -> relay :  "HOST <code>\n"   register a room and wait for a peer
                      "JOIN <code>\n"   join an existing room
+  relay  -> host  :  "HOSTED\n"        the room is registered — a JOIN with this code will now find it
   relay  -> both  :  "PAIRED\n"        a peer arrived; everything after this is forwarded verbatim
   relay  -> joiner:  "NOHOST\n"        no room with that code (then the relay closes the connection)
+  relay  -> host  :  "BUSY\n"          that code is already hosting (then the relay closes the connection)
+
+HOSTED is what makes the rendezvous a condition rather than a guess: without it the host has no way to know its
+room exists, so a joiner can only wait a fixed time and hope, and under load that JOIN loses the race and gets
+NOHOST. It also means a relay predating this line will hang a host that waits for it, and a client predating it
+will reject a relay that sends it — relay and client ship together in this repo, so upgrade both.
 
 No auth, no persistence, one peer pair per room. Rooms that never get a joiner expire after ROOM_TTL seconds.
-Run:  python3 netplay-relay.py [--host 0.0.0.0] [--port 55666]
+Run:  python3 netplay-relay.py [--host 0.0.0.0] [--port 55666]      (--port 0 = pick a free port and print it)
 """
 import argparse
 import asyncio
@@ -70,6 +77,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         if code in rooms:                       # code already hosting -> reject the newcomer
             writer.write(b"BUSY\n"); await writer.drain(); writer.close(); return
         rooms[code] = (reader, writer, now)
+        # Acknowledge only AFTER the room is in the table, so a host that waits for this can hand the code out
+        # knowing a JOIN cannot lose the race.
+        writer.write(b"HOSTED\n")
+        await writer.drain()
         print(f"[+] HOST {code} from {peer}; rooms={len(rooms)}", flush=True)
         # Park here until a joiner pairs us (which starts the pipe) or the connection drops.
         try:
@@ -85,6 +96,10 @@ async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
 
     # JOIN
     room = rooms.pop(code, None)
+    # A host that already went away is still in the table until its parked coroutine notices. Pairing a joiner to
+    # that corpse hands it a PAIRED it can never make progress on; NOHOST is the honest answer.
+    if room and (room[1].is_closing() or room[0].at_eof()):
+        room = None
     if not room:
         writer.write(b"NOHOST\n"); await writer.drain(); writer.close(); return
     host_reader, host_writer, _ = room
@@ -102,7 +117,10 @@ async def main():
     ap.add_argument("--port", type=int, default=55666)
     args = ap.parse_args()
     server = await asyncio.start_server(handle, args.host, args.port)
-    print(f"EB netplay relay listening on {args.host}:{args.port}", flush=True)
+    # Report the port the OS actually gave us, so --port 0 is usable: a caller that needs a relay of its own can
+    # take a free one instead of racing every other caller for a hard-coded number.
+    bound = server.sockets[0].getsockname()[1] if server.sockets else args.port
+    print(f"EB netplay relay listening on {args.host}:{bound}", flush=True)
     async with server:
         await server.serve_forever()
 

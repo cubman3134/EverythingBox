@@ -20,7 +20,10 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-55677}"
+# 0 = let the OS pick a free port for this run's relay, and read back what it picked. A hard-coded default meant
+# two suites on one machine fought over one port: the loser's relay died silently, its probes talked to the
+# winner's, and the netplay results stopped being about this run (issue #164). Override to pin it if you need to.
+RELAY_PORT="${RELAY_PORT:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -156,11 +159,19 @@ run() { # <name> <sentinel> <exe> [args...]
 }
 
 # Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
+RELAY_LOG="$(mktemp -t eb-relay.XXXXXX)"
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null; rm -f "${RELAY_LOG:-}"' EXIT
+for _ in $(seq 1 100); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+# The port the relay actually bound. Waiting for "listening" and then carrying on regardless is how a relay that
+# never came up got papered over: the netplay probes would connect to SOMEONE's relay and the result meant
+# nothing. No port here is a hard failure.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" 2>/dev/null | head -1)"
+if [ -z "$RELAY_PORT" ]; then
+  echo "FATAL: the netplay relay did not come up — $(head -3 "$RELAY_LOG" 2>/dev/null)"; exit 2
+fi
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"; echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
