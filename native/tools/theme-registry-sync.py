@@ -46,9 +46,44 @@ def canonical_hash(path):
     return hashlib.sha256(blob.encode("utf-8")).hexdigest(), doc
 
 
-def byte_hash(path):
+def doc_hash(path):
+    """SHA-256 of a document's TEXT, with the newline spelling normalised out first.
+
+    Same principle as canonical_hash one function up: gate the meaning, not the encoding. There the noise
+    was indentation; here it is CRLF-vs-LF, which is not something the author chose at all — it is whatever
+    the checkout produced, so hashing it raw records the platform that ran --update rather than the file.
+    """
     with open(path, "rb") as f:
-        return hashlib.sha256(f.read()).hexdigest()
+        return hashlib.sha256(f.read().replace(b"\r\n", b"\n")).hexdigest()
+
+
+def selftest():
+    """The doc hash must not depend on the line endings of whoever's checkout produced it.
+
+    THEME_FORMAT.md is not JSON, so it is hashed as text rather than by meaning — and no .gitattributes
+    pins its line endings, so it is CRLF in a Windows working copy and LF in CI's. A raw byte hash
+    therefore recorded whichever platform last ran --update and could never match the other. It recorded
+    CRLF, so the gate went red on twelve consecutive CI runs over a file nobody had edited, while every
+    developer's local run passed — a gate that cannot pass in CI reports nothing, including the real drift
+    it exists to catch.
+
+    Gate the property, not that one incident: hash the same text spelled both ways and require one answer.
+    """
+    import tempfile
+    text = "# Heading\n\nA line.\n\n* item\n"
+    out = []
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, data in (("lf", text.encode()), ("crlf", text.replace("\n", "\r\n").encode())):
+            p = os.path.join(tmp, name + ".md")
+            with open(p, "wb") as f:
+                f.write(data)
+            out.append(doc_hash(p))
+    if out[0] != out[1]:
+        return ["the doc hash still depends on line endings, so it records the platform that ran --update\n"
+                "      as LF   %s\n"
+                "      as CRLF %s\n"
+                "    Whichever one is in the record, the other checkout can never match it." % tuple(out)]
+    return []
 
 
 def bundled_themes():
@@ -66,7 +101,10 @@ def load_record():
 
 
 def check():
-    bad = []
+    # Before comparing anything: is the comparison itself sound? A hash that varies by checkout makes every
+    # result below meaningless in one direction or the other, so it is checked first and reported as its own
+    # problem rather than as drift in a file nobody touched.
+    bad = selftest()
     themes = bundled_themes()
 
     # "Did I scan anything?" — a gate that walks an empty corpus prints PASS, which is worse than no gate
@@ -135,7 +173,7 @@ def check():
             bad.append("%s is missing from themes2/ - the registry publishes a copy of it." % doc_name)
             continue
         want = rec.get("publishedDocs", {}).get(doc_name, {}).get("sha256", "")
-        got = byte_hash(path)
+        got = doc_hash(path)
         if got != want:
             bad.append(
                 "%s has changed since it was last synced to the registry.\n"
@@ -159,7 +197,7 @@ def update():
     for doc_name in DOCS:
         path = os.path.join(THEMES, doc_name)
         if os.path.isfile(path):
-            rec["publishedDocs"].setdefault(doc_name, {})["sha256"] = byte_hash(path)
+            rec["publishedDocs"].setdefault(doc_name, {})["sha256"] = doc_hash(path)
     with open(RECORD, "w", encoding="utf-8", newline="\n") as f:
         json.dump(rec, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -181,7 +219,7 @@ def main():
     for doc_name in DOCS:
         path = os.path.join(THEMES, doc_name)
         if os.path.isfile(path):
-            print("%-12s %s" % (doc_name, byte_hash(path)))
+            print("%-12s %s" % (doc_name, doc_hash(path)))
     return 0
 
 
