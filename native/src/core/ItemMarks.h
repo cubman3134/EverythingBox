@@ -11,6 +11,15 @@
 //   marks/<profile>/tagVocab          -> JSON array of the profile's known tags
 //   marks/<profile>/pinnedTags        -> JSON array of pinned (shelf) tags
 //
+// CLEARING AN ITEM LEAVES A HUSK, NOT AN EMPTY SLOT (issue #132). Unhiding / un-completing / un-tagging an
+// item back to all-default does NOT remove its row: it rewrites it as an all-default blob with a fresh
+// updatedAt. The rule this store shares with every other one that merges by timestamp is that "cleared" and
+// "never known" must not have the same representation — a removed row reads to the merge as "this device has
+// never seen that item", so a peer still holding the old marks resurrects exactly what the user just cleared.
+// A husk is a clear with a TIME on it, so it wins the merge and propagates. Every reader treats a husk as no
+// marks (ensureCache skips all-default blobs), and a husk is only written where a record existed to clear.
+// MetaOverrides (issue #24) is the same idiom for the same reason; see saveItem in the .cpp for the cost.
+//
 // Item keys are the SAME stable keys the app already uses (addon itemId / local path keys). They are hashed
 // (MD5-over-UTF8 hex, the SyncOffsets lesson) BEFORE use as an ini group leaf, so keys that differ only in
 // empty/duplicate '/' separators — or a URL-shaped key — never alias to the same entry. The store owns key
