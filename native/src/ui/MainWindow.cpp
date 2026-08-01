@@ -4720,9 +4720,15 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     }
     else if (verb == QStringLiteral("status"))   themedDetailPickStatus();
     else if (verb == QStringLiteral("tags"))     themedDetailEditTags();
-    // Snapshot the key into a LOCAL before the editor's modal loops, the themedDetailPickStatus idiom.
+    // The key is snapshotted into a LOCAL before the editor's modal loops — the themedDetailPickStatus
+    // idiom — but by editItemMetadata's own signature rather than here, so it holds for every caller
+    // instead of by convention: a by-reference parameter ALIASED themedDetailKey_ through every nested
+    // NavMenu::pick / Osk::getText loop the editor runs, and the detail level's onPop clears that member.
+    // The baseline is the themed card's OWN scraped sources, not the scrape cache alone — see
+    // HomeView::themedScrapedValues for the "(none)" against a populated card this replaces.
     else if (verb == QStringLiteral("editmeta"))
-        editItemMetadata(themedDetailKey_, MetaCache::cachedDetailScraped(themedDetailKey_));
+        editItemMetadata(themedDetailKey_, home_ ? home_->themedScrapedValues(themedDetailIndex_)
+                                                 : MediaDetail{});
 }
 
 // The per-item metadata editor (issue #24): a NavMenu re-presented until Back, one row per editable field
@@ -4738,7 +4744,12 @@ void MainWindow::runThemedDetailAction(const QString& verb)
 // a different MATCH by searching the providers — the match id IS the key this correction is filed under, so
 // rewriting it would move the item out from under its own record; and picking a LOCAL FILE as artwork — a
 // path is device-local, so two devices could never converge on one.
-void MainWindow::editItemMetadata(const QString& key, const MediaDetail& scrapedIn)
+//
+// BY VALUE, not by reference: every step below re-enters a modal nested event loop, and both callers hand it
+// a MEMBER (themedDetailKey_, cleared by the detail level's onPop). A `const QString&` parameter binds the
+// editor's whole run to that member, so the target could change — or empty — mid-flow, under a loop that
+// re-reads it on every pass. The copy is taken once, at the boundary, for every caller there will ever be.
+void MainWindow::editItemMetadata(QString key, MediaDetail scrapedIn)
 {
     if (key.isEmpty()) return;
     // The values the editor is correcting: what the PROVIDERS said, not what the card currently shows. Those
@@ -7200,8 +7211,11 @@ void MainWindow::openPcGame(const MediaItem& item)
 
     // Downloading for keeps: save the catalog metadata + poster locally so the game's shelf entry and
     // info render offline (MetaCache; the detail card is added by the Home info page when it was shown).
-    MetaCache::saveItem(item);
-    MetaCache::cacheImage(MetaCache::keyFor(item), QStringLiteral("thumb"), item.thumbnailUrl);
+    // The row as the PROVIDERS gave it — this cache is the scraped layer the correction composites OVER,
+    // so writing the composited row would bake an edit in as a scrape and give "reset" the edit to restore.
+    const MediaItem scraped = home_ ? home_->scrapedRow(item) : item;
+    MetaCache::saveItem(scraped);
+    MetaCache::cacheImage(MetaCache::keyFor(item), QStringLiteral("thumb"), scraped.thumbnailUrl);
 
     mwLog(QStringLiteral("pcgame: download \"%1\" from %2").arg(item.title, logSafeUrl(item.url)));
     QNetworkRequest rq{ QUrl(item.url) };

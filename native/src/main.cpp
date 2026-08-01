@@ -36,7 +36,7 @@
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.198";
+static constexpr const char* kAppVersion = "0.5.199";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.

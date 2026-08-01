@@ -416,6 +416,37 @@ int main(int argc, char** argv)
                       == QStringLiteral("https://x.invalid/right.jpg"),
                   "displayImage: the correction outranks the cached WRONG file (grid tiles change too)");
 
+            // …and offline-first is not suspended for the correction. The corrected poster caches under its
+            // OWN role: cacheImage's "already cached" guard reads imagePath(key, role), and thumb/poster
+            // hold the WRONG art, so under those roles the corrected poster was never fetched and the one
+            // item the user had fixed was the one that rendered as nothing offline.
+            const QString fixRole = MetaCache::fixedImageRole(QStringLiteral("https://x.invalid/right.jpg"));
+            CHECK(MetaCache::imagePath(ok1, fixRole).isEmpty(),
+                  "the wrong art cached under thumb does not answer for the correction's role");
+            // A finished download of the CORRECTED poster (storeImage is the same persist path cacheImage
+            // ends in, without the network).
+            MetaCache::storeImage(ok1, fixRole, QStringLiteral("https://x.invalid/right.jpg"),
+                                  QStringLiteral("image/jpeg"), QByteArray(48, 'r'));
+            CHECK(!MetaCache::imagePath(ok1, fixRole).isEmpty(),
+                  "fixture: the corrected poster really is cached on disk");
+            CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
+                      == MetaCache::imagePath(ok1, fixRole),
+                  "displayImage serves the CORRECTED poster's cached copy (the fixed item renders offline)");
+            // A second correction is a different poster, and must not be served the first one's file.
+            MetaOverrides::Override fix2 = MetaOverrides::get(ok1);
+            fix2.image = QStringLiteral("https://x.invalid/righter.jpg");
+            MetaOverrides::set(ok1, fix2);
+            CHECK(MetaCache::displayImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
+                      == QStringLiteral("https://x.invalid/righter.jpg"),
+                  "a second correction is not served the first correction's cached file");
+            MetaOverrides::set(ok1, fix);   // back to the correction the rest of this section asserts against
+
+            // The editor's poster baseline: the same offline-first read with the correction left OFF, so the
+            // field shows what it replaces and a retype of the visible value is not stored as an override.
+            CHECK(MetaCache::scrapedImage(ok1, QStringLiteral("https://x.invalid/wrong.jpg"))
+                      == MetaCache::imagePath(ok1, QStringLiteral("thumb")),
+                  "scrapedImage keeps the scraped artwork, correction or not");
+
             // The editor's baseline. It shows each correction OVER the value it replaces and offers to reset
             // back to it, so it needs the card WITHOUT the override — seeding it from the composited card
             // would present the user's own edit as the thing being overridden, and reset would look like it
@@ -424,7 +455,10 @@ int main(int argc, char** argv)
             CHECK(raw.title == QStringLiteral("Bonk 3"), "cachedDetailScraped keeps the scraped title");
             CHECK(raw.overview == QStringLiteral("The wrong synopsis."),
                   "cachedDetailScraped keeps the scraped overview");
-            CHECK(raw.imageUrl != QStringLiteral("https://x.invalid/right.jpg"),
+            // Pinned to the cached WRONG file by identity, not merely "not the correction": != would also
+            // hold for an EMPTY imageUrl, i.e. for a baseline that lost the target reset is supposed to
+            // restore. The reset assertion further down reads the same path, so the two agree.
+            CHECK(raw.imageUrl == MetaCache::imagePath(ok1, QStringLiteral("thumb")),
                   "cachedDetailScraped keeps the scraped artwork, so reset has a target");
 
             // THE POINT OF THE FEATURE: the scraper runs again and writes the wrong data back. The

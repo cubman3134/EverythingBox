@@ -58,6 +58,18 @@ namespace MetaCache
     void cacheImage(const QString& key, const QString& role, const QString& url);
     QString imagePath(const QString& key, const QString& role);
     QString displayImage(const QString& key, const QString& url);
+    // displayImage WITHOUT the user's correction on top — the offline-first cached file, else `url`. The
+    // metadata editor's baseline needs this half for the same reason cachedDetailScraped exists: it shows
+    // each correction over the value it replaces and offers to reset back to it, so seeding the poster field
+    // from the composited answer would present the user's own edit as the thing being overridden.
+    QString scrapedImage(const QString& key, const QString& url);
+    // The role a CORRECTED poster is cached under, derived from its url. Its own role (rather than
+    // thumb/poster) is what makes cacheImage's "already cached" guard honest: that guard looks up
+    // imagePath(key, role), and the thumb/poster roles hold the WRONG art the correction replaces — so the
+    // corrected poster was never fetched at all, and the one item the user had fixed was the one that went
+    // blank offline. Keying the role on the url also means a SECOND correction gets its own file instead of
+    // silently serving the first one's.
+    QString fixedImageRole(const QString& url);
 
     // Persist image bytes we ALREADY downloaded elsewhere (e.g. a grid poster the shelf just fetched) as
     // this item's cached art, so the offline-first displayImage()/imagePath() path serves it with no

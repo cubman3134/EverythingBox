@@ -158,8 +158,16 @@ public:
     // lands on the screen it was made from. Reads MetaCache::cachedDetail, which composites the override —
     // no network, no re-scrape. No-op when no detail card is open.
     void refreshDetailMetaCard();
+    // A row from items_ as the PROVIDERS gave it — the pre-correction copy when it carries a correction,
+    // else the row itself. Anything that WRITES a row into the scrape cache must use this: the cache is the
+    // scraped layer that the correction composites over on every read, so saving the composited row would
+    // bake the user's edit in as if the scraper had said it, and "reset to scraped" would restore the edit.
+    MediaItem scrapedRow(const MediaItem& shown) const;
     // What the providers said about the open detail card — the metadata editor's baseline and reset target.
     MediaDetail detailScrapedValues() const;
+    // The same for the THEMED detail card at `browseIndex`, assembled from the scraped sources that card is
+    // built from (its own /meta reply, the scrape cache, the ROMs gamelist, the pre-correction catalog row).
+    MediaDetail themedScrapedValues(int browseIndex) const;
     // Re-apply the hidden filter to the live surface (the Show-hidden toggle / a profile switch changed it):
     // the Home list rebuilds synchronously; a catalogue level re-issues its request so the filter runs as its
     // items land. Cheapest existing refresh path — no bespoke re-filter of items_ in place.
@@ -425,6 +433,13 @@ private:
     void maybeRestoreSelection();          // on Back, scroll to the drilled-into item (paging in if needed)
     void issueRequest(bool append);        // dispatch an async page request for the current view
     void populate(const MediaCatalog& cat, bool append);
+    // The ONE ingress every row of items_ passes through: composites the user's correction (issue #24) onto
+    // the row and keeps the pre-correction copy, which scrapedRow() hands back to the metadata editor as its
+    // baseline. Used by populate() (catalogs + search) and renderRecents() (recents, favourites, Trakt).
+    MediaItem correctedRow(const MediaItem& src);
+    // key -> the row as the providers gave it, for rows that carry a correction. Bounded by the corrections
+    // on screen: an uncorrected row is not stashed, because the composite left it untouched.
+    QHash<QString, MediaItem> preCorrection_;
     // Show a locally built (addon-less) catalog level: reset paging state and hand it to the grid. Shared
     // boilerplate for the three synthetic levels below (Recent/Downloaded/Favorites).
     void showSyntheticCatalog(const MediaCatalog& cat);
@@ -441,6 +456,9 @@ private:
     // item whose addon returns nothing would otherwise be edited against the PREVIOUS item's card — see
     // ScrapedSnapshot.h for the whole failure and why the key lives beside the value.
     MetaEdit::ScrapedSnapshot scrapedDetail_;
+    // The same, for the THEMED detail card: the /meta reply that card was enriched from, stamped with its
+    // row's key. themedScrapedValues() reads it; MainWindow's "Fix info…" verb passes the result in.
+    MetaEdit::ScrapedSnapshot themedScraped_;
     void hideMeta();
     // Resolve a leaf to a playable/readable source and emit openItem(). Pure (takes all context as args, not
     // detail-page state), so both the classic detail Play button and the themed inline Play reuse it.

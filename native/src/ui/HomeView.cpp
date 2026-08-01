@@ -1078,6 +1078,7 @@ void HomeView::refresh()
     else
     {
         grid_->clear(); items_.clear(); stack_.clear();
+        preCorrection_.clear(); // the pre-correction stash is per rendered page, like items_ itself
         status_->setText(tr("No catalog addons installed. Open the Library to install one."));
         updateChrome();
     }
@@ -2511,6 +2512,37 @@ void HomeView::openShelfLevel(const MediaItem& folder)
     showSyntheticCatalog(cat);
 }
 
+// The ONE ingress every row of items_ passes through. Composites the user's correction to a wrong scrape
+// (issue #24) so every surface items_ feeds — the poster grid, the carousel, the XMB column, the themed
+// browse model, search results, the Home recents/favourites/Trakt rows, and the detail card that opens from
+// any of them — shows the fix without each of them knowing about it. Only display fields move: keyFor()
+// reads id/url, so the item's identity (and therefore which correction is its own) is untouched on every
+// later pass, and the correction cannot follow the wrong item.
+//
+// The pre-correction copy is kept for the one caller that must NOT see the composite: the metadata editor,
+// whose baseline is what the SCRAPER said and whose "typed back what the scraper found -> store nothing"
+// comparison runs against it. The composite overwrites in place, and for a catalog row that was never saved
+// to MetaCache the scraped title then exists nowhere else — the editor would offer the user's own edit as
+// the thing it overrides, and retyping the visible value would CLEAR the correction. Only rows that
+// actually carry one are kept, so the map is bounded by the corrections on screen, not by the catalog.
+MediaItem HomeView::correctedRow(const MediaItem& src)
+{
+    const QString key = MetaCache::keyFor(src);
+    const MetaOverrides::Override ov = MetaOverrides::get(key);
+    if (ov.isEmpty()) return src;   // nothing to composite, and nothing displaced worth keeping
+    preCorrection_.insert(key, src);
+    MediaItem it = src;
+    MetaOverrides::applyTo(ov, it);
+    return it;
+}
+
+// That same row as the providers gave it: the stashed pre-correction copy when this row carries a
+// correction, else the row itself (which the composite left untouched).
+MediaItem HomeView::scrapedRow(const MediaItem& shown) const
+{
+    return preCorrection_.value(MetaCache::keyFor(shown), shown);
+}
+
 void HomeView::renderRecents()
 {
     ++generation_;             // invalidate stale thumbnail loads
@@ -2519,6 +2551,7 @@ void HomeView::renderRecents()
     applyGridMode(/*recentList*/ true);
     grid_->clear();
     items_.clear();
+    preCorrection_.clear();  // the pre-correction stash is per rendered page, like items_ itself
     thumbQueue_.clear();
     grid_->show();
     settingsStore().sync(); // pick up resume positions written by the player since the last render
@@ -2555,11 +2588,15 @@ void HomeView::renderRecents()
             it.type = f.type;
             it.title = f.title;
             it.subtitle = f.subtitle;
-            it.thumbnailUrl = MetaCache::displayImage(f.itemId, f.thumbnailUrl); // offline-first artwork
+            it.thumbnailUrl = MetaCache::scrapedImage(f.itemId, f.thumbnailUrl); // offline-first artwork
             it.expandable = f.expandable;
             it.mime = QStringLiteral("fav:") + f.addonId; // marks a favourite + carries its source addon
             if (isHiddenItem(it)) continue;               // hidden mark hides it from the Favorites shelf too
-            favItems.push_back(it);
+            // The favourite's title/subtitle are the copy FavoritesStore saved when it was starred, so this
+            // shelf is a scraped source like any other and needs the same ingress composite the catalog rows
+            // get — otherwise Home showed a corrected poster (displayImage already ran it) beside an
+            // uncorrected title, on the screen the app lands on.
+            favItems.push_back(correctedRow(it));
         }
         if (favItems.isEmpty()) return;
         addHeader(tr("★ Favorites"));
@@ -2582,8 +2619,10 @@ void HomeView::renderRecents()
         const MediaCatalog cal = traktCalendarItems();
         if (cal.items.isEmpty()) return;
         addHeader(tr("Airing Soon"));
-        for (const MediaItem& it : cal.items)
+        for (const MediaItem& raw : cal.items)
         {
+            // Trakt's own copy of the episode's title/subtitle is a scrape like any other — same ingress.
+            const MediaItem it = correctedRow(raw);
             items_.push_back(it);
             // The air day/episode code rides in the row text: the Home list is a list, not a poster grid,
             // and "Show S01E04" alone does not say WHEN, which is the entire point of this shelf.
@@ -2619,11 +2658,16 @@ void HomeView::renderRecents()
             it.mime = r.kind;                        // routing kind (video/audio/document/game)
             it.type = browse::iconTypeForKind(r.kind); // drives the placeholder icon
             // The real poster (streamed media records it), else a placeholder — the locally cached copy
-            // (saved when the item was downloaded) wins so the shelf renders offline.
-            it.thumbnailUrl = MetaCache::displayImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
+            // (saved when the item was downloaded) wins so the shelf renders offline. Scraped-side read:
+            // correctedRow below puts the user's corrected poster on top and keeps this as its baseline.
+            it.thumbnailUrl = MetaCache::scrapedImage(r.key.isEmpty() ? r.path : r.key, r.thumb);
             it.title = r.title.isEmpty() ? QFileInfo(r.path).completeBaseName() : r.title;
             if (isHiddenItem(it)) continue;          // hidden mark drops the recent row (and search/shelves elsewhere)
-            rows.push_back(it);
+            // RecentStore holds the title as it was when the item was played, so a recents row is a scraped
+            // source too — and this is the surface the app LANDS on. Without the ingress composite Home
+            // showed a corrected poster beside an uncorrected title, on both the list and the XMB column
+            // (fillXmbFromItems reads items_).
+            rows.push_back(correctedRow(it));
         }
         if (rows.isEmpty()) continue;
         addHeader(recentGroupLabel(key));
@@ -3178,9 +3222,13 @@ void HomeView::dlEmit(const MediaItem& it, const QString& url, const QString& mi
     // when it's showing this item; a container crawl saves each episode's own card (see onMetaReady).
     if (!it.id.isEmpty())
     {
-        MetaCache::saveItem(it);
+        // The row as the PROVIDERS gave it: the cache is the scraped layer, and the correction composites
+        // over it on every read. Saving the composited row would bake the user's edit in as if the scraper
+        // had said it — and "reset to scraped" would then restore the edit.
+        const MediaItem scraped = scrapedRow(it);
+        MetaCache::saveItem(scraped);
         const QString key = MetaCache::keyFor(it);
-        MetaCache::cacheImage(key, QStringLiteral("thumb"), it.thumbnailUrl);
+        MetaCache::cacheImage(key, QStringLiteral("thumb"), scraped.thumbnailUrl);
         if (key == lastMetaKey_ && lastMeta_.valid)
         {
             MetaCache::saveDetail(key, lastMeta_);
@@ -3596,6 +3644,7 @@ void HomeView::loadTop()
         ++generation_;
         grid_->clear();
         items_.clear();
+        preCorrection_.clear();
         grid_->hide();
         if (carousel_) carousel_->hide();
         if (xmb_) xmb_->hide();
@@ -4597,10 +4646,15 @@ void HomeView::requestMeta(const MediaItem& item)
     // Show the catalog poster + title right away (guarded by the request id we just set), so the info page
     // has a cover immediately - and still shows one if the addon returns no /meta at all (e.g. Allarr). A
     // valid /meta result later overrides this with the addon's own cover + facts + synopsis.
-    const QString cover = MetaCache::displayImage(MetaCache::keyFor(item), item.thumbnailUrl);
+    // Built from the row BEFORE the ingress composite, because showMeta(fromProvider) takes it as the
+    // editor's baseline: seeding that from the composited row would offer the user their own correction as
+    // "what the scraper found", and then retyping the value on screen would CLEAR the correction instead of
+    // storing it. showMeta composites on top for painting, so the card still shows the corrected cover.
+    const MediaItem raw = scrapedRow(item);
+    const QString cover = MetaCache::scrapedImage(MetaCache::keyFor(item), raw.thumbnailUrl);
     if (!cover.isEmpty())
     {
-        MediaDetail d0; d0.title = item.title; d0.imageUrl = cover; d0.valid = true;
+        MediaDetail d0; d0.title = raw.title; d0.imageUrl = cover; d0.valid = true;
         showMeta(d0);
     }
 }
@@ -4689,6 +4743,11 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         const int reqIdx = themedMetaReqIndex_;
         if (reqIdx != themedMetaIndex_) return;
         const bool rowOk = reqIdx >= 0 && reqIdx < browseRowMap_.size();
+        // The themed editor's baseline, stamped with the row it is for — the themed twin of the classic
+        // card's snapshot, and keyed for the same reason: a row whose addon answers with nothing must not
+        // be edited against the last row that did.
+        if (rowOk && detail.valid)
+            themedScraped_.remember(MetaCache::keyFor(items_[browseRowMap_[reqIdx]]), detail);
         // Offline: the addon returned nothing for a row we have a downloaded bundle for — use its saved card.
         // The RAW provider reply. It is emitted through emitThemedMeta, which composites the user's
         // correction over the finished map — without that the /meta arriving a moment after the detail page
@@ -4789,6 +4848,43 @@ MediaDetail HomeView::detailScrapedValues() const
     const MediaDetail snap = scrapedDetail_.forKey(key);
     if (snap.valid) return snap;
     return MetaCache::cachedDetailScraped(key);
+}
+
+// The themed detail card's values as the PROVIDERS gave them — the twin of detailScrapedValues() for the
+// other surface, and the metadata editor's baseline there. Assembled from the SAME scraped sources the
+// themed card itself is built from, strongest first: this card's own /meta reply, our scrape cache (which is
+// also where the game aggregator writes its merged result), and the ROMs-folder gamelist.xml — over the
+// catalog row as it arrived, before the ingress composite.
+//
+// The editor used to read cachedDetailScraped alone. For a themed card populated from a gamelist entry or
+// from session data the cache never held, that showed "(none)" for every field against a visibly populated
+// card — the defect 7c3f3b7 fixed for the classic surface — and retyping the value on screen stored a
+// needless override, pinning the item against every later, better scrape.
+MediaDetail HomeView::themedScrapedValues(int idx) const
+{
+    if (idx < 0 || idx >= browseRowMap_.size()) return {};
+    const MediaItem& shown = items_[browseRowMap_[idx]];
+    const QString key = MetaCache::keyFor(shown);
+    if (key.isEmpty()) return {};
+    const MediaItem raw = scrapedRow(shown);   // the row BEFORE correctedRow() composited the correction
+    MediaDetail d;
+    d.title    = raw.title;
+    d.subtitle = raw.subtitle;
+    d.imageUrl = MetaCache::scrapedImage(key, raw.thumbnailUrl);
+    MediaDetail rich = themedScraped_.forKey(key);
+    if (!rich.valid) rich = MetaCache::cachedDetailScraped(key);
+    if (!rich.valid && shown.type == QStringLiteral("game")) rich = GamelistStore::lookup(shown.url);
+    if (rich.valid)
+    {
+        // FILL, never blank: a richer source that simply has no subtitle must not erase the row's own.
+        if (!rich.title.isEmpty())    d.title    = rich.title;
+        if (!rich.subtitle.isEmpty()) d.subtitle = rich.subtitle;
+        if (!rich.imageUrl.isEmpty()) d.imageUrl = rich.imageUrl;
+        d.overview = rich.overview;
+        d.facts    = rich.facts;
+    }
+    d.valid = !d.title.isEmpty() || !d.overview.isEmpty() || !d.imageUrl.isEmpty();
+    return d;
 }
 
 void HomeView::refreshDetailMetaCard()
@@ -5036,6 +5132,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
         applyGridMode(/*recentList*/ false); // ensure the poster grid (recents may have left it in list mode)
         grid_->clear();
         items_.clear();
+        preCorrection_.clear();
         clearBrowseFilter(); // a fresh level load resets the transient browse filter (it never persists across levels)
         settingsStore().sync(); // fresh resume positions for the progress bars
         // Synthetic "folder" marker rows (Recent / Downloaded / Playlists / Favorites): each drills natively via
@@ -5225,14 +5322,9 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
     for (const MediaItem& src : cat.items)
     {
         if (isHiddenItem(src)) continue;
-        // Composite the user's correction to a wrong scrape (issue #24) ONCE, on the way in, so every surface
-        // items_ feeds — the poster grid, the carousel, the XMB, the themed browse model, search results, and
-        // the detail card that opens from any of them — shows the fix without each of them knowing about it.
-        // Only display fields move: keyFor() reads id/url, so the item's identity (and its own override) is
-        // untouched, and the correction cannot follow the wrong item on a later pass.
-        MediaItem it = src;
-        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), it);
-        items_.push_back(it);
+        // Composite the user's correction to a wrong scrape (issue #24) ONCE, on the way in — see
+        // correctedRow(), which every items_ ingress goes through.
+        items_.push_back(correctedRow(src));
     }
 
     for (int i = from; i < items_.size(); ++i)

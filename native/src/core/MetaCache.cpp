@@ -265,15 +265,37 @@ QString MetaCache::imagePath(const QString& key, const QString& role)
     return abs;
 }
 
+QString MetaCache::scrapedImage(const QString& key, const QString& url)
+{
+    QString img = imagePath(key, QStringLiteral("thumb"));
+    if (img.isEmpty()) img = imagePath(key, QStringLiteral("poster"));
+    return img.isEmpty() ? url : img;
+}
+
+QString MetaCache::fixedImageRole(const QString& url)
+{
+    return QStringLiteral("fix-")
+           + QString::fromLatin1(
+               QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Md5).toHex().left(16));
+}
+
 QString MetaCache::displayImage(const QString& key, const QString& url)
 {
     // The corrected poster outranks the cached file: that cached file IS the wrong art being corrected, so
     // consulting it first would leave every grid tile showing the mis-scrape the user just fixed.
     const QString fixed = MetaOverrides::get(key).image;
-    if (!fixed.isEmpty()) return fixed;
-    QString img = imagePath(key, QStringLiteral("thumb"));
-    if (img.isEmpty()) img = imagePath(key, QStringLiteral("poster"));
-    return img.isEmpty() ? url : img;
+    if (fixed.isEmpty()) return scrapedImage(key, url);
+    // Offline-first is not suspended for it, though — that is a stated principle of this cache, and the
+    // correction was the one tile it did not hold to. Serve the corrected poster's own cached copy when we
+    // have one, and fetch it (async, idempotent, no-op offline) the first time it is seen. Under its OWN
+    // role: cacheImage's "already cached" guard reads imagePath(key, role), and thumb/poster hold the wrong
+    // art, so under those roles the corrected poster was never downloaded and the fixed item rendered as
+    // NOTHING offline — where the wrong-but-cached art at least used to render.
+    const QString role = fixedImageRole(fixed);
+    const QString local = imagePath(key, role);
+    if (!local.isEmpty()) return local;
+    cacheImage(key, role, fixed);
+    return fixed;
 }
 
 void MetaCache::cacheImage(const QString& key, const QString& role, const QString& url)

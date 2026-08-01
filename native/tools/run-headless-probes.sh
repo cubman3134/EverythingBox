@@ -463,6 +463,32 @@ else
   fi
   [ "$ms_emits" = "1" ] \
     || ms_note "expected exactly ONE 'emit themedMetaReady(' in HomeView.cpp (emitThemedMeta's); found $ms_emits — a raw emit bypasses the composite."
+
+  # The items_ ingress. Every surface that reads items_ — the poster grid, the carousel, the XMB column, the
+  # themed browse model, search — gets the correction from ONE composite on the way in. The first fix did
+  # only populate(), and renderRecents builds its rows separately: the recents groups, the Favorites section
+  # and the Trakt "Airing Soon" shelf each pushed straight into items_ and into their QListWidgetItem labels.
+  # The poster on those same rows WAS corrected (it goes through MetaCache), so Home — the screen the app
+  # lands on — showed fixed art beside an unfixed title. Three shelves, so three call sites.
+  ms_fnbody() { printf '%s\n' "$ms_src" | awk -v sig="$1" '
+    index($0, sig) == 1 { inbody = 1 }
+    inbody              { print }
+    inbody && /^\}/     { exit }'; }
+  ms_cr="$(ms_fnbody 'MediaItem HomeView::correctedRow(')"
+  if [ -z "$(printf '%s' "$ms_cr" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::correctedRow not found — the single items_ ingress is gone."
+  else
+    printf '%s' "$ms_cr" | grep -q 'MetaOverrides::applyTo(' \
+      || ms_note "correctedRow no longer composites the correction — every items_ surface goes back to the scrape."
+    printf '%s' "$ms_cr" | grep -q 'preCorrection_' \
+      || ms_note "correctedRow no longer keeps the pre-correction row: the composite is destructive, so the metadata editor loses the scraped baseline it compares and resets against."
+  fi
+  ms_rec="$(ms_fnbody 'void HomeView::renderRecents()' | grep -c 'correctedRow(' || true)"
+  [ "${ms_rec:-0}" -ge 3 ] \
+    || ms_note "renderRecents composites the correction at $ms_rec of its 3 row sources (recents groups, Favorites, the Trakt shelf) — Home shows corrected art beside an uncorrected title for the ones it misses."
+  ms_pop="$(ms_fnbody 'void HomeView::populate(' | grep -c 'correctedRow(' || true)"
+  [ "${ms_pop:-0}" -ge 1 ] \
+    || ms_note "populate() no longer composites the correction into the catalog rows."
 fi
 if [ "$ms_fail" -eq 0 ]; then echo "PASS: metadata-editor baseline (keyed scrape snapshot)"; else
   echo "FAIL: metadata-editor baseline (keyed scrape snapshot)"; fail=1
