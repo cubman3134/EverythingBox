@@ -5315,7 +5315,7 @@ void MainWindow::themedDetailEditTags(QString key)
 void MainWindow::runThemedBrowseFilter()
 {
     if (!themedBrowseFilterTarget()) return;   // not a filterable surface: the key does nothing, queue nothing
-    QMetaObject::invokeMethod(this, [this] { runThemedBrowseFilterNow(); }, Qt::QueuedConnection);
+    deferPastQmlEmission([this] { runThemedBrowseFilterNow(); });
 }
 
 // The current themed browse surface — the flat browse view, or the XMB home column while drilled into a
