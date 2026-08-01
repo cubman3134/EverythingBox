@@ -935,9 +935,11 @@ int main(int argc, char** argv)
             // cache no peer can use. These pin that the fix landed in the device-local table.
             CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/calendarCache")) == true);
             CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/calendarCachedAt")) == true);
-            // The sibling half once more, at the exact prefix that would swallow it: "trakt/calendar" must
-            // not become a prefix rule either, and trakt/clientId must keep travelling.
-            CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientId")) == false);
+            // NOT repeated here: the trakt/clientId and trakt/clientSecret sibling checks. §16b-trakt above
+            // already runs them, isDeviceLocalKey is a pure function of the key string, so a copy in this
+            // block would assert the identical thing against the identical input — killed by every mutation
+            // that kills the original and by nothing else. Nor is there a calendar-specific sibling to
+            // guard: unlike "trakt/", nothing a user types lives under "trakt/calendar".
 
             // INBOUND: a peer's calendar was fetched against ITS Trakt account and is worth nothing here;
             // landing it would also overwrite a fresher local fetch with an older one. Separate from the
