@@ -36,6 +36,19 @@ namespace BrandMigration
     // (in which case their flags stay UNSET, so signing in later still runs them).
     void run(std::function<void(bool allDone)> cb);
 
+    // ---- the hop BEFORE this one, from the product's original name -------------------------------------
+    // goliath.ini -> the previous brand's ini, one namespace further back. NOT a Step and NOT flagged: its
+    // own guard is that its destination does not yet exist, and it must run before migrateLocalIni so the
+    // install it produces is indistinguishable from a native previous-brand one.
+    //
+    // Unlike the hop below it, this one rewrites the addon namespace in VALUES as well as keys, and applies
+    // no addon-id-keyed exclusion. That is deliberate and load-bearing — see the argument at the definition
+    // (#121) before changing it; the two hops are NOT symmetric, and making them so is a regression.
+    //
+    // Lives here rather than as a static in main.cpp so probe_brand can drive the real function instead of a
+    // re-spelling of it. Returns false only if the copy could not be made.
+    bool migrateGoliathIni(const QString& dataDir);
+
     // ---- the local half, exposed against an explicit data directory ------------------------------------
     // run() calls these with AppPaths::dataDir(); the probe calls them against a QTemporaryDir so the
     // copy/verify/rewrite logic is asserted on a real filesystem without touching the running install. Each

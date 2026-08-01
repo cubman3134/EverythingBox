@@ -13,6 +13,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMetaType>
 #include <QSet>
 #include <QSettings>
 #include <QStringList>
@@ -378,6 +379,115 @@ void BrandMigration::setDone(Step s, bool done)
     if (done) st.setValue(QLatin1String(flagKey(s)), true);
     else      st.remove(QLatin1String(flagKey(s)));
     st.sync();
+}
+
+// One-time migration from the ORIGINAL "Goliath" naming: goliath.ini -> mymediavault.ini, rewriting the
+// renamed addon ids (com.goliath.* -> com.mymediavault.*) in both keys and values, so profiles, API keys and
+// favourites carry over. Idempotent: once mymediavault.ini exists this is skipped.
+//
+// The target here is deliberately AppBrand::Legacy::kIniFile, NOT AppBrand::kIniFile — this is the
+// Goliath->MyMediaVault hop, and pointing it at the current ini would be a data-loss bug, not a rename.
+// The original migration used QFile::copy and never rename, so goliath.ini is STILL on disk on every install
+// that ever ran it. Retargeting this at everythingbox.ini would make the guard read "if everythingbox.ini is
+// absent and goliath.ini is present": on a machine that ran Goliath and then MyMediaVault for years, the
+// decade-old file would be resurrected into everythingbox.ini FIRST, and the MyMediaVault->EverythingBox
+// migration would then find its destination occupied and skip. The user would boot into Goliath-era settings
+// with the entire MyMediaVault era invisible — nothing deleted, so it reads as a wipe rather than looking
+// like one. No ordering of the newer migration can repair that; the damage is already done by the time it
+// runs.
+//
+// Contract for the MyMediaVault->EverythingBox migration: this function's output must be indistinguishable
+// from a genuine MyMediaVault ini (hence the Legacy addon prefix below), so that hop can treat Goliath-era
+// and native MyMediaVault users identically.
+//
+// ---- WHY THIS HOP REWRITES WHAT THE NEXT HOP REFUSES TO (#121) ------------------------------------------
+//
+// Read next to isAddonIdKeyed and rewriteAddonPrefix above, this looks like an oversight: that hop excludes
+// addoncfg/ and addon.enabled. from its KEY rewrite (#56) and does not rewrite VALUES at all (#58), and this
+// one does neither. It is not an oversight. Mirroring those two fixes here is a REGRESSION, and the reason
+// is a single checkable fact rather than a judgement call:
+//
+//   THE GOLIATH RENAME WAS TOTAL. Commit 9e41acb (2026-06-23) moved every com.goliath.* id that has ever
+//   existed — com.goliath.aiocatalog and com.goliath.podcasts, the only two add-ons bundled at the time —
+//   to com.mymediavault.*. Nothing was pinned, and nothing was left behind. The add-on that DOES keep the
+//   previous spelling forever, the remote AIO Worker (com.mymediavault.aiocatalog-worker), which is the
+//   entire reason #56 and #58 exist, was created 1h43m AFTER that rename and was born under the
+//   MyMediaVault name. It never had a Goliath id, so no goliath.ini can contain one. Neither can one
+//   contain a remote add-on at all: remote transport landed 85 minutes after the rename too.
+//
+// So where the next hop's rewrite is a GUESS at an identifier it cannot observe, this one's is a FACT about
+// a namespace that emptied completely. For every add-on id a goliath.ini can actually hold, com.goliath.X
+// really did become com.mymediavault.X — and reconcileAddonConfig / reconcileAddonRefs then carry it the
+// rest of the way to whatever actually loaded, driven by ids rather than by another guess.
+//
+// What breaks if you "fix" it:
+//   * ADDING isAddonIdKeyed HERE strands the very keys the exclusion exists to protect. The key would stay
+//     addoncfg/com.goliath.X/*, and counterpartId knows only the two CURRENT namespaces — the counterpart of
+//     com.everythingbox.X is com.mymediavault.X, never the Goliath spelling — so reconcileAddonConfig would
+//     never visit it. Today that key lands on com.mymediavault.X and is reconciled from there. Excluding it
+//     converts a path that works into a permanent orphan.
+//   * REMOVING THE VALUE REWRITE does the same to favourites. repointStoredId bails on a com.goliath.*
+//     stored id at its `other.isEmpty()` line, correctly treating it as a third party's. Today the id
+//     arrives as com.mymediavault.X and is re-pointed like any other.
+// Both directions are asserted end-to-end in probe_brand section 7a, through AddonContext::readConfig and
+// FavoritesStore rather than through key names, so neither can be reintroduced quietly.
+//
+// ---- WHAT IS STILL LOST, AND WHY IT IS NOT REPAIRED ------------------------------------------------------
+//
+// One case survives, and it is real: an install whose addons/<name>/manifest.json STILL says com.goliath.X
+// at the moment this runs. Nothing rewrites a bundled manifest at launch (desktop never copies addons in;
+// AssetBootstrap is copy-if-absent on mobile), and migrateAddonIds only knows the previous prefix — so that
+// add-on goes on reporting com.goliath.X while the keys below have moved its config to com.mymediavault.X.
+// counterpartId cannot name that pair, so nothing reconciles it. Precisely what is lost: addoncfg/<id>/*
+// (the API keys typed into Configure), addon.enabled.<id>, and the addonId inside every favourite from that
+// add-on. The user sees blank Configure fields and "That favourite's source addon isn't available." Nothing
+// is deleted — the values sit in the ini under the previous brand's spelling, and goliath.ini is still
+// beside the exe — but nothing will ever offer them back.
+//
+// Left unrepaired deliberately. Repairing it needs counterpartId to become a three-namespace relation, which
+// turns the both-spellings-live guard into a three-way problem and starts moving the config of any genuine
+// third-party add-on published under com.goliath.* — which today is correctly left alone end to end. Against
+// that cost, the population is empty: no Goliath-branded build was ever released (the first release, v0.1.0
+// on 2026-06-24, was already MyMediaVault), so the only goliath.ini files that have ever existed are on this
+// project's own development machines. Reaching the case additionally requires dropping a current exe into
+// such a folder WITHOUT the release zip's addons/, which overwrites those manifests and makes the chain
+// above resolve correctly. Documented rather than fixed; if a Goliath-era install ever does turn up, the
+// recovery is to hand-copy the values out of goliath.ini, which migrateLocalIni's copy-never-move rule
+// guarantees is still there.
+bool BrandMigration::migrateGoliathIni(const QString& dataDir)
+{
+    const QString oldIni = dataDir + QStringLiteral("/goliath.ini");
+    const QString newIni = legacyIni(dataDir);
+    if (QFile::exists(newIni) || !QFile::exists(oldIni)) return true;   // nothing to do IS completion
+    if (!QFile::copy(oldIni, newIni)) return false;
+
+    QSettings s(newIni, QSettings::IniFormat);
+    const QString oldNs = QStringLiteral("com.goliath.");
+    const QString newNs = QString::fromLatin1(AppBrand::Legacy::kAddonPrefix);
+    const QStringList keys = s.allKeys();
+    for (const QString& k : keys)
+    {
+        QVariant v = s.value(k);
+        // Rewrite the addon namespace inside string values too (e.g. a favourite's stored addonId) — see the
+        // total-rename argument above for why this is right HERE and wrong one hop later.
+        if (v.typeId() == QMetaType::QString)
+        {
+            QString sv = v.toString();
+            if (sv.contains(oldNs)) { sv.replace(oldNs, newNs); v = sv; }
+        }
+        if (k.contains(oldNs))
+        {
+            QString nk = k; nk.replace(oldNs, newNs);
+            s.setValue(nk, v);
+            s.remove(k);
+        }
+        else if (v.typeId() == QMetaType::QString && v.toString() != s.value(k).toString())
+        {
+            s.setValue(k, v);
+        }
+    }
+    s.sync();
+    return true;
 }
 
 // Step 1 — the one that can lose every setting the user ever made.
