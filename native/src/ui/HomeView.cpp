@@ -2244,11 +2244,31 @@ void HomeView::refreshAfterPcMergeFix()
     // rebuilds from the verdict the next time it is opened.
 }
 
-bool HomeView::fixPcGameEntryAt(int browseIndex)
+// The entry's OWN id, resolved from a row index right now. A caller that has to defer the fix past the
+// current event — the themed action row must, or it rebuilds the browse model under the live delegate that
+// is still emitting — resolves the index here, synchronously, and carries this instead. See
+// fixPcGameEntryById.
+QString HomeView::pcGameIdAt(int browseIndex) const
 {
-    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return false;
-    const MediaItem it = items_[browseRowMap_[browseIndex]];   // copy: the overlay outlives items_
-    return fixPcGameEntry(it);
+    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return QString();
+    return items_[browseRowMap_[browseIndex]].id;
+}
+
+// The fix, addressed by the entry's id rather than by a row index.
+//
+// A row index is only meaningful against the browseRowMap_ that produced it, and the themed detail defers
+// this verb by a full event loop turn — the async owned-games re-present can land in that window and rebuild
+// the map, so the stale index would resolve to a DIFFERENT game and split or merge it. The file's own
+// precedent for every other library-management verb is to act on a stable key for exactly this reason.
+//
+// An id that is no longer in items_ means the entry went away while the call was queued: return false, which
+// the caller already treats as "nothing happened, leave the page alone".
+bool HomeView::fixPcGameEntryById(const QString& itemId)
+{
+    if (itemId.isEmpty()) return false;
+    for (const MediaItem& i : items_)
+        if (i.id == itemId) { const MediaItem copy = i; return fixPcGameEntry(copy); }
+    return false;
 }
 
 bool HomeView::isMergedPcGameAt(int browseIndex) const

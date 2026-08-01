@@ -4719,10 +4719,19 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     // the shape: play launches, favourite/hide only patch detailData, and Hide defers its model rebuild to
     // the pop via themedDetailMarksDirty_. A queued call is the same escape hatch HomeView already uses for
     // every overlay opened from a themed `activated` handler.
+    //
+    // The index is resolved to the ENTRY'S OWN ID here, synchronously, and the id is what the lambda
+    // carries — the same reason the verbs above act on themedDetailKey_ "so a row-index shift can't
+    // misfire", and it bites harder here. A row index only means anything against the browseRowMap_ that
+    // produced it, and the deferral is a whole event-loop turn during which the async owned-games re-present
+    // can rebuild that map; the stale index would then resolve to a DIFFERENT game and split or merge it,
+    // which is the one verb here that cannot be undone by pressing it again.
     else if (verb == QStringLiteral("pcfix"))
     {
-        QMetaObject::invokeMethod(this, [this, idx] {
-            if (!home_->fixPcGameEntryAt(idx)) return;   // Back / Cancel: the page stays exactly as it was
+        const QString pcId = home_->pcGameIdAt(idx);
+        if (pcId.isEmpty()) return;
+        QMetaObject::invokeMethod(this, [this, pcId] {
+            if (!home_->fixPcGameEntryById(pcId)) return; // Back / Cancel / gone: the page stays as it was
             if (NavGraph* g = ThemeEngine::navGraph(stack_->currentWidget())) g->back(); // pop the detail level
             home_->refreshAfterPcMergeFix();
         }, Qt::QueuedConnection);

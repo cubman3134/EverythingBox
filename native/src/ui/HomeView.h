@@ -332,7 +332,11 @@ public:
     // the addGameToPlaylistInteractive idiom) so the caller learns whether anything changed; returns true
     // only when a verdict was written. Nothing is repopulated here — see refreshAfterPcMergeFix.
     bool fixPcGameEntry(const MediaItem& it);
-    bool fixPcGameEntryAt(int browseIndex);      // the themed detail row, resolved to its item
+    // Addressed by ID, never by a row index: the themed action row has to DEFER this verb by an event-loop
+    // turn (it rebuilds the browse model under the delegate that is still emitting), and browseRowMap_ can
+    // be rebuilt in that window. Resolve the index with pcGameIdAt while it is still valid, then fix by id.
+    QString pcGameIdAt(int browseIndex) const;
+    bool fixPcGameEntryById(const QString& itemId);
     // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
     // LEFT rather than refreshed in place.
     void refreshAfterPcMergeFix();
