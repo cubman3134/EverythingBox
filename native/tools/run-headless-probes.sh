@@ -20,7 +20,7 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-55677}"
+RELAY_PORT="${RELAY_PORT:-0}"   # 0 = OS-assigned; see the relay startup below for why not a fixed port
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -155,12 +155,20 @@ run() { # <name> <sentinel> <exe> [args...]
   echo
 }
 
-# Bring up the relay both netplay tests rendezvous through.
-"$PY" "$RELAY_PY" --port "$RELAY_PORT" > /tmp/eb-relay.log 2>&1 &
+# Bring up the relay both netplay tests rendezvous through. Port 0 by default: two suites running at once (two
+# worktrees, a developer alongside CI) must not fight over one port — the loser's relay never binds, and its
+# netplay probes then rendezvous through the WINNER's relay and pair with the wrong process. The log is
+# per-run for the same reason. RELAY_PORT= still pins a port for hand-debugging.
+RELAY_LOG="$(mktemp)"
+"$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" /tmp/eb-relay.log 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(cat /tmp/eb-relay.log 2>/dev/null | head -1)"; echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; rm -f "$RELAY_LOG"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
+for _ in $(seq 1 40); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"
+# The relay reports the port it actually bound; everything downstream uses that, never the requested one.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" | head -1)"
+[ -n "$RELAY_PORT" ] || { echo "FATAL: netplay relay did not start"; cat "$RELAY_LOG"; exit 2; }
+echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }

@@ -32,10 +32,16 @@ public:
     // "Both" online mode: host listens for a DIRECT (UPnP-forwarded) connection AND on the relay at once — first
     // peer to arrive wins, the other path is dropped. The joiner tries the host's direct endpoint first (if any),
     // then falls back to the relay. Lowest latency when UPnP works; always connects thanks to the relay.
+    // localPort 0 lets the OS pick a free port — ask directPort() for the one actually bound.
     void hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code);
     void joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
                     const QString& directIp, quint16 directPort);
     void stop();
+
+    // The port the direct server is actually listening on, or 0 if the direct path never came up (port taken —
+    // the session then runs relay-only). Callers that advertise a direct endpoint must use THIS, not the port
+    // they asked for: hostOnline() deliberately survives a failed listen(), so the two can differ.
+    quint16 directPort() const;
 
     bool active() const { return active_; }
     bool isHost() const { return host_; }

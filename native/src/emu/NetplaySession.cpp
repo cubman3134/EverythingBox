@@ -119,7 +119,11 @@ void NetplaySession::hostOnline(quint16 localPort, const QString& relayHost, qui
         emit status(tr("Player 2 connected directly."));
         beginAsHost();
     });
-    server_->listen(QHostAddress::AnyIPv4, localPort);  // if this fails, the relay path still carries us
+    // A failed listen is not fatal — the relay path still carries us — but it must not be SILENT: the session
+    // then runs relay-only, and without a word about it that shows up much later as unexplained latency (or, in
+    // the probes, as a host that never starts). directPort() reports what actually happened.
+    if (!server_->listen(QHostAddress::AnyIPv4, localPort))
+        emit status(tr("Couldn't open port %1 (%2) — using the relay only.").arg(localPort).arg(server_->errorString()));
 
     // Path B — relay, on its own socket until it wins.
     relaySock_ = new QTcpSocket(this);
@@ -159,6 +163,11 @@ void NetplaySession::hostOnline(quint16 localPort, const QString& relayHost, qui
     });
     emit status(tr("Opening the room — waiting for player 2…"));
     relaySock_->connectToHost(relayHost, relayPort);
+}
+
+quint16 NetplaySession::directPort() const
+{
+    return server_ && server_->isListening() ? server_->serverPort() : quint16(0);
 }
 
 // "Both" join: if the host advertised a direct endpoint (UPnP worked), try it first for lowest latency; on ANY
