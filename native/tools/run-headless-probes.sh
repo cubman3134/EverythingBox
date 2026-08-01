@@ -1145,11 +1145,20 @@ echo
 # network, no keys — that is what makes it a gate rather than a flaky test). So the comparison is against a
 # checked-in record of what was last synced there, native/themes2/REGISTRY-SYNC.json. Edit a bundled theme
 # and its canonical hash moves; this goes red and names the theme, the file that has to be republished, and
-# the command that refreshes the record. Be clear about what that buys: the record states an INTENT, and
-# --update can be run by someone who never pushed. It converts a SILENT drift into a deliberate one — the
-# person editing the theme is told, at the moment of the edit, that a second copy exists. The guarantee
-# needs a publish job (a workflow that pushes the changed themes to the registry itself), which needs a
-# cross-repo write credential; REGISTRY-SYNC.json spells that out.
+# the command that refreshes the record.
+#
+# Be clear about what that buys, because for a year it bought less than it looked like (issue #151).
+# --update recomputes the record from the BUNDLED theme and has never touched the registry, so it could be
+# run by someone who never pushed — and was: #57 and #32 ran it alone, so the record asserted the registry
+# was current while it still served the pre-#29 Triple, `home` and nothing else, under a green gate. The
+# gate was not broken. What it compared against was a claim nobody had to substantiate.
+#
+# So the record now has to NAME what it was published against, and this prints that on every run, whichever
+# it is: a registry commit sha (falsifiable anywhere with a network call — theme-registry-sync.py
+# --verify-registry) or a written reason it has none. A bare --update is refused. Nothing here can PROVE the
+# registry is current — this suite is offline and stays that way — but it no longer silently implies it.
+# The full guarantee is still a publish job with a cross-repo write credential; REGISTRY-SYNC.json spells
+# that out.
 #
 # The hash is canonical, not byte-for-byte, so a reindent is not drift — see theme-registry-sync.py. The
 # script also fails on a theme.json that stops parsing, a view declared with an empty `elements` (which the
@@ -1164,7 +1173,37 @@ elif "$PY" "$THEMESYNC_PY" --check; then
   echo "PASS: bundled-theme / registry drift"
 else
   echo "FAIL: bundled-theme / registry drift — a bundled theme has moved away from the copy the community"
-  echo "  registry serves under the same name. Republish it and rerun with --update (details above)."
+  echo "  registry serves under the same name, or the record no longer says what it was published against."
+  echo "  Republish, then rerun with --update --registry-commit <sha> (details above)."
+  fail=1
+fi
+echo
+
+# Registry index / manifest agreement rule (issue #151). The registry serves SEVEN themes; only three are
+# bundled here, so the drift gate above cannot see Default, Grid, Lumen or Midnight at all — nothing checked
+# that they parse, declare a usable view, or agree with the gallery card that advertises them. That gap is
+# why index.json credited Triple to `cubman3134` while its own theme.json said `EverythingBox` for as long
+# as both files existed: the card and the installed theme disagreed and no reader ever held them together.
+#
+# The RULE lives here, in theme-registry-validate.py, because this repo defines what index.json's fields
+# mean (formFactors semantics in ThemeFormFactors.h, the field list in themes2/THEME_FORMAT.md). The
+# registry's CI downloads and runs it, the same way its theme-assets.yml downloads the app's Theme.js
+# instead of keeping a second copy of that rule.
+#
+# This suite has no registry checkout and no network, so it cannot run the rule against the real data. What
+# it runs is --selftest: build a synthetic registry, confirm the correct one passes, then break one thing at
+# a time and require the matching complaint — plus two negative controls, since a rule that fires on
+# everything is as useless as one that fires on nothing. A validator nobody has shown can fail is the same
+# defect as a sync record nobody has to substantiate, one level up.
+echo "=== registry index / manifest rule ==="
+REGVALIDATE_PY="$HERE/theme-registry-validate.py"
+if [ ! -f "$REGVALIDATE_PY" ]; then
+  echo "FAIL: registry index / manifest rule (theme-registry-validate.py not found at $REGVALIDATE_PY)"; fail=1
+elif "$PY" "$REGVALIDATE_PY" --selftest; then
+  echo "PASS: registry index / manifest rule"
+else
+  echo "FAIL: registry index / manifest rule — a check in theme-registry-validate.py cannot be shown to fire"
+  echo "  on the defect it names, so the registry's CI would be running a rule that reports nothing."
   fail=1
 fi
 echo
