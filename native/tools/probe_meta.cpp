@@ -431,6 +431,12 @@ int main(int argc, char** argv)
         }
 
         // An empty key is a safe no-op on every entry point (same contract as the other per-item stores).
+        // KILL-MATRIX NOTE: the has() line below takes a COMPOUND mutation, and that is a property of the
+        // implementation rather than a weakness here — two independent guards each answer "nothing" for an
+        // empty key (set() refuses to write one, get() refuses to look one up), so removing either alone
+        // still leaves has() false. Both have to go. The count() line beneath it kills set()'s guard on its
+        // own. Same shape as the third-party favourite in probe_cloudmerge section 19; noted so the single
+        // compound entry in the matrix is not read as an oversight.
         MetaOverrides::Override any; any.title = QStringLiteral("nope");
         MetaOverrides::set(QString(), any);
         MetaOverrides::reset(QString());

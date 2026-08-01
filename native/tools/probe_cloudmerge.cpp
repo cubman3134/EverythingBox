@@ -1242,6 +1242,15 @@ int main(int argc, char** argv)
         wipeStores(); injOv(QString(), T); mergeDoc(redo);
         CHECK(ovTitle() == QStringLiteral("The right game"));
 
+        // 20i. mergeAll drops the store's lazy cache. The merge writes metaoverrides/* under the ini
+        // DIRECTLY, so a warm cache would keep serving the correction the merge just replaced — for the rest
+        // of the session, on every screen, with a pull having visibly happened.
+        wipeStores(); injOv(QStringLiteral("Remote wins"), T); const QJsonObject fresh20 = serializeNow();
+        wipeStores(); injOv(QStringLiteral("Local stale"), T - 500);
+        CHECK(MetaOverrides::get(k20).title == QStringLiteral("Local stale")); // warms the cache first
+        mergeDoc(fresh20);
+        CHECK(MetaOverrides::get(k20).title == QStringLiteral("Remote wins"));
+
         // 20h. Via the STORE front-end rather than raw ini, end to end: set -> reset leaves a husk (a real,
         // newer record), not a removed row, and the item reads back as un-overridden.
         wipeStores();
@@ -1249,6 +1258,14 @@ int main(int argc, char** argv)
         ov.title = QStringLiteral("Corrected");
         MetaOverrides::set(k20, ov);
         CHECK(MetaOverrides::get(k20).title == QStringLiteral("Corrected"));
+        // set() is the merge funnel: every content write stamps a fresh timestamp, or the correction could
+        // never outrank the peer copy it was made to replace.
+        {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            const qint64 ts = qint64(QJsonDocument::fromJson(raw.value(ikey).toString().toUtf8())
+                                         .object().value(QStringLiteral("updatedAt")).toDouble());
+            CHECK(saneTs(ts, T, QDateTime::currentSecsSinceEpoch()));
+        }
         CHECK(MetaOverrides::count() == 1);
         MetaOverrides::reset(k20);
         CHECK(ovPresent());                                    // the husk row exists...
