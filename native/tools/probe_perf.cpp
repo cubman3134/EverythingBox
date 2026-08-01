@@ -47,11 +47,27 @@ int main(int argc, char** argv)
     QThread::msleep(5);
     PerfTrace::end("unit.be", QStringLiteral("n=3"));
     PerfTrace::end("unit.orphan");           // no begin -> silent no-op
-    PerfTrace::begin("unit.restart");
-    QThread::msleep(30);
-    PerfTrace::begin("unit.restart");        // overwrite restarts the clock
-    QThread::msleep(5);
-    PerfTrace::end("unit.restart");
+
+    // begin-overwrite restarts the clock. The discriminator here is STRUCTURAL, not a wall-clock
+    // threshold (#164): we bracket the post-restart window with our OWN timer, started before the
+    // overwriting begin() and read after the end(). That bracket strictly contains the interval the
+    // restarted clock measures, so a working restart logs <= the bracket BY CONSTRUCTION; a broken
+    // one also carries the whole pre-restart sleep and lands a head-length above it. A scheduling
+    // stall in the tail inflates the logged span and the bracket by the same amount, so load widens
+    // the margin instead of eating it — there is no jitter budget left to blow.
+    qint64 tailBracketMs = 0, preRestartHeadMs = 0;
+    {
+        QElapsedTimer whole, tailBracket;
+        whole.start();
+        PerfTrace::begin("unit.restart");
+        QThread::msleep(30);                 // the head a non-restarted clock would still be carrying
+        tailBracket.start();                 // ...opened BEFORE the overwrite...
+        PerfTrace::begin("unit.restart");    // overwrite restarts the clock
+        QThread::msleep(5);
+        PerfTrace::end("unit.restart");
+        tailBracketMs = tailBracket.elapsed();          // ...and closed AFTER the end() that logs it
+        preRestartHeadMs = whole.elapsed() - tailBracketMs;
+    }
 
     const QStringList out = lines(log);
     CHECK(out.size() == 3, "exactly the three real spans logged");
@@ -65,9 +81,18 @@ int main(int argc, char** argv)
     CHECK(out[1].contains("unit.be") && out[1].contains("n=3"), "begin/end span carries detail");
     bool restartOk = false;
     { const QStringList parts = out[2].split(QStringLiteral(" | "));
+      const qint64 logged = parts.size() >= 3 ? parts[2].toLongLong() : -1;
+      printf("MEASURE unit.restart: logged %lldms, post-restart bracket %lldms, pre-restart head %lldms\n",
+             (long long)logged, (long long)tailBracketMs, (long long)preRestartHeadMs);
       restartOk = parts.size() >= 3 && parts[1] == QStringLiteral("unit.restart")
-                  && parts[2].toLongLong() < 30; }   // 5ms run, NOT 35ms — overwrite restarted it (J20: 25->30,
-                                                      // the 5ms nominal has enough scheduling jitter on a loaded box)
+                  // The logged span fits inside the bracket that contains only the post-restart window,
+                  // so the overwrite restarted the clock. Had it not, the logged span would also carry
+                  // the pre-restart head and sit ~preRestartHeadMs ABOVE the bracket.
+                  && logged >= 0 && logged <= tailBracketMs
+                  // Guard against the assertion going vacuous if the head sleep is ever dropped: the head
+                  // must clear millisecond truncation by a wide margin, else the two cases could round
+                  // together. This is a resolution floor, not a jitter budget — load only raises it.
+                  && preRestartHeadMs >= 10; }
     CHECK(restartOk, "begin-overwrite restarts the clock");
 
     // ---- Component budgets: real hot-path builders/parsers over synthetic worst-case inputs ----------
