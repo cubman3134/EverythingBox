@@ -110,7 +110,12 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         // first also makes a second Enter (or a Back arriving after a pick) a no-op, so the caller's continuation
         // cannot run twice off one presentation.
         onPicked_ = nullptr; onBack_ = nullptr;
-        fn(folder);
+        // DEFER PAST THE EMISSION (#165). The disarm above stays synchronous — a second Enter must be a no-op
+        // immediately — but the dispatch does not: `fn` re-presents or tears down THIS surface (openAppearance,
+        // openHome -> showThemedHome's removeWidget + deleteLater), and it runs from ThemePicker.qml's row
+        // delegate, whose emission is on the stack. `folder` is a stable name, not a row index, so it survives
+        // the turn (the deferral rule's caller obligation).
+        deferPastQmlEmission([fn, folder] { fn(folder); });
     });
     // No levels are pushed by this host, so every Back bottoms out here: the caller owns what leaving means
     // (Appearance returns to the panel; the forced first-run step wires a quit-confirm or accepts the default).
@@ -118,8 +123,16 @@ ThemePickerHost::ThemePickerHost(QWidget* parent) : QWidget(parent)
         const std::function<void()> fn = onBack_;
         if (!fn) return;
         onPicked_ = nullptr; onBack_ = nullptr;   // same disarm-before-dispatch rule as the pick path above
-        fn();
+        // Same deferral as the pick path, and this one is the sharper case: the startup Back runs
+        // quitConfirmFromStartup(), i.e. NavConfirm::ask — a nested event loop directly on the QML emission.
+        deferPastQmlEmission([fn] { fn(); });
     });
+}
+
+// See the declaration in ThemePickerHost.h, and MainWindow::deferPastQmlEmission for the full rule (#28).
+void ThemePickerHost::deferPastQmlEmission(std::function<void()> work)
+{
+    QMetaObject::invokeMethod(this, std::move(work), Qt::QueuedConnection);
 }
 
 QWidget* ThemePickerHost::quickWidget() const { return view_; }

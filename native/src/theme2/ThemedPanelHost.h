@@ -148,6 +148,20 @@ private:
                    int lastIndex = 0; };   // the panelRows cursor while this panel was live (pop-restore)
 
     void buildView();
+    // Run `work` on the next event-loop turn, once the QML signal emission that reached us has unwound
+    // (issue #28 / #165). Identical mechanism to MainWindow::deferPastQmlEmission — read the rule on THAT
+    // definition before adding a call; the short version is that every path into this host from its own
+    // SettingsPanel.qml (nav.activate / nav.back on a live ListView delegate) runs with that delegate's
+    // emission on the stack, and a nested event loop there flushes pending DeferredDeletes into the middle of
+    // QQuickRepeater::clear(). The caller must resolve any ROW INDEX to a stable row id BEFORE deferring: an
+    // async re-present during the turn can rebuild the model the index came from.
+    void deferPastQmlEmission(std::function<void()> work);
+    // The TextField row editor — the OSK (desktop) or the in-row inline edit (mobile), both BLOCKING nested
+    // loops, plus the relocate-by-id commit that follows. Split out of onGraphActivated so the whole blocking
+    // half runs from deferPastQmlEmission, a turn after the delegate emission that asked for it. Every
+    // parameter is BY VALUE: this runs after the emission AND across a nested loop, so nothing may alias the
+    // row buffer (an async replaceTop can free it mid-edit).
+    void runTextFieldEdit(QString rowId, QString label, QString initial, bool masked, ActivateFn fn);
     // (re)populate the model/title/zone-count from the top entry + land the cursor: the first selectable row on
     // a fresh present(), the entry's REMEMBERED row on a pop-restore (the user's place survives a nested drill).
     void renderTop(bool restore = false);

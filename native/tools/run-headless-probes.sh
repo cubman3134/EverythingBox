@@ -590,6 +590,98 @@ else
     [ -n "$td_undeferred" ] && td_note "createPlaylistInteractive is called without a queued invoke: $(printf '%s' "$td_undeferred" | tr '\n' ' ')"
   fi
 
+  # 8. THE THEME2 HOSTS (issue #165). MainWindow's handlers above are one half of the surface; the other half is
+  #    the host classes that own their own QQuickWidget and dispatch a CALLER's std::function from a NavGraph
+  #    signal. ThemedPanelHost::onGraphActivated and ThemePickerHost's two lambdas are DIRECT connections from
+  #    NavGraph::activated / rootBack, and every production emitter of those is QML — SettingsPanel.qml's row
+  #    delegate + header MouseAreas and root Keys handler, ThemePicker.qml's row delegate and root Keys handler.
+  #    A caller handler dispatched from there runs on a live delegate's emission, and the shipped ones reach
+  #    nested loops (the Emulators/Add-ons QFileDialogs, confirmRemoveAddon's NavConfirm, the startup Back's
+  #    quit-confirm) — plus the panel host runs two loops of its OWN in the TextField editor. probe_navqml §18(k)
+  #    pins the dispatch deferral as BEHAVIOUR for the panel host (it links headlessly); what is held here is the
+  #    part no probe can drive: the TextField editor's own nested loops, and the picker host, which needs a real
+  #    themes directory to present at all.
+  TPHCPP="$HERE/../src/theme2/ThemedPanelHost.cpp"
+  TPKCPP="$HERE/../src/theme2/ThemePickerHost.cpp"
+  # Wider than td_loops: these two files also spin loops the nav kit does not own (the mobile inline edit's raw
+  # QEventLoop, and the QFileDialog a caller opens).
+  td_hostloops="$td_loops|QEventLoop|QFileDialog::"
+  if [ ! -f "$TPHCPP" ] || [ ! -f "$TPKCPP" ]; then
+    td_note "ThemedPanelHost.cpp or ThemePickerHost.cpp not found under $HERE/../src/theme2 — moved? This gate is now asserting nothing about the theme2 hosts."
+  else
+    tph_src="$(sed -E 's://.*$::' "$TPHCPP")"
+    tpk_src="$(sed -E 's://.*$::' "$TPKCPP")"
+
+    # 8a. Each host's own deferral helper must actually defer (the MainWindow check above, per host). Written out
+    #     twice rather than looped: a `for` over "name:$src" pairs word-splits the embedded file on its newlines.
+    td_hd="$(td_body 'void ThemedPanelHost::deferPastQmlEmission(' "$tph_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemedPanelHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemedPanelHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+    td_hd="$(td_body 'void ThemePickerHost::deferPastQmlEmission(' "$tpk_src")"
+    if [ -z "$td_hd" ]; then
+      td_note "ThemePickerHost::deferPastQmlEmission not found — every dispatch below believes it is getting a fresh event-loop turn. This gate is now asserting nothing about it."
+    else
+      printf '%s' "$td_hd" | grep -q 'Qt::QueuedConnection' \
+        || td_note "ThemePickerHost::deferPastQmlEmission does not use Qt::QueuedConnection: it is a direct call wearing the name of a deferral."
+    fi
+
+    # 8b. ThemedPanelHost::onGraphActivated — the panel host's dispatch boundary. FOUR row kinds dispatch from it
+    #     (Action/Progress, Toggle, Choice, TextField) and every one must hand off through the helper; and no
+    #     blocking loop may sit on its own body, because its own body IS the QML emission's stack.
+    td_oga="$(td_body 'void ThemedPanelHost::onGraphActivated(' "$tph_src")"
+    if [ -z "$td_oga" ]; then
+      td_note "ThemedPanelHost::onGraphActivated not found — signature changed? This gate is now asserting nothing about the panel host's dispatch."
+    else
+      td_hit="$(printf '%s' "$td_oga" | grep -nE "$td_hostloops" || true)"
+      [ -n "$td_hit" ] && td_note "ThemedPanelHost::onGraphActivated spins a nested event loop on the QML delegate's own stack: $(printf '%s' "$td_hit" | tr '\n' ' ')"
+      td_n="$(printf '%s\n' "$td_oga" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 4 ] \
+        || td_note "ThemedPanelHost::onGraphActivated has $td_n deferPastQmlEmission call(s); Action/Progress, Toggle, Choice and TextField each need one."
+    fi
+    # ...and the deferred TextField half must still be where the LOOPS live. Without this, inlining
+    # runTextFieldEdit back into the switch leaves the count above satisfied by a deferral to nothing — the
+    # "this gate is now asserting nothing" failure mode, same as runThemedBrowseFilterNow above.
+    td_tfe="$(td_body 'void ThemedPanelHost::runTextFieldEdit(' "$tph_src")"
+    if [ -z "$td_tfe" ]; then
+      td_note "ThemedPanelHost::runTextFieldEdit not found — renamed or inlined? The TextField deferral is then deferring to nothing and this gate is asserting nothing about where the OSK runs."
+    else
+      td_tfe_loops="$(printf '%s\n' "$td_tfe" | grep -cE "$td_hostloops" || true)"
+      [ "$td_tfe_loops" != "0" ] \
+        || td_note "ThemedPanelHost::runTextFieldEdit contains no blocking editor: the OSK / inline-edit loop has moved somewhere this gate cannot see."
+    fi
+
+    # 8c. ThemedPanelHost::onLevelPopped — the ROOT onBack. It leaves the host (a QQuickWidget retirement) or
+    #     opens a quit-confirm, from a nav.back() emission, so it defers; the in-host sub-panel pop above it must
+    #     NOT (probe_navqml §18(k)(v) holds that converse). A bare `gone.onBack()` is the pre-#165 shape.
+    td_olp="$(td_body 'void ThemedPanelHost::onLevelPopped(' "$tph_src")"
+    if [ -z "$td_olp" ]; then
+      td_note "ThemedPanelHost::onLevelPopped not found — signature changed? This gate is now asserting nothing about the root onBack."
+    else
+      printf '%s' "$td_olp" | grep -q 'deferPastQmlEmission' \
+        || td_note "ThemedPanelHost::onLevelPopped does not defer: the root onBack tears down this host's QQuickWidget from inside its own scene's emission again."
+      td_bare="$(printf '%s' "$td_olp" | grep -nE '(^|[^.[:alnum:]_])gone\.onBack\(\)' || true)"
+      [ -n "$td_bare" ] && td_note "ThemedPanelHost::onLevelPopped calls gone.onBack() directly: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+
+    # 8d. ThemePickerHost — both caller dispatches (the row pick, and rootBack, whose startup form is the
+    #     NavConfirm quit prompt) live in the constructor's connect lambdas. They must go through the helper, and
+    #     the bare `fn(folder);` / `fn();` shape they replaced must not come back.
+    td_tpk="$(td_body 'ThemePickerHost::ThemePickerHost(' "$tpk_src")"
+    if [ -z "$td_tpk" ]; then
+      td_note "ThemePickerHost's constructor not found — signature changed? This gate is now asserting nothing about the picker's dispatch."
+    else
+      td_n="$(printf '%s\n' "$td_tpk" | grep -c 'deferPastQmlEmission' || true)"
+      [ "$td_n" -ge 2 ] \
+        || td_note "ThemePickerHost's constructor has $td_n deferPastQmlEmission call(s); the pick dispatch and the rootBack dispatch each need one."
+      td_bare="$(printf '%s' "$td_tpk" | grep -nE '^[[:space:]]*fn\((folder)?\);' || true)"
+      [ -n "$td_bare" ] && td_note "ThemePickerHost dispatches a caller callback directly on the QML emission's stack: $(printf '%s' "$td_bare" | tr '\n' ' ')"
+    fi
+  fi
+
   if [ "$td_fail" -eq 0 ]; then echo "PASS: themed handler deferral"; else
     echo "FAIL: themed handler deferral (a themed handler runs a nested event loop on a live QML delegate's stack)"; fail=1
   fi

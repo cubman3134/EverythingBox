@@ -13,7 +13,6 @@
 #include <QUrl>
 #include <QColor>
 #include <QSet>
-#include <QTimer>
 #include <QFile>
 #include <QDateTime>
 #include <functional>
@@ -258,22 +257,21 @@ void ThemedPanelHost::onLevelPopped()
         return;
     }
     if (!gone.onBack) return;
-#ifdef Q_OS_ANDROID
-    // F7 — the Settings-ROOT nav trap on TV. The root onBack LEAVES this host: it tears down the panel page and
-    // rebuilds the themed home (a heavy QQuickWidget add/setCurrentWidget/deleteLater swap in showThemedHome).
-    // We reach here mid-callback from THIS host's own QML scene — hardware Back and the panelBack "‹ Back" CENTER
-    // both funnel through NavGraph::back() -> popLevel() -> here while the panel host's QQuickWidget is still
-    // dispatching its key/activate event. On Android that in-scene QQuickWidget→QQuickWidget swap silently NO-OPs,
-    // stranding the user on the Settings root (BACK dead, header ‹ Back won't activate). Sub-panels are unaffected
-    // because their pop stays IN-host (renderTop above — no widget swap). Defer the leave-host one event-loop turn
-    // so this callback fully unwinds before the rebuild — the same idiom as openCloudSync's deferred handleBack.
-    // Desktop keeps the synchronous path verbatim (probe_navqml §18 drives this host headlessly), so its semantics
-    // and the desktop suite are untouched.
-    std::function<void()> onBack = gone.onBack;
-    QTimer::singleShot(0, this, [onBack] { onBack(); });
-#else
-    gone.onBack();                 // the last panel was dismissed — the root onBack leaves the host
-#endif
+    // The root onBack LEAVES this host: it tears down the panel page and rebuilds the themed home (a heavy
+    // QQuickWidget add/setCurrentWidget/deleteLater swap in showThemedHome), or — the profile/onboarding roots —
+    // opens a NavConfirm quit prompt, which is a nested event loop. We reach here mid-callback from THIS host's
+    // own QML scene: hardware Back, the SettingsPanel.qml Keys handler's nav.back(), the "‹ Back" header CENTER
+    // and the mobile edge-swipe all funnel through NavGraph::back() -> popLevel() -> here while the panel host's
+    // QQuickWidget is still dispatching the emission. Both of those things are the #28 hazard — retiring the
+    // surface whose emission is on the stack, and spinning a nested loop that flushes pending DeferredDeletes
+    // into the middle of QQuickRepeater::clear().
+    //
+    // This deferral was ANDROID-ONLY (F7 — the Settings-root nav trap, where the in-scene QQuickWidget→QQuickWidget
+    // swap silently no-ops and strands the user). #165 makes it unconditional: the mechanism it dodges is not
+    // platform-specific, and one behaviour on every platform is one behaviour to reason about. Sub-panel pops are
+    // untouched — they stay IN-host (renderTop above), synchronous, no widget swap, no caller code.
+    const std::function<void()> onBack = gone.onBack;
+    deferPastQmlEmission([onBack] { onBack(); });
 }
 
 bool ThemedPanelHost::overlayAbove() const
@@ -282,6 +280,12 @@ bool ThemedPanelHost::overlayAbove() const
     // an OSK / NavMenu mirrors itself as an EXTRA "overlay" level (Osk::getText / NavOverlay::setNavGraph). Any
     // excess depth is therefore an overlay sitting above the top panel.
     return graph_ && graph_->levelDepth() > stack_.size();
+}
+
+// See the declaration in ThemedPanelHost.h, and MainWindow::deferPastQmlEmission for the full rule (#28).
+void ThemedPanelHost::deferPastQmlEmission(std::function<void()> work)
+{
+    QMetaObject::invokeMethod(this, std::move(work), Qt::QueuedConnection);
 }
 
 void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
@@ -305,6 +309,21 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     //   * snapshot the row id, and never touch `r` / `e` after the handler (or after the OSK loop) returns;
     //   * TextField: after the OSK, RE-LOCATE the row by id in the CURRENT top entry (the panel may have been
     //     rebuilt) before committing — if it's gone, drop the commit safely.
+    //
+    // NESTED-LOOP SAFETY (#165, the #28 rule applied to this host). Everything above is host-local. The remaining
+    // hazard is that this slot is a DIRECT connection from NavGraph::activated, and every production emitter of
+    // that signal is QML: SettingsPanel.qml's row-delegate MouseArea, its header Back MouseArea, and its root
+    // Keys handler. So the dispatches below run with a live ListView delegate's own emission on the stack — and
+    // what they reach is a nested event loop, either the host's own (Osk::getText / the mobile inline edit) or
+    // one inside the caller's handler (a NavConfirm/NavMenu behind an Action row, the two shipped QFileDialogs).
+    // A nested loop there flushes the process's pending DeferredDeletes at an arbitrary point, landing a delegate
+    // teardown inside ~QQuickItem -> itemChange -> QQuickRepeater::regenerate -> clear(). The HOST cannot audit
+    // what an arbitrary onActivate does, so it defers UNCONDITIONALLY at this boundary — the enumerable thing is
+    // this host's own dispatch sites, not its ~25 callers' bodies.
+    //
+    // What stays SYNCHRONOUS is the part that must not lag or read stale state: the row lookup, the id snapshot,
+    // the Toggle flip / Choice cycle and their in-place patchRow (so the pill and the option label move on the
+    // frame the user pressed). Only the caller dispatch — and the whole blocking TextField editor — hops a turn.
     const ActivateFn fn = e.onActivate;
     const QString rowId = r.id;
 
@@ -312,14 +331,15 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     {
     case PanelRow::Action:
     case PanelRow::Progress:   // a Downloads job row: activation opens the per-job action chooser (host-driven)
-        if (fn) fn(rowId, QString());   // NB: `r`/`e` may be dangling after this — do not touch them below
+        // NB: `r`/`e` are NOT captured — the deferral outlives them by a whole event-loop turn.
+        if (fn) deferPastQmlEmission([fn, rowId] { fn(rowId, QString()); });
         break;
     case PanelRow::Toggle:
     {
         r.checked = !r.checked;
         const bool on = r.checked;      // read the new state BEFORE dispatch (fn may reassign e.rows)
         model_->patchRow(rowId, r);
-        if (fn) fn(rowId, on ? QStringLiteral("1") : QStringLiteral("0"));
+        if (fn) deferPastQmlEmission([fn, rowId, on] { fn(rowId, on ? QStringLiteral("1") : QStringLiteral("0")); });
         break;
     }
     case PanelRow::Choice:
@@ -332,51 +352,19 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
             r.value = r.options[(cur + 1) % r.options.size()];
             const QString picked = r.value;   // snapshot before dispatch
             model_->patchRow(rowId, r);
-            if (fn) fn(rowId, picked);
+            if (fn) deferPastQmlEmission([fn, rowId, picked] { fn(rowId, picked); });
         }
         break;
     }
     case PanelRow::TextField:
     {
-        // externalEdit contract: the HOST runs the editor in a BLOCKING nested loop (Osk::getText). Mirror the OSK
-        // on THIS graph so Back inside it closes the OSK only (and its close revives the panel's cursor through the
-        // graph's one handler). A masked row (credentials) masks during EDITING too — the OSK honors the echo mode.
-        // Snapshot the edit inputs first: a REFERENCE into e.rows must NOT survive the loop (an async replaceTop can
-        // free this row's buffer mid-edit — the UAF the review found), so `r` is untouched from here on.
+        // Snapshot the edit inputs HERE (a REFERENCE into e.rows must not survive either the deferral or the
+        // nested loop that follows it — an async replaceTop can free this row's buffer mid-edit), then run the
+        // whole blocking editor a turn later. `r` is untouched from this point on.
         const QString label = r.label, initial = r.value;
         const bool masked = r.masked;
-        const QLineEdit::EchoMode echo = masked ? QLineEdit::Password : QLineEdit::Normal;
-        QString t;
-        if (FormFactor::instance().mode() == FormFactor::Mode::Mobile)
-        {
-            // Mobile: edit IN the row — the QML delegate swaps in a focused TextInput (the platform
-            // keyboard pops over the panel) and reports back through the bridge. Same blocking shape
-            // as the OSK path, so everything below (re-locate by id, commit, dispatch) is untouched.
-            QEventLoop loop;
-            bool ok = false; QString out;
-            const QMetaObject::Connection conn = connect(inlineEdit_, &InlineEditBridge::finished, &loop,
-                [&](const QString& s, bool o) { out = s; ok = o; loop.quit(); });
-            ieLog(QStringLiteral("begin row=%1 initialLen=%2").arg(rowId).arg(initial.size()));
-            emit inlineEdit_->begin(initial, masked);
-            loop.exec();
-            disconnect(conn);
-            ieLog(QStringLiteral("loop exit ok=%1 len=%2").arg(ok).arg(out.size()));
-            t = ok ? out : QString();
-        }
-        else
-        {
-            t = Osk::getText(label, initial, echo, window(), graph_);
-        }
-        if (!t.isNull())
-        {
-            // Re-locate the row by id in the CURRENT top entry (the panel may have been rebuilt during the OSK).
-            // If it's gone, drop the commit AND the dispatch — never write through a stale row / fire a stale edit.
-            bool committed = false;
-            if (!stack_.isEmpty())
-                for (PanelRow& er : stack_.last().rows)
-                    if (er.id == rowId) { er.value = t; model_->patchRow(rowId, er); committed = true; break; }
-            if (committed && fn) fn(rowId, t);   // fire the handler captured when the edit began
-        }
+        deferPastQmlEmission([this, rowId, label, initial, masked, fn]
+                             { runTextFieldEdit(rowId, label, initial, masked, fn); });
         break;
     }
     case PanelRow::LogView:      // scroll mode (Task 3) — no commit dispatch yet
@@ -384,6 +372,44 @@ void ThemedPanelHost::onGraphActivated(const QString& zone, int index)
     case PanelRow::Separator:
         break;
     }
+}
+
+// The TextField row editor, run a turn after the delegate emission that asked for it (see onGraphActivated).
+void ThemedPanelHost::runTextFieldEdit(QString rowId, QString label, QString initial, bool masked, ActivateFn fn)
+{
+    // externalEdit contract: the HOST runs the editor in a BLOCKING nested loop (Osk::getText). Mirror the OSK
+    // on THIS graph so Back inside it closes the OSK only (and its close revives the panel's cursor through the
+    // graph's one handler). A masked row (credentials) masks during EDITING too — the OSK honors the echo mode.
+    const QLineEdit::EchoMode echo = masked ? QLineEdit::Password : QLineEdit::Normal;
+    QString t;
+    if (FormFactor::instance().mode() == FormFactor::Mode::Mobile)
+    {
+        // Mobile: edit IN the row — the QML delegate swaps in a focused TextInput (the platform
+        // keyboard pops over the panel) and reports back through the bridge. Same blocking shape
+        // as the OSK path, so everything below (re-locate by id, commit, dispatch) is untouched.
+        QEventLoop loop;
+        bool ok = false; QString out;
+        const QMetaObject::Connection conn = connect(inlineEdit_, &InlineEditBridge::finished, &loop,
+            [&](const QString& s, bool o) { out = s; ok = o; loop.quit(); });
+        ieLog(QStringLiteral("begin row=%1 initialLen=%2").arg(rowId).arg(initial.size()));
+        emit inlineEdit_->begin(initial, masked);
+        loop.exec();
+        disconnect(conn);
+        ieLog(QStringLiteral("loop exit ok=%1 len=%2").arg(ok).arg(out.size()));
+        t = ok ? out : QString();
+    }
+    else
+    {
+        t = Osk::getText(label, initial, echo, window(), graph_);
+    }
+    if (t.isNull()) return;
+    // Re-locate the row by id in the CURRENT top entry (the panel may have been rebuilt during the OSK).
+    // If it's gone, drop the commit AND the dispatch — never write through a stale row / fire a stale edit.
+    bool committed = false;
+    if (!stack_.isEmpty())
+        for (PanelRow& er : stack_.last().rows)
+            if (er.id == rowId) { er.value = t; model_->patchRow(rowId, er); committed = true; break; }
+    if (committed && fn) fn(rowId, t);   // fire the handler captured when the edit began
 }
 
 QString ThemedPanelHost::panelTitle() const { return stack_.isEmpty() ? QString() : stack_.last().title; }
