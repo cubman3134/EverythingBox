@@ -61,9 +61,17 @@ jobs:
       - name: Check out the registry
         uses: actions/checkout@v4
         with:
+          # Must name the same repo as `registry` in native/themes2/REGISTRY-SYNC.json — that record is what
+          # --publish and --verify-remote both derive their urls from, so if the two disagree this job
+          # publishes into one repo and verifies another.
           repository: cubman3134/everythingbox-themes
           ssh-key: ${{ secrets.THEMES_REGISTRY_DEPLOY_KEY }}
           path: registry
+          # Named rather than left to the registry's default branch, because --verify-remote reads back from
+          # raw.githubusercontent's /main/ path (see raw_base in theme-registry-sync.py). Both halves now say
+          # `main` literally; letting them drift apart would push successfully and then fail verify with
+          # "could not read", which points nowhere near the branch.
+          ref: main
           # A shallow checkout is fine: this job only ever adds one commit on top of main.
           fetch-depth: 1
 

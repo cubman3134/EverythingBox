@@ -9,12 +9,18 @@ lost EVERYTHING but `home`, which is the exact shape issue #29 was about. Downlo
 registry gave you a strictly worse theme than the one already in the app, under the same name.
 
 CI cannot see the registry: it is a different repo, and this suite is deliberately offline (no network, no
-keys). So the drift is caught against a CHECKED-IN RECORD of what was last synced there —
-native/themes2/REGISTRY-SYNC.json. Change a bundled theme and its hash moves; the gate goes red and stays
-red until you republish and refresh the record with `--update`. That does not PROVE the registry was
-updated (the record states an intent, and `--update` can be run without pushing anything). What it does is
-turn a silent drift into a deliberate act — the person editing the theme is told, at the moment of the
-edit, that a second copy of it exists. The guarantee needs a publish job; see REGISTRY-SYNC.json.
+keys). So the offline gate compares against a CHECKED-IN RECORD of what the registry is expected to be
+serving — native/themes2/REGISTRY-SYNC.json. Change a bundled theme and its hash moves; the gate goes red
+and stays red until you run `--update` and commit the refreshed record with the theme change. Nothing is
+copied by hand any more: on merge to main the publish-themes workflow checks the registry out with a deploy
+key, runs `--publish` into it, pushes, and then re-reads what the registry actually serves.
+
+Be precise about what each half buys. `--check` compares the bundled themes against the RECORD, not against
+the remote — it cannot, offline — so what it catches is the record falling behind the repo, and it is what
+tells the person editing a theme, at the moment of the edit, that a second copy of it exists. The proof
+that the registry really matches is `--verify-remote`, which the publish job runs after its own push and
+the verify-registry workflow re-runs weekly, catching what the publisher cannot see: a direct edit there, a
+revert, or a publish that never ran.
 
 The hash is CANONICAL, not byte-for-byte: parse, re-serialise with sorted keys and no whitespace, hash
 that. Channels' bundled theme.json is machine-serialised (one value per line, `\\uXXXX` escapes) while
@@ -25,7 +31,7 @@ reindent as drift. Only the meaning is gated. THEME_FORMAT.md is not JSON, so it
 Usage:
   theme-registry-sync.py            # print each bundled theme's canonical hash
   theme-registry-sync.py --check    # gate: compare against REGISTRY-SYNC.json (exit 1 on drift)
-  theme-registry-sync.py --update   # refresh REGISTRY-SYNC.json after republishing
+  theme-registry-sync.py --update   # refresh REGISTRY-SYNC.json after editing a published theme
   theme-registry-sync.py --publish <registry-dir>   # copy the record's published targets into a checkout
   theme-registry-sync.py --verify-remote            # fetch what the registry serves and compare (network)
 """
@@ -600,8 +606,12 @@ def publish_into(rec, themes_dir, registry_dir):
         if kind == "theme" and not os.path.isdir(dest):
             problems.append(
                 "%s is recorded as published to %s, but the registry has no such folder.\n"
-                "    Add its index.json entry there by hand first (name, author, description, dir): the\n"
-                "    description exists nowhere in theme.json, so this job will not invent one." % (name, dest_rel))
+                "    What was tested is the FOLDER, so adding only an index.json entry gets you this same\n"
+                "    refusal again. The registry needs BOTH: the folder (its contents do not matter — this\n"
+                "    job overwrites them wholesale) AND an index.json entry naming it (name, author,\n"
+                "    description, dir), because the description exists nowhere in theme.json and a folder\n"
+                "    nothing lists is a theme nobody can find. Do that side before merging the theme here,\n"
+                "    or the first publish run goes red on main." % (name, dest_rel))
             continue
         if kind == "doc" and not os.path.isfile(dest):
             problems.append("%s is recorded as published to %s, but the registry has no such file."
@@ -654,6 +664,14 @@ def raw_base(rec):
     --publish writes the record's targets into a checkout of it, and this must read back from the same place
     the record points at, not from a url baked in here that could quietly disagree. Returns "" for anything
     that is not a github.com url — the caller reports that as a refusal rather than guessing at a host.
+
+    The BRANCH is hardcoded to `main`, and that is a coupling worth naming rather than leaving incidental:
+    the publish workflow pushes to the branch it checked out of the registry, and this reads back from
+    .../main/. If those two ever named different branches, a publish would push successfully and then
+    --verify-remote would report "could not read" for every target — a green push followed by a red verify,
+    with nothing pointing at the branch as the cause. So publish-themes.yml pins `ref: main` on the registry
+    checkout: both halves now name the same branch literally, and moving the registry's default branch is a
+    change that has to be made in both places.
     """
     url = (rec.get("registry") or "").rstrip("/")
     prefix = "https://github.com/"
@@ -847,9 +865,12 @@ def check():
                     "%s has changed since it was last synced to the registry.\n"
                     "      recorded %s\n"
                     "      now      %s\n"
-                    "    The registry copy is now BEHIND this one: anyone downloading '%s' from the registry\n"
-                    "    gets the older theme under the same name. Republish it (see REGISTRY-SYNC.json for the\n"
-                    "    procedure), then refresh this record with:  native/tools/theme-registry-sync.py --update"
+                    "    This record is what the offline gate compares against, and it no longer describes the\n"
+                    "    theme in this repo — so nothing here says the registry's '%s' is anything but the\n"
+                    "    older theme, served under the same name. Refresh the record and commit it with the\n"
+                    "    theme change:  native/tools/theme-registry-sync.py --update\n"
+                    "    You do not copy anything into the registry: on merge to main the publish workflow\n"
+                    "    pushes the theme there and then verifies what the registry serves."
                     % (name, want or "(none)", got, name))
         elif name not in exempt:
             bad.append("%s is bundled but appears in neither publishedThemes nor notPublished in "
@@ -879,7 +900,9 @@ def check():
                 "      recorded %s\n"
                 "      now      %s\n"
                 "    That file is the format reference theme authors read, and the registry serves its own\n"
-                "    copy. Republish it alongside the themes, then:  native/tools/theme-registry-sync.py --update"
+                "    copy. Refresh the record and commit it with the change:\n"
+                "        native/tools/theme-registry-sync.py --update\n"
+                "    The publish workflow copies it into the registry alongside the themes on merge to main."
                 % (doc_name, want or "(none)", got))
 
     return bad
