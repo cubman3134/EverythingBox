@@ -2085,8 +2085,10 @@ static void runUndeclaredViewAsserts()
 //       by member COUNT: the #40 sweep showed a count assertion passes happily while the WRONG member is in.
 //   (c) an ordinary button in the same container IS still collected while the preview is not — the ring is
 //       live, not empty, at the moment (b) is read.
-//   (d) buildPreview seeds `categories`/`catIndex` (so an XMB/sidebar theme shows its cross/rail), with the
-//       bare buildView embed as the negative control — it leaves `categories` empty.
+//   (d) buildPreview seeds `categories` (so an XMB/sidebar theme shows its cross/rail), with the bare
+//       buildView embed as the NEGATIVE control — it leaves `categories` empty. (Its companion `catIndex` is
+//       deliberately NOT asserted; see the note at the assertion — 0 is also the QML default, so that leg is
+//       a fixed point of the thing under test. It was written, it survived the mutation, it is gone.)
 //
 // Mutation record (this file's standard of proof): restoring Qt::StrongFocus inside buildPreview turns (b)
 // red on BOTH legs; dropping buildPreview's categories block turns (d) red; neither touches (a) or (c).
@@ -2167,8 +2169,10 @@ static void runPreviewFocusAsserts()
             QQuickItem* pr = ThemeEngine::rootItem(pv);
             CHECK(pr && pr->property("categories").toList().size() == items.size(),
                   "preview: buildPreview seeds `categories` from items, so an XMB/sidebar theme shows its axis");
-            CHECK(pr && pr->property("catIndex").toInt() == 0,
-                  "preview: …parked at catIndex 0");
+            // No assertion on `catIndex`. buildPreview parks it at 0, but 0 is ALSO ThemeView.qml's default —
+            // so an assertion on it is a fixed point of the function under test: it passes whether or not the
+            // seeding happened. It was written, mutation-tested against "drop the seeding block", SURVIVED,
+            // and removed. `categories` above is the leg the mutation DOES kill, and it covers the same block.
             delete pv;
             pump();
         }
