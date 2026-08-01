@@ -50,7 +50,7 @@ ListView {
                 anchors.fill: parent
                 // T.tileImage, not a bare modelData.image read: a row carrying art only under the
                 // open-ended `images` role map still gets a poster instead of a blank tile.
-                source: (lv.host && T.tileImage(modelData) !== "") ? lv.host.resolve(T.tileImage(modelData)) : ""
+                source: (lv.host && T.tileImage(modelData) !== "") ? lv.host.contentUrl(T.tileImage(modelData)) : ""
                 fillMode: Image.PreserveAspectCrop
                 visible: status === Image.Ready
             }

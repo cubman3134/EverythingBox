@@ -44,6 +44,63 @@ findexe() {
   return 1
 }
 
+# ---- Stale-binary gate -------------------------------------------------------------------------------------
+# This suite only ever EXECUTES pre-built binaries, so "the probe passed" means no more than "the binary
+# sitting in $BUILD_DIR passed". When a probe stops compiling, the PREVIOUS build's exe is still there — and it
+# runs, prints its sentinel, and passes, reporting on source that no longer exists. The missing-binary check in
+# the probe loop below cannot see this one, because nothing is missing.
+#
+# Not hypothetical: it is what a812cfd found. A brace dropped in the #34 merge resolution took
+# probe_cloudmerge out of the build, and the suite AND a direct run both reported CLOUDMERGE-OK — from a
+# binary built before the merge. The fix at the time was procedural ("rebuild everything and grep the build
+# output for errors"); this is that rule made mechanical.
+#
+# CI is not exposed — it configures a fresh build dir, so a compile error fails the build STEP and the suite
+# never starts. A local incremental run is exposed, and a local run is where that merge was made.
+#
+# Source of truth is each probe's own add_executable() list in native/CMakeLists.txt: the files that actually
+# compile into it. Deliberately NOT "anything under src/ is newer than the exe" — an unrelated edit does not
+# relink this probe, so a tree-wide comparison would go red and STAY red however many times you rebuilt, which
+# is the kind of gate people learn to skip. Scoped per target, every failure here is cleared by exactly the
+# rebuild the message asks for.
+#
+# Known gap, deliberate: a header a probe #includes but that its add_executable() list does not name (AppPaths.h
+# and AppBrand.h are the common ones) is invisible here. The build system tracks those properly; this gate is a
+# backstop for the case where the build was not run at all, so it errs toward staying quiet rather than toward
+# a failure a rebuild cannot clear. Same for probe_themeview's generated ${EB_THEME2_RCC_THEMEVIEW} input.
+NATIVE_DIR="$(cd "$HERE/.." && pwd)"
+# "<target>\t<path relative to native/>", one per line, for every add_executable(probe_*) in the file. Sources
+# may run to the closing paren over many lines, and carry trailing # comments; both are handled. Tokens with no
+# dot (the target name itself) and ${...}/$<...> (a generated input, not a file on disk yet) are skipped.
+PROBE_SRCS="$(awk '
+  { line = $0; sub(/#.*$/, "", line) }
+  !on {
+    if (!match(line, /add_executable\([ \t]*probe_[A-Za-z0-9_]+/)) next
+    seg = substr(line, RSTART, RLENGTH); sub(/add_executable\([ \t]*/, "", seg); tgt = seg
+    line = substr(line, RSTART + RLENGTH); on = 1
+  }
+  { if (!on) next
+    if ((p = index(line, ")")) > 0) { line = substr(line, 1, p - 1); closing = 1 }
+    n = split(line, toks, /[ \t]+/)
+    for (i = 1; i <= n; i++) if (toks[i] ~ /\./ && toks[i] !~ /^\$/) print tgt "\t" toks[i]
+    if (closing) { on = 0; closing = 0 } }
+' "$NATIVE_DIR/CMakeLists.txt" 2>/dev/null)"
+# The corpus guard the neighbouring gates have: a parser that silently stops matching would make every probe
+# below "fresh" and this gate would announce nothing at all. The floor is deliberately far below the real count
+# (52 at the time of writing, and it only grows) and far above zero, so it catches a moved CMakeLists, a changed
+# declaration style, and a broken awk — without needing an edit every time a probe is added.
+PROBE_SRC_TARGETS="$(printf '%s\n' "$PROBE_SRCS" | cut -f1 | sort -u | grep -c '[^[:space:]]' || true)"
+
+# Every declared source of <target> that is NEWER than <exe>, one per line.
+stale_sources() { # <target> <exe>
+  local tgt="$1" exe="$2" f
+  printf '%s\n' "$PROBE_SRCS" | awk -F'\t' -v t="$tgt" '$1 == t { print $2 }' | while IFS= read -r f; do
+    [ -n "$f" ] && [ -e "$NATIVE_DIR/$f" ] || continue
+    [ "$NATIVE_DIR/$f" -nt "$exe" ] && printf '%s\n' "$f"
+  done
+  return 0
+}
+
 # One scratch root per suite run (issue #42). Every probe binary is compiled with EB_ISOLATED_DATA_DIR, which
 # points AppPaths::dataDir() at a per-PROCESS directory created under this root instead of at the exe's own
 # folder — so a GUI run, a throwaway app in build/Release, and forty-odd probes stop sharing one
@@ -59,8 +116,33 @@ export EB_PROBE_SCRATCH_ROOT
 trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"' EXIT
 
 fail=0
+
+if [ "${PROBE_SRC_TARGETS:-0}" -lt 20 ]; then
+  echo "FAIL: stale-binary gate parsed $PROBE_SRC_TARGETS probe target(s) from native/CMakeLists.txt — expected"
+  echo "      one per add_executable(probe_*) in that file, which is dozens. It is asserting nothing about"
+  echo "      staleness; treat every PASS below as covering whichever binary happens to be on disk, not the"
+  echo "      source in this tree."
+  echo
+  fail=1
+fi
+
 run() { # <name> <sentinel> <exe> [args...]
-  local name="$1" sentinel="$2"; shift 2
+  local name="$1" sentinel="$2" exe="$3"; shift 2
+  # Freshness first: a stale binary's sentinel is a report on the PREVIOUS build, so running it at all would
+  # print a PASS-shaped line for source that was never compiled. The target name is the exe's basename —
+  # run()'s $1 is prose for some call sites ("nav kit", "meta cache"), the exe path never is.
+  local tgt stale
+  tgt="$(basename "$exe")"; tgt="${tgt%.exe}"
+  stale="$(stale_sources "$tgt" "$exe")"
+  if [ -n "$stale" ]; then
+    echo "=== $name ==="
+    printf '%s\n' "$stale" | sed 's|^|    |'
+    echo "FAIL: $name ($tgt was not rebuilt — the source(s) above are NEWER than its binary, so anything it"
+    echo "      printed would describe the previous build. Rebuild the probe targets, then re-run.)"
+    fail=1
+    echo
+    return
+  fi
   echo "=== $name ==="
   local out rc
   out="$("$@" 2>&1)"; rc=$?
@@ -211,7 +293,7 @@ fi
 # Foundation-refactor seams: Notifier (window/player notice channel), StreamResolver's m3u/stream
 # classification, PlaybackSession (audio queue + resume state machine), and the synthetic browse
 # catalogs (Recent/Downloaded/Favorites builders) — each extracted pure and probe-tested.
-for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK"; do
+for p in "probe_navqml NAVQML-OK" "probe_themeview THEMEVIEW-OK" "probe_notifier NOTIFIER-OK" "probe_m3u M3U-OK" "probe_playback PLAYBACK-OK" "probe_browse BROWSE-OK" "probe_perf PERF-OK" "probe_formfactor FORMFACTOR-OK" "probe_bootstrap BOOTSTRAP-OK" "probe_sync SYNC-OK" "probe_extplayer EXTPLAYER-OK" "probe_marks MARKS-OK" "probe_stats STATS-OK" "probe_playlists PLAYLISTS-OK" "probe_cloudmerge CLOUDMERGE-OK" "probe_importers IMPORTERS-OK" "probe_onboarding ONBOARDING-OK" "probe_locallib LOCALLIB-OK" "probe_resolver RESOLVER-OK" "probe_showdispatch SHOWDISPATCH-OK" "probe_subs SUBS-OK" "probe_segments SEGMENTS-OK" "probe_stremio STREMIO-OK" "probe_savesync SAVESYNC-OK" "probe_brand BRAND-OK" "probe_theme THEME-OK" "probe_settingstxn SETTINGSTXN-OK" "probe_trakt TRAKT-OK" "probe_passcode PASSCODE-OK" "probe_pcgames PCGAMES-OK" "probe_crashreport CRASHREPORT-OK" "probe_uitest UITEST-OK"; do
   set -- $p
   # A probe in THIS list is not optional. If its binary is missing the probe did not pass -- it did not
   # run, and the commonest cause is that it stopped COMPILING. Treating that as a skip is how a broken

@@ -83,7 +83,7 @@ GridView {
                     anchors.fill: parent
                     // T.tileImage, not a bare modelData.image read: a row that carries its art only under
                     // the open-ended `images` role map still gets a poster instead of a blank tile.
-                    source: (gv.host && T.tileImage(modelData) !== "") ? gv.host.resolve(T.tileImage(modelData)) : ""
+                    source: (gv.host && T.tileImage(modelData) !== "") ? gv.host.contentUrl(T.tileImage(modelData)) : ""
                     fillMode: Image.PreserveAspectCrop
                     visible: status === Image.Ready
                 }

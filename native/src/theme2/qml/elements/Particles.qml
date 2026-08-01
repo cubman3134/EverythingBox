@@ -74,7 +74,7 @@ Item {
             Image {
                 anchors.fill: parent
                 visible: field.image !== ""
-                source: (field.image !== "" && field.host) ? field.host.resolve(field.image) : ""
+                source: (field.image !== "" && field.host) ? field.host.themeAsset(field.image) : ""
                 fillMode: Image.PreserveAspectFit
                 smooth: true
             }

@@ -11,7 +11,7 @@ Text {
     property var host
     property var now: new Date()
     Timer { interval: 1000; running: true; repeat: true; onTriggered: now = new Date() }
-    FontLoader { id: fl; source: (el && el.fontFile && host) ? host.resolve(el.fontFile) : "" }
+    FontLoader { id: fl; source: (el && el.fontFile && host) ? host.themeAsset(el.fontFile) : "" }
     text: Qt.formatDateTime(now, T.val(el, "format", "hh:mm"))
     color: T.val(el, "color", "#FFFFFF")
     // Empty fontFamily -> the app default (NOT Qt's "" -> "MS Sans Serif", which fails DirectWrite and paints nothing).

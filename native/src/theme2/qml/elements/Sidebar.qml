@@ -130,7 +130,9 @@ Item {
                 anchors.left: plate.left; anchors.leftMargin: sb.rowH * 0.34
                 anchors.verticalCenter: parent.verticalCenter
                 width: sb.rowH * 0.42; height: width
-                source: (row.rowIcon !== "" && sb.host) ? sb.host.resolve(row.rowIcon) : ""
+                // A category `icon` is theme-authored art ("relative image path", THEME_FORMAT.md), not
+                // something the host publishes onto the categories model — so it is judged as a manifest path.
+                source: (row.rowIcon !== "" && sb.host) ? sb.host.themeAsset(row.rowIcon) : ""
                 fillMode: Image.PreserveAspectFit; smooth: true
             }
             Text {

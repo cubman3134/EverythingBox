@@ -1,5 +1,6 @@
 #include "ThemeEngine.h"
 #include "../core/AppPaths.h"
+#include "../core/ThemeAssetPath.h"
 #include "../core/ThemeChoice.h"
 #include "FormFactor.h"
 #include "../core/SafeAreaInsets.h"
@@ -54,15 +55,21 @@ static void playEffect(QSoundEffect* e)
 // `keys` lets an action accept aliases (e.g. "navigate"/"move"). Paths are relative to the theme folder;
 // QSoundEffect plays uncompressed WAV. Volume (0..1) applies to every effect in the theme. The effect is
 // created unparented and moved to the theme audio thread; its source is loaded there (see themeAudioThread).
+//
+// The path goes through ThemeAssetPath::resolve, not QDir::absoluteFilePath: a theme.json now arrives from a
+// public, third-party-writable registry, and absoluteFilePath would happily hand back "../../<anything>". A
+// refused path is silence for that one action — the same outcome as a theme that declared no sound for it.
 static QSoundEffect* loadEffect(QObject* /*parent*/, const QString& themeDir, const QVariantMap& sounds,
                                 const QStringList& keys, qreal volume)
 {
     QString file;
     for (const QString& k : keys) { file = sounds.value(k).toString(); if (!file.isEmpty()) break; }
     if (file.isEmpty()) return nullptr;
+    const QString path = ThemeAssetPath::resolve(themeDir, file);
+    if (path.isEmpty()) return nullptr;               // outside the theme's own folder — not ours to play
     auto* e = new QSoundEffect;                       // no parent: it lives on the audio thread, not the GUI thread
     e->moveToThread(themeAudioThread());
-    const QUrl src = QUrl::fromLocalFile(QDir(themeDir).absoluteFilePath(file));
+    const QUrl src = QUrl::fromLocalFile(path);
     QMetaObject::invokeMethod(e, [e, src, volume] { e->setSource(src); e->setVolume(volume); }, Qt::QueuedConnection);
     return e;
 }

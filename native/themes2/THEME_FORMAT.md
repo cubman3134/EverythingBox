@@ -330,6 +330,29 @@ A theme can play a short sound when you act. Add a top-level **`sounds`** object
 
 Any action you leave out is silent. Files must be uncompressed **WAV** (PCM) — that's what the low-latency player supports; keep them short (a few-frame click/blip). **Channels** and **Triple** both ship a `sounds/` folder you can copy.
 
+## Where your files may live
+
+Every path in a `theme.json` — `background.image`, an `image` element's `path` or `fallback`, a `gallery`
+`fallback`, `fontFile`, a category `icon`, a `particles` `image`, `sounds`, `music` — is **relative to your
+own theme folder**, and may only point at a file **inside it**. That has always been how this document
+described them; it is now enforced, because a theme can install itself from the public registry and a
+manifest is not a thing to be trusted with the rest of the disk.
+
+Refused, and silently ignored (the element draws its placeholder, the sound stays silent):
+
+| shape | example | why |
+| --- | --- | --- |
+| leaving your folder | `"../Channels/bg.jpg"`, `"../../../secret.png"` | another theme's files, or the user's, are not yours to read |
+| an absolute path | `"C:/Users/me/art/bg.jpg"`, `"/home/me/bg.jpg"` | it only exists on *your* machine — your theme would render blank for everyone else |
+| a backslash or a drive letter | `"art\\bg.jpg"`, `"C:art.png"` | refused on every platform, so a theme behaves the same everywhere |
+| a **remote URL** | `"https://my-cdn.example/bg.jpg"` | see below |
+
+**Remote URLs are not allowed for a theme's own assets.** Ship the file in your theme folder instead. A theme
+that fetched its artwork from a server would contact that server every time someone's home screen drew,
+would show different art after it was published than when it was reviewed, and would render blank for anyone
+offline. (Artwork that comes from a *provider* — posters, logos, screenshots you reach through `binding` or
+`role` — is unaffected; those are urls the addon supplies, not paths your theme names.)
+
 ## Minimal example
 
 ```json
