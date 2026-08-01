@@ -1,6 +1,19 @@
 // A small persistent list of recently opened content (videos, audio, books/PDFs, games). Stored as a
 // JSON array in everythingbox.ini so it survives restarts; the Home screen's "Recent" tab lists it and the
 // main window re-opens an entry by its kind. Newest first, de-duplicated by path, capped.
+//
+// AN EXPLICIT REMOVE IS TOMBSTONED; A CAP EVICTION IS NOT (issue #150). CloudMerge unions this profile's list
+// with a peer's and cannot read a reason out of an absence, so a removal that left no record was handed
+// straight back by any device that still had the entry — the #132 defect in its list-membership form. remove()
+// and clear() therefore date every entry they drop, in a per-profile tombstone namespace, keyed by the same
+// key-else-path identity the union pass de-duplicates on.
+//
+// The cap is deliberately on the other side of that line. Dropping the 41st entry is the list running out of
+// room rather than the user forgetting something, and tombstoning it would make the cap permanent: an item that
+// scrolled off could never re-enter on a later re-watch. It needs no record — the merge unions and re-caps, so
+// an evicted entry comes back only while it is still among the newest 40 overall. add()'s de-dup removal is a
+// move-to-front and records nothing either; add() also LIFTS any tombstone, because re-opening an item is the
+// user undoing their own removal of it.
 #pragma once
 #include <QString>
 #include <QVector>

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.210 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.211 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -208,6 +208,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SevenZip.cpp     src/core/SevenZip.h
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
+        src/core/ResumeStore.cpp  src/core/ResumeStore.h  # resume/<hash> key scheme + the tombstoned clear (#150)
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
         src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
@@ -446,6 +447,13 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/RecentStore.cpp     src/core/RecentStore.h
         src/core/DownloadsStore.cpp  src/core/DownloadsStore.h
         src/core/Tombstones.cpp      src/core/Tombstones.h
+        src/core/ResumeStore.cpp     src/core/ResumeStore.h        # issue #150: the resume tombstone namespace
+        # issue #150: the RESUME READER. Section 26 asserts the resume fix through the answer the app
+        # actually gives -- a fresh PlaybackSession's pending seek -- and drives it through the real clear
+        # site (finishResume), because an assertion that the row is absent passes on the broken build too.
+        # PlaybackSession is QtCore-only (QSettings + QCryptographicHash + ConsumptionStats, all already
+        # linked here) and AUTOMOC handles its QObject, so this costs the target nothing but one TU.
+        src/media/PlaybackSession.cpp src/media/PlaybackSession.h
         src/core/CloudMerge.cpp      src/core/CloudMerge.h
         src/core/MetaOverrides.cpp   src/core/MetaOverrides.h      # issue #24: mergeAll() carries + invalidates it
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
@@ -457,7 +465,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         third_party/miniz.c                                        # (CloudSync's bundle zip; unused by the exclusion-table asserts)
         src/core/ProfileStore.cpp    src/core/ProfileStore.h)
-    target_include_directories(probe_cloudmerge PRIVATE src src/core src/theme2 third_party)
+    target_include_directories(probe_cloudmerge PRIVATE src src/core src/media src/theme2 third_party)
     target_compile_definitions(probe_cloudmerge PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
     target_link_libraries(probe_cloudmerge PRIVATE Qt6::Core Qt6::Network Qt6::Gui) # Qt6::Gui: CloudSync's QDesktopServices (OAuth browser open)
 
@@ -824,6 +832,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Settings.cpp src/core/Settings.h             # LocalLibrary::root() -> Settings::libraryFolder()
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h     # Settings.cpp -> FormFactor::instance()
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp src/core/RecentStore.cpp
+        src/core/Tombstones.cpp src/core/Tombstones.h   # RecentStore::remove/clear date the removal (#150)
         src/core/ProfileStore.cpp src/addons/AddonModels.cpp)
     target_include_directories(probe_importers PRIVATE src src/core src/addons src/browse src/theme2)
     target_link_libraries(probe_importers PRIVATE Qt6::Core Qt6::Network Qt6::Gui)
@@ -922,6 +931,9 @@ if(EVERYTHINGBOX_BUILD_APP)
     # Headless test for PlaybackSession (queue advance + resume persistence).
     add_executable(probe_playback tools/probe_playback.cpp
         src/media/PlaybackSession.cpp src/media/PlaybackSession.h
+        # finishResume clears through ResumeStore, which dates the clear in the tombstone store (#150).
+        src/core/ResumeStore.cpp      src/core/ResumeStore.h
+        src/core/Tombstones.cpp       src/core/Tombstones.h
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h
         # ConsumptionStats' device-namespaced accrual (mdsync T3) needs Settings::deviceId(), which drags
         # FormFactor via Settings.cpp's virtualPadEnabled() — mirror probe_stats' link set.

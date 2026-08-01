@@ -2,6 +2,7 @@
 #include "../core/AppBrand.h"
 #include "../core/AppPaths.h"
 #include "../core/ConsumptionStats.h"
+#include "../core/ResumeStore.h"   // issue #150: the key scheme + the tombstoned clear
 #include <QCryptographicHash>
 #include <QFileInfo>
 #include <QDateTime>
@@ -9,10 +10,11 @@
 #include <cmath>
 
 // Stable, path-derived key prefix for one file's resume state (shared by video / audio / audiobooks).
+// ResumeStore owns the hash so the clear can name this item to the tombstone store the same way the merge
+// document names it; the trailing '/' is this file's own convenience for appending leaves.
 static QString mediaResumeKey(const QString& path)
 {
-    const QByteArray h = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Md5).toHex().left(10);
-    return QStringLiteral("resume/") + QString::fromLatin1(h) + QStringLiteral("/");
+    return ResumeStore::groupFor(path) + QStringLiteral("/");
 }
 
 // Pre-generalization audiobooks were stored under "audiobook/"; read those too so in-progress books resume.
@@ -130,6 +132,11 @@ void PlaybackSession::persistResume()
     store().setValue(k + QStringLiteral("title"), QFileInfo(resumePath_).completeBaseName());
     store().setValue(k + QStringLiteral("ts"), QDateTime::currentSecsSinceEpoch()); // for cross-device merge-by-recency
     store().sync();
+    // A position undoes an earlier clear of the same item (issue #150): re-watching something you finished must
+    // not be suppressed by the tombstone that finishing it left. Newest-wins would carry all but the same-second
+    // case on its own — the merge's `tomb >= item` rule, which favourites share — so this closes that, and says
+    // out loud that "cleared" is not permanent. Cheap: a lookup that finds nothing on every ordinary save.
+    ResumeStore::noteResumed(resumePath_);
     lastSavedPos_ = audioPos_;
 
     // Consumption stats: accrue the forward-only playback delta since the last heartbeat, clamped to [0, 30]s so
@@ -155,7 +162,12 @@ void PlaybackSession::persistResume()
 void PlaybackSession::finishResume()
 {
     if (resumePath_.isEmpty()) return;
-    store().remove(mediaResumeKey(resumePath_));
+    // Through ResumeStore, which removes the group AND records a dated tombstone (issue #150). A bare remove()
+    // made "played to the end" and "this device has never opened that file" the same fact on disk, and the
+    // merge — which cannot delete, because an absence carries no timestamp — read the second one: the cloud
+    // document still holds THIS device's own pre-finish row, so the next sync put the position back with no
+    // second device involved. The tombstone is a clear with a time on it, which the merge can compare.
+    ResumeStore::clear(store(), resumePath_);
     store().remove(legacyAudiobookKey(resumePath_)); // also clear any legacy audiobook bookmark
     store().sync();
     resumePath_.clear();

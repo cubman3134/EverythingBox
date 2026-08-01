@@ -3,6 +3,7 @@
 #include "AppPaths.h"
 #include "Tombstones.h"
 #include "ItemMarks.h"
+#include "ResumeStore.h"      // issue #150: the resume tombstone namespace, shared with the clear sites
 #include "MetaOverrides.h"      // invalidate() after merging the per-item metadata corrections (issue #24)
 #include "ConsumptionStats.h"   // invalidate() after a namespaced-accumulator merge (mdsync T3)
 #include "Settings.h"           // deviceId() — never clobber our own accumulator namespace on merge
@@ -99,10 +100,21 @@ QByteArray tieKey(const QJsonObject& o) { QJsonObject c = o; normalizeAddonIds(c
 // that item". So a store whose row can return to an all-default state must NOT remove it: it leaves a stamped
 // HUSK (an empty record with a fresh timestamp), which is a clear this function CAN compare and which wins.
 // In a store that merges by timestamp, "cleared" and "never known" must not have the same representation.
-// The stores that instead represent a deletion as a Tombstone (favourites, playlists, tag vocab, pinned tags)
-// are the other legal answer — a deletion with a time on it, in its own namespace — but they buy boundedness
-// with Tombstones::compact(30), so they can only be used where losing a deletion after 30 dormant days is
-// acceptable. Anything else, and the merge below silently undoes the user's clear.
+// The stores that instead represent a deletion as a Tombstone (favourites, playlists, tag vocab, pinned tags,
+// and since #150 resume and recents) are the other legal answer — a deletion with a time on it, in its own
+// namespace — but they buy boundedness with Tombstones::compact(30), so they can only be used where losing a
+// deletion after 30 dormant days is acceptable. Anything else, and the merge below silently undoes the user's
+// clear.
+//
+// WHICH OF THE TWO a store gets is not a matter of taste, and #150 is where the rule got its second half. Ask
+// two questions. (1) Are clears bounded by deliberate user actions? A husk is kept for ever, so a store whose
+// clears fire on their own — resume clears on every finished episode — would grow its husks with USAGE and
+// carry every one in the sync document for ever; that store needs the bounded shape. (2) Does the record have
+// a natural shelf life? compact(30) is the price of boundedness: a device dormant 31 days comes back holding a
+// record whose deletion has expired, and resurrects it. A month-old playback position is stale anyway, so
+// resume can pay that; a hide/complete/tag is a deliberate statement with no expiry, so marks cannot — which
+// is exactly why #132 went the other way on the SAME defect. Answer "yes, bounded by the user" and "no, never
+// expires" and you want a husk; answer the other way and you want a tombstone.
 //
 // Should the remote value replace the local one? Newest timestamp wins; on EQUAL timestamps a deterministic
 // ORDER-INDEPENDENT decision — the lexically-greater tie key — so A-merges-B and B-merges-A pick the SAME
@@ -210,14 +222,34 @@ void serializeResumeRecent(QJsonObject& resume, QJsonObject& recent)
     }
 }
 
-void mergeResume(const QJsonObject& resume)
+// A resume clear is a TOMBSTONE, not a husk (issue #150). The pass below still never deletes on ABSENCE — an
+// absent hash is imported, because an absence carries no timestamp — so a clear has to arrive as a dated
+// record of its own, and this store's is a tombstone in the "resume" namespace rather than the stamped husk
+// #132 gave marks. Both are legal answers to the representation rule stated at remoteReplaces; which one a
+// store gets turns on whether its clears are bounded by deliberate user actions and whether the record has a
+// natural shelf life. A resume clear fires on EVERY finished episode, so husks would grow with playback and
+// ride the document for ever, while compact(30) costs only a position that a peer dormant for 31 days brings
+// back — and a month-old playback point is stale anyway. A mark is the mirror image on both counts.
+//
+// The tombstone namespace is GLOBAL (no profile leaf), matching resume/*'s own global keying, and its key is
+// the <hash> this document is already indexed by — both read from ResumeStore, which the clear sites also read
+// from, so the merge and the writers cannot drift apart on the spelling.
+void mergeResume(const QJsonObject& resume, const QJsonArray& remoteTombs)
 {
+    // Merge + IMPORT the peer's clears first, so they are in hand for both passes below and so this device
+    // re-propagates them (mergeTombs records each at its faithful ts).
+    const QHash<QString, qint64> tombs = mergeTombs(ResumeStore::tombStore(), remoteTombs);
+
     // For each item, keep whichever position was saved more recently (ts). Never delete a local entry. On an
     // EQUAL ts, the order-independent value tie-break decides (below), replacing the old keep-local-on-tie.
     for (auto it = resume.begin(); it != resume.end(); ++it)
     {
         const QJsonObject re = it.value().toObject();
         const QString prefix = QStringLiteral("resume/") + it.key() + QLatin1Char('/');
+        // Deliberately NO tombstone check in this loop. One was written first and then removed: whatever it
+        // wrote through, the sweep below re-examined at the same stamp and removed again, so no mutation of it
+        // could ever be observed — favourites needs its check inline because it BUILDS the surviving list here,
+        // while resume rows are individual keys the sweep can revisit. One mechanism, not two that must agree.
         const bool haveLocal = store().contains(prefix + QStringLiteral("pos"));
         if (haveLocal)
         {
@@ -237,15 +269,67 @@ void mergeResume(const QJsonObject& resume)
         if (re.contains(QStringLiteral("ts")))    store().setValue(prefix + QStringLiteral("ts"),    re.value(QStringLiteral("ts")).toDouble());
         if (re.contains(QStringLiteral("title"))) store().setValue(prefix + QStringLiteral("title"), re.value(QStringLiteral("title")).toString());
     }
+
+    // THE suppression pass, over the local rows — which by now include anything the loop above just wrote, so
+    // it covers a tombstoned remote position and a tombstoned local one in the same stroke. It is also the
+    // only half that can carry a peer's clear TO this device: a peer that finished the episode sends a
+    // tombstone and NO resume entry for that hash, so there is nothing above to suppress and the local row has
+    // to be dropped here or the two devices never converge.
+    //
+    // `>=`, matching favourites and playlists: a position stamped in the same second as the clear is suppressed
+    // (you cannot finish what you never saved, so at an equal stamp the clear is the later event), while a
+    // strictly-newer position wins outright — a clear is not a ban, and re-watching works.
+    for (auto t = tombs.begin(); t != tombs.end(); ++t)
+    {
+        const QString prefix = QStringLiteral("resume/") + t.key() + QLatin1Char('/');
+        if (!store().contains(prefix + QStringLiteral("pos")) && !store().contains(prefix + QStringLiteral("ts"))
+            && !store().contains(prefix + QStringLiteral("dur")) && !store().contains(prefix + QStringLiteral("title")))
+            continue;                                     // nothing here to suppress (the ordinary case)
+        const qint64 localTs = static_cast<qint64>(store().value(prefix + QStringLiteral("ts"), 0.0).toDouble());
+        if (t.value() >= localTs) store().remove(QStringLiteral("resume/") + t.key());
+    }
 }
 
-void mergeRecent(const QJsonObject& recent)
+// The tombstone namespace for one profile's recents (issue #150) — per profile, mirroring the store's own
+// namespacing, exactly as favourites and playlists do. RecentStore::remove/clear write here; the cap does not.
+QString recentTombStore(const QString& p) { return QStringLiteral("recent/") + p; }
+
+void serializeRecentTombs(QJsonObject& out)
+{
+    for (const QString& p : profilesFor(QStringLiteral("recent")))
+    {
+        const QJsonArray tombs = tombsToArray(recentTombStore(p));
+        if (!tombs.isEmpty()) out.insert(p, tombs);
+    }
+}
+
+void mergeRecent(const QJsonObject& recent, const QJsonObject& recentTombs)
 {
     // Union the local + remote lists per profile by stable identity (key, else path), keeping the newest ts for
     // each, sorted newest-first and capped.
-    for (auto it = recent.begin(); it != recent.end(); ++it)
+    //
+    // Over the union of profiles named by EITHER half: a peer that cleared a profile's whole list sends
+    // tombstones and no "recent" entry at all for it (RecentStore::clear removes the key, so nothing is left to
+    // serialize), and a pass driven off "recent" alone would never look at that profile — the deletion would
+    // arrive and be ignored, which is the bug wearing a different hat.
+    // "recent" is keyed by the ini key minus its "recent/" prefix, i.e. "<profile>/items"; "recentTombs" is
+    // keyed by the bare profile, like every other tombstone half of the document. Synthesize the data key for a
+    // tombs-only profile rather than the other way round, so the data half's iteration is byte-for-byte what it
+    // was before this issue.
+    QStringList docKeys = recent.keys();
+    for (const QString& p : recentTombs.keys())
     {
-        const QString localKey = QStringLiteral("recent/") + it.key();
+        const QString k = p + QStringLiteral("/items");
+        if (!docKeys.contains(k)) docKeys.push_back(k);
+    }
+    for (const QString& docKey : docKeys)
+    {
+        const QString localKey = QStringLiteral("recent/") + docKey;
+        const int slash = docKey.indexOf(QLatin1Char('/'));
+        const QString profile = slash > 0 ? docKey.left(slash) : docKey;
+        // Merge + IMPORT the peer's removals (faithful ts) so this device re-propagates them.
+        const QHash<QString, qint64> tombs =
+            mergeTombs(recentTombStore(profile), recentTombs.value(profile).toArray());
         QHash<QString, QJsonObject> byId;
         // Dedup by id keeping the winner per remoteReplaces (newest ts; equal ts -> greater canonical bytes).
         // The tie-break is order-independent, so which list is ingested first no longer changes the winner
@@ -266,9 +350,24 @@ void mergeRecent(const QJsonObject& recent)
                     byId.insert(id, o);
             }
         };
-        ingest(QJsonDocument::fromJson(store().value(localKey).toString().toUtf8()).array()); // local first
-        ingest(QJsonDocument::fromJson(it.value().toString().toUtf8()).array());              // then remote
+        ingest(QJsonDocument::fromJson(store().value(localKey).toString().toUtf8()).array());          // local first
+        ingest(QJsonDocument::fromJson(recent.value(docKey).toString().toUtf8()).array());             // then remote
         QList<QJsonObject> merged = byId.values();
+        // Drop what an explicit removal on EITHER device covers, before the cap: a tombstone at or after an
+        // entry's own ts suppresses it, a strictly-newer re-open beats it (so a removal is not permanent), and
+        // suppressing before the cut means a removed entry never occupies one of the 40 slots. The rule and the
+        // `>=` are favourites' — "no tombstone" is an ABSENT key here, never a ts==0 one, so a legacy entry
+        // written before recents were stamped (ts==0) is not swept by 0>=0.
+        for (int i = merged.size() - 1; i >= 0; --i)
+        {
+            const QString id = merged[i].value(QStringLiteral("key")).toString().isEmpty()
+                                   ? merged[i].value(QStringLiteral("path")).toString()
+                                   : merged[i].value(QStringLiteral("key")).toString();
+            const auto t = tombs.constFind(id);
+            if (t != tombs.constEnd()
+                && t.value() >= static_cast<qint64>(merged[i].value(QStringLiteral("ts")).toDouble()))
+                merged.removeAt(i);
+        }
         // Newest-first; ties broken by canonical bytes so the cap-40 cut is deterministic (order-independent).
         // Deliberately canon() and not tieKey(): a recents entry has no addonId field at all (RecentStore
         // writes path/title/kind/thumb/key/system/ts), so normalizing here would be motion with no reachable
@@ -280,6 +379,9 @@ void mergeRecent(const QJsonObject& recent)
         });
         QJsonArray out;
         for (int i = 0; i < merged.size() && i < 40; ++i) out.append(merged[i]); // cap matches RecentStore's
+        // An empty result is written as "[]" and NOT removed. Tidying the key away would read identically to
+        // every caller (RecentStore::list parses "[]" and an absent key to the same empty list) and no
+        // assertion could tell the two apart, so the store keeps the shape it had before #150.
         store().setValue(localKey, QString::fromUtf8(QJsonDocument(out).toJson(QJsonDocument::Compact)));
     }
 }
@@ -612,8 +714,9 @@ void mergeNamespaced(const QString& rootPrefix, const QJsonObject& in, const QSt
 
 void CloudMerge::serializeAll(QJsonObject& root)
 {
-    QJsonObject resume, recent, marks, favorites, playlists, stats, playstats, metaoverrides;
+    QJsonObject resume, recent, recentTombs, marks, favorites, playlists, stats, playstats, metaoverrides;
     serializeResumeRecent(resume, recent);
+    serializeRecentTombs(recentTombs);                           // issue #150: the explicit removals
     serializeMarks(marks);
     serializeFavorites(favorites);
     serializePlaylists(playlists);
@@ -622,6 +725,14 @@ void CloudMerge::serializeAll(QJsonObject& root)
     serializeNamespaced(QStringLiteral("playstats"), playstats);
     root.insert(QStringLiteral("resume"), resume);
     root.insert(QStringLiteral("recent"), recent);
+    // The two deletion namespaces #150 added, carried as SEPARATE root keys rather than by re-shaping "resume"
+    // / "recent" into {items,tombs}. That is what makes the mixed-version fleet work in the direction that
+    // cannot be fixed later: an already-shipped build reads root["resume"] as a flat hash->object map and
+    // root["recent"]'s per-profile value as the list JSON STRING, so re-shaping either would have made every
+    // old device read an empty document and stop merging progress at all. Unknown root keys are ignored by
+    // every build (mergeAll reads by name), so these ride along invisibly until the peer is upgraded.
+    root.insert(QStringLiteral("resumeTombs"), tombsToArray(ResumeStore::tombStore()));
+    root.insert(QStringLiteral("recentTombs"), recentTombs);
     root.insert(QStringLiteral("marks"), marks);
     root.insert(QStringLiteral("favorites"), favorites);
     root.insert(QStringLiteral("playlists"), playlists);
@@ -632,8 +743,10 @@ void CloudMerge::serializeAll(QJsonObject& root)
 
 void CloudMerge::mergeAll(const QJsonObject& root)
 {
-    mergeResume(root.value(QStringLiteral("resume")).toObject());
-    mergeRecent(root.value(QStringLiteral("recent")).toObject());
+    mergeResume(root.value(QStringLiteral("resume")).toObject(),
+                root.value(QStringLiteral("resumeTombs")).toArray());
+    mergeRecent(root.value(QStringLiteral("recent")).toObject(),
+                root.value(QStringLiteral("recentTombs")).toObject());
     mergeMarks(root.value(QStringLiteral("marks")).toObject());
     mergeFavorites(root.value(QStringLiteral("favorites")).toObject());
     mergePlaylists(root.value(QStringLiteral("playlists")).toObject());
