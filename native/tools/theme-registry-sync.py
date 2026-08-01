@@ -26,10 +26,12 @@ Usage:
   theme-registry-sync.py            # print each bundled theme's canonical hash
   theme-registry-sync.py --check    # gate: compare against REGISTRY-SYNC.json (exit 1 on drift)
   theme-registry-sync.py --update   # refresh REGISTRY-SYNC.json after republishing
+  theme-registry-sync.py --publish <registry-dir>   # copy the record's published targets into a checkout
 """
 import hashlib
 import json
 import os
+import shutil
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -86,6 +88,83 @@ def selftest():
     return []
 
 
+def _write(path, text):
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+
+
+def _read(path):
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def _selftest_publish():
+    """--publish copies what the record names, replaces wholesale, and touches nothing else.
+
+    Three properties, each a real failure mode rather than a hypothetical. (1) The registry carries themes
+    this repo does not bundle — Default, Grid, Lumen, Midnight — so a sync that walked themes2/ instead of
+    the record would delete four themes on its first run. (2) A theme folder must be REPLACED, not merged:
+    the canonical hash covers theme.json alone, so a sound file dropped from the bundled theme would
+    survive every check we have while still being served. (3) A recorded theme the registry does not
+    already carry is a catalog change, and index.json entries hold a `description` that exists nowhere in
+    theme.json — publishing the folder alone would serve a theme nothing lists.
+    """
+    import tempfile
+    problems = []
+    rec = {
+        "publishedThemes": {"Shared": {"registryPath": "themes2/Shared", "canonicalSha256": ""}},
+        "publishedDocs": {"DOC.md": {"registryPath": "DOC.md", "sha256": ""}},
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        src_themes = os.path.join(tmp, "bundled")
+        registry = os.path.join(tmp, "registry")
+
+        os.makedirs(os.path.join(src_themes, "Shared", "sounds"))
+        _write(os.path.join(src_themes, "Shared", "theme.json"), '{"name":"Shared","views":{}}')
+        _write(os.path.join(src_themes, "Shared", "sounds", "new.wav"), "NEW")
+        _write(os.path.join(src_themes, "DOC.md"), "# doc\n")
+
+        # The registry starts with an OLDER Shared (carrying a file the bundled copy no longer has) and a
+        # registry-only theme the record says nothing about.
+        os.makedirs(os.path.join(registry, "themes2", "Shared", "sounds"))
+        _write(os.path.join(registry, "themes2", "Shared", "theme.json"), '{"name":"old"}')
+        _write(os.path.join(registry, "themes2", "Shared", "sounds", "stale.wav"), "OLD")
+        os.makedirs(os.path.join(registry, "themes2", "RegistryOnly"))
+        _write(os.path.join(registry, "themes2", "RegistryOnly", "theme.json"), '{"name":"RegistryOnly"}')
+        _write(os.path.join(registry, "DOC.md"), "# stale\n")
+
+        copied, bad = publish_into(rec, src_themes, registry)
+        if bad:
+            problems.append("--publish refused a well-formed registry: %s" % "; ".join(bad))
+        if sorted(copied) != ["DOC.md", "themes2/Shared"]:
+            problems.append("--publish copied %r, expected the two recorded targets" % sorted(copied))
+        if not os.path.isfile(os.path.join(registry, "themes2", "Shared", "sounds", "new.wav")):
+            problems.append("--publish did not copy a theme's subdirectory contents.")
+        if os.path.exists(os.path.join(registry, "themes2", "Shared", "sounds", "stale.wav")):
+            problems.append("--publish MERGED into the theme folder instead of replacing it, so a file the "
+                            "bundled theme dropped is still being served.")
+        if not os.path.isfile(os.path.join(registry, "themes2", "RegistryOnly", "theme.json")):
+            problems.append("--publish deleted a registry-only theme. It must copy the record's targets and "
+                            "leave everything else alone.")
+        if _read(os.path.join(registry, "DOC.md")) != "# doc\n":
+            problems.append("--publish did not overwrite the published doc.")
+
+        # A recorded theme the registry does not carry: refuse, and change nothing.
+        rec2 = {"publishedThemes": {"Absent": {"registryPath": "themes2/Absent", "canonicalSha256": ""}},
+                "publishedDocs": {}}
+        os.makedirs(os.path.join(src_themes, "Absent"))
+        _write(os.path.join(src_themes, "Absent", "theme.json"), '{"name":"Absent"}')
+        copied2, bad2 = publish_into(rec2, src_themes, registry)
+        if not bad2:
+            problems.append("--publish created themes2/Absent in the registry. A theme the registry does "
+                            "not already carry needs an index.json entry that cannot be generated.")
+        if copied2:
+            problems.append("--publish reported copies while refusing: %r" % copied2)
+        if os.path.exists(os.path.join(registry, "themes2", "Absent")):
+            problems.append("--publish created the folder it claimed to refuse.")
+    return problems
+
+
 def bundled_themes():
     """Every folder under themes2/ that holds a theme.json, sorted."""
     out = []
@@ -100,11 +179,99 @@ def load_record():
         return json.load(f)
 
 
+def published_targets(rec):
+    """(kind, name, registry-relative destination) for everything the record publishes.
+
+    ONE place decides what "published" means. --publish copies exactly this list and --verify-remote fetches
+    exactly this list, so the two cannot disagree about scope — and neither walks themes2/, which carries a
+    different set of themes than the registry does.
+
+    No source path is returned: --publish resolves one against whichever themes dir it was handed, and
+    --verify-remote has no local source at all. Returning a value only one caller wants, computed from a
+    module global the other caller is trying not to use, is how a helper starts lying.
+    """
+    out = []
+    for name in sorted(rec.get("publishedThemes", {})):
+        out.append(("theme", name, rec["publishedThemes"][name].get("registryPath") or ("themes2/" + name)))
+    for doc_name in sorted(rec.get("publishedDocs", {})):
+        out.append(("doc", doc_name, rec["publishedDocs"][doc_name].get("registryPath") or doc_name))
+    return out
+
+
+def publish_into(rec, themes_dir, registry_dir):
+    """Copy the record's published targets from themes_dir into registry_dir.
+
+    Parameterised rather than reading the module globals so _selftest_publish can drive it against scratch
+    directories — the whole point of putting the copy rules here instead of in the workflow.
+
+    Returns (copied, problems). A non-empty problems list means NOTHING was copied for that target and the
+    caller must not commit: publishing half a record is worse than publishing none of it.
+    """
+    problems = []
+    copied = []
+    if not os.path.isdir(registry_dir):
+        return [], ["registry checkout not found at %s" % registry_dir]
+
+    for kind, name, dest_rel in published_targets(rec):
+        # `name` is the folder name for a theme and the filename for a doc, and both sit directly under
+        # themes_dir — which is why the source can be derived here rather than handed in.
+        src = os.path.join(themes_dir, name)
+        dest = os.path.join(registry_dir, *dest_rel.split("/"))
+
+        if not os.path.exists(src):
+            problems.append("%s is recorded as published but is missing from themes2/." % name)
+            continue
+
+        # REFUSAL: never CREATE a path in the registry. A recorded theme the registry does not already
+        # carry is a catalog change — index.json entries hold a `description` that exists nowhere in
+        # theme.json, so it cannot be generated, and a folder nothing lists is a theme nobody can find.
+        if kind == "theme" and not os.path.isdir(dest):
+            problems.append(
+                "%s is recorded as published to %s, but the registry has no such folder.\n"
+                "    Add its index.json entry there by hand first (name, author, description, dir): the\n"
+                "    description exists nowhere in theme.json, so this job will not invent one." % (name, dest_rel))
+            continue
+        if kind == "doc" and not os.path.isfile(dest):
+            problems.append("%s is recorded as published to %s, but the registry has no such file."
+                            % (name, dest_rel))
+            continue
+
+        if kind == "theme":
+            # WHOLESALE, not merge. The canonical hash covers theme.json alone, so a sound or font dropped
+            # from the bundled theme would otherwise survive here and keep being served, invisible to every
+            # check in this file.
+            shutil.rmtree(dest)
+            shutil.copytree(src, dest)
+        else:
+            shutil.copy2(src, dest)
+        copied.append(dest_rel)
+
+    if problems:
+        return [], problems
+    return copied, []
+
+
+def publish(registry_dir):
+    """--publish entry point. Returns a list of problems; empty means the copy is done."""
+    try:
+        rec = load_record()
+    except Exception as exc:                                            # noqa: BLE001
+        return ["cannot read %s: %s" % (RECORD, exc)]
+    copied, problems = publish_into(rec, THEMES, registry_dir)
+    if problems:
+        return problems
+    for dest_rel in copied:
+        print("  published %s" % dest_rel)
+    print("  %d target(s) published into %s; everything else there was left untouched."
+          % (len(copied), registry_dir))
+    return []
+
+
 def check():
     # Before comparing anything: is the comparison itself sound? A hash that varies by checkout makes every
     # result below meaningless in one direction or the other, so it is checked first and reported as its own
     # problem rather than as drift in a file nobody touched.
-    bad = selftest()
+    bad = selftest() + _selftest_publish()
     themes = bundled_themes()
 
     # "Did I scan anything?" — a gate that walks an empty corpus prints PASS, which is worse than no gate
@@ -214,6 +381,14 @@ def main():
     if arg == "--update":
         update()
         return 0
+    if arg == "--publish":
+        if len(sys.argv) < 3:
+            print("  --publish needs the path to a registry checkout")
+            return 1
+        problems = publish(sys.argv[2])
+        for p in problems:
+            print("  " + p)
+        return 1 if problems else 0
     for name in bundled_themes():
         print("%-12s %s" % (name, canonical_hash(os.path.join(THEMES, name, "theme.json"))[0]))
     for doc_name in DOCS:
