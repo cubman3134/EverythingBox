@@ -145,7 +145,8 @@ void MetaOverrides::applyTo(const Override& ov, MediaArt& art)
 
 void MetaOverrides::applyTo(const Override& ov, QVariantMap& row)
 {
-    if (ov.isEmpty()) return;
+    // No isEmpty() early-out: put() and the image guard below already make an empty override a no-op, and a
+    // third guard saying the same thing would be a line no mutation could kill.
     auto put = [&row](const QString& key, const QString& value) {
         if (!value.isEmpty()) row.insert(key, value);
     };

@@ -337,6 +337,36 @@ int main(int argc, char** argv)
             MediaDetail blank;
             MetaOverrides::applyTo(ov, blank);
             CHECK(blank.valid, "composite: a corrected-but-unscraped item becomes a valid card");
+
+            // The themed row map a theme binds through. Some surfaces assemble it from a session art cache
+            // that never went near MediaArt on this pass, so the composite has to write the scalar role
+            // aliases itself — otherwise a corrected poster would show on the detail cover and NOT on the
+            // element bound to selected.poster, on the same screen.
+            QVariantMap themed;
+            scraped.art.writeInto(themed);
+            themed.insert(QStringLiteral("title"), scraped.title);
+            themed.insert(QStringLiteral("subtitle"), scraped.subtitle);
+            themed.insert(QStringLiteral("image"), scraped.imageUrl);
+            MetaOverrides::applyTo(ov, themed);
+            CHECK(themed.value(QStringLiteral("title")).toString() == QStringLiteral("Bonk's Adventure"),
+                  "row map: selected.title takes the correction");
+            CHECK(themed.value(QStringLiteral("subtitle")).toString() == QStringLiteral("1993"),
+                  "row map: an unset field leaves the scrape alone");
+            CHECK(themed.value(QStringLiteral("image")).toString() == QStringLiteral("https://x.invalid/right.jpg"),
+                  "row map: selected.image takes the corrected poster");
+            CHECK(themed.value(QStringLiteral("poster")).toString() == QStringLiteral("https://x.invalid/right.jpg"),
+                  "row map: the selected.poster scalar alias too");
+            CHECK(themed.value(QStringLiteral("thumb")).toString() == QStringLiteral("https://x.invalid/right.jpg"),
+                  "row map: …and selected.thumb");
+            CHECK(themed.value(QStringLiteral("images")).toMap()
+                      .value(QStringLiteral("poster")).toStringList().value(0)
+                      == QStringLiteral("https://x.invalid/right.jpg"),
+                  "row map: the correction leads the poster gallery list");
+            QVariantMap untouchedRow{ { QStringLiteral("title"), QStringLiteral("Bonk 3") } };
+            MetaOverrides::applyTo(MetaOverrides::Override{}, untouchedRow);
+            CHECK(untouchedRow.size() == 1 && untouchedRow.value(QStringLiteral("title")).toString()
+                                                  == QStringLiteral("Bonk 3"),
+                  "row map: an empty override adds nothing and changes nothing");
         }
 
         // -- through MetaCache's read primitives, and ACROSS a re-scrape --------------------------------
