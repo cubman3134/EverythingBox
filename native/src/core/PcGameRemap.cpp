@@ -165,6 +165,56 @@ private:
 //   carry a real verdict the newer updatedAt wins, because that is the user's most recent statement.
 // tags: UNION, destination order first. Tags are additive by nature and dropping one loses a shelf.
 // updatedAt: max — the record's newest write is what the multi-device merge orders on.
+//
+// …WITH ONE EXCEPTION, AND IT IS THE WHOLE OF ISSUE #166. Every rule above is monotone-ADD-ONLY: it can turn
+// false into true and it can grow the tag list, and it can never do the reverse. That is right for two LIVE
+// records collapsing into one, which is what the rules were written for. It is wrong for the one blob shape
+// that means the opposite of a record — an ALL-DEFAULT blob, which since #132 is not "an empty record" but a
+// CLEAR: the stamped husk ItemMarks::saveItem leaves where a mark was removed. OR-ing an older marked copy
+// into a newer husk un-does the user's clear and re-stamps the result as the newest thing in the fleet, so
+// the un-clear then propagates to every device. A clear must not be resurrected by an older record — that is
+// #132's rule, and this merge is inside its scope, not outside it.
+//
+// So: THE NEWER SIDE, IF IT IS A CLEAR, WINS OUTRIGHT. Both directions, because both are reachable:
+//   * destination newer — this device remapped, the user then cleared the combined tile, and a peer that has
+//     not remapped re-imported the old row on the next merge (a retired row is DELETED, see remapMarks, so
+//     an absence reads as ignorance and the peer's copy comes back). The next library refresh would fold the
+//     stale copy back in.
+//   * SOURCE newer — the mirror image: a peer that has not remapped cleared the mark under the OLD id, so
+//     what arrives here under that id is that peer's husk, and the record this device already moved to the
+//     combined id is the stale one.
+// It is a pure function of the two blobs and of nothing else, which is the property that matters: every
+// device reaches the same verdict whatever order they ran the repair in. A device-local ledger of "what this
+// device already absorbed" would fix the first case and not the second — the peer has no such ledger — and
+// would make the outcome depend on which device ran the repair first, which is exactly what #166 asks not to
+// happen.
+//
+// EQUAL stamps fall through to the ordinary rules deliberately: at equal stamps neither side is "the more
+// recent statement", so there is nothing for a clear to be newer THAN, and the union is the order-independent
+// answer. RESIDUAL, stated rather than hidden: a PARTIAL clear (one tag removed, the hide kept) is not
+// distinguishable from "this record never carried that tag" by any function of the two blobs, because marks
+// carry one stamp per RECORD and not per field — so an older peer copy can still restore a single retired
+// tag until that peer remaps too. Closing that needs per-field stamps in ItemMarks, not a rule here.
+bool isClearedMarks(const QJsonObject& o)
+{
+    // The same predicate as ItemMarks' isDefault (ItemMarks.cpp:82), read off the blob: no hide, no verdict,
+    // no tags. Deliberately ignores updatedAt, exactly as that one does — a husk IS an all-default blob.
+    const QString c = o.value(QStringLiteral("completion")).toString();
+    return !o.value(QStringLiteral("hidden")).toBool()
+        && (c.isEmpty() || c == QLatin1String("none"))
+        && o.value(QStringLiteral("tags")).toArray().isEmpty();
+}
+
+QString clearedBlob(qint64 updatedAt)
+{
+    QJsonObject o;
+    o.insert(QStringLiteral("hidden"), false);
+    o.insert(QStringLiteral("completion"), QStringLiteral("none"));
+    o.insert(QStringLiteral("tags"), QJsonArray());
+    o.insert(QStringLiteral("updatedAt"), double(updatedAt));
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
 QString mergeCompletion(const QString& a, qint64 ta, const QString& b, qint64 tb)
 {
     const bool aNone = a.isEmpty() || a == QLatin1String("none");
@@ -180,6 +230,13 @@ QString mergeMarks(const QString& dstJson, const QString& srcJson)
     const QJsonObject b = QJsonDocument::fromJson(srcJson.toUtf8()).object();
     const qint64 ta = qint64(a.value(QStringLiteral("updatedAt")).toDouble());
     const qint64 tb = qint64(b.value(QStringLiteral("updatedAt")).toDouble());
+
+    // #166: the newer side, if it is a CLEAR, wins outright. See the block comment above.
+    if (ta != tb)
+    {
+        const QJsonObject& newer = (ta > tb) ? a : b;
+        if (isClearedMarks(newer)) return clearedBlob(std::max(ta, tb));
+    }
 
     QJsonObject o;
     o.insert(QStringLiteral("hidden"), a.value(QStringLiteral("hidden")).toBool()
@@ -248,6 +305,23 @@ QString mergeStats(const QString& dstJson, const QString& srcJson)
 // here can reach a state where neither copy exists.
 
 // marks/<profile>/items/<md5(id)> -> one JSON blob per item (ItemMarks.h).
+//
+// THE RETIRED SOURCE IS DELETED, AND IT IS NOT DATED (issue #166). Every OTHER place in the tree that stops
+// holding a value for a per-item key leaves a dated husk (#132) or a tombstone (#150), because there
+// "cleared" and "never known" must not share a representation. A REMAP IS NEITHER. It is a device-local
+// repair, not a statement by the user, so it has nothing true to say about the old key and must not date
+// anything: a husk stamped now would be a clear that is newer than every peer's genuine data, and a peer
+// that has not run the repair yet — the device still READING that key — would have its real marks deleted by
+// a repair it did not run. That is a worse loss than the one #132 fixed, and it is the loss #132's shape
+// would cause if it were applied here mechanically.
+//
+// WHAT A PEER THAT HAS NOT REMAPPED SEES IS THEREFORE: NOTHING. Its rows under the old id stand untouched
+// until it runs the repair itself, and that is the decision — not an accident of which device ran the repair
+// first. The price of not dating the retirement is that the merge's never-delete pass re-imports the old row
+// here on the next sync (an absence has no timestamp, so it reads as ignorance — CloudMerge.cpp's
+// remoteReplaces states the rule). That re-import is harmless BECAUSE mergeMarks refuses to let a stale copy
+// un-do a newer clear; without that guard the round trip would silently restore a hide the user removed. The
+// orphan goes away for good once the peer remaps too.
 void remapMarks(QSettings& s, const QHash<QString, QString>& table)
 {
     s.beginGroup(QStringLiteral("marks"));
@@ -281,6 +355,28 @@ void remapMarks(QSettings& s, const QHash<QString, QString>& table)
 // that ConsumptionStats::migrateStatsProfile folds away. Both are handled: the remap may well run before
 // that fold on a machine upgrading from an old build, and a record it failed to see would be orphaned by
 // the fold a moment later.
+//
+// THE ACCUMULATORS ANSWER #166 DIFFERENTLY FROM marks, AND THE DIFFERENCE IS NOT A JUDGEMENT CALL — it is
+// what their merge rule already is. marks merge per ROW by newest updatedAt; stats and playstats merge per
+// DEVICE NAMESPACE, copied wholesale under a `lastWrite` freshness gate (CloudMerge's mergeNamespaced). A
+// per-row husk is therefore not a thing that merge can even compare — the namespace is replaced or kept
+// entire — so the two representations #132 and #150 offer are both unavailable here, and deleting the row is
+// the only shape there is.
+//
+// It is also already the right one, for one reason that must not be undone: THIS PASS NEVER WRITES
+// `lastWrite`. That leaf is stamped only by the namespace's OWNER at a real accrual, and it is the entire
+// freshness gate. A remap that stamped it — including in the foreign namespaces this pass rewrites, which
+// this device does not own — would make a repair outrank the owner's genuine data, and mergeNamespaced would
+// then hand every peer this device's rekeyed copy in place of the one it is still reading. Leaving the stamp
+// alone is what makes the repair invisible to a peer, which is the same answer marks reach by not dating the
+// retirement, reached by a different mechanism. probe_cloudmerge §30f is the assertion that says so.
+//
+// The residual, stated rather than hidden: once the OWNER of a remapped namespace next accrues, its
+// lastWrite moves and peers take the rekeyed copy verbatim — so a peer that has not remapped stops seeing
+// that device's contribution to the game until it remaps too. Nothing is lost, and it cannot be avoided
+// while the rollups stay coherent: leaving the source row standing beside the destination would double the
+// item against `cat/` (stats) and against profileTotalSeconds (playstats), which is a wrong number on screen
+// rather than a delayed-correct one.
 void remapConsumption(QSettings& s, const QHash<QString, QString>& table)
 {
     s.beginGroup(QStringLiteral("stats"));

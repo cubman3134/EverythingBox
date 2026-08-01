@@ -473,6 +473,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/MissedDismiss.cpp   src/core/MissedDismiss.h      # issue #25: ditto for the "you missed" dismissals
         src/core/TraktMissed.cpp     src/core/TraktMissed.h        # (MissedDismiss::prune -> missedDismissExpired)
         src/core/ConsumptionStats.cpp src/core/ConsumptionStats.h  # mdsync T3: mergeAll() invalidates its cache
+        src/core/PlayStats.cpp       src/core/PlayStats.h          # issue #166: the reader §30f asserts through
+        # issue #166: the PC-game id repair, played against the merge. It is the last place in the tree that
+        # removes a synced per-item row, so what a peer sees while it is mid-repair is a CloudMerge question
+        # and belongs here rather than in probe_pcgames (which has no merge linked). PcGameId comes with it:
+        # remapTable() calls effectiveItemId, so the symbol is needed even though §30 builds its own table.
+        # Neither unit gets EB_PCGAMEID_TEST_SEAM here — un-defined they resolve to AppPaths::dataDir()'s ini,
+        # which IS this probe's per-process scratch ini, so the remap and the stores share one file already.
+        src/core/PcGameId.cpp        src/core/PcGameId.h
+        src/core/PcGameRemap.cpp     src/core/PcGameRemap.h
         src/core/CloudSync.cpp       src/core/CloudSync.h          # mdsync T4: the device-local carve-out + bundle hands-off
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h        # CloudSync::applySettingsJson closes an open txn (#26)
         src/core/TraktRead.cpp       src/core/TraktRead.h          # (TraktSync's id mapping + time parser)
