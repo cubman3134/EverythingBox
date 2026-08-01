@@ -9989,6 +9989,14 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     v->setSpacing(14);
     build(v);
     v->addStretch(1);
+    // Cleared BEFORE the setWidget below, not after it (issue #122). setWidget destroys the OLD content, and a
+    // dialog put there by showDialogPanel is one of its children — so from that call until this assignment a raw
+    // panelDialog_ would name freed memory. That window is not empty: setCurrentWidget below emits
+    // currentChanged, whose slot is updateNavForPage(), which runs panelDialog_->inherits() — a virtual dispatch
+    // through the dead dialog, which is the access violation in #122's dump. Clearing first closes that window;
+    // panelDialog_ being a QPointer closes every OTHER route to the same dangle. Either alone suffices; both are
+    // kept because they guard different things — this line the order, the type the ownership.
+    panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     // NOTE: this deletes the previous content widget SYNCHRONOUSLY, so a hosted dialog that is sitting in a
     // nested event loop must not let a navigation reach here — it would be freed under its own stack frame.
     // What gets one in there is the QUEUED finished() connection in showDialogPanel: a queued call carries
@@ -9998,7 +10006,6 @@ void MainWindow::showPanel(const QString& title, const std::function<void(QVBoxL
     // thing that knows it is busy — see RegistryBrowser::done.
     panelScroll_->setWidget(content);
     stack_->setCurrentWidget(panelPage_);
-    panelDialog_ = nullptr; // a plain panel: no inline dialog owns the keyboard
     updateNavForPage();     // panel -> panel doesn't fire currentChanged; re-register the ring explicitly
     // Drop focus onto the first interactive row so arrow keys / a remote work without a click first.
     // Deferred a tick so the new content widget is laid out and its children are focusable.
