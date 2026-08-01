@@ -393,6 +393,59 @@ else
 fi
 echo
 
+# Metadata-editor baseline gate (issue #24 review). The editor corrects an item against what the PROVIDERS
+# said, and the richest copy of that is the live /meta reply the open card was drawn from — richer than the
+# scrape cache — so HomeView holds it. It is written only when a reply ARRIVES: an item whose addon returns
+# nothing (offline, or gone upstream) writes none, and an UNKEYED member is then still holding the PREVIOUS
+# item's card. The editor, opened on this item's key, seeded its OSK from another item's title/synopsis/
+# poster, ran the "typed back what the scraper found -> store nothing" comparison against them, and wrote
+# them into THIS item's override — which CloudMerge carries to every device. A corrupted record, not a pixel.
+#
+# MetaEdit::ScrapedSnapshot makes that unspellable, and probe_meta asserts the type itself (remember(A), then
+# forKey(B) is invalid). HomeView is the Qt Widgets app, which no headless probe links, so what is gated here
+# is the WIRING: the member IS that type, the read goes through forKey(), and nothing in HomeView touches it
+# any other way. Going back to `if (scrapedDetail_.valid) return scrapedDetail_;` leaves every probe green
+# and resurfaces only as one item's synopsis stored under another item's key, on every device.
+echo "=== metadata-editor baseline (keyed scrape snapshot) ==="
+HVCPP="$HERE/../src/ui/HomeView.cpp"
+HVH="$HERE/../src/ui/HomeView.h"
+ms_fail=0
+ms_note() { echo "  $1"; ms_fail=1; }
+if [ ! -f "$HVCPP" ] || [ ! -f "$HVH" ]; then
+  ms_note "HomeView.{h,cpp} not found under $HERE/../src/ui — this gate is asserting nothing."
+else
+  grep -qE 'MetaEdit::ScrapedSnapshot[[:space:]]+scrapedDetail_' "$HVH" \
+    || ms_note "HomeView.h no longer declares scrapedDetail_ as a MetaEdit::ScrapedSnapshot — a bare MediaDetail can be read without naming the item it belongs to, which is the whole defect."
+  # Line comments stripped, so the prose above the member (which discusses it at length) never trips this.
+  ms_src="$(sed -E 's://.*$::' "$HVCPP")"
+  # Every mention of the member with the two LEGAL spellings deleted; whatever still matches is a raw read
+  # or a raw assignment.
+  ms_raw="$(printf '%s\n' "$ms_src" | grep -n 'scrapedDetail_' \
+            | sed -E 's/scrapedDetail_\.(forKey|remember)\(//g' | grep 'scrapedDetail_' || true)"
+  if [ -n "$ms_raw" ]; then
+    ms_note "scrapedDetail_ is touched outside forKey()/remember() — an unkeyed read is the defect itself:"
+    printf '%s\n' "$ms_raw" | sed 's|^|    |'
+  fi
+  printf '%s\n' "$ms_src" | grep -q 'scrapedDetail_\.remember(' \
+    || ms_note "nothing stamps the snapshot any more (showMeta's fromProvider branch): the editor drops back to the cache for every item, and the open card visibly strips on each edit."
+  ms_body="$(printf '%s\n' "$ms_src" | awk '
+    /^MediaDetail HomeView::detailScrapedValues\(\) const/ { inbody = 1 }
+    inbody { print }
+    inbody && /^}/ { exit }')"
+  if [ -z "$(printf '%s' "$ms_body" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::detailScrapedValues not found — the gate stopped matching its signature."
+  else
+    printf '%s' "$ms_body" | grep -q 'scrapedDetail_\.forKey(' \
+      || ms_note "detailScrapedValues does not read the snapshot through forKey()."
+    printf '%s' "$ms_body" | grep -q 'MetaCache::keyFor(' \
+      || ms_note "detailScrapedValues no longer derives the open item's key — forKey() is only as honest as the key handed to it."
+  fi
+fi
+if [ "$ms_fail" -eq 0 ]; then echo "PASS: metadata-editor baseline (keyed scrape snapshot)"; else
+  echo "FAIL: metadata-editor baseline (keyed scrape snapshot)"; fail=1
+fi
+echo
+
 # Proxy-header log discipline (#43). A stream's behaviorHints.proxyHeaders routinely carry a signed-URL
 # token, a session cookie or an Authorization value, and stream_debug.log is a file users paste into bug
 # reports. probe_stremio pins that StreamHeaders::logSummary emits NAMES and never values; this gate pins the

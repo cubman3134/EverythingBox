@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QPointer>
 #include "../addons/AddonModels.h"
+#include "../core/ScrapedSnapshot.h" // the metadata editor's baseline, stamped with the item it is for (#24)
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
 
 class AddonManager;
@@ -430,7 +431,11 @@ private:
     // way the user's correction is composited on top before anything is drawn.
     void showMeta(const MediaDetail& scraped, bool fromProvider = true);
     void showMetaComposited(const MediaDetail& detail);   // the painter; `detail` is already composited
-    MediaDetail scrapedDetail_;   // the open card as the PROVIDER gave it (issue #24: the reset target)
+    // The open classic card as the PROVIDERS gave it (issue #24: the editor's baseline and the reset target),
+    // stamped with the item it is for. KEYED, not bare: the reply is written only when one ARRIVES, so an
+    // item whose addon returns nothing would otherwise be edited against the PREVIOUS item's card — see
+    // ScrapedSnapshot.h for the whole failure and why the key lives beside the value.
+    MetaEdit::ScrapedSnapshot scrapedDetail_;
     void hideMeta();
     // Resolve a leaf to a playable/readable source and emit openItem(). Pure (takes all context as args, not
     // detail-page state), so both the classic detail Play button and the themed inline Play reuse it.

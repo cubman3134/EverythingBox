@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.196 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.197 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -208,6 +208,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ArchiveRom.cpp   src/core/ArchiveRom.h
         src/core/RecentStore.cpp  src/core/RecentStore.h
         src/core/MetaCache.cpp src/core/MetaOverrides.cpp    src/core/MetaCache.h
+        src/core/ScrapedSnapshot.h   # issue #24: the metadata editor's baseline, keyed to its item
         src/core/GamelistStore.cpp src/core/GamelistStore.h
         src/core/UiTestServer.cpp src/core/UiTestServer.h
         src/core/ProfileStore.cpp src/core/ProfileStore.h
@@ -651,6 +652,7 @@ if(EVERYTHINGBOX_BUILD_APP)
     # (QSettings over the shared ini + header-only AppPaths/AppBrand), so it adds no link dependency here.
     add_executable(probe_meta tools/probe_meta.cpp src/core/MetaCache.cpp src/core/MetaOverrides.cpp
         src/core/MetaCache.h src/core/MetaOverrides.h
+        src/core/ScrapedSnapshot.h   # the metadata editor's keyed baseline (header-only, pure)
         src/addons/AddonModels.cpp src/addons/AddonModels.h)
     target_include_directories(probe_meta PRIVATE src src/core src/addons)
     target_link_libraries(probe_meta PRIVATE Qt6::Core Qt6::Network)

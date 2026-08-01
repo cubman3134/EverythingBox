@@ -4763,8 +4763,14 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
 MediaDetail HomeView::detailScrapedValues() const
 {
     if (stack_.isEmpty() || !stack_.last().detail) return {};
-    if (scrapedDetail_.valid) return scrapedDetail_;
-    return MetaCache::cachedDetailScraped(MetaCache::keyFor(stack_.last().item));
+    const QString key = MetaCache::keyFor(stack_.last().item);
+    // ONLY this item's own snapshot. Asking for it by key is what stops the previous card's reply from
+    // standing in for an item whose addon returned nothing — which would have seeded the editor, and the
+    // "typed back what the scraper found" comparison, with ANOTHER item's values, and written them into this
+    // item's override. When there is none, the per-item scrape cache is the honest fallback.
+    const MediaDetail snap = scrapedDetail_.forKey(key);
+    if (snap.valid) return snap;
+    return MetaCache::cachedDetailScraped(key);
 }
 
 void HomeView::refreshDetailMetaCard()
@@ -4781,13 +4787,14 @@ void HomeView::refreshDetailMetaCard()
 
 void HomeView::showMeta(const MediaDetail& scraped, bool fromProvider)
 {
+    const QString key = stack_.isEmpty() ? QString() : MetaCache::keyFor(stack_.last().item);
     // Remember the provider's own answer before compositing, so the editor can show what it is correcting and
     // a reset has something to go back to. A re-render (fromProvider=false) must NOT overwrite it — it is
-    // handed this very value, and on the offline path it is handed an already-cached card.
-    if (fromProvider) scrapedDetail_ = scraped;
+    // handed this very value, and on the offline path it is handed an already-cached card. Stamped with the
+    // item's key: the snapshot is readable only for the item it was taken for.
+    if (fromProvider) scrapedDetail_.remember(key, scraped);
     MediaDetail d = scraped;
-    MetaOverrides::applyTo(MetaOverrides::get(stack_.isEmpty() ? QString()
-                                                               : MetaCache::keyFor(stack_.last().item)), d);
+    MetaOverrides::applyTo(MetaOverrides::get(key), d);
     showMetaComposited(d);
 }
 

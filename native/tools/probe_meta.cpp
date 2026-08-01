@@ -11,6 +11,7 @@
 #include "AppPaths.h"
 #include "MetaCache.h"
 #include "MetaOverrides.h"
+#include "ScrapedSnapshot.h"
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -483,6 +484,59 @@ int main(int argc, char** argv)
         MetaOverrides::reset(QString());
         CHECK(!MetaOverrides::has(QString()), "an item with no identity can carry no override");
         CHECK(MetaOverrides::count() == 0, "…and storing under an empty key writes nothing");
+
+        // -- the editor's baseline snapshot, keyed (src/core/ScrapedSnapshot.h) --------------------------
+        // The editor corrects an item against what the PROVIDERS said, and the live /meta reply is richer
+        // than the cache — so the open card's own reply is held for it. That reply is written only when one
+        // ARRIVES: an item whose addon returns nothing (offline, or gone upstream) writes none, and a bare
+        // member would still be holding the PREVIOUS item's card. The editor, opened on this item's key,
+        // then seeded from another item's title/synopsis/poster, compared "typed back what the scraper
+        // found" against it, and wrote that content into THIS item's override — which syncs everywhere.
+        //
+        // The surfaces that use this are Qt Widgets/QML classes no headless probe links; the rule they rest
+        // on is pure, so it is asserted here, and the source gate in run-headless-probes.sh pins those
+        // surfaces to it rather than to a member they could read unkeyed again.
+        {
+            MediaDetail a;
+            a.valid = true;
+            a.title = QStringLiteral("Item A");
+            a.overview = QStringLiteral("A's synopsis.");
+            a.imageUrl = QStringLiteral("https://x.invalid/a.jpg");
+
+            MetaEdit::ScrapedSnapshot snap;
+            snap.remember(QStringLiteral("A"), a);
+            CHECK(snap.forKey(QStringLiteral("A")).title == QStringLiteral("Item A"),
+                  "the snapshot answers for the item it was taken for");
+            CHECK(snap.forKey(QStringLiteral("A")).overview == QStringLiteral("A's synopsis."),
+                  "…with the whole provider card, not just its title");
+            // THE CRITICAL ONE: open A online, go back, open B whose addon returns nothing. B's editor must
+            // NOT be handed A's card — committing a field there writes A's content into B's override.
+            CHECK(!snap.forKey(QStringLiteral("B")).valid,
+                  "another item's card is never the baseline (the correction cannot cross items)");
+            CHECK(snap.forKey(QStringLiteral("B")).title.isEmpty(),
+                  "…and nothing of it leaks through field by field either");
+            // One slot PER SURFACE, and the slot is instance state. The classic detail card and the themed
+            // detail card each hold their own; if the storage were shared, the card the user is not looking
+            // at would supply the baseline for the one they are — the same leak across surfaces instead of
+            // across items.
+            MetaEdit::ScrapedSnapshot other;
+            CHECK(!other.forKey(QStringLiteral("A")).valid,
+                  "a second surface's snapshot is its own slot, not a shared one");
+            // Moving on to an item that DOES answer re-stamps the snapshot; A's card is gone with it.
+            MediaDetail b;
+            b.valid = true;
+            b.title = QStringLiteral("Item B");
+            snap.remember(QStringLiteral("B"), b);
+            CHECK(snap.forKey(QStringLiteral("B")).title == QStringLiteral("Item B"),
+                  "the newest provider answer is the one held");
+            CHECK(!snap.forKey(QStringLiteral("A")).valid, "…and the previous item's is no longer readable");
+            // An item with no identity (keyFor() gave nothing) owns no snapshot — otherwise the next
+            // identity-less card would read this one's answer back out.
+            snap.remember(QString(), a);
+            CHECK(!snap.forKey(QString()).valid, "an item with no identity carries no snapshot");
+            CHECK(!snap.forKey(QStringLiteral("B")).valid,
+                  "…and storing under no key drops what was held rather than leaving it addressable");
+        }
 
         std::printf("OVERRIDE-OK\n");
     }
