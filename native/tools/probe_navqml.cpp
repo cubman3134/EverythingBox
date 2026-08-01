@@ -514,7 +514,8 @@ static void runPanelHostReentrancyAsserts()
         host.present(QStringLiteral("Start"), before, onAct, onBack);
         CHECK(host.levelDepth() == 1, "panel-host(reentrant): the start panel presented (depth 1)");
         g->select(QStringLiteral("panelRows"), 0);
-        g->activate();                                 // → onGraphActivated → the copied onAct runs
+        g->activate();                                 // → onGraphActivated → queues the copied onAct (§18(k))
+        QCoreApplication::processEvents();             // ...which runs a turn later — see runPanelHostDeferralAsserts
 
         CHECK(bodyCompleted, "panel-host(reentrant): the activation body ran to completion past its own replaceTop");
         CHECK(host.levelDepth() == 1,
@@ -574,6 +575,121 @@ static void runPanelHostReentrancyAsserts()
         host.updateRow(QStringLiteral("k.url"), patched);   // relocate-by-id succeeds → applies in place
         CHECK(host.levelDepth() == 1,
               "panel-host(textfield-drop): the surviving-row commit path leaves the stack intact (depth 1)");
+    }
+}
+
+// §18(k) — DISPATCH DEFERRAL (issue #165, the #28 rule applied to ThemedPanelHost). ThemedPanelHost::
+// onGraphActivated is a DIRECT connection from NavGraph::activated, and every production emitter of that signal
+// is QML — SettingsPanel.qml's row-delegate MouseArea, its header Back MouseArea, its root Keys handler. So a
+// caller's onActivate used to run with a live ListView delegate's own emission on the stack, and what those
+// handlers reach is a nested event loop (the two shipped QFileDialogs, confirmRemoveAddon's NavConfirm, the
+// per-job NavMenu, …) — the exact interleaving both #28 production dumps died in: a nested loop flushes the
+// process's pending DeferredDeletes mid-walk through QQuickRepeater::clear().
+//
+// The host cannot audit ~25 callers' bodies, so it defers unconditionally at its own dispatch boundary. That is
+// a BEHAVIOUR, not a source shape, and this host links headlessly — so it is pinned here rather than left to the
+// `themed handler deferral` source gate. Each leg below is "the handler has NOT run yet" immediately after the
+// activation, and "it HAS run, with the right payload" after ONE event-loop turn; a mutant that restores the
+// direct call turns the first half red. The last leg is the converse pin: the IN-HOST sub-panel pop (renderTop)
+// must stay synchronous — it runs no caller code and touches no nested loop, and widening the deferral to it
+// would make Back visibly lag a frame.
+static void runPanelHostDeferralAsserts()
+{
+    auto onBack = [] {};
+
+    // ---- (i) Action row: the caller dispatch hops an event-loop turn.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        int calls = 0; QString gotId, gotVal;
+        auto onAct = [&](const QString& id, const QString& v) { ++calls; gotId = id; gotVal = v; };
+
+        host.present(QStringLiteral("P"), panelActionRows(3, QStringLiteral("a")), onAct, onBack);
+        g->select(QStringLiteral("panelRows"), 1);
+        g->activate();
+        CHECK(calls == 0,
+              "panel-host(defer): an Action row's onActivate has NOT run on the emission's own stack");
+        QCoreApplication::processEvents();
+        CHECK(calls == 1 && gotId == QStringLiteral("a1") && gotVal.isEmpty(),
+              "panel-host(defer): it runs exactly once a turn later, with the activated row's id");
+    }
+
+    // ---- (ii) Toggle row: same deferral, and the flip's VALUE is the one computed at activation time.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        int calls = 0; QString gotVal;
+        auto onAct = [&](const QString&, const QString& v) { ++calls; gotVal = v; };
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Toggle; r.id = QStringLiteral("t.on"); r.label = QStringLiteral("T");
+          r.checked = false; rows << r; }
+        host.present(QStringLiteral("P"), rows, onAct, onBack);
+        g->select(QStringLiteral("panelRows"), 0);
+        g->activate();
+        CHECK(calls == 0, "panel-host(defer): a Toggle's onActivate has NOT run on the emission's own stack");
+        QCoreApplication::processEvents();
+        CHECK(calls == 1 && gotVal == QStringLiteral("1"),
+              "panel-host(defer): the Toggle dispatch lands a turn later carrying the flipped state (\"1\")");
+    }
+
+    // ---- (iii) Choice row: same deferral, carrying the option the cycle picked.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        int calls = 0; QString gotVal;
+        auto onAct = [&](const QString&, const QString& v) { ++calls; gotVal = v; };
+
+        QVector<PanelRow> rows;
+        { PanelRow r; r.kind = PanelRow::Choice; r.id = QStringLiteral("c.mode"); r.label = QStringLiteral("C");
+          r.options = { QStringLiteral("auto"), QStringLiteral("tv") }; r.value = QStringLiteral("auto"); rows << r; }
+        host.present(QStringLiteral("P"), rows, onAct, onBack);
+        g->select(QStringLiteral("panelRows"), 0);
+        g->activate();
+        CHECK(calls == 0, "panel-host(defer): a Choice's onActivate has NOT run on the emission's own stack");
+        QCoreApplication::processEvents();
+        CHECK(calls == 1 && gotVal == QStringLiteral("tv"),
+              "panel-host(defer): the Choice dispatch lands a turn later carrying the cycled option (\"tv\")");
+    }
+
+    // ---- (iv) The ROOT onBack — the leave-host callback. It retires this host's QQuickWidget (showThemedHome's
+    //      removeWidget + deleteLater) or opens a NavConfirm quit prompt, both from a nav.back() emission. The
+    //      LEVEL pop itself stays synchronous (the host's own bookkeeping); only the caller's callback hops.
+    //      The depth-0 clause is the CONVERSE half and has its own killer, distinct from the direct-call mutant
+    //      the other legs use: widen the deferral to the pop — `handleBack() {
+    //      deferPastQmlEmission([this]{ graph_->back(); }); }` — and the host is still one level deep when the
+    //      Back returns. That mutant is the plausible over-application of #165 ("defer at the Back boundary
+    //      too"), and it would leave the panel painting a level the user has already left.
+    {
+        ThemedPanelHost host;
+        int backs = 0;
+        host.present(QStringLiteral("Root"), panelActionRows(2, QStringLiteral("r")),
+                     [](const QString&, const QString&) {}, [&] { ++backs; });
+        host.handleBack();
+        CHECK(host.levelDepth() == 0,
+              "panel-host(defer): the root Back pops the host's own level synchronously (depth 0)");
+        CHECK(backs == 0, "panel-host(defer): the root onBack has NOT run on the emission's own stack");
+        QCoreApplication::processEvents();
+        CHECK(backs == 1, "panel-host(defer): the root onBack runs exactly once, a turn later");
+    }
+
+    // ---- (v) CONVERSE: a nested sub-panel's Back runs NO caller code, so its pop-restore must stay synchronous.
+    //      This is what stops the fix widening into "defer everything" — Back on a drilled panel has to repaint
+    //      the parent on the frame it was pressed.
+    {
+        ThemedPanelHost host;
+        NavGraph* g = host.navGraph();
+        auto noop = [](const QString&, const QString&) {};
+        host.present(QStringLiteral("Parent"), panelActionRows(6, QStringLiteral("p")), noop, onBack);
+        g->select(QStringLiteral("panelRows"), 3);
+        host.present(QStringLiteral("Child"), panelActionRows(2, QStringLiteral("c")), noop, onBack);
+        host.handleBack();                                   // NO processEvents between the Back and the checks
+        // ONE check, not two: the title alone is popped by stack_.takeLast() and would still read "Parent" with
+        // renderTop deferred — it is §18(f)'s assertion, not this one. What proves the RE-RENDER ran synchronously
+        // is the cursor, which only renderTop moves.
+        CHECK(host.panelTitle() == QStringLiteral("Parent")
+              && g->zone() == QStringLiteral("panelRows") && g->index() == 3,
+              "panel-host(defer): an in-host sub-panel pop re-renders the parent SYNCHRONOUSLY, cursor restored");
     }
 }
 
@@ -3165,6 +3281,10 @@ int main(int argc, char** argv)
     // the closure's own reassignment, (b) overlayAbove() gate primitive, (c) TextField commit relocates by id and
     // drops safely when a mid-edit replaceTop removed the row.
     runPanelHostReentrancyAsserts();
+    // §18(k): DISPATCH DEFERRAL (issue #165) — every caller callback the host fires (Action/Toggle/Choice
+    // onActivate, the root onBack) hops an event-loop turn so no nested loop ever runs on a live QML delegate's
+    // emission; the in-host sub-panel pop stays synchronous. See the function's note.
+    runPanelHostDeferralAsserts();
     // §18(h): the Add-ons manager panel graph (B2 Task 6.5) — divider-skip landing, the three-level remove-flow
     // double-pop cursor restore, and the masked config field's in-place patch.
     runAddonsPanelAsserts();
