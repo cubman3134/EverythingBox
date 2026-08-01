@@ -7,6 +7,8 @@
 #   * netplay both:direct  — the "Both" online orchestration with the relay dead, so ONLY a direct connection can
 #                            pair them (probe_netplay_both direct -> NETPLAY-BOTH-OK).
 #   * netplay both:relay   — same, but the direct endpoint is dead so it must fall back to the relay.
+#   * netplay both:slowconnect — a host whose connect and whose answer each eat most of the joiner's give-up
+#                            budget, but neither eats all of it: the joiner must still land on the direct path.
 #   * netplay both:silent  — the direct endpoint accepts and then never handshakes (a stale port forward); the
 #     / both:dropped         joiner must still reach the host over the relay instead of hanging or ending.
 #   * core load (optional) — if $CORE_SO points at a real libretro core, dlopen it + run retro_init headlessly.
@@ -22,7 +24,10 @@
 set -uo pipefail
 
 BUILD_DIR="${BUILD_DIR:-build}"
-RELAY_PORT="${RELAY_PORT:-0}"   # 0 = OS-assigned; see the relay startup below for why not a fixed port
+# 0 = let the OS pick a free port for this run's relay, and read back what it picked. A hard-coded default meant
+# two suites on one machine fought over one port: the loser's relay died silently, its probes talked to the
+# winner's, and the netplay results stopped being about this run (issue #164). Override to pin it if you need to.
+RELAY_PORT="${RELAY_PORT:-0}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RELAY_PY="$HERE/netplay-relay.py"
 PY="${PYTHON:-python3}"; command -v "$PY" >/dev/null 2>&1 || PY=python
@@ -157,20 +162,20 @@ run() { # <name> <sentinel> <exe> [args...]
   echo
 }
 
-# Bring up the relay both netplay tests rendezvous through. Port 0 by default: two suites running at once (two
-# worktrees, a developer alongside CI) must not fight over one port — the loser's relay never binds, and its
-# netplay probes then rendezvous through the WINNER's relay and pair with the wrong process. The log is
-# per-run for the same reason. RELAY_PORT= still pins a port for hand-debugging.
-RELAY_LOG="$(mktemp)"
+# Bring up the relay both netplay tests rendezvous through.
+RELAY_LOG="$(mktemp -t eb-relay.XXXXXX)"
 "$PY" "$RELAY_PY" --port "$RELAY_PORT" > "$RELAY_LOG" 2>&1 &
 RELAY_PID=$!
-trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; rm -f "$RELAY_LOG"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null' EXIT
-for _ in $(seq 1 40); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
-echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"
-# The relay reports the port it actually bound; everything downstream uses that, never the requested one.
-RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" | head -1)"
-[ -n "$RELAY_PORT" ] || { echo "FATAL: netplay relay did not start"; cat "$RELAY_LOG"; exit 2; }
-echo
+trap 'rm -rf "$EB_PROBE_SCRATCH_ROOT_POSIX"; [ -n "${RELAY_PID:-}" ] && kill "$RELAY_PID" 2>/dev/null; rm -f "${RELAY_LOG:-}"' EXIT
+for _ in $(seq 1 100); do grep -q "listening" "$RELAY_LOG" 2>/dev/null && break; sleep 0.2; done
+# The port the relay actually bound. Waiting for "listening" and then carrying on regardless is how a relay that
+# never came up got papered over: the netplay probes would connect to SOMEONE's relay and the result meant
+# nothing. No port here is a hard failure.
+RELAY_PORT="$(sed -n 's/.*listening on [^:]*:\([0-9][0-9]*\).*/\1/p' "$RELAY_LOG" 2>/dev/null | head -1)"
+if [ -z "$RELAY_PORT" ]; then
+  echo "FATAL: the netplay relay did not come up — $(head -3 "$RELAY_LOG" 2>/dev/null)"; exit 2
+fi
+echo "relay: $(head -1 "$RELAY_LOG" 2>/dev/null)"; echo
 
 NETPLAY="$(findexe probe_netplay)"       || { echo "FATAL: probe_netplay not built"; exit 2; }
 BOTH="$(findexe probe_netplay_both)"     || { echo "FATAL: probe_netplay_both not built"; exit 2; }
@@ -233,6 +238,11 @@ rm -rf "$ISO_JUNK_ADDON"
 run "netplay relay"       NETPLAY-RELAY-OK "$NETPLAY" "$RELAY_PORT"
 run "netplay both:direct" NETPLAY-BOTH-OK  "$BOTH" direct
 run "netplay both:relay"  NETPLAY-BOTH-OK  "$BOTH" relay "$RELAY_PORT"
+# The joiner's give-up deadline measures the HANDSHAKE, not the connect plus the handshake — and a session the
+# user left inside that window stays left. Deliberately slow (~5s): the only way to tell the two readings of
+# that deadline apart is to make the connect itself cost most of the budget, which on loopback means putting a
+# stalling CONNECT proxy in front of it.
+run "netplay both:slowconnect" NETPLAY-BOTH-OK "$BOTH" slowconnect
 # The two ways a direct endpoint can accept a connection and still be a dead end — a stale port forward that
 # outlived its app, and an EB host that already paired with somebody else. Both used to strand the joiner,
 # because the fallback was keyed on the TCP connect rather than on the handshake completing.

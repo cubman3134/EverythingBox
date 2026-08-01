@@ -7,19 +7,21 @@
 #include <QJsonObject>
 #include <QTimer>
 #include <QPointer>
+#include <QSharedPointer>
 
 // Wire framing: [u32 length][u8 type][payload], length covers type+payload.
 //   type 1 INPUT: [u32 frame][u16 buttons]
 //   type 2 HELLO: JSON { gameId, core }
 //   type 3 STATE: raw save-state bytes (host -> client, once)
 namespace {
-constexpr quint8 T_INPUT = 1, T_HELLO = 2, T_STATE = 3;
-// How long joinOnline's direct attempt may go without progress before the relay takes over. It covers the
-// connect AND the handshake, and is restarted on every byte the host sends — so an arbitrarily large save
-// state is fine, and only actual silence expires it.
-constexpr int kDirectTrialMs = 4000;
+constexpr quint8 T_INPUT = 1, T_HELLO = 2, T_STATE = 3;   // kDirectTrialMs lives in the header: a probe needs it
 void putU32(QByteArray& b, quint32 v) { b.append(char(v >> 24)); b.append(char(v >> 16)); b.append(char(v >> 8)); b.append(char(v)); }
 quint32 getU32(const char* p) { return (quint8(p[0]) << 24) | (quint8(p[1]) << 16) | (quint8(p[2]) << 8) | quint8(p[3]); }
+
+// A peer arriving on the DIRECT port announces itself with this line before anything else. The direct port is
+// deliberately reachable from the internet (UPnP-forwarded), so "someone connected" is not evidence that player 2
+// connected; the room code is.
+QByteArray directGreeting(const QString& code) { return "EBNP1 " + code.toUtf8() + "\n"; }
 }
 
 NetplaySession::NetplaySession(QObject* parent) : QObject(parent) {}
@@ -105,26 +107,27 @@ void NetplaySession::joinViaRelay(const QString& relayHost, quint16 relayPort, c
 }
 
 // "Both" host: listen for a DIRECT (UPnP-forwarded) connection on localPort AND register on the relay at once.
-// Whichever peer arrives first wins; the loser path is torn down. If UPnP mapping succeeded the caller already
-// forwarded localPort so a low-latency direct connection is possible; if not, the relay still pairs us. The relay
-// runs on its OWN socket during the race so a stray direct attempt can't disturb the verified fallback.
+// Whichever path delivers a peer that PROVES it is player 2 wins; the loser path is torn down then and not before.
+// If UPnP mapping succeeded the caller already forwarded localPort so a low-latency direct connection is possible;
+// if not, the relay still pairs us. The relay runs on its OWN socket during the race so a stray direct attempt
+// can't disturb the verified fallback — and a stray direct attempt cannot END the race either (vetDirectPeer).
+// Pass localPort 0 to let the OS pick and read it back with directPort().
 void NetplaySession::hostOnline(quint16 localPort, const QString& relayHost, quint16 relayPort, const QString& code)
 {
     stop();
     active_ = true; host_ = true; ready_ = false; awaitingPair_ = true;
     relayBuf_.clear();
 
-    // Path A — direct server.
+    // Path A — direct server. An inbound connection is a CANDIDATE, not player 2: see vetDirectPeer().
     server_ = new QTcpServer(this);
-    connect(server_, &QTcpServer::newConnection, this, [this] {
-        QTcpSocket* s = server_ ? server_->nextPendingConnection() : nullptr;
-        if (!awaitingPair_ || !s) { if (s) s->deleteLater(); return; }  // relay already won
-        awaitingPair_ = false;
-        server_->close();
-        if (relaySock_) { relaySock_->disconnect(this); relaySock_->abort(); relaySock_->deleteLater(); relaySock_ = nullptr; }
-        attachSocket(s);
-        emit status(tr("Player 2 connected directly."));
-        beginAsHost();
+    connect(server_, &QTcpServer::newConnection, this, [this, code] {
+        while (server_ && server_->hasPendingConnections())
+        {
+            QTcpSocket* s = server_->nextPendingConnection();
+            if (!s) break;
+            if (!awaitingPair_) { s->abort(); s->deleteLater(); continue; }   // relay already won
+            vetDirectPeer(s, code);
+        }
     });
     // A failed listen is not fatal — the relay path still carries us — but it must not be SILENT: the session
     // then runs relay-only, and without a word about it that shows up much later as unexplained latency (or, in
@@ -140,17 +143,11 @@ void NetplaySession::hostOnline(quint16 localPort, const QString& relayHost, qui
     connect(relaySock_, &QTcpSocket::readyRead, this, [this] {
         if (!awaitingPair_ || !relaySock_) return;
         relayBuf_ += relaySock_->readAll();
-        const int nl = relayBuf_.indexOf('\n');
-        if (nl < 0) return;
-        const QByteArray lineB = relayBuf_.left(nl).trimmed();
-        const QByteArray leftover = relayBuf_.mid(nl + 1);
-        relayBuf_.clear();
-        if (lineB != "PAIRED") {
-            emit ended(lineB == "BUSY" ? tr("That code is already in use — pick another.")
-                                       : tr("The relay gave an unexpected response."));
-            stop();
-            return;
-        }
+        QByteArray leftover;
+        QString err;
+        const int r = takeRelayLines(relayBuf_, leftover, err);
+        if (r == 0) return;                                  // HOSTED absorbed, or a partial line — keep waiting
+        if (r < 0) { emit ended(err); stop(); return; }
         // Relay won: adopt it as the session socket, drop the direct server.
         awaitingPair_ = false;
         if (server_) { server_->close(); server_->deleteLater(); server_ = nullptr; }
@@ -177,15 +174,71 @@ quint16 NetplaySession::directPort() const
     return server_ && server_->isListening() ? server_->serverPort() : quint16(0);
 }
 
+// An inbound connection on the direct port proves nothing: that port is deliberately forwarded to the internet, so
+// a scanner, a stale peer or another EverythingBox instance can land on it. Committing to it would be irreversible —
+// the host closes its listener AND drops the relay socket, which deletes the room, so the real joiner's relay
+// fallback then gets NOHOST and the session is stranded with hostStarted=1, joinStarted=0. Instead the candidate is
+// held until it announces the room code; anything else is dropped and BOTH paths stay armed.
+void NetplaySession::vetDirectPeer(QTcpSocket* s, const QString& code)
+{
+    s->setSocketOption(QAbstractSocket::LowDelayOption, 1);
+    auto buf = QSharedPointer<QByteArray>::create();
+    QPointer<QTcpSocket> sp = s;
+    // Once this candidate has been adopted as the session socket it is no longer a candidate, and the deadline
+    // below must not touch it: the timer's context is the socket, so nothing that happens on commit unhooks it,
+    // and dropping the live session five seconds into a game would be a spectacular way to fail.
+    auto adopted = QSharedPointer<bool>::create(false);
+    auto drop = [this, sp, adopted] { if (*adopted || !sp) return; sp->disconnect(this); sp->abort(); sp->deleteLater(); };
+    const QByteArray want = QByteArray(directGreeting(code)).trimmed();
+
+    connect(s, &QTcpSocket::readyRead, this, [this, sp, buf, want, drop, adopted] {
+        if (!sp) return;
+        if (!awaitingPair_) { drop(); return; }              // the relay won while we were vetting
+        *buf += sp->readAll();
+        const int nl = buf->indexOf('\n');
+        if (nl < 0) { if (buf->size() > 512) drop(); return; }   // no greeting line in any sane prefix
+        const QByteArray line = buf->left(nl).trimmed();
+        const QByteArray leftover = buf->mid(nl + 1);
+        if (line != want) { drop(); return; }                 // not our player 2 — keep listening, keep the room
+
+        // Proven. NOW the relay path can go.
+        *adopted = true;
+        awaitingPair_ = false;
+        sp->disconnect(this);
+        sp->setParent(this);          // outlive the QTcpServer that accepted it — reparent BEFORE the server goes
+        // Same teardown as the relay-wins branch: close, delete, null. Leaving a closed QTcpServer parked in
+        // server_ made directPort() and the isListening() checks read a dead object until stop(), and any OTHER
+        // candidate still being vetted (a scanner mid-greeting) stayed accepted for nothing. Deleting the server
+        // takes those with it, which is what the relay-wins branch has always done.
+        if (server_) { server_->close(); server_->deleteLater(); server_ = nullptr; }
+        if (relaySock_) { relaySock_->disconnect(this); relaySock_->abort(); relaySock_->deleteLater(); relaySock_ = nullptr; }
+        attachSocket(sp);
+        rx_ = leftover;
+        emit status(tr("Player 2 connected directly."));
+        beginAsHost();
+        if (!rx_.isEmpty()) onReadyRead();
+    });
+    connect(s, &QAbstractSocket::disconnected, this, [drop] { drop(); });
+    QTimer::singleShot(kDirectGreetingTimeoutMs, s, [drop] { drop(); });  // context = the socket: no fire once it's gone
+}
+
 // "Both" join: if the host advertised a direct endpoint (UPnP worked), try it first for lowest latency; on ANY
-// failure (refused, unreachable, silent, or dropped before we are in sync) fall back to the verified relay
+// failure (refused, unreachable, silent, dropped, or rejected by the host) fall back to the verified relay
 // path. No endpoint -> relay directly.
 //
 // What commits us to the direct path is the HANDSHAKE completing, not the TCP connect. A forwarded port stays
-// open long after the app behind it went away, and an EB host that has already paired with someone else accepts
-// our socket and then drops it — in both cases connect() succeeds and no HELLO ever comes. Committing there
-// stranded the joiner on a peer that was never going to answer, with the relay it was meant to fall back to
-// already abandoned. directWatchdog_ holds the attempt on trial until the state actually arrives.
+// open long after the app behind it went away, an EB host that has already paired with someone else accepts
+// our socket and then drops it, and a host that follows vetDirectPeer hangs up on us outright if we cannot
+// name its room — in all three cases connect() succeeds and no HELLO ever comes. Committing there stranded the
+// joiner on a peer that was never going to answer, with the relay it was meant to fall back to already
+// abandoned. directWatchdog_ holds the attempt on trial until the state actually arrives.
+//
+// The watchdog is a budget PER PHASE, restarted when the connect completes and again on every byte the host
+// sends. One budget covering the connect AND the handshake expires mid-greeting on a slow link — and the
+// host's side of this exchange is irreversible (adoption closes its listener and drops the relay socket,
+// deleting the room), so it would commit to a socket we had already aborted, having destroyed the room our
+// fallback then dials. Both sides strand. On loopback the connect costs nothing and the window is invisible;
+// it is widest on exactly the slow, distant links the relay path exists for.
 void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, const QString& code,
                                 const QString& directIp, quint16 directPort)
 {
@@ -199,6 +252,11 @@ void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, con
 
     directWatchdog_ = new QTimer(this);
     directWatchdog_->setSingleShot(true);
+    // Nulling the watchdog is what retires the attempt, and every route to the relay goes through here — the
+    // timeout, the socket's own error/disconnect, and stop(). That last one is why the check is at the TOP of
+    // this lambda rather than only on the timer: "Leave" inside the trial window used to leave the deadline
+    // armed on the session (which outlives the sockets), so joinViaRelay ran seconds later and put the player
+    // back into a session they had deliberately quit, with no way home.
     auto toRelay = [this, relayHost, relayPort, code, dp]() {
         if (!directWatchdog_) return;   // the race is already decided: in sync, fallen back, or stopped
         directWatchdog_->stop(); directWatchdog_->deleteLater(); directWatchdog_ = nullptr;
@@ -213,37 +271,65 @@ void NetplaySession::joinOnline(const QString& relayHost, quint16 relayPort, con
         joinViaRelay(relayHost, relayPort, code);
     };
     connect(directWatchdog_, &QTimer::timeout, this, [toRelay] { toRelay(); });
-    connect(d, &QTcpSocket::connected, this, [this, dp] {
+    connect(d, &QTcpSocket::connected, this, [this, code, dp] {
         if (!directWatchdog_ || !dp) return;
+        dp->write(directGreeting(code));   // announce which room we are here for; the host vets this
         attachSocket(dp);   // adopt the direct socket; still on trial until the host's HELLO + STATE land
-        directWatchdog_->start(kDirectTrialMs);
+        directWatchdog_->start(kDirectTrialMs);   // the trial clock restarts: it measures the HANDSHAKE now
         emit status(tr("Connected directly — syncing game state…"));
     });
     connect(d, &QAbstractSocket::errorOccurred, this, [toRelay] { toRelay(); });
     connect(d, &QAbstractSocket::disconnected, this, [toRelay] { toRelay(); });
     emit status(tr("Trying a direct connection to the host…"));
     d->connectToHost(directIp, directPort);
+    // Phase one: the CONNECT. Windows never reports a refused loopback connect to Qt inside this window (the
+    // socket sits in ConnectingState with no error), so this deadline — not errorOccurred — is what actually
+    // carries the fallback there.
     directWatchdog_->start(kDirectTrialMs);   // didn't connect in time
 }
 
-// The relay speaks one line (PAIRED / NOHOST / BUSY), then pipes raw bytes. Consume just that line, hand any
-// trailing bytes to the session's rx_, then run the normal handshake over the now-transparent pipe.
+// The relay speaks whole lines — HOSTED (our room is registered), then PAIRED (a peer arrived) — before it turns
+// into a transparent byte pipe. Refusals are NOHOST / BUSY. Consume every complete line; HOSTED is absorbed here
+// and surfaced as roomOpen(), because "the room exists" is the condition a joiner has to wait for and nothing else
+// in the protocol reports it. Emitting it only after the loop keeps a re-entrant slot out of the middle of a parse.
+int NetplaySession::takeRelayLines(QByteArray& buf, QByteArray& leftover, QString& err)
+{
+    bool hosted = false;
+    int result = 0;
+    for (;;)
+    {
+        const int nl = buf.indexOf('\n');
+        if (nl < 0) break;                                   // partial line: wait for the rest
+        const QByteArray line = buf.left(nl).trimmed();
+        const QByteArray rest = buf.mid(nl + 1);
+        if (line == "PAIRED") { leftover = rest; buf.clear(); result = 1; break; }
+        buf = rest;
+        if (line == "HOSTED") { hosted = true; continue; }
+        err = line == "NOHOST" ? tr("No one is hosting with that code.")
+            : line == "BUSY"   ? tr("That code is already in use — pick another.")
+                               : tr("The relay gave an unexpected response.");
+        result = -1;
+        break;
+    }
+    if (hosted && result == 0) emit roomOpen();
+    return result;
+}
+
+// Consume the relay's handshake lines, hand any trailing bytes to the session's rx_, then run the normal handshake
+// over the now-transparent pipe.
 void NetplaySession::onRelayHandshake()
 {
     if (!sock_) return;
     relayBuf_ += sock_->readAll();
-    const int nl = relayBuf_.indexOf('\n');
-    if (nl < 0) return; // wait for the full line
-    const QByteArray line = relayBuf_.left(nl).trimmed();
-    const QByteArray leftover = relayBuf_.mid(nl + 1); // session bytes that arrived alongside PAIRED
-    relayBuf_.clear();
+    QByteArray leftover;   // session bytes that arrived alongside PAIRED
+    QString err;
+    const int r = takeRelayLines(relayBuf_, leftover, err);
+    if (r == 0) return;
     disconnect(sock_, &QTcpSocket::readyRead, this, &NetplaySession::onRelayHandshake);
 
-    if (line != "PAIRED")
+    if (r < 0)
     {
-        emit ended(line == "NOHOST" ? tr("No one is hosting with that code.")
-                 : line == "BUSY"   ? tr("That code is already in use — pick another.")
-                                    : tr("The relay gave an unexpected response."));
+        emit ended(err);
         stop();
         return;
     }
@@ -352,6 +438,10 @@ void NetplaySession::pruneBefore(quint32 frame)
 void NetplaySession::stop()
 {
     active_ = false; ready_ = false; awaitingPair_ = false;
+    // Retire any direct attempt still on trial. The watchdog is owned by the SESSION, not by the socket, so
+    // destroying the sockets below would not disarm it: it would fire, run joinViaRelay, and re-enter a
+    // session the caller has just left (RetroView's "Leave" is inside that window). Nulling it is also what
+    // tells joinOnline's toRelay that the race is over.
     if (directWatchdog_) { directWatchdog_->stop(); directWatchdog_->deleteLater(); directWatchdog_ = nullptr; }
     remoteInputs_.clear();
     rx_.clear(); relayBuf_.clear();
