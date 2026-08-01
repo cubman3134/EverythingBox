@@ -328,6 +328,28 @@ private:
     void playPcGame(const MediaItem& it);
     // Launch ONE chosen source, routed by kind through the launcher path that already exists for it.
     void launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s);
+    // The launcher filter's menu (issue #44), opened from the folder's own control row. A NavMenu, because
+    // three of the four layouts render no widget chrome for a dropdown to live in.
+    void showPcLauncherFilterMenu();
+
+public:
+    // THE MERGE OVERRIDE, offered from the entry it is about (issue #44) — split a tile that is two games,
+    // fuse two tiles that are one, or undo a previous verdict. Synchronous (NavMenu::pick / NavConfirm::ask,
+    // the addGameToPlaylistInteractive idiom) so the caller learns whether anything changed; returns true
+    // only when a verdict was written. Nothing is repopulated here — see refreshAfterPcMergeFix.
+    bool fixPcGameEntry(const MediaItem& it);
+    // Addressed by ID, never by a row index: the themed action row has to DEFER this verb by an event-loop
+    // turn (it rebuilds the browse model under the delegate that is still emitting), and browseRowMap_ can
+    // be rebuilt in that window. Resolve the index with pcGameIdAt while it is still valid, then fix by id.
+    QString pcGameIdAt(int browseIndex) const;
+    bool fixPcGameEntryById(const QString& itemId);
+    // Show the result. Separate replaces the entry with one per copy, so a page showing that entry has to be
+    // LEFT rather than refreshed in place.
+    void refreshAfterPcMergeFix();
+    // Is this browse row a merged PC game? The themed detail action row asks, to decide whether to offer the
+    // fix verb at all.
+    bool isMergedPcGameAt(int browseIndex) const;
+private:
 
     // Playlists: category-scoped (video/audio/game/reading). A "Playlists" folder shows at the category level
     // and at every catalogue root of that category; these drive its synthetic (addon-less) levels. catalogKey
@@ -486,6 +508,8 @@ private:
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
     QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
+    // ⚙ "Fix this entry…" — the PC-game merge override (issue #44), shown only on a merged PC game's page.
+    QPushButton* pcFixBtn_ = nullptr;
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.
@@ -517,6 +541,13 @@ private:
     } lastPlay_;
     int steamMetaSeq_ = -1;           // unique (negative) ids for native Steam meta fetches
     int ownedFetchGen_ = 0;           // in-flight dedup for the async owned-games re-present (only the latest wins)
+    // The PC Games folder's launcher filter, and the launchers it can offer. FOLDER STATE, deliberately not
+    // persisted: it belongs to this level the way the in-folder search query does, and a filter restored on
+    // the next launch would hide most of the library with nothing on screen explaining why. `available` is
+    // recomputed from the same scan the folder is built from, so the menu can never offer a launcher this
+    // machine has no games in.
+    QString     pcLauncherFilter_;
+    QStringList pcLaunchersAvailable_;
     // Triple/XMB theme live-meta + inline-play state (see requestThemedMeta()/playThemedLeaf()).
     int themedMetaReq_ = -1;          // in-flight addon /meta id for the live panel beside the cross
     int themedMetaIndex_ = -1;        // the currently-selected browse index (updated on every hover)

@@ -589,6 +589,238 @@ int main(int argc, char** argv)
               "pcgames: two all-noise titles do NOT collapse into one bucket");
     }
 
+    // ---- pcgames-filter: the launcher filter's CONTROL (issue #44) ---------------------------------------
+    // pcGamesCatalog's launcherFilter shipped working and probe-tested with every call site passing "" and no
+    // surface offering it, so "show me what I own on Steam" — the thing the design used the filter to justify
+    // deleting the four per-launcher folders for — had no replacement. These are the pure halves of the
+    // control that now reaches it: which launchers may be offered, what the menu says, and the folder row.
+    {
+        QList<SteamGame> st; { SteamGame g; g.appid = "1"; g.name = "Hades"; st << g; }
+        QList<GogGame>   gg; { GogGame g;   g.id = "2";    g.name = "Tunic"; gg << g; }
+
+        // Only launchers this machine HAS. Offering all four always would put rows in the menu whose only
+        // possible effect is to empty the folder — the common case is one store installed.
+        CHECK(browse::pcLaunchersPresent(st, {}, gg, {}) == QStringList({ "steam", "gog" }),
+              "pcfilter: only launchers the library actually has, in the folder's fixed order");
+        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}).isEmpty(),
+              "pcfilter: an empty library offers no launcher rows");
+        // Owned-but-not-installed Steam entries COUNT — they are Steam library entries, and "what I own on
+        // Steam" is the exact phrase this feature answers. Without this the filter is missing on a machine
+        // whose Steam games are all uninstalled, which is the library most in need of it.
+        CHECK(browse::pcLaunchersPresent({}, {}, {}, {}, st) == QStringList({ "steam" }),
+              "pcfilter: an owned-but-not-installed Steam library still offers the Steam row");
+        // The order is FIXED, not the order the scans came back in.
+        QList<EpicGame> ep; { EpicGame g; g.appName = "e"; g.name = "Fortnite"; ep << g; }
+        QList<BattleNetGame> bn; { BattleNetGame g; g.code = "wow"; g.name = "WoW"; bn << g; }
+        CHECK(browse::pcLaunchersPresent(st, ep, gg, bn) == QStringList({ "steam", "epic", "gog", "battlenet" }),
+              "pcfilter: the launcher order does not depend on which scan returned first");
+
+        // The menu. "All launchers" is always row 0 with an EMPTY value, so a filter that emptied the folder
+        // can still be cleared; the value and the label ride one pair, so the row pressed and the filter it
+        // means cannot drift apart.
+        {
+            const QVector<QPair<QString, QString>> all = browse::pcLauncherFilterChoices({ "steam", "gog" }, QString());
+            CHECK(all.size() == 3 && all[0].first.isEmpty(),
+                  "pcfilter: the menu is All + one row per available launcher, All first with an empty value");
+            // Guarded on the size, not just asserted after it: CHECK records a failure and CONTINUES, so a
+            // build that returns a shorter list would index past the end and take the probe down with an
+            // access violation instead of printing which assertion failed. (Measured — the "drop the All
+            // row" mutation did exactly that.)
+            CHECK(all.size() == 3 && all[1].first == "steam" && all[2].first == "gog",
+                  "pcfilter: each row's VALUE is the launcher id pcGamesCatalog takes");
+            CHECK(all.size() == 3 && all[1].second.contains("Steam") && all[2].second.contains("GOG"),
+                  "pcfilter: ...and each row's LABEL is the launcher's own name");
+            // Exactly ONE tick, and it is on the current choice. A menu that ticked everything, or nothing,
+            // would pass a size check and tell the user nothing about the state they are in.
+            int ticks = 0; for (const auto& c : all) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1 && all.size() == 3 && all[0].second.contains(QChar(0x2713)),
+                  "pcfilter: no filter set -> the tick is on All launchers, and only there");
+        }
+        {
+            const QVector<QPair<QString, QString>> onGog = browse::pcLauncherFilterChoices({ "steam", "gog" }, "gog");
+            int ticks = 0; for (const auto& c : onGog) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1 && onGog.size() == 3 && onGog[2].second.contains(QChar(0x2713)),
+                  "pcfilter: the tick follows the current filter, and does not stay on All");
+            CHECK(onGog.size() == 3 && onGog[0].first.isEmpty(),
+                  "pcfilter: All launchers is still offered while a filter is active (the way back)");
+        }
+        {
+            // The stale filter: set to a launcher whose games have since gone. The row must still be there,
+            // ticked, or the folder is empty while the menu claims "All launchers" — two surfaces disagreeing
+            // about one state, with no way to see which is true.
+            const QVector<QPair<QString, QString>> stale = browse::pcLauncherFilterChoices({ "steam" }, "gog");
+            bool hasGog = false; for (const auto& c : stale) if (c.first == "gog") hasGog = true;
+            CHECK(hasGog, "pcfilter: a filter on a launcher that has gone is still shown, not silently dropped");
+            int ticks = 0; for (const auto& c : stale) if (c.second.contains(QChar(0x2713))) ++ticks;
+            CHECK(ticks == 1, "pcfilter: ...and it is the one ticked row");
+        }
+        // An unknown launcher id has no name, so it is not offered — a nameless row can only confuse.
+        CHECK(browse::pcLauncherLabel("itch").isEmpty(), "pcfilter: an unknown launcher id has no label");
+        {
+            const QVector<QPair<QString, QString>> odd = browse::pcLauncherFilterChoices({ "itch" }, QString());
+            CHECK(odd.size() == 1, "pcfilter: a launcher with no name is not offered as a row");
+        }
+
+        // The folder row. Its type is what HomeView routes on, and it must NOT look like a media item — a
+        // '_' type keeps it out of the library-management verbs, which have no marks key for it.
+        {
+            const MediaItem all = browse::pcLauncherFilterRow(QString());
+            CHECK(all.type == "_pcfilter" && all.id == "_pcfilter" && all.mime == "pcfilter:",
+                  "pcfilter: the control row carries the routing type/id/mime HomeView dispatches on");
+            CHECK(all.url.isEmpty(), "pcfilter: the control row has no url (a url would make it open as a file)");
+            CHECK(all.subtitle.isEmpty(), "pcfilter: with no filter set the row says nothing extra");
+            const MediaItem one = browse::pcLauncherFilterRow("steam");
+            CHECK(one.title.contains("Steam") && one.title != all.title,
+                  "pcfilter: the row NAMES the active launcher, so a filtered folder is never unexplained");
+            CHECK(!one.subtitle.isEmpty(),
+                  "pcfilter: ...and says the folder is narrowed — games 'missing' with no cause is the failure");
+            CHECK(one.mime == "pcfilter:steam", "pcfilter: the row carries the active filter in its mime");
+        }
+    }
+
+    // ---- pcgames-override: the user's "these are / aren't the same game" verdict reaches the FOLDER -------
+    // pcgame::setOverride and pcgame::sameGame shipped probe-tested with zero callers (issue #44); the
+    // grouping key was pcgame::itemId alone, so the escape hatch the design named as the thing that makes a
+    // fuzzy heuristic shippable could not change anything the user sees. The folder now groups on
+    // pcgame::effectiveItemId, and this is where that is pinned END TO END — a verdict written through the
+    // store the UI writes through, then a catalog built from a real library.
+    //
+    // No test seam is involved: every probe_* target compiles with EB_ISOLATED_DATA_DIR, so this process's
+    // ini starts empty and is its own. Each block clears its verdict afterwards, because the store PERSISTS
+    // and a later section reading an earlier one's leftovers is a documented past failure in this area.
+    //
+    // THE TRAP, named because it is the easy mistake here: "the game appears once" passes just as well on a
+    // build that fuses the WHOLE library into a single tile, and "it appears twice" passes on one that
+    // splits everything. Every block below therefore also asserts on the games that must NOT move —
+    // "Hades" vs "Hades II" above all, since fusing those deletes a game from the library.
+    {
+        QList<SteamGame> st;
+        { SteamGame g; g.appid = "3970";    g.name = "Prey";       st << g; }  // 2006
+        { SteamGame g; g.appid = "480490";  g.name = "Prey (2017)"; st << g; } // the remake: same merge key
+        { SteamGame g; g.appid = "1145360"; g.name = "Hades";      st << g; }
+        { SteamGame g; g.appid = "2074920"; g.name = "Hades II";   st << g; }
+        auto art = [](const QVector<pcgame::PcGameSource>&) { return QString(); };
+        auto idsOf = [](const MediaCatalog& c) {
+            QSet<QString> s; for (const MediaItem& i : c.items) s.insert(i.id); return s;
+        };
+        auto titled = [](const MediaCatalog& c, const char* t) {
+            int n = 0; for (const MediaItem& i : c.items) if (i.title == QString::fromLatin1(t)) ++n; return n;
+        };
+
+        // The PREMISE. Without this the whole section could be passing because the two Prey copies never
+        // merged in the first place, and the separate verdict below would be proving nothing.
+        const MediaCatalog before = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(before.items.size() == 3, "pcgames-override: the premise — the two Prey copies fuse into one tile");
+        CHECK(titled(before, "Prey") == 1 && titled(before, "Hades") == 1 && titled(before, "Hades II") == 1,
+              "pcgames-override: ...and Hades / Hades II are already two separate tiles");
+        QString preyId, hadesId, hades2Id;
+        for (const MediaItem& i : before.items)
+        {
+            if (i.title == "Prey")     { preyId = i.id;  CHECK(i.pcSources.size() == 2,
+                  "pcgames-override: the fused Prey tile carries BOTH copies as sources"); }
+            if (i.title == "Hades")    hadesId  = i.id;
+            if (i.title == "Hades II") hades2Id = i.id;
+        }
+
+        // ---- SEPARATE ------------------------------------------------------------------------------
+        pcgame::setOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"), false);
+        const MediaCatalog sep = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(sep.items.size() == 4, "pcgames-override: separating the key yields one tile per copy");
+        CHECK(titled(sep, "Prey") == 1 && titled(sep, "Prey (2017)") == 1,
+              "pcgames-override: each separated copy is named by its OWN title, not the merged one");
+        // Identity, not just count: two tiles with DIFFERENT non-empty ids, each carrying exactly its own
+        // copy. A build that emitted the same id twice, or an empty one, would pass a size check alone.
+        {
+            // Looked up UNCONDITIONALLY rather than asserted inside a loop over whatever tiles exist: a
+            // build that never separated at all has no "Prey (2017)" row, the loop body never runs, and an
+            // in-loop CHECK silently passes. (Measured — that is exactly what the "ignore the separate
+            // verdict" mutation did to this block before it was written this way.)
+            auto byTitle = [&sep](const char* t) {
+                for (const MediaItem& i : sep.items) if (i.title == QString::fromLatin1(t)) return i;
+                return MediaItem();
+            };
+            const MediaItem a2006 = byTitle("Prey"), a2017 = byTitle("Prey (2017)");
+            CHECK(a2006.pcSources.size() == 1 && a2006.pcSources[0].launchId == "3970",
+                  "pcgames-override: the separated 2006 tile exists and carries only the 2006 copy");
+            CHECK(a2017.pcSources.size() == 1 && a2017.pcSources[0].launchId == "480490",
+                  "pcgames-override: the separated remake tile exists and carries only the remake copy");
+            CHECK(!a2006.id.isEmpty() && !a2017.id.isEmpty() && a2006.id != a2017.id,
+                  "pcgames-override: the two separated tiles have distinct, real ids");
+            CHECK(a2006.id.startsWith("pcgame:") && a2017.id.startsWith("pcgame:"),
+                  "pcgames-override: a separated id is still a pcgame: id (favourites/marks key on the prefix)");
+        }
+        // THE NEGATIVE HALF. Everything the user did not point at is untouched, by id — this is what fails
+        // on a build that separates the whole library instead of one key.
+        CHECK(idsOf(sep).contains(hadesId) && idsOf(sep).contains(hades2Id),
+              "pcgames-override: separating one key leaves every other tile's id EXACTLY as it was");
+        CHECK(titled(sep, "Hades") == 1 && titled(sep, "Hades II") == 1 && hadesId != hades2Id,
+              "pcgames-override: Hades and Hades II are still two games after a separate verdict");
+
+        // The remap sends each copy's records to the tile that copy is actually on. Cheap to get wrong and
+        // invisible when it is: the records land on an id no tile carries and the user's hours vanish.
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : st) lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+            for (const MediaItem& i : sep.items)
+                for (const pcgame::PcGameSource& s : i.pcSources)
+                    CHECK(t.value(pcgame::legacyLaunchId(s)) == i.id,
+                          "pcgames-override: every separated copy's remap destination is the tile it is on");
+            CHECK(t.value("steam:3970") != t.value("steam:480490"),
+                  "pcgames-override: ...and the two copies do NOT share one destination");
+        }
+
+        pcgame::clearOverride(QStringLiteral("Prey"), QStringLiteral("Prey (2017)"));
+        const MediaCatalog undone = browse::pcGamesCatalog(st, {}, {}, {}, {}, QString(), QString(), art);
+        CHECK(undone.items.size() == 3 && idsOf(undone).contains(preyId),
+              "pcgames-override: clearing the verdict restores the ORIGINAL tile, id and all");
+
+        // ---- FUSE ----------------------------------------------------------------------------------
+        // Two spellings the title heuristic cannot join. The premise is checked first, again so the block
+        // cannot pass by them never having been apart.
+        QList<SteamGame> ff = st;
+        { SteamGame g; g.appid = "1462040"; g.name = "Final Fantasy VII Remake"; ff << g; }
+        QList<EpicGame> ep;
+        { EpicGame g; g.appName = "ff7r"; g.name = "FF7 Remake"; ep << g; }
+        const MediaCatalog apart = browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art);
+        CHECK(apart.items.size() == 5, "pcgames-override: the premise — two spellings are two tiles");
+
+        pcgame::setOverride(QStringLiteral("Final Fantasy VII Remake"), QStringLiteral("FF7 Remake"), true);
+        const MediaCatalog fused = browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art);
+        CHECK(fused.items.size() == 4, "pcgames-override: fusing two keys yields ONE tile for the game");
+        {
+            bool found = false;
+            for (const MediaItem& i : fused.items)
+                if (i.pcSources.size() == 2)
+                {
+                    QSet<QString> launchers;
+                    for (const pcgame::PcGameSource& s : i.pcSources) launchers.insert(s.launcher);
+                    if (launchers.contains("steam") && launchers.contains("epic")) found = true;
+                }
+            CHECK(found, "pcgames-override: the fused tile carries BOTH spellings' copies as sources");
+        }
+        // The negative half again, and it is the one that matters most: fusing must not be contagious.
+        CHECK(idsOf(fused).contains(hadesId) && idsOf(fused).contains(hades2Id),
+              "pcgames-override: fusing two keys leaves every other tile's id EXACTLY as it was");
+        CHECK(titled(fused, "Hades") == 1 && titled(fused, "Hades II") == 1,
+              "pcgames-override: Hades and Hades II are still two games after a fuse verdict");
+        CHECK(titled(fused, "Prey") == 1,
+              "pcgames-override: an unrelated fused key does not re-separate the Prey tile");
+        {
+            QVector<QPair<QString, QString>> lib;
+            for (const SteamGame& g : ff) lib << qMakePair(QStringLiteral("steam:") + g.appid, g.name);
+            for (const EpicGame& g : ep)  lib << qMakePair(QStringLiteral("epic:") + g.appName, g.name);
+            const QHash<QString, QString> t = pcgame::remapTable(lib);
+            CHECK(t.value("steam:1462040") == t.value("epic:ff7r") && !t.value("epic:ff7r").isEmpty(),
+                  "pcgames-override: both fused copies' records move to the SAME tile");
+            CHECK(t.value("steam:1145360") != t.value("epic:ff7r"),
+                  "pcgames-override: ...and an untouched game keeps its own destination");
+        }
+        pcgame::clearOverride(QStringLiteral("Final Fantasy VII Remake"), QStringLiteral("FF7 Remake"));
+        CHECK(browse::pcGamesCatalog(ff, ep, {}, {}, {}, QString(), QString(), art).items.size() == 5,
+              "pcgames-override: clearing the fuse verdict returns the two tiles");
+    }
+
     // ---- SearchAggregator dedup/skip rule: the merge path's pure helper (see SearchAggregator::onCatalogReady).
     {
         QSet<QString> seen;

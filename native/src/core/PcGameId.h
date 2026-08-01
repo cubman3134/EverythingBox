@@ -6,6 +6,7 @@
 // Pure and QtCore-only (the override store is a small ini map), so probe_pcgames links lean.
 #pragma once
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 namespace pcgame
@@ -27,6 +28,28 @@ namespace pcgame
     // library will show the remake and the original as ONE entry. See the note in the .cpp for why the
     // year strip is nonetheless required.
     QString normalizeTitle(const QString& raw);
+
+    // normalizeTitle's body with the trailing-year strip made optional. Exposed only because separationTag
+    // below is defined as "everything normalizeTitle does EXCEPT the year", and re-implementing that here
+    // would be a second copy of the eight-step rule — the exact drift this unit's whole design fights.
+    // stripYear = true is normalizeTitle; callers who want that should call normalizeTitle.
+    QString normalizeCore(const QString& raw, bool stripYear);
+
+    // THE KEY A COPY KEEPS ONCE ITS GROUP IS SEPARATED — normalizeTitle with the year left in.
+    //
+    // Choosing it this way, rather than "the raw title", is the whole difference between a usable escape
+    // hatch and a worse mess. The trailing-year strip is the ONE step that fuses genuinely different games
+    // ("Prey (2006)" onto "Prey (2017)"), so restoring it is precisely the distinction the user is pointing
+    // at. Every other step removes edition noise — and keying a separated group on the raw title would then
+    // split "Prey" from "Prey: Game of the Year Edition" too, turning a two-way over-merge into a
+    // three-entry library, which is a fresh instance of the harm being cured.
+    //
+    // The honest consequence: two copies that differ ONLY in something normalizeTitle removes for good
+    // reason (punctuation, a trademark symbol) share a tag, so separating cannot tell them apart. They are
+    // still both launchable — the picker disambiguates same-launcher rows by their per-launcher title and,
+    // failing that, by launch id — and the surface that offers "separate" checks how many distinct tags a
+    // group actually has, so it never offers an action that would do nothing.
+    QString separationTag(const QString& title);
 
     // The grouping key used by the catalog builder: the igdb id when there is one, else the
     // normalised title. Two entries group together iff their mergeKey matches.
@@ -86,8 +109,108 @@ namespace pcgame
     // The user's manual "these are/aren't the same" verdicts, keyed on the pair of normalised titles
     // and symmetric in the pair. This is the escape hatch that makes a fuzzy heuristic shippable: a
     // wrong merge is otherwise uncurable.
-    bool overrideSaysSame(const QString& normA, const QString& normB);
-    void setOverride(const QString& normA, const QString& normB, bool same);
+    //
+    // THESE FOUR TAKE RAW TITLES and normalise once, internally. Do not hand them a key you already
+    // normalised: normalizeTitle is NOT idempotent (the edition-phrase strip runs before punctuation
+    // becomes space, so "Batman Arkham City (GOTY)" -> "batman arkham city goty" -> "batman arkham
+    // city"), so a second pass builds a key nothing ever wrote and the lookup or removal silently misses.
+    // Callers that already hold a STORED key — the Undo surface, which walks overrides() — use
+    // clearOverrideKeys below instead. The full account is in the .cpp above verdictForKeys.
+    bool overrideSaysSame(const QString& titleA, const QString& titleB);
+    void setOverride(const QString& titleA, const QString& titleB, bool same);
+    // Forget a verdict entirely — NOT the same as storing "not the same". Storing a negative is the user
+    // SEPARATING a wrongly merged key and has to keep beating the heuristic forever; clearing is the user
+    // undoing their own correction and handing the decision back to the heuristic. Two different states, so
+    // two different calls (a UI that only had setOverride could never restore the default).
+    void clearOverride(const QString& titleA, const QString& titleB);
+    // The same removal named by the keys the verdict is STORED under, i.e. the `a`/`b` of a MergeVerdict.
+    // Normalises nothing. This is what an Undo that walks overrides() must call.
+    void clearOverrideKeys(const QString& keyA, const QString& keyB);
+
+    // One stored verdict, with both sides already normalised (that is the form they are keyed in).
+    struct MergeVerdict { QString a; QString b; bool same = false; };
+    // Every verdict the user has recorded. Needed because a "same" verdict is a graph edge — the id builder
+    // has to find everything a title was fused WITH, and a pair lookup can only answer about a pair it was
+    // already told about.
+    QVector<MergeVerdict> overrides();
+
+    // Has the user SEPARATED this game, i.e. said the copies that fuse under its key are not one game?
+    // Stored as the self-pair (norm, norm), which is exactly what setOverride writes when the two titles
+    // normalise to the same thing — the case the merge is wrong in ("Prey (2006)" and "Prey (2017)" both
+    // normalise to "prey", so there is no second key to name).
+    //
+    // A RAW TITLE, normalised once here — same rule as setOverride, and for the same reason.
+    bool overrideSaysSeparate(const QString& title);
+
+    // EVERY normalised key in this one's FUSED component, itself included — the "same" verdicts walked as
+    // undirected edges. Order-independent and cycle-safe, so the component is identical whichever member you
+    // ask from. Empty for an empty key.
+    //
+    // It is public because three surfaces need the same walk and a second copy of it is exactly the drift
+    // this unit exists to prevent: effectiveItemId takes its minimum as the surviving id, the merge confirm
+    // has to NAME that minimum, and Undo has to clear the whole component rather than only the edges that
+    // happen to mention the key the user was looking at.
+    QStringList fusedKeys(const QString& normKey);
+
+    // The key a fuse of these two normalised keys would settle on: the minimum of the UNION of their two
+    // components, because the new edge joins them into one.
+    //
+    // The merge confirm's entire purpose is to say whose banked history survives, and the pairwise smaller
+    // of the two titles is the wrong answer whenever either side was already fused with something smaller —
+    // the dialog then names an entry whose records strand under its old id immediately after promising they
+    // were kept. Both arguments are normalizeTitle output.
+    QString fusedCanonicalKey(const QString& normA, const QString& normB);
+
+    // THE TITLE A MERGE CONFIRM MUST NAME as the entry whose already-banked play time, marks and stars the
+    // merged entry keeps — i.e. the title carrying fusedCanonicalKey(A, B).
+    //
+    // It lives here rather than in the dialog for the same reason itemId does: the confirm's ENTIRE PURPOSE
+    // is that disclosure, so the string it quotes has to be derived by the same rule the id is, and a rule
+    // stated twice is a rule that drifts. The dialog is also the one place this can never be tested — it
+    // needs a window and a nested event loop — so the arithmetic is pure, here, and pinned by probe_pcgames.
+    //
+    // Three outcomes the caller MUST distinguish:
+    //   * titleA or titleB     -> that side's history survives; the other side's stays behind.
+    //   * some other title     -> NEITHER of these two keeps its history. One of them was already fused
+    //                             with this third entry, which is smaller, so it is the one that survives
+    //                             and BOTH of the named pair strand. Saying "keeps A's" here is a wrong
+    //                             data-loss disclosure on the dialog whose whole job is that disclosure.
+    //   * empty                -> the surviving key belongs to no supplied title (a copy that has left the
+    //                             library). The caller has nothing honest to name and must say so.
+    // libraryTitles is searched only for the third case; passing the folder's titles is enough.
+    QString fuseSurvivorTitle(const QString& titleA, const QString& titleB,
+                              const QStringList& libraryTitles);
+
+    // THE ID THE FOLDER AND THE REMAP ACTUALLY KEY ON — itemId with the user's overrides applied.
+    //
+    // itemId above stays the pure, override-free base and is still the only place the title arithmetic
+    // lives; this is the one place the escape hatch is spent. It exists as a SEPARATE function rather than
+    // as a change to itemId so the base rule ("an id is a total function of the title") is still stated and
+    // still tested, and so the override is visible at the two call sites that spend it.
+    //
+    // BOTH the catalog builder and pcgame::remapTable call THIS, for the same reason they both call itemId:
+    // the catalog groups on it and the remap moves records onto it, and the failure mode of the two
+    // disagreeing is silent — every record lands on an id no lookup performs. One function, two callers.
+    //
+    // Three outcomes:
+    //   * no verdict touches this title      -> exactly itemId(title)
+    //   * the key was SEPARATED              -> itemId(title) + "#" + separationTag(title), so copies that
+    //                                           differ by the year the merge key threw away get one entry
+    //                                           each while two editions of one copy still fuse. Both callers
+    //                                           are handed the same raw launcher name, so they cannot derive
+    //                                           different ids from it.
+    //   * the key was FUSED with other keys  -> the smallest normalised key in the fused set, so the answer
+    //                                           does not depend on which side the user was looking at, nor on
+    //                                           the order the verdicts were recorded.
+    //
+    // SEPARATE BEATS FUSE when a key somehow carries both: a key cannot simultaneously be too coarse and too
+    // fine, and picking one deterministically is better than a rule that depends on lookup order.
+    //
+    // HONEST LIMIT, and it is inherent rather than an oversight: records are stored under a hash of the id,
+    // so changing the id STRANDS what was already banked. Separating a wrongly merged entry does not
+    // re-divide the play time that was already summed onto it — nothing records which copy earned which
+    // hour — and the surface that offers this has to say so plainly rather than implying an undo.
+    QString effectiveItemId(const QString& title);
 
 #ifdef EB_PCGAMEID_TEST_SEAM
     // Test-only ini redirect, declared and compiled ONLY for probe_pcgames (same rule as
@@ -100,6 +223,18 @@ namespace pcgame
     // and reads as "the revert didn't work". The probe must own a fresh file.
     void setIniPathForTesting(const QString& path);
 #endif
+
+    // Order candidates for the "this is the same game as…" picker: the plausible ones first.
+    //
+    // It exists because the picker's honest list is EVERY other entry in the library, and the two spellings
+    // a user is trying to join are similar by definition — an alphabetical wall of four hundred games buries
+    // the one row the whole action is about. Ranked on how many LEADING normalised words the two titles
+    // share, so "Final Fantasy VII Remake" surfaces beside "Final Fantasy VII", then alphabetically, which
+    // makes the order total and therefore stable between two identical libraries.
+    //
+    // It is an ORDERING and never a filter: a user who knows the two titles look nothing alike must still be
+    // able to reach the row, so nothing is dropped. Returns the same titles, reordered.
+    QStringList rankMergeCandidates(const QString& title, const QStringList& others);
 
     // One way to launch a game.
     struct PcGameSource

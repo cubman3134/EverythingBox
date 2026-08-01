@@ -718,6 +718,26 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     sourceBtn_->installEventFilter(this);
     arl->addWidget(sourceBtn_);
 
+    // "Fix this entry…": the PC-game merge override (issue #44), on the page of the entry it is about. A
+    // wrongly merged tile is only identifiable while you are looking at it — one "Prey" with two Steam
+    // copies on it — so the correction belongs beside Play, not in a settings screen the user would have to
+    // remember the problem to go and find.
+    pcFixBtn_ = new QPushButton(tr("⚙  Fix this entry…"), actionRow_);
+    pcFixBtn_->setCursor(Qt::PointingHandCursor);
+    pcFixBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E7EBF2;border:2px solid #8A97AD;border-radius:6px;"
+        "padding:6px 14px;color:#33405A;font-weight:bold;}"
+        "QPushButton:hover{background:#D6DCE7;}"
+        "QPushButton:focus{background:#C3CCDC;border-color:#5D6B85;}"));
+    pcFixBtn_->setVisible(false);   // revealed in requestMeta() for a merged PC game
+    connect(pcFixBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const MediaItem it = stack_.last().item;   // copy: refreshAfterPcMergeFix pops this level
+        if (fixPcGameEntry(it)) refreshAfterPcMergeFix();
+    });
+    pcFixBtn_->installEventFilter(this);   // Backspace here = Back, like every other action button
+    arl->addWidget(pcFixBtn_);
+
     arl->addStretch(1);
     mc->addWidget(actionRow_);
 
@@ -1852,7 +1872,23 @@ void HomeView::populatePcGames(bool runRemap)
         pcgame::applyRemap(pcgame::remapTable(lib));
     }
 
-    showSyntheticCatalog(pcLibraryCatalog(query, QString(), &scan));
+    // The launcher filter (issue #44). `launcherFilter` has always been a parameter of pcGamesCatalog and
+    // has always worked; nothing offered it, so the "filter inside the folder" that justified deleting the
+    // four per-launcher folders never appeared. It is FOLDER STATE, not a setting: it belongs to this level
+    // the way a search query does, it is set and cleared from the row that displays it, and a persisted
+    // copy would silently hide most of the library on the next launch with no visible cause.
+    //
+    // Which launchers to OFFER is decided from the same scan the folder is built from, so the menu can
+    // never list a launcher this machine has nothing in.
+    pcLaunchersAvailable_ = browse::pcLaunchersPresent(scan.steam, scan.epic, scan.gog, scan.bnet,
+                                                       scan.steamOwned);
+    MediaCatalog cat = pcLibraryCatalog(query, pcLauncherFilter_, &scan);
+    // Pinned at the TOP, and shown unconditionally — including when the filter has emptied the folder,
+    // which is exactly when it must still be reachable to clear. It is inserted HERE and not inside
+    // pcLibraryCatalog because that builder is also the re-derivation path (pcSourcesForId), which looks a
+    // game up by id and has no business seeing a control row.
+    cat.items.insert(0, browse::pcLauncherFilterRow(pcLauncherFilter_));
+    showSyntheticCatalog(cat);
 
     // BACKGROUND: with a key+SteamID configured and the cache stale, fetch the owned library off the GUI
     // thread (async, 8s reply timeout). On completion — ONLY if this console is STILL the top level — re-present
@@ -1881,6 +1917,34 @@ void HomeView::populatePcGames(bool runRemap)
             grid_->scrollToItem(grid_->item(row), QAbstractItemView::PositionAtCenter);
         }
     });
+}
+
+// The launcher filter's menu (issue #44). A NavMenu from the nav kit — an in-window child overlay that a
+// D-pad reaches, never a QDialog or a QComboBox: three of this app's four layouts render no widget chrome at
+// all, so a dropdown above the grid would be a control most users never see and only a mouse could reach.
+//
+// The FOLDER ROW is what opens this, so the control lives inside the thing it controls and says, on the row
+// itself, which launcher is currently showing.
+void HomeView::showPcLauncherFilterMenu()
+{
+    const QVector<QPair<QString, QString>> choices =
+        browse::pcLauncherFilterChoices(pcLaunchersAvailable_, pcLauncherFilter_);
+    QStringList rows;
+    rows.reserve(choices.size());
+    for (const QPair<QString, QString>& c : choices) rows << c.second;
+
+    new NavMenu(tr("Show games from:"), rows, [this, choices](int row) {
+        if (row < 0 || row >= choices.size()) return;             // Back: leave the folder as it was
+        const QString picked = choices.at(row).first;
+        if (picked == pcLauncherFilter_) return;                  // the ticked row: nothing to rebuild
+        pcLauncherFilter_ = picked;
+        // Keep the cursor on the control row: it is row 0 of the rebuilt folder and it is the thing that
+        // just changed, so the user can see the new state and press again without hunting for it.
+        browseSelectKey_ = QStringLiteral("_pcfilter");
+        populatePcGames(/*runRemap=*/false);   // a filter cannot alter the library the remap is derived from
+        emit browseItemsChanged(false);        // re-sync a themed browse view (else its selection desyncs)
+        browseSelectKey_.clear();              // cleared AFTER the re-sync reads it (the favourite idiom)
+    }, window());
 }
 
 // ---- The source picker --------------------------------------------------------------------------------
@@ -1945,15 +2009,277 @@ void HomeView::playPcGame(const MediaItem& it)
             row = row.left(StremioTranslate::kMaxDescribeChars - 1).trimmed() + QChar(0x2026);
         rows << row;
     }
+    // THE FIX ROW (issue #44). This menu is where a wrong merge announces itself: the user pressed Play on
+    // one game and was handed a list of copies, and if two of them are actually different games this list is
+    // the moment they find out. Offering the cure anywhere else means remembering the problem and going to
+    // look for a settings screen. Last, after every playable row, so it can never be pressed by reflex.
+    //
+    // It rides here as well as on the game's own page because this menu is reachable from EVERY layout — a
+    // favourite, a Recent row, the XMB inline chooser — while the detail page is not.
+    const int fixRow = rows.size();
+    rows << tr("⚙   Wrong game? Fix this entry…");
     const MediaItem copy = it; // the overlay outlives items_ (a repopulate can run under it)
     const QVector<pcgame::PcGameSource> keep = sources;
     // Built on a fresh event-loop turn: in the themed modes this can run inside the QML view's `activated`
     // handler, and building/showing widgets from there is best deferred (the game-menu precedent).
-    QMetaObject::invokeMethod(this, [this, copy, keep, rows] {
-        new NavMenu(tr("Play “%1” from:").arg(copy.title), rows, [this, copy, keep](int row) {
+    QMetaObject::invokeMethod(this, [this, copy, keep, rows, fixRow] {
+        new NavMenu(tr("Play “%1” from:").arg(copy.title), rows, [this, copy, keep, fixRow](int row) {
+            if (row == fixRow)
+            {
+                // A fresh turn again: this runs from inside the picker's own callback, and the fix opens
+                // its own overlays on top of the one that is closing.
+                QMetaObject::invokeMethod(this, [this, copy] {
+                    if (fixPcGameEntry(copy)) refreshAfterPcMergeFix();
+                }, Qt::QueuedConnection);
+                return;
+            }
             if (row >= 0 && row < keep.size()) launchPcSource(copy, keep.at(row));
         }, window());
     }, Qt::QueuedConnection);
+}
+
+// ---- The merge override, spent from the entry it is about (issue #44) -----------------------------------
+//
+// pcgame::setOverride shipped with no caller. The design named it "the escape hatch that makes a fuzzy
+// heuristic acceptable to ship — without it, a wrong merge has no cure", and a settings screen is the one
+// place it could not usefully live: the user is looking at ONE tile that is two games (or two tiles that are
+// one), and the correction has to be on that tile. So it is an action on the game's own page, beside Play,
+// and a row on the source picker — which is where a wrong merge announces itself, as two copies of a game
+// you only own once.
+
+// How many entries a "separate" would actually produce, by the same key the id builder uses. Offering an
+// action that would visibly do nothing is worse than not offering it: the user presses it, reads a warning
+// about losing history, accepts, and the folder looks identical.
+static QStringList pcSeparationTags(const QVector<pcgame::PcGameSource>& sources)
+{
+    QStringList out;
+    for (const pcgame::PcGameSource& s : sources)
+    {
+        // sourceName is the launcher's OWN name for this copy, verbatim — the field the merge did not touch
+        // and the same string the catalog derived this copy's id from.
+        const QString t = pcgame::separationTag(s.sourceName);
+        if (!t.isEmpty() && !out.contains(t)) out << t;
+    }
+    return out;
+}
+
+bool HomeView::fixPcGameEntry(const MediaItem& it)
+{
+    if (!isMergedPcGame(it)) return false;
+    const QVector<pcgame::PcGameSource> sources = pcSourcesFor(it);
+    const QStringList tags = pcSeparationTags(sources);
+    const QString norm = pcgame::normalizeTitle(it.title);
+
+    // Is there already a verdict about this key? Only then is "undo" offered — a row that always shows and
+    // usually does nothing teaches people to ignore it.
+    bool hasVerdict = false;
+    for (const pcgame::MergeVerdict& v : pcgame::overrides())
+        if (v.a == norm || v.b == norm) { hasVerdict = true; break; }
+
+    enum Act { Separate, Fuse, Undo };
+    QVector<int> acts;
+    QStringList  rows;
+    if (tags.size() >= 2)
+    {
+        rows << tr("✂   Not one game — split into %1 entries").arg(tags.size());
+        acts << Separate;
+    }
+    rows << tr("🔗   This is the same game as…");
+    acts << Fuse;
+    if (hasVerdict)
+    {
+        rows << tr("↩   Undo my correction for this game");
+        acts << Undo;
+    }
+
+    const int row = NavMenu::pick(tr("Fix “%1”").arg(it.title), rows, window());
+    if (row < 0 || row >= acts.size()) return false;
+
+    if (acts.at(row) == Separate)
+    {
+        // Say plainly what a split can and cannot restore. It CANNOT re-divide what was already summed:
+        // records key on a hash of the entry's id, and nothing anywhere recorded which copy earned which
+        // hour. Implying otherwise would be the worse failure, because it is discovered after the fact.
+        if (NavConfirm::ask(tr("Split “%1”?").arg(it.title),
+                            tr("This entry was built from %1 differently-named copies. Splitting gives each "
+                               "copy its own entry from now on.\n\n"
+                               "Play time, marks and your star were already added together on this one entry "
+                               "and CANNOT be divided back up — nothing recorded which copy earned which "
+                               "hour. The new entries start fresh; the combined history stays where it is.")
+                                .arg(tags.size()),
+                            { tr("Split them"), tr("Cancel") }, /*focusIndex=*/1, /*cancelIndex=*/1,
+                            window()) != 0)
+            return false;
+        // The SELF-pair: both copies normalise to the same key (that is why they merged), so the verdict is
+        // recorded against that key rather than against a second title that does not exist.
+        pcgame::setOverride(it.title, it.title, false);
+        showToast(tr("Split “%1”. Each copy now has its own entry.").arg(it.title), kFeedbackLong);
+        return true;
+    }
+
+    if (acts.at(row) == Undo)
+    {
+        // clearOverrideKeys, NOT clearOverride: `v.a`/`v.b` are the keys the verdict is STORED under, and
+        // clearOverride normalises what it is given. normalizeTitle is not a fixed point — a stored key like
+        // "batman arkham city goty" re-normalises to "batman arkham city" — so handing stored keys to the
+        // raw-title entry point removed a pair nobody had written. QSettings::remove no-ops, the toast below
+        // still said "Undone.", and the wrong fuse survived every retry with the loser side's favourites,
+        // marks and play time stranded under an id nothing looks up again. See PcGameId.h.
+        //
+        // The WHOLE COMPONENT, not only the edges naming `norm`: undo restores the grouping this entry had,
+        // and a chain A—B—C undone from A that left B—C behind (or left B's own self-pair standing) would
+        // leave the user looking at an entry still grouped differently than before, under a toast saying it
+        // was not.
+        QSet<QString> group;
+        for (const QString& k : pcgame::fusedKeys(norm)) group.insert(k);
+        group.insert(norm);
+        for (const pcgame::MergeVerdict& v : pcgame::overrides())
+            if (group.contains(v.a) || group.contains(v.b)) pcgame::clearOverrideKeys(v.a, v.b);
+        showToast(tr("Undone. “%1” groups the way it did before.").arg(it.title), kFeedbackLong);
+        return true;
+    }
+
+    // FUSE. The other entries in the library, closest-looking first — the whole point is that the two
+    // spellings are similar, so an alphabetical wall of the entire library buries the row being looked for.
+    const MediaCatalog all = pcLibraryCatalog(QString(), QString());
+    QStringList others;
+    for (const MediaItem& i : all.items)
+        if (i.id != it.id && !i.title.isEmpty()) others << i.title;
+    if (others.isEmpty())
+    {
+        showToast(tr("There's no other PC game to merge “%1” with.").arg(it.title), kFeedbackLong);
+        return false;
+    }
+    others = pcgame::rankMergeCandidates(it.title, others);
+    const int pick = NavMenu::pick(tr("“%1” is the same game as:").arg(it.title), others, window());
+    if (pick < 0 || pick >= others.size()) return false;
+    const QString other = others.at(pick);
+
+    // ---- The two ways a fuse would be ACCEPTED and then not happen. Both are refused BEFORE the confirm,
+    //      because a destructive-sounding dialog followed by a success toast and an unchanged folder is
+    //      worse than being told no: the user retries it, and every retry fails the same silent way.
+
+    // A title that normalises to NOTHING — "GOTY", "!!!" — is real here: mergeKey has a whole
+    // "pcgame:rawtitle/" fallback for it. setOverride returns early on such a side, so the confirm and the
+    // toast would both fire over a verdict that was never written. The SPLIT direction is already guarded
+    // (a title with no normalised form yields no separation tags, so the row is not offered); this is the
+    // same guard on the direction that lacked it.
+    const QString myNorm    = pcgame::normalizeTitle(it.title);
+    const QString otherNorm = pcgame::normalizeTitle(other);
+    if (myNorm.isEmpty() || otherNorm.isEmpty())
+    {
+        showToast(tr("“%1” can't be merged — one of these names is all punctuation or edition wording, so "
+                     "there's no name left to match on.")
+                      .arg(myNorm.isEmpty() ? it.title : other),
+                  kFeedbackLong);
+        return false;
+    }
+
+    // A side the user has already SPLIT. effectiveItemId applies SEPARATE before FUSE — a key cannot be both
+    // too coarse and too fine — so the separated side would not move at all while the other side was dragged
+    // onto a canonical id no separated copy carries: three entries, one of them keyed on a game that is not
+    // there, after a confirm describing the migration and a toast saying they are now one entry. Refused
+    // rather than silently un-splitting the other entry, which is a destructive change to a tile the user is
+    // not looking at.
+    const bool meSeparated    = pcgame::overrideSaysSeparate(it.title);
+    const bool otherSeparated = pcgame::overrideSaysSeparate(other);
+    if (meSeparated || otherSeparated)
+    {
+        showToast(tr("“%1” is currently split into separate entries, so it can't be merged with anything "
+                     "yet. Undo that split first, then merge.")
+                      .arg(meSeparated ? it.title : other),
+                  kFeedbackLong);
+        return false;
+    }
+
+    // WHICH history survives is decidable up front, so it is stated rather than left to be discovered.
+    //
+    // The surviving key is the minimum of the whole FUSED COMPONENT, not the smaller of these two titles.
+    // Those differ exactly when one side was already fused with something smaller — and then the pairwise
+    // answer names an entry whose records strand under its old id immediately after the dialog promised they
+    // were kept. A wrong data-loss disclosure on the confirm whose entire purpose is that disclosure, so the
+    // rule lives in pcgame::fuseSurvivorTitle where it is derived once and probe-tested.
+    QStringList libraryTitles = others;
+    libraryTitles << it.title;
+    const QString keeps = pcgame::fuseSurvivorTitle(it.title, other, libraryTitles);
+    QString body;
+    if (keeps == it.title || keeps == other)
+    {
+        const QString loses = (keeps == it.title) ? other : it.title;
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "Play time, marks and stars recorded so far were kept per entry: the merged entry "
+                  "keeps “%1”'s, and “%2”'s stay behind under its old entry. New activity is counted "
+                  "together.").arg(keeps, loses);
+    }
+    else if (!keeps.isEmpty())
+    {
+        // The third-entry case: one of these two is already part of a group that “%3” anchors.
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "NEITHER of these keeps its recorded history: one of them was already merged into "
+                  "“%3”, and that entry is the one the play time, marks and stars stay on. Both “%1”'s "
+                  "and “%2”'s stay behind under their old entries. New activity is counted together.")
+                   .arg(it.title, other, keeps);
+    }
+    else
+    {
+        body = tr("They become one entry from now on, with every way to launch either copy on it.\n\n"
+                  "NEITHER of these keeps its recorded history: they join a group anchored by a copy that "
+                  "is no longer in your library, so “%1”'s and “%2”'s play time, marks and stars stay "
+                  "behind under their old entries. New activity is counted together.")
+                   .arg(it.title, other);
+    }
+    if (NavConfirm::ask(tr("Merge “%1” and “%2”?").arg(it.title, other), body,
+                        { tr("Merge them"), tr("Cancel") }, /*focusIndex=*/1, /*cancelIndex=*/1,
+                        window()) != 0)
+        return false;
+    pcgame::setOverride(it.title, other, true);
+    showToast(tr("“%1” and “%2” are now one entry.").arg(it.title, other), kFeedbackLong);
+    return true;
+}
+
+// Show the result of a verdict. The entry that was being looked at may not exist any more — splitting
+// replaces it with one per copy — so a page showing it has to be left, not refreshed in place.
+void HomeView::refreshAfterPcMergeFix()
+{
+    if (atPcGamesConsole()) { populatePcGames(); emit browseItemsChanged(false); return; }
+    // On the game's own detail level: pop back to the folder, whose loadTop() re-runs populatePcGames (and
+    // therefore the remap, which is what actually moves the records onto the new ids).
+    if (stack_.size() > 1 && stack_.last().detail) { goBack(); return; }
+    // Reached from a favourite on Home, or some other level entirely: nothing here to rebuild. The folder
+    // rebuilds from the verdict the next time it is opened.
+}
+
+// The entry's OWN id, resolved from a row index right now. A caller that has to defer the fix past the
+// current event — the themed action row must, or it rebuilds the browse model under the live delegate that
+// is still emitting — resolves the index here, synchronously, and carries this instead. See
+// fixPcGameEntryById.
+QString HomeView::pcGameIdAt(int browseIndex) const
+{
+    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return QString();
+    return items_[browseRowMap_[browseIndex]].id;
+}
+
+// The fix, addressed by the entry's id rather than by a row index.
+//
+// A row index is only meaningful against the browseRowMap_ that produced it, and the themed detail defers
+// this verb by a full event loop turn — the async owned-games re-present can land in that window and rebuild
+// the map, so the stale index would resolve to a DIFFERENT game and split or merge it. The file's own
+// precedent for every other library-management verb is to act on a stable key for exactly this reason.
+//
+// An id that is no longer in items_ means the entry went away while the call was queued: return false, which
+// the caller already treats as "nothing happened, leave the page alone".
+bool HomeView::fixPcGameEntryById(const QString& itemId)
+{
+    if (itemId.isEmpty()) return false;
+    for (const MediaItem& i : items_)
+        if (i.id == itemId) { const MediaItem copy = i; return fixPcGameEntry(copy); }
+    return false;
+}
+
+bool HomeView::isMergedPcGameAt(int browseIndex) const
+{
+    if (browseIndex < 0 || browseIndex >= browseRowMap_.size()) return false;
+    return isMergedPcGame(items_[browseRowMap_[browseIndex]]);
 }
 
 void HomeView::launchPcSource(const MediaItem& it, const pcgame::PcGameSource& s)
@@ -2781,7 +3107,14 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
             return false;
         }
         // --- Detail page: the action button (Favorite, or Play for a Steam game) ---
-        if (obj == favBtn_ || (playBtn_ && obj == playBtn_))
+        // ANY button on the detail action row, not just Play and Favorite. The old test named those two, and
+        // Left/Right swapped between exactly them — so "⬇ Download" and "🔀 Choose source…" have always been
+        // MOUSE-ONLY on this page, which is the defect class issue #40 is open about, on a controller-and-TV
+        // -first app. Adding "⚙ Fix this entry…" (#44) to a row a D-pad cannot traverse would have made that
+        // three. The row is walked in its real left-to-right order instead, so every visible action is
+        // reachable and a button added later is reachable by construction.
+        const QVector<QWidget*> actionRowBtns{ playBtn_, favBtn_, downloadBtn_, sourceBtn_, pcFixBtn_ };
+        if (actionRowBtns.contains(static_cast<QWidget*>(obj)))
         {
             if (k == Qt::Key_Up)   { focusChromeRow(); return true; }
             if (k == Qt::Key_Down) // drop into the child column (container detail), if any is shown
@@ -2791,10 +3124,21 @@ bool HomeView::eventFilter(QObject* obj, QEvent* event)
                 if (col) focusContent();
                 return true;
             }
-            if (k == Qt::Key_Left || k == Qt::Key_Right) // move between Play and Favorite when both are shown
+            if (k == Qt::Key_Left || k == Qt::Key_Right)
             {
-                QWidget* other = (obj == playBtn_) ? static_cast<QWidget*>(favBtn_) : static_cast<QWidget*>(playBtn_);
-                if (other && other->isVisible()) takeFocus(other);
+                // Only the VISIBLE ones: the row's membership changes per item (Download and Choose source
+                // are revealed by requestMeta/showMeta), and stepping onto a hidden button would strand the
+                // cursor somewhere with nothing drawn.
+                QVector<QWidget*> shown;
+                for (QWidget* w : actionRowBtns) if (w && w->isVisible()) shown << w;
+                const int at = shown.indexOf(static_cast<QWidget*>(obj));
+                if (at >= 0 && shown.size() > 1)
+                {
+                    // Wrapping, like the type-button row: with three or more actions a non-wrapping row
+                    // makes the far end a long walk back.
+                    const int step = (k == Qt::Key_Right) ? 1 : shown.size() - 1;
+                    takeFocus(shown.at((at + step) % shown.size()));
+                }
                 return true;
             }
             if (k == Qt::Key_Return || k == Qt::Key_Enter || k == Qt::Key_Space)
@@ -3032,6 +3376,14 @@ void HomeView::activateItem(int row)
     }
     if (it.type == QStringLiteral("_newplaylist"))
         { createPlaylistInteractive(it.mime.mid(QStringLiteral("newplaylist:").size())); return; }
+
+    // The PC Games folder's launcher filter row. Deferred a turn for the same reason every other overlay
+    // here is: in the themed modes this runs inside the QML view's own `activated` handler.
+    if (it.type == QStringLiteral("_pcfilter"))
+    {
+        QMetaObject::invokeMethod(this, [this] { showPcLauncherFilterMenu(); }, Qt::QueuedConnection);
+        return;
+    }
 
     // A generic leaf/container: resolve + open through the shared per-entry path (also reused by Play-random
     // over a playlist, so a random pick resolves identically to activating that item's row).
@@ -4212,6 +4564,13 @@ bool HomeView::isThemedInfoLeaf(int idx) const
     // up"). Its verbs (Download / Favorite / Playlist) live on the themed detail page, so open that.
     // Local/downloaded game rows carry a url (or a localgame: mime) and keep their direct action-menu path.
     if (it.type == QStringLiteral("game") && it.url.isEmpty() && it.mime.isEmpty()) return true;
+    // A MERGED PC game is the same shape wearing a mime: no url (which copy runs is decided by the source
+    // picker at Play time) and mime "pcgame", so the test above misses it and activating a tile drilled into
+    // a level with no children — an empty column. Its verbs all live on the themed detail page (Play,
+    // Favorite, Playlist, and now "Fix this entry…"), which is exactly the classic path's behaviour: a
+    // merged PC game's classic route is openDetailLevel too. This is what makes the merge override reachable
+    // by D-pad in the default themed layout (issue #44).
+    if (isMergedPcGame(it)) return true;
     return false;
 }
 
@@ -4314,6 +4673,9 @@ QVariantMap HomeView::themedDetailData(int idx)
     // "Choose source…" sits next to Play because it IS a play: the same resolve, with the release picked by
     // hand instead of by the auto rule. Offered only where several releases exist to choose between.
     if (bridgedStream) verbs << QStringLiteral("source");
+    // "Fix this entry…" — the PC-game merge override (issue #44), next to Play for the same reason: it is
+    // about THIS entry, and a wrongly merged tile can only be recognised while you are looking at it.
+    if (isMergedPcGame(it)) verbs << QStringLiteral("pcfix");
     verbs << QStringLiteral("favorite");
     if (gates.download && !localSaved) verbs << QStringLiteral("download");
     verbs << QStringLiteral("playlist");
@@ -4608,6 +4970,9 @@ void HomeView::requestMeta(const MediaItem& item)
     // "Choose source…" only where there is a list of releases to choose from (a Stremio-resolved leaf). A
     // bridged leaf can't be known yet — its stream id arrives with /meta — so showMeta reveals that case.
     if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
+    // "Fix this entry…" only on a merged PC game — the only kind of row whose identity is a heuristic guess
+    // the user may need to overrule (issue #44).
+    if (pcFixBtn_) pcFixBtn_->setVisible(isMergedPcGame(item));
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
 
     layoutMetaSections(item.type); // order the text rows per the theme
