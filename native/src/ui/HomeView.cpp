@@ -46,6 +46,7 @@
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
 #include "../core/MetaOverrides.h"
+#include "../core/MissedDismiss.h"   // "You missed" (#25): the per-show dismissal watermarks the rule reads
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/SearchAggregator.h"
@@ -2752,6 +2753,82 @@ void HomeView::openTraktCalendarLevel()
 void HomeView::populateTraktCalendar()
 { showSyntheticCatalog(traktCalendarItems()); }
 
+// ---- Trakt "You Missed" (#25): the Home shelf + the video-catalogue folder --------------------------------
+//
+// The same gate, re-asserted for the same reason, over the SAME cached calendar. Nothing new is fetched:
+// #23's fetch now asks for the lookback window as well as the week ahead (MainWindow::refreshTraktCalendar),
+// so both surfaces read one array and the pure rule decides which entries belong to which.
+//
+// The two local-state lookups the rule needs are supplied HERE, at the one place that is allowed to touch
+// both stores, and nothing about either store reaches TraktMissed.cpp:
+//
+//   * "what does the app already know about this episode" — ItemMarks, under the SAME key the Trakt
+//     watched-backfill writes (the stream id), which is why importing your history clears these rows. Both
+//     non-Unmarked answers mean the same thing to this rule (TraktMissed.h says why), and `hidden` is
+//     folded in beside completion: hiding an item is as explicit a statement as marking it.
+//   * "has this show been waved away, and through when" — MissedDismiss.
+MediaCatalog HomeView::traktMissedItems(int maxRows) const
+{
+    if (!TraktClient::calendarAvailable()) return MediaCatalog{};
+    const QVector<trakt::MissedRow> rows = trakt::planMissed(
+        traktCal_, QDateTime::currentDateTimeUtc(), trakt::kMissedLookbackDays,
+        [](const QString& streamId) {
+            const ItemMarks::Marks m = ItemMarks::get(streamId);
+            if (m.completion == ItemMarks::Completion::Finished) return trakt::LocalState::Watched;
+            if (m.completion != ItemMarks::Completion::None || m.hidden) return trakt::LocalState::OtherExplicit;
+            return trakt::LocalState::Unmarked;
+        },
+        [](const QString& showKey) { return MissedDismiss::through(showKey); });
+    return browse::traktMissedCatalog(rows, maxRows);
+}
+
+void HomeView::openTraktMissedLevel()
+{
+    if (xmbMode_) { atXmbRoot_ = false; if (xmb_) xmb_->setAtRoot(false); }
+    Level lvl;
+    lvl.addon = nullptr; lvl.detail = true; lvl.title = tr("You Missed");
+    lvl.item.id = QStringLiteral("_traktmissed");
+    lvl.item.type = QStringLiteral("_traktmissed");
+    lvl.item.expandable = true;
+    lvl.item.mime = QStringLiteral("traktmissed:"); // so loadTop() repopulates on Back
+    stack_.push_back(lvl);
+    populateTraktMissed();
+}
+
+void HomeView::populateTraktMissed()
+{ showSyntheticCatalog(traktMissedItems(0)); }   // the FOLDER is uncapped; only the shelf is a glance
+
+void HomeView::showTraktMissedMenu(MediaItem it)
+{
+    const QString showKey = browse::traktMissedShowKeyOf(it.mime);
+    const qint64  through = browse::traktMissedThroughOf(it.mime);
+    const QStringList rows = {
+        tr("▶   Play %1").arg(it.subtitle.section(QStringLiteral(" · "), 0, 0)),
+        tr("✓   I'm caught up — stop showing this"),
+    };
+    new NavMenu(it.title, rows, [this, it, showKey, through](int row) {
+        if (row == 0)
+        {
+            resolvePlay(nullptr, it, QString(), QString(), it.imdbStreamId, QStringLiteral("series"));
+            return;
+        }
+        if (row != 1) return;
+        // Fails CLOSED: a row whose marker did not carry both halves does nothing rather than filing a
+        // dismissal under an empty key or through the epoch. Neither can happen from a row this build
+        // produced — probe_browse pins the round trip — so this is the guard for a row some LATER build
+        // produced that this one is still rendering after an update.
+        if (showKey.isEmpty() || through <= 0) return;
+        MissedDismiss::dismissThrough(showKey, through);
+        // Say what it did AND what it did not do. "Stop showing this" reads as unfollow, and the one thing
+        // a user must not have to discover by waiting a week is that the show comes back when it airs.
+        showToast(tr("Caught up on “%1”. It will reappear when a new episode airs.").arg(it.title),
+                  kFeedbackLong);
+        if (recentView_) renderRecents();   // the Home shelf loses the row
+        else             loadTop();         // ...or the folder does
+        emit browseItemsChanged(false);     // re-sync a themed browse view (else its selection desyncs)
+    }, window());
+}
+
 // The watchlist / collection folders. Same gate as the calendar, re-asserted here rather than trusted to
 // have been asserted when the vectors were filled, so a future path that fills them without checking
 // still cannot make a folder appear on an unconfigured install.
@@ -2822,6 +2899,7 @@ void HomeView::onTraktCalendarChanged()
     if (stack_.isEmpty()) return;
     const auto& top = stack_.last();
     if (top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
+    if (top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }
     // Only a catalogue root shows the synthetic folders — refresh there so the folder appears (or, after a
     // disconnect, disappears). Anywhere else it settles on the next navigation to a root; do NOT reload the
     // level the user is standing in. Same rule as onLocalLibraryChanged.
@@ -3018,6 +3096,29 @@ void HomeView::renderRecents()
         }
     };
 
+    // Trakt "You Missed" (#25): the episodes of your followed shows that already aired and you have not
+    // seen. Same absent-unless-there-is-something rule as the shelf above — an empty catalog returns before
+    // the header, so an install with no Trakt account, or one with nothing missed, renders exactly what it
+    // rendered before this existed. BOUNDED at trakt::kMissedShelfMax: this is the one shelf whose length
+    // is driven by how long the user has been away, and a strip you have to scroll has stopped being a
+    // glance. The folder under the video catalogue is where the whole backlog lives.
+    auto renderTraktMissed = [&]() {
+        const MediaCatalog missed = traktMissedItems(trakt::kMissedShelfMax);
+        if (missed.items.isEmpty()) return;
+        addHeader(tr("You Missed"));
+        for (const MediaItem& raw : missed.items)
+        {
+            const MediaItem it = correctedRow(raw);   // Trakt's title is a scrape like any other
+            items_.push_back(it);
+            // The episode code, the day and the backlog size ride the row text for the calendar shelf's
+            // reason: the Home list is a list, and "Show" alone says neither which episode nor how far behind.
+            auto* w = new QListWidgetItem(QStringLiteral("  ") + it.title
+                                          + QStringLiteral("    ·  ") + it.subtitle, grid_);
+            w->setSizeHint(QSize(0, 52));
+            w->setIcon(defaultIcon(it.type, iconSz));
+        }
+    };
+
     const QVector<RecentItem> recents = RecentStore::list();
 
     // Bucket recents into groups (media type, per-console for games), keeping newest-first group order.
@@ -3070,6 +3171,9 @@ void HomeView::renderRecents()
         }
     }
 
+    // Past before future, and both after what you were actually watching. "You Missed" leads "Airing Soon"
+    // because it is the one of the two you can act on right now — anticipation can wait a row.
+    renderTraktMissed();   // "You Missed" (Trakt), the aired-and-unwatched backlog (#25)
     renderTraktCalendar(); // "Airing Soon" (Trakt), between what you watched and what you starred
     renderFavorites();     // the Favorites section, below the recently-played groups
 
@@ -3344,6 +3448,19 @@ void HomeView::activateItem(int row)
         resolvePlay(nullptr, it, QString(), QString(), it.imdbStreamId, QStringLiteral("movie"));
         return;
     }
+    // A Trakt "You Missed" row, on EITHER surface (#25). It opens a MENU rather than playing straight away,
+    // because the row needs a second verb — "I'm caught up" — and a folder row is the only control every one
+    // of this app's four layouts can reach with a D-pad. Play is row 0, so the couch gesture is unchanged
+    // except for one extra press, exactly as the Recent/Downloads game rows already work.
+    //
+    // Deferred a turn, like showGameItemMenu below: this can be reached from a themed `activated` handler,
+    // and opening a nested overlay under a live QML delegate is the crash that idiom exists to avoid.
+    if (browse::isTraktMissedMime(it.mime))
+    {
+        const MediaItem copy = it;
+        QMetaObject::invokeMethod(this, [this, copy] { showTraktMissedMenu(copy); }, Qt::QueuedConnection);
+        return;
+    }
     if (it.mime == QStringLiteral("trakt:cal"))
     {
         if (it.imdbStreamId.isEmpty())
@@ -3437,6 +3554,8 @@ void HomeView::activateItem(int row)
 
     // The synthetic Airing Soon folder drills into the connected Trakt account's calendar.
     if (it.type == QStringLiteral("_traktcal")) { openTraktCalendarLevel(); return; }
+    // ...and the synthetic You Missed folder into what already aired on it (#25).
+    if (it.type == QStringLiteral("_traktmissed")) { openTraktMissedLevel(); return; }
     if (it.type == QStringLiteral("_traktlist"))
     { openTraktListLevel(it.mime.section(QLatin1Char(':'), 1)); return; }
 
@@ -4058,6 +4177,7 @@ void HomeView::loadTop()
         { populateLocalLibrary(top.item.mime.mid(QStringLiteral("locallib:").size())); return; }
     // Returning to the synthetic Airing Soon level: rebuild it from the cached calendar.
     if (top.detail && top.item.type == QStringLiteral("_traktcal")) { populateTraktCalendar(); return; }
+    if (top.detail && top.item.type == QStringLiteral("_traktmissed")) { populateTraktMissed(); return; }
     if (top.detail && top.item.type == QStringLiteral("_traktlist"))
     { populateTraktList(top.item.mime.section(QLatin1Char(':'), 1)); return; }
     // Returning to a console's synthetic Favorites level: rebuild it natively.
@@ -5658,6 +5778,14 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
             // calendarAvailable() is false, so on an install that never linked Trakt this is plainly false
             // and pushFolders skips the row entirely — no folder, no empty row, no "connect Trakt" hint.
             const bool hasTraktCal = isVideo && !traktCalendarItems().items.isEmpty();
+            // Trakt "You Missed" (#25): the same gate and the same emptiness rule, so an install with no
+            // Trakt account gets no folder, and an account with nothing missed gets none either. It is
+            // asked at the SHELF cap rather than uncapped, deliberately: the question is "is there at
+            // least one", the answer is identical either way, and capping bounds the work this does on
+            // every navigation into the video root. (traktListHasRows exists because the LIST form of
+            // this question sorted thousands of rows to compare a size to zero; the missed rule is
+            // bounded by the followed-show count and the cap, so it needs no such twin.)
+            const bool hasTraktMissed = isVideo && !traktMissedItems(trakt::kMissedShelfMax).items.isEmpty();
             // Same gate, same reasoning: the answer is false whenever Trakt is off, so an install that
             // never linked it gets no row at all — and an account with an EMPTY watchlist gets no row
             // either, rather than a folder that opens onto nothing.
@@ -5672,6 +5800,7 @@ void HomeView::populate(const MediaCatalog& cat, bool append)
                 { QLatin1String("_recents"),   tr("Recent"),        QStringLiteral("recents:") + rkind,                      hasRecents },
                 { QLatin1String("_downloads"), tr("Downloaded"),    QStringLiteral("downloads:") + rkind + QLatin1Char('|'), hasDownloads },
                 { QLatin1String("_locallib"),  tr("Local Library"), QStringLiteral("locallib:") + rkind,                     isVideo && !LocalLibrary::index().all().isEmpty() },
+                { QLatin1String("_traktmissed"), tr("You Missed"),  QStringLiteral("traktmissed:"),                          hasTraktMissed },
                 { QLatin1String("_traktcal"),  tr("Airing Soon"),   QStringLiteral("traktcal:"),                             hasTraktCal },
                 { QLatin1String("_traktlist"), tr("Trakt Watchlist"),  QStringLiteral("traktlist:watchlist"),                hasTraktWatchlist },
                 { QLatin1String("_traktlist"), tr("Trakt Collection"), QStringLiteral("traktlist:collection"),               hasTraktCollection },

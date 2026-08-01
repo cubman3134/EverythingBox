@@ -419,6 +419,27 @@ private:
     MediaCatalog traktCalendarItems() const;             // the built catalog, or an EMPTY one when Trakt is off
     void openTraktCalendarLevel();                       // drill it -> the episodes airing soon
     void populateTraktCalendar();                        // (re)build that list from the cached calendar
+    // The synthetic "You Missed" folder + Home shelf (issue #25): the complement of the two above, over the
+    // SAME cached calendar — episodes of your followed shows that already aired, are still inside the
+    // lookback window, are unwatched and are not dismissed. One row per show.
+    //
+    // Gated identically, and that is the whole answer to "what does a user who never linked Trakt see":
+    // nothing. traktMissedItems() is an empty catalog whenever calendarAvailable() is false, an empty
+    // catalog draws no shelf and no folder row, so the surface does not exist rather than existing and
+    // being permanently, unexplainedly empty. It is also absent when Trakt IS linked and there is simply
+    // nothing missed, which is the same rule and the right one: this shelf is a to-do list, and an empty
+    // to-do list is not a thing to draw.
+    //
+    // `maxRows` <= 0 is uncapped (the folder); the shelf passes trakt::kMissedShelfMax.
+    MediaCatalog traktMissedItems(int maxRows) const;
+    void openTraktMissedLevel();                         // drill it -> every missed show
+    void populateTraktMissed();                          // (re)build that list from the cached calendar
+    // Activating a "You Missed" row opens a small menu rather than playing straight away — Play is row 0,
+    // so the couch gesture is still "press twice". The second row is the dismissal, and a menu is how it
+    // becomes reachable: the app has four layouts and a D-pad has no second button to bind, whereas a
+    // NavMenu from the nav kit is controller/keyboard/mouse navigable in all of them. Same pattern, and
+    // the same reasoning, as the Recent/Downloads game menu below.
+    void showTraktMissedMenu(MediaItem it);
     // The synthetic "Trakt Watchlist" / "Trakt Collection" folders (video category only). Gated exactly as
     // the calendar is: the builder returns an EMPTY catalog whenever Trakt is not configured+connected, and
     // an empty catalog means no folder at all — no row, no placeholder, no "connect Trakt" hint.
