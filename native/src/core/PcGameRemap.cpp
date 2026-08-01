@@ -540,6 +540,15 @@ void remapFavorites(QSettings& s, const QHash<QString, QString>& table)
 // maxing `pos` across two records would produce a position that was never reached in either. The newer ts
 // is the one the user last left off at, which is the same rule CloudMerge already applies to resume/ keys.
 // Stated explicitly because it is the one store where "merge" does discard a value.
+//
+// Retiring the source key records NO resume tombstone, deliberately, and the next person to touch a resume
+// deletion should read this before copying #150's shape here. A tombstone says "the user forgot this"; a
+// re-key says "the same position now lives under a different id", and dating it would tell every peer to
+// forget a position that was not forgotten — including the peer that has not run this migration yet and is
+// still the only device holding it. This is the BrandMigration::reconcileAddonRefs posture: a device-local
+// repair is not an edit. The cost is that a peer still on the old id re-imports the retired row on the next
+// merge, leaving one orphan keyed by an id nothing looks up any more; that is invisible to every reader and
+// it goes away once the peer migrates too.
 void remapResume(QSettings& s, const QHash<QString, QString>& table)
 {
     Batch b(s);
