@@ -701,6 +701,20 @@ int main(int argc, char** argv)
                 if ((v.a == n1 && v.b == n2) || (v.a == n2 && v.b == n1)) { sawPair = true; CHECK(v.same); }
             CHECK(sawPair);
         }
+        // ...and EVERY public reader of the store agrees with the folder about this pair. Both of these
+        // take RAW titles and normalise once; a reader that normalised twice would miss the verdict and
+        // fall through to the heuristic, which says these two are different games. Pinned here because
+        // this is the only fixture whose titles can tell one normalisation from two — measured: without
+        // these, "overrideValue normalises twice" and "sameGame re-normalises its already-normalised
+        // keys" both survived the whole suite.
+        CHECK(overrideSaysSame(gogRaw, gotyRaw) == true);
+        CHECK(overrideSaysSame(gotyRaw, gogRaw) == true);          // symmetric, on the awkward pair too
+        CHECK(sameGame(gogRaw, QString(), gotyRaw, QString()) == true);
+        CHECK(sameGame(gotyRaw, QString(), gogRaw, QString()) == true);
+        // ...and the verdict beats two DIFFERENT igdb ids, which is the precedence rule §5b pins only on
+        // titles that are normalisation fixed points.
+        CHECK(sameGame(gogRaw, QStringLiteral("igdb:1"), gotyRaw, QStringLiteral("igdb:2")) == true);
+
         // The remap agrees with the folder — both copies' records go to the one tile.
         {
             QVector<QPair<QString, QString>> lib;
@@ -827,9 +841,33 @@ int main(int argc, char** argv)
         CHECK(fuseSurvivorTitle(c, b, QStringList{ c, b, a }) == a);
         // A survivor that is one of the two IS returned as that side's own spelling, not looked up.
         CHECK(fuseSurvivorTitle(a, c, QStringList{ a, b, c }) == a);
+        // ...and it is named from EITHER position. Asserted with the survivor as the SECOND argument,
+        // which is the only arrangement that can see "always name the first title" — measured: without
+        // this the mutation survived the whole suite while the dialog named the wrong entry every time
+        // the user happened to open the fix menu from the larger-titled side.
+        CHECK(fuseSurvivorTitle(c, a, QStringList{ a, b, c }) == a);
+        CHECK(fuseSurvivorTitle(b, a, QStringList{ a, b, c }) == a);
         // ...and when the anchoring copy has left the library there is nothing to name, which the caller
         // has to say differently rather than quoting a title that is not there.
         CHECK(fuseSurvivorTitle(c, b, QStringList{ b, c }).isEmpty());
+        // Two titles that both normalise to NOTHING have no survivor key at all, so there is nothing to
+        // name — NOT "name the first one anyway". The fix surface refuses this fuse before it gets here,
+        // but the function is total and its answer for the case has to be the honest one.
+        CHECK(fuseSurvivorTitle(QStringLiteral("!!!"), QStringLiteral("GOTY"),
+                                QStringList{ a, b, c }).isEmpty());
+
+        // THE UNION IS TWO-SIDED. A lone key fused with a member of an existing group: the survivor is
+        // the GROUP's minimum, and it is reachable only through the SECOND argument's component. Ordered
+        // deliberately so the lone key is the alphabetically smaller of the two named — otherwise walking
+        // only the first side happens to give the right answer and the check is inert. Measured: without
+        // this pair of checks, "only union one side's component" survived the whole suite.
+        const QString lone  = QStringLiteral("Bastion Drift");
+        const QString nLone = normalizeTitle(lone);
+        CHECK(na < nLone); CHECK(nLone < nc);          // aeon < bastion < cinder — the premise
+        CHECK(fusedKeys(nLone).size() == 1);           // it really is on its own
+        CHECK(fusedCanonicalKey(nLone, nc) == na);     // lone key FIRST: only nc's side holds the answer
+        CHECK(fusedCanonicalKey(nc, nLone) == na);     // ...and the same the other way round
+        CHECK(fuseSurvivorTitle(lone, c, QStringList{ a, b, c, lone }) == a);
 
         // The remap agrees with the folder for all three.
         {
@@ -906,6 +944,32 @@ int main(int argc, char** argv)
         // Three distinct entries where the user was told there would be one fewer.
         CHECK(effectiveItemId(preyBare) != effectiveItemId(preyEpic));
         CHECK(effectiveItemId(prey2017) != effectiveItemId(preyEpic));
+
+        // SEPARATE BEATS FUSE, asserted in the ONE direction that can observe the precedence.
+        //
+        // The fuse recorded just above joins "prey" to a LARGER key ("prey 2017"), so the component
+        // minimum is still "prey" — and a build where the fuse branch ran first would land on the same id
+        // and look correct. The rule only becomes visible when the fused partner is SMALLER, because then
+        // the two branches give different answers. Measured: without this block, swapping the precedence
+        // survived the whole suite, and the documented rule that a separated entry cannot be dragged back
+        // into a group was pinned by nothing.
+        {
+            const QString smaller = QStringLiteral("Aeon Prey");
+            CHECK(normalizeTitle(smaller) < nPrey);          // the premise
+            setOverride(smaller, preyBare, true);            // fuse the SEPARATED key to a smaller one
+            // The fuse branch really WOULD move this key — that is what makes the next check discriminating
+            // rather than a coincidence about which branch happened to run.
+            CHECK(fusedKeys(nPrey).contains(normalizeTitle(smaller)));
+            CHECK(fusedCanonicalKey(nPrey, normalizeTitle(smaller)) == normalizeTitle(smaller));
+            // ...and the separated entry still keys on its own separated id, NOT on the smaller canonical.
+            CHECK(effectiveItemId(preyBare) == sepBare);
+            CHECK(effectiveItemId(preyBare).contains(QLatin1Char('#')));
+            CHECK(effectiveItemId(preyBare) != itemId(smaller));
+            CHECK(effectiveItemId(prey2017) == sep2017);
+            // The smaller partner is unaffected by the separation — it was never the separated key.
+            CHECK(effectiveItemId(smaller) == itemId(smaller));
+            clearOverrideKeys(normalizeTitle(smaller), nPrey);
+        }
 
         // Undoing the split makes the fuse take effect all at once, which is the other half of why the
         // refusal has to be a refusal and not a silent auto-unsplit: the user gets a different library from
