@@ -2,6 +2,7 @@
 #include "AppBrand.h"
 #include "AppPaths.h"
 #include "ProfileStore.h"
+#include "ThemeAssetPath.h"
 
 #include <QSettings>
 #include <QCoreApplication>
@@ -29,14 +30,13 @@ static QVector<Theme> builtinThemes()
     return v;
 }
 
-// Resolve a theme asset path (image/font) relative to the themes folder; absolute/existing paths pass through.
+// Resolve a theme asset path (image/font) relative to the themes folder. A path that reaches outside that
+// folder is refused rather than trimmed — ThemeAssetPath::resolve owns that decision and probe_theme §8 pins
+// it; all that is left here is the one thing the pure half cannot answer, which is whether the file is there.
 static QString resolveAsset(const QString& dir, const QString& path)
 {
-    if (path.isEmpty()) return QString();
-    QFileInfo fi(path);
-    if (fi.isAbsolute() && fi.exists()) return fi.absoluteFilePath();
-    const QString p = QDir::cleanPath(dir + QStringLiteral("/") + path);
-    return QFile::exists(p) ? p : QString();
+    const QString p = ThemeAssetPath::resolve(dir, path);
+    return (!p.isEmpty() && QFile::exists(p)) ? p : QString();
 }
 
 static Theme parseTheme(const QJsonObject& o, const QString& fallbackName, const QString& dir)
