@@ -789,6 +789,83 @@ else
 fi
 echo
 
+# Appearance theme-gallery reachability gate. openAppearance() has TWO builders — a themed one (PanelRows)
+# and a classic one (QWidgets) — and CONTRIBUTING.md names that split as the thing most often half-done. The
+# gallery is a fresh instance of it: the registry browser supported a Themes kind for a long time while being
+# constructed with Addons at its ONE call site, so there was no theme gallery at all and nothing said so.
+#
+# This asserts the property rather than the prose: both builders still reach the registry. The themed side
+# needs presentThemeRegistry to be DEFINED and CALLED (a definition nothing calls is exactly the dead-code
+# state this replaces); the classic side needs a RegistryBrowser::Themes construction.
+#
+# Comments are stripped FIRST, and that is load-bearing rather than tidiness: this whole section is
+# introduced by prose naming every symbol it greps for, so a gate reading the raw file would go on passing
+# after someone deleted the code and left a comment describing it. That is precisely how an assertion ends
+# up gating nothing — the same trap the probe data-dir isolation gate documents.
+echo "=== appearance theme-gallery reachability ==="
+GAL_MW="$HERE/../src/ui/MainWindow.cpp"
+GAL_MWH="$HERE/../src/ui/MainWindow.h"
+if [ ! -f "$GAL_MW" ] || [ ! -f "$GAL_MWH" ]; then
+  echo "FAIL: appearance theme-gallery reachability (MainWindow sources not found under $HERE/../src/ui)"
+  fail=1
+else
+  gal_bad=0
+  gal_src="$(sed -E 's://.*$::' "$GAL_MW")"
+
+  # `grep -q` is deliberately NOT used on this stream, and that is not a style choice. This script runs under
+  # `set -o pipefail` (top of file). grep -q exits the instant it matches, which SIGPIPEs the producer feeding
+  # it; pipefail then reports the whole pipeline as rc=141 — a FAILURE — even though the pattern was found. On
+  # the small files the other gates read the producer finishes inside the pipe buffer and it never shows, so
+  # the idiom looks safe; MainWindow.cpp is ~480 KB, so it fires every single time. Written with grep -q this
+  # gate failed all four assertions against a tree that satisfies all four, which is the mirror image of the
+  # bug it exists to catch and would have been "fixed" by deleting the gate. `grep -c >/dev/null` drains the
+  # stream, so the producer always completes; the exit status is still "did it match".
+  #
+  # -w (whole word) is the other thing the mutation pass paid for. A plain substring grep for
+  # `RegistryBrowser::Themes` is satisfied by `RegistryBrowser::ThemesX`, so renaming the enumerator out from
+  # under the classic builder left this gate green. Every pattern below is anchored on word boundaries now;
+  # the two that end in punctuation (`"appr.browse"`, `presentThemeRegistry()`) were already exact, and -w is
+  # a no-op on them because their own first and last characters are non-word.
+  gal_has() { printf '%s\n' "$gal_src" | grep -cw "$1" >/dev/null; }
+
+  # Floor: did this gate scan the right file at all? A gate that walks the wrong tree prints PASS, which is
+  # worse than no gate — it reports a rule as enforced. openAppearance is the function both builders live in.
+  if ! gal_has 'void MainWindow::openAppearance'; then
+    echo "  MainWindow.cpp has no openAppearance definition — this gate scanned the wrong file or the"
+    echo "  builders moved. Treat a PASS as meaningless until the path is fixed."
+    gal_bad=1
+  fi
+
+  # Themed builder: the row that opens the gallery, and a handler that actually calls it.
+  gal_has '"appr\.browse"' \
+    || { echo "  the themed Appearance builder no longer offers an appr.browse row — the gallery is"; \
+         echo "  unreachable on the themed surface"; gal_bad=1; }
+  gal_has 'void MainWindow::presentThemeRegistry' \
+    || { echo "  presentThemeRegistry is no longer defined — the themed gallery panel is gone"; gal_bad=1; }
+  # Called, not merely defined. The definition line is excluded so it cannot satisfy its own call check. The
+  # narrow grep runs FIRST so the second one is fed a couple of lines rather than the whole file — the same
+  # SIGPIPE reasoning as above, and the reason this pipeline is safe to write as a pipeline.
+  gal_calls="$(printf '%s\n' "$gal_src" | grep -n 'presentThemeRegistry()' \
+                 | grep -v 'void MainWindow::presentThemeRegistry' || true)"
+  [ -n "$gal_calls" ] \
+    || { echo "  presentThemeRegistry is defined but never called — a themed panel nothing opens is the"; \
+         echo "  exact dead-code state this gate exists to prevent"; gal_bad=1; }
+
+  # Classic builder: the only way its gallery opens is a Themes-kind RegistryBrowser.
+  gal_has 'RegistryBrowser::Themes' \
+    || { echo "  the classic Appearance builder no longer constructs RegistryBrowser::Themes — the gallery"; \
+         echo "  is unreachable on the classic surface"; gal_bad=1; }
+
+  if [ "$gal_bad" -eq 0 ]; then
+    echo "PASS: appearance theme-gallery reachability (both builders reach the theme registry)"
+  else
+    echo "FAIL: appearance theme-gallery reachability — a user-facing surface exists on only one of"
+    echo "  openAppearance()'s two builders. See the two-settings-builders rule in CONTRIBUTING.md."
+    fail=1
+  fi
+fi
+echo
+
 # Exe-folder contamination gate (issue #42). The suite's own answer to "did any probe touch the app's data
 # directory". Every probe binary sits next to the GUI exe, and on desktop that folder IS the app's data dir —
 # so before the isolation went in, a suite run left an everythingbox.ini (carrying one-shot add-on migration

@@ -68,7 +68,8 @@ probe executables so they find Qt's plugins without you exporting
 The suite is not only probe executables. It also contains source-level gates
 that scan the tree: the QML no-direct-selection-writes gate, the RetroView
 `.srm` path gate, the probe data-dir isolation wiring gate, the bundled-theme /
-registry drift gate below, and the old-brand gate. Those fail on code you wrote
+registry drift gate below, the Appearance theme-gallery reachability gate, and
+the old-brand gate. Those fail on code you wrote
 even if every probe binary passes. One
 more gate is a property of the run rather than of the source: `exe-folder
 contamination` compares the build folder's app-data footprint before and after
@@ -109,6 +110,14 @@ mechanical — but it is not optional, and forgetting it is the single most comm
 way a new option ships invisible. The same doubling applies to the other panels
 `MainWindow` builds; if you are editing a settings surface, check whether it has
 a themed twin before you assume it doesn't.
+
+The theme gallery is the worked example, and the reason there is now a gate:
+`RegistryBrowser` carried a `Themes` kind for a long time while its only
+construction passed `Addons`, so there was no in-app theme gallery on either
+surface and nothing said so. `=== appearance theme-gallery reachability ===`
+asserts that both builders still reach the theme registry — the themed one via
+`presentThemeRegistry`, the classic one via a `RegistryBrowser::Themes`
+construction.
 
 ### A new pure component gets a probe, registered in three places
 
