@@ -430,6 +430,14 @@ int main(int argc, char** argv)
             QSettings g(goliathIniIn(ddir), QSettings::IniFormat);
             g.setValue(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
                            + QStringLiteral("/apikey"), QStringLiteral("fixture-token-goliath"));
+            // The namespace in a KEY and in that key's own VALUE at once — the shape an add-on config field
+            // that stores a URL or an id takes. Both halves of the rewrite have to fire on the same pass:
+            // renaming the key while writing the ORIGINAL value back leaves a live setting half-migrated,
+            // and nothing downstream looks inside a config value again.
+            g.setValue(QStringLiteral("addoncfg/") + goliathId(QStringLiteral("aiocatalog"))
+                           + QStringLiteral("/manifesturl"),
+                       QStringLiteral("https://example.invalid/") + goliathId(QStringLiteral("aiocatalog"))
+                           + QStringLiteral("/manifest.json"));
             g.setValue(QStringLiteral("addon.enabled.") + goliathId(QStringLiteral("podcasts")), false);
             g.setValue(QStringLiteral("roms/folder"), QStringLiteral("D:/goliath-roms"));
             g.sync();
@@ -448,6 +456,11 @@ int main(int argc, char** argv)
         CHECK(readKey(legacyIniIn(ddir), QStringLiteral("addoncfg/") + legacyId(QStringLiteral("aiocatalog"))
                                              + QStringLiteral("/apikey")) == QStringLiteral("fixture-token-goliath"),
               "the Goliath hop moves an addon-id-keyed config key onto the previous namespace");
+        CHECK(readKey(legacyIniIn(ddir), QStringLiteral("addoncfg/") + legacyId(QStringLiteral("aiocatalog"))
+                                             + QStringLiteral("/manifesturl"))
+                  == QStringLiteral("https://example.invalid/") + legacyId(QStringLiteral("aiocatalog"))
+                         + QStringLiteral("/manifest.json"),
+              "the Goliath hop rewrites the namespace inside a VALUE as well as the key carrying it");
         CHECK(readKey(legacyIniIn(ddir), QStringLiteral("roms/folder")) == QStringLiteral("D:/goliath-roms"),
               "an ordinary setting survives the Goliath hop");
 
@@ -491,8 +504,8 @@ int main(int argc, char** argv)
         // Only now, after the SAME reconcile pass the app runs on every AddonManager::reload(), driven by the
         // ids that actually loaded. Everything above this line is plumbing; these three are the user.
         const QStringList goliathInstalled{ aioNow, podNow };
-        CHECK(BrandMigration::reconcileAddonConfig(ddir, goliathInstalled) == 2,
-              "the reconcile carries both Goliath-era per-addon values onto the ids in use");
+        CHECK(BrandMigration::reconcileAddonConfig(ddir, goliathInstalled) == 3,
+              "the reconcile carries every Goliath-era per-addon value onto the ids in use");
         CHECK(BrandMigration::reconcileAddonRefs(ddir, goliathInstalled) == 1,
               "...and re-points the one Goliath-era favourite reference");
 
