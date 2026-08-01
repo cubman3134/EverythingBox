@@ -655,6 +655,11 @@ static void runPanelHostDeferralAsserts()
     // ---- (iv) The ROOT onBack — the leave-host callback. It retires this host's QQuickWidget (showThemedHome's
     //      removeWidget + deleteLater) or opens a NavConfirm quit prompt, both from a nav.back() emission. The
     //      LEVEL pop itself stays synchronous (the host's own bookkeeping); only the caller's callback hops.
+    //      The depth-0 clause is the CONVERSE half and has its own killer, distinct from the direct-call mutant
+    //      the other legs use: widen the deferral to the pop — `handleBack() {
+    //      deferPastQmlEmission([this]{ graph_->back(); }); }` — and the host is still one level deep when the
+    //      Back returns. That mutant is the plausible over-application of #165 ("defer at the Back boundary
+    //      too"), and it would leave the panel painting a level the user has already left.
     {
         ThemedPanelHost host;
         int backs = 0;

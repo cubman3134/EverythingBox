@@ -238,6 +238,22 @@ QVariantList ThemePickerHost::previewItems()
     return items;
 }
 
+// RUNS ON THE QML DELEGATE'S EMISSION STACK, DELIBERATELY UNDEFERRED (#165). The selectionChanged relay in the
+// constructor lands here, and its production emitters are all QML: ThemePicker.qml's row delegate (onClicked ->
+// g.select) and the root Keys handler (g.move). So a full theme instantiation — buildView's whole QQuickWidget,
+// arbitrary community QML, the theme's QSoundEffects, any MpvPreview — plus the outgoing preview's deleteLater
+// all run with a live ListView delegate's own emission below them. That is the #165 shape, and it is SAFE here
+// for two reasons, both of which a future edit must preserve:
+//
+//   * NO NESTED LOOP on any path out of this function. setSource is synchronous but loop-free, and nothing
+//     theme2 reaches from here spins a QEventLoop / processEvents / QFileDialog / NavConfirm / Osk. A nested
+//     loop is what turns a live emission into the #28 crash: it flushes the process's pending DeferredDeletes
+//     into the middle of QQuickRepeater::clear(). If you ever need one here, defer the work instead.
+//   * The scene retired below is a SIBLING, not the emitter. preview_ is a separate QQuickWidget overlaid on
+//     view_; deleteLater on a scene that is NOT the one dispatching is the survivable half of #28.
+//
+// Deferring this defensively would cost a whole event-loop turn of stale preview on every cursor step, so the
+// deferral stops at the two caller dispatches in the constructor. Keep it that way by keeping the loop out.
 void ThemePickerHost::rebuildPreview()
 {
     const int idx = (graph_ && graph_->zone() == QStringLiteral("themeRows")) ? graph_->index() : 0;
