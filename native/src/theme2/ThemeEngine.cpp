@@ -459,6 +459,27 @@ QWidget* buildView(const QString& themeDir, const QVariantList& items, const QVa
     return qv;
 }
 
+QWidget* buildPreview(const QString& themeDir, const QVariantList& items, const QVariantMap& system,
+                      QWidget* parent)
+{
+    // No callbacks: a preview takes no focus, no keys and no selection, so nothing can fire one.
+    QWidget* w = buildView(themeDir, items, system, parent);
+    if (!w) return nullptr;
+    // THE constraint (see the header). buildView returns Qt::StrongFocus because a themed page IS the focus
+    // target; a preview embedded in someone else's surface never is. Refused HERE so no call site can forget:
+    // a focusable preview inside a widget nav ring silently becomes a ring stop with no action and no focus
+    // outline, which reads to the user as the D-pad selector disappearing.
+    w->setFocusPolicy(Qt::NoFocus);
+    // Feed the categories too, so an XMB theme shows its cross and a sidebar theme its rail rather than an
+    // empty axis. Both preview sites passed the same list they pass as `items`.
+    if (QQuickItem* r = rootItem(w))
+    {
+        r->setProperty("categories", items);
+        r->setProperty("catIndex", 0);
+    }
+    return w;
+}
+
 QQuickItem* rootItem(QWidget* view)
 {
     if (!view) return nullptr;

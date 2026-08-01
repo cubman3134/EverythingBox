@@ -12,8 +12,9 @@
 //
 // THE PREVIEW IS REGISTERED IN NO NAV ZONE and is created Qt::NoFocus. A focusable live view inside a nav
 // surface takes the cursor and strands the user in a preview they cannot leave — the single constraint this
-// class exists to hold. (See rebuildPreview() in the .cpp: the setFocusPolicy(Qt::NoFocus) call, and the
-// ctor's ONE registerZone.)
+// class exists to hold. The NoFocus is no longer set here: it moved into ThemeEngine::buildPreview(), which
+// holds the whole preview contract at construction so a new preview site cannot silently join the nav ring.
+// (See rebuildPreview() in the .cpp for the buildPreview() call, and the ctor's ONE registerZone.)
 #pragma once
 #include <QStringList>
 #include <QVariantList>

@@ -6543,20 +6543,17 @@ void MainWindow::openAppearance()
 
         auto rebuildPreview = [this, pv, previewBox, previewItems, previewSystem](const QString& folder) {
             while (QLayoutItem* old = pv->takeAt(0)) { if (old->widget()) old->widget()->deleteLater(); delete old; }
-            QWidget* p = ThemeEngine::buildView(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
-                                                previewItems, previewSystem, previewBox);
+            // buildPreview, not buildView: the preview must never take the D-pad cursor, and that is now a
+            // property of construction (ThemeEngine.h) rather than a line each preview site has to remember.
+            // This panel lives inside panelRing_, so a Qt::StrongFocus 480x300 view would join the ring with
+            // no action and no focus outline, and arrowing into it reads as the selector vanishing (#40).
+            // buildPreview also seeds `categories`, so an XMB theme shows its cross.
+            QWidget* p = ThemeEngine::buildPreview(ThemeEngine::themesRoot() + QStringLiteral("/") + folder,
+                                                   previewItems, previewSystem, previewBox);
+            if (!p) return;
             p->setMinimumSize(480, 270);
-            // The preview must never take the D-pad cursor. ThemeEngine::buildView hands back a
-            // Qt::StrongFocus QQuickWidget (it has to be focusable when it IS the page), and this panel
-            // lives inside panelRing_ — so without this the ring collects a 480x300 view that has no
-            // action and paints no focus outline, and arrowing into it reads as the selector vanishing.
-            // The themed twin has always done this (ThemePickerHost::rebuildPreview); the classic panel
-            // is the copy that never got it. NOT WA_TransparentForMouseEvents, unlike there: this panel
-            // has no click-through target behind the preview, and leaving mouse handling alone keeps the
-            // change to the one thing that was wrong.
-            p->setFocusPolicy(Qt::NoFocus);
-            if (QQuickItem* r = ThemeEngine::rootItem(p)) // feed categories too, so an XMB theme shows its cross
-                { r->setProperty("categories", previewItems); r->setProperty("catIndex", 0); }
+            // NOT WA_TransparentForMouseEvents, unlike ThemePickerHost: this panel has no click-through
+            // target behind the preview, so leaving mouse handling alone is correct here.
             pv->addWidget(p);
         };
         // The commit path. The list highlights the RESOLVED folder (currentThemeFolder()) while nothing may

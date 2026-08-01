@@ -52,6 +52,8 @@
 #include <QDir>                       // §21: a scratch theme dir for the REAL ThemeEngine::buildView
 #include <QTemporaryDir>
 #include <QFile>
+#include <QPushButton>                // §23: an ordinary ring stop, the control the preview is judged against
+#include "nav/Nav.h"                  // §23: the REAL NavRing — ring membership is the thing being asserted
 #include "theme2/ThemedPanelHost.h"   // §18(e): the REAL host, for the host-level pop-restore assertions
 #include "theme2/ThemeEngine.h"       // §21: the REAL buildView — theme.json -> graph shape -> bridge -> QML
 #include "theme2/FormFactor.h"        // §19: the form-factor authority exposed as the `form` context property
@@ -2181,6 +2183,117 @@ static void runUndeclaredViewAsserts()
         pump();
     }
 }
+
+// §23 — a theme PREVIEW refuses focus BY CONSTRUCTION, so it can never join a widget nav ring (issue #123).
+//
+// The defect (issue #40): classic Settings ▸ Appearance embeds a live theme preview inside panelPage_, which
+// panelRing_ covers. ThemeEngine::buildView returns a Qt::StrongFocus QQuickWidget — correct when the view IS
+// the page — so the 480x300 preview joined the ring as a stop with no action that paints no focus outline.
+// Arrowing into it reads as the D-pad selector vanishing. It was fixed by a setFocusPolicy line at the call
+// site, and the themed twin (ThemePickerHost) held the identical line separately: a rule spelled once per
+// preview is a rule the NEXT preview forgets. ThemeEngine::buildPreview now holds it once, at construction.
+//
+// This section asserts the CONSEQUENCE against a REAL NavRing over a real container, not the property alone:
+//   (a) POSITIVE CONTROL — a bare buildView embed IS collected by the ring. This is the defect reproduced, and
+//       it is what stops (b) from being vacuous: without it, "the preview is not a ring member" would also
+//       pass if the ring simply never collected a QQuickWidget, or never collected anything at all.
+//   (b) a buildPreview embed is Qt::NoFocus and is NOT collected — asserted by IDENTITY (contains(pv)), never
+//       by member COUNT: the #40 sweep showed a count assertion passes happily while the WRONG member is in.
+//   (c) an ordinary button in the same container IS still collected while the preview is not — the ring is
+//       live, not empty, at the moment (b) is read.
+//   (d) buildPreview seeds `categories` (so an XMB/sidebar theme shows its cross/rail), with the bare
+//       buildView embed as the NEGATIVE control — it leaves `categories` empty. (Its companion `catIndex` is
+//       deliberately NOT asserted; see the note at the assertion — 0 is also the QML default, so that leg is
+//       a fixed point of the thing under test. It was written, it survived the mutation, it is gone.)
+//
+// Mutation record (this file's standard of proof): restoring Qt::StrongFocus inside buildPreview turns (b)
+// red on BOTH legs; dropping buildPreview's categories block turns (d) red; neither touches (a) or (c).
+static void runPreviewFocusAsserts()
+{
+    QTemporaryDir dir;
+    CHECK(dir.isValid(), "preview: a scratch theme dir exists");
+    if (!dir.isValid()) return;
+    // A grid home with a button — an ordinary theme, nothing preview-specific about it.
+    const char* themeJson =
+        "{ \"name\": \"PreviewProbe\", \"views\": { \"home\": {"
+        "  \"background\": { \"color\": \"#101010\" },"
+        "  \"elements\": ["
+        "    { \"type\": \"grid\", \"columns\": 4, \"pos\": [0, 0], \"size\": [1, 0.9] },"
+        "    { \"type\": \"button\", \"action\": \"settings\", \"pos\": [0.9, 0.94], \"size\": [0.08, 0.05] }"
+        "  ] } } }";
+    QFile tf(dir.filePath(QStringLiteral("theme.json")));
+    CHECK(tf.open(QIODevice::WriteOnly), "preview: the scratch theme.json is writable");
+    tf.write(themeJson);
+    tf.close();
+
+    QVariantList items;
+    for (const char* n : { "Video", "Games", "Audio", "Reading" })
+        items << QVariantMap{ { QStringLiteral("title"), QString::fromLatin1(n) } };
+    QVariantMap system; system.insert(QStringLiteral("name"), QStringLiteral("Probe"));
+
+    // The stand-in for panelPage_: a container with a real focusable row, covered by a REAL NavRing.
+    QWidget host;
+    host.resize(900, 600);
+    auto* row = new QPushButton(QStringLiteral("Theme"), &host);
+    row->setGeometry(0, 0, 200, 40);
+    NavRing ring(&host);
+    host.show();
+    row->show();
+    pump();
+    CHECK(ring.widgets().contains(row), "preview: the ring collects an ordinary button (the ring is live)");
+
+    // ---- (a) positive control: the DEFECT — a bare buildView embed is a ring stop ------------------------
+    {
+        QWidget* raw = ThemeEngine::buildView(dir.path(), items, system, &host);
+        CHECK(raw != nullptr, "preview control: buildView returned a widget");
+        if (raw)
+        {
+            raw->setGeometry(0, 60, 480, 300);
+            raw->show();
+            pump(); pump();
+            CHECK(raw->focusPolicy() == Qt::StrongFocus,
+                  "preview control: buildView still returns Qt::StrongFocus (it IS the page when it is a page)");
+            CHECK(ring.widgets().contains(raw),
+                  "preview control: a bare buildView embed IS collected by the ring — issue #40 reproduced, "
+                  "so the buildPreview assertion below is not vacuous");
+            // (d) negative control: nothing seeded the categories axis on a bare build.
+            QQuickItem* rr = ThemeEngine::rootItem(raw);
+            CHECK(rr && rr->property("categories").toList().isEmpty(),
+                  "preview control: a bare buildView leaves `categories` empty (the seeding is buildPreview's)");
+            delete raw;
+            pump();
+        }
+    }
+
+    // ---- (b)(c)(d) the shipped preview: focus refused at construction ------------------------------------
+    {
+        QWidget* pv = ThemeEngine::buildPreview(dir.path(), items, system, &host);
+        CHECK(pv != nullptr, "preview: buildPreview returned a widget");
+        if (pv)
+        {
+            pv->setGeometry(0, 60, 480, 300);
+            pv->show();
+            pump(); pump();
+            CHECK(pv->focusPolicy() == Qt::NoFocus,
+                  "preview: buildPreview refuses focus by CONSTRUCTION — no call site has to remember to");
+            const QVector<QWidget*> ws = ring.widgets();
+            // Identity, not count: a count assertion passes while the wrong member is included (#40 note).
+            CHECK(!ws.contains(pv),
+                  "preview: the preview is NOT a ring member — the D-pad can never land on it");
+            CHECK(ws.contains(row),
+                  "preview: …while the real row IS still a member (the ring is populated, not empty)");
+            QQuickItem* pr = ThemeEngine::rootItem(pv);
+            CHECK(pr && pr->property("categories").toList().size() == items.size(),
+                  "preview: buildPreview seeds `categories` from items, so an XMB/sidebar theme shows its axis");
+            // No assertion on `catIndex`. buildPreview parks it at 0, but 0 is ALSO ThemeView.qml's default —
+            // so an assertion on it is a fixed point of the function under test: it passes whether or not the
+            // seeding happened. It was written, mutation-tested against "drop the seeding block", SURVIVED,
+            // and removed. `categories` above is the leg the mutation DOES kill, and it covers the same block.
+            delete pv;
+            pump();
+        }
+    }
+}
 #endif // EB_HAVE_QML
 
 int main(int argc, char** argv)
@@ -3307,6 +3420,9 @@ int main(int argc, char** argv)
     // Theme.js's fallback rather than the old direct theme.views[currentView] read, asserted on the element
     // tree AND the pixels; plus the artwork-less tile placeholder. probe_themeview pins the pure decision.
     runUndeclaredViewAsserts();
+    // §23: a theme PREVIEW refuses focus by construction (issue #123) — ThemeEngine::buildPreview, asserted
+    // against a REAL NavRing with a bare buildView embed as the positive control (the #40 defect reproduced).
+    runPreviewFocusAsserts();
 #endif
 
     if (failures) { std::fprintf(stderr, "NAVQML-FAIL %d check(s) failed\n", failures); return 1; }
