@@ -121,6 +121,11 @@ public:
     // addon's synopsis/facts). play/favoriteThemedLeaf() act on the browse-item at that (filtered) index.
     void requestThemedMeta(int browseIndex); // INSTANT: local (session cache / gamelist / MetaCache) art + facts
     void enrichThemedMeta();                  // DEBOUNCED: online scrape + achievements + addon /meta for that row
+    // The single emitter of themedMetaReady: stamps the row index and composites the user's correction over
+    // the finished map, whichever of the five scraped sources assembled it (issue #24). Nothing else in this
+    // class may emit that signal — a raw emit puts the scrape back over the correction a moment after the
+    // page opens, which is how the feature came to work only while the network was down.
+    void emitThemedMeta(int browseIndex, QVariantMap meta);
     // The themed DETAIL view's own /meta: fetched ONLY for a leaf that could bridge to a Stremio stream id and
     // hasn't yet (the id exists nowhere but /meta). The XMB gets this from its hover debounce; the grid browse
     // has no hover fetch, which is why "Choose source…" was unreachable on the default browse path.

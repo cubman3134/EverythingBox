@@ -440,6 +440,29 @@ else
     printf '%s' "$ms_body" | grep -q 'MetaCache::keyFor(' \
       || ms_note "detailScrapedValues no longer derives the open item's key — forKey() is only as honest as the key handed to it."
   fi
+
+  # The themed half of the same feature. The live panel's map is assembled from five SCRAPED sources — the
+  # catalog row, the ROMs-folder gamelist.xml, this session's art cache, our scrape cache, and the addon's
+  # /meta — and none of them knows about the correction. Emitting any of them raw put the scraped synopsis
+  # and poster back over the correction a moment after the detail page opened, so the feature worked only
+  # with the network down (the offline branch goes through cachedDetail, which composites). One emitter,
+  # compositing the FINISHED map, is what makes that unrepeatable — and what lets the session art cache go
+  # on holding the scraped map, so an edit or a reset needs no cache invalidation to show.
+  ms_emits="$(printf '%s\n' "$ms_src" | grep -c 'emit themedMetaReady(' || true)"
+  ms_fn="$(printf '%s\n' "$ms_src" | awk '
+    /^void HomeView::emitThemedMeta\(/ { inbody = 1 }
+    inbody { print }
+    inbody && /^}/ { exit }')"
+  if [ -z "$(printf '%s' "$ms_fn" | tr -d '[:space:]')" ]; then
+    ms_note "HomeView::emitThemedMeta not found — the single-emitter funnel is gone, so every themed source emits its own raw map again."
+  else
+    printf '%s' "$ms_fn" | grep -q 'MetaOverrides::applyTo(' \
+      || ms_note "emitThemedMeta no longer composites the correction over the map it emits — the panel and the detail card show the scrape, and the session art cache pins it there."
+    printf '%s' "$ms_fn" | grep -q 'emit themedMetaReady(' \
+      || ms_note "emitThemedMeta does not emit themedMetaReady — the funnel stopped being the funnel."
+  fi
+  [ "$ms_emits" = "1" ] \
+    || ms_note "expected exactly ONE 'emit themedMetaReady(' in HomeView.cpp (emitThemedMeta's); found $ms_emits — a raw emit bypasses the composite."
 fi
 if [ "$ms_fail" -eq 0 ]; then echo "PASS: metadata-editor baseline (keyed scrape snapshot)"; else
   echo "FAIL: metadata-editor baseline (keyed scrape snapshot)"; fail=1

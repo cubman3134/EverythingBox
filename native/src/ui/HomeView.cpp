@@ -3849,6 +3849,22 @@ void HomeView::resolvePlay(LoadedAddon* addon, const MediaItem& it, const QStrin
 
 // ---- Triple/XMB theme: live metadata beside the cross + an inline Play/Favorite, no classic detail page ---
 
+// The ONE way a themed row's metadata reaches the panel. Composites the user's correction (issue #24) over
+// the FINISHED map, whichever source assembled it — the catalog row, the ROMs-folder gamelist.xml, this
+// session's art cache, our own scrape cache, or the addon's /meta. Every one of those is a SCRAPED source
+// and none of them knows about the correction, so hooking each one would be five hooks that have to agree;
+// this is the same "composite over the finished map" rule themedDetailData already ends on.
+//
+// It is also what lets themedArtCache_ keep holding the SCRAPED map: the correction is applied on the way
+// out, so a later edit — or a reset — shows without anything having to invalidate that cache.
+void HomeView::emitThemedMeta(int idx, QVariantMap meta)
+{
+    meta.insert(QStringLiteral("index"), idx);
+    if (idx >= 0 && idx < browseRowMap_.size())
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(items_[browseRowMap_[idx]])), meta);
+    emit themedMetaReady(idx, meta);
+}
+
 void HomeView::requestThemedMeta(int idx)
 {
     if (idx < 0 || idx >= browseRowMap_.size() || stack_.isEmpty()) return;
@@ -3917,7 +3933,7 @@ void HomeView::requestThemedMeta(int idx)
         if (ps.totalSeconds > 0)
             base.insert(QStringLiteral("timePlayed"), PlayStats::formatDuration(ps.totalSeconds));
     }
-    emit themedMetaReady(idx, base);
+    emitThemedMeta(idx, base);
     PerfTrace::end(QStringLiteral("nav.select"));
     // The LOCAL art/facts above are resolved + shown instantly (no debounce), so scrolling over cached /
     // gamelist rows shows the logo + metadata immediately with no plain-title flash. Only the NETWORK half
@@ -3968,21 +3984,21 @@ void HomeView::enrichThemedMeta()
                     facts << QVariantMap{ { QStringLiteral("label"), f.label }, { QStringLiteral("value"), f.value } };
                 if (!facts.isEmpty()) m.insert(QStringLiteral("facts"), facts);
                 d.art.writeInto(m); // logo/box/hero/screenshots/videos/audio/meta -> the panel bindings
+                // Cached as the SCRAPER gave it: emitThemedMeta composites the correction on the way out, so
+                // this entry stays valid across an edit and a reset both.
                 themedArtCache_.insert(cacheKey, m); // remember for scroll-back (no re-scrape)
                 if (reqIdx != themedMetaIndex_) return; // selection moved on; cached above, just don't emit now
-                QVariantMap out = m; out.insert(QStringLiteral("index"), reqIdx);
-                emit themedMetaReady(reqIdx, out);
+                emitThemedMeta(reqIdx, m);
             });
         }
         // Publish a list of { title, icon(full URL), earned } into the panel.
         auto publish = [this, reqIdx](const QVariantList& arr, int earned) {
             if (arr.isEmpty()) return;
             QVariantMap m;
-            m.insert(QStringLiteral("index"), reqIdx);
             m.insert(QStringLiteral("achievements"), arr);
             m.insert(QStringLiteral("achEarned"), earned);
             m.insert(QStringLiteral("achTotal"), int(arr.size()));
-            emit themedMetaReady(reqIdx, m);
+            emitThemedMeta(reqIdx, m);
         };
 
         if (cid && RaBrowse::configured())
@@ -4117,10 +4133,9 @@ void HomeView::favoriteThemedLeaf(int idx)
     }
     // Nudge the live panel so its heart reflects the new state.
     QVariantMap m;
-    m.insert(QStringLiteral("index"), idx);
     m.insert(QStringLiteral("favorite"),
              FavoritesStore::isFavorite(isLocalGameLeaf(it) ? gameFavId(it) : it.id));
-    emit themedMetaReady(idx, m);
+    emitThemedMeta(idx, m);
 }
 
 // The per-profile marks key for the browse-item at `idx` — the SAME MetaCache::keyFor the hidden filter and
@@ -4675,11 +4690,14 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
         if (reqIdx != themedMetaIndex_) return;
         const bool rowOk = reqIdx >= 0 && reqIdx < browseRowMap_.size();
         // Offline: the addon returned nothing for a row we have a downloaded bundle for — use its saved card.
+        // The RAW provider reply. It is emitted through emitThemedMeta, which composites the user's
+        // correction over the finished map — without that the /meta arriving a moment after the detail page
+        // opened put the scraped synopsis and poster back over the correction, so the feature worked only
+        // with no network at all (the offline branch below goes through cachedDetail, already composited).
         MediaDetail det = detail;
         if (!det.valid && rowOk)
             det = MetaCache::cachedDetail(MetaCache::keyFor(items_[browseRowMap_[reqIdx]]));
         QVariantMap m;
-        m.insert(QStringLiteral("index"), reqIdx);
         m.insert(QStringLiteral("overview"), det.overview);
         // For games, drop "Released": the year already shows on the subtitle line, so it'd be redundant.
         // (Play history is carried on separate fields that survive this facts merge — see requestThemedMeta.)
@@ -4707,7 +4725,7 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
             if (fresh.contains(QStringLiteral("actions")))
                 m.insert(QStringLiteral("actions"), fresh.value(QStringLiteral("actions")));
         }
-        emit themedMetaReady(reqIdx, m);
+        emitThemedMeta(reqIdx, m);
         return;
     }
     // Triple/XMB theme: a themed Play that needed the IMDB id first -> resolve via stream addons now.
