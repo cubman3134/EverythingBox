@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.183 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.184 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -360,6 +360,15 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/SyncOffsets.cpp src/core/SyncOffsets.h)
     target_include_directories(probe_sync PRIVATE src src/core)
     target_link_libraries(probe_sync PRIVATE Qt6::Core)
+
+    # ThemeRegistry: the pure core of the in-app theme gallery — what a community registry index means, and
+    # which remote paths may become filenames. QtCore-only and network-free by construction, which is the
+    # whole point: both Appearance surfaces share this one copy, and the probe suite (offline, windowless)
+    # can only reach the feature here.
+    add_executable(probe_themereg tools/probe_themereg.cpp
+        src/core/ThemeRegistry.cpp)
+    target_include_directories(probe_themereg PRIVATE src src/core)
+    target_link_libraries(probe_themereg PRIVATE Qt6::Core)
 
     # ItemMarks store: per-profile hidden/completion/tags + tag vocab + pinned shelves, the persistence
     # foundation later library-management tasks (hidden filtering, detail actions, shelves) wire onto.
