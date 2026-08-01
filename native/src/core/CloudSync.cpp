@@ -587,6 +587,22 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         QStringLiteral("trakt/collectionCache"),
         QStringLiteral("trakt/watchlistCachedAt"),
         QStringLiteral("trakt/collectionCachedAt"),
+        // The CALENDAR cache (#148). Same family, same first reason, but it is the one where the churn
+        // argument stops being theoretical: TraktClient re-fetches the calendar on a 30-MINUTE cadence
+        // and stamps trakt/calendarCachedAt with the wall clock on every complete run, whether or not a
+        // single episode changed. Riding the bundle, that stamp alone flipped the fingerprint ~48 times
+        // a day and re-uploaded the whole zip — addons, themes and settings — on a machine nobody
+        // touched. #34 made it worse rather than merely wasteful: the retry machinery reads
+        // localChanged as "a push is owed", so a cache timestamp kept presenting itself as a settings
+        // change that had to be delivered.
+        //
+        // The payload is excluded for the ordinary reason: the other device re-fetches its own calendar
+        // in one request, from ITS OWN Trakt account state, so a copy of ours is worth nothing there.
+        //
+        // These two were added to SettingsTxn::inScope's exclusion list by #23 and missed here, which is
+        // why they are called out separately rather than folded into the list above.
+        QStringLiteral("trakt/calendarCache"),
+        QStringLiteral("trakt/calendarCachedAt"),
         // The flat backfill keys an earlier build of the #23 branch wrote, before the cursor was
         // namespaced per profile. Nothing writes them now and TraktClient removes them on disconnect;
         // they stay named here so an ini that still carries one cannot start syncing it in the
