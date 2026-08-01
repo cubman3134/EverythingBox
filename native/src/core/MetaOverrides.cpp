@@ -143,6 +143,32 @@ void MetaOverrides::applyTo(const Override& ov, MediaArt& art)
     }
 }
 
+void MetaOverrides::applyTo(const Override& ov, QVariantMap& row)
+{
+    if (ov.isEmpty()) return;
+    auto put = [&row](const QString& key, const QString& value) {
+        if (!value.isEmpty()) row.insert(key, value);
+    };
+    put(QStringLiteral("title"), ov.title);
+    put(QStringLiteral("subtitle"), ov.subtitle);
+    put(QStringLiteral("overview"), ov.overview);
+    if (ov.image.isEmpty()) return;
+    row.insert(QStringLiteral("image"), ov.image);
+    // The scalar role aliases MediaArt::writeInto emits (selected.poster / selected.thumb) and the images
+    // sub-map galleries read. Written here rather than left to writeInto because a row can be assembled from
+    // a session cache that never went near MediaArt on this pass.
+    QVariantMap images = row.value(QStringLiteral("images")).toMap();
+    for (const QString& role : { QStringLiteral("poster"), QStringLiteral("thumb") })
+    {
+        row.insert(role, ov.image);
+        QStringList list = images.value(role).toStringList();
+        list.removeAll(ov.image);
+        list.prepend(ov.image);
+        images.insert(role, list);
+    }
+    row.insert(QStringLiteral("images"), images);
+}
+
 // ---- store ---------------------------------------------------------------------------------------------------
 
 QString MetaOverrides::hashKey(const QString& key)

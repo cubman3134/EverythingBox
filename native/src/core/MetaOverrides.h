@@ -77,6 +77,11 @@ namespace MetaOverrides
     void    applyTo(const Override& ov, MediaDetail& d);
     void    applyTo(const Override& ov, MediaItem& it);
     void    applyTo(const Override& ov, MediaArt& art); // image -> front of the poster/thumb candidate lists
+    // The themed row map a theme binds through (`selected.title`, `selected.image`, `selected.poster`, the
+    // `images` sub-map…). Some surfaces assemble that map from several sources — a session art cache, a
+    // gamelist entry, the scrape cache — so the correction is composited over the FINISHED map rather than
+    // over each source, which is also the only way one hook covers all of them.
+    void    applyTo(const Override& ov, QVariantMap& row);
 
     // ---- store ------------------------------------------------------------------------------------------
     QString  hashKey(const QString& key);   // md5-hex of the UTF-8 key (ItemMarks' scheme, same key space)

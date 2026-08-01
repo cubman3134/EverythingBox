@@ -25,6 +25,10 @@ Item {
     // Library-management state for the hide/status pills (supplied by themedDetailData).
     readonly property bool hidden: !!(sel && sel.hidden)
     readonly property string completion: (sel && sel.completion) ? sel.completion : "none"
+    // Does this item carry a metadata correction (issue #24)? The pill says so, because otherwise there is
+    // nothing on any screen to distinguish corrected data from scraped data — and "reset to scraped" would
+    // be an option with no visible reason to reach for it.
+    readonly property bool edited: !!(sel && sel.edited)
     function statusLabel(c) {
         if (c === "inProgress") return "In progress"
         if (c === "finished")   return "Finished"
@@ -57,6 +61,8 @@ Item {
         if (verb === "status")   return { label: "◐  " + statusLabel(completion),
                                           color: (completion === "none" ? "#E7EBF2" : "#CFE3D2"), textColor: "#33405A" }
         if (verb === "tags")     return { label: "🏷  Tags",                              color: "#E7EBF2", textColor: "#33405A" }
+        if (verb === "editmeta") return { label: (edited ? "✎  Info edited" : "✎  Fix info…"),
+                                          color: (edited ? "#CFE3D2" : "#E7EBF2"), textColor: "#33405A" }
         return { label: verb, color: "#E7EBF2", textColor: "#33405A" }
     }
 

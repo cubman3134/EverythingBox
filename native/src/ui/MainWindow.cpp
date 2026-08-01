@@ -69,6 +69,7 @@
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
 #include "../core/MetaCache.h"
+#include "../core/MetaOverrides.h"
 #include "../core/PerfTrace.h"
 #include "../core/UiTestServer.h"
 #include "nav/Nav.h"
@@ -497,6 +498,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     home_->setBingeStore(bingeStore_.get());
     connect(home_, &HomeView::openItem, this, &MainWindow::openLibraryItem);
     connect(home_, &HomeView::chooseSourceRequested, this, &MainWindow::chooseStreamSource);
+    connect(home_, &HomeView::editMetadataRequested, this, &MainWindow::editItemMetadata);
     // Leaving the page a picker request was made from invalidates it — the themed detail pop bumps the
     // generation inline, and this is the same rule for the classic/browse stack pops.
     connect(home_, &HomeView::browseLevelPopped, this, &MainWindow::bumpChooseSourceGen);
@@ -1057,6 +1059,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     ItemMarks::setChangeHook(armProgressSync);
     FavoritesStore::setChangeHook(armProgressSync);
     PlaylistStore::setChangeHook(armProgressSync);
+    MetaOverrides::setChangeHook(armProgressSync); // issue #24: a metadata correction is user data, so it syncs
 
     // The game-launch pipeline + external-emulator lifecycle: resolves the ROM's system/core, loads it into the
     // shared RetroView or hands it to a standalone emulator (installing/monitoring it), and drives the touchy
@@ -4715,8 +4718,106 @@ void MainWindow::runThemedDetailAction(const QString& verb)
             r->setProperty("detailData", d);
         }
     }
-    else if (verb == QStringLiteral("status")) themedDetailPickStatus();
-    else if (verb == QStringLiteral("tags"))   themedDetailEditTags();
+    else if (verb == QStringLiteral("status"))   themedDetailPickStatus();
+    else if (verb == QStringLiteral("tags"))     themedDetailEditTags();
+    // Snapshot the key into a LOCAL before the editor's modal loops, the themedDetailPickStatus idiom.
+    else if (verb == QStringLiteral("editmeta")) editItemMetadata(themedDetailKey_);
+}
+
+// The per-item metadata editor (issue #24): a NavMenu re-presented until Back, one row per editable field
+// showing what is shown TODAY, plus "Reset to scraped" once anything is overridden. Picking a field opens the
+// OSK on its current value; committing writes the correction, and committing an EMPTY value clears that
+// field's override so the scraped value comes back — clearing one field is the same gesture as filling one.
+//
+// The whole flow acts on a LOCAL snapshot of themedDetailKey_ for the reason themedDetailEditTags spells out:
+// every step re-enters a modal nested loop, so the target is bound once rather than re-read across modality.
+//
+// What is editable, and what is not: title, the subtitle line (where a year/rating/runtime lands, and the
+// field most likely to carry a wrong year), the synopsis, and the poster URL. Deliberately NOT here: choosing
+// a different MATCH by searching the providers — the match id IS the key this correction is filed under, so
+// rewriting it would move the item out from under its own record; and picking a LOCAL FILE as artwork — a
+// path is device-local, so two devices could never converge on one.
+void MainWindow::editItemMetadata(const QString& key)
+{
+    if (key.isEmpty()) return;
+    // What the card is showing right now, so a row can display the value being replaced rather than a blank.
+    const MediaDetail shown = MetaCache::cachedDetail(key);
+
+    struct Field { const char* id; QString label; QString cur; QString scraped; };
+    while (true)
+    {
+        const MetaOverrides::Override ov = MetaOverrides::get(key);
+        const QVector<Field> fields = {
+            { "title",    tr("Title"),    ov.title,    shown.title },
+            { "subtitle", tr("Subtitle"), ov.subtitle, shown.subtitle },
+            { "overview", tr("Synopsis"), ov.overview, shown.overview },
+            { "image",    tr("Poster URL"), ov.image,  shown.imageUrl },
+        };
+
+        QStringList rows;
+        for (const Field& f : fields)
+        {
+            // ✎ marks a field the user has corrected; the value shown is what the card shows today, elided so
+            // a long synopsis can't push the menu off the screen.
+            QString value = f.cur.isEmpty() ? f.scraped : f.cur;
+            value = value.simplified();
+            if (value.size() > 48) value = value.left(45) + QStringLiteral("…");
+            if (value.isEmpty()) value = tr("(none)");
+            rows << QStringLiteral("%1%2:  %3").arg(f.cur.isEmpty() ? QStringLiteral("   ")
+                                                                   : QStringLiteral("✎ "), f.label, value);
+        }
+        const int resetIdx = ov.isEmpty() ? -1 : rows.size();
+        if (resetIdx >= 0) rows << tr("↺  Reset to scraped");
+
+        const int pick = NavMenu::pick(tr("Fix info"), rows, this);
+        if (pick < 0) return;                        // Back leaves everything as it is
+        if (pick == resetIdx)
+        {
+            const int c = NavConfirm::ask(tr("Reset to scraped"),
+                tr("Discard your edits to this item and go back to what the scraper found?"),
+                { tr("Cancel"), tr("Reset") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c != 1) continue;                    // Cancel / Back -> re-present the editor unchanged
+            MetaOverrides::reset(key);
+            refreshAfterMetaEdit(key);
+            continue;
+        }
+        if (pick < 0 || pick >= fields.size()) continue;
+
+        const Field& f = fields[pick];
+        // Seed the OSK with the correction if there is one, else with what the scrape found — editing a
+        // wrong title usually means fixing a word in it, not retyping it.
+        const QString seed = f.cur.isEmpty() ? f.scraped : f.cur;
+        const QString typed = Osk::getText(f.label + QLatin1Char(':'), seed, QLineEdit::Normal,
+                                           this, currentThemedGraph());
+        if (typed.isNull()) continue;                // Back out of the OSK: no write at all
+        MetaOverrides::Override next = MetaOverrides::get(key);
+        const QString v = typed.trimmed();
+        // Typing back exactly what the scraper found is not an override — storing it would leave the item
+        // marked "edited" forever and pin it against a later, better scrape for no reason.
+        const QString value = (v == f.scraped.trimmed()) ? QString() : v;
+        if (f.id == QLatin1String("title"))         next.title = value;
+        else if (f.id == QLatin1String("subtitle")) next.subtitle = value;
+        else if (f.id == QLatin1String("overview")) next.overview = value;
+        else if (f.id == QLatin1String("image"))    next.image = value;
+        MetaOverrides::set(key, next);
+        refreshAfterMetaEdit(key);
+    }
+}
+
+// Put the correction on screen immediately, on WHICHEVER detail surface the editor was opened from, and mark
+// the browse model dirty so the tile behind it is rebuilt on the way out. Dropping the session art cache is
+// not optional: it short-circuits the whole MetaCache read path, so without it the card would keep showing
+// the artwork resolved on hover — the very copy the user just replaced.
+void MainWindow::refreshAfterMetaEdit(const QString& key)
+{
+    if (!home_) return;
+    home_->forgetThemedArt(key);
+    themedDetailMarksDirty_ = true;                  // -> browse model rebuilt on detail pop (tile re-reads)
+    home_->refreshDetailMetaCard();                  // classic card (no-op when none is open)
+    if (themedDetailIndex_ < 0) return;
+    QWidget* cur = stack_->currentWidget();
+    if (QQuickItem* r = ThemeEngine::rootItem(cur))
+        r->setProperty("detailData", home_->themedDetailData(themedDetailIndex_));
 }
 
 // The completion-status picker: a controller-navigable NavMenu over the five states, the current one marked
@@ -9969,6 +10070,13 @@ void MainWindow::openGeneralSettings()
         toggle(QStringLiteral("library.resolveonline"), tr("Match local files to online catalogs"),
                Settings::resolveOnline());
         action(QStringLiteral("library.rematch"), tr("Re-match Local Library online"));
+        // The per-item metadata editor's library-wide escape hatch (issue #24). It belongs NEXT to re-match
+        // because that is what a user reaches for when the library looks wrong, and this is the counterpart:
+        // re-match discards what the SCRAPER decided, this discards what YOU decided. The editor itself lives
+        // on each item's detail card — this is only the bulk undo, and it says how many items are affected so
+        // it is never a blind "reset everything".
+        action(QStringLiteral("library.clearmetaedits"),
+               tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
         // --- Playback ---
         sep(tr("Playback"));
         toggle(QStringLiteral("pb.autonext"), tr("Auto-play the next episode"), Settings::autoplayNextEpisode());
@@ -10144,6 +10252,25 @@ void MainWindow::openGeneralSettings()
                     } else {
                         if (resolver_) resolver_->clearCacheAndRequeue(LocalLibrary::index().all());
                         statusBar()->showMessage(tr("Re-matching your Local Library online…"), 4000);
+                    }
+                }
+                else if (id == QStringLiteral("library.clearmetaedits")) {
+                    const int n = MetaOverrides::count();
+                    if (n == 0) { statusBar()->showMessage(tr("You haven't edited any item's info."), 4000); }
+                    else {
+                        // Destructive and library-wide, so it confirms with the count — the confirmDeleteProfile
+                        // card shape (Cancel focused, Back = Cancel).
+                        const int c = NavConfirm::ask(tr("Reset metadata edits"),
+                            tr("Discard your info edits on %n item(s) and go back to what the scrapers found? "
+                               "This can't be undone.", nullptr, n),
+                            { tr("Cancel"), tr("Reset all") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+                        if (c == 1) {
+                            MetaOverrides::clearAll();
+                            if (home_) home_->refreshDetailMetaCard();
+                            setAction(QStringLiteral("library.clearmetaedits"),
+                                      tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
+                            statusBar()->showMessage(tr("Your metadata edits were reset."), 4000);
+                        }
                     }
                 }
                 else if (id == QStringLiteral("roms.keepscrape")) Settings::setKeepScrapedData(on);
@@ -10438,6 +10565,32 @@ void MainWindow::openGeneralSettings()
         connect(llRescan, &QPushButton::clicked, this, [this] {
             rescanLocalLibrary();
             statusBar()->showMessage(tr("Rescanning your local library…"), 4000);
+        });
+
+        // The themed twin of library.clearmetaedits (issue #24). Same store, same clearAll, same confirm — the
+        // editor lives on each item's detail card, this is only the library-wide undo. The button carries the
+        // count so it is never a blind "reset everything", and relabels itself after the reset.
+        auto* metaEdits = new QPushButton(tr("Reset my metadata edits (%n item(s))", nullptr,
+                                             MetaOverrides::count()));
+        metaEdits->setMinimumHeight(34);
+        v->addWidget(metaEdits);
+        auto* metaEditsNote = new QLabel(tr("Discards the title/synopsis/poster corrections you made on "
+                                            "individual items, restoring what the scrapers found."));
+        metaEditsNote->setWordWrap(true);
+        metaEditsNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(metaEditsNote);
+        connect(metaEdits, &QPushButton::clicked, this, [this, metaEdits] {
+            const int n = MetaOverrides::count();
+            if (n == 0) { statusBar()->showMessage(tr("You haven't edited any item's info."), 4000); return; }
+            const int c = NavConfirm::ask(tr("Reset metadata edits"),
+                tr("Discard your info edits on %n item(s) and go back to what the scrapers found? "
+                   "This can't be undone.", nullptr, n),
+                { tr("Cancel"), tr("Reset all") }, /*focusIndex*/ 0, /*cancelIndex*/ 0, this);
+            if (c != 1) return;
+            MetaOverrides::clearAll();
+            if (home_) home_->refreshDetailMetaCard();
+            metaEdits->setText(tr("Reset my metadata edits (%n item(s))", nullptr, MetaOverrides::count()));
+            statusBar()->showMessage(tr("Your metadata edits were reset."), 4000);
         });
         v->addSpacing(10);
 

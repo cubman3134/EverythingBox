@@ -45,6 +45,7 @@
 #include "nav/Osk.h"
 #include "../core/GamelistStore.h"
 #include "../core/MetaCache.h"
+#include "../core/MetaOverrides.h"
 #include "../core/PerfTrace.h"
 #include "../browse/SyntheticCatalogs.h"
 #include "../browse/SearchAggregator.h"
@@ -713,6 +714,27 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     sourceBtn_->installEventFilter(this);
     arl->addWidget(sourceBtn_);
 
+    // "Fix info…": the per-item metadata editor (issue #24), the classic twin of the themed detail's editmeta
+    // pill. It belongs where the wrong data is visible, so it sits on the detail card rather than in settings.
+    // Always shown on a real detail (unlike Play/Download it needs no resolvable source — a mis-scrape is
+    // exactly as wrong on an item you cannot play), which also makes it the one action that is always here for
+    // the arrow ring to land on.
+    editMetaBtn_ = new QPushButton(tr("✎  Fix info…"), actionRow_);
+    editMetaBtn_->setCursor(Qt::PointingHandCursor);
+    editMetaBtn_->setStyleSheet(QStringLiteral(
+        "QPushButton{background:#E7EBF2;border:2px solid #8C9AB4;border-radius:6px;"
+        "padding:6px 14px;color:#33405A;font-weight:bold;}"
+        "QPushButton:hover{background:#D6DDE8;}"
+        "QPushButton:focus{background:#C3CCDC;border-color:#5A6B8C;}"));
+    editMetaBtn_->setVisible(false);
+    connect(editMetaBtn_, &QPushButton::clicked, this, [this] {
+        if (stack_.isEmpty() || !stack_.last().detail) return;
+        const QString key = MetaCache::keyFor(stack_.last().item);
+        if (!key.isEmpty()) emit editMetadataRequested(key);
+    });
+    editMetaBtn_->installEventFilter(this);
+    arl->addWidget(editMetaBtn_);
+
     arl->addStretch(1);
     mc->addWidget(actionRow_);
 
@@ -1332,6 +1354,10 @@ QWidget* HomeView::detailActionButton() const
 {
     if (playBtn_ && playBtn_->isVisible()) return playBtn_;
     if (favBtn_  && favBtn_->isVisible())  return favBtn_;
+    // Last resort: "Fix info…" is shown on every real detail card, so on a page where neither Play nor
+    // Favorite is offered it is the only action there — and without this the D-pad would land on nothing
+    // (the #40/#47 shape of bug).
+    if (editMetaBtn_ && editMetaBtn_->isVisible()) return editMetaBtn_;
     return nullptr;
 }
 
@@ -1549,6 +1575,10 @@ QVariantList HomeView::browseItems()
         // Any richer artwork/videos/audio/meta the catalog already carries -> selected.logo, selected.box,
         // selected.images.screenshot, selected.videos, ... (the aggregator enriches this further on hover).
         it.art.writeInto(m);
+        // The user's correction to a wrong scrape composites LAST, over everything the providers wrote
+        // (issue #24) — the tile is where a mis-scrape is usually noticed, so it must be where it stops
+        // showing. Cheap: one cache-backed lookup per row, and a no-op for the items with no correction.
+        MetaOverrides::applyTo(MetaOverrides::get(MetaCache::keyFor(it)), m);
         out << m;
     }
     return out;
@@ -4269,9 +4299,16 @@ QVariantMap HomeView::themedDetailData(int idx)
             case ItemMarks::Completion::None:       break;
         }
         out.insert(QStringLiteral("completion"), comp);
+        // "Fix info…" — the per-item metadata editor (issue #24). Offered on the same real-media rows as the
+        // other library-management verbs: they share the requirement of a stable key to write against.
+        verbs << QStringLiteral("editmeta");
+        out.insert(QStringLiteral("edited"), MetaOverrides::has(metaKey)); // drives the pill's "(edited)" mark
     }
     out.insert(QStringLiteral("actions"), verbs);
     out.insert(QStringLiteral("readable"), gates.readable);
+    // The correction composites LAST, over every source above — the session art cache, a gamelist entry and
+    // the scrape cache all feed `out`, and only the finished map is common to all three.
+    MetaOverrides::applyTo(MetaOverrides::get(metaKey), out);
     return out;
 }
 
@@ -4521,6 +4558,14 @@ void HomeView::requestMeta(const MediaItem& item)
     // bridged leaf can't be known yet — its stream id arrives with /meta — so showMeta reveals that case.
     if (sourceBtn_) sourceBtn_->setVisible(gates.play && canChooseStreamSource(item));
     if (favBtn_)  favBtn_->setVisible(true); // favourite-able like normal media (text set above)
+    // "Fix info…" needs only a stable key, not a resolvable source — a mis-scrape is exactly as wrong on an
+    // item that will not play. Its label says whether this item already carries a correction.
+    if (editMetaBtn_)
+    {
+        const QString mk = MetaCache::keyFor(item);
+        editMetaBtn_->setVisible(!mk.isEmpty());
+        editMetaBtn_->setText(MetaOverrides::has(mk) ? tr("✎  Info edited") : tr("✎  Fix info…"));
+    }
 
     layoutMetaSections(item.type); // order the text rows per the theme
     meta_->setVisible(true);
@@ -4708,6 +4753,18 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     LoadedAddon* prov = mgr_->metaProviderFor(stack_.last().addon, mi.type);
     if (!prov) return;
     pendingMetaReqId_ = mgr_->requestMeta(prov, mi); // its onMetaReady (now valid) will showMeta()
+}
+
+void HomeView::refreshDetailMetaCard()
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return;
+    const QString key = MetaCache::keyFor(stack_.last().item);
+    if (key.isEmpty()) return;
+    themedArtCache_.remove(key);   // the hover cache short-circuits the read path; it now holds the old art
+    if (editMetaBtn_)
+        editMetaBtn_->setText(MetaOverrides::has(key) ? tr("✎  Info edited") : tr("✎  Fix info…"));
+    const MediaDetail d = MetaCache::cachedDetail(key);   // composites the correction
+    if (d.valid) showMeta(d);
 }
 
 void HomeView::showMeta(const MediaDetail& d)

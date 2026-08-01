@@ -602,6 +602,11 @@ private:
                                              // model on pop so the row vanishes/returns (no re-fetch)
     void themedDetailPickStatus();           // the completion-status picker (NavMenu) for themedDetailKey_
     void themedDetailEditTags();             // the re-presenting tags picker/loop for themedDetailKey_
+    // The per-item metadata editor (issue #24). One nav-kit loop shared by BOTH detail surfaces — the themed
+    // action row passes themedDetailKey_, the classic card's button passes the same MetaCache key through
+    // HomeView::editMetadataRequested — so the two can never drift apart.
+    void editItemMetadata(const QString& key);
+    void refreshAfterMetaEdit(const QString& key); // re-render both cards + drop the stale session art
     void runThemedBrowseFilter();            // the browse Filter menu (All/Favorites/status/tag) for the current level
 
     // The themed AUDIO now-playing view (Task 5): in themed mode, audio opens (openAudioPath/openAudioStream/

@@ -144,6 +144,14 @@ public:
     // of-range/synthetic row. MainWindow's detail hide/status/tags verbs address ItemMarks through this so they
     // stay correct regardless of any row-index churn a hide causes.
     QString themedLeafKey(int browseIndex) const;
+    // Drop one item's entry from the per-session resolved-art cache. That cache short-circuits the whole
+    // MetaCache read path, so after a metadata correction (issue #24) it would keep serving the artwork the
+    // user just replaced — for the rest of the session, on every screen that hovered the item.
+    void forgetThemedArt(const QString& metaKey) { themedArtCache_.remove(metaKey); }
+    // Re-render the CLASSIC detail card from the cache after a metadata correction (issue #24), so the fix
+    // lands on the screen it was made from. Reads MetaCache::cachedDetail, which composites the override —
+    // no network, no re-scrape. No-op when no detail card is open.
+    void refreshDetailMetaCard();
     // Re-apply the hidden filter to the live surface (the Show-hidden toggle / a profile switch changed it):
     // the Home list rebuilds synchronously; a catalogue level re-issues its request so the filter runs as its
     // items land. Cheapest existing refresh path — no bespoke re-filter of items_ in place.
@@ -220,6 +228,9 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
+    // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key —
+    // the same identity the override store files against — because MainWindow owns the nav-kit editor loop.
+    void editMetadataRequested(const QString& metaKey);
     // A browse/detail level was POPPED (classic Back, or the themed column's Back). MainWindow uses this to
     // invalidate a "Choose source…" fan-out started from the page being left: the themed detail pop bumps the
     // generation itself, but the classic stack is invisible to MainWindow, so without this a slow reply from
@@ -472,6 +483,7 @@ private:
     QPushButton* playBtn_ = nullptr;  // ▶ launch button shown on a Steam game's info page
     QPushButton* downloadBtn_ = nullptr; // ⬇ download this item (or, for a series/season, all its content)
     QPushButton* sourceBtn_ = nullptr;   // 🔀 "Choose source…" — shown only for a Stremio-resolved leaf
+    QPushButton* editMetaBtn_ = nullptr; // ✎ "Fix info…" — the per-item metadata editor (issue #24)
     BingeStore* bingeStore_ = nullptr;   // borrowed from MainWindow (see setBingeStore); may be null
     // Download crawl: walk a container's children, resolve each leaf's source, and emit downloadItem for it.
     // Runs sequentially (one resolve in flight) so it paces itself and reuses the existing async result signals.
