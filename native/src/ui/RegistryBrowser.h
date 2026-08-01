@@ -95,9 +95,11 @@ private:
     // Add-ons. An add-on entry LISTS its files (or names a remote URL to subscribe to), so it stays on the
     // raw QJsonObject; nothing in ThemeRegistry describes that shape.
     void renderEntry(const QJsonObject& entry, const QString& indexUrl);
-    // false when the press was REFUSED — another install is already running, or the entry is one this
-    // function does not serve at all. Nothing was touched, so the card must go back exactly as it was. A
-    // FAILED install returns true: it was attempted, and the card is right to offer Retry.
+    // false when the press was REFUSED — another install is already running, the entry is one this function
+    // does not serve at all, or its listing names nothing to install (no id, no files). Nothing was touched
+    // in any of those, so the card must go back exactly as it was, and in the last two pressing again cannot
+    // change the answer. A FAILED install returns true: it was attempted, and the card is right to offer
+    // Retry.
     bool installEntry(const QJsonObject& entry, const QString& indexUrl);
     bool isInstalled(const QJsonObject& entry) const;
 
@@ -107,7 +109,14 @@ private:
     // on desktop Linux (a pre-planted symlink is followed through an O_TRUNC open) and identical on both
     // Appearance surfaces, so two installs racing each other corrupt one temp file with two busy flags that
     // know nothing of each other.
-    bool fetchToBuffer(const QString& url, QByteArray* out, QString* error);
+    //
+    // `maxBytes` is REQUIRED rather than defaulted, so a new call site has to answer the question: QNAM
+    // buffers a whole response, and every caller here reads the body only once it has all arrived, so a
+    // budget applied afterwards would bound nothing at all. The transfer is aborted as it crosses it (see
+    // boundIncoming). *overBudget, when given, says the false return was that REFUSAL and not a network
+    // error — the two want different words on screen, because only one of them is worth retrying.
+    bool fetchToBuffer(const QString& url, qint64 maxBytes, QByteArray* out, QString* error,
+                       bool* overBudget = nullptr);
     // …and the same fetch, landing in a real destination file. The add-on path installs by writing files
     // where they belong, so it keeps this form.
     bool downloadTo(const QString& url, const QString& destPath, QString* error);
@@ -141,4 +150,10 @@ private:
     bool installed_ = false;
     bool installing_ = false;      // an install's nested event loops are on the stack
     bool closeWhenIdle_ = false;   // an exit was asked for while they were, and is owed once they unwind
+    // A refresh was asked for while they were, and is likewise owed. Three doors reach fetchAll mid-install
+    // and two of them have ALREADY changed the registry list by then (a registry added, a registry removed),
+    // so a refusal that merely says "not now" leaves the cards on screen describing a set of registries that
+    // no longer exists. finishInstall() posts the refused fetchAll rather than calling it — see the note
+    // there; calling it directly is the use-after-free the fetchAll guard exists to prevent.
+    bool refreshPending_ = false;
 };

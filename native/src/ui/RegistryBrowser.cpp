@@ -86,6 +86,36 @@ static QString repoOf(const QString& rawUrl)
     return u.host();
 }
 
+// Bound a reply's body AS IT ARRIVES. QNetworkAccessManager buffers a whole response by default — no
+// setReadBufferSize, no MaximumDownloadBufferSizeAttribute, no readyRead handling anywhere here — so a cap
+// tested after readAll() is a cap on nothing: a registry serving ONE 500 MB file has 500 MB resident before
+// anything gets to refuse it, which on the 32-bit armv7 box is exactly the OOM ThemeRegistry's caps were
+// written to prevent. Two mechanisms, because neither does the whole job:
+//
+//   setReadBufferSize  caps what the reply will hold un-read; QNAM stops reading from the socket once it is
+//                      full. Nothing here reads before finished(), so that buffer IS the resident body, and
+//                      this is the thing that actually bounds memory.
+//   downloadProgress   ends the transfer rather than leaving it stalled against a full buffer until the 20 s
+//                      wall, and is what lets the caller tell a REFUSAL from a network error. bytesTotal is
+//                      checked too, so a response that declares itself over budget is dropped before its body
+//                      arrives; a Content-Length that lies is caught by bytesReceived regardless.
+//
+// It does not prevent the chunk that crosses the line, only the response after it — see the residual-gap note
+// on ThemeRegistry::remainingDownloadBudget, which is the header this is the other half of.
+//
+// `context` owns the connection's lifetime: the blocking caller passes its stack QEventLoop so the lambda
+// cannot outlive the `overBudget` flag it writes into, while an async caller passes the reply itself.
+static void boundIncoming(QNetworkReply* reply, qint64 maxBytes, QObject* context, bool* overBudget)
+{
+    reply->setReadBufferSize(maxBytes + 1);   // +1 so the first byte PAST the budget is still seen and refused
+    QObject::connect(reply, &QNetworkReply::downloadProgress, context,
+                     [reply, maxBytes, overBudget](qint64 received, qint64 total) {
+        if (received <= maxBytes && total <= maxBytes) return;   // total is -1 when unknown, which passes
+        if (overBudget) *overBudget = true;
+        reply->abort();
+    });
+}
+
 RegistryBrowser::RegistryBrowser(Kind kind, AddonManager* addons, QWidget* parent)
     : QDialog(parent), kind_(kind), addons_(addons)
 {
@@ -258,9 +288,17 @@ void RegistryBrowser::fetchAll()
     // nothing happened. The install's own per-file status line overwrites this within a file or two, which
     // is fine — what matters is that the press is acknowledged at all, and the line it is overwritten by
     // names the install that is the reason.
+    //
+    // OWED, not dropped, and the message says so because it is now true. Only ONE of the three doors is
+    // Reload. The other two have already changed the registry list by the time they arrive here: commitAdd
+    // has persisted the new registry and drawn its row, and the remove-row handler has deleted one and
+    // dropped its row — so telling either of them "can't reload" describes neither what happened nor what
+    // the user is looking at, and "it will finish first" promised a refresh that nothing was going to run.
+    // finishInstall() now runs the refused refresh, which is what makes the sentence below a fact.
     if (installing_)
     {
-        status_->setText(installStatus(tr("Can't reload while an install is running — it will finish first.")));
+        refreshPending_ = true;
+        status_->setText(installStatus(tr("One install at a time — the list refreshes when it finishes.")));
         return;
     }
     while (QLayoutItem* it = listLayout_->takeAt(0)) { delete it->widget(); delete it; }
@@ -277,6 +315,10 @@ void RegistryBrowser::fetchOne(const QString& indexUrl)
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
     req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
     QNetworkReply* reply = nam_->get(req);
+    // An index.json is read into memory whole by the readAll() below, exactly like a blob, and a registry is
+    // as free to serve half a gigabyte of it. Bounded on arrival for the same reason; an index refused this
+    // way simply contributes no entries, which the "no entries found" line below already covers.
+    boundIncoming(reply, ThemeRegistry::kMaxListingBytes, reply, nullptr);
     connect(reply, &QNetworkReply::finished, this, [this, reply, indexUrl] {
         reply->deleteLater();
         if (reply->error() == QNetworkReply::NoError)
@@ -414,7 +456,8 @@ void RegistryBrowser::renderThemeEntry(const ThemeRegistry::Entry& entry, const 
     });
 }
 
-bool RegistryBrowser::fetchToBuffer(const QString& url, QByteArray* out, QString* error)
+bool RegistryBrowser::fetchToBuffer(const QString& url, qint64 maxBytes, QByteArray* out, QString* error,
+                                    bool* overBudget)
 {
     QNetworkRequest req((QUrl(url)));
     req.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(AppBrand::kUserAgent));
@@ -425,9 +468,24 @@ bool RegistryBrowser::fetchToBuffer(const QString& url, QByteArray* out, QString
     QTimer to; to.setSingleShot(true);
     connect(&to, &QTimer::timeout, &loop, &QEventLoop::quit);
     connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    bool over = false;
+    boundIncoming(reply, maxBytes, &loop, &over);
     to.start(20000);
     loop.exec();
 
+    // Checked BEFORE the error branch, because the abort this refusal performs surfaces as
+    // OperationCanceledError with the errorString "Operation canceled" — which reads as a transient hiccup
+    // worth retrying, and this is not one: it is the app declining a response, and the same registry will
+    // send the same oversized body every time.
+    if (over)
+    {
+        if (overBudget) *overBudget = true;
+        if (error) *error = tr("the server sent more than the %1 MB this app will accept for one download, "
+                               "so the transfer was stopped")
+                                .arg(double(maxBytes) / (1024.0 * 1024.0));
+        reply->abort(); reply->deleteLater();
+        return false;
+    }
     if (!reply->isFinished() || reply->error() != QNetworkReply::NoError)
     {
         if (error) *error = reply->isFinished() ? reply->errorString() : QStringLiteral("timed out");
@@ -442,7 +500,10 @@ bool RegistryBrowser::fetchToBuffer(const QString& url, QByteArray* out, QString
 bool RegistryBrowser::downloadTo(const QString& url, const QString& destPath, QString* error)
 {
     QByteArray data;
-    if (!fetchToBuffer(url, &data, error)) return false;
+    // The add-on path has no per-entry budget of its own, so one file's worth is the bound: the same
+    // kMaxFileBytes a theme file gets, applied for the same reason (this reads the whole body into memory
+    // before writing a byte of it). An add-on is a manifest and some scripts — orders of magnitude under it.
+    if (!fetchToBuffer(url, ThemeRegistry::kMaxFileBytes, &data, error)) return false;
 
     QFileInfo fi(destPath);
     QDir().mkpath(fi.absolutePath());
@@ -513,11 +574,30 @@ QString RegistryBrowser::installStatus(const QString& text) const
 void RegistryBrowser::finishInstall()
 {
     installing_ = false;
-    if (!closeWhenIdle_) return;
-    closeWhenIdle_ = false;
-    // Safe now: the nested loops have unwound, and finished() reaches the host queued, so nothing of ours
-    // is on the stack when it deletes us.
-    accept();
+    if (closeWhenIdle_)
+    {
+        closeWhenIdle_ = false;
+        // Safe now: the nested loops have unwound, and finished() reaches the host queued, so nothing of ours
+        // is on the stack when it deletes us. A refresh owed at the same time is moot — we are leaving.
+        refreshPending_ = false;
+        accept();
+        return;
+    }
+    if (!refreshPending_) return;
+    refreshPending_ = false;
+    // A refresh refused mid-install (an added or removed registry, or Reload), run now that it is safe to.
+    //
+    // SINGLE-SHOT, not a direct call, and that is the whole care in this function. ~InstallScope runs this as
+    // installThemeEntry RETURNS, and the caller it returns into — renderThemeEntry's lambda — goes straight on
+    // to `btn->setText(...)` on the card fetchAll would have just deleted. Calling fetchAll() from here is
+    // therefore the exact use-after-free the guard at the top of fetchAll was added to prevent, reintroduced
+    // through the fix for it. Posting it to the event loop puts it after the click handler has fully returned,
+    // with no dialog frame left on the stack.
+    //
+    // It also cannot land inside a nested loop and do harm: `this` as the context object drops it if the
+    // dialog is destroyed first, and if a SECOND install has started by the time it fires, fetchAll's own
+    // installing_ guard refuses it and owes it again.
+    QTimer::singleShot(0, this, [this] { fetchAll(); });
 }
 
 bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& indexUrl)
@@ -543,12 +623,17 @@ bool RegistryBrowser::installEntry(const QJsonObject& entry, const QString& inde
     QStringList files;
     QString destDir;
 
+    // FALSE for both of these, for the same reason the kind_ guard above returns false: nothing was
+    // attempted. An entry with no id and an entry with no files are refusals by the registry's own listing,
+    // not failures of an install — returning true had the caller re-read isInstalled, find it false and
+    // relabel an untouched card "Retry" for something that never ran and that pressing again cannot change.
+    // This is the confusion the return value exists to prevent, five lines from where it was just fixed.
     const QString id = entry.value(QStringLiteral("id")).toString();
-    if (id.isEmpty()) { status_->setText(tr("Entry has no id.")); return true; }
+    if (id.isEmpty()) { status_->setText(tr("Entry has no id.")); return false; }
     destDir = localDirFor(id);
     for (const QJsonValue& fv : entry.value(QStringLiteral("files")).toArray()) files << fv.toString();
 
-    if (files.isEmpty()) { status_->setText(tr("Nothing to download for this entry.")); return true; }
+    if (files.isEmpty()) { status_->setText(tr("Nothing to download for this entry.")); return false; }
 
     for (const QString& rel : files)
     {
@@ -587,12 +672,16 @@ QByteArray RegistryBrowser::treeFor(const QString& indexUrl, QString* error)
     }
 
     // Reuse fetchToBuffer rather than opening a second blocking-fetch event loop: it already carries the
-    // user agent, the redirect policy and the 20 s cap, and a second copy of that would drift from it. The
-    // listing is wanted in memory, so it never becomes a file — the fixed /tmp path it used to round-trip
-    // through was shared with the themed surface and followed a pre-planted symlink on desktop Linux.
+    // user agent, the redirect policy, the 20 s cap and the arrival-time byte budget, and a second copy of
+    // that would drift from it. The listing is wanted in memory, so it never becomes a file — the fixed /tmp
+    // path it used to round-trip through was shared with the themed surface and followed a pre-planted
+    // symlink on desktop Linux.
+    //
+    // The budget matters here as much as on a blob: a hostile registry can serve a 500 MB tree JSON as
+    // cheaply as a 500 MB font, and this response is read into memory whole.
     QByteArray body;
     QString err;
-    if (!fetchToBuffer(api, &body, &err))
+    if (!fetchToBuffer(api, ThemeRegistry::kMaxListingBytes, &body, &err))
     {
         // Rate limiting lands here too (GitHub allows 60 unauthenticated calls an hour per IP).
         if (error) *error = tr("Couldn't read the registry's file list: %1").arg(err);
@@ -651,10 +740,21 @@ bool RegistryBrowser::installThemeEntry(const ThemeRegistry::Entry& e, const QSt
         const QString url = ThemeRegistry::assetUrl(base, e.dir, rel);
         QByteArray blob;
         QString derr;
-        if (!fetchToBuffer(url, &blob, &derr))
-        { status_->setText(tr("Download failed: %1\n%2").arg(rel, derr)); return true; }
-        // Checked before it joins `blobs`, so a hostile file is refused at the moment it arrives rather
-        // than after the whole folder has been accumulated in memory — which is what the total cap is for.
+        // The budget the transfer itself is held to, carrying the running total: the per-file cap and what is
+        // left of the entry's total, whichever is smaller. Passed IN rather than applied afterwards, because
+        // a check that runs once readAll() has returned is a check on bytes that are already resident.
+        bool over = false;
+        if (!fetchToBuffer(url, ThemeRegistry::remainingDownloadBudget(got), &blob, &derr, &over))
+        {
+            // A refusal is not a failure and must not read as one: nothing about this registry's response is
+            // going to be different next time, so "Download failed" (which invites a retry) would be wrong.
+            status_->setText(over ? tr("Refused %1: %2").arg(rel, derr)
+                                  : tr("Download failed: %1\n%2").arg(rel, derr));
+            return true;
+        }
+        // Belt to the arrival-time brace: the abort above is asynchronous, so a reply that finishes in the
+        // same turn it crosses its budget can still hand back a body over it. This refuses that body rather
+        // than installing it, and is the only bound left if a future caller forgets the budget argument.
         if (!ThemeRegistry::acceptDownloadedBytes(blob.size(), got, rel, &derr))
         { status_->setText(derr); return true; }
         got += blob.size();

@@ -736,6 +736,16 @@ int main(int argc, char** argv)
     //     Staged exactly as block 12 stages it: a copy parked in staging with its destination EMPTY, which is
     //     the state that says "survivor", not "residue". The install under test names the COLLIDING folder,
     //     not the parked one, so nothing about it looks like a retry of the theme it would destroy.
+    //
+    //     CONSIDERED AND NOT CLOSED, so the next reader knows it was weighed rather than missed: on a
+    //     case-insensitive volume a case-VARIANT of an ordinary folder name can still reach a parked
+    //     survivor. With Keep's survivor parked and themes2/Keep empty, installing "KEEP" has QDir resolve
+    //     `old` (<staging>/KEEP.replaced) to the same directory as <staging>/Keep.replaced, so the restore
+    //     branch above picks it up and renames it to themes2/KEEP — the survivor is recovered, under a name
+    //     one letter different from the one it had. That is a far narrower thing than the alias this block
+    //     pins: it destroys nothing, it needs the rare stranded state to already exist, and the only visible
+    //     consequence is the folder's capitalisation. Closing it would mean case-folding the whole
+    //     themes2 namespace on every install, which is a much larger rule than the harm justifies.
     {
         const QString root   = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-alias");
         const QString parked = root + QStringLiteral("/.eb-installing/Keep.replaced");
@@ -863,6 +873,141 @@ int main(int argc, char** argv)
         // A null error pointer is a legal caller — the predicate is the answer, the string is a courtesy.
         CHECK(!ThemeRegistry::acceptDownloadedBytes(ThemeRegistry::kMaxFileBytes + 1, 0,
                                                     QStringLiteral("x"), nullptr));
+    }
+
+    // 15. remainingDownloadBudget — the SAME rule, asked before the bytes exist rather than after. This is
+    //     what makes the caps a bound on peak memory instead of a bound on regret: the two download loops
+    //     hand this number to the network layer, which caps the reply's read buffer at it and aborts the
+    //     transfer when downloadProgress passes it. Without it, QNetworkAccessManager buffers a whole
+    //     response by default and one 500 MB file is 500 MB resident before acceptDownloadedBytes is even
+    //     reached — which on a 32-bit armv7 box is the OOM the caps were written to prevent.
+    //
+    //     WHAT THIS PROBE CANNOT DO, said plainly rather than implied by a green line: it cannot make a
+    //     network request, so the arrival-time abort itself — setReadBufferSize, the downloadProgress
+    //     handler, reply->abort() — is NOT covered here or anywhere else in this suite. What is covered is
+    //     the only part that can be a pure predicate: the number those call sites are given, and the fact
+    //     that it draws exactly the same boundary acceptDownloadedBytes does.
+    {
+        // A fresh entry may bring one full file. min(per-file, whole budget), and kMaxFileBytes is the
+        // smaller by the constant relationship block 14 pins.
+        CHECK(ThemeRegistry::remainingDownloadBudget(0) == ThemeRegistry::kMaxFileBytes);
+        // Spent to the last byte: nothing more, and never a negative allowance — a downstream comparison
+        // against a negative budget would read as unbounded, which is the failure this whole block is about.
+        CHECK(ThemeRegistry::remainingDownloadBudget(ThemeRegistry::kMaxTotalBytes) == 0);
+        CHECK(ThemeRegistry::remainingDownloadBudget(ThemeRegistry::kMaxTotalBytes + 1) == 0);
+        CHECK(ThemeRegistry::remainingDownloadBudget(-1) == 0);
+        // Near the end the TOTAL is what binds, not the per-file cap: what is left is what is left.
+        CHECK(ThemeRegistry::remainingDownloadBudget(ThemeRegistry::kMaxTotalBytes - 1) == 1);
+        CHECK(ThemeRegistry::remainingDownloadBudget(ThemeRegistry::kMaxTotalBytes
+                                                     - ThemeRegistry::kMaxFileBytes / 2)
+              == ThemeRegistry::kMaxFileBytes / 2);
+        // …and while there is more than a file's worth left, the per-file cap is.
+        CHECK(ThemeRegistry::remainingDownloadBudget(ThemeRegistry::kMaxFileBytes)
+              == ThemeRegistry::kMaxFileBytes);
+
+        // THE LOAD-BEARING ONE. The budget handed to the network and the predicate applied to what arrives
+        // have to draw the SAME line: one byte tighter and transfers are aborted that the predicate would
+        // have accepted (a theme that fits refuses to install); one byte looser and the abort is decoration,
+        // with only the after-the-fact check really applying the cap. Swept across the interesting values of
+        // the running total rather than asserted at one point.
+        const qint64 marks[] = { 0,
+                                 1,
+                                 ThemeRegistry::kMaxFileBytes,
+                                 ThemeRegistry::kMaxTotalBytes / 2,
+                                 ThemeRegistry::kMaxTotalBytes - ThemeRegistry::kMaxFileBytes,
+                                 ThemeRegistry::kMaxTotalBytes - 1 };
+        for (const qint64 soFar : marks)
+        {
+            const qint64 budget = ThemeRegistry::remainingDownloadBudget(soFar);
+            CHECK(budget > 0);
+            CHECK(ThemeRegistry::acceptDownloadedBytes(budget, soFar, QStringLiteral("f.bin"), nullptr));
+            CHECK(!ThemeRegistry::acceptDownloadedBytes(budget + 1, soFar, QStringLiteral("f.bin"), nullptr));
+        }
+
+        // Walking a whole entry the way the download loops do: the budget never lets the running total past
+        // the cap, and it reaches exactly zero rather than stalling above it.
+        qint64 got = 0;
+        int steps = 0;
+        while (got < ThemeRegistry::kMaxTotalBytes && steps < 1000)
+        {
+            const qint64 budget = ThemeRegistry::remainingDownloadBudget(got);
+            CHECK(budget > 0);
+            got += budget;
+            ++steps;
+        }
+        CHECK(got == ThemeRegistry::kMaxTotalBytes);
+        CHECK(ThemeRegistry::remainingDownloadBudget(got) == 0);
+
+        // The listing budget is a separate allowance from the theme's, and has to be a real one.
+        CHECK(ThemeRegistry::kMaxListingBytes > 0);
+    }
+
+    // 16. filesUnder's CLAIMED total. acceptDownloadedBytes stays authoritative — a listing may understate,
+    //     and the bytes that arrive are what count — but a listing that says up front that it is over budget
+    //     should be refused before the first request rather than after up to kMaxFiles downloads, each
+    //     behind its own 20 s wall. This is the cheap half of a check whose expensive half already exists.
+    {
+        // A listing that CLAIMS exactly `target` bytes, in as few files as the per-file cap allows, the first
+        // of them theme.json (filesUnder requires one). Built from the constants rather than spelled out, so
+        // the fixture cannot drift from the numbers it exists to sit either side of.
+        auto treeClaiming = [](qint64 target) {
+            QByteArray t = "{\"tree\":[";
+            qint64 left = target;
+            int i = 0;
+            while (left > 0)
+            {
+                const qint64 chunk = left < ThemeRegistry::kMaxFileBytes ? left : ThemeRegistry::kMaxFileBytes;
+                if (i > 0) t += ",";
+                const QString name = i == 0 ? QStringLiteral("theme.json")
+                                            : QStringLiteral("f%1.bin").arg(i);
+                t += QStringLiteral("{\"path\":\"themes2/Grid/%1\",\"type\":\"blob\",\"size\":%2}")
+                         .arg(name, QString::number(chunk)).toUtf8();
+                left -= chunk;
+                ++i;
+            }
+            t += "]}";
+            return t;
+        };
+
+        // EXACTLY the budget is installable — the boundary asserted from the accepting side first, so a check
+        // written one comparison too tight cannot pass this block by refusing everything.
+        const ThemeRegistry::Listing el =
+            ThemeRegistry::filesUnder(treeClaiming(ThemeRegistry::kMaxTotalBytes),
+                                      QStringLiteral("themes2/Grid"));
+        CHECK(el.ok());
+        CHECK(el.files.size() <= ThemeRegistry::kMaxFiles);   // or the file cap, not the total, is answering
+
+        // One byte more is not, and the byte rides on a file that is itself well inside the per-file cap —
+        // the case the per-file check cannot see.
+        const ThemeRegistry::Listing ol =
+            ThemeRegistry::filesUnder(treeClaiming(ThemeRegistry::kMaxTotalBytes + 1),
+                                      QStringLiteral("themes2/Grid"));
+        CHECK(!ol.ok());
+        // …and it says which cap it is, with the number the code actually enforces rather than one typed in.
+        CHECK(ol.error.contains(QString::number(double(ThemeRegistry::kMaxTotalBytes) / (1024.0 * 1024.0))));
+
+        // Comfortably over, the shape a hostile listing would actually take: still refused, and still by the
+        // total rather than by the file count.
+        const ThemeRegistry::Listing bl =
+            ThemeRegistry::filesUnder(treeClaiming(ThemeRegistry::kMaxTotalBytes * 2),
+                                      QStringLiteral("themes2/Grid"));
+        CHECK(!bl.ok());
+        CHECK(bl.error.contains(QString::number(double(ThemeRegistry::kMaxTotalBytes) / (1024.0 * 1024.0))));
+
+        // A NEGATIVE claimed size is refused, not subtracted: left alone it would buy back budget for the
+        // files after it, which is the one way a running total can be talked out of binding.
+        const QByteArray neg = R"({"tree":[
+            {"path":"themes2/Grid/theme.json","type":"blob","size":10},
+            {"path":"themes2/Grid/refund.bin","type":"blob","size":-2000000000}]})";
+        CHECK(!ThemeRegistry::filesUnder(neg, QStringLiteral("themes2/Grid")).ok());
+
+        // An ordinary theme is untouched by any of this — the check must not have become a second, tighter
+        // file cap by arithmetic accident.
+        const QByteArray ok = R"({"tree":[
+            {"path":"themes2/Grid/theme.json","type":"blob","size":4898},
+            {"path":"themes2/Grid/sounds/move.wav","type":"blob","size":6658},
+            {"path":"themes2/Grid/fonts/V.ttf","type":"blob","size":132748}]})";
+        CHECK(ThemeRegistry::filesUnder(ok, QStringLiteral("themes2/Grid")).ok());
     }
 
     if (failures == 0) std::printf("THEMEREG-OK\n");

@@ -221,6 +221,7 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
     QStringList files;
     QSet<QString> seen;
     bool hasThemeJson = false;
+    qint64 claimed = 0;   // the sizes this listing CLAIMS, summed — see the total check in the loop
 
     for (const QJsonValue& v : root.value(QStringLiteral("tree")).toArray())
     {
@@ -245,8 +246,11 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
         // simply omits the key would sail past the cap. The Trees API always reports a size for a blob, so a
         // blob without one is a response we do not understand — and the whole point of the cap is that we do
         // not start a download whose size we have not agreed to.
+        // A NEGATIVE size is refused by the same line and for the same reason: it is not a size the Trees API
+        // produces, so it is a response we do not understand — and it would subtract from the running total
+        // below, buying back budget for the files after it.
         const QJsonValue size = o.value(QStringLiteral("size"));
-        if (!size.isDouble())
+        if (!size.isDouble() || size.toDouble() < 0.0)
         {
             out.error = QStringLiteral("This registry's file listing does not say how large its files are.");
             return out;
@@ -259,6 +263,22 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
                             .arg(double(kMaxFileBytes) / (1024.0 * 1024.0));
             return out;
         }
+        // THE CLAIMED TOTAL. acceptDownloadedBytes remains the authoritative one — a listing is free to
+        // understate and the bytes that arrive are what count — but a listing that admits up front to being
+        // over budget should be refused here rather than after up to kMaxFiles downloads, each behind its own
+        // 20 s wall. Written as a subtraction against the budget rather than as a sum for the same reason
+        // acceptDownloadedBytes is: a sum of two attacker-influenced values is the one form that can overflow
+        // into a pass. Both are non-negative and `claimedSize` is <= kMaxFileBytes <= kMaxTotalBytes by the
+        // two checks above, so the right-hand side cannot go negative.
+        const qint64 claimedSize = qint64(size.toDouble());
+        if (claimed > kMaxTotalBytes - claimedSize)
+        {
+            out.error = QStringLiteral("This theme's files add up to more than the %1 MB this app will "
+                                       "download for one theme.")
+                            .arg(double(kMaxTotalBytes) / (1024.0 * 1024.0));
+            return out;
+        }
+        claimed += claimedSize;
         // Checked BEFORE appending rather than after the loop: a hostile tree should stop being accumulated at
         // the limit, not be collected in full and then refused.
         if (files.size() >= kMaxFiles)
@@ -281,6 +301,20 @@ QString assetUrl(const QString& base, const QString& dir, const QString& rel)
     // `dir` is encoded as well as `rel`: a registry entry is free to name "themes2/My Grid", and an
     // unencoded space there 404s every file in the theme rather than just the oddly-named ones.
     return base + QLatin1Char('/') + encodePathSegments(dir) + QLatin1Char('/') + encodePathSegments(rel);
+}
+
+qint64 remainingDownloadBudget(qint64 soFar)
+{
+    // A negative running total is not a caller we understand; answering 0 refuses the next file rather than
+    // handing the network layer a budget derived from it. acceptDownloadedBytes refuses the same input.
+    if (soFar < 0) return 0;
+    // No subtraction hazard: kMaxTotalBytes is a positive constant and soFar is non-negative here, so the
+    // difference is at most kMaxTotalBytes and cannot overflow. Clamped at 0 because a caller that overshot
+    // (the arrival abort races the last chunk) must get "nothing more", not a negative allowance that a
+    // downstream comparison would read as unbounded.
+    const qint64 left = kMaxTotalBytes - soFar;
+    if (left <= 0) return 0;
+    return left < kMaxFileBytes ? left : kMaxFileBytes;
 }
 
 bool acceptDownloadedBytes(qint64 bytes, qint64 soFar, const QString& rel, QString* error)

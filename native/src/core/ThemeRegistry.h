@@ -26,11 +26,27 @@ inline constexpr qint64 kMaxFileBytes = 8 * 1024 * 1024;
 // files of kMaxFileBytes each is 512 MB, and the download loop holds every one of them in memory as a
 // QByteArray until the last file lands (that is what makes the install atomic) — so the per-file cap alone
 // buys an attacker a half-gigabyte allocation on a product that ships to a 32-bit armv7 Android TV box,
-// where the whole process address space is 2 GB minus Qt's own footprint. 32 MB caps the peak at something
-// that box can hold while leaving an order of magnitude of headroom over any real theme: the three bundled
-// themes are well under 1 MB each, and a lavish one (a couple of fonts, a handful of sounds, a wallpaper)
-// is a few MB. A theme that genuinely needs more than this is installed by hand.
+// where the whole process address space is 2 GB minus Qt's own footprint. 32 MB leaves an order of magnitude
+// of headroom over any real theme: the three bundled themes are well under 1 MB each, and a lavish one (a
+// couple of fonts, a handful of sounds, a wallpaper) is a few MB. A theme that genuinely needs more than this
+// is installed by hand.
+//
+// WHERE THIS IS APPLIED, because a number checked after the bytes are resident bounds nothing. This unit is
+// network-free and cannot abort a transfer, so it states the rule and the two UI download loops apply it AS
+// THE BYTES ARRIVE: remainingDownloadBudget() is the per-file allowance they compute from the running total,
+// they cap the reply's read buffer at it, and they abort the reply the moment QNetworkReply::downloadProgress
+// reports more than it. acceptDownloadedBytes() is the same rule re-checked on what actually landed.
+// remainingDownloadBudget names the overshoot that arrangement still allows; it is kilobytes, not the
+// response size, and it is not rounded away here.
 inline constexpr qint64 kMaxTotalBytes = 32 * 1024 * 1024;
+
+// The two JSON LISTINGS a registry serves — its index.json and the Trees API response — which the same
+// helpers read into memory and which neither cap above covers (those are a theme's files). A hostile registry
+// can serve a 500 MB listing as easily as a 500 MB blob, so every listing fetch is given this budget by the
+// same arrival-time mechanism. 4 MB is about an order of magnitude above the largest plausible listing: the
+// Trees API describes one blob in roughly 150 bytes and marks a tree it cannot fit as truncated (which
+// filesUnder already refuses), so a registry holding hundreds of themes lists in well under 500 KB.
+inline constexpr qint64 kMaxListingBytes = 4 * 1024 * 1024;
 
 struct Entry {
     QString     name;          // display text ONLY — never used as a path
@@ -76,9 +92,14 @@ struct Listing {
 
 // Filter a Trees API response to the blobs under `dir/`. Refuses (with a reason) when the response is
 // truncated, `dir` holds no theme.json of its own, the folder is absent, any path is unsafe, two paths
-// differ only in case, there are more than kMaxFiles files, or any file exceeds kMaxFileBytes — or does not
-// state a size at all, which is the same thing said less honestly. One bad file fails the WHOLE entry: a
-// theme installed without its font is a broken theme, and skipping quietly would produce one.
+// differ only in case, there are more than kMaxFiles files, any file exceeds kMaxFileBytes, or the sizes it
+// CLAIMS already add up past kMaxTotalBytes — or when a file does not state a size at all, which is the same
+// thing said less honestly. One bad file fails the WHOLE entry: a theme installed without its font is a
+// broken theme, and skipping quietly would produce one.
+//
+// The claimed total is a cheap early refusal, not the authoritative one: a listing may understate, which is
+// exactly why acceptDownloadedBytes exists. It is here so a listing that admits up front to being over budget
+// is refused before the first request rather than after a file-by-file download, each behind a 20 s wall.
 Listing filesUnder(const QByteArray& treeJson, const QString& dir);
 
 // The download URL for one listed file: `base`/`dir`/`rel`, with every segment percent-encoded so a theme
@@ -87,17 +108,40 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir);
 // on one surface and not the other.
 QString assetUrl(const QString& base, const QString& dir, const QString& rel);
 
-// The caps applied to bytes that have ACTUALLY ARRIVED, which is a different question from the one
-// filesUnder answers. filesUnder checks the size the TREE RESPONSE CLAIMS; the blobs are fetched afterwards,
-// as separate requests against branch HEAD, so a registry that commits small files, gets listed, and then
-// force-pushes large ones serves whatever it likes. Nothing downstream bounds the read — both surfaces call
-// reply->readAll() — so the only place the promise can be kept is here, after each file is in hand.
+// The most bytes one more file of an entry may bring: the smaller of the per-file cap and what is LEFT of
+// kMaxTotalBytes after `soFar`, never negative. This is the number the two download loops hand to the network
+// layer — they cap the reply's read buffer at it and abort the transfer when downloadProgress passes it — so
+// the per-file cap AND the running total are both enforced while the response is arriving rather than after
+// it is resident. A listing fetch is given kMaxListingBytes the same way.
+//
+// Pure, and here rather than in either caller, for the reason the rest of this unit is: there are two
+// download loops in two files, and a budget computed correctly in one of them is not a budget. It is pinned
+// against acceptDownloadedBytes in probe_themereg, because the two have to draw the SAME boundary — a budget
+// one byte tighter aborts transfers the predicate would have accepted, and one byte looser is a cap that only
+// the predicate is really applying.
+//
+// WHAT THIS DOES AND DOES NOT BOUND, stated rather than rounded up. downloadProgress reports bytes that have
+// already landed in the reply's read buffer, so the abort follows the chunk that crossed the line instead of
+// preventing it; setReadBufferSize(budget + 1) at the call sites is what holds that overshoot to one socket
+// read plus whatever the OS and TLS layers buffer below Qt — kilobytes — rather than the whole response. So
+// the peak an entry can reach is kMaxTotalBytes plus one such overshoot, not kMaxTotalBytes exactly, and a
+// transfer that finishes in the same turn it crosses the budget can deliver its last chunk before the abort
+// lands (which is what acceptDownloadedBytes then refuses). What is bounded is the thing that mattered: no
+// single response can put more than its budget's worth of body into memory before it is stopped.
+qint64 remainingDownloadBudget(qint64 soFar);
+
+// The same caps re-applied to bytes that ACTUALLY ARRIVED — a different question from the one filesUnder
+// answers. filesUnder checks the size the TREE RESPONSE CLAIMS; the blobs are fetched afterwards, as separate
+// requests against branch HEAD, so a registry that commits small files, gets listed, and then force-pushes
+// large ones serves whatever it likes.
+//
+// With remainingDownloadBudget applied at arrival this rarely fires, and it is not redundant: the abort is
+// asynchronous, so a reply that finishes in the same turn the budget is crossed can still hand back a body
+// over it, and this is what refuses that body instead of installing it. It is also the only bound a future
+// caller which forgets to pass a budget would have left.
 //
 // `soFar` is the entry's running total BEFORE this file, so the total budget is enforced across the whole
 // folder rather than one file at a time. Returns false and fills *error with the user-facing reason.
-//
-// It lives in ThemeRegistry rather than in either caller for the reason the rest of this unit does: there
-// are two download loops, they are in different files, and a cap enforced on one of them is not a cap.
 bool acceptDownloadedBytes(qint64 bytes, qint64 soFar, const QString& rel, QString* error);
 
 // Where theme FOLDERS live, given the app's writable data dir: `dataDir/themes2`. ThemeEngine (the picker),
