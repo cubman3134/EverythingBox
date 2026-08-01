@@ -803,6 +803,18 @@ int main(int argc, char** argv)
             for (const MediaItem& i : cat.items) ids.insert(i.id);
             CHECK(ids.size() == cat.items.size(), "traktlist: row ids are unique");
         }
+        // The collision that makes the TYPE part of a synthetic id load-bearing: a film and a series
+        // really can share a title, and an id-less pair of them would otherwise land on ONE key — so
+        // focusing, marking or hiding either would silently do it to both.
+        {
+            QVector<TraktListEntry> clash;
+            clash << entry("movie", "Fargo", 1996, "", 10)
+                  << entry("show",  "Fargo", 2014, "", 10);
+            const MediaCatalog c = browse::traktListCatalog(clash, QStringLiteral("T"));
+            CHECK(c.items.size() == 2, "traktlist: a same-titled film and series are two rows");
+            CHECK(c.items[0].id != c.items[1].id,
+                  "traktlist: ...with DIFFERENT ids, because the kind is part of the key");
+        }
 
         // A TOTAL order: two rows added in the same second (common — no endpoint stamps sub-second
         // times, and /sync/collection sometimes stamps none at all) must not reshuffle between runs.

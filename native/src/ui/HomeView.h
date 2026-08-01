@@ -13,6 +13,7 @@
 #include <QPointer>
 #include "../addons/AddonModels.h"
 #include "../core/TraktRead.h"   // CalendarEntry — the cached Trakt calendar this view draws (#23)
+#include "../core/TraktSync.h"   // TraktListEntry — the cached Trakt watchlist/collection (#23)
 
 class AddonManager;
 class BingeStore;
@@ -192,6 +193,11 @@ public:
     // and folder disappear on the same refresh — there is no state left behind to be shown by a later render.
     void onTraktCalendarChanged();
 
+    // The same, for the watchlist/collection caches. Kept SEPARATE from the calendar signal rather than
+    // folded into one "Trakt changed": the two are written by different fetches on different cadences, and
+    // a single handler would rebuild the level the user is standing in every time the OTHER one landed.
+    void onTraktListsChanged();
+
 signals:
     void toastRequested(const QString& text, int ms); // ask MainWindow to show a window-level notice
     void toastHideRequested();                        // ask MainWindow to dismiss it
@@ -365,6 +371,14 @@ private:
     MediaCatalog traktCalendarItems() const;             // the built catalog, or an EMPTY one when Trakt is off
     void openTraktCalendarLevel();                       // drill it -> the episodes airing soon
     void populateTraktCalendar();                        // (re)build that list from the cached calendar
+    // The synthetic "Trakt Watchlist" / "Trakt Collection" folders (video category only). Gated exactly as
+    // the calendar is: the builder returns an EMPTY catalog whenever Trakt is not configured+connected, and
+    // an empty catalog means no folder at all — no row, no placeholder, no "connect Trakt" hint.
+    //
+    // `which` is "watchlist" or "collection" and rides the level marker, so Back repopulates the right one.
+    MediaCatalog traktListItems(const QString& which) const;
+    void openTraktListLevel(const QString& which);
+    void populateTraktList(const QString& which);
     void openFavoritesLevel(const QString& system);      // drill a console's Favorites folder -> its favourited games
     void populateFavorites(const QString& system);       // (re)build that list of favourited games for the console
     // Marks shelves (Favorites / pinned-tag / Hidden): each drills into a synthetic catalog of the CURRENT
@@ -529,6 +543,10 @@ private:
     // fetch lands. EMPTY whenever Trakt is not configured/connected — that emptiness is what makes the
     // shelf and the folder vanish, on top of the calendarAvailable() gate itself.
     QVector<CalendarEntry> traktCal_;
+    // The watchlist and collection, from the same on-disk caches and for the same offline-launch reason.
+    // Both EMPTY whenever Trakt is not configured/connected, which is what makes their folders vanish.
+    QVector<TraktListEntry> traktWatchlist_;
+    QVector<TraktListEntry> traktCollection_;
     bool recentView_ = false;    // true = showing the local "Recent" list (not an addon catalog)
     bool searchEditing_ = false; // search box: false = highlighted (arrows navigate), true = typing
     QVector<int> thumbQueue_;    // item rows awaiting a remote poster load (throttled)

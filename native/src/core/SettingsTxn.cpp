@@ -136,6 +136,14 @@ bool SettingsTxn::inScope(const QString& key)
         // the user TYPES into Settings and must be able to discard. probe_settingstxn §1b pins both
         // halves.
         "trakt/calendarCache", "trakt/calendarCachedAt",
+        // The watchlist/collection caches and the backfill's progress cursor (#23) — the same family,
+        // written from the same kind of background reply lambda, and excluded for the same two
+        // reasons. The WATERMARK is the one where a Discard would do lasting harm rather than
+        // cosmetic: reverting it to a settings visit's opening snapshot would make the next backfill
+        // re-offer everything the user has since corrected, and reverting `backfillDone` would make
+        // the app offer an import it has already performed.
+        "trakt/watchlistCache", "trakt/collectionCache", "trakt/listsCachedAt",
+        "trakt/backfillThrough", "trakt/backfillDone",
         // RetroAchievements session credentials, written from rcheevos' async login callback (loginCb in
         // Achievements.cpp). Sign in, then Discard, and the stored token reverts while the in-memory session
         // stays logged in. ra/apikey — the web-API key typed in Settings — STAYS in scope.

@@ -16,6 +16,7 @@
 #pragma once
 #include "SingleFlight.h" // the token-refresh queue: one /oauth/token refresh, however many callers
 #include "TraktRead.h"    // CalendarEntry — the read layer's struct, returned by value below
+#include "TraktSync.h"    // TraktListEntry + the paging/reconciliation rules the fetch loop runs on
 
 #include <QObject>
 #include <QString>
@@ -76,6 +77,62 @@ public:
     // configured() && connected() — the one predicate every surface gates on.
     static bool calendarAvailable();
 
+    // ---- the watchlist and the collection (#23) --------------------------------------------------
+    // Both are fetched, cached and surfaced identically; only the endpoint and the cache key differ.
+    // Same contract as fetchMyShowsCalendar throughout: ok=false when Trakt is off, when the token
+    // gate refuses, or when the reply was not the payload — and in every one of those cases the
+    // existing cache is left INTACT for the caller to fall back on. Same lifetime warning too: the
+    // callback may never arrive if this TraktClient is destroyed mid-flight.
+    //
+    // These page. The loop honours Trakt's pagination headers and its 429 + Retry-After, retries only
+    // what can succeed later, and gives up after a bounded number of attempts — all of it decided by
+    // the pure classifiers in TraktSync, so the wire rules live in one probe-covered place. A run that
+    // could not read every page reports ok=false and does NOT overwrite the cache: a watchlist missing
+    // its second page, cached and drawn as if it were the whole thing, is worse than a stale one,
+    // because nothing about it looks wrong.
+    void fetchWatchlist(std::function<void(bool ok, QVector<TraktListEntry> entries)> cb);
+    void fetchCollection(std::function<void(bool ok, QVector<TraktListEntry> entries)> cb);
+
+    static QVector<TraktListEntry> cachedWatchlist();
+    static QVector<TraktListEntry> cachedCollection();
+    // When either list was last written, unix seconds; 0 = never. One stamp for both, because they are
+    // refreshed together and a surface only ever asks "how old is what I am showing".
+    static qint64 cachedListsAt();
+
+    // ---- the watched-history backfill (#23) -------------------------------------------------------
+    // What a run did, in the terms the user is told. Every field is a count of something that really
+    // happened, and `complete` is the one that decides whether the watermark advances at all.
+    struct BackfillReport
+    {
+        bool    complete = false;
+        int     marked = 0;              // items that went from unmarked to watched
+        int     alreadyWatched = 0;      // local already said so; not written, so no sync churn
+        int     keptLocal = 0;           // local said something else on purpose; Trakt lost
+        int     skippedByWatermark = 0;  // already offered by an earlier complete run
+        int     droppedNoKey = 0;        // Trakt has no IMDB id for it — this app cannot key on it
+        int     droppedNoTimestamp = 0;  // watched, but Trakt sent no usable watch time
+        QString stopReason;              // "" when complete; otherwise WHY it stopped, for the user
+    };
+
+    // Import /sync/watched into the app's own marks. ADDITIVE and INCREMENTAL — see TraktSync.h for
+    // the rules and for why repeated runs converge instead of fighting the user.
+    //
+    // The two callbacks are how this stays out of the marks store: `localState` answers what the app
+    // already knows about one stream id, and `markWatched` performs the one write this feature is
+    // allowed to make. TraktClient therefore never includes ItemMarks, never learns the profile, and
+    // the caller owns the mapping from a stream id onto its own key — which is the part that differs
+    // per catalogue and must not be guessed here.
+    //
+    // markWatched is called ONLY for items the plan chose, so a run that changes nothing performs no
+    // writes at all and cannot re-arm the Drive push.
+    void runWatchedBackfill(std::function<trakt::LocalState(const QString&)> localState,
+                            std::function<void(const QString&)> markWatched,
+                            std::function<void(BackfillReport)> cb);
+
+    // Has a COMPLETE backfill ever run for this account? The surface uses it to decide whether to
+    // offer the import at all; disconnectAccount clears it with the rest of the account's state.
+    static bool backfillEverCompleted();
+
 signals:
     void deviceCode(const QString& userCode, const QString& verificationUrl); // show these to the user
     void connectedChanged(bool connected);
@@ -95,6 +152,36 @@ private:
     // Drop the cached calendar (both keys). Only disconnectAccount calls it: the cache is discarded when
     // the account it describes is, and at no other time — a failed fetch deliberately KEEPS it.
     static void clearCalendarCache();
+    // The same rule for everything the second read slice persists: the lists describe an ACCOUNT'S
+    // library and the watermark describes what has been imported FROM that account, so both die with
+    // the link. A watermark that outlived it would make the next account's first backfill skip
+    // everything older than the previous account's newest watch.
+    static void clearListCaches();
+    static void clearBackfillState();
+
+    // One run of a paged GET over an endpoint that answers with a JSON array. Held in a shared_ptr and
+    // carried through the reply lambdas, because the loop is asynchronous and re-entrant: the state has
+    // to outlive each individual request without belonging to the client (two runs can be in flight).
+    struct PagedRun
+    {
+        QString             path;             // "/sync/watchlist" — no query; the loop adds page+limit
+        QVector<QByteArray> bodies;           // one raw body per page actually read
+        int                 page = 1;         // the page being asked for now
+        int                 attempt = 1;      // 1-based attempt at THIS page
+        int                 pagesFetched = 0;
+        int                 pagesExpected = 0;  // 0 until a reply carries the headers
+        bool                complete = false;
+        QString             stopReason;       // "" only when complete
+    };
+    // Fetch `run->page` and either recurse, retry after a backoff, or finish. `done` is called EXACTLY
+    // once per run, complete or not.
+    void fetchPage(std::shared_ptr<PagedRun> run, std::function<void(std::shared_ptr<PagedRun>)> done);
+    // The whole of one paged endpoint, behind the shared token gate.
+    void fetchAllPages(const QString& path, std::function<void(std::shared_ptr<PagedRun>)> done);
+    // Shared by fetchWatchlist and fetchCollection: run the pages, parse, and cache ONLY on a complete
+    // run. `cacheKey` names which of the two caches this fills.
+    void fetchListInto(const QString& path, const char* cacheKey,
+                       std::function<void(bool, QVector<TraktListEntry>)> cb);
 
     // Waiters on the one in-flight /oauth/token refresh. Never more than one request; every caller
     // is answered exactly once, on failure as well as success.

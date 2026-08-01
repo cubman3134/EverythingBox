@@ -1317,6 +1317,9 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // the top-up; deferred off the startup path like the save-sync pull above, and rate-limited inside
     // refreshTraktCalendar. Entirely dormant when Trakt is off — the first line of the refresh returns.
     QTimer::singleShot(3000, this, [this] { refreshTraktCalendar(); });
+    // The lists, later and only once per launch: they PAGE, so they cost several requests where the
+    // calendar costs one, and a watchlist only changes when the user edits it somewhere else.
+    QTimer::singleShot(9000, this, [this] { refreshTraktLists(); });
     // ...and then keep topping it up for as long as the app runs. Without this the shelf is a one-shot: on a
     // set-top box left on for days, every entry drains out of the future-only window (airsAtUtc <= nowUtc, in
     // traktCalendarCatalog) and nothing ever replaces it, so "Airing Soon" is silently EMPTY by Thursday and
@@ -1337,7 +1340,10 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
         // and resetting alone would have refilled it from a stale cache in the meantime.
         traktCalFetchedAt_ = 0;
         if (home_) home_->onTraktCalendarChanged();
+        if (home_) home_->onTraktListsChanged();   // a DISCONNECT must take the lists with it too
+        traktListsFetchedAt_ = 0;                  // a fresh link starts with a clean debounce
         if (conn) refreshTraktCalendar();
+        if (conn) refreshTraktLists();
         updateTraktCalendarTimer();
     });
 }
@@ -1395,6 +1401,88 @@ void MainWindow::refreshTraktCalendar()
 // Read the configured library root on the MAIN thread (QSettings is not thread-safe — a prior review caught
 // a race from reading it inside the worker), capture it by value, then scan off-thread and install the
 // rebuilt index + refresh the home on completion. Called from startup and the Settings picker / Rescan.
+void MainWindow::refreshTraktLists()
+{
+    if (!TraktClient::calendarAvailable() || !trakt_) return;
+    // An hour, not the calendar's fifteen minutes. A watchlist changes when the USER edits it on another
+    // device, which is rare, and each refresh is several paged requests rather than one.
+    static constexpr qint64 kCooldownSec = 60 * 60;
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    if (traktListsFetchedAt_ > 0 && now - traktListsFetchedAt_ < kCooldownSec) return;
+    traktListsFetchedAt_ = now;
+    // ok=false leaves the caches intact by design (TraktClient.h), so the surfaces keep showing whatever
+    // they had. The refresh hook is called on failure too: it re-reads the cache, which is what makes the
+    // offline path and the just-fetched path one piece of code rather than two.
+    trakt_->fetchWatchlist([this](bool, QVector<TraktListEntry>) {
+        if (home_) home_->onTraktListsChanged();
+    });
+    trakt_->fetchCollection([this](bool, QVector<TraktListEntry>) {
+        if (home_) home_->onTraktListsChanged();
+    });
+}
+
+// The watched-history import (#23). The RULES live in TraktSync (additive, incremental, local always
+// wins, and see there for why repeated runs converge); what lives HERE is the one thing that cannot
+// live there: the mapping from a Trakt stream id onto the key this app files marks under.
+//
+// That mapping is the IDENTITY question issue #23 raises, and it is honest about its limit. ItemMarks is
+// keyed by MetaCache::keyFor(item), which is the item's own id — and for every IMDB-keyed surface in this
+// app (the IMDB catalogues, the scanned local library, the Trakt calendar and the Trakt lists themselves)
+// that id IS "tt123" or "ttShow:season:episode", the same shape the scrobbler already emits. So the
+// import lands on the right item for those. It does NOT reach an addon catalogue that keys its items by
+// TMDB or by its own opaque id: nothing here can invent that mapping, and guessing one would file a mark
+// under a key no surface reads — which is strictly worse than not importing it, because it looks like it
+// worked. That is the same boundary the local library's "prefer local" badge already lives inside.
+void MainWindow::runTraktBackfill()
+{
+    if (!TraktClient::calendarAvailable() || !trakt_)
+    { notify(tr("Connect a Trakt account first.")); return; }
+    // Two overlapping runs would each plan against the SAME stored watermark, and the second would
+    // re-offer everything the first had already applied.
+    if (traktBackfillRunning_)
+    { notify(tr("The Trakt import is already running.")); return; }
+    traktBackfillRunning_ = true;
+    notify(tr("Importing your Trakt watched history..."));
+    trakt_->runWatchedBackfill(
+        [](const QString& streamId) {
+            switch (ItemMarks::get(streamId).completion)
+            {
+            case ItemMarks::Completion::Finished: return trakt::LocalState::Watched;
+            case ItemMarks::Completion::None:     return trakt::LocalState::Unmarked;
+            // In progress / abandoned / planned are things the user said ON PURPOSE. An import may not
+            // overrule them, so they are reported as an explicit local state and Trakt loses.
+            default:                              return trakt::LocalState::OtherExplicit;
+            }
+        },
+        [](const QString& streamId) {
+            ItemMarks::setCompletion(streamId, ItemMarks::Completion::Finished);
+        },
+        [this](const TraktClient::BackfillReport& rep) {
+            traktBackfillRunning_ = false;
+            if (home_) home_->reloadForFilterChange();   // marks drive row filtering; show the new state
+            if (!rep.complete)
+            {
+                // A partial import SAYS SO. Everything it managed to mark stays marked and the next run
+                // continues from where this one stopped, but claiming success would leave the user with
+                // half a history and no reason to go looking for the rest.
+                notify(tr("Trakt import INCOMPLETE - %1 marked so far. %2 Run it again to finish.")
+                           .arg(rep.marked).arg(rep.stopReason), kFeedbackLong);
+                return;
+            }
+            QString msg = tr("Trakt import finished: %1 newly marked watched.").arg(rep.marked);
+            if (rep.keptLocal > 0)
+                msg += QLatin1Char(' ') + tr("%1 kept your own mark.").arg(rep.keptLocal);
+            // The un-importable are REPORTED, never swallowed. "Nothing happened" and "412 titles Trakt
+            // has no IMDB id for" look identical from the outside, and only one of them is a bug.
+            if (rep.droppedNoKey > 0)
+                msg += QLatin1Char(' ') + tr("%1 had no IMDB id and could not be matched.")
+                                              .arg(rep.droppedNoKey);
+            if (rep.droppedNoTimestamp > 0)
+                msg += QLatin1Char(' ') + tr("%1 had no watch date.").arg(rep.droppedNoTimestamp);
+            notify(msg, kFeedbackLong);
+        });
+}
+
 void MainWindow::rescanLocalLibrary()
 {
     const QString libRoot = LocalLibrary::root();               // read Settings on the MAIN thread
@@ -10037,6 +10125,10 @@ void MainWindow::openGeneralSettings()
         textf(QStringLiteral("trakt.secret"), tr("Client secret"), Settings::traktClientSecret(), /*masked=*/true);
         action(QStringLiteral("trakt.connect"), TraktClient::connected() ? tr("Disconnect from Trakt")
                                                                           : tr("Connect to Trakt"));
+        // The watched-history import (#23). An ACTION, not a toggle: it is something the user asks for
+        // once after linking, and it reports what it did. Its twin lives in the QWidget builder below —
+        // a user-facing setting has to exist in BOTH or it is unreachable in one of the two modes.
+        action(QStringLiteral("trakt.backfill"), tr("Import watched history from Trakt"));
         info(QStringLiteral("trakt.status"), tr("Status"), TraktClient::connected() ? tr("Connected")
                                                                                      : tr("Not connected"));
         // --- Profiles (issue #30) ---
@@ -10229,6 +10321,7 @@ void MainWindow::openGeneralSettings()
                 else if (id == QStringLiteral("os.pass")) Settings::setOpenSubPassword(val);
                 else if (id == QStringLiteral("trakt.id"))     Settings::setTraktClientId(val);
                 else if (id == QStringLiteral("trakt.secret")) Settings::setTraktClientSecret(val);
+                else if (id == QStringLiteral("trakt.backfill")) { runTraktBackfill(); return; }
                 else if (id == QStringLiteral("trakt.connect")) {
                     if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
                     if (!TraktClient::configured()) {
@@ -10682,6 +10775,19 @@ void MainWindow::openGeneralSettings()
         connect(trakt_, &TraktClient::connectedChanged, tkBtn, [tkBtn, tkStatus](bool on) {
             tkBtn->setText(on ? tr("Disconnect") : tr("Connect to Trakt"));
             tkStatus->setText(on ? tr("✓ Connected to Trakt.") : tr("Not connected.")); });
+        // The watched-history import (#23): the twin of the themed builder's "trakt.backfill" row.
+        auto* tkBackfill = new QPushButton(tr("Import watched history from Trakt"));
+        tkBackfill->setMinimumHeight(32);
+        auto* tkBfRow = new QHBoxLayout(); tkBfRow->addWidget(tkBackfill); tkBfRow->addStretch(1);
+        v->addLayout(tkBfRow);
+        auto* tkBfNote = new QLabel(tr("Marks everything Trakt says you have watched. It never clears a "
+                                       "mark and never overrides one you set yourself, and running it "
+                                       "again only picks up what is new."));
+        tkBfNote->setWordWrap(true);
+        tkBfNote->setStyleSheet(QStringLiteral("color:#888;font-size:12px;"));
+        v->addWidget(tkBfNote);
+        connect(tkBackfill, &QPushButton::clicked, this, [this] { runTraktBackfill(); });
+
         connect(tkBtn, &QPushButton::clicked, this, [this, tkStatus] {
             if (TraktClient::connected()) { trakt_->disconnectAccount(); return; }
             if (!TraktClient::configured()) { tkStatus->setText(tr("Enter your Client ID and Secret first.")); return; }

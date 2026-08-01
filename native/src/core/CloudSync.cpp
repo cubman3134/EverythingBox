@@ -569,6 +569,24 @@ bool CloudSync::isDeviceLocalKey(const QString& key)
         QStringLiteral("display/tvPromptDone"),   // one-shot per-device onboarding flag
         QStringLiteral("onboarding/done"),        // first-run choice resolved on THIS device (must not sync back)
         QStringLiteral("profiles/current"),       // the active profile is per-device (profiles/list SYNCS)
+        // Trakt read-layer state (#23). Matched as EXACT leaves, never as a "trakt/" prefix, because
+        // trakt/clientId and trakt/clientSecret are typed by the user and DO sync — set the app up
+        // once, and it is set up everywhere.
+        //
+        // Two different reasons, both device-local:
+        //   * The caches are a copy of data the other device can re-fetch in one request, and carrying
+        //     them would flip the bundle's stateHash on every refresh — re-uploading the whole zip for
+        //     a list nobody edited. Exactly the churn the per-item-store carve-out below exists to stop.
+        //   * The BACKFILL WATERMARK is a claim about what THIS install has already imported. Synced,
+        //     one device's completed run would suppress another device's first one, and the second
+        //     device would report a complete import having written nothing. The MARKS the import
+        //     produces sync normally through the progress document; the cursor that produced them
+        //     must not.
+        QStringLiteral("trakt/watchlistCache"),
+        QStringLiteral("trakt/collectionCache"),
+        QStringLiteral("trakt/listsCachedAt"),
+        QStringLiteral("trakt/backfillThrough"),
+        QStringLiteral("trakt/backfillDone"),
     };
     if (kExact.contains(key)) return true;
     // Prefix families that are wholly device-local.

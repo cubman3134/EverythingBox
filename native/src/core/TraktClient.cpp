@@ -29,6 +29,25 @@ constexpr const char* kBase = "https://api.trakt.tv";
 constexpr const char* kCacheKey   = "trakt/calendarCache";
 constexpr const char* kCacheAtKey = "trakt/calendarCachedAt";
 
+// The watchlist/collection caches, and the backfill's progress cursor (#23). Same posture as the two
+// keys above, and for the same three reasons: they are written from a reply lambda rather than from a
+// settings row (so SettingsTxn excludes them), nothing in the Settings UI reads them, and — the one
+// that is new here — they are DEVICE-LOCAL, so CloudSync::isDeviceLocalKey excludes them from the
+// Drive bundle. That last exclusion is deliberate on both counts. The caches would flip the bundle's
+// stateHash on every refresh and re-upload the whole zip for data the other device can fetch in one
+// request; and the WATERMARK is a statement about what THIS install has already imported, so syncing
+// it would let one device's completed run suppress another's first one.
+constexpr const char* kWatchlistKey  = "trakt/watchlistCache";
+constexpr const char* kCollectionKey = "trakt/collectionCache";
+constexpr const char* kListsAtKey    = "trakt/listsCachedAt";
+constexpr const char* kBackfillThroughKey = "trakt/backfillThrough";
+constexpr const char* kBackfillDoneKey    = "trakt/backfillDone";
+
+// How many rows to ask for per page. Trakt only emits its pagination headers when a page size is
+// requested, so asking for one is what makes the loop's paging visible at all; 100 is Trakt's own
+// documented maximum, which is the fewest requests a large list can be read in.
+constexpr int kPageLimit = 100;
+
 QSettings& store()
 {
     static QSettings s(AppPaths::dataDir() + QStringLiteral("/") + QLatin1String(AppBrand::kIniFile),
@@ -149,6 +168,12 @@ void TraktClient::disconnectAccount()
     //
     // Cleared BEFORE the signal, because the handler's onTraktCalendarChanged() re-reads the store.
     clearCalendarCache();
+    // The same rule, for the same reason, for everything the second read slice keeps. The lists are the
+    // previous account's library; the WATERMARK is the sharper hazard — left behind, the next account's
+    // very first backfill would skip every watch older than the previous account's newest one, silently
+    // importing a fraction of the history and reporting that it was complete.
+    clearListCaches();
+    clearBackfillState();
     if (pollTimer_) pollTimer_->stop();
     emit connectedChanged(false);
 }
@@ -361,6 +386,287 @@ void TraktClient::fetchMyShowsCalendar(int daysBack, int daysForward,
             const QVector<CalendarEntry> e = trakt::parseMyShowsCalendar(body);
             writeCalendarCache(e);
             if (cb) cb(true, e);
+        });
+    });
+}
+
+// ---- the read side, part two: the lists and the watched-history backfill (#23) --------------------
+
+namespace {
+// Qt hands back header names in whatever case the server used, and HTTP says they are
+// case-insensitive; TraktSync's readers take a lowercased map, so the normalisation happens here, at
+// the boundary, once. A pure function cannot do it for itself and a probe cannot assert it — which is
+// exactly why it is one line in one place rather than a lookup repeated per header.
+QMap<QString, QString> lowercasedHeaders(QNetworkReply* r)
+{
+    QMap<QString, QString> h;
+    const auto pairs = r->rawHeaderPairs();
+    for (const auto& p : pairs)
+        h.insert(QString::fromLatin1(p.first).trimmed().toLower(), QString::fromLatin1(p.second));
+    return h;
+}
+} // namespace
+
+void TraktClient::clearListCaches()
+{
+    store().remove(QLatin1String(kWatchlistKey));
+    store().remove(QLatin1String(kCollectionKey));
+    store().remove(QLatin1String(kListsAtKey));
+    store().sync();
+}
+
+void TraktClient::clearBackfillState()
+{
+    store().remove(QLatin1String(kBackfillThroughKey));
+    store().remove(QLatin1String(kBackfillDoneKey));
+    store().sync();
+}
+
+QVector<TraktListEntry> TraktClient::cachedWatchlist()
+{ return trakt::deserializeList(store().value(QLatin1String(kWatchlistKey)).toByteArray()); }
+
+QVector<TraktListEntry> TraktClient::cachedCollection()
+{ return trakt::deserializeList(store().value(QLatin1String(kCollectionKey)).toByteArray()); }
+
+qint64 TraktClient::cachedListsAt()
+{ return store().value(QLatin1String(kListsAtKey)).toLongLong(); }
+
+bool TraktClient::backfillEverCompleted()
+{ return store().value(QLatin1String(kBackfillDoneKey), false).toBool(); }
+
+void TraktClient::fetchPage(std::shared_ptr<PagedRun> run,
+                            std::function<void(std::shared_ptr<PagedRun>)> done)
+{
+    // The outright page bound, checked before the request rather than after it: kMaxPages is there to
+    // cap the number of REQUESTS a hostile or buggy page_count can cost, which a check on the way out
+    // would not do.
+    if (run->page > trakt::kMaxPages)
+    {
+        run->stopReason = tr("Stopped after %1 pages.").arg(trakt::kMaxPages);
+        if (done) done(run);
+        return;
+    }
+    const QString url = run->path + QStringLiteral("?page=") + QString::number(run->page)
+                      + QStringLiteral("&limit=") + QString::number(kPageLimit);
+    QNetworkReply* r = nam_->get(req(url, true));
+    connect(r, &QNetworkReply::finished, this, [this, r, run, done] {
+        r->deleteLater();
+        const int status = r->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QMap<QString, QString> headers = lowercasedHeaders(r);
+        const QByteArray body = r->readAll();
+        // A transport error has no HTTP status to classify, so it is reported as status 0 — which
+        // classifyPage reads as "no response at all" and treats as retryable.
+        const int effective = (r->error() != QNetworkReply::NoError && status == 0) ? 0 : status;
+        const trakt::PageVerdict v = trakt::classifyPage(effective, headers, body);
+
+        switch (v.outcome)
+        {
+        case trakt::PageOutcome::Ok:
+            break;
+        case trakt::PageOutcome::Retryable:
+            if (trakt::shouldRetryAttempt(run->attempt))
+            {
+                const int wait = trakt::backoffSecFor(run->attempt, v.retryAfterSec);
+                ++run->attempt;
+                // The status and the retry, never the body: a 429's body and a captive portal's are
+                // both places a token could be echoed back at us, and this line is a log.
+                emit log(QStringLiteral("trakt: page %1 of %2 deferred (HTTP %3), retrying in %4s")
+                             .arg(run->page).arg(run->path).arg(effective).arg(wait));
+                QTimer::singleShot(wait * 1000, this, [this, run, done] { fetchPage(run, done); });
+                return;
+            }
+            run->stopReason = tr("Trakt is rate-limiting or unavailable (HTTP %1).").arg(effective);
+            if (done) done(run);
+            return;
+        case trakt::PageOutcome::AuthFailed:
+            // The token gate's business, not the retry loop's. Hammering an expired or revoked token
+            // cannot help, and on Trakt it is how an app gets its client id throttled.
+            run->stopReason = tr("Trakt refused the request — the account may need re-linking.");
+            if (done) done(run);
+            return;
+        case trakt::PageOutcome::Malformed:
+            // HTTP 200 carrying something that is not the payload: a captive portal, a proxy's error
+            // page. The transport SUCCEEDED, so a retry returns the same page; stop and say so.
+            run->stopReason = tr("The reply was not a Trakt list (HTTP %1).").arg(effective);
+            if (done) done(run);
+            return;
+        case trakt::PageOutcome::Fatal:
+            run->stopReason = tr("Trakt rejected the request (HTTP %1).").arg(effective);
+            if (done) done(run);
+            return;
+        }
+
+        run->bodies.push_back(body);
+        ++run->pagesFetched;
+        const trakt::PageInfo info = trakt::parsePageInfo(headers);
+        if (info.pageCount > 0) run->pagesExpected = info.pageCount;
+        // nextPageAfter is handed the page WE ASKED FOR, never the one the server echoed — see
+        // TraktSync.h. 0 means the run is done.
+        const int next = trakt::nextPageAfter(info, run->page);
+        if (next <= 0) { run->complete = true; if (done) done(run); return; }
+        run->page = next;
+        run->attempt = 1;             // a fresh page gets its own attempt budget
+        fetchPage(run, done);
+    });
+}
+
+void TraktClient::fetchAllPages(const QString& path, std::function<void(std::shared_ptr<PagedRun>)> done)
+{
+    auto run = std::make_shared<PagedRun>();
+    run->path = path;
+    if (!calendarAvailable())
+    {
+        run->stopReason = tr("Trakt is not connected.");
+        if (done) done(run);
+        return;
+    }
+    // Every read goes through the SAME token gate the scrobbler and the calendar use, for the reason
+    // spelled out on ensureValidToken: Trakt rotates its refresh token, and a second place that
+    // refreshed would eventually break the link rather than fail one call.
+    ensureValidToken([this, run, done](bool ok) {
+        if (!ok)
+        {
+            run->stopReason = tr("Could not refresh the Trakt token.");
+            if (done) done(run);
+            return;
+        }
+        fetchPage(run, done);
+    });
+}
+
+void TraktClient::fetchListInto(const QString& path, const char* cacheKey,
+                                std::function<void(bool, QVector<TraktListEntry>)> cb)
+{
+    fetchAllPages(path, [this, path, cacheKey, cb](std::shared_ptr<PagedRun> run) {
+        QVector<TraktListEntry> all;
+        for (const QByteArray& body : run->bodies) all += trakt::parseListPayload(body);
+
+        // The cache is written ONLY by a complete run. A watchlist missing its second page, cached and
+        // then drawn as if it were the whole list, is worse than a stale one: every later launch shows
+        // the truncated version and nothing about it looks wrong. A failed run therefore leaves
+        // whatever was there — the same rule the calendar fetch follows on a non-calendar reply.
+        if (!run->complete)
+        {
+            emit log(QStringLiteral("trakt: %1 incomplete after %2 page(s) — cache kept (%3)")
+                         .arg(path).arg(run->pagesFetched).arg(run->stopReason));
+            if (cb) cb(false, {});
+            return;
+        }
+        store().setValue(QLatin1String(cacheKey), trakt::serializeList(all));
+        store().setValue(QLatin1String(kListsAtKey), QDateTime::currentSecsSinceEpoch());
+        store().sync();
+        if (cb) cb(true, all);
+    });
+}
+
+void TraktClient::fetchWatchlist(std::function<void(bool, QVector<TraktListEntry>)> cb)
+{
+    // /sync/watchlist without a type returns every kind at once — movies, shows, seasons, episodes —
+    // and parseListPayload keeps the two this app has a tile for. Asking for all of them in one
+    // request rather than two costs the user nothing and halves the rate-limit budget this spends.
+    fetchListInto(QStringLiteral("/sync/watchlist"), kWatchlistKey, cb);
+}
+
+void TraktClient::fetchCollection(std::function<void(bool, QVector<TraktListEntry>)> cb)
+{
+    // /sync/collection, by contrast, REQUIRES a type, so the movies and the shows are two runs. They
+    // are chained rather than issued together: two concurrent runs would race on the one cache key,
+    // and the second to land would overwrite the first with only its own half.
+    fetchAllPages(QStringLiteral("/sync/collection/movies"),
+                  [this, cb](std::shared_ptr<PagedRun> movies) {
+        if (!movies->complete)
+        {
+            emit log(QStringLiteral("trakt: collection (movies) incomplete — cache kept (%1)")
+                         .arg(movies->stopReason));
+            if (cb) cb(false, {});
+            return;
+        }
+        QVector<TraktListEntry> all;
+        for (const QByteArray& b : movies->bodies) all += trakt::parseListPayload(b);
+        fetchAllPages(QStringLiteral("/sync/collection/shows"),
+                      [this, cb, all](std::shared_ptr<PagedRun> shows) mutable {
+            if (!shows->complete)
+            {
+                // HALF a collection is not a collection. The movies really did arrive, but caching
+                // them alone would silently drop every show the user owns, and the folder would look
+                // complete. Keep the previous cache and report the failure.
+                emit log(QStringLiteral("trakt: collection (shows) incomplete — cache kept (%1)")
+                             .arg(shows->stopReason));
+                if (cb) cb(false, {});
+                return;
+            }
+            for (const QByteArray& b : shows->bodies) all += trakt::parseListPayload(b);
+            store().setValue(QLatin1String(kCollectionKey), trakt::serializeList(all));
+            store().setValue(QLatin1String(kListsAtKey), QDateTime::currentSecsSinceEpoch());
+            store().sync();
+            if (cb) cb(true, all);
+        });
+    });
+}
+
+void TraktClient::runWatchedBackfill(std::function<trakt::LocalState(const QString&)> localState,
+                                     std::function<void(const QString&)> markWatched,
+                                     std::function<void(BackfillReport)> cb)
+{
+    // Both halves of the history, chained for the same reason the collection's are: the plan has to be
+    // computed over the WHOLE observed set, because the watermark it produces is the maximum over that
+    // set. Planning the movies alone and then the shows would advance the watermark twice, and the
+    // second advance would be over a set that had already been filtered by the first.
+    fetchAllPages(QStringLiteral("/sync/watched/movies"),
+                  [this, localState, markWatched, cb](std::shared_ptr<PagedRun> movies) {
+        fetchAllPages(QStringLiteral("/sync/watched/shows"),
+                      [this, localState, markWatched, cb, movies](std::shared_ptr<PagedRun> shows) {
+            BackfillReport rep;
+            trakt::WatchedParse w;
+            for (const QByteArray& b : movies->bodies)
+            {
+                const trakt::WatchedParse p = trakt::parseWatchedPayload(b);
+                w.marks += p.marks;
+                w.droppedNoKey += p.droppedNoKey;
+                w.droppedNoTimestamp += p.droppedNoTimestamp;
+            }
+            for (const QByteArray& b : shows->bodies)
+            {
+                const trakt::WatchedParse p = trakt::parseWatchedPayload(b);
+                w.marks += p.marks;
+                w.droppedNoKey += p.droppedNoKey;
+                w.droppedNoTimestamp += p.droppedNoTimestamp;
+            }
+
+            const qint64 watermark = store().value(QLatin1String(kBackfillThroughKey), 0).toLongLong();
+            trakt::BackfillPlan plan = trakt::planWatchedBackfill(w.marks, watermark, localState);
+            // The CALLER'S verdict, which the planner cannot reach: both halves had to be read in full.
+            plan.complete = movies->complete && shows->complete;
+
+            // Applied whether or not the run was complete. Every write is Unmarked -> Watched and
+            // therefore idempotent, so there is nothing to roll back and no reason to throw away work
+            // that is already correct — what a partial run must NOT do is advance the watermark.
+            if (markWatched) for (const QString& id : plan.toMark) markWatched(id);
+
+            if (plan.complete && plan.newWatermark > watermark)
+            {
+                store().setValue(QLatin1String(kBackfillThroughKey), plan.newWatermark);
+                store().setValue(QLatin1String(kBackfillDoneKey), true);
+                store().sync();
+            }
+            else if (plan.complete)
+            {
+                // A complete run that observed nothing NEWER still completed. Recording that matters:
+                // it is what stops the surface offering "import your history" for ever.
+                store().setValue(QLatin1String(kBackfillDoneKey), true);
+                store().sync();
+            }
+
+            rep.complete           = plan.complete;
+            rep.marked             = int(plan.toMark.size());
+            rep.alreadyWatched     = plan.alreadyWatched;
+            rep.keptLocal          = plan.keptLocal;
+            rep.skippedByWatermark = plan.skippedByWatermark;
+            rep.droppedNoKey       = w.droppedNoKey;
+            rep.droppedNoTimestamp = w.droppedNoTimestamp;
+            if (!plan.complete)
+                rep.stopReason = movies->complete ? shows->stopReason : movies->stopReason;
+            if (cb) cb(rep);
         });
     });
 }

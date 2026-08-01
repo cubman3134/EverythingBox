@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.195 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.196 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -265,6 +265,21 @@ if(EVERYTHINGBOX_BUILD_APP)
         third_party/duktape/duktape.c)
     target_include_directories(everythingbox PRIVATE src src/core src/addons third_party third_party/duktape ${MPV_INCLUDE_DIR} ${EB_SECRETS_GEN_DIR})
     target_compile_definitions(everythingbox PRIVATE MINIZ_NO_ZLIB_COMPATIBLE_NAMES)
+    # MainWindow.cpp crossed MSVC's 65,536-section-per-object limit (fatal error C1128) while the Trakt
+    # settings rows were being added. The count is of COMDAT sections, which Qt's tr()/lambda/template
+    # expansion produces in quantity, so this is a property of how big the file is rather than of anything
+    # in particular that was added — the next thing added will cross it again. /bigobj raises the ceiling
+    # to 2^32 and changes no code generation.
+    #
+    # TARGET-SCOPED, and that is not tidiness. Applied project-wide with add_compile_options it makes
+    # probe_cloudmerge.cpp fail to compile at all — "error C1075: '{' no matching token found" pointing at
+    # its main(), on a file this branch never touches — which is an MSVC defect rather than anything wrong
+    # with that probe: removing the flag compiles it unchanged. So the flag goes exactly where the C1128
+    # is, and the probe suite keeps building. Anyone widening this should re-run the whole probe build,
+    # not just the app.
+    if(MSVC)
+        target_compile_options(everythingbox PRIVATE /bigobj)
+    endif()
     # Qt6::GuiPrivate: the uitest `touch` verb posts synthetic touch via <qpa/qwindowsysteminterface.h>.
     target_link_libraries(everythingbox PRIVATE everythingbox_libretro rcheevos lzma7z Qt6::Widgets Qt6::OpenGLWidgets Qt6::Multimedia Qt6::Network Qt6::Concurrent Qt6::GuiPrivate ${MPV_LIBRARY})
     if(NOT ANDROID)

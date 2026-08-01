@@ -98,6 +98,12 @@ private slots:
     // the PERIODIC tick below; never per navigation — the surfaces read TraktClient's on-disk cache, which
     // does not need a live fetch to be drawn. No-op when Trakt is not configured/connected.
     void refreshTraktCalendar();
+    // The watchlist/collection top-up (#23). Deliberately NOT folded into refreshTraktCalendar: the two
+    // have different costs (the lists page, the calendar is one request) and different reasons to run —
+    // a calendar goes stale by the day, a watchlist only when the user edits it somewhere else.
+    void refreshTraktLists();
+    // Import the Trakt watched history into ItemMarks. Additive and incremental; see TraktSync.h.
+    void runTraktBackfill();
     // Start/stop the periodic top-up to match the link state. Separate from the fetch so the two reasons the
     // timer exists (a box left running for days; an account linked mid-session) share one definition.
     void updateTraktCalendarTimer();
@@ -540,6 +546,8 @@ private:
     HomeView* home_ = nullptr;
     quint64   libScanGen_ = 0;             // bumped per rescan; a slow earlier scan can't install over a newer one
     qint64    traktCalFetchedAt_ = 0;      // unix secs of the last calendar fetch ATTEMPT (the refresh debounce)
+    qint64    traktListsFetchedAt_ = 0;    // ...and the same debounce for the watchlist/collection fetch
+    bool      traktBackfillRunning_ = false;  // one import at a time (see runTraktBackfill)
     QTimer*   traktCalTimer_ = nullptr;    // the PERIODIC top-up (see refreshTraktCalendar); runs only while linked
 
     // Themed (QML) home, gated by "themedHome/enabled" (default ON as of B2 Task 6 — absent key = themed; an
