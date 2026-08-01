@@ -77,6 +77,8 @@ Completion completionFromString(const QString& s)
     return Completion::None; // "none", unknown, or corrupt
 }
 
+// No mark set. Ignores updatedAt, so a CLEARED item's husk (an all-default blob carrying a fresh stamp) is
+// "default" for every reader while still being a real, newer, propagating record. See saveItem.
 bool isDefault(const Marks& m)
 {
     return !m.hidden && m.completion == Completion::None && m.tags.isEmpty();
@@ -181,17 +183,45 @@ Marks loadItem(const QString& hash)
     return marksFromJson(store().value(itemKey(hash)).toString().toUtf8());
 }
 
-// Persist one item's marks: an all-default blob is removed (never leave junk), else written with a fresh
-// updatedAt stamp (the merge funnel — every content write bumps the item's timestamp). isDefault() ignores
-// updatedAt, so a marks-cleared item is still removed rather than left as a timestamp-only husk.
+// Persist one item's marks, with a fresh updatedAt stamp (the merge funnel — every content write bumps the
+// item's timestamp).
+//
+// A row cleared back to all-default is NOT removed. THE RULE, here and in every store that merges by
+// timestamp: "cleared" and "never known" must not have the same representation. A deleted row is
+// indistinguishable from "this device has never seen that item", so the next merge with a peer still holding
+// the old marks reads present-on-them / absent-on-us — ignorance, not a newer clear — and CloudMerge's
+// never-delete marks pass puts back exactly what the user just cleared, on both devices (issue #132). The
+// cleared row is therefore left as a stamped HUSK: an all-default blob carrying a fresh updatedAt, which is a
+// fact with a time on it that mergeMarks can compare, and which wins. Same idiom, same reason, as
+// MetaOverrides::reset() (issue #24) — one spelling of this, not two.
+//
+// Nothing on the READ side had to change, and that is a property of the shape rather than luck: a husk IS an
+// all-default blob, so get() / anyHidden() / itemKeysWithTag() answer "no marks" for it by construction, on
+// this build and on every build already shipped. A device still running an older binary therefore reads a
+// husk correctly even though it cannot write one, which is what lets a mixed-version fleet converge.
+// (ensureCache's `if (isDefault(m)) continue` is a size optimisation on top of that, not the mechanism —
+// leaving a husk IN the cache would answer every reader identically. It is called out here because no
+// assertion can distinguish the two, so nothing else would say so.)
+//
+// A husk is only ever left where there was a record to CLEAR. Clearing an item that never carried a mark
+// (unhiding something never hidden, saving an empty tag list on an untagged item) writes nothing at all:
+// nothing was cleared, so "never known" is the truth, and a husk there would record an event that did not
+// happen — and would grow the store on every no-op. Re-clearing an item that is ALREADY a husk does re-stamp
+// it, which is harmless (the record still says "cleared", now more recently) and keeps the funnel one branch.
+//
+// Husks are never compacted, deliberately, and for MetaOverrides' reason: a husk has to outlive any peer's
+// stale copy of the marks it cleared, and "any peer" has no expiry — a device that has been off for a year
+// still holds that copy. So the store keeps one ~85-byte row per (profile, item) ever marked and then
+// cleared, and never shrinks. The cost is bounded by deliberate user actions (hide/complete/tag, then undo),
+// not by playback, and what it buys off is the user's clear silently undoing itself at the next sync. A
+// Tombstones entry would be the bounded alternative and is the WRONG one here: Tombstones::compact(30) runs
+// at every merge, so a device dormant for 31 days would resurrect the mark — which is this bug again.
 void saveItem(const QString& hash, Marks m)
 {
-    if (isDefault(m)) { store().remove(itemKey(hash)); }
-    else
-    {
-        m.updatedAt = QDateTime::currentSecsSinceEpoch();
-        store().setValue(itemKey(hash), QString::fromUtf8(marksToJson(m)));
-    }
+    const QString k = itemKey(hash);
+    if (isDefault(m) && !store().contains(k)) return; // nothing stored, so nothing was cleared: stay absent
+    m.updatedAt = QDateTime::currentSecsSinceEpoch();
+    store().setValue(k, QString::fromUtf8(marksToJson(m)));
     store().sync();
     ItemMarks::invalidate();
     fireChanged();
@@ -270,8 +300,11 @@ void ItemMarks::removeTagEverywhere(const QString& tag)
     QStringList pinned = readStringArray(pinnedKey());
     if (pinned.removeAll(tag) > 0) writeStringArray(pinnedKey(), pinned);
 
-    // 3. Strip it from every item in this profile (rewrite only the ones that carried it; a blob left
-    //    all-default after the strip is removed).
+    // 3. Strip it from every item in this profile (rewrite only the ones that carried it). An item left
+    //    all-default by the strip is REWRITTEN as a stamped husk, not removed — deleting it would hand the
+    //    next merge an absence to read as ignorance and let a peer's stale copy restore the tag on an item
+    //    whose tag this device just retired (see saveItem). Every hash here came from childKeys(), so a
+    //    record exists by construction and the husk always records a real clear.
     QSettings& s = store();
     const QString grp = itemsGroup();
     s.beginGroup(grp);
@@ -282,12 +315,8 @@ void ItemMarks::removeTagEverywhere(const QString& tag)
         Marks m = loadItem(h);
         if (m.tags.removeAll(tag) > 0)
         {
-            if (isDefault(m)) s.remove(itemKey(h));
-            else
-            {
-                m.updatedAt = QDateTime::currentSecsSinceEpoch(); // this direct-rewrite path is a write funnel too
-                s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
-            }
+            m.updatedAt = QDateTime::currentSecsSinceEpoch(); // this direct-rewrite path is a write funnel too
+            s.setValue(itemKey(h), QString::fromUtf8(marksToJson(m)));
         }
     }
     s.sync();

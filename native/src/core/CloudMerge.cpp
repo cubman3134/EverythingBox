@@ -92,6 +92,18 @@ void normalizeAddonIds(QJsonObject& o)
 
 QByteArray tieKey(const QJsonObject& o) { QJsonObject c = o; normalizeAddonIds(c); return canon(c); }
 
+// THE REPRESENTATION RULE EVERY STORE MERGED THROUGH HERE HAS TO KEEP (issues #24, #132). This function can
+// only compare two records; it is never handed the reason one of them is missing. Every per-item pass below
+// is therefore a NEVER-DELETE pass — a hash absent locally is imported, not treated as a deletion — because
+// an absence has no timestamp and could equally mean "cleared a second ago" or "this device has never seen
+// that item". So a store whose row can return to an all-default state must NOT remove it: it leaves a stamped
+// HUSK (an empty record with a fresh timestamp), which is a clear this function CAN compare and which wins.
+// In a store that merges by timestamp, "cleared" and "never known" must not have the same representation.
+// The stores that instead represent a deletion as a Tombstone (favourites, playlists, tag vocab, pinned tags)
+// are the other legal answer — a deletion with a time on it, in its own namespace — but they buy boundedness
+// with Tombstones::compact(30), so they can only be used where losing a deletion after 30 dormant days is
+// acceptable. Anything else, and the merge below silently undoes the user's clear.
+//
 // Should the remote value replace the local one? Newest timestamp wins; on EQUAL timestamps a deterministic
 // ORDER-INDEPENDENT decision — the lexically-greater tie key — so A-merges-B and B-merges-A pick the SAME
 // winner (values identical up to an add-on id's spelling compare equal -> no replace -> a semantic no-op).
@@ -273,6 +285,11 @@ void mergeRecent(const QJsonObject& recent)
 }
 
 // ---- marks (items newest-updatedAt; vocab/pinned union-minus-tombstoned) -----------------------------------
+// Items are never deleted here, which is why ItemMarks::saveItem leaves a stamped HUSK when an item is cleared
+// back to all-default instead of removing the row (issue #132): the husk is a newer record, so it wins this
+// pass and carries the clear to every device, where an absent row would have read as ignorance and let a
+// peer's stale marked copy win. A husk rides serializeMarks like any other blob — nothing here needs to know
+// it is one — and ItemMarks' readers already treat an all-default blob as "no marks".
 
 QString marksItemsGroup(const QString& p) { return QStringLiteral("marks/") + p + QStringLiteral("/items"); }
 QString vocabKey(const QString& p)        { return QStringLiteral("marks/") + p + QStringLiteral("/tagVocab"); }

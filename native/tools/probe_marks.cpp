@@ -9,7 +9,10 @@
 //   * hashed item keys — "a/b", "a//b" and a URL-shaped key resolve independently (no group-path aliasing);
 //   * empty key is a no-op on every writer and reads back {}; an unknown key reads back {};
 //   * the get() cache is hot (an external ini write is NOT seen until invalidate()), then re-reads after it;
-//   * anyHidden() tracks whether the active profile has any hidden item.
+//   * anyHidden() tracks whether the active profile has any hidden item;
+//   * clearing an item back to all-default leaves a stamped HUSK rather than removing the row (issue #132) —
+//     through both write funnels — while every reader still answers "no marks"; and an item that never
+//     carried a mark gets no row at all, so a no-op unhide cannot grow the store.
 //
 // Prints MARKS-OK on success; any failure prints MARKS-FAIL <cond> (line) and exits non-zero.
 //
@@ -25,6 +28,10 @@
 #include <QCoreApplication>
 #include <QSettings>
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStringList>
 #include <cstdio>
 
@@ -196,7 +203,75 @@ int main(int argc, char** argv)
         ItemMarks::setHidden(QStringLiteral("h1"), true);
         CHECK(ItemMarks::anyHidden());                        // now true
         ItemMarks::setHidden(QStringLiteral("h1"), false);
-        CHECK(!ItemMarks::anyHidden());                       // back to false (all-default blob removed)
+        CHECK(!ItemMarks::anyHidden());                       // back to false (the husk reads as no marks)
+    }
+
+    // ---- 8. Clearing leaves a stamped HUSK, not an empty slot (issue #132) --------------------------------
+    //
+    // The store half of the fix. A row cleared back to all-default is REWRITTEN with a fresh updatedAt rather
+    // than removed, because a removed row is indistinguishable from "this device never saw that item" and the
+    // next merge with a peer still holding the marks would put them straight back. The cross-device half —
+    // that the husk actually wins that merge — is probe_cloudmerge section 25; here the contract is: the row
+    // survives, it carries a fresh stamp, and every reader still answers "no marks".
+    {
+        useProfile(QStringLiteral("probeHusk"));
+        const QString grp = QStringLiteral("marks/probeHusk/items/");
+        auto rawBlob = [&](const QString& key) {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            return QJsonDocument::fromJson(raw.value(grp + hash(key)).toString().toUtf8()).object();
+        };
+        auto rowPresent = [&](const QString& key) {
+            QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+            return raw.contains(grp + hash(key));
+        };
+
+        const qint64 before = QDateTime::currentSecsSinceEpoch();
+        ItemMarks::setHidden(QStringLiteral("hk"), true);
+        ItemMarks::setCompletion(QStringLiteral("hk"), Completion::Finished);
+        ItemMarks::setTags(QStringLiteral("hk"), QStringList{QStringLiteral("t")});
+        CHECK(ItemMarks::get(QStringLiteral("hk")).hidden);
+
+        // Clear every mark, one verb at a time — the last of them is what takes the record to all-default.
+        ItemMarks::setHidden(QStringLiteral("hk"), false);
+        ItemMarks::setCompletion(QStringLiteral("hk"), Completion::None);
+        ItemMarks::setTags(QStringLiteral("hk"), QStringList{});
+
+        // The row is STILL THERE — a clear with a time on it, which is the whole point.
+        CHECK(rowPresent(QStringLiteral("hk")));
+        {
+            const QJsonObject o = rawBlob(QStringLiteral("hk"));
+            const qint64 ts = qint64(o.value(QStringLiteral("updatedAt")).toDouble());
+            CHECK(ts >= before && ts <= QDateTime::currentSecsSinceEpoch()); // freshly stamped, not carried
+            CHECK(o.value(QStringLiteral("hidden")).toBool() == false);
+            CHECK(o.value(QStringLiteral("completion")).toString() == QStringLiteral("none"));
+            CHECK(o.value(QStringLiteral("tags")).toArray().isEmpty());
+        }
+        // ...and every reader answers "no marks" for it, exactly as if the row were absent.
+        {
+            const ItemMarks::Marks m = ItemMarks::get(QStringLiteral("hk"));
+            CHECK(!m.hidden && m.completion == Completion::None && m.tags.isEmpty());
+            CHECK(!ItemMarks::anyHidden());
+            CHECK(ItemMarks::itemKeysWithTag(QStringLiteral("t")).isEmpty());
+        }
+
+        // A husk records a CLEAR, so an item that never carried a mark gets no row at all: unhiding something
+        // never hidden, or saving an empty tag list on an untagged item, must not grow the store.
+        ItemMarks::setHidden(QStringLiteral("neverMarked"), false);
+        ItemMarks::setCompletion(QStringLiteral("neverMarked"), Completion::None);
+        ItemMarks::setTags(QStringLiteral("neverMarked"), QStringList{});
+        CHECK(!rowPresent(QStringLiteral("neverMarked")));
+
+        // removeTagEverywhere's direct-rewrite path is the second write funnel and obeys the same rule: an
+        // item left all-default once its only tag is stripped keeps a stamped husk, not a hole.
+        ItemMarks::setTags(QStringLiteral("solo"), QStringList{QStringLiteral("only")});
+        const qint64 beforeStrip = QDateTime::currentSecsSinceEpoch();
+        ItemMarks::removeTagEverywhere(QStringLiteral("only"));
+        CHECK(rowPresent(QStringLiteral("solo")));
+        {
+            const qint64 ts = qint64(rawBlob(QStringLiteral("solo")).value(QStringLiteral("updatedAt")).toDouble());
+            CHECK(ts >= beforeStrip && ts <= QDateTime::currentSecsSinceEpoch());
+        }
+        CHECK(ItemMarks::get(QStringLiteral("solo")).tags.isEmpty());
     }
 
     if (failures == 0) { std::puts("MARKS-OK"); return 0; }

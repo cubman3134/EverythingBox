@@ -1900,6 +1900,122 @@ int main(int argc, char** argv)
         wipeStores();
     }
 
+    // ---- 25. Marks: a CLEAR is a husk, so a peer's stale copy cannot resurrect it (issue #132) -------------
+    //
+    // Section 10 pins that the marks pass never DELETES a local row; this pins the other half — that clearing
+    // an item does not delete it either. ItemMarks used to remove an all-default blob, which made "the user
+    // cleared this" and "this device has never seen that item" the same fact on disk. mergeMarks cannot tell
+    // those apart (it is handed two records or one), so a peer still holding the marks won every time and the
+    // clear came back, on both devices. saveItem now leaves a stamped husk instead.
+    //
+    // EVERY assertion below reads through ItemMarks — "is this still marked?" — and never through the row's
+    // presence. That is deliberate and it is the trap this family sets: an assertion that the row is ABSENT
+    // after a clear passes on the broken build too, because deletion is exactly what the broken build does.
+    // The reader's answer is the only thing that separates them. (The one presence check is on the SERIALIZED
+    // document, which is about the husk propagating at all, not about how a clear is spelled.)
+    {
+        useProfile(QStringLiteral("m25"));
+        const QString k25 = QStringLiteral("show:tt42");
+        const QString h25 = md5(k25);
+        // Marks as a PEER would hold them — hidden is the flag whose resurrection the user actually sees.
+        auto injMark25 = [&](bool hidden, const QStringList& tags, qint64 upd) {
+            QJsonObject o; o[QStringLiteral("hidden")] = hidden;
+            o[QStringLiteral("completion")] = QStringLiteral("none");
+            QJsonArray t; for (const QString& x : tags) t.append(x);
+            o[QStringLiteral("tags")] = t; o[QStringLiteral("updatedAt")] = double(upd);
+            setRaw(QStringLiteral("marks/m25/items/") + h25, compactO(o));
+            ItemMarks::invalidate();
+        };
+        auto docHasItem = [&](const QJsonObject& doc) {
+            return doc.value(QStringLiteral("marks")).toObject().value(QStringLiteral("m25")).toObject()
+                      .value(QStringLiteral("items")).toObject().contains(h25);
+        };
+        // Mark, then clear, through the STORE — saveItem is what decides how a clear is spelled.
+        auto markThenClear = [&]() {
+            ItemMarks::setHidden(k25, true);
+            ItemMarks::setTags(k25, QStringList{QStringLiteral("seen")});
+            ItemMarks::setHidden(k25, false);
+            ItemMarks::setTags(k25, QStringList{});
+        };
+
+        // 25a. THE ISSUE, end to end. Clear on this device; merge a peer that still holds the old marks.
+        wipeStores(); injMark25(true, {QStringLiteral("seen")}, T - 500);
+        const QJsonObject peerStale = serializeNow();   // the peer's document, made before the clear
+        wipeStores();
+        markThenClear();
+        CHECK(!ItemMarks::get(k25).hidden);             // cleared here...
+        mergeDoc(peerStale);
+        CHECK(!ItemMarks::get(k25).hidden);             // ...and the peer's stale copy does NOT bring it back
+        CHECK(ItemMarks::get(k25).tags.isEmpty());
+        CHECK(!ItemMarks::anyHidden());                 // and no shelf/filter surface thinks otherwise
+
+        // 25b. The clear TRAVELS: a peer pulling this device's husk drops its own copy of the marks.
+        wipeStores();
+        markThenClear();
+        const QJsonObject clearedDoc = serializeNow();
+        CHECK(docHasItem(clearedDoc));                  // the husk rides the sync document at all
+        wipeStores(); injMark25(true, {QStringLiteral("seen")}, T - 500);
+        CHECK(ItemMarks::get(k25).hidden);              // the peer's starting state
+        mergeDoc(clearedDoc);
+        CHECK(!ItemMarks::get(k25).hidden);             // the clear propagated
+        CHECK(!ItemMarks::anyHidden());
+
+        // 25c. …and a clear is not permanent. A genuinely newer re-mark beats the husk, or "clear" would
+        // quietly mean "this item can never be hidden again".
+        wipeStores(); injMark25(true, {}, T + 100); const QJsonObject reMark = serializeNow();
+        wipeStores(); markThenClear();
+        mergeDoc(reMark);
+        CHECK(ItemMarks::get(k25).hidden);
+
+        // 25d. A husk arriving from a newer device reads as "no marks" on a device that cannot WRITE one: a
+        // husk IS an all-default blob, so every reader answers for it by construction, on this build and on
+        // every build already shipped — which is what makes a mixed-version fleet converge instead of split.
+        // Injected raw, exactly as the merge would land it.
+        wipeStores(); injMark25(false, {}, T);
+        {
+            const ItemMarks::Marks m = ItemMarks::get(k25);
+            CHECK(!m.hidden && m.tags.isEmpty());
+            CHECK(!ItemMarks::anyHidden());
+        }
+
+        // 25e. The other side of the mixed fleet: a peer still on the OLD build DELETES on clear, so its
+        // document simply omits the hash. The marks pass never deletes, so this device's husk survives and
+        // goes on winning. (Inert unless mergeMarks is made to delete a locally-present, remotely-absent row —
+        // which is the change that would silently re-open this issue from the merge side.)
+        wipeStores(); injArr(QStringLiteral("marks/m25/tagVocab"), {QStringLiteral("other")});
+        const QJsonObject oldBuildDoc = serializeNow();
+        CHECK(!docHasItem(oldBuildDoc));                // the old build's clear is an absence
+        wipeStores(); markThenClear();
+        mergeDoc(oldBuildDoc);
+        CHECK(!ItemMarks::get(k25).hidden);
+        CHECK(docHasItem(serializeNow()));              // the husk is still here to keep carrying the clear
+
+        // 25f. Equal timestamps: a husk and a mark stamped in the same second converge in BOTH merge orders.
+        // The winner is the greater canonical bytes ("true" > "false", so the mark wins), NOT a rule that
+        // clear beats mark — convergence is the property, the winner is only the means. Two devices racing
+        // inside one second is a race the user already lost; two devices disagreeing forever is a bug.
+        wipeStores(); injMark25(true,  {}, T); const QJsonObject tieMark = serializeNow();
+        wipeStores(); injMark25(false, {}, T); const QJsonObject tieHusk = serializeNow();
+        wipeStores(); injMark25(false, {}, T); mergeDoc(tieMark); const bool tie1 = ItemMarks::get(k25).hidden;
+        wipeStores(); injMark25(true,  {}, T); mergeDoc(tieHusk); const bool tie2 = ItemMarks::get(k25).hidden;
+        CHECK(tie1 == tie2);
+        CHECK(tie1);
+
+        // 25g. The husk is stamped at the time of the CLEAR, never with the stamp of the record it cleared.
+        // Adopt a peer's mark by merge, then clear it — the ordinary shape of "sync, then tidy up". A husk
+        // that kept the adopted record's timestamp would TIE with the peer's unchanged copy, and 25f is
+        // exactly why a tie is not good enough here: the byte tie-break hands it to the mark, and the item
+        // un-clears itself on the very next sync with a peer that has done nothing at all.
+        wipeStores(); injMark25(true, {}, T - 100); const QJsonObject peerMark = serializeNow();
+        wipeStores(); mergeDoc(peerMark);               // this device adopts the peer's mark, stamp and all
+        CHECK(ItemMarks::get(k25).hidden);
+        ItemMarks::setHidden(k25, false);               // ...and the user clears it
+        mergeDoc(peerMark);                             // next sync, same unchanged peer
+        CHECK(!ItemMarks::get(k25).hidden);
+
+        wipeStores();
+    }
+
     if (failures == 0) { std::puts("CLOUDMERGE-OK"); return 0; }
     std::fprintf(stderr, "CLOUDMERGE: %d check(s) failed\n", failures);
     return 1;
