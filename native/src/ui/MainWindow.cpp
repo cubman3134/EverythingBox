@@ -4721,7 +4721,8 @@ void MainWindow::runThemedDetailAction(const QString& verb)
     else if (verb == QStringLiteral("status"))   themedDetailPickStatus();
     else if (verb == QStringLiteral("tags"))     themedDetailEditTags();
     // Snapshot the key into a LOCAL before the editor's modal loops, the themedDetailPickStatus idiom.
-    else if (verb == QStringLiteral("editmeta")) editItemMetadata(themedDetailKey_);
+    else if (verb == QStringLiteral("editmeta"))
+        editItemMetadata(themedDetailKey_, MetaCache::cachedDetailScraped(themedDetailKey_));
 }
 
 // The per-item metadata editor (issue #24): a NavMenu re-presented until Back, one row per editable field
@@ -4737,11 +4738,14 @@ void MainWindow::runThemedDetailAction(const QString& verb)
 // a different MATCH by searching the providers — the match id IS the key this correction is filed under, so
 // rewriting it would move the item out from under its own record; and picking a LOCAL FILE as artwork — a
 // path is device-local, so two devices could never converge on one.
-void MainWindow::editItemMetadata(const QString& key)
+void MainWindow::editItemMetadata(const QString& key, const MediaDetail& scrapedIn)
 {
     if (key.isEmpty()) return;
-    // What the card is showing right now, so a row can display the value being replaced rather than a blank.
-    const MediaDetail shown = MetaCache::cachedDetail(key);
+    // The values the editor is correcting: what the PROVIDERS said, not what the card currently shows. Those
+    // differ exactly where the user has already edited, and showing an edit as the thing it overrides would
+    // make "reset to scraped" look like it restores the edit. The caller passes the open card's own reply
+    // when it has one — it is richer than the cache — and the raw cached read stands in when it does not.
+    const MediaDetail shown = scrapedIn.valid ? scrapedIn : MetaCache::cachedDetailScraped(key);
 
     struct Field { const char* id; QString label; QString cur; QString scraped; };
     while (true)

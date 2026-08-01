@@ -221,6 +221,15 @@ MediaArt MetaCache::loadArt(const QString& key)
 
 MediaDetail MetaCache::cachedDetail(const QString& key)
 {
+    MediaDetail d = cachedDetailScraped(key);
+    // The override layer composites LAST, over everything the providers wrote (issue #24). It is the only
+    // layer here that cannot be re-derived, so it is also the only one that must outrank a fresh scrape.
+    MetaOverrides::applyTo(MetaOverrides::get(key), d);
+    return d;
+}
+
+MediaDetail MetaCache::cachedDetailScraped(const QString& key)
+{
     MediaDetail d;
     const QJsonObject obj = load(key);
     const QJsonObject det = obj.value(QStringLiteral("detail")).toObject();
@@ -242,9 +251,6 @@ MediaDetail MetaCache::cachedDetail(const QString& key)
     d.imageUrl = img;
     d.art = loadArt(key); // rich artwork/videos/audio/meta, resolved to local files where cached
     d.valid = !d.title.isEmpty() || !d.art.isEmpty();
-    // The override layer composites LAST, over everything the providers wrote (issue #24). It is the only
-    // layer here that cannot be re-derived, so it is also the only one that must outrank a fresh scrape.
-    MetaOverrides::applyTo(MetaOverrides::get(key), d);
     return d;
 }
 

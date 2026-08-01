@@ -152,6 +152,8 @@ public:
     // lands on the screen it was made from. Reads MetaCache::cachedDetail, which composites the override —
     // no network, no re-scrape. No-op when no detail card is open.
     void refreshDetailMetaCard();
+    // What the providers said about the open detail card — the metadata editor's baseline and reset target.
+    MediaDetail detailScrapedValues() const;
     // Re-apply the hidden filter to the live surface (the Show-hidden toggle / a profile switch changed it):
     // the Home list rebuilds synchronously; a catalogue level re-issues its request so the filter runs as its
     // items land. Cheapest existing refresh path — no bespoke re-filter of items_ in place.
@@ -228,9 +230,11 @@ signals:
     // "Choose source…" was activated on this catalog item (themed action row or the classic detail button).
     // MainWindow owns the picker: it also owns the BingeStore the choice is remembered in.
     void chooseSourceRequested(const MediaItem& item);
-    // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key —
-    // the same identity the override store files against — because MainWindow owns the nav-kit editor loop.
-    void editMetadataRequested(const QString& metaKey);
+    // "Fix info…" was activated on the classic detail card (issue #24). Carries the item's MetaCache key (the
+    // same identity the override store files against) AND what the providers said about it, because the
+    // editor shows each correction over the value it replaces — and the live reply is richer than the cache.
+    // MainWindow owns the nav-kit editor loop.
+    void editMetadataRequested(const QString& metaKey, const MediaDetail& scraped);
     // A browse/detail level was POPPED (classic Back, or the themed column's Back). MainWindow uses this to
     // invalidate a "Choose source…" fan-out started from the page being left: the themed detail pop bumps the
     // generation itself, but the classic stack is invisible to MainWindow, so without this a slow reply from
@@ -421,7 +425,12 @@ private:
     void loadThumbnails(int fromIndex);    // queue posters for items_[fromIndex..]
     void pumpThumbnails();                 // start queued poster loads up to the concurrency cap
     void requestMeta(const MediaItem& item); // fetch + show the detail-header metadata for item
-    void showMeta(const MediaDetail& detail);
+    // Paint the classic detail card. `fromProvider` = this is the source's own answer (so it becomes the
+    // baseline the metadata editor corrects); false for a re-render or the offline cached fallback. Either
+    // way the user's correction is composited on top before anything is drawn.
+    void showMeta(const MediaDetail& scraped, bool fromProvider = true);
+    void showMetaComposited(const MediaDetail& detail);   // the painter; `detail` is already composited
+    MediaDetail scrapedDetail_;   // the open card as the PROVIDER gave it (issue #24: the reset target)
     void hideMeta();
     // Resolve a leaf to a playable/readable source and emit openItem(). Pure (takes all context as args, not
     // detail-page state), so both the classic detail Play button and the themed inline Play reuse it.

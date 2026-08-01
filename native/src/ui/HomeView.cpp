@@ -730,7 +730,7 @@ HomeView::HomeView(AddonManager* mgr, QWidget* parent) : QWidget(parent), mgr_(m
     connect(editMetaBtn_, &QPushButton::clicked, this, [this] {
         if (stack_.isEmpty() || !stack_.last().detail) return;
         const QString key = MetaCache::keyFor(stack_.last().item);
-        if (!key.isEmpty()) emit editMetadataRequested(key);
+        if (!key.isEmpty()) emit editMetadataRequested(key, detailScrapedValues());
     });
     editMetaBtn_->installEventFilter(this);
     arl->addWidget(editMetaBtn_);
@@ -4741,7 +4741,9 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     // its card saved locally (MetaCache), so the info page still gets its synopsis/facts/cover.
     {
         const MediaDetail cached = MetaCache::cachedDetail(MetaCache::keyFor(metaItem_));
-        if (cached.valid) { showMeta(cached); return; }
+        // fromProvider=false: this is the CACHE, already composited by cachedDetail, so it must not become the
+        // editor's "what the scraper found" baseline — detailScrapedValues falls back to the raw read instead.
+        if (cached.valid) { showMeta(cached, /*fromProvider*/ false); return; }
     }
 
     // The source addon returned no metadata. If this is a movie/episode with an embedded IMDB id and another
@@ -4755,6 +4757,16 @@ void HomeView::onMetaReady(int requestId, const MediaDetail& detail)
     pendingMetaReqId_ = mgr_->requestMeta(prov, mi); // its onMetaReady (now valid) will showMeta()
 }
 
+// What the providers said about the open card — the baseline the metadata editor corrects, and what a reset
+// restores. The live provider reply is richer than the cache (facts, full synopsis), so re-rendering from the
+// cache alone visibly STRIPPED the card on every edit; this keeps the same detail and re-composites it.
+MediaDetail HomeView::detailScrapedValues() const
+{
+    if (stack_.isEmpty() || !stack_.last().detail) return {};
+    if (scrapedDetail_.valid) return scrapedDetail_;
+    return MetaCache::cachedDetailScraped(MetaCache::keyFor(stack_.last().item));
+}
+
 void HomeView::refreshDetailMetaCard()
 {
     if (stack_.isEmpty() || !stack_.last().detail) return;
@@ -4763,11 +4775,23 @@ void HomeView::refreshDetailMetaCard()
     themedArtCache_.remove(key);   // the hover cache short-circuits the read path; it now holds the old art
     if (editMetaBtn_)
         editMetaBtn_->setText(MetaOverrides::has(key) ? tr("✎  Info edited") : tr("✎  Fix info…"));
-    const MediaDetail d = MetaCache::cachedDetail(key);   // composites the correction
-    if (d.valid) showMeta(d);
+    const MediaDetail d = detailScrapedValues();
+    if (d.valid) showMeta(d, /*fromProvider*/ false); // re-render: composites the correction over the SAME card
 }
 
-void HomeView::showMeta(const MediaDetail& d)
+void HomeView::showMeta(const MediaDetail& scraped, bool fromProvider)
+{
+    // Remember the provider's own answer before compositing, so the editor can show what it is correcting and
+    // a reset has something to go back to. A re-render (fromProvider=false) must NOT overwrite it — it is
+    // handed this very value, and on the offline path it is handed an already-cached card.
+    if (fromProvider) scrapedDetail_ = scraped;
+    MediaDetail d = scraped;
+    MetaOverrides::applyTo(MetaOverrides::get(stack_.isEmpty() ? QString()
+                                                               : MetaCache::keyFor(stack_.last().item)), d);
+    showMetaComposited(d);
+}
+
+void HomeView::showMetaComposited(const MediaDetail& d)
 {
     QString titleHtml = QStringLiteral("<b>%1</b>").arg(d.title.toHtmlEscaped());
     if (!d.subtitle.isEmpty())

@@ -40,8 +40,17 @@ namespace MetaCache
     MediaArt loadArt(const QString& key);
 
     // Reconstruct a detail card from the cache (valid=false when nothing usable is stored). The image
-    // resolves to the locally cached artwork when present, so it renders fully offline.
+    // resolves to the locally cached artwork when present, so it renders fully offline. cachedDetail
+    // composites the user's metadata override (MetaOverrides, issue #24) over the result — it is what every
+    // surface should show. cachedDetailScraped is the same card with the override left OFF the four fields
+    // the editor edits (title/subtitle/overview/imageUrl), i.e. what the providers actually said about them.
+    // Only the metadata editor wants it, and it wants it for a specific reason — the editor shows "your
+    // correction, over this scraped value", and offers to reset back to it. Seeding that baseline from the
+    // composited card would show the user their own edit as the thing they are overriding, and a reset would
+    // appear to restore the edit. (`art` is NOT stripped: it comes from loadArt, whose candidate lists every
+    // other caller needs corrected, and no editor field reads it.)
     MediaDetail cachedDetail(const QString& key);
+    MediaDetail cachedDetailScraped(const QString& key);
 
     // Artwork. cacheImage downloads url into the item's folder as <role>.<ext> (async; no-op for empty /
     // non-http urls or when already cached) and records it under "images". imagePath returns the local

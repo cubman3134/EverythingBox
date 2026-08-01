@@ -415,6 +415,17 @@ int main(int argc, char** argv)
                       == QStringLiteral("https://x.invalid/right.jpg"),
                   "displayImage: the correction outranks the cached WRONG file (grid tiles change too)");
 
+            // The editor's baseline. It shows each correction OVER the value it replaces and offers to reset
+            // back to it, so it needs the card WITHOUT the override — seeding it from the composited card
+            // would present the user's own edit as the thing being overridden, and reset would look like it
+            // restored the edit. Every other caller wants the composited one.
+            const MediaDetail raw = MetaCache::cachedDetailScraped(ok1);
+            CHECK(raw.title == QStringLiteral("Bonk 3"), "cachedDetailScraped keeps the scraped title");
+            CHECK(raw.overview == QStringLiteral("The wrong synopsis."),
+                  "cachedDetailScraped keeps the scraped overview");
+            CHECK(raw.imageUrl != QStringLiteral("https://x.invalid/right.jpg"),
+                  "cachedDetailScraped keeps the scraped artwork, so reset has a target");
+
             // THE POINT OF THE FEATURE: the scraper runs again and writes the wrong data back. The
             // correction must still win — an override a refresh silently discards is worse than none,
             // because the user is never told it happened.
