@@ -76,6 +76,125 @@ before and after the suite, and fails if anything changed it while the suite
 ran — normally a probe, occasionally an app or a build running out of that
 same folder.
 
+## Driving the app live (the uitest channel)
+
+The probe suite cannot see timing, focus, or what a user actually experiences.
+Anything of that shape — a delay, a focus hand-off, a screen that renders but is
+unreachable — has to be driven in the real app before it merges. That is what
+this channel is for, and it needs no foreground and no OS focus, so it works
+while you keep using the machine.
+
+**Never point any of this at `C:\EverythingBox-app` (or whatever the installed
+copy is on your machine).** It is somebody's real library, and the channel can
+delete things through the UI just like a person can. Run the build tree.
+
+### 1. Build it and run it where it is
+
+A Release build now runs from `build/Release` as-is: a `windeployqt` step stages
+the Qt runtime beside the exe and the libmpv/SDL2 DLLs are copied in alongside
+it (`EB_WINDEPLOYQT`, on by default on Windows — pass `-DEB_WINDEPLOYQT=OFF` if
+you are relinking in a loop and don't need to run what you built). Before that
+existed, `build/Release/EverythingBox.exe` died instantly with `0xC0000135`
+(STATUS_DLL_NOT_FOUND) even with Qt's `bin/` on `PATH`, because libmpv is a
+load-time dependency that lives somewhere else again — and the workaround was to
+copy an entire real installation and drop the new exe into it, which is slow,
+and runs new code against real data.
+
+### 2. Seed the data directory, or you will be driving the first-run wizard
+
+The desktop build is portable: **its data directory is the folder the exe is in**
+(`build/Release`), so a fresh build starts factory-new. Two things then stand
+between you and the screen you wanted, and both eat your keystrokes:
+
+* the profile picker (and, on a fresh install, the onboarding choice);
+* the FORCED theme pick — a profile with no stored theme gets "Pick your look"
+  pre-home, and it deliberately has no exit other than choosing.
+
+Stage the stock themes and seed those answers first:
+
+```bash
+cp -r native/themes2 build/Release/themes2
+```
+
+```ini
+; build/Release/everythingbox.ini
+[profiles]
+list="[{\"icon\":\"\",\"id\":\"test\",\"name\":\"Test\",\"restricted\":false}]"
+current=test
+skipPickerWhenSingle=true
+
+[onboarding]
+done=true
+
+[themedHome]
+theme\test=Triple
+```
+
+`theme\test` is `themedHome/theme/<profile id>` — it is **per profile**, so it
+has to name the same id as `current` or the forced pick fires anyway. Without
+`themes2/` the themed home has nothing to render and falls back to the classic
+one with a notice, which is not the surface you meant to test.
+
+### 3. Launch with the channel on, and read stderr
+
+```powershell
+$env:EB_UITEST = "1"
+$env:EB_UITEST_PIPE = "EB-mytest"        # your own channel name; see below
+Start-Process build\Release\EverythingBox.exe -WorkingDirectory build\Release `
+  -RedirectStandardError eb-stderr.txt
+```
+
+`EB_UITEST=1` (or a `--uitest` argument, or the Settings ▸ Debug toggle) turns
+the channel on. `EB_UITEST_PIPE` gives this instance its own channel name and
+you should always set it: the default name is `EverythingBox-uitest`, and if any
+other EverythingBox is already serving it, **this one refuses the name and says
+so on stderr** rather than standing a second server on it — because Windows will
+happily let both listen and then route each client to whichever it feels like,
+which means a harness "passing" against the wrong app.
+
+Redirect stderr. The app is a GUI-subsystem binary with no console of its own,
+so that file is where you see the channel refuse to come up. (The same lines
+also land in `build/Release/stream_debug.log`, which is where to look if you
+forgot to redirect.)
+
+### 4. Drive it
+
+```bash
+EB_UITEST_PIPE=EB-mytest python native/tools/uitest.py status
+EB_UITEST_PIPE=EB-mytest python native/tools/uitest.py state
+EB_UITEST_PIPE=EB-mytest python native/tools/uitest.py keys "right enter down enter"
+EB_UITEST_PIPE=EB-mytest python native/tools/uitest.py shot C:/tmp/after.png
+```
+
+`state` is a JSON snapshot (page, focus, overlay selection, themed selection,
+panel row, reader page…); `shot` renders the window even while it is occluded or
+backgrounded; `touch` synthesizes real touch. `uitest.py` with no arguments
+lists the rest.
+
+`status` answers `ok ready` once the main window exists and `ok starting` before
+that. The channel starts listening in `main()`, **before** the asset bootstrap,
+the brand migration, the cloud pull and the whole `MainWindow` constructor, so a
+startup that never reaches the window is diagnosable instead of silent: the
+connect succeeds, and you get `ok starting` (or, if the app is wedged in
+straight-line startup code rather than an event loop, a connect that succeeds
+and a reply that never comes). Before issue #172 the server was created ~400
+lines into the `MainWindow` ctor, so anything that stalled on the way there left
+**no pipe at all** — which looks exactly like an app that was never launched
+with `EB_UITEST`, and reads to a harness like nothing being wrong.
+
+### Notes
+
+* Driving the app writes into `build/Release` (its ini, `stream_debug.log`,
+  `.assets-version`, `metadata/`…). That is fine for the probe suite — the
+  `exe-folder contamination` gate compares that folder before and after its own
+  run — but **do not leave the app running while the suite runs**, or the gate
+  will (correctly) report that something changed the folder underneath it.
+* A Home/recent item takes two Enters: the first opens its detail overlay, the
+  second launches.
+* If `state` starts taking seconds to answer, that is not the harness. The
+  channel is served on the GUI thread, so a slow round-trip *is* a blocked GUI
+  thread — which is a finding, not an obstacle.
+
 ## Rules that the review will hold you to
 
 ### All modal UI goes through `src/ui/nav`

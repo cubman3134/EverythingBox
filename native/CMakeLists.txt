@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.232 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.233 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -1067,6 +1067,50 @@ if(EVERYTHINGBOX_BUILD_APP)
         message(STATUS "Gamepad: SDL2 found (${SDL2_LIBRARY})")
     else()
         message(STATUS "Gamepad: SDL2 not found - building without controller input")
+    endif()
+
+    # ---- Windows: make the binary RUNNABLE WHERE IT IS BUILT (issue #172) ---------------------------------
+    # Until now `build/Release/EverythingBox.exe` exited instantly with 0xC0000135 (STATUS_DLL_NOT_FOUND) even
+    # with Qt's bin/ on PATH, because libmpv is a LOAD-TIME dependency and lives somewhere else again. The only
+    # way to run a build was to copy a real installation and drop the new exe into it — which is how #172's
+    # verification gap started: the recipe was undocumented, expensive (a multi-GB copy), and it ran the new
+    # code against somebody else's data directory. A build tree that runs is the cheaper, safer default.
+    #
+    # This is the same deployment the release workflow already performs (.github/workflows/release.yml), just
+    # done in place. It costs one windeployqt pass per RELINK of the app (not per build: POST_BUILD only runs
+    # when the exe is actually produced), and nothing at all for a probe-only build, since it hangs off the app
+    # target. Turn it off with -DEB_WINDEPLOYQT=OFF if you are relinking in a tight loop and don't need to run
+    # what you built.
+    if(WIN32 AND NOT ANDROID)
+        option(EB_WINDEPLOYQT "Stage the Qt + libmpv runtime beside the built app so it runs from the build tree" ON)
+        find_program(EB_WINDEPLOYQT_EXE NAMES windeployqt HINTS "${QT6_INSTALL_PREFIX}/${QT6_INSTALL_BINS}"
+                     "${QT6_INSTALL_PREFIX}/bin")
+        if(EB_WINDEPLOYQT AND EB_WINDEPLOYQT_EXE)
+            # --qmldir mirrors release.yml: the themed home is QML, and without its module scan the app starts
+            # and then renders nothing — the failure mode this whole issue is about (it looks like it worked).
+            add_custom_command(TARGET everythingbox POST_BUILD
+                COMMAND "${EB_WINDEPLOYQT_EXE}" --release --no-translations --no-system-d3d-compiler
+                        --qmldir "${CMAKE_CURRENT_SOURCE_DIR}/src/theme2/qml" "$<TARGET_FILE:everythingbox>"
+                COMMENT "windeployqt: staging the Qt runtime beside EverythingBox.exe")
+            # windeployqt knows only about Qt. libmpv (and SDL2, when found) are linked against import libs
+            # whose DLLs live in their own SDK folder, so copy those too — otherwise the deploy is complete
+            # except for the one DLL whose absence was the original 0xC0000135.
+            set(_eb_runtime_libs "${MPV_LIBRARY}")
+            if(SDL2_LIBRARY)
+                list(APPEND _eb_runtime_libs "${SDL2_LIBRARY}")
+            endif()
+            foreach(_lib ${_eb_runtime_libs})
+                get_filename_component(_lib_dir "${_lib}" DIRECTORY)
+                file(GLOB _lib_dlls "${_lib_dir}/*.dll")
+                foreach(_dll ${_lib_dlls})
+                    add_custom_command(TARGET everythingbox POST_BUILD
+                        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                                "${_dll}" "$<TARGET_FILE_DIR:everythingbox>")
+                endforeach()
+            endforeach()
+        elseif(EB_WINDEPLOYQT)
+            message(STATUS "EverythingBox: windeployqt not found - the built exe will need Qt + libmpv on PATH")
+        endif()
     endif()
 
     # -----------------------------------------------------------------------------------------------------

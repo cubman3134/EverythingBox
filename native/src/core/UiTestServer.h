@@ -3,6 +3,7 @@
 // keeps the foreground. Line-based protocol over a QLocalSocket (a named pipe on Windows, a unix socket
 // elsewhere), served on the GUI thread:
 //
+//   status                                          -> "ok ready" once the window exists, "ok starting" before
 //   key <up|down|left|right|enter|back|escape|Nx>   inject a nav key through sendNavKey (Nx = raw Qt::Key int)
 //   state                                           -> "ok {json}": page, focus widget, overlays, geometry
 //   shot <absolute-path.png>                        render the whole window (works occluded/backgrounded)
@@ -15,10 +16,26 @@
 // styling and the watchdog behave exactly as they would live. See native/tools/uitest.py for the client.
 //
 // OFF by default. Enabled only by EB_UITEST=1 in the environment or a --uitest command-line argument.
+//
+// LISTENING IS SPLIT FROM THE HOOKS, and that split is the whole point of issue #172. The hooks need a built
+// MainWindow, but the CHANNEL does not: main() calls ensureListening() before the startup work (asset
+// bootstrap, brand migration, the cloud pull) and MainWindow's ctor later calls setHooks() on the same
+// object. Before that moment every command answers `err not-ready: ...`.
+//
+// The failure this replaces: the server used to be constructed ~400 lines into the MainWindow ctor, so
+// ANY stall before that point (a blocking startup step, a slow network round-trip, a modal nobody can see
+// because the window is not shown yet) left NO pipe at all — the client's connect just failed, which looks
+// exactly like "the app isn't running with EB_UITEST" and reads, to a harness, like nothing at all. A
+// channel that is silently absent is indistinguishable from a test that passed. So now:
+//   * the pipe exists from the first moments of startup, and says `not-ready` while the window is missing;
+//   * a listen() that FAILS (the usual cause: a second instance already owns the name) is announced on
+//     stderr and through qCritical, never swallowed.
 #pragma once
 #include <QObject>
 #include <QString>
 #include <functional>
+
+class QLocalServer;
 
 class UiTestServer : public QObject
 {
@@ -39,8 +56,27 @@ public:
         std::function<bool(const QString&)> touch;
     };
 
-    static bool wanted();                                 // EB_UITEST=1 or --uitest present
-    explicit UiTestServer(const Hooks& hooks, QObject* parent = nullptr);
+    static bool wanted();                                 // EB_UITEST=1, --uitest, or the Settings toggle
+    // The half of wanted() that reads NO settings. main() uses it to bring the channel up before the ini is
+    // safe to read (Settings::store() snapshots the file on its first read, and the brand migration has to
+    // copy the ini into place first — see main.cpp), so an EB_UITEST=1 / --uitest launch is drivable from
+    // the very first moments even if the settings-dependent startup work never finishes.
+    static bool wantedFromEnvOrArgs();
+    explicit UiTestServer(const Hooks& hooks = {}, QObject* parent = nullptr);
+    ~UiTestServer() override;
+
+    // The process-wide channel. ensureListening() creates + listens on first call and is a no-op after that
+    // (it returns the existing object, reparenting it to `parent` when one is given, so the window can take
+    // ownership of a channel main() started). Returns nullptr only when the channel is not wanted at all.
+    // A listen FAILURE still returns the object — it has already been announced, and the caller's hooks are
+    // harmless on a server nobody can reach; isListening() is how you ask.
+    static UiTestServer* ensureListening(QObject* parent = nullptr);
+    static UiTestServer* instance();
+    bool isListening() const { return listening_; }
+
+    // Bind (or, with a default-constructed Hooks, unbind) the app-side hooks. Until this is called the
+    // channel answers, and says it is not ready — see handle().
+    void setHooks(const Hooks& hooks) { hooks_ = hooks; }
 
     // EB_UITEST_PIPE overrides the channel name so a test build can be driven alongside a normally-running
     // instance (which already owns the default pipe). uitest.py honours the same variable.
@@ -52,5 +88,7 @@ public:
 
 private:
     QString handle(const QString& line);                  // one command -> one response line
-    Hooks hooks_;
+    Hooks         hooks_;
+    QLocalServer* server_    = nullptr;
+    bool          listening_ = false;
 };

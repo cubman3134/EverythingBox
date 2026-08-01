@@ -2432,8 +2432,20 @@ void MainWindow::updateUiTestServer()
         if (!isActiveWindow()) QApplication::setActiveWindow(this);
         return uitestRunTouch(windowHandle(), arg, this);
     };
-    uiTest_ = new UiTestServer(h, this);
-    mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
+    // Adopt the channel main() already started (issue #172) — or start it now, for the Settings ▸ Debug
+    // toggle flipped at runtime. Either way this window becomes its parent, so the channel still dies with
+    // the window exactly as it did when this line was a bare `new`.
+    uiTest_ = UiTestServer::ensureListening(this);
+    if (!uiTest_) return;                       // unreachable: wanted() was true at the top of this function
+    uiTest_->setHooks(h);
+    if (uiTest_->isListening())
+        mwLog(QStringLiteral("uitest: control channel listening (%1)").arg(UiTestServer::serverName()));
+    else
+        // Never claim to be listening when we are not: that log line was the only evidence anyone had, and it
+        // printed unconditionally — including on the failed-listen path the ctor returned early from. The
+        // detail (and stderr) comes from UiTestServer itself; this keeps the app's own log honest.
+        mwLog(QStringLiteral("uitest: control channel NOT listening (%1) - the app is running WITHOUT it")
+                  .arg(UiTestServer::serverName()));
 
     // Black-frame watchdog (debug-gated, same conditions as the UI-test channel): catch + self-heal the
     // intermittent all-black app state and name where it came from.

@@ -6,20 +6,101 @@
 #include <QLocalSocket>
 #include <QPointer>
 
-bool UiTestServer::wanted()
+#include <cstdio>
+
+bool UiTestServer::wantedFromEnvOrArgs()
 {
     return qEnvironmentVariableIntValue("EB_UITEST") == 1
-           || QCoreApplication::arguments().contains(QStringLiteral("--uitest"))
+           || QCoreApplication::arguments().contains(QStringLiteral("--uitest"));
+}
+
+bool UiTestServer::wanted()
+{
+    return wantedFromEnvOrArgs()
            || Settings::uiTestChannel(); // the Settings ▸ Debug toggle
+}
+
+// The process-wide channel (see the header). A plain pointer rather than a QPointer so this unit stays
+// dependency-free; the destructor clears it, which covers both the parented and the stack case.
+static UiTestServer* g_channel = nullptr;
+
+UiTestServer* UiTestServer::instance() { return g_channel; }
+
+// Say it TWICE, on purpose. stderr is where a harness that launched the app with redirected output will see
+// it (the app is a GUI-subsystem binary, so there is no console of its own); qCritical is where the app's own
+// message handler will see it and write it into stream_debug.log, which is the only record a launch WITHOUT
+// redirection leaves behind. A test channel that fails to come up must not be discoverable only by noticing
+// that nothing happened.
+static void complain(const QString& msg)
+{
+    std::fprintf(stderr, "%s\n", msg.toLocal8Bit().constData());
+    std::fflush(stderr);
+    qCritical("%s", msg.toLocal8Bit().constData());
+}
+
+UiTestServer* UiTestServer::ensureListening(QObject* parent)
+{
+    if (!wanted()) return nullptr;
+    if (g_channel)
+    {
+        // Adopt: the window that supplies the hooks also takes ownership, so the channel dies with it exactly
+        // as it did when the ctor was the only entry point.
+        if (parent && g_channel->parent() != parent) g_channel->setParent(parent);
+        return g_channel;
+    }
+    g_channel = new UiTestServer(Hooks{}, parent ? parent : static_cast<QObject*>(QCoreApplication::instance()));
+    return g_channel;
 }
 
 UiTestServer::UiTestServer(const Hooks& hooks, QObject* parent)
     : QObject(parent), hooks_(hooks)
 {
     auto* server = new QLocalServer(this);
+    server_ = server;
+
+    // REFUSE TO SHARE THE NAME, and this is not a hypothetical: two EverythingBox instances were run against
+    // one channel name during #172 and BOTH listened — Qt's Windows backend happily stands a second named-pipe
+    // instance on an existing name, and the OS then hands each connecting client whichever one it likes. The
+    // harness cannot tell, so every command lands on a coin flip and a green result means nothing. A cheap
+    // connect-first probe turns that into a refusal with a reason. It costs effectively nothing when the name
+    // is free (connecting to a pipe/socket that does not exist fails immediately, not after the timeout), and
+    // it cannot be fooled by a stale endpoint: a dead process's pipe is gone on Windows, and on Unix a stale
+    // socket file has nobody accepting on it, so the connect fails there too and we fall through to listen().
+    {
+        QLocalSocket probe;
+        probe.connectToServer(serverName());
+        if (probe.waitForConnected(300))
+        {
+            probe.abort();
+            complain(QStringLiteral(
+                "uitest: the control channel '%1' is ALREADY SERVED by another process, so this instance is "
+                "running WITHOUT it. Do NOT assume a harness on that name is driving this app - it is driving "
+                "the other one. Close the other instance, or give this one its own channel with "
+                "EB_UITEST_PIPE=<name> (uitest.py honours the same variable).").arg(serverName()));
+            return;
+        }
+    }
+
     QLocalServer::removeServer(serverName()); // clear a stale socket from a crashed previous run
     if (!server->listen(serverName()))
-        return; // another instance already serves it; this one just doesn't
+    {
+        // The old code just returned here, and that silence is issue #172: the app came up looking completely
+        // normal with no channel on it, and the only symptom at the other end was a connect that failed — the
+        // same thing you get when the app was never launched with EB_UITEST at all. An occupied name is
+        // handled above; what reaches here is the name itself being unusable (over 256 characters on Windows,
+        // a socket path that cannot be created on Unix, a permissions problem). Name it, and say so.
+        complain(QStringLiteral(
+            // Deliberately ASCII-only: this string is written with toLocal8Bit() to a console whose code page
+            // is nobody's business to predict, and a diagnostic that arrives as mojibake is a diagnostic
+            // half-read.
+            "uitest: FAILED to listen on the control channel '%1' (%2). This app is running WITHOUT the "
+            "UI-test channel - nothing can drive it, and a client pointed at that name gets a connect "
+            "failure indistinguishable from 'the app was never launched with EB_UITEST'. Check the channel "
+            "name (EB_UITEST_PIPE overrides it; uitest.py honours the same variable).")
+                .arg(serverName(), server->errorString()));
+        return;
+    }
+    listening_ = true;
     connect(server, &QLocalServer::newConnection, this, [this, server] {
         QLocalSocket* sock = server->nextPendingConnection();
         if (!sock) return;
@@ -51,10 +132,30 @@ UiTestServer::UiTestServer(const Hooks& hooks, QObject* parent)
     });
 }
 
+UiTestServer::~UiTestServer()
+{
+    if (g_channel == this) g_channel = nullptr;
+}
+
+// The reply when the channel is up but the app has not bound its hooks yet — i.e. the window is not built.
+// This is the OTHER half of the #172 fix and the reason the channel now listens early: a startup that stalls
+// used to be invisible (no pipe, no message, nothing), and is now a specific answer naming what is missing.
+static QString notReady(const QString& cmd)
+{
+    return QStringLiteral("err not-ready: the app is still starting — '%1' needs the main window, which has "
+                          "not been built yet (the channel listens from launch, on purpose: if this persists, "
+                          "startup is stuck BEFORE the window, not after)").arg(cmd);
+}
+
 QString UiTestServer::handle(const QString& line)
 {
     const QString cmd = line.section(QLatin1Char(' '), 0, 0).toLower();
     const QString arg = line.section(QLatin1Char(' '), 1).trimmed();
+
+    // Answerable with no window at all, and the reason it exists: a harness can ask whether the app has got
+    // as far as building its UI instead of inferring it from a command that fails for six other reasons.
+    if (cmd == QStringLiteral("status"))
+        return hooks_.state ? QStringLiteral("ok ready") : QStringLiteral("ok starting");
 
     if (cmd == QStringLiteral("key"))
     {
@@ -78,21 +179,26 @@ QString UiTestServer::handle(const QString& line)
         };
         int k = keys.value(arg.toLower(), 0);
         if (!k) k = arg.toInt();                       // raw Qt::Key value for anything exotic
-        if (!k || !hooks_.sendKey) return QStringLiteral("err unknown key '%1'").arg(arg);
+        if (!k) return QStringLiteral("err unknown key '%1'").arg(arg);
+        // A missing hook is NOT an unknown key, and saying so was the difference between "your test typo'd a
+        // key name" and "the app never finished starting". Distinct answers for distinct failures.
+        if (!hooks_.sendKey) return notReady(line);
         hooks_.sendKey(k);
         return QStringLiteral("ok");
     }
     if (cmd == QStringLiteral("state"))
-        return hooks_.state ? QStringLiteral("ok ") + hooks_.state() : QStringLiteral("err no state hook");
+        return hooks_.state ? QStringLiteral("ok ") + hooks_.state() : notReady(cmd);
     if (cmd == QStringLiteral("shot"))
     {
-        if (arg.isEmpty() || !hooks_.screenshot) return QStringLiteral("err usage: shot <path.png>");
+        if (arg.isEmpty()) return QStringLiteral("err usage: shot <path.png>");
+        if (!hooks_.screenshot) return notReady(cmd);
         return hooks_.screenshot(arg) ? QStringLiteral("ok ") + arg
                                       : QStringLiteral("err couldn't save %1").arg(arg);
     }
     if (cmd == QStringLiteral("open"))
     {
-        if (arg.isEmpty() || !hooks_.openDoc) return QStringLiteral("err usage: open <path>");
+        if (arg.isEmpty()) return QStringLiteral("err usage: open <path>");
+        if (!hooks_.openDoc) return notReady(cmd);
         return hooks_.openDoc(arg) ? QStringLiteral("ok ") + arg
                                    : QStringLiteral("err couldn't open %1").arg(arg);
     }
@@ -104,9 +210,9 @@ QString UiTestServer::handle(const QString& line)
         const QString sub = arg.section(QLatin1Char(' '), 0, 0).toLower();
         if (sub != QStringLiteral("tap") && sub != QStringLiteral("flick") && sub != QStringLiteral("pinch"))
             return QStringLiteral("err usage: touch tap X Y | flick X1 Y1 X2 Y2 [MS] | pinch CX CY SCALE [MS]");
-        if (!hooks_.touch) return QStringLiteral("err no touch hook");
+        if (!hooks_.touch) return notReady(cmd);
         // false = a sequence is already in flight; reject so overlapping gestures can't corrupt Qt touch state.
         return hooks_.touch(arg) ? QStringLiteral("ok") : QStringLiteral("err busy");
     }
-    return QStringLiteral("err unknown command '%1' (key/state/shot/open/touch)").arg(cmd);
+    return QStringLiteral("err unknown command '%1' (status/key/state/shot/open/touch)").arg(cmd);
 }

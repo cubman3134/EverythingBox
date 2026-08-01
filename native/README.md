@@ -71,13 +71,13 @@ cmake -S native -B build -DEVERYTHINGBOX_BUILD_APP=ON ^
   -DSDL2_INCLUDE_DIR="C:/SDL2/include" -DSDL2_LIBRARY="C:/SDL2/lib/x64/SDL2.lib"
 cmake --build build --config Release
 ```
-Make it runnable (copy Qt + mpv + SDL2 DLLs next to the exe):
+That build is runnable **in place** — a post-build step runs `windeployqt` over the exe and copies the
+libmpv/SDL2 DLLs next to it, so no manual deploy is needed:
 ```
-C:\Qt\6.8.3\msvc2022_64\bin\windeployqt.exe build\Release\EverythingBox.exe --release
-copy C:\mpv-dev\libmpv-2.dll build\Release\
-copy C:\SDL2\lib\x64\SDL2.dll build\Release\
 build\Release\EverythingBox.exe
 ```
+(Turn the step off with `-DEB_WINDEPLOYQT=OFF`; then the exe needs `C:\Qt\6.8.3\msvc2022_64\bin`,
+`C:\mpv-dev` and the SDL2 DLL on `PATH`, and Qt's QML/platform plugins found some other way.)
 A ready-to-run copy is already deployed at **`C:\EverythingBox-app\EverythingBox.exe`** — double-click it,
 **Open Video…**, and pick an MKV.
 

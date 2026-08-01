@@ -32,9 +32,10 @@
 #include "core/SaveMeta.h"     // save-sync T4: the one-time stray core-save sweep
 #include "core/PerfTrace.h"
 #include "core/CrashReport.h"  // issue #28: first-chance AV reporter, installed before the GUI comes up
+#include "core/UiTestServer.h" // issue #172: the UI-test channel listens BEFORE the startup work, not after
 
 // App version (keep in sync with project(VERSION ...) in native/CMakeLists.txt).
-static constexpr const char* kAppVersion = "0.5.232";
+static constexpr const char* kAppVersion = "0.5.233";
 
 // Path of the single diagnostic log (shared with the stream/manga resolution tracing). The Settings ▸ Debug
 // viewer reads this file.
@@ -190,6 +191,20 @@ int main(int argc, char** argv)
     // on mobile the application NAME, set just above) to already exist. Still long before any window.
     CrashReport::install((AppPaths::dataDir() + QStringLiteral("/crash_report.log")).toUtf8().constData());
 
+    // Issue #172: bring the UI-test channel up HERE — before the asset bootstrap, the brand migration, the
+    // cloud pull, and the whole MainWindow ctor. It used to be created ~400 lines into that ctor, which meant
+    // any stall on the way there left no pipe at all: the harness saw a connect failure, which is exactly what
+    // it sees when the app was never launched with EB_UITEST, and a live verification became "nothing
+    // happened, presumably fine". Now the channel exists from the first moments and answers `not-ready` until
+    // the window binds its hooks, so a stuck startup is a specific answer instead of silence.
+    //
+    // wantedFromEnvOrArgs(), NOT wanted(): the Settings ▸ Debug toggle cannot be read yet. Settings::store()
+    // holds a function-local static QSettings that snapshots the ini on its FIRST read, and the brand
+    // migration below has to copy the ini into place before that happens (see the note on
+    // brandMigrationAtStartup) — reading it here would run the whole session off an empty settings file. The
+    // toggle gets its own ensureListening() further down, once the ini is settled.
+    if (UiTestServer::wantedFromEnvOrArgs()) UiTestServer::ensureListening();
+
     // Comfortable, remote/touch-friendly base sizing for generic controls (dialogs, lists, inputs). Views
     // that set their own styles (Home chrome, settings panels) keep theirs; this just enlarges the rest.
     // The :focus rules are the app-wide SELECTION HIGHLIGHT: stylesheet-styled controls suppress the
@@ -243,6 +258,10 @@ int main(int argc, char** argv)
 
     BrandMigration::migrateGoliathIni(AppPaths::dataDir()); // carry over the oldest ini before any read
     brandMigrationAtStartup(); // then move that install onto the CURRENT brand — still before any read
+    // The ini is settled, so the Settings ▸ Debug toggle is now safe to read. No-op if the env/argument pass
+    // above already brought the channel up. Deliberately BEFORE the cloud pull: that step runs an event loop
+    // on a network round-trip, and it is precisely the kind of startup work whose stall must stay drivable.
+    UiTestServer::ensureListening();
     cloudPullAtStartup();    // then pull a newer cloud snapshot (if signed in) before loading state
     ProfileStore::migrateIcons(); // one-time: repair legacy mojibake-corrupted profile icons on disk
     ConsumptionStats::migrate();  // one-time: fold pre-upgrade un-namespaced stats into this device's namespace
