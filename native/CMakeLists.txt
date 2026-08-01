@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.206 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.207 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -533,9 +533,14 @@ if(EVERYTHINGBOX_BUILD_APP)
     # TraktSync.cpp joins it for the same reason: the watchlist/collection parsers, the paging + rate-limit
     # classifier and the watched-history reconciliation are all pure, so the partial-page, 429 and
     # "local and Trakt disagree" cases are reachable here with no socket and no account.
+    # TraktMissed.cpp joins them for the same reason again (#25): "you missed" is a pure join of the
+    # calendar, the marks and the per-show dismissal watermarks, with both local-state lookups arriving
+    # through callbacks — so every clause of it, and every negative case, is reachable here with no
+    # socket, no account and no ini.
     add_executable(probe_trakt tools/probe_trakt.cpp
         src/core/TraktRead.cpp src/core/TraktRead.h
         src/core/TraktSync.cpp src/core/TraktSync.h
+        src/core/TraktMissed.cpp src/core/TraktMissed.h
         src/core/SingleFlight.h)
     target_include_directories(probe_trakt PRIVATE src src/core)
     target_link_libraries(probe_trakt PRIVATE Qt6::Core)
