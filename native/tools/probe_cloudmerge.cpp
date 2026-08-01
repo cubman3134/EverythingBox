@@ -873,6 +873,91 @@ int main(int argc, char** argv)
                   == QStringLiteral("1700000000"));
         }
 
+        // 16b-cal. #148: a CALENDAR cache write cannot move the sync fingerprint.
+        //
+        // Asserted through stateFingerprint(), deliberately NOT through "the key is absent from
+        // buildSettingsJson()". An absence assertion is satisfied by an EMPTY bundle — break
+        // buildSettingsJson outright and every "!contains" above it still passes — and absence was never
+        // the property that cost anything here. What cost roughly 48 whole-zip uploads a day was the
+        // fingerprint MOVING: checkStatus reads it as st.localChanged, and since #34 localChanged is a
+        // debt the retry machinery keeps trying to pay, so a 30-minute cache stamp kept re-presenting
+        // itself as an owed settings change. The property is therefore: write the cache, and the number
+        // the push gate consults is bit-identical.
+        //
+        // The payload and the stamp are moved in SEPARATE steps, both compared against the SAME baseline.
+        // Moving them together would make one assertion out of two: either half's exclusion deleted would
+        // fail the combined check, so neither key would be pinned on its own, and an exclusion covering
+        // only trakt/calendarCache would sail through while the clock — the half that actually ticks every
+        // 30 minutes on an untouched machine — went on flipping the fingerprint.
+        {
+            {
+                QSettings raw(iniPath, QSettings::IniFormat);
+                raw.remove(QStringLiteral("trakt"));                                   // 16b-trakt's fixture is done with
+                raw.setValue(QStringLiteral("display/theme"), QStringLiteral("dark")); // a genuinely bundle-synced key
+                raw.setValue(QStringLiteral("trakt/calendarCache"), QStringLiteral("[{\"ep\":1}]"));
+                raw.setValue(QStringLiteral("trakt/calendarCachedAt"), QStringLiteral("1700000000"));
+                raw.sync();
+            }
+            const QByteArray fpCal = CloudSync::stateFingerprint();
+
+            // (a) the PAYLOAD alone: a refresh that brought back a different episode list.
+            {
+                QSettings raw(iniPath, QSettings::IniFormat);
+                raw.setValue(QStringLiteral("trakt/calendarCache"), QStringLiteral("[{\"ep\":2}]"));
+                raw.sync();
+            }
+            CHECK(CloudSync::stateFingerprint() == fpCal);
+
+            // (b) the STAMP alone, against the same baseline: the every-30-minutes case where the episode
+            // list came back byte-identical and only the wall clock moved. This is the one the issue is
+            // actually about — on an idle machine (a) never happens and (b) happens 48 times a day.
+            {
+                QSettings raw(iniPath, QSettings::IniFormat);
+                raw.setValue(QStringLiteral("trakt/calendarCachedAt"), QStringLiteral("1700001800"));
+                raw.sync();
+            }
+            CHECK(CloudSync::stateFingerprint() == fpCal);
+
+            // (c) the POSITIVE CONTROL, and the reason (a) and (b) are not vacuous: the SAME fingerprint,
+            // on the SAME ini, still moves for a real synced setting. Without this, a build whose
+            // fingerprint was constant — isDeviceLocalKey returning true unconditionally, stateHash
+            // returning early, an empty store — would pass everything above and report the churn fixed.
+            {
+                QSettings raw(iniPath, QSettings::IniFormat);
+                raw.setValue(QStringLiteral("display/theme"), QStringLiteral("light"));
+                raw.sync();
+            }
+            CHECK(CloudSync::stateFingerprint() != fpCal);
+
+            // The predicate itself, both leaves. Not a restatement of (a)/(b): those are satisfied by an
+            // exclusion in EITHER table, and isPerItemStoreKey is the wrong one — that table is a claim
+            // that the merge document owns the key and will carry it between devices, which is false of a
+            // cache no peer can use. These pin that the fix landed in the device-local table.
+            CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/calendarCache")) == true);
+            CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/calendarCachedAt")) == true);
+            // The sibling half once more, at the exact prefix that would swallow it: "trakt/calendar" must
+            // not become a prefix rule either, and trakt/clientId must keep travelling.
+            CHECK(CloudSync::isDeviceLocalKey(QStringLiteral("trakt/clientId")) == false);
+
+            // INBOUND: a peer's calendar was fetched against ITS Trakt account and is worth nothing here;
+            // landing it would also overwrite a fresher local fetch with an older one. Separate from the
+            // fingerprint assertions — applySettingsJson consults the table independently, and a build that
+            // stopped consulting it there keeps (a)-(c) green.
+            {
+                QJsonObject peerC;
+                peerC[QStringLiteral("trakt/calendarCache")]    = QStringLiteral("[{\"peer\":1}]");
+                peerC[QStringLiteral("trakt/calendarCachedAt")] = QStringLiteral("9999999999");
+                CloudSync::applySettingsJson(QJsonDocument(peerC).toJson(QJsonDocument::Compact));
+                QSettings raw(iniPath, QSettings::IniFormat); raw.sync();
+                CHECK(raw.value(QStringLiteral("trakt/calendarCache")).toString()
+                      == QStringLiteral("[{\"ep\":2}]"));            // OUR payload, untouched
+                CHECK(raw.value(QStringLiteral("trakt/calendarCachedAt")).toString()
+                      == QStringLiteral("1700001800"));              // OUR stamp, untouched
+            }
+            // No state is put back: (c) left display/theme on "light", which is exactly where 16b's
+            // inbound case had left it, and §16's cleanup removes the whole "trakt" group either way.
+        }
+
         // 16c. applySettingsJson CLOSES an open settings transaction (#26). A remote bundle writes in-scope
         // settings keys; if one lands while a settings visit is open, the snapshot predates it, so a later
         // Discard would read the PEER's values as "the user's changes" and put the local ones back —
