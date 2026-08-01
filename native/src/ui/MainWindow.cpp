@@ -1299,7 +1299,7 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // starts from a state that has seen the peers' changes and resolve() can answer NothingToSend rather than
     // uploading over one. It is a no-op on the overwhelmingly common path — nothing owed, or signed out —
     // because due() returns Nothing before any network call is made.
-    QTimer::singleShot(2500, this, [this] { runPendingPush(/*manual*/false); });
+    QTimer::singleShot(2500, this, [this] { runPendingPush(PushTrigger::Backoff); });
 
     // Local video library: scan off-thread at startup, install the index + refresh the home on the main
     // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
@@ -10876,6 +10876,9 @@ void MainWindow::openCloudSync()
         // "Sync now": Sync now is a blind push, this is the conflict-aware attempt, and it is the ONLY way out
         // of the two parked states short of a restart.
         if (in && !pending.isEmpty()) action(QStringLiteral("cloud.retry"), tr("Retry sync"));
+        // Remembered so refreshCloudPendingRow can tell "the line changed" from "the row SET changed" — the
+        // second needs a rebuild, because a themed row that was omitted cannot be patched into existence.
+        cloudRetryRowShown_ = in && !pending.isEmpty();
         if (in)         action(QStringLiteral("cloud.signout"), tr("Sign out"));
         action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
 
@@ -10886,7 +10889,7 @@ void MainWindow::openCloudSync()
         auto onAct = [this, setStatus](const QString& id, const QString&) {
             if      (id == QStringLiteral("cloud.signin"))  { setStatus(tr("Opening your browser…")); cloud_->signIn(); }
             else if (id == QStringLiteral("cloud.syncnow")) { setStatus(tr("Syncing…")); cloudSyncNow(); }
-            else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(/*manual*/true); }
+            else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(PushTrigger::UserAction); }
             else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
             else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
         };
@@ -10948,6 +10951,10 @@ void MainWindow::openCloudSync()
         auto* signOut = panelRow(tr("Sign out"));
         auto* setup = panelRow(tr("Set up sign-in…"));
         v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
+        // Held for the same reason as cloudPendingLabel_: a park arising minutes after the panel was built has
+        // to move the ACTION the line names, not only the line. refresh() below owns it on a rebuild; this
+        // pointer is how a push completing later reaches it without one.
+        cloudRetryRow_ = retry;
 
         auto refresh = [this, status, pendingLabel, signIn, syncNow, retry, signOut, setup] {
             const bool cfg = CloudSync::isConfigured();
@@ -10970,7 +10977,7 @@ void MainWindow::openCloudSync()
         connect(signOut, &QPushButton::clicked, this, [this] { cloud_->signOut(); });
         connect(syncNow, &QPushButton::clicked, this, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
         connect(retry, &QPushButton::clicked, this, [this, status] {
-            status->setText(tr("Retrying…")); runPendingPush(/*manual*/true); });
+            status->setText(tr("Retrying…")); runPendingPush(PushTrigger::UserAction); });
         connect(setup, &QPushButton::clicked, this, [this] { openCloudClientSetup(); });
         // Context = status (recreated each time the panel is built) -> these auto-disconnect on rebuild.
         connect(cloud_.get(), &CloudSync::signedIn, status, [this, refresh](const QString&) {
@@ -11283,8 +11290,18 @@ void MainWindow::openCloudClientSetup()
 }
 
 // ---- push settings on Save, with a durable retry when offline (#34) ---------------------------------------
-// The policy is in core/PendingPush (and probe_cloudmerge §19-22). This is the plumbing.
-//
+// The policy is in core/PendingPush (and probe_cloudmerge §19-23). This is the plumbing.
+
+// The post-Save debounce, and the interval a DEFERRED attempt asks again on (see armSettingsPushTimer).
+static constexpr int kSettingsPushDelayMs = 3000;
+// How long an attempt may hold the in-flight guard before it is abandoned. The chain is up to four Drive round
+// trips and CloudSync now sets a transfer timeout on every one of them, so this is not the request timeout —
+// it is the backstop for a chain that stops calling back for a reason the transport never notices (a reply
+// dropped on a suspended handheld, a callback lost to a destroyed context). Without it a single wedged reply
+// silently disables EVERY later attempt — automatic and manual alike — until the app restarts, which is a
+// worse failure than any it guards against, and one the user has no way to see.
+static constexpr int kCloudPushWatchdogMs = 180000;
+
 // THE TRIGGER IS THE SAVE ANSWER, NOTHING ELSE. leaveSettingsArea calls this from `choice == 0` only, so
 // Discard does not push (there is nothing new to send — rollback restored the snapshot) and Keep editing does
 // not either (the visit is still open). Note what ALSO does not push, deliberately: the clean-exit branch
@@ -11302,27 +11319,58 @@ void MainWindow::openCloudClientSetup()
 void MainWindow::pushSettingsAfterSave()
 {
     if (!cloud_ || !cloud_->isSignedIn()) return;   // local-first: no account is not a failure, it is a no-op
+    // manual == true: a Save is a user action, so it overrides a backoff window and un-parks a retry that had
+    // given up. The user just told us these settings matter; making them wait out a 30-minute backoff for a
+    // change they made deliberately is the wrong trade. Held in a member because the attempt this arms may be
+    // DEFERRED (a re-entered settings visit) and re-armed, and the user action must survive that.
+    settingsPushManual_ = true;
+    armSettingsPushTimer();
+}
+
+// The short timer, shared by the Save path and the deferral path. ONE interval for both: each says "come back
+// when the navigation — or the edit — has settled", and a deferral polling faster than the debounce would just
+// burn wakeups inside a settings visit that can last minutes.
+void MainWindow::armSettingsPushTimer()
+{
     if (!settingsPushTimer_)
     {
         settingsPushTimer_ = new QTimer(this);
         settingsPushTimer_->setSingleShot(true);
-        // manual == true: a Save is a user action, so it overrides a backoff window and un-parks a retry that
-        // had given up. The user just told us these settings matter; making them wait out a 30-minute backoff
-        // for a change they made deliberately is the wrong trade.
-        connect(settingsPushTimer_, &QTimer::timeout, this, [this] { runPendingPush(/*manual*/true); });
+        // The flag is consumed HERE, before the attempt: if that attempt defers, runPendingPush ORs it straight
+        // back in, and if it proceeds the user action has been spent. Leaving it set would make every later
+        // backoff tick claim a user standing behind it and un-park a give-up nobody asked to resume.
+        connect(settingsPushTimer_, &QTimer::timeout, this, [this] {
+            const bool m = settingsPushManual_;
+            settingsPushManual_ = false;
+            runPendingPush(m ? PushTrigger::AfterSave : PushTrigger::Backoff);
+        });
     }
-    settingsPushTimer_->start(3000);
+    settingsPushTimer_->start(kSettingsPushDelayMs);
 }
 
 // One attempt. Never blocks: every step is a callback, and the caller returns immediately.
-void MainWindow::runPendingPush(bool manual)
+void MainWindow::runPendingPush(PushTrigger t)
 {
     if (!cloud_) return;
     const PendingPush::State st = PendingPush::load();
-    switch (PendingPush::due(st, cloud_->isSignedIn(), manual, QDateTime::currentMSecsSinceEpoch()))
+    // A Save and a panel press both override a backoff window and un-park a give-up; only the two TIMERS are
+    // held off by an open settings visit (PendingPush decision 5 states both, and why they differ). Both facts
+    // are derived HERE, at the one place every timer and every panel button funnels through, rather than at
+    // each of them — and SettingsTxn::active() is read rather than passed in so no caller can forget it.
+    const bool manual = (t != PushTrigger::Backoff);
+    const bool unconfirmed = (t != PushTrigger::UserAction) && SettingsTxn::active();
+    switch (PendingPush::due(st, cloud_->isSignedIn(), manual, QDateTime::currentMSecsSinceEpoch(), unconfirmed))
     {
         case PendingPush::Due::Nothing:     return;   // signed out, or nothing owed — do not touch the network
         case PendingPush::Due::Wait:        armPendingRetry(); return;
+        // A settings visit is open, so the ini holds edits the user has not confirmed and may Discard. Uploading
+        // them would publish rejected values — and on the PullThenPush arm applySettingsJson would force-commit
+        // the transaction, destroying the Discard itself. RE-ARM rather than return: the owed record has to
+        // survive the visit, and the user action (if any) rides along with it.
+        case PendingPush::Due::Deferred:
+            settingsPushManual_ = settingsPushManual_ || (t == PushTrigger::AfterSave);
+            armSettingsPushTimer();
+            return;
         // The two PARKED states. Both are dead ends for the automatic path on purpose — an account that needs
         // re-authentication and one that has burned the attempt cap both need a human, and the Cloud Sync
         // panel is where they are told (cloudPendingLine). Re-arming a timer here is exactly the battery and
@@ -11334,24 +11382,43 @@ void MainWindow::runPendingPush(bool manual)
     // An attempt is up to three Drive round trips; a second one overlapping it would race on cloud/syncedHash.
     if (cloudPushBusy_) return;
     cloudPushBusy_ = true;
+    // The epoch this attempt runs under. Every callback below carries it, so the watchdog can hand the guard
+    // to a later attempt without this one's late reply corrupting the record.
+    const quint32 epoch = ++cloudPushEpoch_;
+    if (!cloudPushWatchdog_)
+    {
+        cloudPushWatchdog_ = new QTimer(this);
+        cloudPushWatchdog_->setSingleShot(true);
+        connect(cloudPushWatchdog_, &QTimer::timeout, this, [this] {
+            if (!cloudPushBusy_) return;
+            // The chain never called back. Release the guard and RECORD the attempt as failed — it did fail,
+            // and a failure that goes unrecorded is one the backoff and the give-up cap never see. Bumping the
+            // epoch is what makes a reply arriving after this a no-op rather than a second report.
+            cloudPushBusy_ = false;
+            ++cloudPushEpoch_;
+            mwLog(QStringLiteral("cloud push: no reply within %1 ms — attempt abandoned").arg(kCloudPushWatchdogMs));
+            recordPushOutcome(false);
+        });
+    }
+    cloudPushWatchdog_->start(kCloudPushWatchdogMs);
 
     // CONFLICT-AWARE, unlike the manual "Sync now" below. Sync now is the user's explicit make-the-cloud-match
     // lever and stays a blind push by design; an AUTOMATIC push has no user standing behind it, so it must not
     // silently overwrite a bundle another device put there while this one was offline.
-    cloud_->checkStatus([this](const CloudSync::Status& s) {
+    cloud_->checkStatus([this, epoch](const CloudSync::Status& s) {
         switch (PendingPush::resolve(s.reached, s.listReached, s.localChanged, s.remoteChanged))
         {
             case PendingPush::Plan::Unreachable:
-                finishPendingPush(false);
+                finishPendingPush(false, epoch);
                 return;
             case PendingPush::Plan::NothingToSend:
                 // The idempotent no-op the issue asks for: the fingerprint already matches the synced
                 // baseline, so whatever this record thought it owed has since gone up another way (an exit
                 // push, a manual Sync now, a peer's bundle we applied). Counted as a SUCCESS — it clears.
-                finishPendingPush(true);
+                finishPendingPush(true, epoch);
                 return;
             case PendingPush::Plan::Push:
-                cloud_->pushLocal([this](bool ok, const QString&) { finishPendingPush(ok); });
+                cloud_->pushLocal([this, epoch](bool ok, const QString&) { finishPendingPush(ok, epoch); });
                 return;
             case PendingPush::Plan::PullThenPush:
                 // Take the peer's bundle FIRST. applySettingsJson writes their keys into our ini without
@@ -11364,9 +11431,9 @@ void MainWindow::runPendingPush(bool manual)
                 // cloud/syncedHash to the remote's own hash, so the next checkStatus reports localChanged
                 // false and resolve() answers NothingToSend. The next attempt is a fresh timer tick that must
                 // pass due() again.
-                cloud_->applyRemote(s.fileId, s.modifiedIso, s.remoteHash, [this](bool pulled) {
-                    if (!pulled) { finishPendingPush(false); return; }
-                    cloud_->pushLocal([this](bool ok, const QString&) { finishPendingPush(ok); });
+                cloud_->applyRemote(s.fileId, s.modifiedIso, s.remoteHash, [this, epoch](bool pulled) {
+                    if (!pulled) { finishPendingPush(false, epoch); return; }
+                    cloud_->pushLocal([this, epoch](bool ok, const QString&) { finishPendingPush(ok, epoch); });
                 });
                 return;
         }
@@ -11376,8 +11443,13 @@ void MainWindow::runPendingPush(bool manual)
 // An ATTEMPT finished. Separate from recordPushOutcome because only an attempt holds the in-flight guard: a
 // manual Sync now reports its outcome without ever taking it, and clearing a guard it does not hold would let
 // a second attempt start on top of one already talking to Drive.
-void MainWindow::finishPendingPush(bool ok)
+void MainWindow::finishPendingPush(bool ok, quint32 epoch)
 {
+    // Late arrival from an attempt the watchdog already abandoned (or from a chain whose successor now holds
+    // the guard). Its outcome was recorded when it was abandoned, so reporting again would double-count the
+    // failure — or, worse, clear a record the CURRENT attempt owns. Drop it.
+    if (epoch != cloudPushEpoch_ || !cloudPushBusy_) return;
+    if (cloudPushWatchdog_) cloudPushWatchdog_->stop();
     cloudPushBusy_ = false;
     recordPushOutcome(ok);
 }
@@ -11385,12 +11457,28 @@ void MainWindow::finishPendingPush(bool ok)
 void MainWindow::recordPushOutcome(bool ok)
 {
     if (!cloud_) return;
+    // Signed out since this push started. The sign-out handler already cleared the record, and writing an
+    // attempt count for an account we no longer hold would leave ini residue that the next sign-in inherits.
+    // (A REVOKED grant is still "signed in" — the refresh token is still stored — so the auth park below is
+    // unaffected; this is only about an account the user removed.)
+    if (!cloud_->isSignedIn()) return;
     // THE ONE FUNNEL. Every push in the app ends here — the automatic attempt, the manual Sync now, and the
     // exit push — so the durable record can never drift from what actually happened on the wire, and the
     // "before the exit push" retry the issue asks for costs nothing: the exit push IS an attempt, and this is
     // where it reports. classifyPush is what keeps a dead network out of the "sign in again" prompt — only the
     // token layer may declare an auth failure.
-    const PendingPush::Outcome o = PendingPush::classifyPush(ok, cloud_->lastAuth());
+    //
+    // ...EXCEPT that a FAILED push which had nothing to send owes nothing, and must not inflate the record
+    // (review round 1, minor 4). The exit push runs on every close whether or not a setting changed, so a
+    // chronically-offline user would otherwise be told "8 attempts failed, retrying has stopped" about changes
+    // that do not exist. This is the same idempotence gate the attempt path already applies — resolve()'s
+    // NothingToSend, which finishes as a SUCCESS — moved to where the exit push and Sync now can reach it: the
+    // record's whole meaning is "this device owes the cloud a push", and a device whose state matches its
+    // synced baseline does not, however the last upload went. (Nothing is laundered: if a push was genuinely
+    // owed, the fingerprint differs from the baseline and this reads false.)
+    const bool nothingOwed = !CloudSync::localChangedSinceSync();
+    const PendingPush::Outcome o = nothingOwed ? PendingPush::Outcome::Success
+                                               : PendingPush::classifyPush(ok, cloud_->lastAuth());
     PendingPush::save(PendingPush::onOutcome(PendingPush::load(), o, QDateTime::currentMSecsSinceEpoch()));
     armPendingRetry();
     refreshCloudPendingRow();   // keep an open Cloud Sync panel honest, without stealing focus or re-presenting
@@ -11408,6 +11496,14 @@ void MainWindow::refreshCloudPendingRow()
         PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.pending");
         r.label = tr("Unsynced"); r.value = line.isEmpty() ? tr("Everything is up to date.") : line;
         themedPanelHost_->updateRow(QStringLiteral("cloud.pending"), r);   // no-ops if no panel carries the row
+        // THE ROW SET, not just the row. A park arising while the panel is open makes the line say 'choose
+        // "Retry sync"' — and in themed mode that action is OMITTED, not hidden, so patching the text alone
+        // points the user at a row that is not on screen until they leave and come back. Themed rows cannot
+        // appear by patching, so the panel is rebuilt IN PLACE (replaceTop), and only when the set genuinely
+        // changed: themedPanelIsTop refuses while an OSK or menu is above, so no live edit is torn down.
+        if (cloud_ && cloud_->isSignedIn() && (!line.isEmpty()) != cloudRetryRowShown_
+            && themedPanelIsTop(tr("Cloud Sync")))
+        { openCloudSync(); return; }
     }
 #endif
     if (cloudPendingLabel_)
@@ -11415,6 +11511,8 @@ void MainWindow::refreshCloudPendingRow()
         cloudPendingLabel_->setText(line);
         cloudPendingLabel_->setVisible(!line.isEmpty());
     }
+    // The classic twin of the rebuild above — cheaper, because a hidden QPushButton is still there to show.
+    if (cloudRetryRow_) cloudRetryRow_->setVisible(!line.isEmpty());
 }
 
 // (Re)arm the backoff. Reads the record rather than remembering anything: a give-up or an auth park leaves the
@@ -11425,17 +11523,41 @@ void MainWindow::armPendingRetry()
     {
         pendingRetryTimer_ = new QTimer(this);
         pendingRetryTimer_->setSingleShot(true);
-        connect(pendingRetryTimer_, &QTimer::timeout, this, [this] { runPendingPush(/*manual*/false); });
+        connect(pendingRetryTimer_, &QTimer::timeout, this, [this] { runPendingPush(PushTrigger::Backoff); });
     }
     pendingRetryTimer_->stop();
     if (!cloud_) return;
     const PendingPush::State st = PendingPush::load();
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    if (PendingPush::due(st, cloud_->isSignedIn(), /*manual*/false, now) == PendingPush::Due::Nothing) return;
-    if (PendingPush::gaveUp(st) || st.failure == PendingPush::Failure::AuthExpired) return;   // parked
+    // ONE verdict decides both whether to arm and how long for. Reading due() and then re-deriving the parked
+    // states from the record (which is what this did) is two policies that can disagree — and they did: due()
+    // now answers Attempt for a stamp in the future, while the arithmetic below still computes a wait a month
+    // long, so the clamp would have held off the very attempt due() had just declared.
+    switch (PendingPush::due(st, cloud_->isSignedIn(), /*manual*/false, now, SettingsTxn::active()))
+    {
+        // Nothing owed, or parked behind a state only a user action clears. The timer stays STOPPED — that is
+        // the whole point: a permanently-failing account stops costing battery and Drive quota.
+        case PendingPush::Due::Nothing:
+        case PendingPush::Due::NeedsSignIn:
+        case PendingPush::Due::GaveUp:
+            return;
+        // Due NOW — including the clock-jumped-backwards case, where the arithmetic below would say "in three
+        // weeks" and the clamp would turn that into a 30-minute wait that never resolves.
+        case PendingPush::Due::Attempt:
+            pendingRetryTimer_->start(0);
+            return;
+        // A settings visit is open. Ask again shortly instead of computing a backoff against a state the user
+        // has not confirmed; whichever timer wins the race defers again until the visit closes.
+        case PendingPush::Due::Deferred:
+            pendingRetryTimer_->start(kSettingsPushDelayMs);
+            return;
+        case PendingPush::Due::Wait:
+            break;
+    }
     // Clamped at 0 rather than trusting the arithmetic: a clock that jumped backwards (or an ini carried to a
     // machine in another timezone with a wrong RTC) makes dueAt - now enormous, and a retry that is "due in
-    // three weeks" is indistinguishable from one that never runs.
+    // three weeks" is indistinguishable from one that never runs. (The clamp bounds the WAIT; what stops that
+    // state from stalling forever is due()'s future-stamp rule above, not this line.)
     const qint64 wait = PendingPush::dueAtMs(st) - now;
     pendingRetryTimer_->start(int(qBound<qint64>(0, wait, PendingPush::kMaxDelayMs)));
 }

@@ -61,19 +61,34 @@ qint64 PendingPush::dueAtMs(const State& s)
     return s.lastAttemptMs + backoffMs(s.attempts);
 }
 
-PendingPush::Due PendingPush::due(const State& s, bool signedIn, bool manual, qint64 nowMs)
+PendingPush::Due PendingPush::due(const State& s, bool signedIn, bool manual, qint64 nowMs,
+                                  bool unconfirmedEditsOpen)
 {
     // No account, nothing to owe a push TO. Signing out clears the record anyway; this is the belt.
     if (!signedIn) return Due::Nothing;
+    // Nothing owed and nobody asking: no traffic, and — the reason this is checked before the visit gate —
+    // no pointless deferral poll either. A manual attempt is legitimate from a clean record (the post-Save
+    // push), which is why the owed test only short-circuits the automatic path.
+    if (!manual && !owed(s)) return Due::Nothing;
+    // Decision 5: an open settings visit means the bytes on disk are UNCONFIRMED, and no timer may upload
+    // them. Checked BEFORE `manual`, because the post-Save timer IS manual — the Save it inherited confirmed
+    // the state as it was THEN, not the edits the user went back in and started making. The caller re-arms on
+    // Deferred, so this delays an attempt, never cancels one. (A push the user is asking for right now does
+    // not report a visit here; see decision 5's second paragraph.)
+    if (unconfirmedEditsOpen) return Due::Deferred;
     // A user action overrides every park and every backoff window — that is what makes give-up recoverable
-    // without a restart, and it is checked BEFORE the owed test so a manual Retry works even from a clean
-    // record (the panel only offers it when owed, but nothing here depends on the panel getting that right).
+    // without a restart, and it is checked BEFORE the owed-state tests so a manual Retry works even from a
+    // clean record (the panel only offers it when owed, but nothing here depends on the panel getting that
+    // right).
     if (manual) return Due::Attempt;
-    if (!owed(s)) return Due::Nothing;
     // Auth BEFORE give-up, deliberately: an expired sign-in that has also burned through the attempt cap
     // should report the ACTIONABLE state ("sign in again"), not the generic one ("gave up").
     if (s.failure == Failure::AuthExpired) return Due::NeedsSignIn;
     if (gaveUp(s)) return Due::GaveUp;
+    // A stamp in the FUTURE (see "A NOTE ON THE CLOCK" in the header) is due NOW. Placed after the two parked
+    // states so a clock correction cannot un-park a record that needs a human, and before the Wait test so it
+    // cannot become the un-reachable deadline that stalls the retry for the rest of the session.
+    if (s.lastAttemptMs > nowMs) return Due::Attempt;
     if (nowMs < dueAtMs(s)) return Due::Wait;
     return Due::Attempt;
 }
@@ -114,16 +129,32 @@ PendingPush::State PendingPush::onOutcome(const State& before, Outcome o, qint64
     return after;
 }
 
-PendingPush::Auth PendingPush::classifyRefresh(bool haveRefreshToken, bool serverAnswered, bool serverRejected)
+PendingPush::Auth PendingPush::classifyRefresh(bool haveRefreshToken, int httpStatus, const QString& oauthError,
+                                               bool haveAccessToken)
 {
     // No stored grant at all: there is nothing to refresh and no network trip to make. Expired rather than
     // Offline, because the fix is a sign-in.
     if (!haveRefreshToken) return Auth::Expired;
-    // We never heard back. That is the network's fault, not the account's — patience, not a sign-in prompt.
-    if (!serverAnswered) return Auth::Offline;
-    // The endpoint answered and said no (a revoked or expired grant). No amount of retrying changes that.
-    if (serverRejected) return Auth::Expired;
-    return Auth::Ok;
+    // No HTTP status means no HTTP response: DNS, TLS, a dead route, a transfer that timed out. The network's
+    // fault, not the account's — patience, not a sign-in prompt.
+    if (httpStatus <= 0) return Auth::Offline;
+    // It worked.
+    if (haveAccessToken) return Auth::Ok;
+    // Rate limiting and server faults are the transient answers the token endpoint gives WITH a JSON body, and
+    // they are what the old "any JSON body is a rejection" rule got wrong. Checked before the error code so no
+    // code appearing in a 5xx body can be read as a verdict on the grant.
+    if (httpStatus == 429 || httpStatus >= 500) return Auth::Offline;
+    // The only positive evidence that the grant itself is dead (RFC 6749 §5.2), and only from the status class
+    // that is allowed to carry it. Note what is NOT here: `invalid_request` (our request is malformed — a bug
+    // in this client, which a sign-in does not fix), `unauthorized_client` and `unsupported_grant_type` (the
+    // OAuth client is misconfigured, likewise), and any unrecognised code.
+    if (httpStatus >= 400 && httpStatus < 500
+        && (oauthError == QLatin1String("invalid_grant") || oauthError == QLatin1String("invalid_client")))
+        return Auth::Expired;
+    // Answered, no token, and no proof the grant is dead — a proxy's error page, an unrecognised code, an
+    // empty 400. Back off: the attempt cap will surface it as "retrying has stopped", which the user can act
+    // on, rather than as a sign-in prompt that would not help.
+    return Auth::Offline;
 }
 
 PendingPush::Outcome PendingPush::classifyPush(bool ok, Auth a)

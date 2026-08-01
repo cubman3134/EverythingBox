@@ -58,6 +58,35 @@
 //    and never re-arms from its own completion — the next attempt is a fresh timer tick that must first pass
 //    due(). The only way to keep pushing is for the local settings to keep genuinely changing, which is the
 //    user editing them.
+//
+// 5. NO TIMER UPLOADS AN OPEN SETTINGS VISIT (review round 1). SettingsTxn is snapshot-and-restore: an edit
+//    writes THROUGH to the ini immediately and the snapshot is what a Discard puts back. So while a visit is
+//    open, the bytes on disk — and therefore CloudSync's fingerprint, and therefore checkStatus's
+//    localChanged — are a state the user has NOT confirmed and may be about to reject. A timer firing in that
+//    window would upload it, and on the PullThenPush arm it would also take the Discard away entirely, because
+//    CloudSync::applySettingsJson force-commits an open transaction. (That force-commit is a deliberate trade
+//    against a PEER's bundle arriving mid-visit; nothing about it licenses this device's own timer to do the
+//    same to itself.) due() therefore answers Deferred, and it does so BEFORE the manual override, because the
+//    post-Save timer is manual: "the user pressed Save three seconds ago" is not consent to upload the
+//    different, still-open edits they went back in and started making. Deferred is not a drop — the caller
+//    re-arms, so the owed record survives the visit and is attempted the moment it closes. This is the same
+//    invariant the push TRIGGER states ("the user never confirmed the state that resulted, so this device does
+//    not upload it"), now enforced on the timers and not only on the trigger.
+//
+//    WHAT THIS DOES NOT COVER, deliberately: a push the user is asking for AT THIS INSTANT — the Cloud panel's
+//    "Retry sync" and "Sync now". Those are unreachable except from INSIDE the settings area, so the
+//    transaction is open by construction whenever they are pressed, and blocking on it would leave the user
+//    pressing a button that visibly does nothing. They are the same explicit make-the-cloud-match lever "Sync
+//    now" has always been, and the caller reflects that by not reporting a visit for them. The distinction the
+//    flag draws is therefore not "is a transaction open" but "is this state one nobody has confirmed AND
+//    nobody is asking for" — hence the parameter's name.
+//
+// A NOTE ON THE CLOCK. lastAttemptMs is wall clock, and wall clock moves backwards (an RTC that read ahead,
+// then an NTP correction). A timestamp in the FUTURE makes dueAtMs unreachable, so a naive `now < dueAt ->
+// Wait` would re-arm forever without ever attempting, with the panel cheerfully saying "retrying
+// automatically" — a permanent silent stall that give-up never rescues because no attempt is ever made. due()
+// treats lastAttemptMs > nowMs as DUE NOW: one un-backed-off attempt, whose outcome rewrites the stamp with
+// the corrected clock, and the record is healthy again.
 #pragma once
 #include <QString>
 #include <QtGlobal>
@@ -103,11 +132,16 @@ namespace PendingPush
     {
         Nothing,      // signed out, or nothing owed — do not touch the network
         Wait,         // owed, but the backoff window has not elapsed
+        Deferred,     // the state on disk is UNCONFIRMED (a settings visit is open) — ask again shortly
         NeedsSignIn,  // parked: the account needs re-authentication, retrying cannot fix it
         GaveUp,       // parked: kMaxAttempts consecutive failures, only a user action resumes
         Attempt       // go
     };
-    Due due(const State& s, bool signedIn, bool manual, qint64 nowMs);
+    // `unconfirmedEditsOpen` — a settings visit is open (SettingsTxn::active()) and no live user action stands
+    // behind this attempt; see decision 5 above. A parameter rather than a call into SettingsTxn so this stays
+    // a pure function of stated facts, and with no default: every caller must answer it, because the caller
+    // that forgets is the one that uploads a state the user is still deciding about.
+    Due due(const State& s, bool signedIn, bool manual, qint64 nowMs, bool unconfirmedEditsOpen);
 
     // Given a resolved CloudSync::Status, what should the attempt actually do? See decision 4 above.
     enum class Plan
@@ -123,12 +157,28 @@ namespace PendingPush
     State onOutcome(const State& before, Outcome o, qint64 nowMs);
 
     // ---- failure classification ---------------------------------------------------------------------
-    // Whether the OAuth token refresh could be completed, and if not, whose problem it is. `serverAnswered`
-    // is "the token endpoint replied at all" and `serverRejected` is "it replied, and the reply was an error
-    // rather than an access token" — Google answers a revoked or expired grant with an HTTP 400 body, and a
-    // dead network with no body at all, so those two facts separate "needs a human" from "needs patience".
+    // Whether the OAuth token refresh could be completed, and if not, whose problem it is.
+    //
+    // THE DISCRIMINATOR IS THE OAuth ERROR CODE AND THE HTTP STATUS, not "the body parsed" (review round 1).
+    // The earlier rule — any JSON object without an access_token is a rejection — reads Google's rate limit,
+    // its 5xx, and any JSON-speaking proxy's error page as a REVOKED GRANT. That parks the device at the FIRST
+    // failure with "your sign-in expired": no backoff, no automatic recovery, and a prompt the user cannot act
+    // on because nothing is actually wrong with their account. Which is precisely the failure the Offline
+    // direction was written to avoid, left open in the other one.
+    //
+    // So Expired requires POSITIVE evidence that the grant itself is dead: a 4xx carrying RFC 6749 §5.2's
+    // `invalid_grant` (revoked, expired, or reused) or `invalid_client` (the client credentials no longer
+    // work). Everything else backs off. The asymmetry is deliberate — a transient error mislabelled Expired
+    // strands the device until a human notices, while a genuine expiry mislabelled Offline still surfaces
+    // within the attempt cap as "retrying has stopped", which is visible and user-clearable.
+    //
+    //   haveRefreshToken — is there a stored grant to refresh at all
+    //   httpStatus       — the reply's HTTP status; 0 when nothing arrived (dead network, DNS, TLS)
+    //   oauthError       — the body's `error` field, empty when it carried none (or was not JSON at all)
+    //   haveAccessToken  — the reply actually carried an access_token
+    // The body is classified and dropped: no part of it is logged, stored, or returned.
     enum class Auth { Ok, Offline, Expired };
-    Auth classifyRefresh(bool haveRefreshToken, bool serverAnswered, bool serverRejected);
+    Auth classifyRefresh(bool haveRefreshToken, int httpStatus, const QString& oauthError, bool haveAccessToken);
 
     // Map a push result onto an Outcome. A failure is AuthExpired ONLY when the token layer said so; every
     // other failure is retryable.
