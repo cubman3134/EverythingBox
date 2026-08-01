@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(EverythingBoxNative VERSION 0.5.187 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
+project(EverythingBoxNative VERSION 0.5.188 LANGUAGES C CXX) # keep in sync with kAppVersion in src/main.cpp
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -213,6 +213,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/ProfilePasscode.cpp src/core/ProfilePasscode.h  # per-profile passcode hash/policy/rate-limit (#30)
         src/core/ThemeChoice.cpp  src/core/ThemeChoice.h  # single owner of the per-profile themed-home theme key (#57)
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # settings save/discard snapshot-and-restore (#26)
+        src/core/PendingPush.cpp  src/core/PendingPush.h  # durable pending cloud push + retry policy (#34)
         src/core/FavoritesStore.cpp src/core/FavoritesStore.h
         src/core/ItemMarks.cpp    src/core/ItemMarks.h  # per-profile hidden/completion/tags store (marks/shelves T1)
         src/core/Tombstones.cpp   src/core/Tombstones.h  # per-store deletion tombstones for multi-device merge (mdsync T1)
@@ -439,6 +440,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/OnboardingRoute.h                                    # the pure router under test (header-only)
         src/core/CloudSync.cpp       src/core/CloudSync.h             # signInAvailable() + the onboarding/done carve-out
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
@@ -528,6 +530,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/BrandMigrationDrive.cpp                              # run() + the Drive folder/file steps
         src/core/CloudSync.cpp       src/core/CloudSync.h
         src/core/SettingsTxn.cpp     src/core/SettingsTxn.h           # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/PendingPush.cpp     src/core/PendingPush.h           # CloudSync's token refresh classifies via it (#34)
         src/core/Settings.cpp        src/core/Settings.h
         src/theme2/FormFactor.cpp    src/theme2/FormFactor.h          # Settings.cpp references FormFactor::instance()
         src/addons/AddonContext.cpp  src/addons/AddonContext.h        # the REAL per-addon config lookup (see below)
@@ -711,6 +714,7 @@ if(EVERYTHINGBOX_BUILD_APP)
         src/core/Tombstones.cpp   src/core/Tombstones.h
         src/core/CloudSync.cpp    src/core/CloudSync.h
         src/core/SettingsTxn.cpp  src/core/SettingsTxn.h  # CloudSync::applySettingsJson closes an open txn (#26)
+        src/core/PendingPush.cpp  src/core/PendingPush.h  # CloudSync's token refresh classifies via it (#34)
         src/core/BrandMigration.cpp src/core/BrandMigration.h  # CloudSync/AddonManager consult its flags (QtCore-only TU)
         src/core/Settings.cpp     src/core/Settings.h
         src/theme2/FormFactor.cpp src/theme2/FormFactor.h

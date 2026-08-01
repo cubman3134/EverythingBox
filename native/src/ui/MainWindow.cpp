@@ -62,6 +62,7 @@
 #include "../core/CloudSync.h"
 #include "../core/CloudMerge.h"
 #include "../core/SettingsTxn.h"   // settings save/discard transaction (issue #26)
+#include "../core/PendingPush.h"   // durable pending cloud push + retry policy (issue #34)
 #include "../core/SaveSync.h"   // per-file save/state sync (save-sync T5)
 #include "ProfileDialog.h"
 #include "RegistryBrowser.h"
@@ -446,6 +447,24 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // sweep's first request never competes with the first frame.
     prefetcher_ = new CatalogPrefetcher(addons_.get(), this);
     cloud_ = std::make_unique<CloudSync>(this); // eager: needed for push-on-exit even if the panel never opens
+    // WINDOW-SCOPED sign-in listeners for the pending-push record (#34) — deliberately NOT in the
+    // panelPageConns_ pool the Cloud panel uses, which is cleared whenever any pool user re-presents. The
+    // record has to be corrected whether or not the panel is open, and a sign-out that leaves an owed push
+    // behind is how a device ends up retrying against an account it no longer has.
+    connect(cloud_.get(), &CloudSync::signedOut, this, [this] {
+        PendingPush::clear();                                   // no account, nothing owed
+        if (pendingRetryTimer_) pendingRetryTimer_->stop();
+        if (settingsPushTimer_) settingsPushTimer_->stop();
+        refreshCloudPendingRow();
+    });
+    connect(cloud_.get(), &CloudSync::signedIn, this, [this](const QString&) {
+        // A fresh grant un-parks whatever the old one had accumulated — including a give-up and an auth park,
+        // which is exactly the recovery route the "sign in again" line points the user at. The push that
+        // follows (cloudSyncNow, from the panel / the onboarding restore) reports through recordPushOutcome,
+        // so a still-broken account simply starts counting again from one.
+        PendingPush::clear();
+        refreshCloudPendingRow();
+    });
     // Per-file save/state sync (save-sync T5), owned beside the CloudSync it drives. Eager for the same reason
     // cloud_ is: the exit flush must exist even if no game and no settings panel was ever opened this session.
     // deviceId is Settings::deviceId() — the SAME id the progress sync stamps (mdsync T4), so a preserved
@@ -1273,6 +1292,14 @@ MainWindow::MainWindow(bool chooseProfileAtStart, QWidget* parent)
     // saves/ entries (which Task 3's applyBundle now skips anyway) cannot arrive on top of a resolved file.
     // The FIRST-RUN restore is a different chain entirely and hooks itself — see finishOnboardingRestore.
     QTimer::singleShot(1500, this, [this] { startSaveSync(); });
+
+    // …and pick up a settings push this device still owes from a previous run (#34). This is the "retry on
+    // next launch" leg, and it is deliberately the LAST of the three startup kicks: main.cpp's
+    // cloudPullAtStartup has already applied any remote bundle by the time this window exists, so the attempt
+    // starts from a state that has seen the peers' changes and resolve() can answer NothingToSend rather than
+    // uploading over one. It is a no-op on the overwhelmingly common path — nothing owed, or signed out —
+    // because due() returns Nothing before any network call is made.
+    QTimer::singleShot(2500, this, [this] { runPendingPush(/*manual*/false); });
 
     // Local video library: scan off-thread at startup, install the index + refresh the home on the main
     // thread. Dormant (instant, empty) when no library/folder is configured. Shares the single async-scan
@@ -9216,7 +9243,12 @@ bool MainWindow::leaveSettingsArea(std::function<void(SettingsReturn)> proceed)
                                        /*cancelIndex*/ 2,       // Esc == Keep editing: dismissing changes nothing
                                        this);
     if (choice == 2) return false;                 // Keep editing: stay put, transaction still open
-    if (choice == 0) { SettingsTxn::commit(); }    // Save: the writes already happened
+    // Save: the writes already happened — and THIS is the explicit "yes, keep these settings" moment #34 waits
+    // for, so it is the one and only place an automatic settings push is triggered from. Discard must not push
+    // (rollback put the old values back, so there is nothing new to send) and Keep editing must not either.
+    // pushSettingsAfterSave arms a short timer and returns: the local save has already happened, and the
+    // network is never allowed to gate it — offline, this simply becomes an owed push.
+    if (choice == 0) { SettingsTxn::commit(); pushSettingsAfterSave(); }
     else             { SettingsTxn::rollback(); }  // Discard: restore + the hook re-renders (see `where` above)
     proceed(where);
     return true;
@@ -10832,8 +10864,18 @@ void MainWindow::openCloudSync()
         auto action = [&rows](const QString& id, const QString& label) {
             PanelRow r; r.kind = PanelRow::Action; r.id = id; r.label = label; rows << r; };
         info(QStringLiteral("cloud.status"), tr("Status"), status);
+        // #34 offline honesty. Present whenever signed in — "Everything is up to date" is as much a fact the
+        // user came here for as the warning is, and a row that only appears on failure is a row nobody learns
+        // to look at. Kept adjacent to Status so the two read as one state block.
+        const QString pending = cloudPendingLine();
+        if (in) info(QStringLiteral("cloud.pending"), tr("Unsynced"),
+                     pending.isEmpty() ? tr("Everything is up to date.") : pending);
         if (cfg && !in) action(QStringLiteral("cloud.signin"), tr("Sign in with Google"));
         if (in)         action(QStringLiteral("cloud.syncnow"), tr("Sync now"));
+        // The retry the issue asks for, offered only when there is something to retry. It is distinct from
+        // "Sync now": Sync now is a blind push, this is the conflict-aware attempt, and it is the ONLY way out
+        // of the two parked states short of a restart.
+        if (in && !pending.isEmpty()) action(QStringLiteral("cloud.retry"), tr("Retry sync"));
         if (in)         action(QStringLiteral("cloud.signout"), tr("Sign out"));
         action(QStringLiteral("cloud.setup"), cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
 
@@ -10844,6 +10886,7 @@ void MainWindow::openCloudSync()
         auto onAct = [this, setStatus](const QString& id, const QString&) {
             if      (id == QStringLiteral("cloud.signin"))  { setStatus(tr("Opening your browser…")); cloud_->signIn(); }
             else if (id == QStringLiteral("cloud.syncnow")) { setStatus(tr("Syncing…")); cloudSyncNow(); }
+            else if (id == QStringLiteral("cloud.retry"))   { setStatus(tr("Retrying…")); runPendingPush(/*manual*/true); }
             else if (id == QStringLiteral("cloud.signout")) cloud_->signOut();
             else if (id == QStringLiteral("cloud.setup"))   openCloudClientSetup();
         };
@@ -10891,19 +10934,31 @@ void MainWindow::openCloudSync()
         auto* status = new QLabel(); status->setWordWrap(true); status->setTextFormat(Qt::RichText);
         status->setStyleSheet(QStringLiteral("font-size:15px;padding:6px 0;"));
         v->addWidget(status);
+        // #34 offline honesty, the classic half of the pair. Held in a member QPointer so a push completing
+        // minutes later can patch it in place (refreshCloudPendingRow) rather than rebuilding the panel under
+        // the user. Hidden — not blank — when nothing is owed, so the panel does not carry an empty row.
+        auto* pendingLabel = new QLabel(); pendingLabel->setWordWrap(true);
+        pendingLabel->setStyleSheet(QStringLiteral("font-size:14px;padding:2px 0;"));
+        v->addWidget(pendingLabel);
+        cloudPendingLabel_ = pendingLabel;
 
         auto* signIn = panelRow(tr("Sign in with Google"));
         auto* syncNow = panelRow(tr("Sync now"));
+        auto* retry = panelRow(tr("Retry sync"));
         auto* signOut = panelRow(tr("Sign out"));
         auto* setup = panelRow(tr("Set up sign-in…"));
-        v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(signOut); v->addWidget(setup);
+        v->addWidget(signIn); v->addWidget(syncNow); v->addWidget(retry); v->addWidget(signOut); v->addWidget(setup);
 
-        auto refresh = [this, status, signIn, syncNow, signOut, setup] {
+        auto refresh = [this, status, pendingLabel, signIn, syncNow, retry, signOut, setup] {
             const bool cfg = CloudSync::isConfigured();
             const bool in = cloud_->isSignedIn();
             setup->setText(cfg ? tr("Change sign-in client…") : tr("Set up sign-in…"));
             signIn->setVisible(cfg && !in);
             syncNow->setVisible(in);
+            const QString pending = in ? cloudPendingLine() : QString();
+            pendingLabel->setText(pending);
+            pendingLabel->setVisible(!pending.isEmpty());
+            retry->setVisible(!pending.isEmpty());   // offered only when there is something to retry
             signOut->setVisible(in);
             if (!cfg) status->setText(tr("Google sign-in isn’t set up yet — “Set up sign-in…” to paste a Desktop-app client."));
             else if (in) status->setText(tr("Signed in as <b>%1</b>.").arg(cloud_->accountEmail().toHtmlEscaped()));
@@ -10914,6 +10969,8 @@ void MainWindow::openCloudSync()
         connect(signIn, &QPushButton::clicked, this, [this, status] { status->setText(tr("Opening your browser…")); cloud_->signIn(); });
         connect(signOut, &QPushButton::clicked, this, [this] { cloud_->signOut(); });
         connect(syncNow, &QPushButton::clicked, this, [this, status] { status->setText(tr("Syncing…")); cloudSyncNow(); });
+        connect(retry, &QPushButton::clicked, this, [this, status] {
+            status->setText(tr("Retrying…")); runPendingPush(/*manual*/true); });
         connect(setup, &QPushButton::clicked, this, [this] { openCloudClientSetup(); });
         // Context = status (recreated each time the panel is built) -> these auto-disconnect on rebuild.
         connect(cloud_.get(), &CloudSync::signedIn, status, [this, refresh](const QString&) {
@@ -11225,6 +11282,177 @@ void MainWindow::openCloudClientSetup()
     }, [this] { openCloudSync(); });
 }
 
+// ---- push settings on Save, with a durable retry when offline (#34) ---------------------------------------
+// The policy is in core/PendingPush (and probe_cloudmerge §19-22). This is the plumbing.
+//
+// THE TRIGGER IS THE SAVE ANSWER, NOTHING ELSE. leaveSettingsArea calls this from `choice == 0` only, so
+// Discard does not push (there is nothing new to send — rollback restored the snapshot) and Keep editing does
+// not either (the visit is still open). Note what ALSO does not push, deliberately: the clean-exit branch
+// (dirtyCount() == 0) returns before the prompt, and — the case the issue warns about — a remote apply landing
+// mid-visit COMMITS the transaction (CloudSync::applySettingsJson), which makes dirtyCount() report 0 for the
+// rest of the visit. So a visit interrupted by a peer's bundle leaves through the clean-exit branch and pushes
+// nothing: the user never confirmed the state that resulted, so this device does not upload it. The exit push
+// still carries it later, by which time it is simply "the settings", not "an answer the user gave".
+//
+// DEBOUNCE. #26's transaction already spans the whole settings AREA — hub, panel, theme picker share one — so
+// a user walking through several screens answers Save once and this is called once. The short timer is not
+// there to coalesce screens; it is there so the push never runs on the navigation path at all. Re-arming it
+// replaces the pending fire, so a user who bounces in and out of Settings twice in three seconds still causes
+// one attempt.
+void MainWindow::pushSettingsAfterSave()
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return;   // local-first: no account is not a failure, it is a no-op
+    if (!settingsPushTimer_)
+    {
+        settingsPushTimer_ = new QTimer(this);
+        settingsPushTimer_->setSingleShot(true);
+        // manual == true: a Save is a user action, so it overrides a backoff window and un-parks a retry that
+        // had given up. The user just told us these settings matter; making them wait out a 30-minute backoff
+        // for a change they made deliberately is the wrong trade.
+        connect(settingsPushTimer_, &QTimer::timeout, this, [this] { runPendingPush(/*manual*/true); });
+    }
+    settingsPushTimer_->start(3000);
+}
+
+// One attempt. Never blocks: every step is a callback, and the caller returns immediately.
+void MainWindow::runPendingPush(bool manual)
+{
+    if (!cloud_) return;
+    const PendingPush::State st = PendingPush::load();
+    switch (PendingPush::due(st, cloud_->isSignedIn(), manual, QDateTime::currentMSecsSinceEpoch()))
+    {
+        case PendingPush::Due::Nothing:     return;   // signed out, or nothing owed — do not touch the network
+        case PendingPush::Due::Wait:        armPendingRetry(); return;
+        // The two PARKED states. Both are dead ends for the automatic path on purpose — an account that needs
+        // re-authentication and one that has burned the attempt cap both need a human, and the Cloud Sync
+        // panel is where they are told (cloudPendingLine). Re-arming a timer here is exactly the battery and
+        // quota drain the issue asks us not to build.
+        case PendingPush::Due::NeedsSignIn: return;
+        case PendingPush::Due::GaveUp:      return;
+        case PendingPush::Due::Attempt:     break;
+    }
+    // An attempt is up to three Drive round trips; a second one overlapping it would race on cloud/syncedHash.
+    if (cloudPushBusy_) return;
+    cloudPushBusy_ = true;
+
+    // CONFLICT-AWARE, unlike the manual "Sync now" below. Sync now is the user's explicit make-the-cloud-match
+    // lever and stays a blind push by design; an AUTOMATIC push has no user standing behind it, so it must not
+    // silently overwrite a bundle another device put there while this one was offline.
+    cloud_->checkStatus([this](const CloudSync::Status& s) {
+        switch (PendingPush::resolve(s.reached, s.listReached, s.localChanged, s.remoteChanged))
+        {
+            case PendingPush::Plan::Unreachable:
+                finishPendingPush(false);
+                return;
+            case PendingPush::Plan::NothingToSend:
+                // The idempotent no-op the issue asks for: the fingerprint already matches the synced
+                // baseline, so whatever this record thought it owed has since gone up another way (an exit
+                // push, a manual Sync now, a peer's bundle we applied). Counted as a SUCCESS — it clears.
+                finishPendingPush(true);
+                return;
+            case PendingPush::Plan::Push:
+                cloud_->pushLocal([this](bool ok, const QString&) { finishPendingPush(ok); });
+                return;
+            case PendingPush::Plan::PullThenPush:
+                // Take the peer's bundle FIRST. applySettingsJson writes their keys into our ini without
+                // removing ours, so what we upload afterwards is the UNION — their changes survive this
+                // device's push instead of being reverted by it. Per-key conflicts still resolve
+                // whole-document in their favour; the settings bundle has never had a per-key merge, and
+                // giving it one is #27's question, not this one's.
+                //
+                // Exactly ONE round, and the completion never re-enters runPendingPush: applyRemote sets
+                // cloud/syncedHash to the remote's own hash, so the next checkStatus reports localChanged
+                // false and resolve() answers NothingToSend. The next attempt is a fresh timer tick that must
+                // pass due() again.
+                cloud_->applyRemote(s.fileId, s.modifiedIso, s.remoteHash, [this](bool pulled) {
+                    if (!pulled) { finishPendingPush(false); return; }
+                    cloud_->pushLocal([this](bool ok, const QString&) { finishPendingPush(ok); });
+                });
+                return;
+        }
+    });
+}
+
+// An ATTEMPT finished. Separate from recordPushOutcome because only an attempt holds the in-flight guard: a
+// manual Sync now reports its outcome without ever taking it, and clearing a guard it does not hold would let
+// a second attempt start on top of one already talking to Drive.
+void MainWindow::finishPendingPush(bool ok)
+{
+    cloudPushBusy_ = false;
+    recordPushOutcome(ok);
+}
+
+void MainWindow::recordPushOutcome(bool ok)
+{
+    if (!cloud_) return;
+    // THE ONE FUNNEL. Every push in the app ends here — the automatic attempt, the manual Sync now, and the
+    // exit push — so the durable record can never drift from what actually happened on the wire, and the
+    // "before the exit push" retry the issue asks for costs nothing: the exit push IS an attempt, and this is
+    // where it reports. classifyPush is what keeps a dead network out of the "sign in again" prompt — only the
+    // token layer may declare an auth failure.
+    const PendingPush::Outcome o = PendingPush::classifyPush(ok, cloud_->lastAuth());
+    PendingPush::save(PendingPush::onOutcome(PendingPush::load(), o, QDateTime::currentMSecsSinceEpoch()));
+    armPendingRetry();
+    refreshCloudPendingRow();   // keep an open Cloud Sync panel honest, without stealing focus or re-presenting
+}
+
+// Patch the pending line into whichever Cloud Sync surface exists. Both are patch-in-place, never a rebuild: a
+// push completing while the user is reading the panel must not re-present it under them, and in themed mode a
+// rebuild would pop a live OSK. Both calls are no-ops when their surface is absent, so this needs no gate.
+void MainWindow::refreshCloudPendingRow()
+{
+    const QString line = cloudPendingLine();
+#ifdef EB_HAVE_QML
+    if (themedPanelHost_)
+    {
+        PanelRow r; r.kind = PanelRow::Info; r.id = QStringLiteral("cloud.pending");
+        r.label = tr("Unsynced"); r.value = line.isEmpty() ? tr("Everything is up to date.") : line;
+        themedPanelHost_->updateRow(QStringLiteral("cloud.pending"), r);   // no-ops if no panel carries the row
+    }
+#endif
+    if (cloudPendingLabel_)
+    {
+        cloudPendingLabel_->setText(line);
+        cloudPendingLabel_->setVisible(!line.isEmpty());
+    }
+}
+
+// (Re)arm the backoff. Reads the record rather than remembering anything: a give-up or an auth park leaves the
+// timer stopped, which is the whole point — a permanently-failing account stops costing anything.
+void MainWindow::armPendingRetry()
+{
+    if (!pendingRetryTimer_)
+    {
+        pendingRetryTimer_ = new QTimer(this);
+        pendingRetryTimer_->setSingleShot(true);
+        connect(pendingRetryTimer_, &QTimer::timeout, this, [this] { runPendingPush(/*manual*/false); });
+    }
+    pendingRetryTimer_->stop();
+    if (!cloud_) return;
+    const PendingPush::State st = PendingPush::load();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (PendingPush::due(st, cloud_->isSignedIn(), /*manual*/false, now) == PendingPush::Due::Nothing) return;
+    if (PendingPush::gaveUp(st) || st.failure == PendingPush::Failure::AuthExpired) return;   // parked
+    // Clamped at 0 rather than trusting the arithmetic: a clock that jumped backwards (or an ini carried to a
+    // machine in another timezone with a wrong RTC) makes dueAt - now enormous, and a retry that is "due in
+    // three weeks" is indistinguishable from one that never runs.
+    const qint64 wait = PendingPush::dueAtMs(st) - now;
+    pendingRetryTimer_->start(int(qBound<qint64>(0, wait, PendingPush::kMaxDelayMs)));
+}
+
+QString MainWindow::cloudPendingLine() const
+{
+    if (!cloud_ || !cloud_->isSignedIn()) return QString();
+    const PendingPush::State st = PendingPush::load();
+    if (!PendingPush::owed(st)) return QString();
+    if (st.failure == PendingPush::Failure::AuthExpired)
+        return tr("Settings changes aren't synced yet — the Google sign-in has expired. Sign in again to send them.");
+    if (PendingPush::gaveUp(st))
+        return tr("Settings changes aren't synced yet — %n attempt(s) failed, so retrying has stopped. "
+                  "Choose \"Retry sync\" to try again.", "", st.attempts);
+    return tr("Settings changes aren't synced yet — no connection. Retrying automatically.");
+}
+
 // Manual "Sync now": save the current state up to Drive immediately (same as the automatic exit push).
 void MainWindow::cloudSyncNow()
 {
@@ -11232,6 +11460,7 @@ void MainWindow::cloudSyncNow()
     statusBar()->showMessage(tr("Saving to Google Drive…"));
     cloud_->pushLocal([this](bool ok, const QString& m) {
         statusBar()->showMessage(ok ? tr("Saved to Google Drive.") : m, ok ? kFeedbackShort : kFeedbackLong); // success -> Short, error -> Long (J22)
+        recordPushOutcome(ok);   // #34: an explicit push clears the owed record, or arms the retry if it failed
     });
     // "Sync now" is the user's explicit make-the-cloud-match lever, and saves are part of what is synced now,
     // so reconcile them too (save-sync T5). This is ALSO the mid-session sign-in path: the Cloud Sync panel's
@@ -11357,7 +11586,14 @@ void MainWindow::closeEvent(QCloseEvent* e)
     };
     if (saveSync_) saveSync_->flush([oneDone](bool) { oneDone(); });
     else           oneDone();
-    cloud_->pushLocal([oneDone](bool, const QString&) { oneDone(); });
+    cloud_->pushLocal([this, oneDone](bool ok, const QString&) {
+        // #34: the exit push is itself an attempt, so it reports here. A failed exit push is what leaves the
+        // record owed for the NEXT launch to pick up, and a successful one clears whatever was owed — which is
+        // why no separate "retry before exit" step is needed. PendingPush::save() sync()s, so the record is on
+        // disk before the watchdog is allowed to force the process down.
+        recordPushOutcome(ok);
+        oneDone();
+    });
 }
 
 void MainWindow::openRetroAchievements()

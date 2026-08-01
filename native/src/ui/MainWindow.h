@@ -651,6 +651,27 @@ private:
     void pullAndMergeProgress();          // download remote progress + merge into local, then refresh the home view
     QByteArray serializeProgress() const; // current resume positions + per-profile recent lists -> JSON
     void mergeProgress(const QByteArray& json); // merge remote JSON into local by recency (never deletes local)
+
+    // ---- push settings on Save, with a durable retry when offline (#34) ---------------------------------
+    // The POLICY (when to attempt, when to wait, when to stop, what to do about a peer's push) lives in
+    // core/PendingPush and is exercised headlessly by probe_cloudmerge §19-22. What lives here is only the
+    // plumbing: two timers, one in-flight guard, and the funnel that feeds every push's outcome back into the
+    // durable record. Nothing on this path may block the UI or gate a local save on the network.
+    QTimer* settingsPushTimer_ = nullptr;  // Save -> one push per settings VISIT (short debounce off the nav path)
+    QTimer* pendingRetryTimer_ = nullptr;  // the backoff timer; re-armed from the record after every attempt
+    bool cloudPushBusy_ = false;           // one attempt in flight at a time (an attempt is 1-3 Drive round trips)
+    void pushSettingsAfterSave();          // called from leaveSettingsArea's Save branch, and ONLY from there
+    void runPendingPush(bool manual);      // one attempt: due() -> checkStatus -> resolve() -> push/pull+push
+    void finishPendingPush(bool ok);       // an ATTEMPT ended: release the in-flight guard, then record
+    void recordPushOutcome(bool ok);       // THE funnel — every push in the app reports its result here
+    void armPendingRetry();                // (re)arm pendingRetryTimer_ from the durable record
+    // The Cloud Sync panel's honesty line: empty when nothing is owed, else why and what the user can do.
+    // Reports STATE, never a credential or a settings value.
+    QString cloudPendingLine() const;
+    void refreshCloudPendingRow();         // patch that line into whichever Cloud Sync surface is built
+    // The classic panel's pending line. A QPointer because the panel is rebuilt (and the label destroyed)
+    // whenever showPanel runs, while a push completing minutes later still wants to patch it if it is alive.
+    QPointer<QLabel> cloudPendingLabel_;
     QNetworkAccessManager* docNam_ = nullptr; // lazily created: fetches remote CBZ/EPUB/PDF to a cache file
 
     class AppUpdater* updater_ = nullptr; // checks GitHub Releases for a newer app build + installs it in place

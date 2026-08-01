@@ -94,6 +94,7 @@ void CloudSync::signOut()
     store().sync();
     accessToken_.clear();
     accessExpiryMs_ = 0;
+    lastAuth_ = PendingPush::Auth::Ok;   // no account is not a failed one — the owed push is cleared with it (#34)
     emit signedOut();
 }
 
@@ -234,6 +235,7 @@ void CloudSync::exchangeCode(const QString& code, const QString& verifier, const
         { emit signInFailed(tr("Sign-in failed (no token returned).")); return; }
         accessToken_ = at;
         accessExpiryMs_ = QDateTime::currentMSecsSinceEpoch() + (o.value(QStringLiteral("expires_in")).toInt(3600) - 60) * 1000LL;
+        lastAuth_ = PendingPush::Auth::Ok;   // a fresh grant un-parks a retry that gave up on the old one (#34)
         store().setValue(QStringLiteral("cloud/refreshToken"), rt);
         store().sync();
         fetchAccountEmail();
@@ -259,9 +261,11 @@ void CloudSync::fetchAccountEmail()
 
 void CloudSync::withAccessToken(std::function<void(bool)> cb)
 {
-    if (!accessToken_.isEmpty() && QDateTime::currentMSecsSinceEpoch() < accessExpiryMs_) { cb(true); return; }
+    if (!accessToken_.isEmpty() && QDateTime::currentMSecsSinceEpoch() < accessExpiryMs_)
+    { lastAuth_ = PendingPush::Auth::Ok; cb(true); return; }
     const QString rt = store().value(QStringLiteral("cloud/refreshToken")).toString();
-    if (rt.isEmpty()) { cb(false); return; }
+    // No stored grant: nothing to refresh and no trip to make. Expired, not Offline — the fix is a sign-in.
+    if (rt.isEmpty()) { lastAuth_ = PendingPush::classifyRefresh(false, false, false); cb(false); return; }
 
     QNetworkRequest req((QUrl(QString::fromLatin1(kTokenUrl))));
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/x-www-form-urlencoded"));
@@ -273,8 +277,17 @@ void CloudSync::withAccessToken(std::function<void(bool)> cb)
     QNetworkReply* reply = nam_->post(req, body.toString(QUrl::FullyEncoded).toUtf8());
     connect(reply, &QNetworkReply::finished, this, [this, reply, cb] {
         reply->deleteLater();
-        const QJsonObject o = QJsonDocument::fromJson(reply->readAll()).object();
+        // #34: separate "the endpoint answered and said no" from "we never heard back". Google answers a
+        // revoked or expired grant with a JSON error body; a dead network yields nothing, and a captive
+        // portal yields HTML — so "parses as a JSON object" is the ANSWERED test, not "the bytes are
+        // non-empty". Getting this wrong in the lenient direction would park a merely-offline device behind
+        // a "sign in again" prompt it cannot act on. The body is classified and dropped: never logged,
+        // never stored, and no part of it reaches the pending-push record.
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        const QJsonObject o = doc.object();
         const QString at = o.value(QStringLiteral("access_token")).toString();
+        lastAuth_ = PendingPush::classifyRefresh(/*haveRefreshToken*/true, /*serverAnswered*/doc.isObject(),
+                                                 /*serverRejected*/doc.isObject() && at.isEmpty());
         if (at.isEmpty()) { cb(false); return; }
         accessToken_ = at;
         accessExpiryMs_ = QDateTime::currentMSecsSinceEpoch() + (o.value(QStringLiteral("expires_in")).toInt(3600) - 60) * 1000LL;
