@@ -411,6 +411,12 @@ HVCPP="$HERE/../src/ui/HomeView.cpp"
 HVH="$HERE/../src/ui/HomeView.h"
 ms_fail=0
 ms_note() { echo "  $1"; ms_fail=1; }
+# COUNTS, never `grep -q`, for anything fed from a variable: the suite runs under `set -o pipefail`, and -q
+# exits at the first match — which SIGPIPEs the printf still writing a 5,000-line source blob into it, so the
+# PIPELINE reports failure and the gate announces a violation that isn't there. A gate that cries wolf is one
+# people learn to skip, which is worse than not having it. (`grep -q` on a real FILE is fine; nothing is
+# writing into it. The existing gates above feed grep single function bodies, small enough to never block.)
+ms_n() { printf '%s\n' "$2" | grep -c "$1" || true; }
 if [ ! -f "$HVCPP" ] || [ ! -f "$HVH" ]; then
   ms_note "HomeView.{h,cpp} not found under $HERE/../src/ui — this gate is asserting nothing."
 else
@@ -426,7 +432,7 @@ else
     ms_note "scrapedDetail_ is touched outside forKey()/remember() — an unkeyed read is the defect itself:"
     printf '%s\n' "$ms_raw" | sed 's|^|    |'
   fi
-  printf '%s\n' "$ms_src" | grep -q 'scrapedDetail_\.remember(' \
+  [ "$(ms_n 'scrapedDetail_\.remember(' "$ms_src")" -ge 1 ] \
     || ms_note "nothing stamps the snapshot any more (showMeta's fromProvider branch): the editor drops back to the cache for every item, and the open card visibly strips on each edit."
   ms_body="$(printf '%s\n' "$ms_src" | awk '
     /^MediaDetail HomeView::detailScrapedValues\(\) const/ { inbody = 1 }
@@ -435,9 +441,9 @@ else
   if [ -z "$(printf '%s' "$ms_body" | tr -d '[:space:]')" ]; then
     ms_note "HomeView::detailScrapedValues not found — the gate stopped matching its signature."
   else
-    printf '%s' "$ms_body" | grep -q 'scrapedDetail_\.forKey(' \
+    [ "$(ms_n 'scrapedDetail_\.forKey(' "$ms_body")" -ge 1 ] \
       || ms_note "detailScrapedValues does not read the snapshot through forKey()."
-    printf '%s' "$ms_body" | grep -q 'MetaCache::keyFor(' \
+    [ "$(ms_n 'MetaCache::keyFor(' "$ms_body")" -ge 1 ] \
       || ms_note "detailScrapedValues no longer derives the open item's key — forKey() is only as honest as the key handed to it."
   fi
 
@@ -448,7 +454,7 @@ else
   # with the network down (the offline branch goes through cachedDetail, which composites). One emitter,
   # compositing the FINISHED map, is what makes that unrepeatable — and what lets the session art cache go
   # on holding the scraped map, so an edit or a reset needs no cache invalidation to show.
-  ms_emits="$(printf '%s\n' "$ms_src" | grep -c 'emit themedMetaReady(' || true)"
+  ms_emits="$(ms_n 'emit themedMetaReady(' "$ms_src")"
   ms_fn="$(printf '%s\n' "$ms_src" | awk '
     /^void HomeView::emitThemedMeta\(/ { inbody = 1 }
     inbody { print }
@@ -456,9 +462,9 @@ else
   if [ -z "$(printf '%s' "$ms_fn" | tr -d '[:space:]')" ]; then
     ms_note "HomeView::emitThemedMeta not found — the single-emitter funnel is gone, so every themed source emits its own raw map again."
   else
-    printf '%s' "$ms_fn" | grep -q 'MetaOverrides::applyTo(' \
+    [ "$(ms_n 'MetaOverrides::applyTo(' "$ms_fn")" -ge 1 ] \
       || ms_note "emitThemedMeta no longer composites the correction over the map it emits — the panel and the detail card show the scrape, and the session art cache pins it there."
-    printf '%s' "$ms_fn" | grep -q 'emit themedMetaReady(' \
+    [ "$(ms_n 'emit themedMetaReady(' "$ms_fn")" -ge 1 ] \
       || ms_note "emitThemedMeta does not emit themedMetaReady — the funnel stopped being the funnel."
   fi
   [ "$ms_emits" = "1" ] \
@@ -478,15 +484,15 @@ else
   if [ -z "$(printf '%s' "$ms_cr" | tr -d '[:space:]')" ]; then
     ms_note "HomeView::correctedRow not found — the single items_ ingress is gone."
   else
-    printf '%s' "$ms_cr" | grep -q 'MetaOverrides::applyTo(' \
+    [ "$(ms_n 'MetaOverrides::applyTo(' "$ms_cr")" -ge 1 ] \
       || ms_note "correctedRow no longer composites the correction — every items_ surface goes back to the scrape."
-    printf '%s' "$ms_cr" | grep -q 'preCorrection_' \
+    [ "$(ms_n 'preCorrection_' "$ms_cr")" -ge 1 ] \
       || ms_note "correctedRow no longer keeps the pre-correction row: the composite is destructive, so the metadata editor loses the scraped baseline it compares and resets against."
   fi
-  ms_rec="$(ms_fnbody 'void HomeView::renderRecents()' | grep -c 'correctedRow(' || true)"
+  ms_rec="$(ms_n 'correctedRow(' "$(ms_fnbody 'void HomeView::renderRecents()')")"
   [ "${ms_rec:-0}" -ge 3 ] \
     || ms_note "renderRecents composites the correction at $ms_rec of its 3 row sources (recents groups, Favorites, the Trakt shelf) — Home shows corrected art beside an uncorrected title for the ones it misses."
-  ms_pop="$(ms_fnbody 'void HomeView::populate(' | grep -c 'correctedRow(' || true)"
+  ms_pop="$(ms_n 'correctedRow(' "$(ms_fnbody 'void HomeView::populate(')")"
   [ "${ms_pop:-0}" -ge 1 ] \
     || ms_note "populate() no longer composites the correction into the catalog rows."
 fi

@@ -29,6 +29,12 @@
 // RESURRECT the thing the user just reset. The husk is newer, so it wins the merge and propagates the reset.
 // A husk composites as "no override", which is exactly "show the scraped values".
 //
+// Husks are therefore NEVER compacted, unlike Tombstones (compact(30) at every merge): a husk has to outlive
+// any peer's stale copy of the override it reset, and "any peer" has no expiry — a device that has been off
+// for a year still holds that copy. So this store grows by one ~45-byte record per item ever reset and never
+// shrinks. Accepted deliberately: ten thousand resets is well under a megabyte of ini, and what it buys off
+// is the user's reset silently undoing itself the day a long-dormant device syncs.
+//
 // CONVERGENCE. CloudMerge carries the store as "metaoverrides": {"<hash>": <blob>} and merges per hash with
 // remoteReplaces() — newest updatedAt wins, and on an EQUAL timestamp the lexically-greater canonical bytes
 // decide, order-independently. Two devices converge because the record has exactly one canonical spelling:

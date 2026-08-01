@@ -626,7 +626,13 @@ void CloudMerge::mergeAll(const QJsonObject& root)
     mergeNamespaced(QStringLiteral("playstats"), root.value(QStringLiteral("playstats")).toObject(), localDevice);
     store().sync();
     ItemMarks::invalidate();      // the merge wrote marks/* under the ini directly; drop the stale static cache
-    MetaOverrides::invalidate();  // ditto for metaoverrides/* (issue #24) — its lazy cache would show the old scrape
+    // Ditto for metaoverrides/* (issue #24): its lazy cache would otherwise go on showing the old scrape.
+    // Dropping the cache is ALL that happens — no live surface is refreshed, so a peer's correction lands on
+    // screen at the next natural rebuild (leaving the level, a Home re-render, the next launch) rather than
+    // mid-navigation. Deliberate, and the same behaviour marks have had since they started syncing: the
+    // alternative is rebuilding the browse model, and re-issuing the level's request, under the user's
+    // cursor on a background merge. The correction is never LOST by waiting — every read composites it.
+    MetaOverrides::invalidate();
     ConsumptionStats::invalidate(); // ditto for the summed-across-devices stats cache
     Tombstones::compact(30);      // keep the deleted/* footprint bounded (cheap; runs at every merge)
 }
