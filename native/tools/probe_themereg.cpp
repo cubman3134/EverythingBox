@@ -21,6 +21,71 @@ static int failures = 0;
     if (!(cond)) { std::fprintf(stderr, "THEMEREG-FAIL %s (line %d)\n", #cond, __LINE__); ++failures; } \
 } while (0)
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <aclapi.h>
+#include <vector>
+
+// Block 11 needs a directory that still lets its children be MOVED AWAY but refuses to accept a new one, so
+// that a swap can half-complete: exactly what happens when another process takes the destination name back
+// between the two renames. NTFS has a right for precisely that half — FILE_ADD_SUBDIRECTORY — so one
+// non-inherited deny ACE on the themes root arranges it without touching anything else. Non-inherited
+// matters: the staging directory below it must stay writable or the install never reaches the renames.
+//
+// The original DACL is handed back to the caller and MUST be restored, or the temp tree cannot be cleaned up
+// the way every other block cleans up after itself.
+static bool denyAddSubdirectory(const QString& dir, PSECURITY_DESCRIPTOR* sdOut, PACL* originalOut)
+{
+    *sdOut = nullptr;
+    *originalOut = nullptr;
+    std::vector<wchar_t> path(dir.size() + 1);
+    path[dir.toWCharArray(path.data())] = L'\0';
+
+    PACL oldDacl = nullptr;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (GetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                              nullptr, nullptr, &oldDacl, nullptr, &sd) != ERROR_SUCCESS)
+        return false;
+
+    SID_IDENTIFIER_AUTHORITY world = SECURITY_WORLD_SID_AUTHORITY;
+    PSID everyone = nullptr;
+    if (!AllocateAndInitializeSid(&world, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &everyone))
+    { LocalFree(sd); return false; }
+
+    EXPLICIT_ACCESS_W ea = {};
+    ea.grfAccessPermissions = FILE_ADD_SUBDIRECTORY;
+    ea.grfAccessMode        = DENY_ACCESS;
+    ea.grfInheritance       = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName    = static_cast<LPWSTR>(everyone);
+
+    PACL newDacl = nullptr;
+    const DWORD built = SetEntriesInAclW(1, &ea, oldDacl, &newDacl);
+    FreeSid(everyone);
+    if (built != ERROR_SUCCESS) { LocalFree(sd); return false; }
+
+    const DWORD set = SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                            nullptr, nullptr, newDacl, nullptr);
+    LocalFree(newDacl);
+    if (set != ERROR_SUCCESS) { LocalFree(sd); return false; }
+
+    *sdOut = sd;                // oldDacl points INTO sd, so the descriptor outlives the guard
+    *originalOut = oldDacl;
+    return true;
+}
+
+static void restoreDacl(const QString& dir, PSECURITY_DESCRIPTOR sd, PACL original)
+{
+    if (!sd) return;
+    std::vector<wchar_t> path(dir.size() + 1);
+    path[dir.toWCharArray(path.data())] = L'\0';
+    SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                          nullptr, nullptr, original, nullptr);
+    LocalFree(sd);
+}
+#endif
+
 int main(int argc, char** argv)
 {
     QCoreApplication app(argc, argv);
@@ -270,6 +335,27 @@ int main(int argc, char** argv)
             {"path":"themes2/Grid/sounds/move.wav","type":"blob","size":10},
             {"path":"themes2/Grid/SOUNDS/Move.WAV","type":"blob","size":10}]})";
         CHECK(!ThemeRegistry::filesUnder(dupeDir, QStringLiteral("themes2/Grid")).ok());
+
+        // A blob with NO size key is refused rather than read as size 0: toDouble() on an absent value is
+        // zero, so treating "no size" as "small" would let anything through the one cap that decides how much
+        // this app agrees to download.
+        const QByteArray nosize = R"({"tree":[
+            {"path":"themes2/Grid/theme.json","type":"blob","size":10},
+            {"path":"themes2/Grid/mystery.bin","type":"blob"}]})";
+        CHECK(!ThemeRegistry::filesUnder(nosize, QStringLiteral("themes2/Grid")).ok());
+        // A size that is not a number is the same claim in a different shape.
+        const QByteArray strsize = R"({"tree":[
+            {"path":"themes2/Grid/theme.json","type":"blob","size":10},
+            {"path":"themes2/Grid/mystery.bin","type":"blob","size":"10"}]})";
+        CHECK(!ThemeRegistry::filesUnder(strsize, QStringLiteral("themes2/Grid")).ok());
+
+        // The oversize message must state the cap that is actually enforced, not a number typed once and
+        // left behind when kMaxFileBytes changes.
+        const QByteArray big2 = R"({"tree":[
+            {"path":"themes2/Grid/theme.json","type":"blob","size":10},
+            {"path":"themes2/Grid/huge.bin","type":"blob","size":9000000}]})";
+        CHECK(ThemeRegistry::filesUnder(big2, QStringLiteral("themes2/Grid")).error
+              .contains(QString::number(double(ThemeRegistry::kMaxFileBytes) / (1024.0 * 1024.0))));
     }
 
     // 8b. assetUrl — every segment percent-encoded, so a space in a font name resolves.
@@ -293,14 +379,22 @@ int main(int argc, char** argv)
               == base + QStringLiteral("/themes2/Grid/%252e%252e/x.png"));
     }
 
-    // 9. The file cap. kMaxFiles + 1 blobs (theme.json included) is a refusal.
+    // 9. The file cap. kMaxFiles + 1 blobs (theme.json included) is a refusal — and exactly kMaxFiles is not,
+    //    which is the assertion that keeps the check honest now that it is made INSIDE the loop (a hostile
+    //    tree stops being accumulated at the limit rather than being collected in full and then refused).
     {
-        QByteArray many = R"({"tree":[{"path":"themes2/Big/theme.json","type":"blob","size":10})";
-        for (int i = 0; i <= ThemeRegistry::kMaxFiles; ++i)
-            many += QByteArray(",{\"path\":\"themes2/Big/f") + QByteArray::number(i)
-                  + QByteArray(".png\",\"type\":\"blob\",\"size\":10}");
-        many += "]}";
-        CHECK(!ThemeRegistry::filesUnder(many, QStringLiteral("themes2/Big")).ok());
+        auto tree = [](int extra) {
+            QByteArray b = R"({"tree":[{"path":"themes2/Big/theme.json","type":"blob","size":10})";
+            for (int i = 0; i < extra; ++i)
+                b += QByteArray(",{\"path\":\"themes2/Big/f") + QByteArray::number(i)
+                   + QByteArray(".png\",\"type\":\"blob\",\"size\":10}");
+            return b + "]}";
+        };
+        const ThemeRegistry::Listing atCap =
+            ThemeRegistry::filesUnder(tree(ThemeRegistry::kMaxFiles - 1), QStringLiteral("themes2/Big"));
+        CHECK(atCap.ok());
+        CHECK(atCap.files.size() == ThemeRegistry::kMaxFiles);
+        CHECK(!ThemeRegistry::filesUnder(tree(ThemeRegistry::kMaxFiles), QStringLiteral("themes2/Big")).ok());
     }
 
     // 10. installFiles — the folder lands complete, WITH its subdirectories. The flattening both existing
@@ -325,7 +419,12 @@ int main(int argc, char** argv)
 
         // The staging an atomic install needs does not survive it. Anything left beside the theme is a
         // directory ThemeEngine::availableThemes() would scan, and one holding a theme.json would be OFFERED.
-        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+        //
+        // QDir::Hidden is included deliberately, even though availableThemes()'s own filter does not: the
+        // staging directory is dot-prefixed, so on Unix the default filter would hide the very leftover this
+        // line exists to catch and the assertion would pass without checking anything. What is asserted here
+        // is that the cleanup RAN, on every platform — not that a leftover would be invisible on some.
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
               == QStringList{ QStringLiteral("Probe") });
 
         // Re-installing the same folder replaces it wholesale rather than merging: a theme that dropped a
@@ -335,7 +434,7 @@ int main(int argc, char** argv)
         CHECK(ThemeRegistry::installFiles(root, QStringLiteral("Probe"), fewer, &err));
         CHECK(QFile::exists(root + QStringLiteral("/Probe/theme.json")));
         CHECK(!QFile::exists(root + QStringLiteral("/Probe/sounds/move.wav")));
-        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
               == QStringList{ QStringLiteral("Probe") });   // and the REPLACED copy is gone too
 
         // A refusal leaves NOTHING behind — not a partial folder, and not a damaged previous install. This
@@ -360,6 +459,13 @@ int main(int argc, char** argv)
         CHECK(!ThemeRegistry::installFiles(root, QString(), files, &err));
         CHECK(!QDir(root + QStringLiteral("/Probe4")).exists());
         CHECK(!QDir(QDir::tempPath() + QStringLiteral("/evil")).exists());
+
+        // The staging directory's own name IS a plain segment, so nothing in the path rules refuses it — and
+        // installing "into" it would make the destination and the staging root the same directory, with every
+        // rename below targeting a child of itself. Refused by name, on purpose, rather than by arithmetic.
+        CHECK(!ThemeRegistry::installFiles(root, QStringLiteral(".eb-installing"), files, &err));
+        CHECK(!QDir(root + QStringLiteral("/.eb-installing")).exists());
+        CHECK(QFile::exists(root + QStringLiteral("/Probe/theme.json")));   // and it touched nothing
 
         // Two paths that collide case-insensitively are refused HERE too, not only in the listing: this is
         // the function that turns a string into a filename, and it does not get to assume its caller checked.
@@ -390,11 +496,73 @@ int main(int argc, char** argv)
         CHECK(!ThemeRegistry::installFiles(root, QStringLiteral("Probe7"), midway, &err));
         CHECK(!err.isEmpty());
         CHECK(!QDir(root + QStringLiteral("/Probe7")).exists());
-        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot)
+        CHECK(QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden)
               == (QStringList{ QStringLiteral("Probe"), QStringLiteral("Probe6") }));
 
         QDir(root).removeRecursively();
     }
+
+    // 11. The one unwind that can LOSE the user's data: the swap half-completed. The existing theme was
+    //     renamed out of the way, the new copy could not be renamed into its place, and putting the old one
+    //     back failed too — at which point the folder parked in staging is the ONLY copy in existence and an
+    //     unconditional tidy-up deletes it. Every other refusal in block 10 is caught before staging, and the
+    //     mid-write case targets a folder that did not exist, so nothing above reaches this path at all.
+    //
+    //     Windows-only, and not for want of trying: POSIX rename() needs write+execute on BOTH parent
+    //     directories, so the move OUT of themesRoot and the move BACK IN require exactly the same rights and
+    //     no static permission state can fail one while allowing the other. NTFS separates them —
+    //     FILE_ADD_SUBDIRECTORY governs creating an entry, DELETE the object being moved away — so denying
+    //     just that one right on themesRoot lets the first rename succeed and fails both of the others,
+    //     which is precisely the shape of the accident ("another process took the name back") this guards.
+    //     The code under test is platform-neutral; only the way of provoking it is not.
+#ifdef Q_OS_WIN
+    {
+        const QString root = QDir::tempPath() + QStringLiteral("/eb-themereg-probe-unwind");
+        QDir(root).removeRecursively();
+        CHECK(QDir().mkpath(root));
+
+        QVector<QPair<QString, QByteArray>> before;
+        before << qMakePair(QStringLiteral("theme.json"),      QByteArray("{\"name\":\"Before\"}"));
+        before << qMakePair(QStringLiteral("sounds/move.wav"), QByteArray("RIFFold"));
+        QString err;
+        CHECK(ThemeRegistry::installFiles(root, QStringLiteral("Keep"), before, &err));
+
+        // The deny below blocks creating a subdirectory of root, which includes the staging directory itself;
+        // pre-create it so the install gets as far as the renames rather than failing at mkpath.
+        CHECK(QDir().mkpath(root + QStringLiteral("/.eb-installing")));
+
+        PSECURITY_DESCRIPTOR sd = nullptr;
+        PACL original = nullptr;
+        CHECK(denyAddSubdirectory(root, &sd, &original));
+
+        QVector<QPair<QString, QByteArray>> after;
+        after << qMakePair(QStringLiteral("theme.json"), QByteArray("{\"name\":\"After\"}"));
+        err.clear();
+        const bool installed = ThemeRegistry::installFiles(root, QStringLiteral("Keep"), after, &err);
+        restoreDacl(root, sd, original);            // before the assertions, so a failure still unwinds it
+
+        CHECK(!installed);
+        CHECK(!err.isEmpty());
+
+        // The theme the user had is still on disk, whole, and is the OLD one — not the half-installed new
+        // copy wearing its name.
+        const QString parked = root + QStringLiteral("/.eb-installing/Keep.replaced");
+        CHECK(QFile::exists(parked + QStringLiteral("/theme.json")));
+        CHECK(QFile::exists(parked + QStringLiteral("/sounds/move.wav")));
+        QFile kept(parked + QStringLiteral("/theme.json"));
+        CHECK(kept.open(QIODevice::ReadOnly));
+        CHECK(kept.readAll() == QByteArray("{\"name\":\"Before\"}"));
+        kept.close();
+
+        // A folder the user cannot find is a folder we lost. The message has to name where it went.
+        CHECK(err.contains(parked));
+
+        // The half-built copy IS dropped — it is the one of the two that is safe to delete.
+        CHECK(!QDir(root + QStringLiteral("/.eb-installing/Keep")).exists());
+
+        QDir(root).removeRecursively();
+    }
+#endif
 
     if (failures == 0) std::printf("THEMEREG-OK\n");
     return failures == 0 ? 0 : 1;

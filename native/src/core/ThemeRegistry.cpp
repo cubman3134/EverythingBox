@@ -101,6 +101,11 @@ QString encodePathSegments(const QString& path)
     return enc.join(QLatin1Char('/'));
 }
 
+// The one directory under themesRoot that installFiles owns rather than offers. It is a plain segment, so
+// isPlainSegment would happily accept it as a theme folder name — and then the destination and the staging
+// directory would be the same path. Named once here so the reservation and the staging path cannot drift.
+const QLatin1String kStagingDirName(".eb-installing");
+
 } // namespace
 
 namespace ThemeRegistry {
@@ -225,11 +230,28 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
             out.error = QStringLiteral("This theme lists two files that differ only in capitalisation.");
             return out;
         }
-        if (o.value(QStringLiteral("size")).toDouble() > double(kMaxFileBytes))
+        // An ABSENT size is refused, not treated as zero: toDouble() on a missing value is 0, so an entry that
+        // simply omits the key would sail past the cap. The Trees API always reports a size for a blob, so a
+        // blob without one is a response we do not understand — and the whole point of the cap is that we do
+        // not start a download whose size we have not agreed to.
+        const QJsonValue size = o.value(QStringLiteral("size"));
+        if (!size.isDouble())
         {
-            out.error = QStringLiteral("This theme contains a file larger than 8 MB.");
+            out.error = QStringLiteral("This registry's file listing does not say how large its files are.");
             return out;
         }
+        // The cap is interpolated rather than spelled out, so raising kMaxFileBytes cannot leave the message
+        // stating a number the code no longer enforces.
+        if (size.toDouble() > double(kMaxFileBytes))
+        {
+            out.error = QStringLiteral("This theme contains a file larger than %1 MB.")
+                            .arg(double(kMaxFileBytes) / (1024.0 * 1024.0));
+            return out;
+        }
+        // Checked BEFORE appending rather than after the loop: a hostile tree should stop being accumulated at
+        // the limit, not be collected in full and then refused.
+        if (files.size() >= kMaxFiles)
+        { out.error = QStringLiteral("This theme contains more than %1 files.").arg(kMaxFiles); return out; }
         if (rel == QLatin1String("theme.json")) hasThemeJson = true;
         files << rel;
     }
@@ -238,8 +260,6 @@ Listing filesUnder(const QByteArray& treeJson, const QString& dir)
     { out.error = QStringLiteral("This theme's folder is empty or missing from the registry."); return out; }
     if (!hasThemeJson)
     { out.error = QStringLiteral("This folder has no theme.json, so it is not a theme."); return out; }
-    if (files.size() > kMaxFiles)
-    { out.error = QStringLiteral("This theme contains more than %1 files.").arg(kMaxFiles); return out; }
 
     out.files = files;
     return out;
@@ -261,6 +281,12 @@ bool installFiles(const QString& themesRoot, const QString& folder,
         return fail(QStringLiteral("No themes folder to install into."));
     if (folder.isEmpty() || !isPlainSegment(folder))
         return fail(QStringLiteral("Unusable theme folder name."));
+    // The staging directory is a plain segment and would pass the check above, which would make the
+    // destination and the staging root the SAME path — every rename below then targets a child of itself.
+    // It refuses safely today, by accident of that arithmetic; refuse it on purpose instead, so the property
+    // survives a change to where staging lives.
+    if (folder == kStagingDirName)
+        return fail(QStringLiteral("That theme folder name is reserved."));
     if (files.isEmpty())
         return fail(QStringLiteral("Nothing was downloaded for this theme."));
 
@@ -285,17 +311,21 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     // that phantom in the picker forever. One level deeper, nothing scans for it — and it is still on the
     // same filesystem as the destination, so the swap stays a rename rather than a copy.
     const QString dest  = themesRoot + QLatin1Char('/') + folder;
-    const QString stage = themesRoot + QStringLiteral("/.eb-installing");
+    const QString stage = themesRoot + QLatin1Char('/') + kStagingDirName;
     const QString tmp   = stage + QLatin1Char('/') + folder;
     const QString old   = stage + QLatin1Char('/') + folder + QStringLiteral(".replaced");
 
     QDir(tmp).removeRecursively();                 // a previous run that died mid-install
     QDir(old).removeRecursively();
-    if (!QDir().mkpath(tmp)) return fail(QStringLiteral("Could not create %1").arg(tmp));
 
     // rmdir, not removeRecursively: it succeeds only when the staging directory is empty, so tidying up
-    // after this install cannot delete another one that is still running.
+    // after this install cannot delete another one that is still running. Declared before the first exit
+    // that could leave something behind — mkpath creates the PARENTS first, so a failure on the leaf still
+    // leaves an empty staging directory, and "a refusal leaves no residue" has to hold at every exit or it
+    // is not a rule.
     auto clean = [&] { QDir(tmp).removeRecursively(); QDir(old).removeRecursively(); QDir().rmdir(stage); };
+
+    if (!QDir().mkpath(tmp)) { clean(); return fail(QStringLiteral("Could not create %1").arg(tmp)); }
 
     for (const auto& f : files)
     {
@@ -326,7 +356,20 @@ bool installFiles(const QString& themesRoot, const QString& folder,
     { clean(); return fail(QStringLiteral("Could not replace the existing %1.").arg(folder)); }
     if (!QDir().rename(tmp, dest))
     {
-        if (hadOld) QDir().rename(old, dest);       // put it back
+        // At this point `old` is the ONLY copy of the theme the user already had: the rename that emptied
+        // `dest` succeeded and the one that would have refilled it did not. Putting it back can fail for the
+        // very same reason the install just did — the name taken again by another process, a parent that has
+        // stopped accepting new subdirectories — and clean() would then delete it. Checking this return is
+        // the whole difference between "refuses without having touched the existing install", which is what
+        // the header promises, and silently destroying a theme while reporting only that the install failed.
+        // So: drop the half-built copy, KEEP `old`, and say where it is so it can be recovered by hand.
+        if (hadOld && !QDir().rename(old, dest))
+        {
+            QDir(tmp).removeRecursively();
+            return fail(QStringLiteral("Could not install into %1, and the theme that was there could not be "
+                                       "put back. It is safe in %2 — move that folder back by hand.")
+                            .arg(dest, old));
+        }
         clean();
         return fail(QStringLiteral("Could not install into %1.").arg(dest));
     }

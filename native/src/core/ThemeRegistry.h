@@ -66,9 +66,9 @@ struct Listing {
 
 // Filter a Trees API response to the blobs under `dir/`. Refuses (with a reason) when the response is
 // truncated, `dir` holds no theme.json of its own, the folder is absent, any path is unsafe, two paths
-// differ only in case, there are more than kMaxFiles files, or any file exceeds kMaxFileBytes. One bad file
-// fails the WHOLE entry: a theme installed without its font is a broken theme, and skipping quietly would
-// produce one.
+// differ only in case, there are more than kMaxFiles files, or any file exceeds kMaxFileBytes — or does not
+// state a size at all, which is the same thing said less honestly. One bad file fails the WHOLE entry: a
+// theme installed without its font is a broken theme, and skipping quietly would produce one.
 Listing filesUnder(const QByteArray& treeJson, const QString& dir);
 
 // The download URL for one listed file: `base`/`dir`/`rel`, with every segment percent-encoded so a theme
@@ -81,8 +81,13 @@ QString assetUrl(const QString& base, const QString& dir, const QString& rel);
 // Writes into a staging directory and renames into place, so an interrupted or refused install never leaves
 // a partial folder where it would be picked up — ThemeEngine::availableThemes() offers any SUBDIRECTORY of
 // themesRoot holding a theme.json, and a theme with missing sounds and fonts would be selectable. Refuses an
-// empty file set, an unsafe folder name, any unsafe relative path and any case-insensitive collision,
-// without having touched the existing install. Subdirectories are PRESERVED.
+// empty file set, an unsafe folder name, the reserved staging name, any unsafe relative path and any
+// case-insensitive collision, without having touched the existing install. Subdirectories are PRESERVED.
+//
+// The one case where a refusal cannot leave the existing install where it was is a swap that half-completed:
+// the old folder was moved aside and neither the new copy nor the old one could be moved back. The old
+// folder is then LEFT in staging rather than deleted, and *error names its path — a theme the user can move
+// back by hand is a recoverable failure; deleting it because the tidy-up is unconditional is not.
 bool installFiles(const QString& themesRoot, const QString& folder,
                   const QVector<QPair<QString, QByteArray>>& files, QString* error);
 
